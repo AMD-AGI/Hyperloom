@@ -1066,10 +1066,11 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     )
 
 
-def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkeypatch, capsys):
-    """The run's failure names what the orchestrator raised, not a missing analysis.json."""
+def _run_agent_route_to_a_skill_error(tmp_path, monkeypatch, capsys, skill_error):
+    """Run ``main`` on the agent route with a skill that raises ``skill_error``; return rc, result and arch calls."""
     trace = tmp_path / "trace.json"
     trace.write_text('{"traceEvents": []}', encoding="utf-8")
+    calls = []
     monkeypatch.setattr(tla, "_reject_capture_only_input", lambda *_args: None)
     monkeypatch.setattr(
         tla,
@@ -1081,7 +1082,7 @@ def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkey
         "_check_tracelens_checkout",
         lambda *_args: tla._TraceLensCheckout(root=tmp_path, internal_root=None, skill=tmp_path / "SKILL.md"),
     )
-    monkeypatch.setattr(tla, "_gpu_arch_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tla, "_gpu_arch_json", lambda *_args, **_kwargs: calls.append("arch"))
     monkeypatch.setattr(
         tla,
         "_run_trace_split",
@@ -1089,10 +1090,10 @@ def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkey
     )
     monkeypatch.setattr(tla, "write_run_config", lambda **_kwargs: None)
 
-    async def _sdk_fails(*_args, **_kwargs):
-        raise ConnectionError("model endpoint refused the connection")
+    async def _skill_fails(*_args, **_kwargs):
+        raise skill_error
 
-    monkeypatch.setattr(tla, "run_tracelens_skill", _sdk_fails)
+    monkeypatch.setattr(tla, "run_tracelens_skill", _skill_fails)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1106,14 +1107,64 @@ def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkey
             "agent",
         ],
     )
-
     rc = tla.main()
-    result = json.loads(capsys.readouterr().out)
+    return rc, json.loads(capsys.readouterr().out), calls
+
+
+def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkeypatch, capsys):
+    """The run's failure names what the orchestrator raised, not a missing analysis.json."""
+    rc, result, _calls = _run_agent_route_to_a_skill_error(
+        tmp_path, monkeypatch, capsys, ConnectionError("model endpoint refused the connection")
+    )
     assert (rc, result["status"], result["error"]) == (
         1,
         "failed",
         "ConnectionError: model endpoint refused the connection",
     )
+
+
+def test_import_sdk_reports_a_transitive_import_failure(tmp_path, monkeypatch):
+    package = tmp_path / "claude_agent_sdk"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "raise ImportError('libx.so: cannot open shared object file')\n", encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "claude_agent_sdk", raising=False)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        tlr._import_sdk()
+
+    assert str(excinfo.value) == (
+        f"claude_agent_sdk failed to import from {package / '__init__.py'} in {sys.executable}: "
+        "ImportError: libx.so: cannot open shared object file"
+    )
+
+
+def _fail_sdk_import_on_backend(monkeypatch, backend):
+    def _sdk_import_fails():
+        raise RuntimeError("X")
+
+    monkeypatch.setenv(tlr.llm_config.AGENT_BACKEND_ENV, backend)
+    monkeypatch.setattr(tlr, "_import_sdk", _sdk_import_fails)
+
+
+def test_a_broken_claude_sdk_fails_the_agent_route_before_the_arch_benchmark(tmp_path, monkeypatch, capsys):
+    _fail_sdk_import_on_backend(monkeypatch, "claude")
+    rc, result, calls = _run_agent_route_to_a_skill_error(
+        tmp_path, monkeypatch, capsys, ConnectionError("agent route started")
+    )
+
+    assert (rc, result["error"], calls) == (1, "RuntimeError: X", [])
+
+
+def test_a_non_claude_backend_skips_the_sdk_precheck(tmp_path, monkeypatch, capsys):
+    _fail_sdk_import_on_backend(monkeypatch, "codex")
+    rc, result, calls = _run_agent_route_to_a_skill_error(
+        tmp_path, monkeypatch, capsys, ConnectionError("agent route started")
+    )
+
+    assert (rc, result["error"], calls) == (1, "ConnectionError: agent route started", ["arch"])
 
 
 @pytest.mark.parametrize(
@@ -2352,6 +2403,72 @@ def test_the_failed_status_keeps_the_skill_artifacts_when_a_later_step_raises(tm
     result = json.loads(capsys.readouterr().out)
     status = json.loads(Path(result["status_path"]).read_text(encoding="utf-8"))
     assert (status["state"], status["artifact_paths"]["tracelens_agent_report"]) == ("failed", str(report))
+
+
+@pytest.mark.parametrize(
+    ("report_info", "messages"),
+    [
+        (
+            {"mode": "deterministic-fallback", "trace_quality": "poor", "warnings": ["GRAPH_UNDER_RECORDED", "short"]},
+            ["GRAPH_UNDER_RECORDED", "short"],
+        ),
+        (
+            {"mode": "deterministic-fallback", "trace_quality": "poor"},
+            ["TraceLens analysis mode is deterministic-fallback"],
+        ),
+        ({"mode": "agentic", "trace_quality": "ok"}, []),
+    ],
+    ids=["fallback_with_warnings", "fallback_without_warnings", "clean"],
+)
+@pytest.mark.parametrize("idle_pct", [5.0, 95.0], ids=["kept", "idle_gated"])
+def test_the_agent_route_records_poor_trace_quality(tmp_path, monkeypatch, report_info, messages, idle_pct):
+    monkeypatch.delenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
+    monkeypatch.setattr(trace_gates, "_graph_coverage_from_raw_trace", lambda _tp: {})
+    report = tmp_path / "analysis.md"
+    report.write_text(f"| Compute % | 90.00% |\n| Idle % | {idle_pct:.2f}% |\n", encoding="utf-8")
+    analysis_json = tmp_path / "analysis.json"
+    analysis_json.write_text(json.dumps({"report_info": report_info, "compute_optimizations": []}), encoding="utf-8")
+    monkeypatch.setattr(tla, "render_analysis_json", lambda _md: analysis_json)
+    skill_result = tlr.TraceLensSkillRunResult(output_dir=tmp_path, report_path=report, runner="agent")
+    warnings: list[dict] = []
+
+    tla._agent_route_outcome(skill_result, None, tmp_path / "raw.json", warnings, tmp_path / "log")
+
+    assert [w for w in warnings if w["code"] == "trace_quality_poor"] == [
+        {"code": "trace_quality_poor", "severity": "warning", "message": text, "source": str(analysis_json)}
+        for text in messages
+    ]
+    assert [w["code"] for w in warnings if w["code"] == "high_gpu_idle_pct"] == (
+        ["high_gpu_idle_pct"] if idle_pct > 80.0 else []
+    )
+
+
+def test_a_route_with_no_located_kernel_source_records_kernel_source_unresolved(tmp_path, capsys):
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    report = tmp_path / "analysis.json"
+    report.write_text(
+        json.dumps({"compute_optimizations": [{"operation": "kernel_a", "members": [{"kernel_name": ["kernel_a"]}]}]}),
+        encoding="utf-8",
+    )
+    analysis = PerfReportAnalysis(report, trace_gates.WorkloadShares(5.0, 80.0, 5.0), [])
+
+    def split_to_input(_args, job, *_rest):
+        return job.analysis_trace_path, {"chunks_extracted": 1, "chunks_by_mode": {}}
+
+    with (
+        patch.object(tla, "_run_trace_split", split_to_input),
+        patch.object(tla, "analyze_perf_report", return_value=analysis),
+    ):
+        _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    result = json.loads(capsys.readouterr().out)
+    assert [
+        (w["severity"], w["located"], w["total"])
+        for w in result["trace_health_warnings"]
+        if w["code"] == "kernel_source_unresolved"
+    ] == [("warning", 0, 1)]
 
 
 def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
