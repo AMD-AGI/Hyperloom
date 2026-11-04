@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 from hyperloom.measure.framework.tests.test_table_modules import BPRESHUFFLE, CONFIG, _package, _table
+from hyperloom.measure.jit.modules import MODULE_BUILD_LIMIT_SEC
 from hyperloom.measure.runner import rebuild_watchdog, run
 from hyperloom.measure.runner.rebuild_watchdog import raise_rebuild_watchdog, rebuild_watchdog_sec
 from hyperloom.measure.socket import TestCall
@@ -73,7 +74,7 @@ def test_a_table_that_makes_modules_stale_raises_the_watchdog_of_both_carriers(i
 
 
 def test_the_estimate_is_the_builds_plus_the_margin() -> None:
-    assert rebuild_watchdog_sec(["m"]) == rebuild_watchdog.MODULE_BUILD_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
+    assert rebuild_watchdog_sec(["m"]) == MODULE_BUILD_LIMIT_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
     assert rebuild_watchdog_sec(["m"]) > 300, "longer than sglang's default watchdog"
 
 

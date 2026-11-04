@@ -13,6 +13,7 @@ build from does not.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import json
@@ -31,10 +32,12 @@ from hyperloom.measure import local, signing
 from hyperloom.measure.jit.publish import STAGING_PATH, publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.jit.tests.triton_cache import find_kernel, get_group
+from hyperloom.measure.farm import NativeModule
 from hyperloom.measure.manifest import JitCacheFacts, ResultManifest
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner import jit as runner_jit
 from hyperloom.measure.runner import own_jit
+from hyperloom.measure.runner import run as run_module
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.runner.tests.test_run import (  # noqa: F401 - fixtures
     POINT,
@@ -613,6 +616,26 @@ def test_a_run_whose_server_never_imported_the_patched_aiter_ends_as_an_inert_pa
     assert (patched.outcome.failure_class, patched.outcome.returncode) == ("infra", HOSTED_INFRA_FAILURE_RC)
     assert str(patched.outcome.failure_reason).startswith("inert_patch: no process of the server noted importing aiter")
     assert (run / "scratch" / "test" / "farm" / "site" / "sitecustomize.py").is_file(), "the runner installed the watch"
+
+
+def test_the_runners_own_import_of_a_native_module_the_farm_laid_is_not_counted_as_the_servers(
+    rig, monkeypatch
+) -> None:
+    """The check of the farm imports each native module it laid, as the server would, and so runs the farm's aiter in a
+    process of the runner's, which notes it. The stand-in server imports nothing: the patch never ran in it."""
+    build = run_module.build_farm
+
+    def with_a_native_module(*args, **kwargs):
+        farm = build(*args, **kwargs)
+        return dataclasses.replace(
+            farm, native=(NativeModule("aiter.ops.mha", farm.site / "aiter" / "ops" / "mha.py"),)
+        )
+
+    monkeypatch.setattr(run_module, "build_farm", with_a_native_module)
+    patched, _, _ = rig.run("probed", _arm(rig, roots=_aiter_patch(rig)))
+
+    assert (patched.outcome.failure_class, patched.outcome.returncode) == ("infra", HOSTED_INFRA_FAILURE_RC)
+    assert str(patched.outcome.failure_reason).startswith("inert_patch: no process of the server noted importing aiter")
 
 
 def test_without_the_cache_variable_a_test_builds_cold_even_when_the_store_holds_its_kernels(rig) -> None:
