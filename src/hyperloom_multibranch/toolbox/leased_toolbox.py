@@ -55,15 +55,19 @@ class LeaseBook(Protocol):
     on_release: Callable[[], None]
     ledger: LeaseLedger
 
-    def capacity(self) -> MeasurementCapacity: ...
+    def capacity(self) -> MeasurementCapacity:
+        """The cards counted for measurement, with the leased ones among them."""
 
-    def tests_at_once(self) -> int: ...
+    def tests_at_once(self) -> int:
+        """How many tests the cards left for measurement run at once."""
 
     async def lease(
         self, holder: str, cards: int, /, *, charge: LeaseCharge, wait_sec: float | None = None
-    ) -> BranchLease: ...
+    ) -> BranchLease:
+        """Lease ``cards`` cards to ``holder``, charged as ``charge`` says, waiting at most ``wait_sec`` for them."""
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release every lease and refuse the waiting ones their cards."""
 
 
 class LeasedToolbox(RealToolbox):
