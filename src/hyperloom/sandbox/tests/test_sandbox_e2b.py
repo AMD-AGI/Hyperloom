@@ -211,17 +211,6 @@ CREATE_FAILED_BODY = {"code": 500, "reason": "sandbox_create_failed", "message":
 #: SDK's message of joint run 4, word for word, in the same E2B error body).
 KEY_SPENT_MESSAGE = "idempotency_key_spent: sbx-00000000000000000000000000000000"
 KEY_SPENT_BODY = {"code": 410, "reason": "idempotency_key_spent", "message": KEY_SPENT_MESSAGE}
-#: Its answer to the original create whose sandbox was not running within its pending timeout: the reason code first,
-#: then SaFE's last phase and status.
-PENDING_TIMEOUT_MESSAGE = (
-    "pending_timeout: workload sbx-00000000000000000000000000000000 phase Pending, status Scheduling"
-)
-#: Its answer to a replay of that key: the key is spent, then the original reason.
-KEY_SPENT_PENDING_BODY = {
-    "code": 410,
-    "reason": "idempotency_key_spent",
-    "message": f"{KEY_SPENT_MESSAGE}: {PENDING_TIMEOUT_MESSAGE}",
-}
 #: How a gateway cuts a create that is still pending: its 180 s limit, or the service's context cancelled under it.
 GATEWAY_CUTS = [
     (504, {"code": 504, "message": "context canceled"}),
@@ -235,12 +224,8 @@ def _keys_sent(service: _Service) -> list[str]:
 
 @pytest.mark.parametrize(
     "body",
-    [
-        CREATE_FAILED_BODY,
-        {"code": 500, "message": "workload sbx-1 phase Failed"},
-        {"code": 500, "message": "sandbox_create_failed: workload sbx-1 was deleted while pending, status Scheduling"},
-    ],
-    ids=["sandbox_create_failed", "phase_failed", "deleted_while_pending"],
+    [CREATE_FAILED_BODY, {"code": 500, "message": "workload sbx-1 phase Failed"}],
+    ids=["sandbox_create_failed", "phase_failed"],
 )
 def test_a_create_whose_sandbox_failed_is_final_and_not_replayed(
     service: _Service, provider: E2BSandboxProvider, body: dict[str, Any]
@@ -250,20 +235,6 @@ def test_a_create_whose_sandbox_failed_is_final_and_not_replayed(
         _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
     assert str(failed.value) == f"500: {body['message']}", "the platform's own message is kept"
     assert _keys_sent(service) == ["k-1"], "a replay of the key would only find the failed sandbox or make another"
-
-
-@pytest.mark.parametrize("status", [500, 503, 504])
-def test_a_create_whose_sandbox_timed_out_pending_is_unavailable_and_not_replayed(
-    service: _Service, provider: E2BSandboxProvider, status: int
-) -> None:
-    service.reply(
-        "POST", "/v2/sandboxes", (status, {"code": status, "message": PENDING_TIMEOUT_MESSAGE}), (201, SANDBOX)
-    )
-    with pytest.raises(SandboxUnavailable) as timed_out:
-        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
-    assert type(timed_out.value) is SandboxUnavailable, "the sandbox never ran: it is not a failed sandbox"
-    assert PENDING_TIMEOUT_MESSAGE in str(timed_out.value), "the service's reason is kept"
-    assert _keys_sent(service) == ["k-1"], "the key is spent: a replay would only be answered with a 410"
 
 
 @pytest.mark.parametrize("cut", GATEWAY_CUTS, ids=["context_canceled", "gateway_page"])
@@ -292,24 +263,10 @@ def test_a_replay_after_a_cut_that_finds_the_sandbox_failed_stops_there(
     assert _keys_sent(service) == ["k-1", "k-1"]
 
 
-def test_a_replay_answered_with_the_key_spent_and_a_pending_timeout_is_unavailable(
+def test_a_key_spent_before_the_first_send_is_gone_for_the_caller_to_replace(
     service: _Service, provider: E2BSandboxProvider
 ) -> None:
-    """The gateway cut the create while its sandbox was pending, and the sandbox then timed out: the replay's 410 carries
-    the original reason, which makes this create unavailable, not failed."""
-    service.reply("POST", "/v2/sandboxes", GATEWAY_CUTS[0], (410, KEY_SPENT_PENDING_BODY), (201, SANDBOX))
-    with pytest.raises(SandboxUnavailable, match="pending_timeout") as timed_out:
-        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
-    assert type(timed_out.value) is SandboxUnavailable
-    assert KEY_SPENT_PENDING_BODY["message"] in str(timed_out.value), "the key and the reason are kept"
-    assert _keys_sent(service) == ["k-1", "k-1"]
-
-
-@pytest.mark.parametrize("body", [KEY_SPENT_BODY, KEY_SPENT_PENDING_BODY], ids=["key_spent", "pending_timeout"])
-def test_a_key_spent_before_the_first_send_is_gone_for_the_caller_to_replace(
-    service: _Service, provider: E2BSandboxProvider, body: dict[str, Any]
-) -> None:
-    service.reply("POST", "/v2/sandboxes", (410, body))
+    service.reply("POST", "/v2/sandboxes", (410, KEY_SPENT_BODY))
     with pytest.raises(SandboxGone) as gone:
         _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
     assert type(gone.value) is SandboxGone, "an earlier process spent the key; this create made nothing"

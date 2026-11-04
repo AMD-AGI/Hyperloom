@@ -14,23 +14,18 @@ is classified into the socket exceptions; one the socket has no word for (a bad 
 
 Two refusals of a create carry a meaning of their own. A 410 means the idempotency key's sandbox has ended, so the key is
 spent (``SandboxGone``). A 429 whose error message names ``grant_quota_exceeded`` means the session's quota is full
-(``SandboxQuotaExceeded``, a ``SandboxUnavailable``). The SDK keeps only the ``message`` of an error body, so the service
-must put its reason code in ``message``, as it does for ``pending_timeout`` and ``no_capacity``; a 503 stays a plain
-``SandboxUnavailable``.
+(``SandboxQuotaExceeded``, a ``SandboxUnavailable``). The SDK keeps only the ``message`` of a 429 body, so the service
+must put that reason code in ``message``, as it does for the 503 reasons ``pending_timeout`` and ``no_capacity``; a 503
+stays a plain ``SandboxUnavailable``.
 
 A server error is replayed only while it says nothing about the sandbox: a gateway that cut a create still pending, say,
-where the replay with the same key finds that sandbox. The service's own answer about the sandbox is final at once,
-since a replay finds only that sandbox (the service never makes a second one for a key, nor repeats the answer):
-
-- ``pending_timeout`` says the sandbox was not running within the service's pending timeout (a 500, or a 503, with
-  SaFE's last phase and status). The sandbox never ran, so it is ``SandboxUnavailable``, as a ``no_capacity`` 503 is;
-  its key is spent, and a new attempt takes a new key.
-- ``sandbox_create_failed`` (the workload was deleted while pending) or a workload in the ``Failed`` phase (SaFE's own
-  reason, ``CapacityGone`` say) says the platform made the sandbox and it failed before it ran: ``SandboxCreateFailed``.
-
-A replay of a key after a cut is answered with a 410 ``idempotency_key_spent`` followed by the original reason, so a 410
-to a create's own replay takes its class from that reason: ``SandboxUnavailable`` when it names ``pending_timeout``,
-``SandboxCreateFailed`` otherwise. Only a 410 to the first send means a key spent before this create (``SandboxGone``).
+where the replay with the same key finds that sandbox. A failure whose message names ``sandbox_create_failed`` or a
+workload in the ``Failed`` phase says the platform made the sandbox and it failed before it ran. Replaying that key finds
+only the failed sandbox (the platform reports the key spent, or makes a new sandbox that fails the same way), so it is
+final at once (``SandboxCreateFailed``): a new attempt, with a new key, is the caller's to decide. A replay of the key
+after a cut is answered with a 410 ``idempotency_key_spent`` when the sandbox the first send made has failed meanwhile
+(the service never makes a second sandbox for a key, nor repeats the 500), so a 410 to a create's own replay is
+``SandboxCreateFailed`` too; only a 410 to the first send means a key spent before this create.
 
 A key that may create in more than one workspace (a SaFE key used directly; a Claw grant's key names its own) must say
 which: the provider's ``workspace`` (``HYPERLOOM_SANDBOX_WORKSPACE``) is sent on every create as the metadata
@@ -105,9 +100,6 @@ _WORKSPACE_REQUIRED = re.compile(r"\bworkspace_required\b")
 
 #: How the service says a create's sandbox failed before it ran: its reason code, or the terminal phase of its workload.
 _CREATE_FAILED = re.compile(r"\bsandbox_create_failed\b|\bphase Failed\b")
-
-#: How the service says a create's sandbox was not running within its pending timeout: its reason code.
-_PENDING_TIMEOUT = re.compile(r"\bpending_timeout\b")
 
 #: Statuses that mean the request was not processed and may succeed if repeated; a 503 means the service has no room
 #: and is not retried on create. A 501 or 505 will not change on a retry.
@@ -209,7 +201,7 @@ def _is_transient(exc: Exception, *, capacity: bool) -> bool:
     """Whether the same call may succeed if repeated; ``capacity`` also counts a rate limit or a 503."""
     if isinstance(exc, (e2b.SandboxNotRunningException, e2b.SandboxUnreachableException)):
         return False
-    if _CREATE_FAILED.search(str(exc)) or _PENDING_TIMEOUT.search(str(exc)):
+    if _CREATE_FAILED.search(str(exc)):
         return False
     if isinstance(exc, (httpx.TransportError, json.JSONDecodeError, e2b.TimeoutException)):
         return True
@@ -392,12 +384,10 @@ class E2BSandboxProvider:
             SandboxCreateFailed: The platform made the sandbox and it failed before it ran (``sandbox_create_failed``,
                 a workload in the ``Failed`` phase); the create is not replayed. Also a 410 answering this create's
                 own replay: the service binds the key to the sandbox it made first and, once that sandbox failed,
-                answers every replay with ``idempotency_key_spent``, the same id and the original reason.
+                answers every replay with ``idempotency_key_spent`` and the same id.
             SandboxQuotaExceeded: The session's quota is full (429 ``grant_quota_exceeded``); it clears when a running
                 sandbox ends.
-            SandboxUnavailable: No capacity (503), or the sandbox was not running within ``wait_sec``, or the service
-                says it was not within its pending timeout (``pending_timeout``, a 500 or 503, or the reason of a 410
-                answering this create's own replay); that create is not replayed and its key is spent.
+            SandboxUnavailable: No capacity (503), or the sandbox was not running within ``wait_sec``.
         """
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be positive")
@@ -426,8 +416,7 @@ class E2BSandboxProvider:
             created = control.call(attempt, retry=retry, until=deadline)
         except SandboxGone as exc:
             if sends > 1:  # this create's own sandbox ended or failed while the request was cut
-                ended = SandboxUnavailable if _PENDING_TIMEOUT.search(str(exc)) else SandboxCreateFailed
-                raise ended(f"the sandbox of this create did not run: {exc}") from exc
+                raise SandboxCreateFailed(f"the sandbox of this create did not run: {exc}") from exc
             raise
         except SandboxDenied as exc:
             if _WORKSPACE_REQUIRED.search(str(exc)):
