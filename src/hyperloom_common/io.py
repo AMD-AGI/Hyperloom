@@ -8,6 +8,7 @@ from __future__ import annotations
 import json as _json
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator
 from contextlib import suppress
@@ -77,9 +78,9 @@ class WriteOptions:
 
     A new file is owner-only (``0o600``). ``mode`` is applied with group/other bits
     stripped; ``preserve_mode`` instead keeps an existing file's permission bits and
-    is ignored when ``mode`` is given. ``group_read`` makes a new file ``0o640`` instead
-    of ``0o600`` (a shared-tree file read by the directory's group; never other-readable;
-    ignored when ``mode`` is given or ``preserve_mode`` keeps an existing file's bits). ``fsync`` and ``fsync_dir`` raise the
+    is ignored when ``mode`` is given. ``group_read`` lets the directory's group read a
+    new file when the directory is shared with that group (setgid and group-readable);
+    never other-readable, and ignored when ``mode`` or ``preserve_mode`` applies. ``fsync`` and ``fsync_dir`` raise the
     ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
     """
@@ -117,6 +118,13 @@ class JsonLineFormat:
 _JSON_WRITE = WriteOptions(make_parents=True)
 
 
+def _share_with_directory_group(file: Path, directory: Path) -> None:
+    """Grant ``file`` its directory's group read bit when the directory is a setgid shared tree."""
+    shared = directory.stat().st_mode
+    if shared & stat.S_ISGID:
+        os.chmod(file, stat.S_IRUSR | stat.S_IWUSR | (shared & stat.S_IRGRP))
+
+
 def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions = WriteOptions()) -> None:
     """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
@@ -136,7 +144,7 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
         elif options.preserve_mode and path.is_file():
             shutil.copymode(path, tmp)
         elif options.group_read:
-            os.chmod(tmp, 0o640)
+            _share_with_directory_group(tmp, path.parent)
         os.replace(tmp, path)
         if options.fsync_dir:
             fsync_directory(path.parent)

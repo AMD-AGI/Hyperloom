@@ -180,10 +180,23 @@ def test_atomic_write_bytes_mode_wins_over_preserve_mode(tmp_path):
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
 
-def test_atomic_write_group_read_new_file_is_0640(tmp_path):
-    p = tmp_path / "g.json"
+@pytest.mark.parametrize(
+    ("directory_mode", "expected"),
+    [
+        pytest.param(0o2750, 0o640, id="setgid-shared-tree"),
+        pytest.param(0o2710, 0o600, id="setgid-without-group-read"),
+        pytest.param(0o750, 0o600, id="not-a-shared-tree"),
+    ],
+)
+def test_atomic_write_group_read_follows_the_directory(tmp_path, directory_mode, expected):
+    shared = tmp_path / "session"
+    shared.mkdir()
+    shared.chmod(directory_mode)
+    if directory_mode & stat.S_ISGID and not shared.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    p = shared / "g.json"
     atomic_write_text(p, "x", options=WriteOptions(group_read=True))
-    assert stat.S_IMODE(p.stat().st_mode) == 0o640
+    assert stat.S_IMODE(p.stat().st_mode) == expected
 
 
 def test_atomic_write_group_read_yields_to_mode_and_preserve(tmp_path):

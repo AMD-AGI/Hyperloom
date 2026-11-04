@@ -23,6 +23,16 @@ from kernelforge.knowledge.pr_knowledge import mcp_server as server
 _MODULE = "kernelforge.knowledge.pr_knowledge.inclusion"
 
 
+@pytest.fixture(autouse=True)
+def _no_background_maintenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clone or fetch may start a detached ``git maintenance run --auto`` whose lock and repacks race the
+    object-store snapshots these tests compare."""
+    for index, (key, value) in enumerate((("maintenance.auto", "false"), ("gc.auto", "0"))):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{index}", key)
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{index}", value)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+
+
 def _repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     root.mkdir()

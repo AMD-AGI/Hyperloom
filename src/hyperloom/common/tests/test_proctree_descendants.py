@@ -22,7 +22,11 @@ def _procfs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parents: dict[int, 
 def test_descendants_are_deepest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _procfs(tmp_path, monkeypatch, {10: 1, 11: 10, 12: 11, 13: 10})
 
-    assert [pid for pid, _ in proctree.descendants(10)] == [12, 11, 13]
+    order = [pid for pid, _ in proctree.descendants(10)]
+
+    # Siblings come in /proc listing order, which is the filesystem's; only "a child before its parent" is promised.
+    assert sorted(order) == [11, 12, 13]
+    assert order.index(12) < order.index(11)
 
 
 def test_a_parent_cycle_ends_the_walk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
