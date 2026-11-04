@@ -37,3 +37,37 @@ path = "src/kernelforge/examples/triton2flydsl-mxfp8-grouped-gemm/mxfp8_grouped_
 precedence = "override"
 SPDX-FileCopyrightText = "SGLang Team and contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Arbor, vendored at a release tag (src/hyperloom_arbor/VENDOR.md). It is AMD's, under its own
+# Apache-2.0 licence (src/hyperloom_arbor/LICENSE), not this repository's MIT; the entries after
+# this one name what it carries from elsewhere.
+[[annotations]]
+path = "src/hyperloom_arbor/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "Apache-2.0"
+
+# KernelForge's pages that Arbor's kernels and hardware skills carry: MIT, as src/kernelforge.
+[[annotations]]
+path = [
+    "src/hyperloom_arbor/.claude/skills/kernels/reference/**",
+    "src/hyperloom_arbor/.claude/skills/hardware/reference/**",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "MIT"
+
+# The FlyDSL reference kernel among those pages, as src/kernelforge annotates its own copy.
+[[annotations]]
+path = "src/hyperloom_arbor/.claude/skills/kernels/reference/examples/flydsl-softmax-forge-loop/softmax_kernel.py"
+precedence = "override"
+SPDX-FileCopyrightText = "FlyDSL Project Contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# The SGLang kernel among those pages, the Triton oracle of the mxfp8 grouped-GEMM example: SGLang's, as
+# src/kernelforge annotates its own copy of it.
+[[annotations]]
+path = "src/hyperloom_arbor/.claude/skills/kernels/reference/examples/triton2flydsl-mxfp8-grouped-gemm/mxfp8_grouped_gemm.py"
+precedence = "override"
+SPDX-FileCopyrightText = "SGLang Team and contributors"
+SPDX-License-Identifier = "Apache-2.0"
