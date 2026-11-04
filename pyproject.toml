@@ -332,6 +332,8 @@ hyperloom_kb = [
 ]
 hyperloom_multibranch = [
     "contracts/llm_prices.json",
+    "blackboard/knowledge/declarations/*.yaml",
+    "blackboard/knowledge/mappings/*.yaml",
 ]
 
 [tool.pytest.ini_options]
