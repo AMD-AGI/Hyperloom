@@ -368,15 +368,23 @@ def _entries(directory: Path) -> dict[str, tuple[int, int]]:
 
 
 def test_another_accounts_copies_leave_this_account_laying_and_importing_its_own(tmp_path, monkeypatch):
-    """Every account on the host shares its temporary directory: the copies another account's profiles laid there
-    first, in a directory this account cannot write, neither keep this account's profile from its own patched copy nor
-    hold it."""
+    """Every account on the host shares its temporary directory: the copy another account's profile laid there first,
+    in that account's directory for its copies, which this account cannot write, neither keeps this account's profile
+    from its own patched copy nor is imported by it."""
     install = _Install(tmp_path, monkeypatch, "sglang")
     other = os.getuid() + 1
     with monkeypatch.context() as as_other:
         as_other.setattr(_patch_laying.os, "getuid", lambda: other)
         _server_patcher.ensure_sglang_patched_for_tracelens()
     (theirs,) = (tmp_path / "tmp").iterdir()
+    laid = _server_patcher.ensure_sglang_patched_for_tracelens()
+    assert laid is not None and laid.site is not None
+    copy = laid.site.parent
+    if copy.parent != theirs:  # the same copy, as the other account's profile lays it in its own directory
+        copy.rename(theirs / copy.name)
+        copy.parent.rmdir()
+    assert [path.name for path in (tmp_path / "tmp").iterdir()] == [theirs.name]
+    assert [path.name for path in theirs.iterdir()] == [copy.name], "the other account's copy is laid"
     if os.geteuid() == 0:
         for path in (theirs, *theirs.rglob("*")):
             os.lchown(path, other, other)
