@@ -30,9 +30,11 @@ from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor, _card_
 from hyperloom_multibranch.toolbox.tests.card_list import INTRUDER, CardList
 from hyperloom_multibranch.toolbox.tests.helpers import Rig as ToolboxRig
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
-from hyperloom_multibranch.toolbox.tests.test_branch_leases import local  # noqa: F401 - fixture
+from hyperloom_multibranch.toolbox.tests import test_branch_leases
 from hyperloom_multibranch.toolbox.tests.test_card_placement import FOREIGN, POLICY, _PointPerBranch, _settled, _until
 
+#: The real local toolbox of ``test_branch_leases``, which the local toolbox's tests take as a fixture.
+local = test_branch_leases.local
 Make = Callable[..., Awaitable[tuple[Rig, ToolboxRig, "CardList"]]]
 Local = Callable[..., Awaitable[Any]]
 
@@ -172,11 +174,10 @@ async def test_a_result_kept_beside_a_process_says_so_in_its_facts_and_carries_a
 
 def _runner_envs(tmp_path: Path, options: LocalOptions) -> dict[str, str]:
     session = LocalSession(tmp_path, "run-guard", range(2))
-    provider = local_hosted._provider(session, (0, 1), local_hosted._runner_template(session, options), options, {})
-    try:
+    with local_hosted._provider(
+        session, (0, 1), local_hosted._runner_template(session, options), options, {}
+    ) as provider:
         return dict(provider._templates["runner-1"].envs)
-    finally:
-        provider.close()
 
 
 @pytest.mark.parametrize(
@@ -217,15 +218,14 @@ def test_the_pool_of_the_local_provider_follows_the_guard_and_enforces_when_none
     holders.holders = (INTRUDER,)
     options = LocalOptions(card_guard=guard, card_holders=holders)
     session = LocalSession(tmp_path, "run-pool", range(1))
-    provider = local_hosted._provider(session, (0,), local_hosted._runner_template(session, options), options, {})
-    try:
+    with local_hosted._provider(
+        session, (0,), local_hosted._runner_template(session, options), options, {}
+    ) as provider:
         if refused:
             with pytest.raises(CardsHeld, match="card 0 by pid 4242"):
                 provider.pool.acquire(1, 0.0)
         else:
             assert provider.pool.acquire(1, 0.0) == (0,)
-    finally:
-        provider.close()
 
 
 def test_a_result_kept_although_its_runner_could_not_look_at_its_cards_carries_a_warning_saying_why() -> None:
