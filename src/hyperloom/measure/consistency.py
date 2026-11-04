@@ -43,6 +43,7 @@ import dataclasses
 import datetime
 import importlib
 import json
+import logging
 import math
 import statistics
 import subprocess
@@ -77,6 +78,8 @@ __all__ = [
     "run_checklist",
     "summarize",
 ]
+
+log = logging.getLogger(__name__)
 
 #: The schema of the file the runner lists in its result bundle (``FARM_INVENTORY_FILE``) with what it rebuilt.
 FARM_INVENTORY_SCHEMA = "hyperloom.farm-inventory/v1"
@@ -377,7 +380,10 @@ def _run_side(
         _write_outcome(log_dir, outcome)
     except subprocess.TimeoutExpired as exc:
         side = Side(None, problem=f"timeout: {exc.timeout}s", log_dir=str(log_dir))
-    except Exception as exc:  # noqa: BLE001 - one broken side must not stop the checklist; it is recorded
+    except Exception as exc:  # one broken side must not stop the checklist; it is recorded
+        log.warning(
+            "a side of %s raised; it is that side's problem (its logs: %s)", call.task_id, log_dir, exc_info=True
+        )
         side = Side(None, problem=f"raised: {type(exc).__name__}: {exc}", log_dir=str(log_dir))
     facts = outcome.sandbox if outcome is not None else None
     placed = dataclasses.replace(

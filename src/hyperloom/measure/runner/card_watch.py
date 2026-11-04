@@ -35,6 +35,7 @@ each, and no memory may be held that no process of this container accounts for):
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -67,6 +68,8 @@ __all__ = [
     "CardStatement",
     "CardWatch",
 ]
+
+log = logging.getLogger(__name__)
 
 #: How often a running test's cards are looked at. A look is a few small file reads, so it is made every second: a
 #: process that holds a card and is gone before the next look is not seen, which is the limit of looking at all.
@@ -182,7 +185,10 @@ class CardWatch:
         to be the test's own."""
         try:
             reading = card_occupancy.read_holders(self._cards)
-        except Exception as exc:  # noqa: BLE001 - a look that failed must leave the result unknown, never clean
+        except Exception as exc:  # a look that failed must leave the result unknown, never clean
+            # The result keeps the first failed look's reason; a watch that polls every second logs that look's.
+            level = logging.DEBUG if self._unavailable else logging.WARNING
+            log.log(level, "a look at the cards (%s) failed; what is on them is unknown", when, exc_info=True)
             return CardReading(unavailable=f"a look at the cards failed ({type(exc).__name__})"), ()
         if reading.unavailable is not None:
             return reading, ()

@@ -12,6 +12,7 @@ process is never a clean one. :func:`write_answered` leaves the answers in ``out
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -32,6 +33,8 @@ __all__ = [
     "model_of",
     "write_answered",
 ]
+
+log = logging.getLogger(__name__)
 
 
 class PassFailed(Exception):
@@ -108,7 +111,10 @@ async def _one_process(
         answers = await _answer(plan, prompts, serving, budget)
     except (PassFailed, CompletionError) as exc:
         return ProcessEntry(index, FAILED, str(exc), booted - started, clock() - booted, {})
-    except Exception as exc:  # noqa: BLE001 - one process's unforeseen end is that process's failure, not the test's
+    except Exception as exc:  # one process's unforeseen end is that process's failure, not the test's
+        log.warning(
+            "process %d of the short-prompt check ended on an unforeseen error; it failed", index, exc_info=True
+        )
         reason = f"{type(exc).__name__} while running the process"
         return ProcessEntry(index, FAILED, reason, booted - started, clock() - booted, {})
     finally:

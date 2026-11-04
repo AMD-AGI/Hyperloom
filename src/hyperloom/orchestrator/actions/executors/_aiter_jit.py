@@ -71,6 +71,7 @@ _BATON_LOG_NAMES = {"server.log", "benchmark_stderr.log", "benchmark_stdout.log"
 # Bounds on the baton-wait scan: newest log files read, and bytes read from the end of each.
 _BATON_SCAN_MAX_FILES = 20
 _BATON_SCAN_TAIL_BYTES = 256 * 1024
+_UTF8 = "utf-8"
 
 
 def probe_aiter_jit_cache() -> dict[str, Any]:
@@ -508,7 +509,7 @@ def _positive_int(value: object) -> int | None:
 def _default_cu_nums(package_root: Path) -> dict[str, int]:
     """The image's ``GFX_CU_NUM_MAP``, read as a literal and never imported; empty when it cannot be read."""
     try:
-        tree = ast.parse(package_root.joinpath(*_BUILD_TARGETS_FILE).read_text(encoding="utf-8"))
+        tree = ast.parse(package_root.joinpath(*_BUILD_TARGETS_FILE).read_text(encoding=_UTF8))
     except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
         return {}
     for node in tree.body:
@@ -642,7 +643,7 @@ def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> 
     """
     rows: list[tuple[str, str]] = []
     try:
-        with csv_path.open(newline="", encoding="utf-8") as handle:
+        with csv_path.open(newline="", encoding=_UTF8) as handle:
             for row in csv.DictReader(handle):
                 name = str(row.get("kernelName") or "").strip()
                 if not name:
@@ -691,7 +692,7 @@ def serving_modules_cover_csv(
     for name, libtype in rows:
         resolved = serving_module_for_kernel(name, libtype, modules)
         search = (resolved,) if resolved else modules
-        encoded = name.encode("utf-8")
+        encoded = name.encode(_UTF8)
         saw_so = False
         found = False
         for module in dict.fromkeys(search):
@@ -796,7 +797,7 @@ def _built_for(entry: Mapping[str, Any], targets: BuildTargets | None) -> bool:
 def _module_config(package_root: Path) -> dict[str, Any]:
     """aiter's module config (``jit/optCompilerConfig.json``) of the package; empty when it cannot be read."""
     try:
-        document = json.loads((package_root / "jit" / _MODULE_CONFIG).read_text(encoding="utf-8"))
+        document = json.loads((package_root / "jit" / _MODULE_CONFIG).read_text(encoding=_UTF8))
     except (OSError, ValueError):
         return {}
     return document if isinstance(document, dict) else {}
