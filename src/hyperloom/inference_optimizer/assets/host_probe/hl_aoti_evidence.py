@@ -31,7 +31,6 @@ SCHEMA = "hyperloom.aoti_evidence/1"
 
 _LOCK = threading.Lock()
 _COUNTS = {"compiled": 0, "loaded": 0, "invoked": 0}
-_INSTALLED = False
 _INSTRUMENTED = False
 _OUT_DIR = ""
 
@@ -64,6 +63,7 @@ def _write(counts: dict) -> None:
             json.dump(payload, handle)
         os.replace(tmp, final)
     except OSError:
+        # Nothing here may raise: a run that cannot publish its counters beats one that is broken.
         pass
 
 
@@ -158,14 +158,13 @@ class _TorchImportHook(importlib.abc.MetaPathFinder):
 
 def install_from_env() -> bool:
     """Arm the counters when ``HYPERLOOM_AOTI_EVIDENCE_DIR`` names an output directory."""
-    global _INSTALLED, _OUT_DIR
-    if _INSTALLED:
+    global _OUT_DIR
+    if _OUT_DIR:
         return True
     out_dir = str(os.environ.get("HYPERLOOM_AOTI_EVIDENCE_DIR", "") or "").strip()
     if not out_dir:
         return False
     _OUT_DIR = out_dir
-    _INSTALLED = True
     if "torch" in sys.modules:
         _instrument(sys.modules["torch"])
     else:

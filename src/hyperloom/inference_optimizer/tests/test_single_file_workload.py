@@ -1046,21 +1046,6 @@ def test_gate_stays_shut_when_the_shim_did_not_run(workload, tmp_path, monkeypat
     assert WritebackCollaborator._keep_really_exported(object.__new__(WritebackCollaborator), str(empty)) is False
 
 
-def test_gate_stays_shut_when_the_shim_did_not_run(workload, tmp_path):
-    """Missing counters are a broken harness, not a verdict; there is no source fallback."""
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
-
-    _, hook, _, _ = workload
-    # A module that would satisfy the old source check, with no counters beside it.
-    hook.write_text(
-        "import torch\n\n\ndef hyperloom_optimize(model):\n    return torch._inductor.aoti_load_package('m.pt2')\n"
-    )
-    empty = tmp_path / "ws-no-counters"
-    empty.mkdir()
-
-    assert WritebackCollaborator._keep_really_exported(SimpleNamespace(), str(empty)) is False
-
-
 def test_evidence_pythonpath_keeps_the_inherited_entries(workload, tmp_path, monkeypatch):
     """Prepended, not replaced: the image and the operator put things there too."""
     from hyperloom.orchestrator.actions.executors.bypass_scriptable import build_scriptable_env
