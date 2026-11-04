@@ -8,7 +8,8 @@ its outcome is logged before the blackboard is written, and the entry is settled
 crash every accepted request is in exactly one of three states: waiting to run, measured and waiting to be written, or
 settled. Ids are UUID v5 of the campaign id and ``branch/sequence``; the sequence is per branch and is never reused
 (a submit that failed after it was logged still used its number), so a restart hands out the numbers it would have.
-A torn last line, the trace of a crash mid-write, is ignored.
+A torn last line, the trace of a crash mid-write, is cut off the file when it is read back, so the next entry starts
+a line of its own.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ OUTCOME = "outcome"
 SETTLED = "settled"
 ABORTED = "aborted"
 RECIPE_DIGEST = "recipe_digest"
+_UTF8 = "utf-8"
 
 
 @dataclass
@@ -50,6 +52,28 @@ class LogEntry:
     @property
     def unwritten(self) -> bool:
         return self.outcome is not None and not self.settled and not self.aborted
+
+
+def append_line(path: Path, record: Mapping[str, object]) -> None:
+    """Append ``record`` to the JSON-lines file ``path`` as one line, flushed and fsynced before this returns."""
+    with path.open("a", encoding=_UTF8) as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def complete_lines(path: Path) -> list[str]:
+    """The complete lines of the JSON-lines file ``path``. A torn last line, a write a crash cut short and that was
+    never acknowledged, is cut off the file, so the next :func:`append_line` starts a line of its own instead of
+    running on into it."""
+    with path.open("r+b") as handle:
+        data = handle.read()
+        end = data.rfind(b"\n") + 1
+        if end < len(data):
+            handle.truncate(end)
+            handle.flush()
+            os.fsync(handle.fileno())
+    return data[:end].decode(_UTF8).splitlines()
 
 
 @dataclass
@@ -113,18 +137,14 @@ class SubmissionLog:
         self._append({"type": ABORTED, "request_id": request_id})
 
     def _append(self, record: Mapping[str, object]) -> None:
-        line = json.dumps(record, sort_keys=True) + "\n"
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
+        append_line(self.path, record)
 
     def _replay(self) -> None:
-        for number, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), start=1):
+        for number, line in enumerate(complete_lines(self.path), start=1):
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
-                continue  # a torn write: only the last line can be one, and it was never acknowledged
+                continue  # a torn line an earlier append ran on into: neither half reads back
             self._apply(record, number)
 
     def _apply(self, record: Mapping[str, object], number: int) -> None:

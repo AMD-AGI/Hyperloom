@@ -99,6 +99,17 @@ def test_a_torn_last_line_is_ignored_and_the_lines_before_it_are_kept(tmp_path):
     assert len(ShortPromptPool(tmp_path / POOL_FILE).answers(_key(tmp_path))) == 1
 
 
+def test_a_process_pooled_after_a_torn_last_line_reads_back(tmp_path):
+    pooled_result(ShortPromptPool(tmp_path / POOL_FILE), RECIPE, _landed(tmp_path, "a", "good"), tmp_path)
+    with (tmp_path / POOL_FILE).open("a", encoding="utf-8") as handle:
+        handle.write('{"recipe_digest": "sha256:')
+
+    pooled_result(ShortPromptPool(tmp_path / POOL_FILE), RECIPE, _landed(tmp_path, "b", "bad"), tmp_path)
+    reread = ShortPromptPool(tmp_path / POOL_FILE).answers(_key(tmp_path))
+
+    assert list(reread) == ["tests/a/attempt-1#0", "tests/b/attempt-1#0"]
+
+
 def test_a_result_without_a_check_a_digest_or_readable_outputs_is_left_as_it_is(tmp_path):
     pool = ShortPromptPool(tmp_path / POOL_FILE)
     landed = _landed(tmp_path, "a", "good")
