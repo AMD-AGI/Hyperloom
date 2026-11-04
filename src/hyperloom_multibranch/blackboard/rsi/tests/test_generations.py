@@ -33,12 +33,12 @@ SESSIONS = [_session(f"s{n}") for n in range(5)] + [_session(f"m{n}", MOE) for n
 
 
 def test_the_held_out_sessions_hold_one_of_each_model_type_and_the_evolution_set_the_rest() -> None:
-    evolution, held = split(SESSIONS, 4, seed="x")
+    evolution, held = split(SESSIONS)
 
     assert len(held) == 4 and len(evolution) == 4
     assert {tree.task.labels.get("model_type", "") for tree in held} == {"", "qwen3_next"}
-    assert split(SESSIONS, 4, seed="x") == (evolution, held)
-    assert len(split(SESSIONS[:3], 4)[1]) == 1
+    assert split(SESSIONS) == (evolution, held)
+    assert len(split(SESSIONS[:3])[1]) == 1
 
 
 def _answers(*documents: object):
@@ -111,7 +111,7 @@ async def test_a_rule_change_is_asked_at_the_archived_decision_points_before_its
 
 
 def test_a_generation_reads_the_champion_its_replay_the_stop_audits_and_the_ledger(tmp_path: Path) -> None:
-    prompt = generation_prompt(SESSIONS[:2], H0, PlaybookPool(tmp_path), 2, "")
+    prompt = generation_prompt(SESSIONS[:2], H0, PlaybookPool(tmp_path), 2)
 
     assert prompt.startswith("You are improving the playbook offline")
     assert "- stall_tests: default (bounds 4 to 10)" in prompt and H0.render() in prompt

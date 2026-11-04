@@ -35,7 +35,6 @@ read; authoring holds a new one to the same two tests (:func:`r1_reading`).
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import math
 import re
 import statistics
@@ -134,9 +133,7 @@ def r0(candidate: Playbook, parent: Playbook | None) -> Rung:
     return Rung("R0", not found, "; ".join(found) or "within its bounds, one change of its parent")
 
 
-def r1(
-    candidate: Playbook, champion: Playbook, trees: Sequence[SearchTree], *, runs: int = REPLAY_RUNS, seed: str = ""
-) -> Rung:
+def r1(candidate: Playbook, champion: Playbook, trees: Sequence[SearchTree], *, runs: int = REPLAY_RUNS) -> Rung:
     """R1: ``candidate`` beside ``champion`` in the scheduling replay of ``trees``, both ways beyond the data."""
 
     changed = changes(champion, candidate)
@@ -148,7 +145,7 @@ def r1(
     lows = []
     pair = {champion.label: champion, candidate.label: candidate}
     for beyond in (OPTIMISTIC, PESSIMISTIC):
-        found = compare(trees, pair, baseline=champion.label, drawn=Draws(runs=runs, beyond=beyond, seed=seed))
+        found = compare(trees, pair, baseline=champion.label, drawn=Draws(runs=runs, beyond=beyond))
         row = next(item for item in found.rows if item.label == candidate.label)
         lows.append((beyond, row.gain_difference, row.difference_low))
     passed = all(low > 0 for _, _, low in lows)
@@ -263,12 +260,10 @@ async def r2_sessions(
     champion: Playbook,
     trees: Sequence[SearchTree],
     judge: ReplayJudge,
-    *,
-    drawn: Draws = Draws(runs=JUDGED_RUNS),
 ) -> Rung:
-    """R2 for a rule change: ``trees`` replayed under ``candidate`` and ``champion`` as ``drawn`` says, ``judge``
-    asked every round; it passes when the candidate's best gain beats the champion's, paired run by run. A change of
-    numbers only is R1's to replay."""
+    """R2 for a rule change: ``trees`` replayed :data:`JUDGED_RUNS` times each under ``candidate`` and ``champion``,
+    ``judge`` asked every round; it passes when the candidate's best gain beats the champion's, paired run by run. A
+    change of numbers only is R1's to replay."""
 
     if "rules" not in changes(champion, candidate):
         return Rung("R2", True, "a change of numbers: R1 replays it", skipped=True)
@@ -278,11 +273,11 @@ async def r2_sessions(
         return asyncio.run_coroutine_threadsafe(judge.ask(prompt), loop).result()
 
     pair = {champion.label: champion, candidate.label: candidate}
-    judged = dataclasses.replace(drawn, decide=decide)
+    judged = Draws(runs=JUDGED_RUNS, decide=decide)
     found = await asyncio.to_thread(compare, trees, pair, baseline=champion.label, drawn=judged)
     row = next(item for item in found.rows if item.label == candidate.label)
     said = (
-        f"judged replay of {len(found.sessions)} sessions, {drawn.runs} runs each: best gain "
+        f"judged replay of {len(found.sessions)} sessions, {JUDGED_RUNS} runs each: best gain "
         f"{row.gain_difference:+.2f} points against {champion.label} ({row.difference_low:+.2f} to "
         f"{row.difference_high:+.2f})"
     )
