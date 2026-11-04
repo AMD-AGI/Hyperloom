@@ -82,6 +82,9 @@ logger = logging.getLogger(__name__)
 #: edit in place (a tool defaulting to the installed tree) breaks every branch's tests. aiter is left writable, since
 #: it builds its JIT modules beside itself unless told otherwise.
 READ_ONLY_FRAMEWORKS = ("sglang", "vllm")
+#: The prefix that runs a command in a mount namespace of its own, whose mounts no other process sees; the probe of
+#: :func:`mount_namespaces` runs the same one.
+_PRIVATE_MOUNTS = ("unshare", "--mount", "--propagation", "private", "--")
 #: Mounts each path given before ``--`` read-only in the command's own mount namespace, then runs the rest.
 _READ_ONLY_SCRIPT = (
     'while [ "$1" != -- ]; do mount --bind "$1" "$1" && mount -o remount,bind,ro "$1" || exit 97; shift; done; '
@@ -586,7 +589,7 @@ class LocalAgentSandbox:
 def read_only_argv(paths: tuple[Path, ...], argv: list[str]) -> list[str]:
     """``argv`` run in a private mount namespace where each of ``paths`` is mounted read-only."""
     script = ["sh", "-c", _READ_ONLY_SCRIPT, "read-only", *map(str, paths), "--", *argv]
-    return ["unshare", "--mount", "--propagation", "private", "--", *script]
+    return [*_PRIVATE_MOUNTS, *script]
 
 
 @functools.cache
@@ -618,9 +621,11 @@ def framework_protection() -> FrameworkProtection:
 def mount_namespaces() -> bool:
     """Whether this host gives a command a mount namespace of its own: root, and ``unshare`` permitted."""
 
-    probe = ["unshare", "--mount", "--propagation", "private", "--", "true"]
+    probe = [*_PRIVATE_MOUNTS, "true"]
     try:
-        return shutil.which("unshare") is not None and subprocess.run(probe, capture_output=True).returncode == 0
+        return (
+            shutil.which(_PRIVATE_MOUNTS[0]) is not None and subprocess.run(probe, capture_output=True).returncode == 0
+        )
     except OSError:
         return False
 
