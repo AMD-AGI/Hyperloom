@@ -28,8 +28,10 @@ of the cache that changes after that check never reaches the runner or pip, whoe
 manifest records no ``source.tar`` (an older builder made it) is refused.
 
 The sandbox installs exactly the wheels the manifest lists, each pinned to the hash the manifest records
-(:func:`requirements_text`); the builder has checked every one of them against the lock. An entry without a manifest is
-an unfinished build, and nothing uses it. ``<cache>`` is the directory
+(:func:`requirements_text`). The check the builder and the sandbox share (:func:`_wheels_problems`) passes a manifest
+only when it lists one wheel for each pin of the lock and nothing else, each a file the lock lists for its pin or
+recorded as built from one: a manifest that lists a pin twice is refused, so every wheel installed is one the check
+read. An entry without a manifest is an unfinished build, and nothing uses it. ``<cache>`` is the directory
 ``HYPERLOOM_RUNNER_CACHE`` names, on the builder's machine as well as inside the sandbox (the mount point may differ).
 
 One lock per Python. A pin has wheels for the Python versions its release supports, so no one set of pins installs on
@@ -56,6 +58,7 @@ import re
 import shutil
 import sys
 import tarfile
+from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -355,8 +358,16 @@ def _wheel_problems(wheels: Path, wheel: WheelEntry, pin: LockPin, verify_hash: 
 
 
 def _wheels_problems(wheels: Path, manifest: Manifest, pins: list[LockPin], verify_hash: bool) -> list[str]:
+    """Why the manifest's wheels are not one per pin of the lock, each a file the lock lists for that pin
+    (:func:`_wheel_problems`). The sandbox stages and pip installs every entry the manifest lists, so a pin listed twice
+    is refused like a pin with no entry and an entry of no pin: only then is every entry one this check read."""
+    counted = Counter((wheel.name, wheel.version) for wheel in manifest.wheels)
+    problems = [
+        f"the manifest lists {name}=={version} {count} times, and a pin has one wheel"
+        for (name, version), count in counted.items()
+        if count > 1
+    ]
     listed = {(wheel.name, wheel.version): wheel for wheel in manifest.wheels}
-    problems: list[str] = []
     for pin in pins:
         wheel = listed.pop((pin.name, pin.version), None)
         if wheel is None:
@@ -425,12 +436,13 @@ def check_entry(
     """Every reason the cache entry directory ``entry`` is not a whole build of ``sha``, as it lies in the cache; empty
     when it is. This is the builder's check; the sandbox's is :func:`stage_entry`.
 
-    Every wheel the lock pins must be there with its recorded size, ``source.tar`` must be there with its recorded size,
-    the source must be the tree the manifest recorded and the lock (the one of the manifest's Python, :func:`lock_file`)
-    the one the wheels were chosen from. With ``python_version`` (``"3.14"``, the interpreter that is to install them),
-    wheels the manifest records for another Python are refused. The content of the wheels and of ``source.tar`` is not
-    read unless ``verify_hash``, and ``bootstrap.sh`` is read only then: the script that runs the sandbox's check cannot
-    vouch for itself (see :mod:`hyperloom.measure.runner.bootstrap`).
+    Every wheel the lock pins must be there with its recorded size and listed once (:func:`_wheels_problems`),
+    ``source.tar`` must be there with its recorded size, the source must be the tree the manifest recorded and the lock
+    (the one of the manifest's Python, :func:`lock_file`) the one the wheels were chosen from. With ``python_version``
+    (``"3.14"``, the interpreter that is to install them), wheels the manifest records for another Python are refused.
+    The content of the wheels and of ``source.tar`` is not read unless ``verify_hash``, and ``bootstrap.sh`` is read
+    only then: the script that runs the sandbox's check cannot vouch for itself (see
+    :mod:`hyperloom.measure.runner.bootstrap`).
     """
     problems, manifest = _pinned_manifest(entry, sha, manifest_pin)
     if manifest is None:
