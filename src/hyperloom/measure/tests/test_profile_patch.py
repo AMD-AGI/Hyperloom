@@ -115,7 +115,7 @@ def test_a_farm_that_rebuilt_the_profiled_framework_gets_the_patch_in_its_own_fi
     assert _imported(farm.site, installed) == (str(farm.site / _RUNNER), True)
     assert (farm.site / "sglang" / "srt" / "other.py").read_bytes() == _CANDIDATE, "the candidate's change is kept"
     assert _tree(installed) == before, "the installed tree is byte-identical"
-    assert not (tmp_path / "tmp" / "hyperloom-tracelens").exists(), "the farm's patch is laid in the farm"
+    assert not list((tmp_path / "tmp").glob("hyperloom-tracelens*")), "the farm's patch is laid in the farm"
 
 
 def test_a_test_that_does_not_profile_with_the_patch_leaves_its_farm_as_built(tmp_path, installed, monkeypatch):
@@ -184,7 +184,7 @@ def test_this_hosts_copy_takes_the_place_of_the_copy_the_point_was_rendered_with
     monkeypatch.setattr(farm_module, "ensure_patched_copy", lambda package, checkout: PatchedServer(site))
     rendered = [
         "/farm/site",
-        "/app/tmp/hyperloom-tracelens/sglang-gc-ab/site",
+        "/app/tmp/hyperloom-tracelens-1000/sglang-gc-ab/site",
         "/tool",
         "/x/hyperloom-tracelens/v/site",
     ]
