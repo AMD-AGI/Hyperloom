@@ -131,6 +131,8 @@ class RoundCost:
     planning_sec: float = 0.0
     total_sec: float = 0.0
     measurement_sec: float = 0.0
+    # The part of ``planning_sec`` the plan critic and the revision it asked for took.
+    review_sec: float = 0.0
 
 
 @dataclass
@@ -166,6 +168,7 @@ def _validate_round_costs(costs: "RoundCostState") -> None:
                 entry.measurement_sec,
             )
         )
+        durations.append((f"round_costs.recent[{index}].review_sec", entry.review_sec))
     for label, value in durations:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"run state {label} must be a number")
@@ -515,6 +518,7 @@ def apply_round_cost(state: "RunState", cost: RoundCost, *, campaign_sec: float)
     planning = max(0.0, float(cost.planning_sec))
     total = max(planning, float(cost.total_sec))
     measurement = max(0.0, float(cost.measurement_sec))
+    review = min(planning, max(0.0, float(cost.review_sec)))
     if planning <= 0:
         raise ValueError("a round that did not plan has no cost to record")
     costs = state.round_costs
@@ -533,6 +537,7 @@ def apply_round_cost(state: "RunState", cost: RoundCost, *, campaign_sec: float)
             planning_sec=planning,
             total_sec=total,
             measurement_sec=measurement,
+            review_sec=review,
         )
     )
     costs.recent = costs.recent[-ROUND_COST_WINDOW:]

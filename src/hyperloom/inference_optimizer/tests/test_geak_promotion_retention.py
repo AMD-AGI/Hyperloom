@@ -385,7 +385,9 @@ def test_geak_replay_without_launch_fields_preserves_stack_controls(promotion, a
         extra_envs={"SGLANG_AITER_MLA_PERSIST": "3"},
         args_mode="replace",
         remove_args=["--disable-radix-cache"],
-        unset_envs=["SGLANG_AITER_MLA_PERSIST"],
+        # A name the snapshot's own ``extra_envs`` does not set: an unset of a key the snapshot asserts is no delta
+        # against that snapshot, so it is not carried.
+        unset_envs=["SGLANG_MOE_PADDING"],
     )
     result["accepted_config"] = {"flags": "--mem-fraction-static 0.95", "env_map": {}, "args_mode": accepted_mode}
     assert coord.phase_kernel.promote_geak_from_candidate(
@@ -399,7 +401,7 @@ def test_geak_replay_without_launch_fields_preserves_stack_controls(promotion, a
     )
     assert best["extra_server_args"] == expected
     assert best["args_mode"] == "replace"
-    assert best["unset_envs"] == ["SGLANG_AITER_MLA_PERSIST"]
+    assert best["unset_envs"] == ["SGLANG_MOE_PADDING"]
     assert best["extra_envs"] == {"SGLANG_AITER_MLA_PERSIST": "3"}
 
 

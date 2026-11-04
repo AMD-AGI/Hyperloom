@@ -10,6 +10,14 @@ from typing import Any
 from hyperloom_common.coerce import optional_positive_float, to_float
 
 
+def hot_pass_cost_sec(warm_sec: Any, post_ready_sec: Any, eval_sec: Any) -> float | None:
+    """A hot pass's warm runtime, else the cold post-ready time less an eval it strictly encloses (separate clocks)."""
+    warm, post_ready, evaluation = (optional_positive_float(value) for value in (warm_sec, post_ready_sec, eval_sec))
+    if warm is not None or post_ready is None:
+        return warm
+    return post_ready - evaluation if evaluation is not None and evaluation < post_ready else post_ready
+
+
 #: The ``warm_replay_status`` of a baseline round that has not finished yet.
 _IN_FLIGHT = "in_flight"
 
@@ -55,12 +63,10 @@ def _cold_anchor_shortfall(baseline: dict[str, Any], pending: dict[str, Any]) ->
         return None
     usable = to_float(baseline.get("session_usable_sec"))
     runtime = optional_positive_float(baseline.get("runtime_sec"))
-    benchmark = optional_positive_float(baseline.get("warm_runtime_sec")) or optional_positive_float(
-        baseline.get("post_ready_runtime_sec")
+    benchmark = hot_pass_cost_sec(
+        baseline.get("warm_runtime_sec"), baseline.get("post_ready_runtime_sec"), baseline.get("eval_runtime_sec")
     )
-    retry = runtime
-    if runtime is not None and benchmark is not None:
-        retry += benchmark
+    retry = runtime if runtime is None or benchmark is None else runtime + benchmark
     viability = _prelude_viability(baseline)
     use_sec = to_float(viability.get("measured_round_sec")) or runtime
     if usable is None or retry is None or use_sec is None or usable >= retry + use_sec:

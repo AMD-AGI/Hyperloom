@@ -2375,7 +2375,14 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "explore", "predicted_gain_pct": 5.0},
+                # Admission refuses an explore with nothing to measure.
+                payload={
+                    "action_name": "explore",
+                    "predicted_gain_pct": 5.0,
+                    "params": {
+                        "grid": [{"name": "chunked_prefill", "extra_server_args": "--chunked-prefill-size 4096"}]
+                    },
+                },
             ),
         )
         if record_alert:

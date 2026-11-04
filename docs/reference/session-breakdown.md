@@ -462,7 +462,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "schema_version": "hyperloom.session_breakdown.v6.1",
       "hyperloom": "a1b2c3d",
       "framework": "sglang",
-      "framework_version": "0.5.22",
+      "framework_version": "0.5.23",
       "tools": {
         "geak": { "tool": "geak", "root_dir": "/opt/geak", "commit": "9f8e7d6", "version": "0.4.2" }
       }
@@ -482,8 +482,8 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
       "user_data_path": "/workspace",
       "tick_count": 89,
-      "image": "lmsysorg/sglang-rocm:v0.5.22-rocm10-mi30x-20261022",
-      "image_id": "sglang-rocm:v0.5.22-rocm10-mi30x-20261022",
+      "image": "lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261102",
+      "image_id": "sglang-rocm:v0.5.23-rocm10-mi30x-20261102",
       "recovery": {
         "recovered": false,
         "crash_count": 0,
@@ -495,7 +495,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     },
     "task_config": {
       "framework_name": "sglang",
-      "framework_version": "0.5.22",
+      "framework_version": "0.5.23",
       "model_name": "GLM-5-FP8",
       "model_path": "/models/GLM-5-FP8",
       "gpu_type": "mi355x",

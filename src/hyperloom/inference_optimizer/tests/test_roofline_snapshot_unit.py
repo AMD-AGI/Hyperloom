@@ -112,14 +112,17 @@ def test_extract_workload_summary_reads_analysis_json(tmp_path):
 
 
 def test_analysis_json_names_top_bottleneck_and_top_kernel(tmp_path):
-    member = {"operation_cell": "op_a", "pct_e2e": 40.0, "efficiency_percent": 65.0, "bound": "compute"}
-    other = {"operation_cell": "op_b", "pct_e2e": 5.0, "efficiency_percent": None, "bound": None}
+    member = {"kernel_name": ["Cijk_gemm_a"], "pct_e2e": 40.0, "efficiency_percent": 65.0, "bound": "compute"}
+    other = {"kernel_name": ["norm_b"], "pct_e2e": 5.0, "efficiency_percent": None, "bound": None}
     report = tmp_path / "analysis.json"
     report.write_text(
         json.dumps(
             {
                 "top_operations": [{"rank": 1, "category": "gemm"}, {"rank": 2, "category": "norm"}],
-                "compute_optimizations": [{"members": [other]}, {"members": [member]}],
+                "compute_optimizations": [
+                    {"operation": "op_b", "members": [other]},
+                    {"operation": "op_a", "members": [member]},
+                ],
             }
         ),
         encoding="utf-8",
@@ -134,6 +137,19 @@ def test_analysis_json_names_top_bottleneck_and_top_kernel(tmp_path):
         "efficiency_pct": 65.0,
         "bound_type": "compute",
     }
+
+
+def test_analysis_json_top_kernel_of_a_task_with_no_operation_is_named_by_its_device_symbol(tmp_path):
+    member = {
+        "kernel_name": ["Cijk_gemm_a", "Cijk_gemm_a_tail"],
+        "pct_e2e": 40.0,
+        "efficiency_percent": 65.0,
+        "bound": "compute",
+    }
+    report = tmp_path / "analysis.json"
+    report.write_text(json.dumps({"compute_optimizations": [{"operation": "", "members": [member]}]}), encoding="utf-8")
+
+    assert rs.extract_top_kernel(report)["name"] == "Cijk_gemm_a"
 
 
 def test_extract_workload_summary_memcpy_none_without_row(tmp_path):

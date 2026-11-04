@@ -258,11 +258,13 @@ class IterationPhasesMixin:
         orchestration_service,
         on_iteration,
     ) -> _RoundPlan | None:
-        """The round's synthesized plan, or None when planning failed and the iteration was abandoned."""
+        """The round's synthesized plan, or None when the budget refused the round or failed planning abandoned it."""
         iteration = frame.iteration
         if fan_out_plan is not None:
             plan_path, orchestration_error = fan_out_plan
         else:
+            if self._round_started_at is None and not self._admit_replanned_round(iteration):
+                return None
             print("  [orchestration] analyzing and dispatching specialists...")
             self._last_orchestration_plan_executable = None
             plan_path, orchestration_error = await self._plan_round(
@@ -582,6 +584,8 @@ class IterationPhasesMixin:
                 else self._build_orchestration_context()
             )
         )
+        if orchestration_service.has_plan_critic:
+            context = self._with_plan_review(iteration, context)
         try:
             result = await orchestration_service.run(
                 context,
@@ -596,6 +600,7 @@ class IterationPhasesMixin:
             self._checkpoint_llm_usage()
 
         self._record_probe_hazard(iteration, result)
+        self._charge_plan_review(result)
         self._last_lane_plans = [plan for plan in result.optimization_plans if str(plan).strip()]
         self._persist_orchestration_result(iteration, context, result)
         plan_path = self._persist_lane_plans(

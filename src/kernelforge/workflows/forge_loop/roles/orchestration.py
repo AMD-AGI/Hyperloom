@@ -420,21 +420,19 @@ class OrchestrationAgent:
         if not analyses:
             raise ValueError("no specialist analysis is available for synthesis")
         payload = synthesis_payload(context, specialists, analyses)
-        result = await self._run_result(
-            context,
-            _Turn(
-                SYNTHESIS_SYSTEM_PROMPT,
-                json.dumps(payload, indent=2, sort_keys=True),
-                role="orchestration synthesis",
-            ),
-            usage=usage,
+        turn = _Turn(
+            SYNTHESIS_SYSTEM_PROMPT,
+            json.dumps(payload, indent=2, sort_keys=True),
+            role="orchestration synthesis",
         )
+        result = await self._run_result(context, turn, usage=usage)
         return SynthesizedPlan(
             text=self._validated_text(
                 result,
                 role="orchestration synthesis",
             ),
             session_id=str(result.session_id or "").strip(),
+            system_prompt=turn.system_prompt,
         )
 
     async def synthesize_lane_plan_results(
@@ -464,17 +462,14 @@ class OrchestrationAgent:
 
         async def _lane(index: int, on_response_started: Callable[[], None] | None = None) -> SynthesizedPlan | None:
             prompt, shared = prompts[index]
-            result = await self._run_result(
-                context,
-                _Turn(
-                    LANE_SYNTHESIS_SYSTEM_PROMPT,
-                    prompt,
-                    role=f"orchestration lane {index + 1} synthesis",
-                    shared_prompt_prefix=shared,
-                    on_response_started=on_response_started,
-                ),
-                usage=usage,
+            turn = _Turn(
+                LANE_SYNTHESIS_SYSTEM_PROMPT,
+                prompt,
+                role=f"orchestration lane {index + 1} synthesis",
+                shared_prompt_prefix=shared,
+                on_response_started=on_response_started,
             )
+            result = await self._run_result(context, turn, usage=usage)
             text = self._validated_text(
                 result,
                 role=f"orchestration lane {index + 1} synthesis",
@@ -485,6 +480,7 @@ class OrchestrationAgent:
             return SynthesizedPlan(
                 text=text,
                 session_id=str(result.session_id or "").strip(),
+                system_prompt=turn.system_prompt,
                 ground=grounds[index].ground,
                 joint=grounds[index].joint,
                 fallback=grounds[index].fallback,
@@ -800,7 +796,7 @@ class OrchestrationAgent:
             result = await self._resume_result(
                 context,
                 _Turn(
-                    REVISION_SYSTEM_PROMPT,
+                    draft.system_prompt,
                     "",
                     role="orchestration revision",
                     max_turns=PLAN_REVISION_MAX_TURNS,
@@ -983,6 +979,7 @@ class OrchestrationService:
         self._specialist_pool = specialist_pool
         self._definitions = dict(definitions)
         self._plan_critic = plan_critic
+        self.has_plan_critic = plan_critic is not None
 
     async def run(
         self,
@@ -1022,16 +1019,15 @@ class OrchestrationService:
         draft_plan = ""
         critic_outcome = None
         plan_revised = False
-        # Every round a synthesis produced is reviewed, at any width.
-        if self._plan_critic is not None and optimization_plan_executable:
+        # A round the loop sends for review is reviewed once a synthesis produced it, at any width.
+        if self._plan_critic is not None and context.review_plan and optimization_plan_executable:
             review = await self._review_round(context, synthesized_plans, specialists, usage=usage)
             diagnostics.update(review.diagnostics)
             plans, draft_plan, critic_outcome = review.plans, review.draft_plan, review.critic_outcome
             plan_revised, optimization_plan_executable = review.plan_revised, review.executable
         elif self._plan_critic is not None:
-            diagnostics["plan_critic"] = {
-                "status": "skipped_synthesis_unavailable",
-            }
+            status = "skipped_synthesis_unavailable" if context.review_plan else "skipped_not_requested"
+            diagnostics["plan_critic"] = {"status": status}
         diagnostics["lanes"] = {
             "requested": int(lanes),
             "planned": planned_lanes,

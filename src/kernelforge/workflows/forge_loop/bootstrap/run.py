@@ -781,7 +781,7 @@ def _search(
     print(
         "  Plan Critic: "
         + (
-            "enabled (long-horizon, same backend/model)"
+            "enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
             if plan.critic_enabled
             else "disabled (requires --max-hours > 2)"
         )

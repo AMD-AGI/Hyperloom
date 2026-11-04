@@ -151,6 +151,8 @@ class IterationLoop(
         # What the round spent in the canonical validation and benchmark, which is what prices the next round's
         # dispatch.
         self._round_measurement_sec = 0.0
+        # The part of the round's planning its plan critic and the revision it asked for took.
+        self._round_review_sec = 0.0
         # The instant the CAMPAIGN began, which on a resumed session is before this process did: ``start_time`` less
         # the wall-clock earlier sessions already banked.
         self._campaign_started_at: float = 0.0

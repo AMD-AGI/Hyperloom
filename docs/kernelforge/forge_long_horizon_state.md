@@ -125,7 +125,11 @@ Each iteration runs:
    review. `REVISE`/`REPLACE` permits one Orchestration revision without
    rerunning specialists. The revision resumes the original synthesis session
    when its backend exposes a session handle, otherwise it uses one fresh
-   revision session. Both calls have a 100-turn ceiling, and incomplete output
+   revision session. A resumed revision keeps the synthesis session's system
+   prompt and carries the revision instructions in its message, so the cached
+   synthesis conversation is read rather than rewritten, and backends that
+   apply a system prompt only when a session starts still receive the
+   instructions. Both calls have a 100-turn ceiling, and incomplete output
    is rejected. The revision has a 10-minute runtime ceiling; the Critic's is
    10 minutes per plan it reads, bounded by the Orchestration session timeout,
    because a round of several plans is several times the reading. Sized for one
@@ -199,7 +203,18 @@ The same `max_hours > 2` long-horizon gate enables both the Plan Critic and
 hardware profiling. Shorter sessions keep Analysis static-only and do not
 inject self-profiling guidance into the Implementer.
 
-The Plan Critic reviews every round a synthesis produced, at any width. A wide
+The Plan Critic reviews the first round a synthesis produced, at any width, and
+a later one only when the previous round kept no candidate of its own, the
+search is in DIVERSIFY mode, or the last critic asked for a challenger lane. A
+round that continues, in EXPLOIT mode, a route its predecessor kept a candidate
+on publishes its drafts unreviewed and records
+`plan_critic.status = "skipped_not_requested"`; every round logs its decision as
+a `plan_review` event naming the rule. A KEEP of two stacked archived gains is
+not a candidate any round planned, so it does not count as the previous round's.
+Every planning happens in an admitted round, including the one an iteration
+buys when the queued lane candidate it held no longer applies, and admission
+prices a round's planning without the review time observed rounds spent, since
+that round may skip it. A wide
 round is reviewed once, with its division in view: whether any lane's ground is
 worth an Implementer session, whether two lanes are one change described twice,
 whether a lane would have to edit code another lane owns, and whether the round

@@ -62,7 +62,7 @@ def _round_post_ready_sec(
     started_unix: float,
     runtime_sec: float,
 ) -> float | None:
-    """How much of a round's wall-clock was the benchmark rather than the boot."""
+    """How much of a round's wall-clock came after the boot: the benchmark, and the accuracy eval if it ran one."""
     if not server_log_path:
         return None
     return post_ready_runtime_sec(

@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 
+from kernelforge.workflows.forge_loop.iteration.merge_candidates import MERGE_PLAN_PREFIX
+from kernelforge.workflows.forge_loop.policy.plan_critic_policy import decide_plan_review, review_seconds
 from kernelforge.workflows.forge_loop.policy.round_budget import admit_dispatch, admit_round, estimate_measurement_sec
 from kernelforge.workflows.forge_loop.campaign.run_state import RoundCost, StallPolicy, apply_round_cost, make_event
 from kernelforge.workflows.forge_loop.search.search_policy import (
@@ -18,6 +21,7 @@ from kernelforge.workflows.forge_loop.search.search_policy import (
     SearchPolicyDecision,
     SearchState,
 )
+from kernelforge.workflows.forge_loop.roles.contracts import OrchestrationContext
 
 
 class RoundAdmissionMixin:
@@ -59,15 +63,18 @@ class RoundAdmissionMixin:
         self._round_lanes = max(1, int(lanes))
         self._round_planning_sec = 0.0
         self._round_measurement_sec = 0.0
+        self._round_review_sec = 0.0
 
     def _close_round(self) -> None:
         """Record what the open round cost, if it bought any planning."""
         started_at = self._round_started_at
         planning_sec = self._round_planning_sec
         measurement_sec = self._round_measurement_sec
+        review_sec = self._round_review_sec
         self._round_started_at = None
         self._round_planning_sec = 0.0
         self._round_measurement_sec = 0.0
+        self._round_review_sec = 0.0
         if started_at is None or planning_sec <= 0:
             return
         total_sec = max(planning_sec, time.time() - started_at)
@@ -79,6 +86,7 @@ class RoundAdmissionMixin:
                 planning_sec=planning_sec,
                 total_sec=total_sec,
                 measurement_sec=measurement_sec,
+                review_sec=review_sec,
             ),
             campaign_sec=self._advance_campaign_clock(),
         )
@@ -90,6 +98,7 @@ class RoundAdmissionMixin:
                 planning_sec=round(planning_sec, 3),
                 total_sec=round(total_sec, 3),
                 measurement_sec=round(measurement_sec, 3),
+                review_sec=round(review_sec, 3),
             )
         )
         self.state_store.save(self.run_state)
@@ -122,11 +131,11 @@ class RoundAdmissionMixin:
         """Wall-clock the canonical validation and benchmark may still take."""
         return estimate_measurement_sec(list(self.run_state.round_costs.recent))
 
-    def _admit_next_round(self, iteration: int) -> int | None:
+    def _admit_next_round(self, iteration: int, *, requested_lanes: int) -> int | None:
         """How many lanes the next round may PLAN, or ``None`` if none fit."""
         decision = admit_round(
             remaining_sec=self._time_remaining(),
-            requested_lanes=self.ic.lanes,
+            requested_lanes=requested_lanes,
             history=list(self.run_state.round_costs.recent),
             measurement_sec=self._measurement_estimate_sec(),
         )
@@ -134,7 +143,7 @@ class RoundAdmissionMixin:
             return decision.lanes
         event_fields = {
             "lanes": decision.lanes,
-            "requested_lanes": max(1, int(self.ic.lanes)),
+            "requested_lanes": max(1, int(requested_lanes)),
             "remaining_sec": round(decision.remaining_sec, 3),
             "required_sec": round(decision.required_sec, 3),
             "planning_sec": round(decision.planning_sec, 3),
@@ -204,10 +213,22 @@ class RoundAdmissionMixin:
         self._close_round()
         round_lanes: int | None = self.ic.lanes
         if not self._lane_queue:
-            round_lanes = self._admit_next_round(iteration)
+            round_lanes = self._admit_next_round(iteration, requested_lanes=self.ic.lanes)
             if round_lanes is not None:
                 self._open_round(iteration, lanes=round_lanes)
         return round_lanes
+
+    def _admit_replanned_round(self, iteration: int) -> bool:
+        """Price and open the one-lane round an iteration plans once the queued candidate it held no longer applies.
+
+        The iteration was priced while the queue still held that candidate, so no round was admitted for it; the plan
+        it now buys is admitted and charged like any other.
+        """
+        lanes = self._admit_next_round(iteration, requested_lanes=1)
+        if lanes is None:
+            return False
+        self._open_round(iteration, lanes=lanes)
+        return True
 
     def _update_search_policy(self, iteration: int) -> SearchPolicyDecision:
         """Derive and persist the search mode before planning an iteration."""
@@ -265,6 +286,39 @@ class RoundAdmissionMixin:
         if decision.mode != previous_mode or decision.reason_codes != previous_reasons:
             print(f"  [search-policy] {decision.mode}: " + ", ".join(decision.reason_codes))
         return decision
+
+    def _previous_round_kept(self) -> bool | None:
+        """Whether the last round that planned kept a candidate of its own, or ``None`` before any round planned.
+
+        Every KEEP moves the best, so that round kept one when the best is at or after the round's first iteration and
+        is not a stacked merge of archived gains, which no round planned. A merge kept after the round's own KEEP hides
+        that KEEP, and the next round is reviewed.
+        """
+        recent = self.run_state.round_costs.recent
+        if not recent:
+            return None
+        best = self.run_state.best
+        return best.iteration >= recent[-1].iteration and not best.plan.startswith(MERGE_PLAN_PREFIX)
+
+    def _with_plan_review(self, iteration: int, context: OrchestrationContext) -> OrchestrationContext:
+        """The round's context, carrying whether its plans go to the plan critic."""
+        decision = decide_plan_review(
+            previous_round_kept=self._previous_round_kept(),
+            search_mode=context.search_mode,
+            last_critic_verdict=context.last_critic_verdict,
+        )
+        print(f"  [plan-critic] {'reviewing' if decision.review else 'skipping'} this round: {decision.reason}")
+        self.state_store.append_event(
+            make_event("plan_review", iteration, review=decision.review, reason=decision.reason)
+        )
+        return replace(context, review_plan=decision.review)
+
+    def _charge_plan_review(self, result) -> None:
+        """Charge the open round for what its plan critic and revision took."""
+        if self._round_started_at is None:
+            return
+        durations = result.structured_output_diagnostics.get("phase_durations_sec") or {}
+        self._round_review_sec += review_seconds(durations)
 
     async def _plan_round(
         self,

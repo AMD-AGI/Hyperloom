@@ -2999,8 +2999,17 @@ async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coor
 
 
 # -- handle_delegate branches ----------------------------------------------
+# An explore is admitted on something to measure; these tests are about the other delegate branches,
+# not that grid, so they delegate one admission has no quarrel with.
+_DELEGATE_PARAMS = {"explore": {"grid": [{"name": "v1"}]}}
+
+
 def _delegate(action_name: str, key: str, params=None) -> Intent:
-    payload = {"action_name": action_name, "params": params or {}, "idempotency_key": key}
+    payload = {
+        "action_name": action_name,
+        "params": params if params is not None else dict(_DELEGATE_PARAMS.get(action_name, {})),
+        "idempotency_key": key,
+    }
     return Intent(type=IntentType.DELEGATE, payload=payload)
 
 

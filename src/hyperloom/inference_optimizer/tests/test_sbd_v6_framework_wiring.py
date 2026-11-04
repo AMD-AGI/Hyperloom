@@ -909,6 +909,11 @@ def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
 
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
+    # Admission refuses a grid with no named variant, as the round would find nothing to measure.
+    grid = [
+        row if row.get("name") else {"name": row.get("variant_name") or f"variant-{i}", **row}
+        for i, row in enumerate(grid)
+    ]
     # The execution-order gate holds ``explore`` until a baseline exists, or nothing mints.
     if coord.shared_state.baseline_tput <= 0:
         coord.shared_state.baseline_tput = 100.0

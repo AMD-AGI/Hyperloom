@@ -35,6 +35,9 @@ def _backends_full() -> dict[str, object]:
     }
 
 
+_A_VARIANT = {"name": "chunked_prefill", "extra_server_args": "--chunked-prefill-size 4096"}
+
+
 @pytest.mark.asyncio
 async def test_fresh_session_is_not_resume(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
@@ -287,11 +290,13 @@ async def test_replay_mixed_pending_and_decided(session_dir):
             if action == "explore":
                 # Admission holds each proposal to its phase's actions; explore is FRAMEWORK_AGENT's.
                 c1.shared_state.phase = "FRAMEWORK_AGENT"
+            # Admission refuses an explore with nothing to measure.
+            extra = {"params": {"grid": [_A_VARIANT]}} if action == "explore" else {}
             await c1.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.PROPOSE_ACTION,
-                    payload={"action_name": action, "predicted_gain_pct": 0.0},
+                    payload={"action_name": action, "predicted_gain_pct": 0.0, **extra},
                 ),
             )
             tail = await c1.bus.tail(topic="proposal", n=1)
