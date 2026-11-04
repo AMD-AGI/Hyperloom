@@ -205,6 +205,8 @@ REPEATABLE = "append"
 SWITCH = "store_true"
 #: Where ``run`` measures: this machine's cards, or the sandboxes of a grant handed to it.
 LOCAL_MEASUREMENT, HOSTED_MEASUREMENT = "local", "hosted"
+#: The command a host runs a session under, with the campaign spec it injects.
+HOSTED_COMMAND = "hosted"
 #: What a grant handed to ``run --measurement hosted`` must give: the sandbox service, the measurement key and
 #: templates, the grant's limits and creation time, and the source the runner cache is built from.
 HANDED_GRANT = (HostGroup.SANDBOX, HostGroup.MEASUREMENT_KEY, HostGroup.GRANT, HostGroup.SOURCE)
@@ -230,7 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")
     final_only.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
-    hosted = commands.add_parser("hosted", help="Run under a host that injects the campaign spec and its inputs.")
+    hosted = commands.add_parser(HOSTED_COMMAND, help="Run under a host that injects the campaign spec and its inputs.")
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
     hosted_commands.add_parser(
         "run",
@@ -1112,7 +1114,7 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command == "hosted":
+    if args.command == HOSTED_COMMAND:
         return hosted_run()
     if args.command == "review":
         return review.main(args)
