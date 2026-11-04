@@ -85,11 +85,11 @@ def failures_at(snapshot: BlackboardSnapshot, head: str) -> tuple[FailedTest, ..
     return tuple(sorted(failed, key=lambda item: _TIER_ORDER.index(item.tier)))
 
 
-def repeated_failures(failures: Sequence[FailedTest], at_least: int = 2) -> tuple[tuple[str, int], ...]:
-    """The directions that failed at least ``at_least`` times, most often first."""
+def repeated_failures(failures: Sequence[FailedTest]) -> tuple[tuple[str, int], ...]:
+    """The directions that failed more than once, most often first."""
 
     counts = Counter(item.direction for item in failures)
-    return tuple((direction, count) for direction, count in counts.most_common() if count >= at_least)
+    return tuple((direction, count) for direction, count in counts.most_common() if count > 1)
 
 
 @dataclass(frozen=True)
