@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
@@ -44,7 +45,7 @@ def _own_tmpdir(tmp_path: Path, monkeypatch) -> None:
 
 
 def _copies(tmp_path: Path) -> list[Path]:
-    root = tmp_path / "tmp" / "hyperloom-tracelens"
+    root = tmp_path / "tmp" / f"hyperloom-tracelens-{os.getuid()}"
     return sorted(root.iterdir()) if root.is_dir() else []
 
 
