@@ -16,6 +16,15 @@ import pytest
 from hyperloom.measure.tests.gpu_free_host import USES_REAL_GPUS_FLAG, machine_without_readable_gpus  # noqa: F401
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
+from hyperloom_multibranch.toolbox.local_hosted import JIT_STORE_ENV
+
+
+@pytest.fixture(autouse=True)
+def own_jit_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A compiled-code cache of each test's own: a toolbox keeps one on this host when none is named, and a test must
+    neither read what another published there nor leave its own behind. The variable, not ``tempfile``, is what moves:
+    an unprivileged native build must still reach the temporary trees it is given."""
+    monkeypatch.setenv(JIT_STORE_ENV, str(tmp_path / "jit-store"))
 
 
 @pytest.fixture(autouse=True)
