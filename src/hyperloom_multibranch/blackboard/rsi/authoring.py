@@ -43,7 +43,14 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     problems,
 )
 from hyperloom_multibranch.blackboard.rsi.replay import REPLAYED_NUMBERS
-from hyperloom_multibranch.blackboard.rsi.session import FAILED, NO_PROFILE, WRITTEN, CloseStep, archived_history
+from hyperloom_multibranch.blackboard.rsi.session import (
+    ALREADY_RECORDED,
+    FAILED,
+    NO_PROFILE,
+    WRITTEN,
+    CloseStep,
+    archived_history,
+)
 from hyperloom_multibranch.blackboard.rsi.similarity import workload_kind
 from hyperloom_multibranch.blackboard.rsi.stops import StopAudit, stop_audit
 
@@ -156,14 +163,23 @@ def measures_line(measures: Sequence[str]) -> str:
     return f"The decision measures R3 can read on this task, one of which a change aims at: {', '.join(measures)}."
 
 
+def _finite(value: float) -> bool:
+    """Whether ``value`` is a finite number a float can hold: no infinity, no NaN, no integer too large for a float."""
+
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _changed_numbers(champion: Playbook, change: Mapping[str, object]) -> PlaybookNumbers:
     name, value = change.get("number"), change.get("value")
     if not isinstance(name, str) or name not in BOUNDS:
         raise ValueError(f"{name!r} is no number of the playbook")
     if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
         raise ValueError(f"{name} takes a number, not {value!r}")
-    if value is not None and not math.isfinite(value):
-        raise ValueError(f"{name} takes a finite number, not {value!r}")
+    if value is not None and not _finite(value):
+        raise ValueError(f"{name} takes a finite number")
     whole = isinstance(getattr(champion.numbers, name), int) or name in _WHOLE
     if whole and value is not None and value != int(value):
         raise ValueError(f"{name} takes a whole number, not {value!r}")
@@ -211,7 +227,7 @@ def read_change(
     try:
         numbers = _changed_numbers(champion, change) if "number" in change else champion.numbers
         rules = champion.rules if "number" in change else _changed_rules(champion, change)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         return None, str(exc)
     proposed = Playbook(
         named,
@@ -242,22 +258,20 @@ async def author_playbook(
     complete: Complete,
     *,
     model: str,
-    archive: TreeArchive | None = None,
-    pool: PlaybookPool | None = None,
 ) -> CloseStep:
     """CLOSE, after the search tree is archived: one change to the scheduling playbook. Ask the LLM, through
     ``complete``, with this session's decision audit, the playbook it played and the evidence ledger, and write the
-    change to ``pool``, by default the one beside ``archive``, by default the environment's, when it passes the
-    static check and repeats no retired playbook. ``model`` names the LLM in its provenance. A step that cannot be
+    change to the playbook pool beside the environment's archive when it passes the static check and repeats no
+    retired playbook. ``model`` names the LLM in its provenance. A step that cannot be
     done says why and never stops CLOSE."""
 
     profile = snapshot.profile
     if profile is None:
         return CloseStep(SKIPPED, NO_PROFILE)
-    target = archive if archive is not None else TreeArchive.from_env()
+    target = TreeArchive.from_env()
     if target is None:
         return CloseStep(SKIPPED, NO_ARCHIVE)
-    writable = pool if pool is not None else PlaybookPool.beside(target)
+    writable = PlaybookPool.beside(target)
     asked = await asyncio.to_thread(_question, snapshot, profile.session_id, target, writable)
     if isinstance(asked, CloseStep):
         return asked
@@ -325,6 +339,8 @@ def _pooled(pool: PlaybookPool, proposed: Playbook, asked: _Asked, now: float) -
     reading = r1_reading(proposed, champion, asked.alike)
     try:
         written = pool.register(proposed)
+        if written is not proposed:
+            return CloseStep(SKIPPED, ALREADY_RECORDED, {"written": 0, "refused": 0})
         if reading is not None and reading.reading == WORSE:
             evidence = f"the scheduling replay of the archive reads it worse both ways: {reading.spans()}"
             pool.retire(Retired(written.label, now, evidence))

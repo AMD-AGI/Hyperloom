@@ -16,6 +16,7 @@ from hyperloom_multibranch.blackboard.knowledge.recall import (
     CONDITION_KEYS,
     DECISION,
     INTERACTIVITY_OBJECTIVE,
+    RECALL_LIMIT,
     THROUGHPUT_OBJECTIVE,
     IdentityIndex,
     RecallQuery,
@@ -55,7 +56,7 @@ def test_an_experience_measured_under_every_queried_condition_is_a_prior_and_oth
         )
     )
 
-    recall = recall_experiences(reader, profile(), 1000.0, RecallQuery("attention", "s1", limit=5))
+    recall = recall_experiences(reader, profile(), 1000.0, RecallQuery("attention", "s1"))
 
     tiers = {item.experience_id: (item.tier, item.differing) for item in recall.experiences}
     assert tiers == {
@@ -208,14 +209,14 @@ def test_an_index_is_built_only_on_a_reader_whose_service_exports() -> None:
 def test_the_read_carries_the_sessions_identity_workload_baseline_and_bottleneck() -> None:
     reader = FakeExperienceReader(completed_read())
 
-    recall_experiences(reader, profile(), 1000.0, RecallQuery("attention", "s1", "fp8 kv cache", limit=5))
+    recall_experiences(reader, profile(), 1000.0, RecallQuery("attention", "s1"))
 
     ((decision, context, limit),) = reader.calls
-    assert (decision, limit) == (DECISION, 5)
+    assert (decision, limit) == (DECISION, RECALL_LIMIT)
     assert context["identity"]["gpu"] == "MI355X" and "isl" not in context["identity"]
     assert context["workload"] == {"tp": 8, "conc": 64, "isl": 1024, "osl": 1024}
     assert context["benchmark_baseline"]["throughput"] == 1000.0
-    assert context["observations"] == {"bottleneck": "attention", "branch": "s1", "intent": "fp8 kv cache"}
+    assert context["observations"] == {"bottleneck": "attention", "branch": "s1"}
 
 
 def test_an_agentx_session_asks_for_the_interactivity_objective() -> None:

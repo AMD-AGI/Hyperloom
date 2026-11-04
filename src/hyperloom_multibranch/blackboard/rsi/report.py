@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Markdown for the MB2 study reports: a table, and numbers that may be missing."""
+"""Markdown for the RSI study reports: a table, and numbers that may be missing."""
 
 from __future__ import annotations
 

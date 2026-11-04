@@ -209,12 +209,12 @@ class FamilyReport:
         return "\n".join([self.check.render(), "", *table(headers, rows)])
 
 
-def family_report(trees: Sequence[SearchTree], limit: int = REPORT_ROWS) -> FamilyReport:
-    """The offline check over ``trees`` and their ``limit`` families with the most tests, before the cap."""
+def family_report(trees: Sequence[SearchTree]) -> FamilyReport:
+    """The offline check over ``trees`` and their :data:`REPORT_ROWS` families with the most tests, before the cap."""
 
     stats = family_stats(trees)
     ranked = sorted(stats.items(), key=lambda item: (-item[1].tests, item[0].label))
-    return FamilyReport(discrimination(trees), tuple(ranked[:limit]))
+    return FamilyReport(discrimination(trees), tuple(ranked[:REPORT_ROWS]))
 
 
 __all__ = [
