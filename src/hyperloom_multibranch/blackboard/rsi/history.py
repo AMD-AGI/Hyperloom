@@ -37,7 +37,7 @@ from hyperloom_multibranch.contracts.blackboard import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeBranch, tree_from_snapshot
-from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions
+from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, workload_kind
 
 #: How many judged tests past a stall, or into a new branch, the odds look for a commit in.
 HORIZON_TESTS = 4
@@ -57,8 +57,6 @@ MIN_SEEN = 5.0
 OPENING_SECONDS = 15 * 60.0
 MAX_CHARS = 1500
 MODEL_TYPE_LABEL = "model_type"
-WORKLOAD_LABEL = "workload"
-DEFAULT_WORKLOAD = "inferencex"
 _SECONDS_PER_MINUTE = 60.0
 
 
@@ -285,19 +283,15 @@ def stall_bar(hazard: Mapping[int, Odds], new_branch: Mapping[int, Odds]) -> int
     return MAX_STALL_TESTS
 
 
-def _workload(task: TaskConditions) -> str:
-    return task.labels.get(WORKLOAD_LABEL, DEFAULT_WORKLOAD)
-
-
 def stall_odds(history: Sequence[SearchTree], task: TaskConditions, *, session: SearchTree | None = None) -> StallOdds:
     """The odds for a session on ``task`` from the archived ``history``, with the running ``session``'s own tree in
     full when given; an archived tree of the session itself is left out."""
 
-    model_type = task.labels.get(MODEL_TYPE_LABEL)
+    model_type, kind = task.labels.get(MODEL_TYPE_LABEL), workload_kind(task)
     archived = _Tally()
     sessions = same_model = 0
     for tree in history:
-        if (session is not None and tree.session_id == session.session_id) or _workload(tree.task) != _workload(task):
+        if (session is not None and tree.session_id == session.session_id) or workload_kind(tree.task) != kind:
             continue
         same = model_type is not None and tree.task.labels.get(MODEL_TYPE_LABEL) == model_type
         archived.add(tree, 1.0 if same else OTHER_MODEL_WEIGHT)
@@ -378,7 +372,6 @@ def _lines(odds: StallOdds) -> list[str]:
 
 __all__ = [
     "DEFAULT_STALL_TESTS",
-    "DEFAULT_WORKLOAD",
     "HORIZON_TESTS",
     "MAX_CHARS",
     "MAX_POSITION",
@@ -389,7 +382,6 @@ __all__ = [
     "OPENING_SECONDS",
     "OTHER_MODEL_WEIGHT",
     "PRIOR_TESTS",
-    "WORKLOAD_LABEL",
     "Odds",
     "StallOdds",
     "hazard_observations",
