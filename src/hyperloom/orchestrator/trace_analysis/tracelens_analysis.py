@@ -34,6 +34,7 @@ from .tracelens_skill_runner import (
     extract_compute_pct_from_analysis_md,
     extract_exposed_comm_pct_from_analysis_md,
     extract_idle_pct_from_analysis_md,
+    require_claude_sdk,
     run_tracelens_skill,
     write_run_config,
 )
@@ -945,6 +946,9 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
         current_step="check_tracelens_dependencies",
     )
     tl_root, tl_internal_root, skill = _check_tracelens_checkout(args, run.log_path)
+    # Fail before the arch microbenchmark, which can run up to its timeout.
+    if run.route is AnalysisRoute.AGENT:
+        require_claude_sdk()
 
     tracelens_dir = run.run_dir / "tracelens"
     tracelens_dir.mkdir(parents=True, exist_ok=True)
