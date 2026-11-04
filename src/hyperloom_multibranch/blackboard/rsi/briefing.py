@@ -26,8 +26,7 @@ wider of them, or a union of their rows, decided as a merge decides it. When nei
 and the head's artifact is named in ``replaces``.
 
 At the root before anything was tried, the brief is the first batch's: cross-session content only. Lessons and leads
-together stay under ``max_chars``, the most specific first. Where the brief sits in the prompt and how long it may be
-is the specialist's call, so the cap is a parameter.
+together stay under :data:`MAX_BRIEF_CHARS`, the most specific first.
 
 :class:`SessionBriefs` is the session's one source of briefs, so a branch's brief can be rebuilt at every launch of its
 specialist, on its head then: the Experience KB is read once per focus and branch, and only the blackboard's part is read
@@ -85,7 +84,7 @@ from hyperloom_multibranch.blackboard.tools import render_brief
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MAX_CHARS = 4000
+MAX_BRIEF_CHARS = 4000
 KEPT = "keep"
 #: How many notes a brief lists about its focus at most, this session's and past sessions' in one list.
 LEARNINGS = 5
@@ -164,13 +163,13 @@ def _recalled(recall: Recall | None) -> _Recalled:
     )
 
 
-def _fit(items: Iterable[_Item], max_chars: int) -> list[_Item]:
-    """Lessons and leads, in priority order, up to the first that would pass ``max_chars``."""
+def _fit(items: Iterable[_Item]) -> list[_Item]:
+    """Lessons and leads, in priority order, up to the first that would pass :data:`MAX_BRIEF_CHARS`."""
 
     kept: list[_Item] = []
     used = 0
     for item in items:
-        if used + len(item.text) > max_chars:
+        if used + len(item.text) > MAX_BRIEF_CHARS:
             break
         kept.append(item)
         used += len(item.text)
@@ -236,7 +235,6 @@ class CrossSessionBriefing(StartupBriefProvider):
     metric: str = ""
     focus: str = ""
     branch: str = ""
-    max_chars: int = DEFAULT_MAX_CHARS
     identities: IdentityIndex | None = None
     learnings: LearningRecall | None = None
     recalls: RecallCache | None = None
@@ -474,7 +472,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             *_listed(recalled.leads),
             *(_Item(True, text) for text in listed([*recalled.lessons, *kb_lessons])),
         ]
-        kept = _fit(ordered, self.max_chars)
+        kept = _fit(ordered)
         lists, noted = await self._menu(snapshot, start_commit)
         self._record_brief(snapshot, kept, notes + noted)
         return replace(
@@ -519,7 +517,6 @@ class SessionBriefs:
     experiences: ExperienceReader | None = None
     metric: str = ""
     learnings: LearningRecall | None = None
-    max_chars: int = DEFAULT_MAX_CHARS
     repo: RecipeReads | None = None
     stack_slot: StackSlot | None = None
     menus: DirectionMenus | None = None
@@ -546,7 +543,6 @@ class SessionBriefs:
             metric=self.metric,
             focus=self._focus.get(branch, ""),
             branch=branch,
-            max_chars=self.max_chars,
             identities=self._identities,
             learnings=self.learnings,
             recalls=self._recalls,
@@ -565,7 +561,7 @@ class SessionBriefs:
 
 
 __all__ = [
-    "DEFAULT_MAX_CHARS",
+    "MAX_BRIEF_CHARS",
     "KNOWN_DEFECT",
     "ON_HEAD",
     "CrossSessionBriefing",
