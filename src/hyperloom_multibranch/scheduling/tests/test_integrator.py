@@ -79,7 +79,7 @@ from hyperloom_multibranch.scheduling.integrator import (
 )
 from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, CompletionFailed, CompletionReply
 from hyperloom_multibranch.rulegate import agentx
-from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
+from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASE_IMAGE_DIGEST,
@@ -93,6 +93,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     recipe_effect,
     session_gate,
 )
+from hyperloom_multibranch.tests.fakes import quick_polls  # noqa: F401
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, TestJob
 from hyperloom_multibranch.toolbox.fake_model import Fate
 
@@ -701,9 +702,9 @@ async def test_a_merge_that_could_not_be_measured_is_tried_again_on_the_next_hea
 
     bench = await _bench(tmp_path, tags=("c1",))
     c2 = await _committed_elsewhere(bench, bench.deltas["c2"], GAINS["c2"])
-    measure_no_throughput(monkeypatch)
-    unmeasured = await _one(bench)
-    monkeypatch.undo()
+    with monkeypatch.context() as patch:
+        measure_no_throughput(patch)
+        unmeasured = await _one(bench)
 
     merged = await _one(bench)
     retried = await _one(bench)

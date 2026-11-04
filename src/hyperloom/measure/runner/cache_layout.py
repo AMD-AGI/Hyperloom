@@ -12,11 +12,13 @@ start-up script (:mod:`hyperloom.measure.runner.bootstrap`) installs from it wit
                                locks included
     <cache>/<sha>/source/      that archive unpacked; the builder reads it, the sandbox never does
     <cache>/<sha>/wheels/      one wheel per pin of the lock of the entry's Python (:func:`lock_file`)
+    <cache>/<sha>/sdists/      the source distribution of each wheel the builder built from one, which the builder
+                               builds again before it reuses the entry; the sandbox never reads it
     <cache>/<sha>/bootstrap.sh the start-up script (``BOOTSTRAP_SCRIPT``) of the builder that made the entry, mode 0755;
                                a template step runs it with ``sh``
     <cache>/<sha>/manifest     JSON, written last: the commit and its tree, the size and SHA-256 of ``source.tar``, the
                                digest of ``source``, the SHA-256 of ``bootstrap.sh`` and, for each wheel, its pin, file,
-                               size and SHA-256 (see :class:`WheelEntry`)
+                               size and SHA-256, and the source distribution it was built from (see :class:`WheelEntry`)
 
 The sandbox runs nothing from the cache itself (:func:`stage_entry`). It reads the manifest once; it reads
 ``source.tar`` once, hashing the bytes as it reads them, and unpacks those same bytes below its own scratch directory
@@ -26,8 +28,10 @@ of the cache that changes after that check never reaches the runner or pip, whoe
 manifest records no ``source.tar`` (an older builder made it) is refused.
 
 The sandbox installs exactly the wheels the manifest lists, each pinned to the hash the manifest records
-(:func:`requirements_text`); the builder has checked every one of them against the lock. An entry without a manifest is
-an unfinished build, and nothing uses it. ``<cache>`` is the directory
+(:func:`requirements_text`). The check the builder and the sandbox share (:func:`_wheels_problems`) passes a manifest
+only when it lists one wheel for each pin of the lock and nothing else, each a file the lock lists for its pin or
+recorded as built from one: a manifest that lists a pin twice is refused, so every wheel installed is one the check
+read. An entry without a manifest is an unfinished build, and nothing uses it. ``<cache>`` is the directory
 ``HYPERLOOM_RUNNER_CACHE`` names, on the builder's machine as well as inside the sandbox (the mount point may differ).
 
 One lock per Python. A pin has wheels for the Python versions its release supports, so no one set of pins installs on
@@ -54,6 +58,7 @@ import re
 import shutil
 import sys
 import tarfile
+from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -69,6 +74,7 @@ __all__ = [
     "MANIFEST_NAME",
     "MANIFEST_PIN_ENV",
     "REQUIREMENTS_FILE",
+    "SDISTS_DIR",
     "SOURCE_ARCHIVE",
     "SOURCE_DIR",
     "WHEELS_DIR",
@@ -110,6 +116,8 @@ SOURCE_DIR = "source"
 LOCAL_SOURCE_DIR = "hl-source"
 LOCAL_WHEELS_DIR = "hl-wheels"
 WHEELS_DIR = "wheels"
+#: The source distributions of the wheels the builder built, below an entry; only the builder reads them.
+SDISTS_DIR = "sdists"
 #: The lock of every Python version that has none of its own (see :func:`lock_file`).
 LOCK_FILE = "requirements/runner.lock"
 _VERSION_LOCK = "requirements/runner-cp{digits}.lock"
@@ -159,8 +167,11 @@ class WheelEntry:
     """One wheel of the cache: the pin it satisfies and the file that does.
 
     A pin that the index serves only as a source distribution is built into a wheel by the builder; ``sdist_sha256`` is
-    the hash of that source distribution, which the lock lists, and ``sha256`` is the built wheel's. Empty for a wheel
-    that was downloaded, whose own hash the lock lists.
+    the hash of that source distribution, which the lock lists, ``sdist_file`` its file in ``<entry>/sdists``, and
+    ``sha256`` is the built wheel's. The lock cannot tell a source distribution's hash from a wheel's, so the builder
+    reuses an entry with such a wheel only when that file is there with that hash and building it again makes a wheel of
+    the same content (:mod:`hyperloom.measure.runner.cache_build`). Both are empty for a wheel that was downloaded, whose
+    own hash the lock lists.
     """
 
     name: str
@@ -169,6 +180,7 @@ class WheelEntry:
     size: int
     sha256: str
     sdist_sha256: str = ""
+    sdist_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -346,8 +358,16 @@ def _wheel_problems(wheels: Path, wheel: WheelEntry, pin: LockPin, verify_hash: 
 
 
 def _wheels_problems(wheels: Path, manifest: Manifest, pins: list[LockPin], verify_hash: bool) -> list[str]:
+    """Why the manifest's wheels are not one per pin of the lock, each a file the lock lists for that pin
+    (:func:`_wheel_problems`). The sandbox stages and pip installs every entry the manifest lists, so a pin listed twice
+    is refused like a pin with no entry and an entry of no pin: only then is every entry one this check read."""
+    counted = Counter((wheel.name, wheel.version) for wheel in manifest.wheels)
+    problems = [
+        f"the manifest lists {name}=={version} {count} times, and a pin has one wheel"
+        for (name, version), count in counted.items()
+        if count > 1
+    ]
     listed = {(wheel.name, wheel.version): wheel for wheel in manifest.wheels}
-    problems: list[str] = []
     for pin in pins:
         wheel = listed.pop((pin.name, pin.version), None)
         if wheel is None:
@@ -416,12 +436,13 @@ def check_entry(
     """Every reason the cache entry directory ``entry`` is not a whole build of ``sha``, as it lies in the cache; empty
     when it is. This is the builder's check; the sandbox's is :func:`stage_entry`.
 
-    Every wheel the lock pins must be there with its recorded size, ``source.tar`` must be there with its recorded size,
-    the source must be the tree the manifest recorded and the lock (the one of the manifest's Python, :func:`lock_file`)
-    the one the wheels were chosen from. With ``python_version`` (``"3.14"``, the interpreter that is to install them),
-    wheels the manifest records for another Python are refused. The content of the wheels and of ``source.tar`` is not
-    read unless ``verify_hash``, and ``bootstrap.sh`` is read only then: the script that runs the sandbox's check cannot
-    vouch for itself (see :mod:`hyperloom.measure.runner.bootstrap`).
+    Every wheel the lock pins must be there with its recorded size and listed once (:func:`_wheels_problems`),
+    ``source.tar`` must be there with its recorded size, the source must be the tree the manifest recorded and the lock
+    (the one of the manifest's Python, :func:`lock_file`) the one the wheels were chosen from. With ``python_version``
+    (``"3.14"``, the interpreter that is to install them), wheels the manifest records for another Python are refused.
+    The content of the wheels and of ``source.tar`` is not read unless ``verify_hash``, and ``bootstrap.sh`` is read
+    only then: the script that runs the sandbox's check cannot vouch for itself (see
+    :mod:`hyperloom.measure.runner.bootstrap`).
     """
     problems, manifest = _pinned_manifest(entry, sha, manifest_pin)
     if manifest is None:

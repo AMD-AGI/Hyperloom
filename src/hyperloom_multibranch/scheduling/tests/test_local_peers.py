@@ -47,12 +47,12 @@ from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
 from hyperloom_multibranch.blackboard.tests.factories import START, delta, intent, judgement, profile, request, result
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.rulegate.critic import NoCritic
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase, read_case
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
-from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
+from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
+from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
@@ -98,6 +98,7 @@ from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSe
 from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
+from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
@@ -122,9 +123,8 @@ IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
 LOCAL = LocalCards((0, 1, 2, 3))
 HOST = MeasurementHost(LOCAL, IMAGE, "a" * 40, InferenceXCheckout("b" * 40, "/opt/InferenceX"))
 AGENTX_CHECKOUT = InferenceXCheckout("c" * 40, "/opt/InferenceX-agentx/inferencex-e2e")
-#: What the single-lineage child took to measure the GLM-5.3 TP4 AgentX baseline that a session's toolbox killed at an
-#: hour, the limit of every test then.
-SINGLE_LINEAGE_AGENTX_BASELINE_SEC = 88 * 60
+#: An AgentX baseline test that runs past an hour, the limit every test once had.
+AGENTX_TEST_PAST_AN_HOUR_SEC = 90 * 60
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 DEV_SANDBOX_TOOLS = {f"dev_sandbox_{verb}" for verb in ("lease", "run", "start", "read", "release")}
 
@@ -474,7 +474,7 @@ async def _peers(
         desk,
         ProcessRegistry(layout.pids, clock),
         blobs,
-        NoCritic(),
+        RefusingCritic(),
         {"geak": layout.reference / "geak"},
         dev_leases,
         (),
@@ -590,7 +590,7 @@ async def test_an_agentx_test_may_outlast_its_trace_window_and_an_inferencex_tes
         pass
 
     [agentx, inferencex] = given
-    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, SINGLE_LINEAGE_AGENTX_BASELINE_SEC)
+    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, AGENTX_TEST_PAST_AN_HOUR_SEC)
     assert inferencex.timeout_sec == DEFAULT_TEST_TIMEOUT_SEC
 
 
@@ -809,7 +809,7 @@ async def test_an_agentx_test_in_the_services_sandboxes_may_outlast_its_trace_wi
         pass
 
     [agentx] = given
-    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, SINGLE_LINEAGE_AGENTX_BASELINE_SEC)
+    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, AGENTX_TEST_PAST_AN_HOUR_SEC)
 
 
 def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:

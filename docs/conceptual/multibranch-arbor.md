@@ -14,9 +14,9 @@ This page says which side runs each step of an MB session, and what passes betwe
 - **As of 2026-11-01:**
   - Hyperloom `multibranch-dev` at `8f59f12db` or later;
   - Arbor `main` `85f01cc`.
-- **Arbor's copy of this page:** [`docs/who-runs-what.md`](../../src/hyperloom_arbor/docs/who-runs-what.md), in the
+- **Arbor's copy of this page:** [`docs/who-runs-what.md`](../../third_party/arbor/docs/who-runs-what.md), in the
   vendored copy.
-- **The contract key by key, from Arbor's side:** [`docs/hosts.md`](../../src/hyperloom_arbor/docs/hosts.md).
+- **The contract key by key, from Arbor's side:** [`docs/hosts.md`](../../third_party/arbor/docs/hosts.md).
 - **The design and its decisions:** [`docs/component-mode.md`](https://github.com/AMD-AGI/Arbor/blob/main/docs/component-mode.md).
 
 In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's paths are in the Arbor repository.
@@ -47,7 +47,7 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
 
 1. **MB starts the session.**
    - **The run:** `hyperloom-multibranch run ... --autonomous-agent arbor`, once per Arbor. `arbor` is the tree
-     vendored at `src/hyperloom_arbor` of the running source checkout, copied and committed on fetch; an Arbor
+     vendored at `third_party/arbor` of the running source checkout, copied and committed on fetch; an Arbor
      checkout's path or git URL also works.
    - **What counts as an Arbor checkout:** one with `arbor/component.py`, `arbor/__main__.py` and `docs/hosts.md`.
    - **Its copy:** each source is fetched once into `MB-agent-plans/sources/<i>`.

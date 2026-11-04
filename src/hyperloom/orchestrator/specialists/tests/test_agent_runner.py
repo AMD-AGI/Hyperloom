@@ -463,7 +463,7 @@ async def test_cpu_work_in_the_process_tree_keeps_a_long_shell_command_alive(tmp
 
     def burn_cpu() -> None:  # the command burning one CPU second per virtual second, as the sampler sees it
         ticks["n"] += 5
-        add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=ticks["n"] * 100, children=[])
+        add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=ticks["n"] * 100)
 
     clock.on_tick.append(burn_cpu)
     await run_fake_time(clock, handle, 1000.0)
@@ -480,7 +480,7 @@ async def test_a_tree_that_burns_no_cpu_is_lost_even_though_a_process_exists(tmp
     clock.keep_alive = False
     runner = clocked_runner(tmp_path, clock, proc_root=proc_root)
     handle = await runner.launch(spec)
-    add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=500, children=[])  # alive, but idle
+    add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=500)  # alive, but idle
     await run_fake_time(clock, handle, 1000.0)
     status = await runner.poll(handle)
     assert status.state == "lost"
@@ -687,3 +687,27 @@ async def test_a_silent_cli_with_no_tool_in_flight_is_lost_in_poll_and_in_the_re
         assert handle.session.outcome["stale_heartbeat"]
     finally:
         await stop_and_collect(runner, handle)
+
+
+async def test_a_session_that_ends_while_poll_looks_at_its_cli_reads_as_ended_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The window is long enough that the reaper never calls the CLI silent; only poll looks, and it looks past it.
+    runner = quiet_runner(tmp_path, window=30.0)
+    spec = make_spec(tmp_path / "w", code="import time; time.sleep(1.0)")
+    handle = await runner.launch(spec)
+    go_quiet(spec)
+
+    def look_that_outlasts_the_session(*_args: object, **_kwargs: object) -> bool:
+        # A look taken while the session ends, as during a deadline kill that takes the tool down first: it sees no
+        # output and no tool, though by the time poll reads it the reap loop has recorded how the session ended.
+        end = real_time.time() + 20
+        while not handle.session.task.done():
+            assert real_time.time() < end, "the session never ended"
+            real_time.sleep(0.02)
+        return False
+
+    monkeypatch.setattr(agent_runner, "cli_alive", look_that_outlasts_the_session)
+    status = await runner.poll(handle)
+    assert (status.state, status.returncode, status.timed_out) == ("exited", 0, False)
+    await runner.collect(handle)

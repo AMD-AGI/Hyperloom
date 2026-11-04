@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import importlib.metadata
+import logging
 import os
 import re
 import shutil
@@ -73,8 +74,9 @@ from hyperloom.measure.farm import (
     verify_farm,
 )
 from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, card_arch, cold_start
-from hyperloom.measure.runner.import_outcome import install_import_watch, refine_imports
+from hyperloom.measure.runner.import_outcome import clear_import_notes, install_import_watch, refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
+from hyperloom.measure.runner.native.prewarm import preflight_build
 from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
 from hyperloom.measure.runner.rebuild_watchdog import raise_rebuild_watchdog
 from hyperloom.measure.runner.trace_fit import fit_traces
@@ -91,9 +93,12 @@ from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
+from hyperloom.orchestrator.actions.executors._aiter_serving_once import prepare_serving_so_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 
 __all__ = ["run"]
+
+log = logging.getLogger(__name__)
 
 _START_FAILED = "runner_start_failed"
 _SPEC_REJECTED = "spec_rejected"
@@ -106,6 +111,9 @@ _KEY_ENV = "HYPERLOOM_SIGNING_KEY_FILE"
 _BOOTSTRAP_STARTED_ENV = "HYPERLOOM_BOOTSTRAP_STARTED_UNIX"
 _BOOTSTRAP_ENDED_ENV = "HYPERLOOM_BOOTSTRAP_ENDED_UNIX"
 _TIMED_OUT_RC = 124
+#: The ``procedure.benchmark_backend`` that runs a test through Magpie's launchers and its lm-eval.
+_MAGPIE = "magpie"
+_TABLE_PREFIX = "AITER_CONFIG_"
 
 
 @dataclass
@@ -257,16 +265,16 @@ def _surface_sha256(spec: MeasurementSpec, points: list[Path]) -> str:
     Magpie the benchmark script a test executes is Magpie's own copy of its launcher, which the backend puts in the
     InferenceX checkout before the first round; it is put there first so that the hash is of the file that runs.
     """
-    if spec.procedure.benchmark_backend == "magpie":
+    if spec.procedure.benchmark_backend == _MAGPIE:
         install_launchers(points)
     return extract_surface(yaml.safe_load(points[0].read_text()) or {}).sha256
 
 
-def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[list[Path], Path, Farm | None]:
+def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Farm | None]:
     """Tools, attachments, farm and the rewritten YAML; returns the point path and the InferenceX checkout."""
     try:
         inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
-        if spec.procedure.benchmark_backend == "magpie":
+        if spec.procedure.benchmark_backend == _MAGPIE:
             ctx.environ["MAGPIE_PATH"] = str(ensure_magpie(spec.tools.magpie, ctx.cache))
     except ToolError as exc:
         raise RunnerFailure(_START_FAILED, str(exc)) from exc
@@ -339,7 +347,7 @@ def _install_eval_deps(ctx: _Context, spec: MeasurementSpec, points: list[Path],
     output (``measure.runner.eval_deps``). A test the evaluator cannot be installed for is not run: its accuracy round
     could only fail the same way, later.
     """
-    if not spec.procedure.accuracy or spec.procedure.benchmark_backend != "magpie":
+    if not spec.procedure.accuracy or spec.procedure.benchmark_backend != _MAGPIE:
         return
     benchmark = (yaml.safe_load(points[0].read_text()) or {}).get("benchmark") or {}
     if is_magpie_agentx(benchmark):
@@ -551,6 +559,27 @@ def _drop_compile_dir(ctx: _Context) -> None:
         shutil.rmtree(ctx.compile, ignore_errors=True)
 
 
+def _build_moved_aside_once(ctx: _Context, spec: MeasurementSpec, points: list[Path]) -> None:
+    """Run the launch preflight of aiter's serving modules before the test's servers are given their JIT directories, and
+    build what it moves aside from the image's own tables once for this container
+    (:func:`~hyperloom.measure.runner.native.prewarm.preflight_build`): each test's servers build into a directory of
+    their own, so a module only they built would be built again by every later test. The test's directories then link
+    the built modules, and the preflight of the test's own launch keeps them. A preflight that cannot run is logged and
+    the servers build what they lack, as they would without it."""
+    tables = {
+        name: str(value)
+        for name, value in server_environment(yaml.safe_load(points[0].read_text()) or {}).items()
+        if str(name).startswith(_TABLE_PREFIX) and str(value).strip()
+    }
+    try:
+        preflight = prepare_serving_so_once(tables, _round_environment(ctx, spec, points), build=preflight_build)
+    except OSError as exc:
+        log.warning("aiter serving preflight before the test failed: %s", exc)
+        return
+    if preflight.outcome.get("action") == "invalidate":
+        log.warning("aiter serving preflight before the test: %s", preflight.summary())
+
+
 def _jit_session(
     ctx: _Context, spec: MeasurementSpec, points: list[Path], farm: Farm | None, facts
 ) -> JitCacheSession | None:
@@ -601,13 +630,15 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     changed = align_platform_env(ctx.environ, spec.platform_env)
     progress.phase("preparing")
     ctx.phases.begin(ENV_REBUILD)
-    points, inferencex, farm = _prepare(ctx, spec, visible)
+    points, inferencex, farm = _prepare(ctx, spec)
     _patch_replay_client(ctx, points, inferencex)
     surface = _surface_sha256(spec, points)
+    _build_moved_aside_once(ctx, spec, points)
     session = _jit_session(ctx, spec, points, farm, facts)
     arch = card_arch(spec, facts[0] if facts else None)
     call = _own_directories(ctx, _call(ctx, spec, points, inferencex, progress), session, farm, arch)
     _install_eval_deps(ctx, spec, points, inferencex)
+    clear_import_notes(farm)
     ctx.cards.check(BEFORE_TEST)
     ctx.cards.enforce_guard()
     progress.phase("running")
@@ -720,7 +751,8 @@ def run(
         except RunnerFailure as failure:
             write_status(out_dir, state=_FAILED, error_class=failure.error_class, message=str(failure))
             return failure.exit_code
-        except Exception as exc:  # noqa: BLE001 - the application reads status.json, not a traceback
+        except Exception as exc:  # the application reads status.json, not a traceback
+            log.exception("the runner failed; status.json says how")
             error_class = DISK_FULL if is_disk_full(exc) else "runner_error"
             message = f"{type(exc).__name__}: {exc} (at {_raised_at(exc)})"
             write_status(out_dir, state=_FAILED, error_class=error_class, message=message)

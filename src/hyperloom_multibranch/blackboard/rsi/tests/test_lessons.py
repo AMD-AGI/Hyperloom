@@ -70,9 +70,11 @@ def test_a_revision_is_written_once_reads_back_whole_and_a_later_one_takes_its_p
     first = revision("first", START)
     second = revision("second", START + 60, supersedes=(first.revision_id,), text=FIXED)
 
-    assert pool.write(first) and not pool.write(first)
+    wrote, wrote_again = pool.write(first), pool.write(first)
+    assert wrote and not wrote_again
     assert pool.revisions() == (first,) and pool.live() == (first,) and first.measured
-    assert pool.write(second)
+    wrote_second = pool.write(second)
+    assert wrote_second
     assert pool.live() == (second,)
     assert pool.lessons()[LESSON].revisions == (first, second)
 
@@ -233,6 +235,30 @@ def test_a_person_lists_shows_revises_retires_and_purges_lessons_from_the_comman
     assert [head.author for head in pool.lessons()[other].heads] == ["x"] and pool.lessons()[other].retired is not None
     assert LESSON not in pool.lessons() and [item.author for item in pool.purges()] == [human_author("curator")]
     assert main(["list"]) == 2
+
+
+def test_a_purge_cut_short_after_its_record_is_written_is_finished_by_running_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool = LessonPool.beside(TreeArchive(tmp_path))
+    pool.write(revision("first", START))
+    pool.write(revision("second", START + 1, supersedes=(revision_id_for("first"),), text=FIXED))
+    command = ["--archive", str(tmp_path), "purge", LESSON, "--author", "curator", "--reason", "a token", "--yes"]
+    unlink, failures = Path.unlink, iter([PermissionError("the revision is read-only")])
+
+    def flaky(path: Path, missing_ok: bool = False) -> None:
+        failure = next(failures, None)
+        if failure is not None:
+            raise failure
+        unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", flaky)
+    cut_short = main(command)
+    left = list((pool.root / "revisions").glob("*.json"))
+    finished = main(command)
+
+    assert (cut_short, len(left), finished) == (2, 2, 0)
+    assert list((pool.root / "revisions").glob("*.json")) == [] and LESSON not in pool.lessons()
 
 
 def test_a_person_merges_lessons_that_say_the_same_into_one_and_retires_the_rest(

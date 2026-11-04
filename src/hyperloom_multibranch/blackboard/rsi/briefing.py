@@ -26,8 +26,7 @@ wider of them, or a union of their rows, decided as a merge decides it. When nei
 and the head's artifact is named in ``replaces``.
 
 At the root before anything was tried, the brief is the first batch's: cross-session content only. Lessons and leads
-together stay under ``max_chars``, the most specific first. Where the brief sits in the prompt and how long it may be
-is the specialist's call, so the cap is a parameter.
+together stay under :data:`MAX_BRIEF_CHARS`, the most specific first.
 
 :class:`SessionBriefs` is the session's one source of briefs, so a branch's brief can be rebuilt at every launch of its
 specialist, on its head then: the Experience KB is read once per focus and branch, and only the blackboard's part is read
@@ -85,7 +84,7 @@ from hyperloom_multibranch.blackboard.tools import render_brief
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MAX_CHARS = 4000
+MAX_BRIEF_CHARS = 4000
 KEPT = "keep"
 #: How many notes a brief lists about its focus at most, this session's and past sessions' in one list.
 LEARNINGS = 5
@@ -164,17 +163,33 @@ def _recalled(recall: Recall | None) -> _Recalled:
     )
 
 
-def _fit(items: Iterable[_Item], max_chars: int) -> list[_Item]:
-    """Lessons and leads, in priority order, up to the first that would pass ``max_chars``."""
+def _fit(items: Iterable[_Item]) -> list[_Item]:
+    """Lessons and leads, in priority order, up to the first that would pass :data:`MAX_BRIEF_CHARS`."""
 
     kept: list[_Item] = []
     used = 0
     for item in items:
-        if used + len(item.text) > max_chars:
+        if used + len(item.text) > MAX_BRIEF_CHARS:
             break
         kept.append(item)
         used += len(item.text)
     return kept
+
+
+def _repeated(snapshot: BlackboardSnapshot, start_commit: str) -> list[str]:
+    """The directions this session failed in again and again on the states ``start_commit`` builds on."""
+
+    on_line = [item for item in failures_at(snapshot, start_commit) if item.tier is not FailureTier.ELSEWHERE]
+    return [
+        f"this session: {direction} failed {count} times on the states this one builds on"
+        for direction, count in repeated_failures(on_line)
+    ]
+
+
+def _learnt_lines(notes: Notes) -> list[str]:
+    """Each note's line, named as learnt here or before."""
+
+    return [f"{'learnt here' if mine else 'learnt before'}: {line[2:]}" for line, mine in zip(notes.lines, notes.mine)]
 
 
 class RecallCache:
@@ -220,7 +235,6 @@ class CrossSessionBriefing(StartupBriefProvider):
     metric: str = ""
     focus: str = ""
     branch: str = ""
-    max_chars: int = DEFAULT_MAX_CHARS
     identities: IdentityIndex | None = None
     learnings: LearningRecall | None = None
     recalls: RecallCache | None = None
@@ -443,37 +457,24 @@ class CrossSessionBriefing(StartupBriefProvider):
         tried = await self.blackboard.startup_brief(start_commit)
         snapshot = await self.blackboard.snapshot()
         on_head = await self._on_line(snapshot, start_commit)
-        on_line = [item for item in failures_at(snapshot, start_commit) if item.tier is not FailureTier.ELSEWHERE]
-        repeated = [
-            f"this session: {direction} failed {count} times on the states this one builds on"
-            for direction, count in repeated_failures(on_line)
-        ]
         recalled = _recalled(await self._recall(snapshot))
         notes = await self._learnt(snapshot)
-        learnt = [
-            f"{'learnt here' if mine else 'learnt before'}: {line[2:]}" for line, mine in zip(notes.lines, notes.mine)
-        ]
         kb_lessons = [
             f"{lead.canonical_id}: {text}" for lead in self.warm for text in (*lead.pitfalls, *lead.what_failed)
         ]
         ordered = [
             *await self._known_defects(snapshot),
             *(_Item(True, f"{ON_HEAD}: recipe {lead.summary()}") for lead in self.warm if lead.canonical_id in on_head),
-            *(_Item(True, text) for text in listed(repeated)),
-            *(_Item(True, text) for text in learnt),
+            *(_Item(True, text) for text in listed(_repeated(snapshot, start_commit))),
+            *(_Item(True, text) for text in _learnt_lines(notes)),
             *(_recipe(lead) for lead in self.warm if lead.canonical_id not in on_head),
             *(_Item(False, f"reference: {lead.describe()}") for lead in self.references),
             *_listed(recalled.leads),
             *(_Item(True, text) for text in listed([*recalled.lessons, *kb_lessons])),
         ]
-        kept = _fit(ordered, self.max_chars)
+        kept = _fit(ordered)
         lists, noted = await self._menu(snapshot, start_commit)
-        if self.learnings is not None:
-            shown = tuple(item.lead for item in kept if item.lead is not None)
-            logged = notes + noted
-            self.learnings.record(
-                snapshot, Retrieval(self.branch, RetrievalSource.BRIEF, self.focus, shown), logged.here, logged.logged()
-            )
+        self._record_brief(snapshot, kept, notes + noted)
         return replace(
             tried,
             lessons=tuple(item.text for item in kept if item.lesson),
@@ -483,6 +484,15 @@ class CrossSessionBriefing(StartupBriefProvider):
             settings_menu=lists.get(SETTINGS, ()),
             code_menu=lists.get(CODE, ()),
         )
+
+    def _record_brief(self, snapshot: BlackboardSnapshot, kept: Sequence[_Item], logged: Notes) -> None:
+        """The leads the brief shows and its ``logged`` notes, in the recall's log; nothing without one."""
+
+        if self.learnings is None:
+            return
+        shown = tuple(item.lead for item in kept if item.lead is not None)
+        retrieval = Retrieval(self.branch, RetrievalSource.BRIEF, self.focus, shown)
+        self.learnings.record(snapshot, retrieval, logged.here, logged.logged())
 
     async def direction_note(self, intent: Intent, delta: RecipeDelta) -> str:
         """What the archive and this session say of the family a claim of ``intent`` with ``delta`` falls in."""
@@ -507,7 +517,6 @@ class SessionBriefs:
     experiences: ExperienceReader | None = None
     metric: str = ""
     learnings: LearningRecall | None = None
-    max_chars: int = DEFAULT_MAX_CHARS
     repo: RecipeReads | None = None
     stack_slot: StackSlot | None = None
     menus: DirectionMenus | None = None
@@ -534,7 +543,6 @@ class SessionBriefs:
             metric=self.metric,
             focus=self._focus.get(branch, ""),
             branch=branch,
-            max_chars=self.max_chars,
             identities=self._identities,
             learnings=self.learnings,
             recalls=self._recalls,
@@ -553,7 +561,7 @@ class SessionBriefs:
 
 
 __all__ = [
-    "DEFAULT_MAX_CHARS",
+    "MAX_BRIEF_CHARS",
     "KNOWN_DEFECT",
     "ON_HEAD",
     "CrossSessionBriefing",

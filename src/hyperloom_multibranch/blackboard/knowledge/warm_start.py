@@ -527,8 +527,9 @@ def _read_lead(
         return None
 
 
-def warm_leads(reader: RecipeReader, profile: SessionProfile, *, limit: int = MAX_CANDIDATES) -> tuple[WarmLead, ...]:
-    """Champions of this session's scope on its task, exact identity first, then best gain first.
+def warm_leads(reader: RecipeReader, profile: SessionProfile) -> tuple[WarmLead, ...]:
+    """Champions of this session's scope on its task, at most :data:`MAX_CANDIDATES`, exact identity first, then best
+    gain first.
 
     None when the session's scope is not one the KB files, or its identity names no slug per dimension.
     """
@@ -540,7 +541,8 @@ def warm_leads(reader: RecipeReader, profile: SessionProfile, *, limit: int = MA
         return ()
     match = {key: value for key, value in labels.items() if key != FRAMEWORK_VERSION_LABEL}
     found = (
-        _read_lead(reader, item, scope, labels) for item in candidates(reader, scope.identity_scheme, match, limit)
+        _read_lead(reader, item, scope, labels)
+        for item in candidates(reader, scope.identity_scheme, match, MAX_CANDIDATES)
     )
     leads = [lead for lead in found if lead is not None]
     return tuple(sorted(leads, key=lambda lead: (bool(lead.differing), -(lead.gain_pct or 0.0))))
@@ -572,21 +574,17 @@ def replay(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target:
 
 
 def replay_leads(
-    client: RecipeDownloader,
-    profile: SessionProfile,
-    leads: Sequence[WarmLead],
-    target: ReplayTarget,
-    *,
-    limit: int = REPLAY_LEADS,
+    client: RecipeDownloader, profile: SessionProfile, leads: Sequence[WarmLead], target: ReplayTarget
 ) -> tuple[WarmLead, ...]:
-    """``leads`` with the replay of each of the first ``limit``, best first as :func:`warm_leads` orders them."""
+    """``leads`` with the replay of each of the first :data:`REPLAY_LEADS`, best first as :func:`warm_leads` orders
+    them."""
 
     try:
         _, scope = recipe_identity(profile)
     except RemoteRecipeValidationError:
         return tuple(leads)
     return tuple(
-        replace(lead, replay=replay(client, lead, scope, target)) if index < limit else lead
+        replace(lead, replay=replay(client, lead, scope, target)) if index < REPLAY_LEADS else lead
         for index, lead in enumerate(leads)
     )
 

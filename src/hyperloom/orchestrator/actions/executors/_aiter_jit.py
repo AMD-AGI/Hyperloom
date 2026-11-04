@@ -71,6 +71,7 @@ _BATON_LOG_NAMES = {"server.log", "benchmark_stderr.log", "benchmark_stdout.log"
 # Bounds on the baton-wait scan: newest log files read, and bytes read from the end of each.
 _BATON_SCAN_MAX_FILES = 20
 _BATON_SCAN_TAIL_BYTES = 256 * 1024
+_UTF8 = "utf-8"
 
 
 def probe_aiter_jit_cache() -> dict[str, Any]:
@@ -508,7 +509,7 @@ def _positive_int(value: object) -> int | None:
 def _default_cu_nums(package_root: Path) -> dict[str, int]:
     """The image's ``GFX_CU_NUM_MAP``, read as a literal and never imported; empty when it cannot be read."""
     try:
-        tree = ast.parse(package_root.joinpath(*_BUILD_TARGETS_FILE).read_text(encoding="utf-8"))
+        tree = ast.parse(package_root.joinpath(*_BUILD_TARGETS_FILE).read_text(encoding=_UTF8))
     except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
         return {}
     for node in tree.body:
@@ -642,7 +643,7 @@ def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> 
     """
     rows: list[tuple[str, str]] = []
     try:
-        with csv_path.open(newline="", encoding="utf-8") as handle:
+        with csv_path.open(newline="", encoding=_UTF8) as handle:
             for row in csv.DictReader(handle):
                 name = str(row.get("kernelName") or "").strip()
                 if not name:
@@ -691,7 +692,7 @@ def serving_modules_cover_csv(
     for name, libtype in rows:
         resolved = serving_module_for_kernel(name, libtype, modules)
         search = (resolved,) if resolved else modules
-        encoded = name.encode("utf-8")
+        encoded = name.encode(_UTF8)
         saw_so = False
         found = False
         for module in dict.fromkeys(search):
@@ -709,8 +710,9 @@ def serving_modules_cover_csv(
 
 #: What hyperloom's prewarm writes beside the modules it built from the image's own tree and tables
 #: (``hyperloom.measure.runner.native.prewarm``): ``{"schema", "modules": [{"name", "sha256", "tables_sha256", ...}]}``.
+#: This module owns the format; the prewarm writes it and the measure runner reads it with these names.
 AITER_PREWARM_MANIFEST = "hyperloom-prewarm.json"
-_PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
+AITER_PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
 _MODULE_CONFIG = "optCompilerConfig.json"
 _HASH_CHUNK_BYTES = 1024 * 1024
 
@@ -723,13 +725,28 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _tables_sha256(configs_dir: Path) -> str:
+def tuned_tables_sha256(configs_dir: Path) -> str:
     """The prewarm's digest of aiter's tuned tables: a line ``<relative path>\\t<sha256>\\n`` per file, by path."""
     files = sorted((p.relative_to(configs_dir).as_posix(), p) for p in configs_dir.rglob("*") if p.is_file())
     digest = hashlib.sha256()
     for relative, path in files:
         digest.update(f"{relative}\t{_file_sha256(path)}\n".encode())
     return digest.hexdigest()
+
+
+def read_prewarm_manifest(jit_dir: Path) -> dict[str, dict[str, Any]]:
+    """The modules :data:`AITER_PREWARM_MANIFEST` in ``jit_dir`` lists, by name; empty when there is none or it is not
+    one."""
+    try:
+        document = json.loads((Path(jit_dir) / AITER_PREWARM_MANIFEST).read_bytes())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(document, dict) or document.get("schema") != AITER_PREWARM_SCHEMA:
+        return {}
+    entries = document.get("modules")
+    if not isinstance(entries, list):
+        return {}
+    return {str(entry["name"]): entry for entry in entries if isinstance(entry, dict) and "name" in entry}
 
 
 def image_own_modules(
@@ -745,11 +762,8 @@ def image_own_modules(
     the image's own for this round; one built for another card or CU count holds another card's rows, and
     none counts when the target is not known.
     """
-    try:
-        document = json.loads((jit_dir / AITER_PREWARM_MANIFEST).read_bytes())
-    except (OSError, ValueError):
-        return frozenset()
-    if not isinstance(document, dict) or document.get("schema") != _PREWARM_SCHEMA:
+    entries = read_prewarm_manifest(jit_dir)
+    if not entries:
         return frozenset()
     overridden = {
         m
@@ -759,12 +773,12 @@ def image_own_modules(
     }
     tables: str | None = None
     own: set[str] = set()
-    for entry in document.get("modules") or []:
+    for entry in entries.values():
         name = _installed_for(entry, jit_dir, overridden, targets)
         if name is None:
             continue
         try:
-            tables = _tables_sha256(configs_dir) if tables is None else tables
+            tables = tuned_tables_sha256(configs_dir) if tables is None else tables
         except OSError:
             continue
         if entry.get("tables_sha256") == tables:
@@ -796,7 +810,7 @@ def _built_for(entry: Mapping[str, Any], targets: BuildTargets | None) -> bool:
 def _module_config(package_root: Path) -> dict[str, Any]:
     """aiter's module config (``jit/optCompilerConfig.json``) of the package; empty when it cannot be read."""
     try:
-        document = json.loads((package_root / "jit" / _MODULE_CONFIG).read_text(encoding="utf-8"))
+        document = json.loads((package_root / "jit" / _MODULE_CONFIG).read_text(encoding=_UTF8))
     except (OSError, ValueError):
         return {}
     return document if isinstance(document, dict) else {}
@@ -990,6 +1004,7 @@ __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
     "AITER_PREWARM_MANIFEST",
+    "AITER_PREWARM_SCHEMA",
     "BuildTargets",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
@@ -1006,12 +1021,14 @@ __all__ = [
     "is_aiter_jit_registry_mismatch",
     "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",
+    "read_prewarm_manifest",
     "registry_mismatch_modules",
     "result_is_aiter_jit_registry_mismatch",
     "serving_module_for_kernel",
     "serving_modules_cover_csv",
     "sweep_stale_aiter_locks_if_dead",
     "target_names",
+    "tuned_tables_sha256",
     "_any_live_compiler",
     "_resolve_lock_sweep_dirs",
 ]

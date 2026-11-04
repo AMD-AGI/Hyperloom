@@ -49,12 +49,10 @@ from dataclasses import dataclass, field
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeBranch
 from hyperloom_multibranch.blackboard.rsi.history import (
-    DEFAULT_WORKLOAD,
     MAX_POSITION,
     MAX_STALL_TESTS,
     MIN_STALL_TESTS,
     MODEL_TYPE_LABEL,
-    WORKLOAD_LABEL,
     Odds,
     judged_tests,
     opened_with,
@@ -62,6 +60,7 @@ from hyperloom_multibranch.blackboard.rsi.history import (
 )
 from hyperloom_multibranch.blackboard.rsi.playbook import H0, Playbook, PlaybookNumbers, replaced
 from hyperloom_multibranch.blackboard.rsi.report import number, table
+from hyperloom_multibranch.blackboard.rsi.similarity import workload_kind
 from hyperloom_multibranch.blackboard.rsi.stops import JUDGE_CAUSE
 
 REPLAY_RUNS = 200
@@ -203,8 +202,8 @@ def _increments(branch: TreeBranch) -> list[tuple[float, float]]:
     return steps
 
 
-def _label(tree: SearchTree, key: str, default: str = "") -> str:
-    return tree.task.labels.get(key, default)
+def _label(tree: SearchTree, key: str) -> str:
+    return tree.task.labels.get(key, "")
 
 
 def pace_for(tree: SearchTree, history: Sequence[SearchTree], beyond: str = OPTIMISTIC) -> Pace:
@@ -212,8 +211,7 @@ def pace_for(tree: SearchTree, history: Sequence[SearchTree], beyond: str = OPTI
 
     others = tuple(item for item in history if item.session_id != tree.session_id)
     odds = stall_odds(others, tree.task)
-    workload = _label(tree, WORKLOAD_LABEL, DEFAULT_WORKLOAD)
-    alike = [item for item in others if _label(item, WORKLOAD_LABEL, DEFAULT_WORKLOAD) == workload]
+    alike = [item for item in others if workload_kind(item.task) == workload_kind(tree.task)]
     same = [item for item in alike if _label(item, MODEL_TYPE_LABEL) == _label(tree, MODEL_TYPE_LABEL)]
 
     def steps(trees: Sequence[SearchTree]) -> list[tuple[float, float]]:
@@ -292,7 +290,9 @@ def stops_in(reply: str) -> tuple[str, ...]:
     except json.JSONDecodeError:
         return ()
     orders = document.get(_STOP_KEY) if isinstance(document, dict) else None
-    return tuple(str(item.get("branch")) for item in orders or () if isinstance(item, Mapping))
+    if not isinstance(orders, list):
+        return ()
+    return tuple(str(item.get("branch")) for item in orders if isinstance(item, Mapping))
 
 
 @dataclass(frozen=True)
@@ -730,23 +730,21 @@ def _reproduced(tree: SearchTree) -> bool:
     return math.isclose(kept.best_gain_pct, best) and math.isclose(kept.gpu_hours, gpu, rel_tol=1e-9, abs_tol=1e-9)
 
 
-def cut_check(tree: SearchTree, pace: Pace, cut: float, *, runs: int = REPLAY_RUNS, seed: str = "") -> CutCheck:
+def cut_check(tree: SearchTree, pace: Pace, cut: float, *, runs: int = REPLAY_RUNS) -> CutCheck:
     """Where ``tree``'s real best gain falls among ``runs`` replays that keep its decisions and test times and sample
     every outcome after ``cut``."""
 
     real = simulate(tree, None, pace).best_gain_pct
     replays = []
     for run in range(runs):
-        replay = _CutRun(tree, pace, None, run, seed, cut=cut)
+        replay = _CutRun(tree, pace, None, run, "", cut=cut)
         replay.play()
         replays.append(replay.best)
     below = sum(1 for gain in replays if gain < real) + 0.5 * sum(1 for gain in replays if gain == real)
     return CutCheck(tree.session_id, cut / _SECONDS_PER_MINUTE, real, statistics.median(replays), below / runs)
 
 
-def check(
-    trees: Sequence[SearchTree], *, runs: int = REPLAY_RUNS, seed: str = "", draws: int = BOOTSTRAP_DRAWS
-) -> ReplayCheck:
+def check(trees: Sequence[SearchTree], *, runs: int = REPLAY_RUNS) -> ReplayCheck:
     """The replay's checks over ``trees``: each cut at a time drawn between a fifth and four fifths of its span."""
 
     reproduced = [tree.session_id for tree in trees if _reproduced(tree)]
@@ -756,12 +754,12 @@ def check(
         if not steered:
             continue
         start, end = steered[0].opened_s, tree.budget_seconds
-        cut = start + (end - start) * (0.2 + 0.6 * _seeded(seed, tree.session_id, "cut").random())
-        cuts.append(cut_check(tree, pace_for(tree, trees), cut, runs=runs, seed=seed))
+        cut = start + (end - start) * (0.2 + 0.6 * _seeded("", tree.session_id, "cut").random())
+        cuts.append(cut_check(tree, pace_for(tree, trees), cut, runs=runs))
     held, dropped = (
         {
             row.label: row
-            for row in compare(trees, variants(), drawn=Draws(runs=runs, beyond=beyond, seed=seed, draws=draws)).rows
+            for row in compare(trees, variants(), drawn=Draws(runs=runs, beyond=beyond, draws=BOOTSTRAP_DRAWS)).rows
         }
         for beyond in (OPTIMISTIC, PESSIMISTIC)
     )

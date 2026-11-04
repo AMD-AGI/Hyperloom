@@ -149,8 +149,7 @@ class GitExperimentRepo:
         recipes = [await self.read_recipe(commit) for commit in (base, resolved, target)]
         stored = replace(self._stored(), protected=await self._contributed(target, protected))
         merge = await asyncio.to_thread(carry, onto, *recipes, stored)
-        carried = await self._git("rev-list", "--topo-order", "--reverse", resolved, f"^{target}")
-        return replace(merge, carried=tuple(carried.split()))
+        return replace(merge, carried=await self._carried(resolved, target))
 
     async def merge_many(
         self, candidates: Sequence[str], onto: str, protected: frozenset[str] = frozenset()
@@ -196,8 +195,11 @@ class GitExperimentRepo:
             return None
         if not step.clean:
             return None
-        carried = await self._git("rev-list", "--topo-order", "--reverse", resolved, f"^{onto}")
-        return replace(step, carried=tuple(carried.split()))
+        return replace(step, carried=await self._carried(resolved, onto))
+
+    async def _carried(self, commit: str, onto: str) -> tuple[str, ...]:
+        """The commits ``commit`` has that ``onto`` lacks, oldest first."""
+        return tuple((await self._git("rev-list", "--topo-order", "--reverse", commit, f"^{onto}")).split())
 
     async def _merge_base(self, candidate: str, onto: str) -> str:
         """The one nearest common ancestor of ``candidate`` and ``onto``; ``RecipeError`` when there are several, since

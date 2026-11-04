@@ -93,7 +93,7 @@ class VerifiedBundle:
             raise ResultRejected(RejectReason.UNLISTED_FILE, relative)
         root_fd = _open_staging(self.staging_dir)
         try:
-            data = _read_checked(root_fd, relative, expected.size, expected.sha256)
+            data = _read_checked(root_fd, expected)
         finally:
             os.close(root_fd)
         return data
@@ -246,17 +246,18 @@ def _check_rule_pack(manifest: ResultManifest, session_digest: str) -> None:
         )
 
 
-def _read_checked(root_fd: int, relative: str, size: int, sha256: str) -> bytes:
-    """Read a listed file fully and compare it with the manifest; used for the small ``read_file`` path."""
-    chunks: list[bytes] = []
-    fd = _open_listed(root_fd, relative)
+def _read_checked(root_fd: int, entry: ManifestFile) -> bytes:
+    """Read a listed file and compare it with the manifest; used for the small ``read_file`` path.
+
+    No more than ``entry.size + 1`` bytes are read, so a file that grew after verification costs no more memory than
+    the one that was verified.
+    """
+    fd = _open_listed(root_fd, entry.path)
     try:
-        for chunk in fsafe.stream(fd):
-            chunks.append(chunk)
+        data = b"".join(fsafe.stream(fd, entry.size))
     finally:
         os.close(fd)
-    data = b"".join(chunks)
-    _compare(relative, len(data), hashlib.sha256(data).hexdigest(), size, sha256)
+    _compare(entry.path, len(data), hashlib.sha256(data).hexdigest(), entry.size, entry.sha256)
     return data
 
 
@@ -288,7 +289,7 @@ def _check_files(root_fd: int, manifest: ResultManifest) -> None:
     for entry in manifest.files:
         fd = _open_listed(root_fd, entry.path)
         try:
-            sha256, size = fsafe.sha256_and_size(fd)
+            sha256, size = fsafe.sha256_and_size(fd, entry.size)
         finally:
             os.close(fd)
         _compare(entry.path, size, sha256, entry.size, entry.sha256)
@@ -352,14 +353,21 @@ def _stage_files(bundle: VerifiedBundle, scratch_fd: int) -> None:
 
 
 def _copy_checked(root_fd: int, entry: ManifestFile, parent: int, name: str) -> None:
+    """Copy a listed file into the scratch directory, comparing it with the manifest.
+
+    The staging directory is not trusted after verification, so the file may have grown: no more than ``entry.size + 1``
+    bytes are read and none past ``entry.size`` is written.
+    """
     digest, total = hashlib.sha256(), 0
     source = _open_listed(root_fd, entry.path)
     try:
         target = fsafe.create_exclusive(parent, name)
         try:
-            for chunk in fsafe.stream(source):
-                digest.update(chunk)
+            for chunk in fsafe.stream(source, entry.size):
                 total += len(chunk)
+                if total > entry.size:
+                    break
+                digest.update(chunk)
                 os.write(target, chunk)
         finally:
             os.close(target)

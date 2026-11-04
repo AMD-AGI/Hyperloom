@@ -184,13 +184,16 @@ def test_leads_come_from_either_flow_exact_identity_first(
     assert "inference:malformed" in caplog.text and "inference:other-scope" in caplog.text
 
 
-def test_the_search_matches_six_dimensions_page_by_page(store: FakeRecipeStore) -> None:
+def test_the_search_matches_six_dimensions_page_by_page(
+    store: FakeRecipeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     warm_leads(RemoteRecipeClient(store), PROFILE)
 
     assert [search["offset"] for search in store.searches] == [0, 2, 4]
     assert store.searches[0]["scheme"] == "inference"
     assert store.searches[0]["match"] == {key: value for key, value in LABELS.items() if key != "framework_version"}
-    assert len(warm_leads(RemoteRecipeClient(store), PROFILE, limit=1)) == 1
+    monkeypatch.setattr(warm_start, "MAX_CANDIDATES", 1)
+    assert len(warm_leads(RemoteRecipeClient(store), PROFILE)) == 1
 
 
 def test_a_scope_the_kb_cannot_file_reads_nothing(store: FakeRecipeStore) -> None:
@@ -345,25 +348,6 @@ def test_a_champion_on_this_image_replays_its_whole_recipe_on_any_head_its_files
     assert found.on(CHAMPION, "c9") is None
 
 
-def test_a_replay_stacks_the_champions_table_over_the_heads_instead_of_replacing_it(tmp_path: Path) -> None:
-    from hyperloom_multibranch.repo.merge import wider_table
-    from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
-    from hyperloom_multibranch.toolbox.tests.kernel_rows import ALPHA_NEW, ENV, SHARED, csv_text
-
-    narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
-    wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, ALPHA_NEW))
-    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, ALPHA_NEW)}
-    head = replace(ROOT, kernels=(narrow,))
-    champion = replace(CHAMPION, kernels=(wide,), components=ROOT.components)
-    found = PreparedReplay(EXACT_ID, champion, champion.launch)
-
-    on_head = found.on(head, "c3", lambda wanted, current: wider_table(wanted, current, lambda a: store[a.sha256]))
-
-    assert on_head is not None
-    assert on_head.delta.add_kernels == (wide,)
-    assert apply(head, on_head.delta).kernels == (wide,)
-
-
 def test_a_replay_keeps_the_heads_upstream_for_a_component_the_head_has_and_brings_the_rest(
     snapshot: BlackboardSnapshot, tmp_path: Path
 ) -> None:
@@ -505,12 +489,13 @@ def test_launch_only_replays_the_launch_config_without_what_the_patches_read_lis
 
 
 def test_only_the_best_leads_get_a_replay_and_one_that_changes_nothing_gets_none(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     same = replace(LEAD, canonical_id="inference:same", server_args=ROOT.launch.server_args, envs={}, replayable=False)
     leads = (LEAD, same, replace(LEAD, canonical_id="inference:third"))
+    monkeypatch.setattr(warm_start, "REPLAY_LEADS", 2)
 
-    replayed = replay_leads(_downloads(snapshot, tmp_path), PROFILE, leads, _target(tmp_path), limit=2)
+    replayed = replay_leads(_downloads(snapshot, tmp_path), PROFILE, leads, _target(tmp_path))
 
     assert [lead.replay is not None for lead in replayed] == [True, False, False]
     assert replayed[0].render().endswith(f"; replay on your head with {REPLAY_TOOL}: the whole recipe")

@@ -154,6 +154,31 @@ def test_a_live_claim_blocks_the_next_generation_until_it_expires(tmp_path: Path
     assert [claim.holder for claim in store.all_current()] == ["s2"]
 
 
+def test_the_claims_in_force_come_from_one_listing_of_the_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LeaseStore(tmp_path)
+    store.acquire(_claim("s1"), START)
+    for request_id in ("r1", "r2"):
+        store.change(KEY, lambda claim, request_id=request_id: replace(claim, request_id=request_id))
+    other = replace(_claim("s2"), key=ClaimKey("c1", intent("s2", "c1").fingerprint))
+    store.acquire(other, START)
+    listings: list[str] = []
+    for name in ("glob", "iterdir"):
+        original = getattr(Path, name)
+
+        def counted(path: Path, *args: str, name: str = name, original: Callable[..., object] = original) -> object:
+            listings.append(name)
+            return original(path, *args)
+
+        monkeypatch.setattr(Path, name, counted)
+
+    current = sorted((claim.holder, claim.generation, claim.request_id) for claim in store.all_current())
+
+    assert listings == ["iterdir"]
+    assert current == [("s1", 3, "r2"), ("s2", 1, None)]
+
+
 def test_a_change_beaten_by_another_writer_is_reapplied_to_the_newer_generation(tmp_path: Path) -> None:
     store = LeaseStore(tmp_path)
     store.acquire(_claim("s1"), START)

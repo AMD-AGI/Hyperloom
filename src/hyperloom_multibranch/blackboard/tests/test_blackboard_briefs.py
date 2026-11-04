@@ -17,6 +17,7 @@ from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import InboxItem, Learning, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LineageKind
 from hyperloom_multibranch.blackboard import STALL_TESTS, BriefTriggers, LocalBlackboard
+from hyperloom_multibranch.blackboard.local import feeds
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, delta, intent, judgement, request, result
 
 Open = Callable[..., LocalBlackboard]
@@ -51,9 +52,10 @@ def _briefs(items: tuple[InboxItem, ...]) -> list[tuple[str, str]]:
 
 
 async def test_a_stall_briefs_the_branch_once_when_its_last_commit_is_that_many_judged_tests_back(
-    open_as: Open, root: Path, clock: FakeClock
+    open_as: Open, root: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    s1 = _briefed(root, clock, "s1", BriefTriggers(stall_tests=2))
+    monkeypatch.setattr(feeds, "STALL_TESTS", 2)
+    s1 = _briefed(root, clock, "s1", BriefTriggers())
     await _judged(open_as, "r1", Conclusion.RECORDED_ONLY)
     await _judged(open_as, "r2", Conclusion.UNVERIFIED)
     first = await s1.poll("s1")
@@ -91,20 +93,20 @@ async def test_another_branchs_pitfall_briefs_a_branch_holding_a_claim_in_that_d
 
     page = await s1.poll("s1")
     unheld = await _briefed(root, clock, "s2", BriefTriggers()).poll("s2")
-    quiet = await _briefed(root, clock, "s1", BriefTriggers(pitfalls=False)).poll("s1")
 
     # The second names no direction, but its words are about the family s1 holds a claim in: the KV cache's precision.
     named, worded = [item for item in page.items if item.kind is InboxKind.BRIEF]
     assert named.pointer == "c0"
     assert named.summary.startswith(f"pitfall: s2 learnt, in a direction this branch holds: {FP8_PITFALL};")
     assert worded.summary.startswith(f"pitfall: s2 learnt, in a direction this branch holds: {unnamed};")
-    assert _briefs(unheld.items) == [] and _briefs(quiet.items) == []
+    assert _briefs(unheld.items) == []
 
 
 async def test_claims_refused_while_another_branch_tests_the_intent_do_not_count_toward_a_stall(
-    open_as: Open, root: Path, clock: FakeClock
+    open_as: Open, root: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    s2 = _briefed(root, clock, "s2", BriefTriggers(stall_tests=1))
+    monkeypatch.setattr(feeds, "STALL_TESTS", 1)
+    s2 = _briefed(root, clock, "s2", BriefTriggers())
     await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(
         FP8_KV, delta("--kv-cache-dtype fp8").fingerprint(), ttl_seconds=TTL
     )
@@ -130,8 +132,3 @@ async def test_without_triggers_the_inbox_has_no_brief_items(open_as: Open) -> N
 
     assert [item.kind for item in page.items].count(InboxKind.JUDGEMENT) == STALL_TESTS
     assert _briefs(page.items) == []
-
-
-def test_a_stall_takes_at_least_one_judged_test() -> None:
-    with pytest.raises(ValueError, match="at least one"):
-        BriefTriggers(stall_tests=0)

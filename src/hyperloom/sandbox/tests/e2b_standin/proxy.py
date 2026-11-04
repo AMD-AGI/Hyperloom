@@ -6,12 +6,17 @@
 This is what E2B's client proxy (and the Claw Router) does: the SDK sends every envd request to ``E2B_SANDBOX_URL`` and
 names the target sandbox in a header. Bodies and responses are relayed as streams, so large files and long-running
 commands pass through without buffering. A request for a sandbox that does not exist gets the 502 E2B's proxy gives.
+
+The router reaches only the envd of the sandbox it looked up, on this machine at the port the control plane gave it: a
+request whose target is not a path there (an absolute URL, an authority) is refused with 400, and an envd answer with a
+line break inside a header, which would split the response the router writes, with 502.
 """
 
 from __future__ import annotations
 
 import http.client
 import json
+import re
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -33,6 +38,16 @@ _HOP_BY_HOP = frozenset(
     }
 )
 _CHUNK = 1 << 20
+#: Where every sandbox's envd listens; only its port is the sandbox's.
+_UPSTREAM_HOST = "127.0.0.1"
+#: The request target the router relays: a path, with its query, on the sandbox's envd.
+_PATH_ONLY = re.compile(r"/[!-~]*")
+_SANDBOX_HEADER = "E2b-Sandbox-Id"
+
+
+def _breaks_a_line(headers: list[tuple[str, str]]) -> bool:
+    """Whether a header's name or value holds a CR or an LF, which would end the line the router writes it on."""
+    return any(mark in text for header in headers for text in header for mark in "\r\n")
 
 
 def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
@@ -44,22 +59,30 @@ def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
         def log_message(self, *args: object) -> None:
             pass
 
+        def _answer(self, status: int, message: str) -> None:
+            body = json.dumps(
+                {"sandboxId": self.headers.get(_SANDBOX_HEADER), "message": message, "code": status}
+            ).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _route(self) -> None:
-            sandbox_id = self.headers.get("E2b-Sandbox-Id")
+            sandbox_id = self.headers.get(_SANDBOX_HEADER)
             box = plane.lookup(sandbox_id)
             if box is None:
-                body = json.dumps(
-                    {"sandboxId": sandbox_id, "message": f"The sandbox {sandbox_id} was not found", "code": 502}
-                ).encode()
-                self.send_response(502)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._answer(502, f"The sandbox {sandbox_id} was not found")
                 return
-            conn = http.client.HTTPConnection("127.0.0.1", box.port, timeout=3600)
+            path = self.path
+            if not _PATH_ONLY.fullmatch(path):
+                self.close_connection = True
+                self._answer(400, "The request target is not a path on the sandbox")
+                return
+            conn = http.client.HTTPConnection(_UPSTREAM_HOST, box.port, timeout=3600)
             try:
-                self._relay(conn)
+                self._relay(conn, path)
             except (http.client.HTTPException, OSError, ValueError):
                 self.close_connection = True
             finally:
@@ -87,17 +110,21 @@ def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
                 yield self.rfile.read(size)
                 self.rfile.readline()
 
-        def _relay(self, conn: http.client.HTTPConnection) -> None:
+        def _relay(self, conn: http.client.HTTPConnection, path: str) -> None:
             headers = {k: v for k, v in self.headers.items() if k.lower() not in _HOP_BY_HOP}
             body = self._body()
             chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
             if chunked:
                 headers["Transfer-Encoding"] = "chunked"
-            conn.request(self.command, self.path, body=body, headers=headers, encode_chunked=chunked)
+            conn.request(self.command, path, body=body, headers=headers, encode_chunked=chunked)
             response = conn.getresponse()
+            received = response.getheaders()
+            if _breaks_a_line(received):
+                self._answer(502, "The sandbox answered with a line break inside a header")
+                return
             self.send_response(response.status)
             length = response.getheader("Content-Length")
-            for name, value in response.getheaders():
+            for name, value in received:
                 if name.lower() not in _HOP_BY_HOP and name.lower() != "content-length":
                     self.send_header(name, value)
             if length is not None or response.status in (204, 304) or self.command == "HEAD":

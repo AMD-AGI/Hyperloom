@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from asyncio import sleep
 from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
@@ -36,10 +37,11 @@ from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected, Toolbox
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
-from hyperloom_multibranch.rulegate.service import Polling
 
 log = logging.getLogger(__name__)
 
+#: Seconds between two reads of the record of a test still in flight.
+POLL_SECONDS = 5.0
 #: Seconds before a repro test the toolbox refused with backpressure is submitted again.
 RESUBMIT_SECONDS = 30.0
 NO_DELTA = RecipeDelta()
@@ -79,6 +81,14 @@ class ReproRun:
         return self.verdict or self.failure
 
 
+async def ended(blackboard: RecordSearch, request_id: str) -> TestRecord:
+    """The record of ``request_id`` once its test is no longer in flight."""
+
+    while (record := await blackboard.record(request_id)).in_flight:
+        await sleep(POLL_SECONDS)
+    return record
+
+
 class ReproRunner:
     """Runs a case as a repro test through ``toolbox`` and reads its verdict back from ``blackboard``.
 
@@ -87,13 +97,10 @@ class ReproRunner:
     a :attr:`ReproRun.failure`. A caller that stops waiting takes its test back, shielded from a second cancel.
     """
 
-    def __init__(
-        self, toolbox: Toolbox, blackboard: RecordSearch, verifier: ResultVerifier, *, polling: Polling = Polling()
-    ) -> None:
+    def __init__(self, toolbox: Toolbox, blackboard: RecordSearch, verifier: ResultVerifier) -> None:
         self._toolbox = toolbox
         self._blackboard = blackboard
         self._verifier = verifier
-        self._polling = polling
 
     async def run(
         self, commit: str, delta: RecipeDelta, attachments: tuple[AttachmentRef, ...], *, branch: str
@@ -113,7 +120,7 @@ class ReproRunner:
         except RequestRejected as error:
             return ReproRun("", failure=f"refused by the toolbox ({error})")
         try:
-            return await self._verdict(await self._ended(request_id))
+            return await self._verdict(await ended(self._blackboard, request_id))
         except asyncio.CancelledError:
             await asyncio.shield(self._toolbox.cancel(request_id))
             raise
@@ -129,12 +136,7 @@ class ReproRunner:
             try:
                 return await self._toolbox.submit_test(request)
             except Backpressure:
-                await self._polling.sleep(RESUBMIT_SECONDS)
-
-    async def _ended(self, request_id: str) -> TestRecord:
-        while (record := await self._blackboard.record(request_id)).in_flight:
-            await self._polling.sleep(self._polling.seconds)
-        return record
+                await sleep(RESUBMIT_SECONDS)
 
     async def _verdict(self, record: TestRecord) -> ReproRun:
         request_id, result = record.request_id, record.result
@@ -362,6 +364,7 @@ async def _gathered(awaitables: Iterable[Awaitable[T]]) -> list[T]:
 
 __all__ = [
     "NO_DELTA",
+    "POLL_SECONDS",
     "RESUBMIT_SECONDS",
     "CasePool",
     "CaseRegistry",
@@ -372,6 +375,7 @@ __all__ = [
     "RegressionSet",
     "ReproRun",
     "ReproRunner",
+    "ended",
     "prove_fix",
     "register_case",
 ]

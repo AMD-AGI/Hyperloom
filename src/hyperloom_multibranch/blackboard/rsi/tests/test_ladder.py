@@ -7,17 +7,21 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import math
 from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.blackboard.codec import encode
+from hyperloom_multibranch.blackboard.rsi import ladder
 from hyperloom_multibranch.blackboard.rsi.ladder import (
     BETTER,
     GAIN_PER_GPU_HOUR,
     JUDGE_SYSTEM_PROMPT,
     MAX_TRIALS,
     PAIR_SECONDS,
+    STANDING_FORMAT,
     UNCLEAR,
     DecisionPoint,
     Difference,
@@ -47,7 +51,15 @@ from hyperloom_multibranch.blackboard.rsi.ladder import (
     trial_of,
     trials,
 )
-from hyperloom_multibranch.blackboard.rsi.playbook import H0, Governs, Playbook, PlaybookPool, PlaybookRule, replaced
+from hyperloom_multibranch.blackboard.rsi.playbook import (
+    H0,
+    Governs,
+    Playbook,
+    PlaybookNumbers,
+    PlaybookPool,
+    PlaybookRule,
+    replaced,
+)
 from hyperloom_multibranch.blackboard.rsi.replay import OLD_RULE, Draws
 from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, model_name
 from hyperloom_multibranch.blackboard.rsi.stops import stop_audit
@@ -56,6 +68,7 @@ from hyperloom_multibranch.blackboard.rsi.tests.trees import HOUR, branch, tree
 MINUTE = 60.0
 PATIENT = Playbook("patient", replaced(H0, stall_tests=8).numbers, parent=H0.label, measure="early_stops")
 ALIKE = PlaybookRule(Governs.STOP, "Of two branches whose changes are alike, stop the one further behind integration.")
+WORSE_OPTIMISTIC, WORSE_PESSIMISTIC = Difference(-2.0, -3.0, -1.0), Difference(-1.0, -1.5, -0.5)
 
 
 def _judged(*minutes: float) -> tuple[float, ...]:
@@ -151,7 +164,7 @@ async def test_r2_counts_the_points_each_playbook_gets_right_asked_through_the_j
         stops = [] if "Scheduling playbook patient" in prompt else [{"branch": "b1"}, {"branch": "b2"}]
         return json.dumps({"stop": stops})
 
-    asking = ReplayJudge(judge, "the judge's system prompt")
+    asking = ReplayJudge(judge)
 
     tie = await r2(PATIENT, H0, (undo, keep), asking)
     ahead = await r2(PATIENT, H0, (undo, undo, keep), asking)
@@ -275,7 +288,7 @@ def test_the_measures_r3_can_read_are_those_the_champions_sessions_of_the_task_v
 def test_close_retires_a_playbook_the_latest_replay_reads_worse_both_ways(tmp_path: Path) -> None:
     pool = PlaybookPool(tmp_path)
     pool.register(PATIENT)
-    worse = StandingRow(PATIENT.label, Difference(-2.0, -3.0, -1.0), Difference(-1.0, -1.5, -0.5))
+    worse = StandingRow(PATIENT.label, WORSE_OPTIMISTIC, WORSE_PESSIMISTIC, PATIENT.numbers, PATIENT.rules)
     record_standing(pool, ReplayStanding("s1", 10.0, H0.label, 3, 50, (worse,)))
 
     (done,) = settle(pool, 50.0)
@@ -285,6 +298,54 @@ def test_close_retires_a_playbook_the_latest_replay_reads_worse_both_ways(tmp_pa
         "optimistic -2.00 (-3.00 to -1.00); pessimistic -1.00 (-1.50 to -0.50)"
     )
     assert pool.on_trial() == ()
+
+
+@pytest.mark.parametrize(
+    ("numbers", "rules"),
+    [(H0.numbers, ()), (PATIENT.numbers, (ALIKE,)), (None, ())],
+    ids=["the default variant's numbers", "other rules", "a row kept before rows held them"],
+)
+def test_close_keeps_a_playbook_on_trial_that_only_the_replay_of_another_playbook_of_its_label_reads_worse(
+    tmp_path: Path, numbers: PlaybookNumbers | None, rules: tuple[PlaybookRule, ...]
+) -> None:
+    pool = PlaybookPool(tmp_path)
+    pool.register(PATIENT)
+    worse = StandingRow(PATIENT.label, WORSE_OPTIMISTIC, WORSE_PESSIMISTIC, numbers, rules)
+    record_standing(pool, ReplayStanding("s1", 10.0, H0.label, 3, 50, (worse,)))
+
+    assert settle(pool, 50.0) == ()
+    assert [item.label for item in pool.on_trial()] == [PATIENT.label]
+
+
+def test_a_standing_kept_before_its_rows_held_what_they_replayed_still_reads(tmp_path: Path) -> None:
+    pool = PlaybookPool(tmp_path)
+    row = {"label": PATIENT.label, "optimistic": encode(WORSE_OPTIMISTIC), "pessimistic": encode(WORSE_PESSIMISTIC)}
+    kept = {"session_id": "s1", "at": 10.0, "champion": H0.label, "sessions": 3, "runs": 50, "rows": [row]}
+    (pool.root / "replays").mkdir(parents=True)
+    (pool.root / "replays" / "s1.json").write_text(
+        json.dumps({"format": STANDING_FORMAT, "record": kept}), encoding="utf-8"
+    )
+
+    (standing,) = standings(pool)
+
+    assert standing.rows[0].reading == "worse" and not standing.rows[0].replays(PATIENT)
+
+
+def test_a_trial_or_standing_that_cannot_be_read_is_skipped_with_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pool = PlaybookPool(tmp_path)
+    record_trial(pool, _trial("c0", H0.label, 0.0, 1.0))
+    record_standing(pool, ReplayStanding("s1", 10.0, H0.label, 3, 50))
+    for folder in ("trials", "replays"):
+        (pool.root / folder / "broken.json").write_text("{", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        kept, stood = trials(pool), standings(pool)
+
+    assert [item.session_id for item in kept] == ["c0"] and [item.session_id for item in stood] == ["s1"]
+    assert "skipping unreadable trial record" in caplog.text
+    assert "skipping unreadable replay standing record" in caplog.text
 
 
 def test_close_retires_a_playbook_aiming_at_a_measure_the_champions_sessions_never_varied_in(tmp_path: Path) -> None:
@@ -323,11 +384,14 @@ def test_a_sessions_task_is_its_workload_model_image_sizes_and_budget_and_its_tr
     assert (trial.task, trial.started_at, trial.fell_back) == (session_task(played), 1000.0, True)
 
 
-def test_the_replay_standing_reads_every_playbook_against_the_champion_and_keeps_once(tmp_path: Path) -> None:
+def test_the_replay_standing_reads_every_playbook_against_the_champion_and_keeps_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pool = PlaybookPool(tmp_path)
     pool.register(PATIENT)
+    monkeypatch.setattr(ladder, "CLOSE_REPLAY_RUNS", 2)
 
-    standing, comparisons = replay_standing((SESSION,), pool, session_id="s", at=10.0, runs=2)
+    standing, comparisons = replay_standing((SESSION,), pool, session_id="s", at=10.0)
 
     labels = {row.label for row in standing.rows}
     assert (standing.champion, standing.sessions, standing.runs, len(comparisons)) == (H0.label, 1, 2, 2)

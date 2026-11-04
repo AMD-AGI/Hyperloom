@@ -22,11 +22,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom_kb import ReadStatus, RemoteExperienceKB
-from hyperloom_kb.collect import load_mapping
+from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.blackboard.records import LearningRecord, BlackboardSnapshot, SessionProfile
 from hyperloom_multibranch.blackboard.knowledge.experience import experience_identity
-from hyperloom_multibranch.blackboard.knowledge.learnings import MAPPING_PATH
 from hyperloom_multibranch.blackboard.knowledge.recall import WORKLOAD_KEYS, ExperienceReader, IdentityIndex, classify
 from hyperloom_multibranch.blackboard.families import Family
 from hyperloom_multibranch.blackboard.learning_search import (
@@ -194,12 +192,6 @@ class LearningRecall(SessionLearnings):
         self._identities = identities if identities is not None else IdentityIndex.of(reader)
         self._read: OrderedDict[tuple[str, int], PastLearnings] = OrderedDict()
         self._lock = threading.Lock()
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None, *, log: RetrievalLog | None = None) -> LearningRecall:
-        """The recall on the Experience KB ``HYPERLOOM_KB_URL`` names; this session's learnings only without one."""
-
-        return cls(RemoteExperienceKB.from_env(load_mapping(MAPPING_PATH).declaration, env), log=log)
 
     def record(
         self,

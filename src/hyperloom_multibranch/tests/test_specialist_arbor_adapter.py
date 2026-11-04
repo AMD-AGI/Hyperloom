@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import ast
 import asyncio
 import json
 import os
@@ -24,7 +25,8 @@ from hyperloom_multibranch.blackboard.tests.factories import result
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_manifest import REFUSED_FILE, AgentManifest
-from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, AgentSpec, make_ready, root_profile
+from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, make_ready, root_profile
+from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import (
     BRANCH_RUN,
     DOSSIER_DIR,
@@ -194,6 +196,13 @@ def _spec(tmp_path: Path, **changes: object) -> AgentSpec:
 def _filled(command: str, port: int, out: str) -> str:
     """``command`` as Arbor fills a host's bench command (arbor/component.py's ``fill_bench``)."""
     return command.replace("{port}", str(port)).replace("{out}", shlex.quote(out))
+
+
+def test_the_adapter_imports_nothing_from_the_onboarding_that_imports_it() -> None:
+    tree = ast.parse(Path(arbor_adapter.__file__).read_text())
+    imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+
+    assert "hyperloom_multibranch.specialist.agent_onboarding" not in imported
 
 
 @pytest.mark.parametrize("missing", ["", *MARKERS])
@@ -564,7 +573,7 @@ def test_arbor_is_held_to_mb_s_accuracy_floor_unless_the_launch_or_the_recipe_se
 
 
 def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Path) -> None:
-    # Operator, 2026-11-01: the benchmark's rules are considered in validation, and are part of the dossier.
+    # The benchmark's rules are considered in validation, and are part of the dossier.
     spec = _spec(tmp_path)
     agentx = replace(spec, workload={"kind": "agentx", "conc": 8})
 

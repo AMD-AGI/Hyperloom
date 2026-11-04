@@ -8,7 +8,9 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.measure.runner import card_watch, hardware
+from hyperloom.measure.runner import run as run_module
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
+from hyperloom.orchestrator.actions.executors._aiter_serving_once import ServingPreflight
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.card_occupancy import CardReading
 
@@ -23,6 +25,17 @@ def rig(tmp_path_factory: pytest.TempPathFactory) -> Rig:
 def _nobody_holds_the_cards(monkeypatch: pytest.MonkeyPatch) -> None:
     """The runner tests do not read the kernel's list of the machine they run on: a test that needs one says what it holds."""
     monkeypatch.setattr(card_occupancy, "read_holders", lambda cards: CardReading())
+
+
+@pytest.fixture(autouse=True)
+def _no_serving_preflight_of_this_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runner tests never run the launch preflight on an aiter of the machine they run on, which it may move modules
+    of aside and build into: a test of the runner's preflight says what it finds."""
+    monkeypatch.setattr(
+        run_module,
+        "prepare_serving_so_once",
+        lambda envs, environ, build=None: ServingPreflight({"action": "noop", "reason": "the runner tests run none"}),
+    )
 
 
 class SettleClock:

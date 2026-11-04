@@ -4,9 +4,9 @@
 """The review a correctness fix passes after its repro case proved it: is the defect's trigger reachable under the
 target workload, so the fix matters for what the session serves?
 
-The review only ever refuses by default: a critic that gives no usable answer after one retry, or no critic at all,
-refuses the fix with the reason, and the candidate is judged on its performance alone. What each reply cost, an
-unreadable one included, goes to the usage sink the critic is built on as the critic's spend, with no branch.
+The review only ever refuses by default: a critic that gives no usable answer after one retry refuses the fix with the
+reason, and the candidate is judged on its performance alone. What each reply cost, an unreadable one included, goes to
+the usage sink the critic is built on as the critic's spend, with no branch.
 """
 
 from __future__ import annotations
@@ -98,13 +98,6 @@ class FixReviewer(Protocol):
 
 class CriticAnswerError(ValueError):
     """The critic's reply is not exactly the verdict object."""
-
-
-class NoCritic:
-    """The reviewer of a session that configures none: every fix is refused, never approved unseen."""
-
-    async def review(self, review: FixReview) -> CriticVerdict:
-        return CriticVerdict(False, f"no critic is configured to review the fix of {review.judgement.request_ids[0]}")
 
 
 class LlmCritic:
@@ -208,7 +201,6 @@ __all__ = [
     "FixReview",
     "FixReviewer",
     "LlmCritic",
-    "NoCritic",
     "ReproVerdicts",
     "anthropic_critic",
 ]

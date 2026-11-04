@@ -214,20 +214,24 @@ def test_the_compile_user_can_reach_its_work_below_the_services_private_scratch(
     assert stat.S_IMODE(scratch.stat().st_mode) == 0o701, "others may pass through it, never list or read it"
 
 
-#: A child that stages what it could do: its user, whether it could read the key, and its network namespace.
+#: A child that stages what it could do: its user, whether it could read the key and its job, and its network namespace.
 _PROBING_CHILD = """\
 import json
 import os
 from pathlib import Path
 
 
-def main(argv):
+def readable(path):
     try:
-        Path({key!r}).read_bytes()
-        key = "read"
+        path.read_bytes()
     except OSError as exc:
-        key = type(exc).__name__
-    seen = {{"uid": str(os.getuid()), "key": key, "net": os.readlink("/proc/self/ns/net")}}
+        return type(exc).__name__
+    return "read"
+
+
+def main(argv):
+    key, job = readable(Path({key!r})), readable(Path(argv[0]) / "job.json")
+    seen = {{"uid": str(os.getuid()), "key": key, "job": job, "net": os.readlink("/proc/self/ns/net")}}
     record = {{"status": "failed", "outputs": [], "toolchain": seen, "log": "", "failure": "probe"}}
     (Path(argv[0]) / "staged.json").write_text(json.dumps(record))
     return 0
@@ -266,6 +270,7 @@ def test_on_a_real_host_the_compile_runs_as_nobody_cannot_read_the_key_and_has_a
         seen = dict(staged.toolchain)
         own_network = os.readlink("/proc/self/ns/net")
         assert (seen["uid"], seen["key"], seen[ISOLATION_KEY]) == ("65534", "PermissionError", isolation.level)
+        assert seen["job"] == "read", "the job is the compile user's own once its work directory is given to it"
         assert (seen["net"] != own_network) is network
     finally:
         subprocess.run(["rm", "-rf", str(base)], check=False)

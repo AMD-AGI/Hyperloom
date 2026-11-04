@@ -1342,7 +1342,7 @@ class _Machine:
         (workspace / "torch_trace" / "rank0.pt.trace.json.gz").write_bytes(b"trace")
         listener = socket.socket()
         try:
-            listener.bind(("0.0.0.0", port))
+            listener.bind(("127.0.0.1", port))
             listener.listen()
         except OSError as exc:
             listener.close()

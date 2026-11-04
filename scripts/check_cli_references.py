@@ -46,8 +46,8 @@ _EXTERNAL_MODULE_PREFIXES = ("atom.entrypoints.",)
 _LEGACY_MODULES = frozenset({"hyperloom.inference_optimizer.cli"})
 _RUNNABLE_TOP_LEVEL = frozenset({"hyperloom", "kernelforge", "hyperloom_kb"})
 _SKIPPED_TOP_DIRS = frozenset({".git", ".venv", "build", "node_modules"})
-# Vendored Arbor (src/hyperloom_arbor/VENDOR.md): its skills run Arbor's own modules from its root, checked upstream.
-_SKIPPED_TREES = ("src/hyperloom_arbor/",)
+# Vendored Arbor (third_party/arbor/VENDOR.md): its skills run Arbor's own modules from its root, checked upstream.
+_SKIPPED_TREES = ("third_party/arbor/",)
 
 
 def _doc_files(root: Path) -> list[Path]:

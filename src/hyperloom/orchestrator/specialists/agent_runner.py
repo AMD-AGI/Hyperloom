@@ -6,11 +6,17 @@
 The local implementation spawns the argv the existing command builders produced,
 and hands the existing reap loop an absolute deadline, so a long-lived session is
 not cut by the 4 hour cap that only applies to an unbounded run. Heartbeat rules,
-environment allowlist and tree teardown are the existing ones. How a session that
-ended or was lost is restarted and resumed from the branch log is the specialist
-runtime's decision (multi-branch design 4.4); this module only launches, polls,
-cancels and collects, and, for a session launched with its stdin open, sends it
-further messages.
+environment allowlist, tree kill and reap-mark sweep are the dispatcher's: each
+launch puts its own ``HYPERLOOM_REAP_MARK`` in the CLI's environment, and however
+supervision ends (exit, done file, silence, deadline, cancel) the CLI's tree is
+killed if its root still runs, and then every process that still carries that
+mark, however it detached. Nothing else is found: a process the CLI started that
+dropped its environment (one exec'd with an empty one, say) carries no mark, so
+unless it is still in the tree of a live root it outlives the session, as it
+outlives the dispatcher's. How a session that ended or was lost is restarted and
+resumed from the branch log is the specialist runtime's decision (multi-branch
+design 4.4); this module only launches, polls, cancels and collects, and, for a
+session launched with its stdin open, sends it further messages.
 
 Tokens reach the CLI only through environment variables: the MCP configuration
 written to disk names the variable, never its value.
@@ -43,7 +49,7 @@ from hyperloom_common.fs_utils import create_nofollow, read_bytes_nofollow, read
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 
 from .agent_cli_config import _build_specialist_env as build_specialist_env
-from .launch_env import prepare_demote, resolve_launch_user, stage_mcp_config
+from .launch_env import prepare_demote, resolve_launch_user, stage_mcp_config, stamp_reap_mark
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
 from .reap_watch import cli_alive
 from .resources import (
@@ -185,27 +191,39 @@ class AgentHandle:
 
 
 class AgentRunner(Protocol):
+    """Launches, polls, cancels and collects agent CLI sessions."""
+
     name: str
 
-    def launch(self, spec: AgentLaunchSpec) -> Awaitable[AgentHandle]: ...
+    def launch(self, spec: AgentLaunchSpec) -> Awaitable[AgentHandle]:
+        """Start the CLI ``spec`` describes and return the handle of its session."""
 
-    def poll(self, handle: AgentHandle) -> Awaitable[AgentStatus]: ...
+    def poll(self, handle: AgentHandle) -> Awaitable[AgentStatus]:
+        """Whether the session is running, has exited, or is lost. A session reads as ended once its CLI's root has
+        exited, which can be before the teardown has swept what the CLI started; :meth:`collect` waits for that."""
 
-    def cancel(self, handle: AgentHandle) -> Awaitable[None]: ...
+    def cancel(self, handle: AgentHandle) -> Awaitable[None]:
+        """Kill the CLI's process tree. When this returns the CLI's root is dead, but a process the CLI detached can
+        still run until the session's teardown has swept the launch's reap mark; :meth:`collect` returns only after
+        that sweep."""
 
-    def collect(self, handle: AgentHandle) -> Awaitable[None]: ...
+    def collect(self, handle: AgentHandle) -> Awaitable[None]:
+        """Record an ended session once its teardown, the reap-mark sweep included, has finished; a session whose CLI
+        still runs is refused."""
 
 
 class InteractiveAgentRunner(AgentRunner, Protocol):
     """A runner that keeps a session's stdin open when its spec asks, so one CLI takes message after message."""
 
-    def send(self, handle: AgentHandle, data: bytes) -> Awaitable[None]: ...
+    def send(self, handle: AgentHandle, data: bytes) -> Awaitable[None]:
+        """Write ``data`` to the session's stdin."""
 
-    def close_stdin(self, handle: AgentHandle) -> Awaitable[None]: ...
+    def close_stdin(self, handle: AgentHandle) -> Awaitable[None]:
+        """Close the session's stdin; its CLI ends once it has read what was sent."""
 
 
 def _infer_backend(spec: AgentLaunchSpec) -> str:
-    backend = (spec.backend or "").strip().lower()
+    backend = spec.backend.strip().lower()
     if not backend:
         backend = AGENT_BACKEND_CODEX if "codex" in Path(spec.argv[0]).name.lower() else AGENT_BACKEND_CLAUDE
     if backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
@@ -340,13 +358,31 @@ class _Session:
     config_claim: str | None
     concurrent_at_start: int
     oom_kill_at_start: int | None
+    reap_mark: str
+    run_as: RunAs | None
     version: str = UNKNOWN
     task: asyncio.Task[None] | None = None
     sampler_task: asyncio.Task[None] | None = None
     outcome: dict[str, Any] = field(default_factory=dict)
     cancelled: bool = False
+    torn_down: bool = False
     finished_mono: float | None = None
     collected: bool = False
+
+
+def _ended(session: _Session) -> bool:
+    """Whether the session's supervision has finished or its CLI has exited."""
+    return (session.task is not None and session.task.done()) or session.proc.poll() is not None
+
+
+def _ended_status(session: _Session, heartbeat: float | None) -> AgentStatus:
+    """The status of an ended session, from what the reap loop recorded; ``lost`` when it ended the CLI as silent."""
+    outcome = session.outcome
+    returncode = outcome.get("exit_code", session.proc.poll())
+    error = str(outcome.get("error", ""))
+    if outcome.get("stale_heartbeat"):
+        return AgentStatus(STATE_LOST, returncode, heartbeat, error=error)
+    return AgentStatus("exited", returncode, heartbeat, timed_out=bool(outcome.get("timed_out")), error=error)
 
 
 def _close_stdin(session: _Session) -> None:
@@ -381,10 +417,13 @@ class Liveness:
 
 @dataclass(frozen=True)
 class _Spawned:
-    """An agent CLI just started: its process, the MCP tokens its environment carries, and its CLI version."""
+    """An agent CLI just started: its process, the MCP tokens and the reap mark its environment carries, the account it
+    runs as, and its CLI version."""
 
     proc: Any
     tokens: tuple[str, ...]
+    reap_mark: str
+    run_as: RunAs | None
     version: str
 
 
@@ -418,14 +457,14 @@ class LocalAgentRunner:
         liveness: Liveness = Liveness(),
         host: RunnerHost = RunnerHost(),
     ) -> None:
-        self._log = ResourceLog(Path(session_dir) / RESOURCES_RELATIVE_PATH)
+        self._log = ResourceLog(session_dir / RESOURCES_RELATIVE_PATH)
         self._poll_interval = float(poll_interval_seconds)
         self._lost_after = float(liveness.lost_after_seconds)
         self._monotonic = host.monotonic
         self._wall = host.wall
         self._popen = host.popen
-        self._cgroup_root = Path(host.cgroup_root)
-        self._proc_root = Path(host.proc_root)
+        self._cgroup_root = host.cgroup_root
+        self._proc_root = host.proc_root
         self._version_probe = version_probe
         self._dispatcher = SpecialistSubprocessDispatcher(
             SpecialistSubprocessConfig(
@@ -470,6 +509,7 @@ class LocalAgentRunner:
     ) -> _Spawned:
         spec.workspace.mkdir(parents=True, exist_ok=True)
         tokens = tuple(env[e.token_env] for e in spec.mcp_servers)
+        reap_mark = stamp_reap_mark(env)  # after the caller's env, so a mark it carried cannot join two launches
         version = await asyncio.to_thread(
             self._version_probe, spec.argv[0], {k: v for k, v in env.items() if v not in tokens}
         )
@@ -477,7 +517,7 @@ class LocalAgentRunner:
         # The child works in ``cwd``, so that is the tree it must be able to write.
         demote = await asyncio.to_thread(prepare_demote, run_as, spec.workspace, spec.cwd, env, private)
         command = argv if run_as is None else run_as.command(argv)
-        return _Spawned(self._spawn(spec, command, env, demote), tokens, version)
+        return _Spawned(self._spawn(spec, command, env, demote), tokens, reap_mark, run_as, version)
 
     def _supervised(self, spec: AgentLaunchSpec, backend: str, spawned: _Spawned, claim: str | None) -> _Session:
         """The live session of the CLI just ``spawned``, sampled and supervised from now on."""
@@ -496,6 +536,8 @@ class LocalAgentRunner:
             config_claim=claim,
             concurrent_at_start=0,
             oom_kill_at_start=read_container_cgroup(self._cgroup_root).oom_kill,
+            reap_mark=spawned.reap_mark,
+            run_as=spawned.run_as,
             version=spawned.version,
         )
         self._live[proc.pid] = session
@@ -510,22 +552,16 @@ class LocalAgentRunner:
     async def poll(self, handle: AgentHandle) -> AgentStatus:
         session: _Session = handle.session
         heartbeat = self._last_activity(session)
-        outcome = session.outcome
-        task_done = session.task is not None and session.task.done()
-        if task_done or session.proc.poll() is not None:
-            returncode = outcome.get("exit_code", session.proc.poll())
-            if outcome.get("stale_heartbeat"):
-                return AgentStatus(STATE_LOST, returncode, heartbeat, error=str(outcome.get("error", "")))
-            return AgentStatus(
-                "exited",
-                returncode,
-                heartbeat,
-                timed_out=bool(outcome.get("timed_out")),
-                error=str(outcome.get("error", "")),
-            )
-        if await self._silent(session, heartbeat):
-            return AgentStatus(STATE_LOST, None, heartbeat, error=f"no heartbeat for more than {self._lost_after:.0f}s")
-        return AgentStatus("running", None, heartbeat)
+        if not _ended(session):
+            silent = await self._silent(session, heartbeat)
+            # The look at the CLI runs on a thread, while the reap loop may end the session; a deadline kill takes
+            # the tool down first, so a look taken during it sees silence. How the session ended outranks that look.
+            if not _ended(session):
+                if silent:
+                    error = f"no heartbeat for more than {self._lost_after:.0f}s"
+                    return AgentStatus(STATE_LOST, None, heartbeat, error=error)
+                return AgentStatus("running", None, heartbeat)
+        return _ended_status(session, heartbeat)
 
     async def _silent(self, session: _Session, heartbeat: float | None) -> bool:
         """Whether nothing shows the session alive. A beat, the CLI's process log or the session's start within the
@@ -664,10 +700,17 @@ class LocalAgentRunner:
         except Exception as exc:
             log.exception("agent %s: reap loop failed", spec.task_id)
             session.outcome = {"exit_code": session.proc.poll(), "error": f"reap loop failed: {exc!r}"}
+        finally:
+            # Supervision is over: stop sampling, then end what is left of the session off the event loop.
+            session.torn_down = True
+            if session.sampler_task is not None:
+                session.sampler_task.cancel()
+            await asyncio.to_thread(self._tear_down, session)
 
     def _on_supervision_done(self, session: _Session, _task: asyncio.Task[None]) -> None:
-        """Runs however the supervisor ended, even if it was cancelled before its first step."""
-        self._ensure_dead(session)
+        """Runs however the supervisor ended, and tears the session down when it was cancelled before its first step."""
+        if not session.torn_down:
+            self._tear_down(session)
         _close_stdin(session)
         session.finished_mono = self._monotonic()
         if session.sampler_task is not None:
@@ -676,8 +719,15 @@ class LocalAgentRunner:
         self._release(session.config_claim)
         self._live.pop(session.proc.pid, None)
 
+    def _tear_down(self, session: _Session) -> None:
+        """End what is left of the session: the CLI's tree if its root still runs, then every process that carries the
+        session's reap mark, which a CLI that exited on its own leaves running and a tree kill does not reach once it
+        has detached."""
+        self._ensure_dead(session)
+        self._dispatcher._reap_marked(session.reap_mark, session.run_as)
+
     def _ensure_dead(self, session: _Session) -> None:
-        """However the reap loop ended, no process of the session may outlive its supervision."""
+        """Kill the CLI's tree when the reap loop ended with its root still running; what it detached is the sweep's."""
         if session.proc.poll() is not None:
             return
         try:

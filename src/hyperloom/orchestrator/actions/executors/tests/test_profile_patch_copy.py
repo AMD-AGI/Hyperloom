@@ -7,6 +7,7 @@ stays byte-identical whatever the profile does, and profiles running at once sha
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -52,7 +53,9 @@ diff --git a/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.p
 
 _VLLM_MODULE = "vllm.v1.worker.gpu_worker"
 _VLLM_WORKER = "vllm/v1/worker/gpu_worker.py"
-_VLLM_SOURCE = "def work():\n    return 1\n"
+#: Three lines, so its patch carries the three lines of context ``git diff`` writes: the vLLM plan falls back to
+#: ``patch --fuzz=2`` where the host has GNU patch, and that drops up to two of them, all of a shorter hunk's.
+_VLLM_SOURCE = "def work():\n    done = 1\n    return done\n"
 _VLLM_PATCH = """\
 diff --git a/vllm/profiler/graph_capture.py b/vllm/profiler/graph_capture.py
 new file mode 100644
@@ -64,12 +67,13 @@ new file mode 100644
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
-@@ -1,2 +1,5 @@
+@@ -1,3 +1,6 @@
 +from vllm.profiler.graph_capture import graph_capture_profiler as _set_profile_trace_tag
 +
 +
  def work():
-     return 1
+     done = 1
+     return done
 """
 
 
@@ -150,8 +154,13 @@ def profile_environment(tmp_path: Path, monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+def _copies_dir(tmp_path: Path) -> Path:
+    """This account's directory of patched copies, under the test's temporary directory."""
+    return tmp_path / "tmp" / f"hyperloom-tracelens-{os.getuid()}"
+
+
 def _copies(tmp_path: Path) -> list[Path]:
-    root = tmp_path / "tmp" / "hyperloom-tracelens"
+    root = _copies_dir(tmp_path)
     return sorted(root.iterdir()) if root.is_dir() else []
 
 
@@ -213,7 +222,8 @@ def test_a_profile_whose_patch_does_not_apply_leaves_the_installed_tree_and_keep
 ):
     install = _Install(tmp_path, monkeypatch, framework)
     drifted = install.site / (_SGLANG_RUNNER if framework == "sglang" else _VLLM_WORKER)
-    drifted.write_text(drifted.read_text(encoding="utf-8").replace("    return", "    return 2 *"), encoding="utf-8")
+    # The line the hunk is anchored on: the fuzzy fallback drops only the context lines farthest from the change.
+    drifted.write_text(drifted.read_text(encoding="utf-8").replace("def ", "def renamed_", 1), encoding="utf-8")
     before = install.snapshot()
 
     envs = _profile(tmp_path, framework)
@@ -222,6 +232,24 @@ def test_a_profile_whose_patch_does_not_apply_leaves_the_installed_tree_and_keep
     assert not any(_patch_laying.is_patched_copy(part) for part in str(envs.get("PYTHONPATH", "")).split(os.pathsep))
     assert install.snapshot() == before
     assert _copies(tmp_path) == [], "nothing half-built is left"
+
+
+@pytest.mark.skipif(shutil.which("patch") is None, reason="the fuzzy fallback runs only where GNU patch is installed")
+def test_a_vllm_patch_whose_outer_context_drifted_is_laid_with_fuzz_in_the_copy_and_the_installed_tree_is_left(
+    tmp_path, monkeypatch
+):
+    install = _Install(tmp_path, monkeypatch, "vllm")
+    worker = install.site / _VLLM_WORKER
+    worker.write_text(worker.read_text(encoding="utf-8").replace("return done", "return 2 * done"), encoding="utf-8")
+    before = install.snapshot()
+
+    envs = _profile(tmp_path, "vllm")
+
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "ok"
+    (copy,) = _copies(tmp_path)
+    origin, patched = _serve(install, envs["PYTHONPATH"])
+    assert patched and Path(origin).is_relative_to(copy / "site"), "the server runs the copy the fallback patched"
+    assert install.snapshot() == before, "the installed tree is byte-identical"
 
 
 class _Stopped(Exception):
@@ -287,7 +315,7 @@ def test_no_profile_finds_the_copy_before_every_file_of_it_is_laid(tmp_path, mon
     install.patch.with_name("prefill.patch").write_text(_SGLANG_PREFILL_PATCH, encoding="utf-8")
     plan = _server_patcher._sglang_plan()
     assert plan is not None
-    published = tmp_path / "tmp" / "hyperloom-tracelens" / f"{plan.framework}-{_patch_laying._copy_key(plan)}"
+    published = _copies_dir(tmp_path) / f"{plan.framework}-{_patch_laying._copy_key(plan)}"
     looks: list[tuple[bool, bool]] = []
     real_git = _patch_laying._git
 
@@ -312,23 +340,15 @@ def test_no_profile_finds_the_copy_before_every_file_of_it_is_laid(tmp_path, mon
     assert "PREFILL_TAG" in (patched.site / _SGLANG_PREFILL).read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("planted_by", ["others-can-write-it", "another-user"])
-def test_a_copy_under_the_published_name_that_is_not_this_users_own_is_never_imported(
-    tmp_path, monkeypatch, planted_by
-):
-    """The host's temporary directory is shared, and a copy is found by its name: one this user did not lay, or that
-    others can write, is not taken whatever its sentinels say; the profile lays its own under a private name, and leaves
-    the other where it is."""
+def test_a_copy_under_the_published_name_that_others_can_write_is_never_imported(tmp_path, monkeypatch):
+    """A copy is found by its name: one that others can write is not taken whatever its sentinels say; the profile lays
+    its own under a private name, and leaves the other where it is."""
     install = _Install(tmp_path, monkeypatch, "sglang")
     first = _server_patcher.ensure_sglang_patched_for_tracelens()
     assert first is not None and first.site is not None
     planted = first.site.parent
     (first.site / "sglang" / "srt" / "planted.py").write_text("PLANTED = 1\n", encoding="utf-8")
-    if planted_by == "others-can-write-it":
-        planted.chmod(0o777)
-    else:
-        uid = os.getuid()
-        monkeypatch.setattr(_patch_laying.os, "getuid", lambda: uid + 1)
+    planted.chmod(0o777)
 
     second = _server_patcher.ensure_sglang_patched_for_tracelens()
 
@@ -337,6 +357,62 @@ def test_a_copy_under_the_published_name_that_is_not_this_users_own_is_never_imp
     assert _serve(install, str(second.site)) == (str(second.site / _SGLANG_RUNNER), True)
     assert not (second.site / "sglang" / "srt" / "planted.py").exists()
     assert (planted / "site" / "sglang" / "srt" / "planted.py").is_file(), "the other copy is left as it was"
+
+
+def _entries(directory: Path) -> dict[str, tuple[int, int]]:
+    """Every entry below ``directory``: its owner and its mode."""
+    return {
+        str(path.relative_to(directory)): (path.lstat().st_uid, path.lstat().st_mode)
+        for path in sorted(directory.rglob("*"))
+    }
+
+
+def test_another_accounts_copies_leave_this_account_laying_and_importing_its_own(tmp_path, monkeypatch):
+    """Every account on the host shares its temporary directory: the copies another account's profiles laid there
+    first, in a directory this account cannot write, neither keep this account's profile from its own patched copy nor
+    hold it."""
+    install = _Install(tmp_path, monkeypatch, "sglang")
+    other = os.getuid() + 1
+    with monkeypatch.context() as as_other:
+        as_other.setattr(_patch_laying.os, "getuid", lambda: other)
+        _server_patcher.ensure_sglang_patched_for_tracelens()
+    (theirs,) = (tmp_path / "tmp").iterdir()
+    if os.geteuid() == 0:
+        for path in (theirs, *theirs.rglob("*")):
+            os.lchown(path, other, other)
+    else:
+        theirs.chmod(0o555)  # another account's 0755 directory, as this account sees it
+    try:
+        mine = _server_patcher.ensure_sglang_patched_for_tracelens()
+    finally:
+        theirs.chmod(0o755)
+
+    assert mine is not None and mine.site is not None, "this account's profile is patched"
+    assert theirs not in mine.site.parents, "and imports nothing from the other account's directory"
+    assert _serve(install, str(mine.site)) == (str(mine.site / _SGLANG_RUNNER), True)
+
+
+@pytest.mark.parametrize("planted_by", ["others-can-write-it", "another-account"])
+def test_a_copies_directory_under_this_accounts_name_that_is_not_its_own_is_neither_used_nor_written(
+    tmp_path, monkeypatch, planted_by
+):
+    """A directory under this account's name for its copies that another account made, or that others can write, could
+    have its copies replaced under a server: the profile takes no copy from it and lays none in it."""
+    _Install(tmp_path, monkeypatch, "sglang")
+    first = _server_patcher.ensure_sglang_patched_for_tracelens()
+    assert first is not None and first.site is not None
+    copies = first.site.parent.parent
+    if planted_by == "others-can-write-it":
+        copies.chmod(0o777)
+    else:
+        uid = os.getuid()
+        monkeypatch.setattr(_patch_laying.os, "getuid", lambda: uid + 1)
+        copies = copies.rename(copies.with_name(f"hyperloom-tracelens-{uid + 1}"))
+    before = _entries(copies)
+
+    assert _server_patcher.ensure_sglang_patched_for_tracelens() is None
+    assert _entries(copies) == before, "nothing is laid in it"
+    assert [path.name for path in (tmp_path / "tmp").iterdir()] == [copies.name]
 
 
 def test_a_farm_that_rebuilt_the_framework_gets_the_patch_in_its_own_files_only(tmp_path, monkeypatch):

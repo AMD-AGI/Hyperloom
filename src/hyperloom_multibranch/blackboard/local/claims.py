@@ -73,12 +73,15 @@ class LeaseStore:
         return self._load(key.token, generations[-1]) if generations else None
 
     def all_current(self) -> list[Claim]:
-        """The generation in force on every claimed key."""
+        """The generation in force on every claimed key, from one listing of the claims folder."""
 
         if not self.root.is_dir():
             return []
-        tokens = sorted({match["token"] for match in map(_NAME.match, (p.name for p in self.root.iterdir())) if match})
-        return [self._load(token, self._generations(token)[-1]) for token in tokens]
+        latest: dict[str, int] = {}
+        for match in map(_NAME.match, (path.name for path in self.root.iterdir())):
+            if match is not None:
+                latest[match["token"]] = max(int(match["generation"]), latest.get(match["token"], 0))
+        return [self._load(token, latest[token]) for token in sorted(latest)]
 
     def acquire(self, claim: Claim, now: float) -> Claim:
         """Create the next generation for ``claim.key``; raises :class:`LeaseTaken` while a live claim holds it."""

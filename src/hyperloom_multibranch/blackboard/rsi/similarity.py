@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.experience import experience_identity
 from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_LABEL, labels_of
 
@@ -36,8 +37,8 @@ LABEL_WEIGHTS = {
 SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": MINOR_WEIGHT}
 PROFILE_WEIGHT = 2.0
 WORKLOAD = "workload"
-AGENTX = "agentx"
-INFERENCEX = "inferencex"
+AGENTX = WorkloadKind.AGENTX.value
+INFERENCEX = WorkloadKind.INFERENCEX.value
 #: Below this, a past session shares too little with this one to teach it anything: one matching GPU is not enough.
 MIN_SIMILARITY = 0.5
 # A size eight times larger or smaller no longer counts as similar.

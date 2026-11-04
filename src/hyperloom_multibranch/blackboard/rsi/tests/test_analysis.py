@@ -57,7 +57,6 @@ def test_a_direction_that_keeps_failing_is_named_once_with_its_count() -> None:
     other = FailedTest(FailureTier.ELSEWHERE, "r9", "s2", "c0", "sampler / fused topk", "flat", 0.0)
 
     assert repeated_failures([*failed, other]) == (("attention / split kv", 3),)
-    assert repeated_failures([other], at_least=1) == (("sampler / fused topk", 1),)
 
 
 def test_each_direction_shows_where_it_was_tried_who_carries_it_and_who_holds_it(snapshot: BlackboardSnapshot) -> None:

@@ -56,6 +56,8 @@ _GIT_IDENTITY = {
 _FIXED_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "diff.noprefix=false")
 _STAGE = ("add", "--all", "--")
 _HEAD = "HEAD"
+_REV_PARSE = "rev-parse"
+_GIT_DIR = ".git"
 _QUIET = "--quiet"
 _DIFF = "diff"
 _CACHED = "--cached"
@@ -89,7 +91,7 @@ def installed_upstream(package: PackageBase) -> Upstream | None:
     if named is None:
         return None
     try:
-        commit = _git(package.path, "rev-parse", "--verify", _QUIET, f"{named.group(1)}^{{commit}}").strip()
+        commit = _git(package.path, _REV_PARSE, "--verify", _QUIET, f"{named.group(1)}^{{commit}}").strip()
         repo = _git(package.path, "remote", "get-url", "origin").strip()
     except WorktreeError:
         return None
@@ -167,16 +169,17 @@ class SourceBase:
             third_party = _third_party(metas)
             if third_party is not None:
                 prefix, installed = third_party
-                copy = self.path / ".git" / THIRD_PARTY_COPY / prefix
+                copy = self.path / _GIT_DIR / THIRD_PARTY_COPY / prefix
                 shutil.copytree(installed, copy, symlinks=True, ignore=_ignore(installed, ()))
                 links.append((prefix.as_posix(), str(copy)))
                 excluded.append(f"/{prefix.as_posix()}")
             native = self._native.get(component)
             if native is not None:
                 self._lay_native(native.root, (package, *metas))
-        (self.path / ".git" / "info").mkdir(exist_ok=True)
-        (self.path / ".git" / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
-        (self.path / ".git" / LINKED_PATHS).write_text("".join(f"{prefix}\t{target}\n" for prefix, target in links))
+        git_dir = self.path / _GIT_DIR
+        (git_dir / "info").mkdir(exist_ok=True)
+        (git_dir / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
+        (git_dir / LINKED_PATHS).write_text("".join(f"{prefix}\t{target}\n" for prefix, target in links))
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
@@ -224,7 +227,7 @@ def linked_paths(worktree: Path) -> list[tuple[str, str]]:
     """The paths the worktree at ``worktree`` links rather than holds, as its source base recorded them: ``3rdparty``
     trees from the base's copies (:func:`_third_party`) and compiled extensions from the installed package
     (:func:`_extensions`)."""
-    common = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    common = Path(_git(worktree, _REV_PARSE, "--path-format=absolute", "--git-common-dir").strip())
     links = common / LINKED_PATHS
     lines = links.read_text().splitlines() if links.exists() else []
     return [(prefix, target) for prefix, target in (line.split("\t") for line in lines)]
@@ -335,7 +338,7 @@ class BranchWorktree:
 
     def commit(self) -> str:
         """The git commit the worktree's HEAD is at."""
-        return _git(self.path, "rev-parse", _HEAD).strip()
+        return _git(self.path, _REV_PARSE, _HEAD).strip()
 
     def diff_from(self, commit: str, component: str) -> str:
         """The worktree's files of ``component`` against its git commit ``commit``, whatever was committed on top of it

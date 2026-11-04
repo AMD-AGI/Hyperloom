@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from hyperloom_kb import Experience, RemoteExperienceKB
-from hyperloom_kb.collect import collect, load_mapping
+from hyperloom_kb.collect import CollectReport, collect, load_mapping
 
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -48,7 +48,6 @@ from hyperloom_multibranch.blackboard.knowledge.experience import (
     change_document,
     export_document,
     publish_experiences,
-    publish_multibranch_experiences,
 )
 from hyperloom_multibranch.blackboard.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.blackboard.tests.factories import profile, result
@@ -63,8 +62,16 @@ def _rows(snapshot: BlackboardSnapshot) -> dict[str, dict[str, Any]]:
     return {row["request_id"]: row for row in document["candidates"]}
 
 
+def _shared(snapshot: BlackboardSnapshot) -> CollectReport:
+    return collect(MAPPING_PATH, export_document(snapshot, METRIC), dry_run=True)
+
+
+def _own(snapshot: BlackboardSnapshot) -> CollectReport:
+    return collect(MULTIBRANCH_MAPPING_PATH, export_document(snapshot, METRIC), dry_run=True)
+
+
 def _collected(snapshot: BlackboardSnapshot) -> dict[str, Any]:
-    return {item.unit_id: item.experience for item in publish_experiences(snapshot, METRIC, dry_run=True).collected}
+    return {item.unit_id: item.experience for item in _shared(snapshot).collected}
 
 
 def _change_group(experience: Experience) -> dict[str, Any]:
@@ -99,7 +106,7 @@ def test_every_finished_specialist_test_is_one_row_with_its_derived_decision(sna
 
 
 def test_the_rows_with_reasoning_become_experiences_and_the_rest_say_why_not(snapshot: BlackboardSnapshot) -> None:
-    report = publish_experiences(snapshot, METRIC, dry_run=True)
+    report = _shared(snapshot)
     collected = {item.unit_id: item.experience for item in report.collected}
 
     assert {item.unit_id: item.reason for item in report.skipped} == {
@@ -240,8 +247,8 @@ def test_a_kernel_change_goes_to_the_blackboards_own_declaration_and_the_rest_st
     artifact = KernelArtifact(KernelKind.GEMM, "moe", "kernel/gemm/moe.json", "d" * 64)
     kernel = _with_delta(snapshot, "r1", RecipeDelta(add_kernels=(artifact,)))
 
-    shared = publish_experiences(kernel, METRIC, dry_run=True)
-    own = publish_multibranch_experiences(kernel, METRIC, dry_run=True)
+    shared = _shared(kernel)
+    own = _own(kernel)
 
     (recorded,) = own.collected
     assert recorded.unit_id == "r1"
@@ -263,12 +270,9 @@ def test_an_agentx_session_records_every_change_on_interactivity_in_the_same_rep
     snapshot: BlackboardSnapshot,
 ) -> None:
     agentx = dataclasses.replace(snapshot, profile=profile(isl=None, osl=None))
-    shared = {item.unit_id: item.experience for item in publish_experiences(snapshot, METRIC, dry_run=True).collected}
+    shared = {item.unit_id: item.experience for item in _shared(snapshot).collected}
 
-    own = {
-        item.unit_id: item.experience
-        for item in publish_multibranch_experiences(agentx, METRIC, dry_run=True).collected
-    }
+    own = {item.unit_id: item.experience for item in _own(agentx).collected}
 
     assert sorted(own) == sorted(shared) == ["r1", "r2"]
     assert {experience.objective for experience in own.values()} == {"e2e_interactivity@v1"}
@@ -319,9 +323,7 @@ def test_only_a_test_of_kind_test_is_published_as_the_other_kinds_examine_a_stat
 def test_without_a_profile_there_is_nothing_to_export_and_agentx_publishes_nothing(
     snapshot: BlackboardSnapshot,
 ) -> None:
-    agentx = publish_experiences(
-        dataclasses.replace(snapshot, profile=profile(isl=None, osl=None)), METRIC, dry_run=True
-    )
+    agentx = _shared(dataclasses.replace(snapshot, profile=profile(isl=None, osl=None)))
 
     with pytest.raises(NotRecorded):
         export_document(dataclasses.replace(snapshot, profile=None), METRIC)

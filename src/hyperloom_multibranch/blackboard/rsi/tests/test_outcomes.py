@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 from pathlib import Path
 
 import pytest
@@ -122,3 +123,16 @@ def test_the_pool_keeps_each_sessions_outcomes_once_and_the_studies_add_them_up(
     )
     assert code == 0 and "| menu | 4 | 15 | 0.27 |" in capsys.readouterr().out
     assert main(["outcomes", "--archive", str(tmp_path / "empty")]) == 2
+
+
+def test_an_outcome_record_the_pool_cannot_read_is_skipped_with_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pool = OutcomePool.beside(TreeArchive(tmp_path))
+    pool.record(SpecialistOutcomes("a", {MENU_GROUP: GroupOutcome(branches=1, tests=2, commits=1)}))
+    (pool.root / "b.json").write_text("{", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        kept = pool.sessions()
+
+    assert [item.session_id for item in kept] == ["a"] and "skipping unreadable outcome record" in caplog.text

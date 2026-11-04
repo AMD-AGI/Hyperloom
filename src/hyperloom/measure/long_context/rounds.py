@@ -12,6 +12,7 @@ and a phase cap that leaves prompts unsent each end the check ``incomplete`` wit
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +28,8 @@ from hyperloom.measure.short_prompts.client import CompletionError, request_time
 from hyperloom.measure.short_prompts.rounds import PassFailed, PassHost, Serving, model_of
 
 __all__ = ["run_long_context"]
+
+log = logging.getLogger(__name__)
 
 _PHASE_CAP = "the phase cap ended the check before every prompt was sent"
 _REQUEST_CAP = "the phase cap ended this prompt's request"
@@ -92,7 +95,8 @@ async def _answered(plan: LongContextPlan, prompts: Sequence[Prompt], host: Pass
         entries = await asyncio.to_thread(_ask_all, plan, prompts, serving, deadline)
     except (PassFailed, CompletionError) as exc:
         return _Answered([], str(exc), time.monotonic() - started)
-    except Exception as exc:  # noqa: BLE001 - an unforeseen end is the check's incomplete, not the test's failure
+    except Exception as exc:  # an unforeseen end is the check's incomplete, not the test's failure
+        log.warning("the long-context check ended on an unforeseen error; it is incomplete", exc_info=True)
         return _Answered([], f"{type(exc).__name__} while running the check", time.monotonic() - started)
     finally:
         await host.stop()

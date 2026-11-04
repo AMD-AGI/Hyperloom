@@ -22,7 +22,6 @@ Each session's outcomes are kept beside the archive (:class:`OutcomePool`), so t
 from __future__ import annotations
 
 import dataclasses
-import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -30,12 +29,13 @@ from pathlib import Path
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
-from hyperloom_multibranch.blackboard.codec import decode, encode
+from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.families import Family
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.family_stats import FamilyStat, family_stats
 from hyperloom_multibranch.blackboard.rsi.history import MODEL_TYPE_LABEL
+from hyperloom_multibranch.blackboard.rsi.lessons import published_records
 from hyperloom_multibranch.blackboard.rsi.menu import LoggedMenu, explored, in_control, record_family
 from hyperloom_multibranch.blackboard.rsi.report import table
 
@@ -125,10 +125,10 @@ class SpecialistOutcomes:
     session_id: str
     groups: Mapping[str, GroupOutcome] = field(default_factory=dict)
 
-    def render(self, title: str = "") -> str:
+    def render(self) -> str:
         names = (MENU_GROUP, CONTROL_GROUP, *((NO_MENU_GROUP,) if NO_MENU_GROUP in self.groups else ()))
         rows = [self.groups.get(name, GroupOutcome()).row(name) for name in names]
-        return "\n".join([f"# {title or f'Specialist outcomes of {self.session_id}'}", "", *table(HEADERS, rows)])
+        return "\n".join([f"# Specialist outcomes of {self.session_id}", "", *table(HEADERS, rows)])
 
     def note(self) -> str:
         menu, control = (self.groups.get(name, GroupOutcome()) for name in (MENU_GROUP, CONTROL_GROUP))
@@ -241,15 +241,7 @@ class OutcomePool:
         return publish_once(path, encode_json({"format": OUTCOMES_FORMAT, "record": encode(outcomes)}))
 
     def sessions(self) -> tuple[SpecialistOutcomes, ...]:
-        found = []
-        for path in sorted(self.root.glob("*.json")):
-            try:
-                document = json.loads(path.read_text(encoding="utf-8"))
-                if document.get("format") == OUTCOMES_FORMAT:
-                    found.append(decode(SpecialistOutcomes, document.get("record")))
-            except (OSError, KeyError, TypeError, ValueError):
-                continue
-        return tuple(found)
+        return tuple(published_records(self.root, SpecialistOutcomes, OUTCOMES_FORMAT, "outcome"))
 
 
 def pooled(sessions: Sequence[SpecialistOutcomes]) -> SpecialistOutcomes:

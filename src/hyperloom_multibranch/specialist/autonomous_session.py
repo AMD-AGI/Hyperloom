@@ -848,11 +848,12 @@ class AutonomousSession:
             return replace(from_start_tables(kept, self._start_tables), outside=tuple(outside))
         workspace = self._place.worktree.path
         patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)
-        source, summary = manifest.config_source, self._summary(manifest)
+        source = manifest.config_source
+        started = KeptChange(seq, patch, self._root.server_args, dict(self._root.envs), self._summary(manifest))
         if source is None:
-            return KeptChange(seq, patch, self._root.server_args, dict(self._root.envs), summary)
+            return started
         where = workspace if source.root == WORKSPACE else self._agent_dir / SOURCE_DIR
-        kept = read_kept_change(seq, patch, read_json(where / source.path), source, summary, self._root)
+        kept = read_kept_change(started, read_json(where / source.path), source)
         return with_tables(from_start_tables(kept, self._start_tables), (workspace, self._agent_dir))
 
     def _applied(self, root: str, outside: list[str], patches: Sequence[str]) -> str:

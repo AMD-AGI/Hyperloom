@@ -9,10 +9,8 @@ it asked for before instead of paying for another.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Protocol
 
 from hyperloom.contracts.measurement import Validity
@@ -22,21 +20,13 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, G
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
-from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
+from hyperloom_multibranch.rulegate.regression import ended
 from hyperloom_multibranch.rulegate.rules import Rule, repeats, retest_request
 
 
 class GateBlackboard(RecordSearch, SnapshotQuery, CommitQuery, GateRecords, Protocol):
     """The gate's handle: it writes the baseline and reads every test and recorded value."""
-
-
-@dataclass(frozen=True)
-class Polling:
-    """How the gate waits for a test to end: ``seconds`` between two reads of its record, waited out with ``sleep``."""
-
-    seconds: float = 5.0
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
 class GateService:
@@ -46,26 +36,17 @@ class GateService:
     :class:`~hyperloom_multibranch.contracts.gate.ResultUnverified`, a :class:`NotMeasured`.
     """
 
-    def __init__(
-        self,
-        blackboard: GateBlackboard,
-        toolbox: Toolbox,
-        rule: Rule,
-        verifier: ResultVerifier,
-        *,
-        polling: Polling = Polling(),
-    ) -> None:
+    def __init__(self, blackboard: GateBlackboard, toolbox: Toolbox, rule: Rule, verifier: ResultVerifier) -> None:
         self._blackboard = blackboard
         self._toolbox = toolbox
         self._rule = rule
         self._verifier = verifier
-        self._polling = polling
 
     async def baseline_test_count(self) -> int:
         return self._rule.baseline_tests
 
     async def establish_baseline(self, root_commit: str, request_ids: Sequence[str]) -> BaselineRecord:
-        records = [await self._ended(request_id) for request_id in request_ids]
+        records = [await ended(self._blackboard, request_id) for request_id in request_ids]
         measured = [record for record in records if _succeeded(record)]
         if len(measured) < self._rule.min_baselines:
             needed = self._rule.min_baselines
@@ -109,18 +90,13 @@ class GateService:
         return await self._toolbox.submit_test(retest_request(first, self._rule))
 
     async def _measured(self, request_id: str) -> TestRecord:
-        record = await self._ended(request_id)
+        record = await ended(self._blackboard, request_id)
         if record.result is None:
             raise NotMeasured(f"{request_id} was withdrawn ({record.withdrawal_reason})")
         if not _succeeded(record):
             reason = record.result.failure_reason or "no reason given"
             raise NotMeasured(f"{request_id} ended {record.result.validity.value} ({reason})")
         await self._verifier.reverify(request_id)
-        return record
-
-    async def _ended(self, request_id: str) -> TestRecord:
-        while (record := await self._blackboard.record(request_id)).in_flight:
-            await self._polling.sleep(self._polling.seconds)
         return record
 
 
@@ -138,4 +114,4 @@ def _succeeded(record: TestRecord) -> bool:
     return record.result is not None and record.result.validity is Validity.SUCCEEDED
 
 
-__all__ = ["BASELINE_TESTS", "GateBlackboard", "GateService", "Polling"]
+__all__ = ["GateBlackboard", "GateService"]

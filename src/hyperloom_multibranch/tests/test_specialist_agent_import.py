@@ -76,6 +76,10 @@ def _kept(seq: int, patch: str, args: str = ROOT.launch.server_args, envs: dict[
     return KeptChange(seq, patch, args, dict(ROOT.launch.envs) if envs is None else envs, summary=f"keep {seq}")
 
 
+def _started(launch: LaunchConfig, seq: int = 1, patch: str = "", summary: str = "") -> KeptChange:
+    return KeptChange(seq, patch, launch.server_args, dict(launch.envs), summary)
+
+
 def _patches(recipe: Recipe) -> tuple[PatchRef, ...]:
     [component] = recipe.components
     return component.patches
@@ -111,7 +115,7 @@ def test_a_keep_reads_the_agent_s_config_through_its_config_source() -> None:
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
     state = {"server_flags": "--tp 1 --enable-torch-compile", "server_env": {"SGLANG_A": "0"}}
 
-    kept = read_kept_change(3, "diff\n", state, source, "fused rmsnorm", ROOT.launch)
+    kept = read_kept_change(_started(ROOT.launch, 3, "diff\n", "fused rmsnorm"), state, source)
 
     assert kept == KeptChange(3, "diff\n", "--tp 1 --enable-torch-compile", {"SGLANG_A": "0"}, "fused rmsnorm")
 
@@ -120,7 +124,7 @@ def test_a_keep_leaves_out_the_workload_variables_the_measurement_sets_and_names
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
     state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "ISL": "1024", "osl": "1024"}}
 
-    kept = read_kept_change(1, "", state, source, "", ROOT.launch)
+    kept = read_kept_change(_started(ROOT.launch), state, source)
 
     assert kept.envs == {"SGLANG_A": "0"}
     assert kept.dropped == {"ISL": "1024", "osl": "1024"}
@@ -130,7 +134,7 @@ def test_a_keep_leaves_out_arbor_s_evaluation_settings_which_mb_gives_it() -> No
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
     state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}}
 
-    kept = read_kept_change(1, "", state, source, "", ROOT.launch)
+    kept = read_kept_change(_started(ROOT.launch), state, source)
 
     assert kept.envs == {"SGLANG_A": "0"}
     assert kept.dropped == {"GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}
@@ -140,7 +144,7 @@ def test_a_keep_whose_config_the_source_cannot_read_is_refused_naming_the_file()
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
 
     with pytest.raises(KeptChangeError, match="agent/config.json"):
-        read_kept_change(1, "diff\n", {"server_flags": "--tp 1"}, source, "", ROOT.launch)
+        read_kept_change(_started(ROOT.launch, patch="diff\n"), {"server_flags": "--tp 1"}, source)
 
 
 async def test_a_keep_of_a_component_new_on_the_head_names_the_upstream_its_package_was_built_from() -> None:
@@ -236,7 +240,7 @@ def test_a_keep_reads_what_the_agent_accepted_on_top_of_its_start_from_a_result_
     source = ConfigSource("result.json", "accepted_config.flags", "accepted_config.env", "checkout", adds=True)
     state = {"accepted_config": {"flags": "--mem-fraction-static 0.9 --page-size 16", "env": f"{TABLE_ENV}=/t.csv"}}
 
-    kept = read_kept_change(1, "", state, source, "", ROOT.launch)
+    kept = read_kept_change(_started(ROOT.launch), state, source)
 
     assert kept.server_args == "--tp 1 --mem-fraction-static 0.9 --page-size 16"
     assert kept.envs == {"SGLANG_A": "1", TABLE_ENV: "/t.csv"}
@@ -246,7 +250,7 @@ def test_an_environment_string_that_is_not_name_value_words_is_refused_naming_th
     source = ConfigSource("result.json", "flags", "env", "checkout", adds=True)
 
     with pytest.raises(KeptChangeError, match="result.json"):
-        read_kept_change(1, "", {"flags": "", "env": "--not-an-assignment"}, source, "", ROOT.launch)
+        read_kept_change(_started(ROOT.launch), {"flags": "", "env": "--not-an-assignment"}, source)
 
 
 def _listing(*paths: object) -> str:
@@ -523,8 +527,8 @@ def test_a_keep_that_sets_a_variable_needing_a_flag_off_is_read_without_it_and_n
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
     state = {"server_flags": SPEC_LAUNCH.server_args, "server_env": {MONOKERNEL: "1"}}
 
-    kept = read_kept_change(1, "", state, source, "", SPEC_LAUNCH)
-    off = read_kept_change(2, "", {**state, "server_env": {MONOKERNEL: "0"}}, source, "", SPEC_LAUNCH)
+    kept = read_kept_change(_started(SPEC_LAUNCH), state, source)
+    off = read_kept_change(_started(SPEC_LAUNCH, 2), {**state, "server_env": {MONOKERNEL: "0"}}, source)
     valued = without_conflicts(KeptChange(3, "", f"--tp 1 {REPLAYSSM}=true", {MONOKERNEL: "1"}))
 
     assert (kept.server_args, kept.disabled) == ("--tp 1 --mem-fraction-static 0.8", {REPLAYSSM: f"{MONOKERNEL}=1"})

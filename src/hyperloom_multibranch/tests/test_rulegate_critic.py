@@ -21,7 +21,6 @@ from hyperloom_multibranch.rulegate.critic import (
     CriticVerdict,
     FixReview,
     LlmCritic,
-    NoCritic,
     ReproVerdicts,
     anthropic_critic,
 )
@@ -137,12 +136,6 @@ async def test_a_critic_that_cannot_be_reached_refuses_the_fix_and_says_why():
 async def test_an_error_that_is_no_failed_call_is_not_taken_for_a_refusal():
     with pytest.raises(KeyError):
         await _critic(_Model(KeyError("bug"))).review(_review())
-
-
-async def test_no_critic_refuses_every_fix():
-    verdict = await NoCritic().review(_review())
-
-    assert not verdict.reachable and "no critic" in verdict.reason
 
 
 async def test_a_reply_is_recorded_as_the_critic_s_spend_with_no_branch_and_a_failed_call_records_nothing():
