@@ -12,7 +12,7 @@ from hyperloom.measure.compile import PackageBase
 from hyperloom.sandbox import SandboxGone
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist import agent_sessions
-from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
+from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import MAPPED
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierSetup, DossierStart
 from hyperloom_multibranch.specialist.agent_sessions import (

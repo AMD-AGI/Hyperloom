@@ -49,7 +49,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlsplit
 
 from hyperloom.common.gain_math import (
@@ -67,10 +67,9 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS, SURFACE_ENV_KEYS
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
+from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.worktree import SKIPPED
 
-if TYPE_CHECKING:
-    from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
 
 #: What makes a checkout Arbor's, run as a component: the mode, the entry point and the host's contract.
 MARKERS = ("arbor/component.py", "arbor/__main__.py", "docs/hosts.md")

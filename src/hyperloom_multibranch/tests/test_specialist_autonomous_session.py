@@ -38,7 +38,8 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import result
 from hyperloom_multibranch.specialist import autonomous_session
-from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec, CommandResult, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_onboarding import CommandResult, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.autonomous_session import (
