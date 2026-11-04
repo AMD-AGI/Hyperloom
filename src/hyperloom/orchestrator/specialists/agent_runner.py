@@ -9,12 +9,14 @@ not cut by the 4 hour cap that only applies to an unbounded run. Heartbeat rules
 environment allowlist, tree kill and reap-mark sweep are the dispatcher's: each
 launch puts its own ``HYPERLOOM_REAP_MARK`` in the CLI's environment, and however
 supervision ends (exit, done file, silence, deadline, cancel) the CLI's tree is
-killed if it still runs and then every process carrying that mark, so nothing the
-CLI started outlives the session, however it detached. How a session that ended
-or was lost is restarted and resumed from the branch log is the specialist
-runtime's decision (multi-branch design 4.4); this module only launches, polls,
-cancels and collects, and, for a session launched with its stdin open, sends it
-further messages.
+killed if its root still runs, and then every process that still carries that
+mark, however it detached. Nothing else is found: a process the CLI started that
+dropped its environment (one exec'd with an empty one, say) carries no mark, so
+unless it is still in the tree of a live root it outlives the session, as it
+outlives the dispatcher's. How a session that ended or was lost is restarted and
+resumed from the branch log is the specialist runtime's decision (multi-branch
+design 4.4); this module only launches, polls, cancels and collects, and, for a
+session launched with its stdin open, sends it further messages.
 
 Tokens reach the CLI only through environment variables: the MCP configuration
 written to disk names the variable, never its value.
@@ -197,13 +199,17 @@ class AgentRunner(Protocol):
         """Start the CLI ``spec`` describes and return the handle of its session."""
 
     def poll(self, handle: AgentHandle) -> Awaitable[AgentStatus]:
-        """Whether the session is running, has exited, or is lost."""
+        """Whether the session is running, has exited, or is lost. A session reads as ended once its CLI's root has
+        exited, which can be before the teardown has swept what the CLI started; :meth:`collect` waits for that."""
 
     def cancel(self, handle: AgentHandle) -> Awaitable[None]:
-        """End the session and its whole process tree."""
+        """Kill the CLI's process tree. When this returns the CLI's root is dead, but a process the CLI detached can
+        still run until the session's teardown has swept the launch's reap mark; :meth:`collect` returns only after
+        that sweep."""
 
     def collect(self, handle: AgentHandle) -> Awaitable[None]:
-        """Record an ended session; a session that still runs is refused."""
+        """Record an ended session once its teardown, the reap-mark sweep included, has finished; a session whose CLI
+        still runs is refused."""
 
 
 class InteractiveAgentRunner(AgentRunner, Protocol):
