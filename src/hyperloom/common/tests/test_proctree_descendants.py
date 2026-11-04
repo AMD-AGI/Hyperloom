@@ -12,9 +12,16 @@ import pytest
 from hyperloom.common import proctree
 
 
-def _procfs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parents: dict[int, int]) -> None:
+def _procfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parents: dict[int, int], *, listing: str = "native"
+) -> None:
     for pid in parents:
         (tmp_path / str(pid)).mkdir()
+    if listing != "native":
+        # The order ``iterdir`` yields is the filesystem's choice, so a test pins it rather than relying on it.
+        real_iterdir = Path.iterdir
+        ordered = sorted(real_iterdir(tmp_path), key=lambda entry: int(entry.name), reverse=listing == "descending")
+        monkeypatch.setattr(Path, "iterdir", lambda self: iter(ordered) if self == tmp_path else real_iterdir(self))
     monkeypatch.setattr(proctree, "_PROC", tmp_path)
     monkeypatch.setattr(proctree, "proc_identity", lambda pid: (parents[pid], float(pid)) if pid in parents else None)
 
@@ -23,6 +30,16 @@ def test_descendants_are_deepest_first(tmp_path: Path, monkeypatch: pytest.Monke
     _procfs(tmp_path, monkeypatch, {10: 1, 11: 10, 12: 11, 13: 10})
 
     assert [pid for pid, _ in proctree.descendants(10)] == [12, 11, 13]
+
+
+@pytest.mark.parametrize("listing", ["ascending", "descending"])
+def test_siblings_are_ordered_by_pid_whatever_the_listing_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listing: str
+) -> None:
+    parents = {10: 1, 11: 10, 12: 11, 13: 10, 14: 10, 15: 14}
+    _procfs(tmp_path, monkeypatch, parents, listing=listing)
+
+    assert [pid for pid, _ in proctree.descendants(10)] == [12, 11, 13, 15, 14]
 
 
 def test_a_parent_cycle_ends_the_walk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
