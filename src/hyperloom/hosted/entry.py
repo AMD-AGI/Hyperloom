@@ -20,7 +20,8 @@ fails ends the run finally (return code 2).  The session directory is a function
 so a restart finds it again; a directory that holds every file of :data:`SESSION_FILES` is resumed, any other is
 started fresh, after the stray files of a session that never finished its first write are removed.  A spec whose ``flow`` is ``multibranch`` is validated here and then handed to the ``hyperloom-multibranch`` command, which reads the host inputs itself,
 after the same installer run; its environment is the entry's own, with the running interpreter's directory first on ``PATH`` (as for ``optimize``) so the
-command resolves to, and runs with, the interpreter the installer installed into.  The installer itself never sees the host-only inputs.
+command resolves to, and runs with, the interpreter the installer installed into.  The installer itself never sees a host-only input
+other than ``HYPERLOOM_STATE_DIR``, which it needs to install the hosted extra.
 """
 
 from __future__ import annotations
