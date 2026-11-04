@@ -49,12 +49,10 @@ from dataclasses import dataclass, field
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeBranch
 from hyperloom_multibranch.blackboard.rsi.history import (
-    DEFAULT_WORKLOAD,
     MAX_POSITION,
     MAX_STALL_TESTS,
     MIN_STALL_TESTS,
     MODEL_TYPE_LABEL,
-    WORKLOAD_LABEL,
     Odds,
     judged_tests,
     opened_with,
@@ -62,6 +60,7 @@ from hyperloom_multibranch.blackboard.rsi.history import (
 )
 from hyperloom_multibranch.blackboard.rsi.playbook import H0, Playbook, PlaybookNumbers, replaced
 from hyperloom_multibranch.blackboard.rsi.report import number, table
+from hyperloom_multibranch.blackboard.rsi.similarity import workload_kind
 from hyperloom_multibranch.blackboard.rsi.stops import JUDGE_CAUSE
 
 REPLAY_RUNS = 200
@@ -203,8 +202,8 @@ def _increments(branch: TreeBranch) -> list[tuple[float, float]]:
     return steps
 
 
-def _label(tree: SearchTree, key: str, default: str = "") -> str:
-    return tree.task.labels.get(key, default)
+def _label(tree: SearchTree, key: str) -> str:
+    return tree.task.labels.get(key, "")
 
 
 def pace_for(tree: SearchTree, history: Sequence[SearchTree], beyond: str = OPTIMISTIC) -> Pace:
@@ -212,8 +211,7 @@ def pace_for(tree: SearchTree, history: Sequence[SearchTree], beyond: str = OPTI
 
     others = tuple(item for item in history if item.session_id != tree.session_id)
     odds = stall_odds(others, tree.task)
-    workload = _label(tree, WORKLOAD_LABEL, DEFAULT_WORKLOAD)
-    alike = [item for item in others if _label(item, WORKLOAD_LABEL, DEFAULT_WORKLOAD) == workload]
+    alike = [item for item in others if workload_kind(item.task) == workload_kind(tree.task)]
     same = [item for item in alike if _label(item, MODEL_TYPE_LABEL) == _label(tree, MODEL_TYPE_LABEL)]
 
     def steps(trees: Sequence[SearchTree]) -> list[tuple[float, float]]:
