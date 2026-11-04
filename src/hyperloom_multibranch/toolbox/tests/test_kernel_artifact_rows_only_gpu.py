@@ -31,7 +31,8 @@ from hyperloom.measure.framework.merge import PRIVATE
 from hyperloom_multibranch.toolbox.tests.integration_inputs import baseline_recipe
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, build_stack
 from hyperloom_multibranch.toolbox.tests.test_framework_isolation_parallel_gpu import AITER_MERGE_DIR, SHARED, VARIABLE
-from hyperloom_multibranch.toolbox.tests.test_kernel_artifact_gpu import (  # noqa: F401  (the fixtures and skips)
+from hyperloom_multibranch.toolbox.tests import test_kernel_artifact_gpu
+from hyperloom_multibranch.toolbox.tests.test_kernel_artifact_gpu import (
     ENVS,
     SHAPE_ROW,
     TARGET,
@@ -42,10 +43,12 @@ from hyperloom_multibranch.toolbox.tests.test_kernel_artifact_gpu import (  # no
     _put_rows_hit,
     _run,
     _variant,
-    pytestmark,
-    workload_environment,
 )
 from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import CARDS, MODEL, _probe, _run_root
+
+#: The artifact test's skips, and its autouse fixture that sets the process environment, apply to the tests here too.
+pytestmark = test_kernel_artifact_gpu.pytestmark
+workload_environment = test_kernel_artifact_gpu.workload_environment
 
 MODEL_TABLE = Path(DEFAULT_CONFIGS) / "model_configs" / "qwen3_8b_bf16_tuned_gemm.csv"
 #: What a row of a bf16 table is told apart by; the test's own reading of the image's tables, not the toolbox's.
