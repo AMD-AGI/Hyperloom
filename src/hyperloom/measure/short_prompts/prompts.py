@@ -159,7 +159,8 @@ def _read_prompt(line: bytes, number: int) -> Prompt:
 
 class _Identified(Protocol):
     @property
-    def id(self) -> str: ...
+    def id(self) -> str:
+        """The id the prompt has in its set; no two prompts of a set share one."""
 
 
 _P = TypeVar("_P", bound=_Identified)
