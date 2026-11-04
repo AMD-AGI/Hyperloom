@@ -25,12 +25,15 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
 
     * :doc:`Components </components/index>`
     * :doc:`Hyperloom optimization loop </conceptual/optimization-loop>`
+    * :doc:`Arbor in multi-branch, who runs what </conceptual/multibranch-arbor>`
 
   .. grid-item-card:: How to
 
     * :doc:`Run a Hyperloom optimization </how-to/optimize>`
     * :doc:`Optimize your own workload </how-to/optimize-custom-workload>`
     * :doc:`Quantization with AMD Quark </how-to/quantization-quark>`
+    * :doc:`Run hosted multi-branch on a new cluster </how-to/hosted-multibranch-new-cluster>`
+    * :doc:`Review the agent map before the Arbor branches open </how-to/multibranch-review-gate>`
 
   .. grid-item-card:: Reference
 

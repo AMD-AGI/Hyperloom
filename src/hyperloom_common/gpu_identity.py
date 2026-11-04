@@ -90,6 +90,19 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
             aliases=("AMD Instinct MI325X",),
             device_ids=frozenset({"74a5", "74b9"}),
         ),
+        # MI355X's die at 2.2 GHz rather than 2.4: its peaks scaled by 2.2/2.4, AMD's published 2.3/4.6/9.2 PF. Its device
+        # id was read with amd-smi on MI350X nodes (2026-10-31: "AMD Instinct MI350X", VBIOS "MI350 OAM"); its VF id is
+        # unlisted.
+        GpuBoard(
+            "mi350x",
+            "gfx950",
+            256,
+            288.0,
+            8000.0,
+            _matrix_peaks(bf16=2306.9, fp8=4613.8, fp4=9227.5, fp32=144.2),
+            aliases=("AMD Instinct MI350X",),
+            device_ids=frozenset({"75a0"}),
+        ),
         GpuBoard(
             "mi355x",
             "gfx950",

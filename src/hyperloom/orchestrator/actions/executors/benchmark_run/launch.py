@@ -75,6 +75,12 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any]) -> None:
 
     Nothing restores what this drops, so it is parked on the cache's own filesystem (the
     preflight's default) rather than copied into the run directory, which sits on shared NFS.
+    What it parks from the image's own tables is built once for this container before the boot
+    (:mod:`.._aiter_serving_once`), so the servers that run in JIT directories of their own link
+    it instead of each building it again.
+
+    The decision is logged as a warning, the level ``hyperloom optimize`` logs at without ``-v``:
+    a move, every time; that nothing moved, once per process.
 
     Args:
         extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
@@ -85,19 +91,25 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any]) -> None:
         for key, value in (extra_envs or {}).items()
         if str(key).startswith("AITER_CONFIG_") and str(value).strip()
     }
-    from .._aiter_jit import prepare_serving_so_for_csvs
+    environ = {**os.environ, **{str(key): str(value) for key, value in (extra_envs or {}).items()}}
+    from .._aiter_serving_once import prepare_serving_so_once
 
     try:
-        outcome = await asyncio.to_thread(prepare_serving_so_for_csvs, csv_envs)
+        preflight = await asyncio.to_thread(prepare_serving_so_once, csv_envs, environ)
     except OSError as exc:
         # A jit directory this cannot read is not a reason to lose the measurement.
         log.warning("baseline_executor: aiter serving .so preflight failed: %s", exc)
         return
-    if isinstance(outcome, dict) and outcome.get("action") == "invalidate":
-        log.info(
-            "baseline_executor: the CSVs this boot loads outran the serving .so; dropped %d module(s) for rebuild",
-            len(outcome.get("removed") or []),
-        )
+    action, jit_dir = preflight.outcome.get("action"), preflight.outcome.get("jit_dir")
+    if action == "skip" and jit_dir not in _COVERED_SAID:
+        _COVERED_SAID.add(jit_dir)
+        log.warning("baseline_executor: %s", preflight.summary())
+    elif action == "invalidate":
+        log.warning("baseline_executor: %s", preflight.summary())
+
+
+#: The jit directories this process has said once already that the serving ``.so`` covers its boots' tables.
+_COVERED_SAID: set[str | None] = set()
 
 
 def _attach_baseline_launch_evidence(

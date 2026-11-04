@@ -39,6 +39,8 @@ subtrees:
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
+  - file: conceptual/multibranch-arbor.md
+    title: Arbor in multi-branch, who runs what
 
 - caption: How to
   entries:
@@ -48,6 +50,10 @@ subtrees:
     title: Optimize your own workload
   - file: how-to/quantization-quark.md
     title: Enable quantization with AMD Quark
+  - file: how-to/hosted-multibranch-new-cluster.md
+    title: Run hosted multi-branch on a new cluster
+  - file: how-to/multibranch-review-gate.md
+    title: Review the agent map before the Arbor branches open
 
 - caption: Reference
   entries:

@@ -1,0 +1,47 @@
+name: parallel-dossier
+description: >
+  The map step of a parallel run's round (runner decision 0003; arbor/parallel/mapstep.py):
+  the dossier skill's update round uK for the round's base tree, written as a document
+  campaign on the controller's host while the round's profile runs on a node. Part A
+  writes 03.uK (the code read again) and 10.uK (what every lane of the last round learned);
+  part B, once the profile is in, writes 06.uK (the bar), 07.uK (the profile) and 11.uK,
+  the directions ending in the `## Map` line the next round's lanes run from.
+
+  There is no model server and no GPU: this is a `document` workload, and the harness
+  scores each committed draft with score_dossier.py (check-dossier.py's content check per
+  part, and the map). The score is a floor on form; the critic reads for substance, and
+  the controller checks the map (its plans' ITEMS, the reopen rule) before it runs a lane.
+
+objective:
+  kind: maximize_perf
+  metric: dossier_score
+  direction: max
+  unit: "points"
+  measurement:
+    # The scorer is deterministic: any gain is real, and a FIX may lose nothing.
+    count: 1
+    threshold_rel: 1.001
+    noise_band_pct: 0.0
+
+validator:
+  bench: validator/bench_dossier.sh
+  correctness: validator/correctness_dossier.sh
+  protected:
+    - validator/
+
+workload:
+  kind: document
+
+skills: [dossier, profiler, knowledge-collector]
+
+tools:
+  score: "validator/score_dossier.py"
+
+constraints:
+  - "THE DELIVERABLES ARE reports/NN.uK-<part>.md, the dossier skill's update round (.claude/skills/dossier/SKILL.md, 'Updating the dossier'); the directives say which parts this half writes. inputs/ is the evidence and is READ-ONLY: the correctness check fails any draft that changes it."
+  - "READ BEFORE YOU WRITE: knowledge/parallel-dossier.md lists the inputs. inputs/tree/ is the round's base tree, the code part 3 reads; inputs/lanes/<lane>/ is what each lane of the last round did (outcomes, findings, artifacts); inputs/ROUND.md is the last round's record, with its drops and conflicts marked reopenable; inputs/dossier/ is the run's dossier."
+  - "EVERY NUMBER CITES ITS SOURCE in the inputs: a part, a lane's iteration, a ledger id, the bar, the profile. A number no input supports is `unknown: <what would measure it>`."
+  - "THE MAP IS THE ROUND'S WORK: part 11 ends in its ## Map line, with the lane fields (lane, plan, depends_on, nodes, upstream). A direction that died earlier in the run comes back only with reopens {round, why}, on 10.uK's evidence; nothing else reopens."
+  - "RUN THE CHECKS YOURSELF before DONE: python3 packs/parallel-dossier/validator/score_dossier.py <workspace>, python3 .claude/skills/dossier/check-dossier.py <workspace>/reports --round uK --no-index, python3 -m arbor.directions check <workspace>/reports/11.uK-directions.md --dossier <workspace>/reports."
+  - "ONE PART OR ONE CONCERN PER ITERATION, so the critic can judge it. End with `DONE: <part>: <what changed>`. Declare CLASS: B when the score rises, A when it holds and the draft is more correct, PROBE when you only read and record LEDGER findings."
+  - "THIS CAMPAIGN HAS NO NODE. Do not start a server, submit a job, ssh anywhere or run anything on a GPU; the profile is measured for you and lands in inputs/profile/ before part B."

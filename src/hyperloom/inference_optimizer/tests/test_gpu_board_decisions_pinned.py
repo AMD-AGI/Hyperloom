@@ -74,6 +74,7 @@ def test_only_r9700_pins_its_geak_identity():
         ("Card Series: AMD Instinct MI300X VF", "mi300x"),
         ("Card Series: AMD Instinct MI308X OAM", "mi308x"),
         ("Card Series: AMD Instinct MI325X OAM", "mi325x"),
+        ("Card Series: AMD Instinct MI350X OAM", "mi350x"),
         ("Card Series: AMD Instinct MI355X OAM", "mi355x"),
         ("AMD_INSTINCT_MI300X", "mi300x"),
         ("Card Series: AMD Radeon AI PRO R9700", "r9700"),

@@ -154,7 +154,7 @@ def agentx_concurrency(env: Mapping[str, str] | None = None) -> int:
     without one carries no workload this layer can size a cap from.
     """
     runtime = os.environ if env is None else env
-    raw = str(runtime.get("CONC") or "").strip()
+    raw = str(runtime.get(ENV_CONC) or "").strip()
     return int(raw) if raw.isdigit() and int(raw) > 0 else 0
 
 

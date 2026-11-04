@@ -309,6 +309,6 @@ async def test_explicit_recipe_replacement_survives_following_keep_and_replay(na
     assert len(observed) == 4
     for launch in observed:
         assert launch["replace_args"] is True
-        assert launch["append_args"] == replacement
+        assert launch["append_args"] == [*replacement, "--watchdog-timeout", "1800"]
         assert "--enable-hierarchical-cache" not in launch["append_args"]
         assert _OPTION not in launch["append_args"]

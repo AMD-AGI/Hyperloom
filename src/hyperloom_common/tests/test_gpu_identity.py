@@ -19,7 +19,14 @@ def test_a_device_id_belongs_to_one_board():
 
 @pytest.mark.parametrize(
     ("device_id", "board"),
-    [("0x75a3", "mi355x"), ("0x75A3", "mi355x"), (0x75A3, "mi355x"), ("0x74a1", "mi300x"), ("0x74a5", "mi325x")],
+    [
+        ("0x75a3", "mi355x"),
+        ("0x75A3", "mi355x"),
+        (0x75A3, "mi355x"),
+        ("0x75a0", "mi350x"),
+        ("0x74a1", "mi300x"),
+        ("0x74a5", "mi325x"),
+    ],
 )
 def test_the_boards_the_measured_nodes_report(device_id, board):
     assert gpu_type_for_device_id(device_id) == board

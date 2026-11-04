@@ -9,7 +9,12 @@ from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_co
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import launch_shape
-from hyperloom.inference_optimizer.cli.benchmark_config import bind_benchmark, configure_benchmark
+from hyperloom.inference_optimizer.cli.benchmark_config import (
+    AgentXWorkload,
+    bind_benchmark,
+    configure_benchmark,
+    write_agentx_benchmark,
+)
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     default_baseline_config,
@@ -101,8 +106,10 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
         source, tmp_path / "round", launch=LaunchLayer(extra_envs={"TEST_SERVER_KNOB": "2"})
     )
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
-    assert launch["append_args"] == ["--disable-custom-all-reduce"]
-    assert launch["env"] == {"TEST_SERVER_KNOB": "2"}
+    watchdog = ["--watchdog-timeout", "1800"] if framework == "sglang" else []
+    assert launch["append_args"] == ["--disable-custom-all-reduce", *watchdog]
+    step_timeout = {"VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "1200"} if framework == "vllm" else {}
+    assert launch["env"] == {"TEST_SERVER_KNOB": "2", **step_timeout}
     enable_profile(candidate)
     profiled = load_benchmark(candidate)["profiler"]["torch_profiler"]
     assert profiled["enabled"] is True
@@ -137,6 +144,25 @@ def test_generated_yaml_pins_local_checkpoint(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_PATH", str(model))
     _, source = _launch(tmp_path, monkeypatch)
     assert load_benchmark(source)["envs"]["MODEL_PATH"] == str(model.resolve())
+
+
+def test_explicit_workload_values_write_the_yaml_the_cli_generates_and_bind_agreeing_flags(tmp_path, monkeypatch):
+    args, generated = _launch(tmp_path, monkeypatch, "--tp", "2", "--conc", "8", "--gpu-type", "mi308x")
+    written = tmp_path / "explicit.yaml"
+    flags = {"framework": "sglang", "model": "Qwen/Qwen3-8B", "precision": args.precision, "tp": 2, "conc": 8}
+    write_agentx_benchmark(written, AgentXWorkload(**flags, ep=1, gpu_type="mi308x"))
+    assert load_benchmark(written) == load_benchmark(generated)
+    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(written))
+    bound = _build_parser().parse_args(["optimize", *(f"--{name}={value}" for name, value in flags.items())])
+    configure_benchmark(bound)
+    assert (bound.ep, bound.docker_image, benchmark_config_path()) == (1, None, written.resolve())
+
+
+def test_explicit_workload_values_are_validated_before_writing(tmp_path):
+    target = tmp_path / "benchmark.yaml"
+    with pytest.raises(ValueError, match="positive envs.TP and envs.CONC"):
+        write_agentx_benchmark(target, AgentXWorkload("sglang", "/model", "bf16", tp=1, ep=1, conc=0))
+    assert not target.exists()
 
 
 def test_resume_reuses_saved_workload_without_switch_or_yaml_flag(tmp_path, monkeypatch):
@@ -255,7 +281,8 @@ def test_operator_argument_can_be_ablated(tmp_path, monkeypatch):
         source, tmp_path / "ablate", launch=LaunchLayer(remove_args=["--cuda-graph-max-bs"])
     )
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
-    assert launch["append_args"] == launch["remove_args"] == []
+    assert launch["append_args"] == ["--watchdog-timeout", "1800"]
+    assert launch["remove_args"] == []
 
 
 def test_operator_env_can_be_removed_or_replaced_by_a_candidate(tmp_path, monkeypatch):
