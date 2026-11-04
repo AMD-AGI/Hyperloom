@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.jit.prewarmed import PREWARM_MANIFEST, PREWARM_SCHEMA, build_record, unlike_prewarmed
+from hyperloom.measure.jit.prewarmed import build_record, unlike_prewarmed
+from hyperloom.orchestrator.actions.executors._aiter_jit import AITER_PREWARM_MANIFEST, AITER_PREWARM_SCHEMA
 
 GFX, CU = "gfx950", 256
 MODULE = "module_gemm_a8w8_bpreshuffle_cktile"
@@ -33,8 +34,8 @@ def jit_with(tmp_path: Path, **entry: object) -> Path:
     jit = tmp_path / "jit"
     jit.mkdir()
     (jit / f"{MODULE}.so").write_bytes(b"\x7fELF prewarmed")
-    document = {"schema": PREWARM_SCHEMA, "modules": [{"name": MODULE, **entry}]}
-    (jit / PREWARM_MANIFEST).write_text(json.dumps(document), encoding="utf-8")
+    document = {"schema": AITER_PREWARM_SCHEMA, "modules": [{"name": MODULE, **entry}]}
+    (jit / AITER_PREWARM_MANIFEST).write_text(json.dumps(document), encoding="utf-8")
     return jit
 
 

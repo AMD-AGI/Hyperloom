@@ -240,14 +240,7 @@ def prepare_profile(
     checkout the launch puts on the server's path, which the patched copy then mirrors (:func:`patch_for_profile`)."""
     plan = _capture_plan(envs)
     envs["OSL"] = plan.osl
-    return _apply_framework_profile(
-        bench,
-        envs,
-        delay_iters=plan.delay_iters,
-        max_iters=plan.max_iters,
-        num_prompts=plan.num_prompts,
-        vllm_checkout=vllm_checkout,
-    )
+    return _apply_framework_profile(bench, envs, plan, vllm_checkout=vllm_checkout)
 
 
 def apply_atom_profile_caps(envs: dict[str, Any], caps: _AtomTracelensCaps | None) -> None:
@@ -394,13 +387,7 @@ def _fit_profile_osl(osl: int, *, cap: int, ratio: float, safe_conc: int, explic
 
 
 def _apply_framework_profile(
-    bench: dict[str, Any],
-    envs: dict[str, Any],
-    *,
-    delay_iters: int,
-    max_iters: int,
-    num_prompts: int,
-    vllm_checkout: Path | None = None,
+    bench: dict[str, Any], envs: dict[str, Any], plan: CapturePlan, *, vllm_checkout: Path | None = None
 ) -> ProfileInstrumentation:
     framework = str(bench.get("framework") or "").lower()
     patch_ok, sitecustomize, site = patch_for_profile(envs, framework, vllm_checkout=vllm_checkout)
@@ -409,16 +396,16 @@ def _apply_framework_profile(
         conc = int(envs.get("CONC") or DEFAULT_CONC)
         return ProfileInstrumentation(conc, caps, [], 0)
     if "vllm" in framework:
-        flags = _apply_vllm_profile(envs, delay_iters=delay_iters, max_iters=max_iters, patch_ok=patch_ok)
-        return ProfileInstrumentation(num_prompts, None, flags, max_iters, site)
+        flags = _apply_vllm_profile(envs, delay_iters=plan.delay_iters, max_iters=plan.max_iters, patch_ok=patch_ok)
+        return ProfileInstrumentation(plan.num_prompts, None, flags, plan.max_iters, site)
     _apply_sglang_profile(
         bench,
         envs,
-        capture_window=(delay_iters, max_iters),
+        capture_window=(plan.delay_iters, plan.max_iters),
         sitecustomize=sitecustomize,
         patch_ok=patch_ok,
     )
-    return ProfileInstrumentation(num_prompts, None, [], 0, site)
+    return ProfileInstrumentation(plan.num_prompts, None, [], 0, site)
 
 
 def write_tracelens_patch_status(envs: dict[str, Any], *, attempted: bool, patched: bool, fw: str) -> None:
@@ -487,9 +474,6 @@ def patch_for_profile(envs: dict[str, Any], framework: str, *, vllm_checkout: Pa
     return ProfilePatch(patch_ok, sitecustomize, site)
 
 
-#: The ``--profiler-config`` fields only TraceLens's vLLM patch adds (``_server_patcher``): a vLLM that was not patched
-#: refuses them, so the server they are passed to must run a patched vLLM.
-VLLM_PATCH_PROFILER_FIELDS: tuple[str, ...] = ("capture_torch_profiler", "detailed_trace_annotation")
 #: The server flag only TraceLens's SGLang roofline patch adds (``server_args.patch``, SGLang < 0.5.18), which an SGLang
 #: that was not patched refuses with its whole command line.
 SGLANG_PATCH_SERVER_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
