@@ -699,22 +699,6 @@ def test_bytecode_the_workspace_guard_already_deleted_does_not_violate_integrity
     assert gate.integrity_verdict == "clean"
 
 
-def test_restore_does_not_put_back_bytecode(tmp_path: Path):
-    workspace, tests = _workspace_with_test_modules(tmp_path)
-    _import(tests, "helpers")
-    cached = _bytecode_of(tests / "helpers.py")
-    gate = _gate_over(workspace)
-    cached.unlink()
-    (workspace / "config.yaml").write_text("task_type: image_kernel\nagent: hacked\n")
-
-    assert "config.yaml" in gate.finalize_integrity()
-    gate.restore_protected_files()
-
-    assert (workspace / "config.yaml").read_text() == "task_type: image_kernel\n"
-    assert not cached.exists()
-    assert gate.integrity_verdict == "clean"
-
-
 def test_a_changed_source_or_sourceless_pyc_under_a_protected_dir_is_still_reported(tmp_path: Path):
     workspace, tests = _workspace_with_test_modules(tmp_path)
     # Only the interpreter's cache is rebuilt from source; a .pyc beside the sources may be the module itself.

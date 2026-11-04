@@ -754,8 +754,6 @@ class InSessionGate:
 
         The next import, this gate's own validation included, then compiles the protected source instead.
         """
-        if self.workspace_root is None:
-            return
         try:
             paths = self._iter_snapshot_paths()
         except (OSError, RuntimeError, ValueError):  # the integrity scan that follows reports the failed inventory
@@ -866,7 +864,7 @@ class InSessionGate:
             if state.error:
                 raise RuntimeError(state.error)
             current_state = current.get(key)
-            if current_state == state or FORGE_PROTECTED_PATHS.is_rebuildable_bytecode(state.path):
+            if current_state == state:
                 continue
             path = state.path
             if state.kind == "missing":
