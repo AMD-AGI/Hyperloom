@@ -66,6 +66,8 @@ _JSON, _SUFFIX, _ENCODING, _FORMAT, _RECORD = "*.json", ".json", "utf-8", "forma
 _SESSION_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")
 #: The command line's argument naming the lesson a command acts on.
 _LESSON_ARGUMENT = "lesson"
+#: What the warning for a record of the pool that cannot be read calls it.
+_LESSON_RECORD = "lesson"
 #: Fixed, so the lessons a session leaves get the same ids however often its CLOSE runs.
 _NAMESPACE = uuid.UUID("6f1d3a52-9c4e-4b8a-a7d2-0e5c9b1f3a64")
 Kept = TypeVar("Kept")
@@ -195,8 +197,9 @@ class Lesson:
     retired: LessonRetirement | None = None
 
 
-def _document(path: Path, kind: type[Kept], name: str) -> Kept | None:
-    """The ``kind`` record ``path`` holds; ``None``, with a warning, when it cannot be read as one."""
+def _document(path: Path, kind: type[Kept], name: str, what: str) -> Kept | None:
+    """The ``kind`` record ``path`` holds; ``None``, with a warning naming it a ``what`` record, when it cannot be
+    read as one."""
 
     try:
         document = json.loads(path.read_text(encoding=_ENCODING))
@@ -204,12 +207,15 @@ def _document(path: Path, kind: type[Kept], name: str) -> Kept | None:
             raise ValueError(f"unsupported format {document.get(_FORMAT)!r}")
         return decode(kind, document.get(_RECORD))
     except (AttributeError, OSError, KeyError, TypeError, ValueError) as exc:
-        log.warning("skipping unreadable lesson record %s: %s", path, exc)
+        log.warning("skipping unreadable %s record %s: %s", what, path, exc)
         return None
 
 
-def _documents(folder: Path, kind: type[Kept], name: str) -> list[Kept]:
-    found = (_document(path, kind, name) for path in sorted(folder.glob(_JSON)))
+def published_records(folder: Path, kind: type[Kept], name: str, what: str) -> list[Kept]:
+    """Each ``kind`` record of format ``name`` published in ``folder``, in path order; one that cannot be read is
+    skipped with a warning naming it a ``what`` record."""
+
+    found = (_document(path, kind, name, what) for path in sorted(folder.glob(_JSON)))
     return [item for item in found if item is not None]
 
 
@@ -265,21 +271,21 @@ class LessonPool:
     def revisions(self) -> tuple[LessonRevision, ...]:
         """Every readable revision, the earliest written first."""
 
-        found = _documents(self.root / _REVISIONS, LessonRevision, REVISION_FORMAT)
+        found = published_records(self.root / _REVISIONS, LessonRevision, REVISION_FORMAT, _LESSON_RECORD)
         held = (item for item in found if written_by(self.as_of, item.written_at))
         return tuple(sorted(held, key=lambda item: (item.written_at, item.revision_id)))
 
     def revision(self, revision_id: str) -> LessonRevision | None:
         path = self.root / _REVISIONS / f"{revision_id}{_SUFFIX}"
-        return _document(path, LessonRevision, REVISION_FORMAT) if path.is_file() else None
+        return _document(path, LessonRevision, REVISION_FORMAT, _LESSON_RECORD) if path.is_file() else None
 
     def retirements(self) -> tuple[LessonRetirement, ...]:
-        found = _documents(self.root / _RETIRED, LessonRetirement, RETIREMENT_FORMAT)
+        found = published_records(self.root / _RETIRED, LessonRetirement, RETIREMENT_FORMAT, _LESSON_RECORD)
         held = (item for item in found if written_by(self.as_of, item.retired_at))
         return tuple(sorted(held, key=lambda item: item.retired_at))
 
     def purges(self) -> tuple[LessonPurge, ...]:
-        found = _documents(self.root / _PURGED, LessonPurge, PURGE_FORMAT)
+        found = published_records(self.root / _PURGED, LessonPurge, PURGE_FORMAT, _LESSON_RECORD)
         return tuple(sorted(found, key=lambda item: item.purged_at))
 
     def lessons(self) -> dict[str, Lesson]:
@@ -328,7 +334,7 @@ class LessonPool:
         doomed = [
             path
             for path in sorted((self.root / _REVISIONS).glob(_JSON))
-            if (found := _document(path, LessonRevision, REVISION_FORMAT)) is not None
+            if (found := _document(path, LessonRevision, REVISION_FORMAT, _LESSON_RECORD)) is not None
             and found.lesson_id == purge.lesson_id
         ]
         for path in doomed:
@@ -347,7 +353,7 @@ class LessonPool:
     def standings(self) -> tuple[SessionStandings, ...]:
         """Every session's standings, the earliest written first."""
 
-        found = _documents(self.root / _STANDINGS, SessionStandings, STANDINGS_FORMAT)
+        found = published_records(self.root / _STANDINGS, SessionStandings, STANDINGS_FORMAT, _LESSON_RECORD)
         held = (item for item in found if written_by(self.as_of, item.written_at))
         return tuple(sorted(held, key=lambda item: item.written_at))
 
@@ -577,6 +583,7 @@ __all__ = [
     "human_author",
     "lesson_id_for",
     "main",
+    "published_records",
     "retirement_proposals",
     "revision_id_for",
     "specialist_author",
