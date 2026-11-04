@@ -12,12 +12,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
 
 from hyperloom.measure.docs import DocumentError, canonical_json, parse_json_object
-from hyperloom.measure.short_prompts.prompts import PromptSetError, load_lines
+from hyperloom.measure.short_prompts.prompts import PromptSetError, parse_lines
 
-__all__ = ["GENERATOR", "PER_TASK", "TASKS", "Prompt", "PromptSetError", "load_prompts", "prompts_bytes"]
+__all__ = ["GENERATOR", "PER_TASK", "TASKS", "Prompt", "PromptSetError", "parse_prompts", "prompts_bytes"]
 
 #: The version of the generators: a change to a task, the filler or the placement rule changes it.
 GENERATOR = "hl-long-context/1"
@@ -73,6 +72,6 @@ def _read_prompt(line: bytes, number: int) -> Prompt:
     return Prompt(document["id"], document["task"], document["input"], tuple(refs), document["tokens"])
 
 
-def load_prompts(path: Path) -> tuple[Prompt, ...]:
-    """The prompts of a staged file; a file that is not a prompt set, or repeats an id, is refused."""
-    return load_lines(path, _read_prompt)
+def parse_prompts(raw: bytes, where: str) -> tuple[Prompt, ...]:
+    """The prompts of a staged file's bytes; bytes that are not a prompt set, or repeat an id, are refused."""
+    return parse_lines(raw, _read_prompt, where)
