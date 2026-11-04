@@ -417,6 +417,17 @@ def test_what_moved_since_the_last_close_is_read_against_the_same_champion() -> 
     assert "No earlier CLOSE read the replay against h0." in standing_report(second, (), None)
 
 
+def test_a_label_whose_rows_replayed_two_playbooks_has_not_moved() -> None:
+    sure, unsure = Difference(1.0, 0.5, 1.5), Difference(1.0, -0.5, 2.0)
+    other = dataclasses.replace(H0.numbers, stall_tests=5)
+    first = ReplayStanding("s", 10.0, H0.label, 1, 2, (StandingRow("stall-5", unsure, unsure, H0.numbers),))
+    replayed_again = dataclasses.replace(first, at=20.0, rows=(StandingRow("stall-5", sure, sure, H0.numbers),))
+    replayed_other = dataclasses.replace(first, at=20.0, rows=(StandingRow("stall-5", sure, sure, other),))
+
+    assert moved(first, replayed_again) == ("stall-5: unclear -> better",)
+    assert moved(first, replayed_other) == ()
+
+
 def test_a_sessions_measures_are_its_decisions_counted() -> None:
     measures = session_measures(SESSION, stop_audit(SESSION))
 
