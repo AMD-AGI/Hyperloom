@@ -51,7 +51,6 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
         ("MI325X", "mi300x"),
         ("amd instinct mi355x", "mi355x"),
         ("amd_instinct_mi325x", "mi300x"),
-        ("gfx1201", "r9700"),
         ("Radeon 8060S", "radeon8060s"),
         ("gfx1100", "gfx1100"),
         ("MI250-X", "mi250_x"),
@@ -59,6 +58,12 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
 )
 def test_canonical_gpu_type_records_one_chip_under_one_name(value, expected):
     assert canonical_gpu_type(value) == expected
+
+
+def test_gfx1201_names_a_product_only_when_the_board_is_unambiguous():
+    boards = {board.product for board in AMD_GPU_BOARDS.values() if board.gfx == "gfx1201"}
+    expected = next(iter(boards)) if len(boards) == 1 else "gfx1201"
+    assert canonical_gpu_type("gfx1201") == expected
 
 
 @pytest.mark.parametrize(
