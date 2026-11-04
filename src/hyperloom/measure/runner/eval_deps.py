@@ -26,7 +26,7 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors import EVAL_OUTPUT_ENV, LM_EVAL_READY_FN, ensure_lm_eval_install_once
+from hyperloom.orchestrator.actions.executors import LM_EVAL_READY_FN, ensure_lm_eval_install_once
 
 __all__ = ["EVAL_DEPS_LOG", "EVAL_DEPS_TIMEOUT_SEC", "EvalDepsError", "install_eval_deps"]
 
@@ -65,8 +65,7 @@ def install_eval_deps(
             f"lm-eval was not installed before the server booted: {inferencex / _LIB} cannot be made to install it "
             "once, so the accuracy round installs it itself"
         )
-    # The install's output is kept in its own log already; the round's eval keeps its output where the round says.
-    env = {**environ, EVAL_OUTPUT_ENV: str(log_path)}
+    env = dict(environ)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("wb") as log:
         process = subprocess.Popen(
