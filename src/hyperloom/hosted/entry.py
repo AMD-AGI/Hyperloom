@@ -112,7 +112,7 @@ def _run() -> int:
     if not Path(os.environ.get(ENV_USER_DATA_PATH, "")).is_absolute():
         raise Refused(f"{ENV_USER_DATA_PATH} must be set to an absolute path")
     if spec.flow == FLOW_MULTIBRANCH:
-        # The command is the wheel's own; install.sh's ``ensure_hosted_extra`` step installs the wheel's ``hosted`` extra (e2b, ...) that it imports.
+        # install.sh's ``ensure_hosted_extra`` step installs the wheel's ``hosted`` extra into this interpreter before the command starts.
         _put_interpreter_first_on_path()
         _run_installer(info.state_dir)
         _exec_multibranch()
