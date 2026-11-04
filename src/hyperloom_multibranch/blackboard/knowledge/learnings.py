@@ -81,12 +81,11 @@ def publish_learnings(
     snapshot: BlackboardSnapshot,
     *,
     kb: CollectionTarget | None = None,
-    dry_run: bool = False,
     receipt: Path | None = None,
 ) -> CollectReport:
     """CLOSE: write the session's learnings to ``kb``, or to the service ``HYPERLOOM_KB_URL`` names."""
 
-    return collect(MAPPING_PATH, export_document(snapshot), kb=kb, dry_run=dry_run, receipt=receipt)
+    return collect(MAPPING_PATH, export_document(snapshot), kb=kb, receipt=receipt)
 
 
 __all__ = [

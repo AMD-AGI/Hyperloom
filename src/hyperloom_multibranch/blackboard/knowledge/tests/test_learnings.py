@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from hyperloom_kb import RemoteExperienceKB
-from hyperloom_kb.collect import load_mapping
+from hyperloom_kb.collect import collect, load_mapping
 
 from hyperloom_multibranch.contracts.blackboard import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
@@ -91,7 +91,7 @@ def test_each_current_learning_is_one_row_with_the_sessions_conditions_and_its_t
 
 
 def test_the_learnings_become_experiences_of_their_own_schema(snapshot: BlackboardSnapshot) -> None:
-    report = publish_learnings(_with_learnings(snapshot), dry_run=True)
+    report = collect(MAPPING_PATH, export_document(_with_learnings(snapshot)), dry_run=True)
     collected = {item.unit_id: item.experience for item in report.collected}
 
     assert not report.skipped
@@ -110,7 +110,8 @@ def test_the_learnings_become_experiences_of_their_own_schema(snapshot: Blackboa
     assert (gemm.identity["model"], gemm.identity["layer"]) == ("deepseek-ai/DeepSeek-R1", "kernel")
     assert gemm.provenance.source_ref == "multibranch:sess-1:s1:2"
     assert collected["s2:2"].outcome["decision"] == "unmeasured"
-    assert publish_learnings(_with_learnings(snapshot), dry_run=True).collected == report.collected
+    again = collect(MAPPING_PATH, export_document(_with_learnings(snapshot)), dry_run=True)
+    assert again.collected == report.collected
 
 
 def test_without_a_profile_there_is_nothing_to_export(snapshot: BlackboardSnapshot) -> None:

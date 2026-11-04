@@ -29,6 +29,7 @@ from hyperloom_multibranch.blackboard.knowledge.breakdown import (
     EXPORTER_VERSION,
     FILENAME,
     SCHEMA_VERSION,
+    SESSION_VARIABLES,
     CloseOutcome,
     SessionPlace,
     build_breakdown,
@@ -106,7 +107,7 @@ def test_the_close_section_holds_the_merge_statistics_the_scheduler_passes(snaps
 
 
 def test_a_hosted_run_adds_the_session_block_and_its_records_under_the_names_the_legacy_flow_uses(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hosted = {
         "CLAW_SESSION_ID": "claw-7",
@@ -121,10 +122,12 @@ def test_a_hosted_run_adds_the_session_block_and_its_records_under_the_names_the
     )
     (tmp_path / "plugs.resolved.json").write_text(json.dumps(plugs), "utf-8")
 
-    metadata = build_breakdown(snapshot, place=SessionPlace(tmp_path, environ=hosted, code_revision="38724291b"))[
-        "metadata"
-    ]
-    local = build_breakdown(snapshot, place=SessionPlace(environ={}))["metadata"]
+    for name in SESSION_VARIABLES.values():
+        monkeypatch.delenv(name, raising=False)
+    local = build_breakdown(snapshot)["metadata"]
+    for name, value in hosted.items():
+        monkeypatch.setenv(name, value)
+    metadata = build_breakdown(snapshot, place=SessionPlace(tmp_path, code_revision="38724291b"))["metadata"]
 
     assert metadata["session"] == {
         "session_id": "sess-1",
@@ -148,8 +151,8 @@ def test_the_agent_runners_samples_give_each_specialists_record_and_the_containe
         "".join(json.dumps(row) + "\n" for row in (first, early, second, late)) + '{"kind": "spec', "utf-8"
     )
 
-    metadata = build_breakdown(snapshot, place=SessionPlace(runner_dir=tmp_path, environ={}))["metadata"]
-    unsampled = build_breakdown(snapshot, place=SessionPlace(runner_dir=tmp_path / "elsewhere", environ={}))["metadata"]
+    metadata = build_breakdown(snapshot, place=SessionPlace(runner_dir=tmp_path))["metadata"]
+    unsampled = build_breakdown(snapshot, place=SessionPlace(runner_dir=tmp_path / "elsewhere"))["metadata"]
 
     assert (metadata["specialist_resources"], metadata["container_resources"]) == ([first, second], late)
     assert not {"specialist_resources", "container_resources"} & set(unsampled)

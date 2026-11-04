@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from hyperloom_kb import RemoteExperienceKB
-from hyperloom_kb.collect import load_mapping
+from hyperloom_kb.collect import collect, load_mapping
 from hyperloom_kb.collect.engine import CollectReport, FailedUnit
 
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
@@ -129,7 +129,7 @@ def test_a_live_kb_and_an_archive_take_the_experiences_the_learnings_and_the_tre
             ),
         )
 
-    dry = experience.publish_experiences(learnt, METRIC, dry_run=True)
+    dry = collect(experience.MAPPING_PATH, experience.export_document(learnt, METRIC), dry_run=True)
     assert done.experiences == CloseStep(
         WRITTEN, counts={"created": len(dry.collected), "skipped": len(dry.skipped), "errors": 0}
     )
@@ -337,7 +337,7 @@ def test_an_agentx_sessions_experiences_go_to_the_blackboards_own_declaration(
             agentx, METRIC, targets=CloseTargets(multibranch_kb=RemoteExperienceKB(client, own), receipts=reports)
         )
 
-    dry = experience.publish_multibranch_experiences(agentx, METRIC, dry_run=True)
+    dry = collect(experience.MULTIBRANCH_MAPPING_PATH, experience.export_document(agentx, METRIC), dry_run=True)
     assert done.multibranch_experiences == CloseStep(
         WRITTEN, counts={"created": len(dry.collected), "skipped": len(dry.skipped), "errors": 0}
     )
