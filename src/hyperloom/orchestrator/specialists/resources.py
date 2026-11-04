@@ -26,9 +26,6 @@ from typing import Any, Mapping
 from hyperloom.common.proctree import descendants
 
 __all__ = [
-    "CONTAINER_RECORD_KIND",
-    "RESOURCES_RELATIVE_PATH",
-    "SPECIALIST_RECORD_KIND",
     "ContainerSnapshot",
     "ProcessTreeSampler",
     "ResourceLog",
@@ -39,9 +36,6 @@ __all__ = [
 
 UTF8 = "utf-8"
 DECODE_ERRORS = "replace"
-RESOURCES_RELATIVE_PATH = Path("agents") / "resources.jsonl"
-SPECIALIST_RECORD_KIND = "specialist_resources"
-CONTAINER_RECORD_KIND = "container_resources"
 
 
 @dataclass(frozen=True)

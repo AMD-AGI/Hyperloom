@@ -44,11 +44,8 @@ from hyperloom_common.jsonio import read_json, read_jsonl
 from hyperloom_common.timeutil import epoch_iso
 from hyperloom.contracts.measurement import BuildPayment
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
-from hyperloom.orchestrator.specialists.resources import (
-    CONTAINER_RECORD_KIND,
-    RESOURCES_RELATIVE_PATH,
-    SPECIALIST_RECORD_KIND,
-)
+from hyperloom.inference_optimizer.session.session_paths import RESOURCES_RELATIVE_PATH
+from hyperloom.orchestrator.specialists.agent_runner import CONTAINER_RECORD_KIND, SPECIALIST_RECORD_KIND
 from hyperloom_multibranch.contracts.blackboard.peers import SandboxFacts
 from hyperloom_multibranch.contracts.blackboard.records import SECONDS_PER_HOUR, BlackboardSnapshot, TestRecord
 from hyperloom_multibranch.blackboard.codec import encode
