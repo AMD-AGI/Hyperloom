@@ -213,13 +213,11 @@ class SessionCases:
         return tuple(PooledCase(entry.case_id, entry.data, entry.origin) for entry in others)
 
 
-def session_cases(
-    image_digest: str, blackboard: SessionRecords, archive: TreeArchive | None = None
-) -> SessionCases | None:
-    """The pool for ``RegressionSet(pool=...)``: beside ``archive``, by default the one a running session reads;
-    ``None`` without one or without the session's image digest."""
+def session_cases(image_digest: str, blackboard: SessionRecords) -> SessionCases | None:
+    """The pool for ``RegressionSet(pool=...)``: beside the archive a running session reads; ``None`` without one or
+    without the session's image digest."""
 
-    target = archive if archive is not None else TreeArchive.read_from_env()
+    target = TreeArchive.read_from_env()
     if target is None or not image_digest:
         return None
     return SessionCases(CasePool.beside(target), image_digest, blackboard)

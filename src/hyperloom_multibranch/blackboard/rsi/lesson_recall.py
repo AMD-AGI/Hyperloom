@@ -141,7 +141,7 @@ def _named_again(found: Notes, seen: frozenset[str]) -> Notes:
 
 class LessonRecall(LearningRecall):
     """One session's retrieval over its learnings and the lesson pool ``pool``, shared by every branch's tools and
-    briefs; ``reader``, ``identities`` and ``log`` as for :class:`LearningRecall`."""
+    briefs; ``reader`` and ``log`` as for :class:`LearningRecall`."""
 
     def __init__(
         self, reader: ExperienceReader | None = None, *, pool: LessonPool | None = None, log: RetrievalLog | None = None
@@ -202,12 +202,10 @@ class LessonRecall(LearningRecall):
                 found.append((Match(kin, overlap * weight, head.written_at), item))
         return found
 
-    def pooled(
-        self, snapshot: BlackboardSnapshot, query: str, *, limit: int, family: Family | None = None
-    ) -> tuple[PastLearning, ...]:
-        """The pool's live lessons that bear on ``query``, about ``family`` first, the best ``limit`` first."""
+    def pooled(self, snapshot: BlackboardSnapshot, query: str, *, limit: int) -> tuple[PastLearning, ...]:
+        """The pool's live lessons that bear on ``query``, the best ``limit`` first."""
 
-        return tuple(_ranked([], self._scored(snapshot, query, family), limit))
+        return tuple(_ranked([], self._scored(snapshot, query, None), limit))
 
     def past_for(self, snapshot: BlackboardSnapshot, query: str, *, limit: int) -> PastLearnings | None:
         """The pool's lessons for ``query``, after the Experience KB's when one is configured; ``None`` before the
