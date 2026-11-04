@@ -53,10 +53,13 @@ def test_unconfined_the_sweep_kills_every_sandbox_s_server(signalled: list[tuple
     assert [pid for pid, _ in signalled] == [OURS, THEIRS, UNTAGGED]
 
 
-def test_confined_the_sweep_kills_only_its_own_sandbox_s_server(signalled: list[tuple[int, int]]) -> None:
+def test_confined_the_sweep_kills_only_its_own_sandbox_s_server(
+    monkeypatch: pytest.MonkeyPatch, signalled: list[tuple[int, int]]
+) -> None:
     module = _benchmarker()
     real_os = module.os
-    magpie_confined.confine_sweep(module, b"lsb-a", environ=lambda pid: ENVIRONS[pid])
+    monkeypatch.setattr(magpie_confined, "process_environ", lambda pid: ENVIRONS[pid])
+    magpie_confined.confine_sweep(module, b"lsb-a")
 
     module.BenchmarkMode()._cleanup_server_processes("sglang")
 
@@ -108,9 +111,12 @@ def test_outside_a_sandbox_magpie_s_sweep_spares_every_sandbox_s_server(
     assert signalled == [(UNTAGGED, signal.SIGKILL)]
 
 
-def test_the_sweep_spares_a_process_whose_environment_cannot_be_read(signalled: list[tuple[int, int]]) -> None:
+def test_the_sweep_spares_a_process_whose_environment_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, signalled: list[tuple[int, int]]
+) -> None:
     module = _benchmarker()
-    magpie_confined.confine_sweep(module, b"", environ=lambda pid: None if pid == UNTAGGED else ENVIRONS[pid])
+    monkeypatch.setattr(magpie_confined, "process_environ", lambda pid: None if pid == UNTAGGED else ENVIRONS[pid])
+    magpie_confined.confine_sweep(module, b"")
 
     module.BenchmarkMode._cleanup_server_processes("sglang")
 

@@ -58,16 +58,14 @@ class ConfinedOs:
             os.kill(pid, sig)
 
 
-def confine_sweep(
-    module: ModuleType, sandbox: bytes, *, environ: Callable[[int], list[bytes] | None] | None = None
-) -> None:
+def confine_sweep(module: ModuleType, sandbox: bytes) -> None:
     """Make ``module``'s sweep signal only processes of ``sandbox``; say so on stderr when it has no sweep."""
     owner = getattr(module, SWEEP_CLASS, None)
     sweep = getattr(owner, SWEEP, None)
     if sweep is None:
         print(f"magpie_confined: {SWEEP_CLASS}.{SWEEP} not found; Magpie's cleanup runs unconfined", file=sys.stderr)
         return
-    confined = ConfinedOs(sandbox, environ or process_environ)
+    confined = ConfinedOs(sandbox, process_environ)
 
     def confined_sweep(*args: Any, **kwargs: Any) -> Any:
         real = module.os

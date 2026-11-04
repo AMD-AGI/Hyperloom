@@ -17,7 +17,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.coerce import to_float, to_int, to_str_list
-from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.gain_math import accuracy_passed, gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
@@ -57,10 +57,7 @@ from ..stop_attribution import (
     stopped_by_the_run_class,
     variant_budget_stop,
 )
-from ._accuracy_gate import (
-    accuracy_passed,
-    parse_eval_results,
-)
+from ._accuracy_gate import parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
 from .bypass_scriptable import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
