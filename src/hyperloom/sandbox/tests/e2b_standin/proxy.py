@@ -35,6 +35,11 @@ _HOP_BY_HOP = frozenset(
 _CHUNK = 1 << 20
 
 
+def _one_line(text: str) -> str:
+    """``text`` without line breaks, so a relayed header can neither start another header nor end the head early."""
+    return text.replace("\r", "").replace("\n", "")
+
+
 def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
     """Build the (not yet serving) proxy on a free loopback port."""
 
@@ -45,6 +50,10 @@ def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
             pass
 
         def _route(self) -> None:
+            if not self.path.startswith("/"):
+                # Only a path on the sandbox's own envd is relayed; an absolute URL is no request for a sandbox.
+                self.send_error(400, "the request target must be a path")
+                return
             sandbox_id = self.headers.get("E2b-Sandbox-Id")
             box = plane.lookup(sandbox_id)
             if box is None:
@@ -99,10 +108,10 @@ def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
             length = response.getheader("Content-Length")
             for name, value in response.getheaders():
                 if name.lower() not in _HOP_BY_HOP and name.lower() != "content-length":
-                    self.send_header(name, value)
+                    self.send_header(_one_line(name), _one_line(value))
             if length is not None or response.status in (204, 304) or self.command == "HEAD":
                 if length is not None:
-                    self.send_header("Content-Length", length)
+                    self.send_header("Content-Length", str(int(length)))
                 self.end_headers()
                 while self.command != "HEAD" and (data := response.read(_CHUNK)):
                     self.wfile.write(data)
