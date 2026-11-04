@@ -1069,6 +1069,7 @@ and input variables are always required, and a variable that is set is checked e
 | `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of template names, for example `{"runner": {"1": "t1", "8": "t8"}, "dev": "t"}`. |
 | `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_SUBRUN`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
+| `HYPERLOOM_SANDBOX_WORKSPACE` | When a SaFE key reaches the sandbox service directly and its user is in more than one workspace; always for a `system-admin` key | The workspace every sandbox is created in, sent on each create as the metadata `agent-sandbox.io/workspace`; a create whose own metadata names a workspace keeps its own. Without it the service refuses such a key's creates with `workspace_required`, reported as `SandboxDenied` naming this variable. A Claw grant's key names its own workspace, so a Claw host leaves it unset and the creates are unchanged. No whitespace; not a credential. |
 | `HYPERLOOM_RESULT_ARCHIVE` | No | Unset means results are archived on the shared storage, in a directory the application chooses. Otherwise `s3://<bucket>/<prefix>`; the prefix may be empty and has no empty, `.` or `..` segment. A local path (`/x`, `file://...`) is refused: local means unset. |
 | `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When `HYPERLOOM_RESULT_ARCHIVE` is `s3://`, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) and `AWS_REGION` (not a credential) are optional. |
 | `HYPERLOOM_GRANT_LIMITS` | No | JSON object of the totals the host granted the run: `max_sandboxes`, `max_gpus`, `max_runtime_sec` (whole numbers) and `gpu_hours` (a number), each at least 0 and each optional; other keys are ignored. The legacy `optimize` flow only logs it. Removed from the environment once read. |
@@ -1143,6 +1144,16 @@ Types (v1): `hyperloom.campaign_started`, `plugs_lock_mismatch`, `phase_changed`
 schema of each is `src/hyperloom/contracts/hyperloom_events.v1.schema.json`; a test keeps the emitters consistent with it.
 `hyperloom.budget` is sent after a state save, at most every 5 minutes; its `tokens` and `gpu_sec` are null in the legacy flow.
 With the local implementation (the default) an event is only a debug log line.
+
+## Measurement card guard
+
+What is done about a process outside a test that holds one of the test's GPU cards. The local toolbox reads it once, when
+it is built (the `card_guard` option wins over it), applies it to the cards it hands out to tests and leases, and passes
+the same value to every measurement runner it starts.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_CARD_GUARD` | `enforce` | `enforce`: a card some process holds is not handed out (the test waits for a free one; the log names the card, the process and the memory it holds, once per holder), and a test whose card a process outside it holds is ended at the first look that finds it (about once a second) and refused as the infrastructure failure `foreign_process_on_card`, which is retried on other cards. `observe`: cards are handed out and tests run to their end; the signed result says `foreign` with the process, the card and when, and carries a warning. Any other value is refused at start-up. Where the cards cannot be read, both modes go on and the result says `unknown` and why. |
 
 ## Variables intentionally not exposed
 
