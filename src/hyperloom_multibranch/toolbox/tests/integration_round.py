@@ -39,7 +39,6 @@ from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, Stac
 
 _TOOL_WAIT_SEC = 3300.0
 _POLL_SEC = 0.25
-_SOURCE, _CONFIG = IntentLayer.SOURCE.value, IntentLayer.CONFIG.value
 _WITHDRAWN = "withdrawn"
 
 

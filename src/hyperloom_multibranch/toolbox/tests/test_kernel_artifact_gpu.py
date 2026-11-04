@@ -48,15 +48,18 @@ from hyperloom_multibranch.toolbox.tests.test_framework_isolation_parallel_gpu i
     VARIABLE,
     _installed_aiter_names_the_variable,
 )
-from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import (  # noqa: F401  (workload_environment is a fixture)
+from hyperloom_multibranch.toolbox.tests import test_toolbox_kinds_gpu
+from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import (
     CARDS,
     INFERENCEX,
     MODEL,
     _probe,
     _run_root,
     pytestmark,
-    workload_environment,
 )
+
+#: The kinds test's autouse fixture: the process environment the points are rendered from, set for the tests here too.
+workload_environment = test_toolbox_kinds_gpu.workload_environment
 
 pytestmark = [
     pytestmark,
