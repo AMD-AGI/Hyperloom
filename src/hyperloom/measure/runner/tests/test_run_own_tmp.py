@@ -14,7 +14,7 @@ import yaml
 
 from hyperloom.measure import local
 from hyperloom.measure.runner.own_tmp import OWN_TMP_PREFIX, own_tmpdir
-from hyperloom.measure.runner.tests.test_run_jit import Rig, _arm, env, key, rig  # noqa: F401 - fixtures
+from hyperloom.measure.runner.tests.test_run_jit import _arm, env, key, rig  # noqa: F401 - fixtures
 from hyperloom.measure.socket import TestCall
 
 MERGED = "aiter_configs/merged.csv"

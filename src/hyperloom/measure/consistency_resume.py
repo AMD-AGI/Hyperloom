@@ -215,7 +215,7 @@ class RunLock:
         try:
             os.utime(self.path)
         except OSError:
-            pass
+            pass  # a beat that cannot be written is retried by the next one
 
     def start_heartbeat(self, every_sec: float = HEARTBEAT_SEC) -> None:
         def beat() -> None:

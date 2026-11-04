@@ -3,7 +3,7 @@
 
 """The local sandbox provider: every sandbox is a temporary directory on this machine.
 
-Used for development, CI, the consistency check and multi-branch MB1. It speaks
+Used for development, CI, the consistency check and local multi-branch runs. It speaks
 the same socket as a hosted provider (:mod:`hyperloom.sandbox.socket`), with
 the same sealed policy, the same ``agent-sandbox.io/`` metadata and one process group
 per runner that is reaped as a tree.
