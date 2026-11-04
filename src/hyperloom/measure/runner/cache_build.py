@@ -63,11 +63,14 @@ wheel's. So the builder pins such a wheel only when it has built it itself: on a
 reuse, from the entry's copy in ``sdists/``, which must have the hash the manifest records and be a file the commit's
 lock lists for that pin, built again offline in a directory of the builder's own with the lock's build tools (installed
 from the entry's own wheels of them, by the lock's hashes) into a wheel with the cached wheel's name, files and
-contents (:func:`_built_wheel_differences`). A wheel passed off as a source distribution does not build, and an entry
-that claims a source distribution it does not hold is refused. So the pin vouches for such a wheel as what the commit's
-build tools make of a file the commit's lock lists, whoever can write the cache. A source distribution whose build does
-not write the same files every time (one that stamps a time or a path into a file) makes every reuse of its entry a
-:class:`CacheConflict`; build that commit into another cache directory.
+contents (:func:`_built_wheel_differences`). An entry that claims a source distribution it does not hold is refused. A
+wheel the lock lists, kept there as the source distribution, does not build under a source distribution's name
+(``.tar.gz``, ``.zip``): pip finds no project in it. Under a ``.whl`` name pip copies it as the wheel it builds, so for
+a pure-Python wheel the comparison decides: a cached wheel with that wheel's name, files and contents is reused and any
+other refused; it installs the same files as that wheel, a file the lock lists for its pin. So the pin vouches for such
+a wheel as what the commit's build tools make of a file the commit's lock lists, whoever can write the cache. A source
+distribution whose build does not write the same files every time (one that stamps a time or a path into a file) makes
+every reuse of its entry a :class:`CacheConflict`; build that commit into another cache directory.
 
 The cache must stay readable by the account the sandbox runs as: run the builder with a ``umask`` that leaves new files
 readable by others (``022``).
