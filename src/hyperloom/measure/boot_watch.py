@@ -80,6 +80,7 @@ _MAX_POLL_SEC = 2.0
 _SERVER_LOG = "server.log"
 #: How much of the end of a server log is read for its last line.
 _TAIL_BYTES = 8192
+_UTF8 = "utf-8"
 
 
 def boot_limit_sec(benchmark: Mapping[str, Any], timeout_sec: float) -> float | None:
@@ -207,7 +208,7 @@ def _last_line(path: Path) -> str:
             handle.seek(0, 2)
             size = handle.tell()
             handle.seek(max(0, size - _TAIL_BYTES))
-            text = handle.read().decode("utf-8", errors="replace")
+            text = handle.read().decode(_UTF8, errors="replace")
     except OSError:
         return ""
     lines = [line for line in text.splitlines() if line.strip()]
@@ -217,7 +218,7 @@ def _last_line(path: Path) -> str:
 def _stamped_at(stamp: Path) -> float:
     """The wall-clock second a stamp says its server was ready; ``0.0`` for one that cannot be read."""
     try:
-        return float(stamp.read_text(encoding="utf-8").split()[0])
+        return float(stamp.read_text(encoding=_UTF8).split()[0])
     except (OSError, ValueError, IndexError):
         return 0.0
 
@@ -256,7 +257,7 @@ def read_ready_stamp(directory: Path) -> tuple[float, float] | None:
 def _booted_in(stamp: Path) -> float:
     """The seconds the boot a stamp records took; ``0.0`` for a stamp that records none or cannot be read."""
     try:
-        seconds = float(stamp.read_text(encoding="utf-8").split()[1])
+        seconds = float(stamp.read_text(encoding=_UTF8).split()[1])
     except (OSError, ValueError, IndexError):
         return 0.0
     return seconds if math.isfinite(seconds) else 0.0

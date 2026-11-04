@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import importlib.metadata
+import logging
 import os
 import re
 import shutil
@@ -95,6 +96,8 @@ from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 
 __all__ = ["run"]
 
+log = logging.getLogger(__name__)
+
 _START_FAILED = "runner_start_failed"
 _SPEC_REJECTED = "spec_rejected"
 _NODE_FAULT = "node_fault"
@@ -106,6 +109,8 @@ _KEY_ENV = "HYPERLOOM_SIGNING_KEY_FILE"
 _BOOTSTRAP_STARTED_ENV = "HYPERLOOM_BOOTSTRAP_STARTED_UNIX"
 _BOOTSTRAP_ENDED_ENV = "HYPERLOOM_BOOTSTRAP_ENDED_UNIX"
 _TIMED_OUT_RC = 124
+#: The ``procedure.benchmark_backend`` that runs a test through Magpie's launchers and its lm-eval.
+_MAGPIE = "magpie"
 
 
 @dataclass
@@ -257,7 +262,7 @@ def _surface_sha256(spec: MeasurementSpec, points: list[Path]) -> str:
     Magpie the benchmark script a test executes is Magpie's own copy of its launcher, which the backend puts in the
     InferenceX checkout before the first round; it is put there first so that the hash is of the file that runs.
     """
-    if spec.procedure.benchmark_backend == "magpie":
+    if spec.procedure.benchmark_backend == _MAGPIE:
         install_launchers(points)
     return extract_surface(yaml.safe_load(points[0].read_text()) or {}).sha256
 
@@ -266,7 +271,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
     """Tools, attachments, farm and the rewritten YAML; returns the point path and the InferenceX checkout."""
     try:
         inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
-        if spec.procedure.benchmark_backend == "magpie":
+        if spec.procedure.benchmark_backend == _MAGPIE:
             ctx.environ["MAGPIE_PATH"] = str(ensure_magpie(spec.tools.magpie, ctx.cache))
     except ToolError as exc:
         raise RunnerFailure(_START_FAILED, str(exc)) from exc
@@ -339,7 +344,7 @@ def _install_eval_deps(ctx: _Context, spec: MeasurementSpec, points: list[Path],
     output (``measure.runner.eval_deps``). A test the evaluator cannot be installed for is not run: its accuracy round
     could only fail the same way, later.
     """
-    if not spec.procedure.accuracy or spec.procedure.benchmark_backend != "magpie":
+    if not spec.procedure.accuracy or spec.procedure.benchmark_backend != _MAGPIE:
         return
     benchmark = (yaml.safe_load(points[0].read_text()) or {}).get("benchmark") or {}
     if is_magpie_agentx(benchmark):
@@ -720,7 +725,8 @@ def run(
         except RunnerFailure as failure:
             write_status(out_dir, state=_FAILED, error_class=failure.error_class, message=str(failure))
             return failure.exit_code
-        except Exception as exc:  # noqa: BLE001 - the application reads status.json, not a traceback
+        except Exception as exc:  # the application reads status.json, not a traceback
+            log.exception("the runner failed; status.json says how")
             error_class = DISK_FULL if is_disk_full(exc) else "runner_error"
             message = f"{type(exc).__name__}: {exc} (at {_raised_at(exc)})"
             write_status(out_dir, state=_FAILED, error_class=error_class, message=message)

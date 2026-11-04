@@ -48,6 +48,10 @@ _CACHE_DIR = "__pycache__"
 
 # Per-``git`` invocation timeout (defensive against hung NFS).
 _GIT_TIMEOUT_SEC = 30
+#: The tools a patch is laid with, which also name how each patch of a set was laid; ``_SKIP``: it was in the tree.
+_GIT, _PATCH, _SKIP = "git", "patch", "skip"
+#: The ``git`` command that checks, lays and takes out a patch.
+_APPLY = "apply"
 _UTF8 = "utf-8"
 #: How a patch or a tool's output that is not valid UTF-8 is read: what it says is kept, the rest replaced.
 _LENIENT = "replace"
@@ -300,7 +304,7 @@ def _is_patched(plan: _PatchPlan) -> bool:
 
 def _apply_atomic(plan: _PatchPlan) -> bool:
     """Apply every patch in ``plan.patches`` as a transaction."""
-    git = shutil.which("git")
+    git = shutil.which(_GIT)
     if git is None:
         log.warning(
             "_server_patcher: `git` not on PATH — cannot apply %s patches "
@@ -309,7 +313,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         )
         return False
     # ``None`` disables the fuzzy fallback (no ``patch`` binary, or a strict-only plan).
-    patch_bin = shutil.which("patch") if plan.allow_fuzzy else None
+    patch_bin = shutil.which(_PATCH) if plan.allow_fuzzy else None
 
     # Per-patch precheck: each must pass ``git apply --check`` (strict) OR the fuzzy ``patch --fuzz=2 --dry-run``
     # fallback; if neither accepts a patch the whole set fail-softs.
@@ -317,8 +321,8 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
 
     apply_modes: dict[Path, str] = {}
     for p in plan.patches:
-        if _git(git, ("apply", "--check", strip_arg, str(p)), plan.apply_root):
-            apply_modes[p] = "git"
+        if _git(git, (_APPLY, "--check", strip_arg, str(p)), plan.apply_root):
+            apply_modes[p] = _GIT
             continue
         if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
             log.warning(
@@ -331,11 +335,11 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
                 strip_arg,
                 plan.framework,
             )
-            apply_modes[p] = "patch"
+            apply_modes[p] = _PATCH
             continue
         # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
         # iff the tree already contains its post-image).
-        if _git(git, ("apply", "-R", "--check", strip_arg, str(p)), plan.apply_root):
+        if _git(git, (_APPLY, "-R", "--check", strip_arg, str(p)), plan.apply_root):
             log.info(
                 "_server_patcher: %s patch %s already applied (reverse "
                 "`git apply -R --check %s` is clean); skipping it from the "
@@ -344,7 +348,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
                 p.name,
                 strip_arg,
             )
-            apply_modes[p] = "skip"
+            apply_modes[p] = _SKIP
             continue
         # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
         # hunks).
@@ -359,7 +363,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
                 plan.framework,
                 p.name,
             )
-            apply_modes[p] = "skip"
+            apply_modes[p] = _SKIP
             continue
         if p.name in plan.optional_patches:
             log.warning(
@@ -372,7 +376,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
                 strip_arg,
                 plan.version,
             )
-            apply_modes[p] = "skip"
+            apply_modes[p] = _SKIP
             continue
         log.warning(
             "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
@@ -390,12 +394,12 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     skipped = 0
     for p in plan.patches:
         mode = apply_modes[p]
-        if mode == "skip":
+        if mode == _SKIP:
             # Already applied; nothing to do and nothing to roll back.
             skipped += 1
             continue
-        if mode == "git":
-            ok = _git(git, ("apply", strip_arg, str(p)), plan.apply_root)
+        if mode == _GIT:
+            ok = _git(git, (_APPLY, strip_arg, str(p)), plan.apply_root)
         else:
             ok = _patch_apply(
                 patch_bin,
@@ -418,7 +422,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
 
-    fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
+    fuzzy_count = sum(1 for _, mode in applied if mode == _PATCH)
     log.info(
         "_server_patcher: applied %d patch(es) for %s %s "
         "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
@@ -458,10 +462,10 @@ def _rollback_applied(
 ) -> None:
     """Reverse-apply ``applied`` patches (newest first) to restore the tree."""
     for prev, prev_mode in reversed(applied):
-        if prev_mode == "git":
+        if prev_mode == _GIT:
             rolled_back = _git(
                 git,
-                ("apply", "-R", strip_arg, str(prev)),
+                (_APPLY, "-R", strip_arg, str(prev)),
                 plan.apply_root,
             )
         else:
