@@ -75,7 +75,9 @@ def gemm_tune():
             help="Decode and demand M: aiter's multiple-of-16 bucket up to 256 (bucket), or exact batch sizes (exact)",
         ),
     ),
-    click.option("--mp", default=1, type=int, help="Number of GPUs for parallel tuning"),
+    click.option(
+        "--mp", default=0, type=int, help="GPUs to tune on in parallel; 0 (default) is every GPU this process can see"
+    ),
     click.option("--output-dir", required=True, type=click.Path(), help="Output directory for all artifacts"),
     option_group(
         "bench",
