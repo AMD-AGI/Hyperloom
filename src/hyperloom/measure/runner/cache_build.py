@@ -28,10 +28,14 @@ distribution's own build requirements name is never fetched. The lock must there
 - Builders of one commit exclude each other with an exclusive ``flock`` on ``<cache>/.<sha>.lock``; the one that waits
   finds the finished entry when it gets the lock and uses it, with no download. The lock is also what keeps two hosts that
   share the cache directory over NFS apart (the cache's file system must support ``flock``, as NFSv4 does).
-- An entry that is already there is used when it is complete and still what a build would write (same commit tree, same
-  wheel target, source archive, source and wheels intact, this builder's script); one that differs is never modified:
-  the build refuses and names the difference (:class:`CacheConflict`). An entry with no manifest is the remains of a
-  build that did not finish; it is removed and built again.
+- An entry that is already there is used when it is complete and still what a build would write; one that differs is
+  never modified: the build refuses and names the difference (:class:`CacheConflict`). Its manifest file is read once,
+  the entry is checked against those bytes and the pin returned is their SHA-256, as a build returns the SHA-256 of the
+  text it wrote: never a fresh read of the cache. What the manifest records is checked against the commit, not only
+  against the entry: the same commit tree and wheel target, this builder's script, and the commit's archive and source
+  made again from the clone in a directory of the builder's own (as a build makes them), whose size and hash must be
+  what the manifest records. An entry with no manifest is the remains of a build that did not finish; it is removed
+  and built again.
 - ``<entry>/source.tar`` is the commit's ``git archive`` made with every setting that changes its bytes fixed
   (``git -c tar.umask=0022 -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null archive --format=tar
   <sha>``), in a throwaway repository that borrows only the objects of the builder's clone and with git's system and
@@ -47,6 +51,16 @@ distribution's own build requirements name is never fetched. The lock must there
   leaves the entry byte for byte as it was, because a campaign that started on it has pinned its manifest
   (``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``). Builders of different versions that build one commit use separate
   ``HYPERLOOM_RUNNER_CACHE`` directories.
+
+What the pin vouches for. A sandbox accepts only the manifest whose SHA-256 its template pins, unpacks only the
+``source.tar`` bytes of the size and hash that manifest records, reads the lock from that copy, and installs only the
+wheels the manifest lists, each matched to a pin of that lock and hashed against the manifest as it is copied
+(:func:`~hyperloom.measure.runner.cache_layout.stage_entry`). The builder pins a manifest only when that archive is the
+commit's own, so the runner's code and its lock are the commit's, whoever can write the cache, and so is every wheel
+downloaded for a pin, whose hash is one the commit's lock lists. A wheel built here from a source distribution is not
+covered: the lock lists the hash of the source distribution, not of the wheel, so on reuse the builder can check a
+built wheel only against the entry's own manifest, and one replaced together with that manifest is pinned and
+installed. Only a cache that no one but the builder can write rules that out.
 
 The cache must stay readable by the account the sandbox runs as: run the builder with a ``umask`` that leaves new files
 readable by others (``022``).
@@ -424,7 +438,8 @@ def _builder_problems(raw: bytes, manifest: Manifest) -> list[str]:
 
 
 def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry:
-    """Make the entry beside ``final`` and rename it into place; the manifest is the last file written."""
+    """Make the entry beside ``final`` and rename it into place; the manifest is the last file written, and the pin
+    returned is the SHA-256 of the text written, which the check of the new entry is pinned to."""
     pending = final.parent / f".{sha}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     pending.mkdir()
     try:
@@ -438,35 +453,59 @@ def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
         target = options.target.manifest_form()
         manifest = Manifest(sha, tree, tree_digest(source), entries, target, bootstrap, archive)
         _check_installable(pending, manifest, options.target)
-        (pending / MANIFEST_NAME).write_text(manifest_to_json(manifest), encoding=_UTF8)
-        problems = check_entry(pending, sha, verify_hash=True)
+        text = manifest_to_json(manifest).encode(_UTF8)
+        (pending / MANIFEST_NAME).write_bytes(text)
+        pin = hashlib.sha256(text).hexdigest()
+        problems = check_entry(pending, sha, pin, verify_hash=True)
         if problems:
             raise CacheBuildError(f"the entry just built does not verify: {'; '.join(problems[:3])}")
         os.rename(pending, final)
     except BaseException:
         shutil.rmtree(pending, ignore_errors=True)
         raise
-    return CacheEntry(final, file_sha256(final / MANIFEST_NAME), reused=False)
+    return CacheEntry(final, pin, reused=False)
 
 
-def _differences(final: Path, sha: str, tree: str, options: BuildOptions) -> list[str]:
-    """How the finished entry ``final`` differs from what a build would write, one line each; empty when it does not."""
-    problems = check_entry(final, sha, verify_hash=True)
-    if problems:
-        return problems
-    raw = (final / MANIFEST_NAME).read_bytes()
+def _source_differences(repo: Path, sha: str, manifest: Manifest) -> list[str]:
+    """How the source ``manifest`` records differs from the commit's: the archive and its unpacked tree are made again
+    from ``repo`` as a build makes them (:func:`_export_source`), in a directory of the builder's own, and compared by
+    size and hash with what the manifest records."""
+    with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as scratch:
+        archive = _export_source(repo, sha, Path(scratch))
+        source = tree_digest(Path(scratch) / SOURCE_DIR)
+    problems: list[str] = []
+    if manifest.source_archive != archive:
+        problems.append(
+            f"its {SOURCE_ARCHIVE} is not the archive of {sha}: the manifest records {manifest.source_archive}, "
+            f"the commit's is {archive}"
+        )
+    if manifest.source != source:
+        problems.append(
+            f"its {SOURCE_DIR} is not the tree of {sha}: the manifest records {manifest.source}, not {source}"
+        )
+    return problems
+
+
+def _differences(repo: Path, sha: str, tree: str, raw: bytes, options: BuildOptions) -> list[str]:
+    """How the manifest text ``raw`` of an entry that agrees with it differs from what a build of ``sha`` would write,
+    one line each; empty when it does not. What it records is checked against the commit, not against the entry: the
+    commit's tree, and its archive and source made again from ``repo`` (:func:`_source_differences`)."""
     manifest = manifest_from_json(raw)
+    problems: list[str] = []
     if manifest.git_tree != tree:
         problems.append(f"its manifest records tree {manifest.git_tree}, but the tree of {sha} is {tree}")
     if manifest.target != options.target.manifest_form():
         problems.append(f"its wheels are for {json.dumps(manifest.target)}, not {options.target.manifest_form()}")
-    return problems + _builder_problems(raw, manifest)
+    return problems + _source_differences(repo, sha, manifest) + _builder_problems(raw, manifest)
 
 
-def _use_or_clear(final: Path, sha: str, tree: str, options: BuildOptions) -> CacheEntry | None:
+def _use_or_clear(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry | None:
     """The finished entry at ``final`` if it is what a build would write, ``None`` when there is nothing to use.
 
     An entry that has no manifest is an unfinished build's remains and is removed. A finished one is never written to.
+    Its manifest file is read once: the entry is checked against those bytes (:func:`check_entry` pinned to their
+    hash, so a manifest written over meanwhile is refused), those bytes against the commit (:func:`_differences`), and
+    the pin returned is their SHA-256.
 
     Raises:
         CacheConflict: When the entry is finished and differs.
@@ -476,12 +515,14 @@ def _use_or_clear(final: Path, sha: str, tree: str, options: BuildOptions) -> Ca
     if final.is_dir() and not (final / MANIFEST_NAME).is_file():
         shutil.rmtree(final)
         return None
-    problems = _differences(final, sha, tree, options)
+    raw = (final / MANIFEST_NAME).read_bytes()
+    pin = hashlib.sha256(raw).hexdigest()
+    problems = check_entry(final, sha, pin, verify_hash=True) or _differences(repo, sha, tree, raw, options)
     if problems:
         raise CacheConflict(
             f"{final} is not what a build of {sha} writes, so it is left alone: {'; '.join(problems[:3])}"
         )
-    return CacheEntry(final, file_sha256(final / MANIFEST_NAME), reused=True)
+    return CacheEntry(final, pin, reused=True)
 
 
 @contextmanager
@@ -520,7 +561,7 @@ def ensure_runner_cache(repo: Path, sha: str, cache_root: Path, options: BuildOp
     with _exclusive(cache_root / f".{sha}.lock", options.lock_timeout_sec):
         for leftover in cache_root.glob(f".{sha}.tmp-*"):
             shutil.rmtree(leftover, ignore_errors=True)
-        return _use_or_clear(final, sha, tree, options) or _build(repo, sha, tree, final, options)
+        return _use_or_clear(repo, sha, tree, final, options) or _build(repo, sha, tree, final, options)
 
 
 def _repeatable(parser: argparse.ArgumentParser, flag: str, help_text: str) -> None:
