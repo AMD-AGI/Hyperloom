@@ -500,6 +500,36 @@ def _wait_health(
     return False
 
 
+def _pd_leg_healthy(role: str, url: str) -> bool:
+    """Return True when one PD leg's own ``/health`` answers 2xx."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(  # nosec B310 - http URL built from this driver's own summary.
+            f"{url.rstrip('/')}/health",
+            timeout=3,
+        ) as resp:
+            if 200 <= resp.status < 300:
+                _log(f"{role} leg /health OK ({url})")
+                return True
+    except (urllib.error.URLError, OSError):
+        pass
+    return False
+
+
+def _pd_leg_fatal(role: str, leg_log: Path | None) -> bool:
+    """Return True after reporting a fatal line found in a PD leg's own log."""
+    if leg_log is None:
+        return False
+    fatal_line = _scan_log_for_fatal(leg_log)
+    if not fatal_line:
+        return False
+    _log(f"ERROR {role} leg fatal in {leg_log.name}: {fatal_line[:300]}; aborting health wait")
+    _emit_log_tail(leg_log)
+    return True
+
+
 def _wait_pd_legs_health(
     prefill_url: str,
     decode_url: str,
@@ -507,8 +537,6 @@ def _wait_pd_legs_health(
     log_dir: str | None = None,
 ) -> bool | None:
     """Poll both PD legs' own ``/health`` until each answers, within one budget."""
-    import urllib.error
-    import urllib.request
 
     def _leg_log(role: str) -> Path | None:
         # Legs log to {pid_file_name stem}.log, e.g. decode_0.log / prefill_0.log.
@@ -518,26 +546,13 @@ def _wait_pd_legs_health(
     started = time.monotonic()
     while pending and time.monotonic() - started < timeout_s:
         for role, url in list(pending.items()):
-            try:
-                with urllib.request.urlopen(  # nosec B310 - http URL built from this driver's own summary.
-                    f"{url.rstrip('/')}/health",
-                    timeout=3,
-                ) as resp:
-                    if 200 <= resp.status < 300:
-                        _log(f"{role} leg /health OK ({url})")
-                        pending.pop(role)
-                        continue
-            except (urllib.error.URLError, OSError):
-                pass
+            if _pd_leg_healthy(role, url):
+                pending.pop(role)
+                continue
             # A remote leg's PID is not ours to os.kill; a fatal in its own log is the cross-node-safe proof of death
             # (the nohup wrapper hides crashes).
-            leg_log = _leg_log(role)
-            if leg_log is not None:
-                fatal_line = _scan_log_for_fatal(leg_log)
-                if fatal_line:
-                    _log(f"ERROR {role} leg fatal in {leg_log.name}: {fatal_line[:300]}; aborting health wait")
-                    _emit_log_tail(leg_log)
-                    return False
+            if _pd_leg_fatal(role, _leg_log(role)):
+                return False
         if pending:
             time.sleep(5)
     if pending:

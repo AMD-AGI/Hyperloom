@@ -1192,6 +1192,10 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
     assert gpu_types._autodetect_gpu_type() is None
 
+    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(KeyError("device"))
+    with pytest.raises(KeyError, match="device"):
+        gpu_types._autodetect_gpu_type()
+
 
 def test_gpu_type_autodetect_is_none_when_torch_cannot_load_its_library(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer import gpu_types

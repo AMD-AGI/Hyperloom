@@ -1493,34 +1493,33 @@ def _profile_yaml_model(tmp_path, framework: str, model: str, envs: dict) -> Pat
     return src
 
 
+def _sglang_profile_envs(tmp_path, monkeypatch, model: str, *, config: str | None = None, force: str | None = None):
+    """Materialize a patched-SGLang profile run of ``model``; ``config`` is written as its config.json when given."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    if force is None:
+        monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", force)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    if config is not None:
+        Path(model).mkdir()
+        (Path(model) / "config.json").write_text(config, encoding="utf-8")
+    src = _profile_yaml_model(tmp_path, "sglang", model, {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = materialize_benchmark_config(src, tmp_path)
+    return yaml.safe_load(out.read_text())["benchmark"]["envs"]
+
+
+_GEMMA2_CONFIG = json.dumps({"model_type": "gemma2", "architectures": ["Gemma2ForCausalLM"]})
+
+
 def test_materialize_profile_sglang_skips_shape_discovery_for_gemma2(
     tmp_path,
     monkeypatch,
 ):
     """Gemma2 + patched SGLang must NOT inject shape-discovery (it crashes CUDA-graph capture); --enable-profile-cuda-graph still applies."""
-    import yaml
-
-    _clear_workload_env(monkeypatch)
-    _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    model = tmp_path / "gemma2_model"
-    model.mkdir()
-    (model / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": "gemma2",
-                "architectures": ["Gemma2ForCausalLM"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    src = _profile_yaml_model(
-        tmp_path,
-        "sglang",
-        str(model),
-        {"CONC": 32, "ISL": 256, "OSL": 1024},
-    )
-    out = materialize_benchmark_config(src, tmp_path)
-    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    envs = _sglang_profile_envs(tmp_path, monkeypatch, str(tmp_path / "gemma2_model"), config=_GEMMA2_CONFIG)
     assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
 
@@ -1530,32 +1529,13 @@ def test_materialize_profile_sglang_keeps_shape_discovery_for_non_gemma2(
     monkeypatch,
 ):
     """A non-Gemma2 model still gets shape-discovery when patched."""
-    import yaml
-
-    _clear_workload_env(monkeypatch)
-    _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    model = tmp_path / "llama_model"
-    model.mkdir()
-    (model / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": "llama",
-                "architectures": ["LlamaForCausalLM"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    src = _profile_yaml_model(
+    envs = _sglang_profile_envs(
         tmp_path,
-        "sglang",
-        str(model),
-        {"CONC": 32, "ISL": 256, "OSL": 1024},
+        monkeypatch,
+        str(tmp_path / "llama_model"),
+        config=json.dumps({"model_type": "llama", "architectures": ["LlamaForCausalLM"]}),
     )
-    out = materialize_benchmark_config(src, tmp_path)
-    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
-        "EXTRA_SGLANG_ARGS",
-        "",
-    )
+    extra = envs.get("EXTRA_SGLANG_ARGS", "")
     assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
 
 
@@ -1564,21 +1544,8 @@ def test_materialize_profile_sglang_skips_shape_discovery_gemma2_by_path(
     monkeypatch,
 ):
     """No config.json but a gemma-2 path -> heuristic skips shape-discovery."""
-    import yaml
-
-    _clear_workload_env(monkeypatch)
-    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
-    _mock_patchers(monkeypatch, vllm=False, sglang=True)
     # Path looks like Gemma2 but ships no config.json (not-yet-materialized).
-    model = "/path/models/google-gemma-2-9b-it"
-    src = _profile_yaml_model(
-        tmp_path,
-        "sglang",
-        model,
-        {"CONC": 32, "ISL": 256, "OSL": 1024},
-    )
-    out = materialize_benchmark_config(src, tmp_path)
-    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    envs = _sglang_profile_envs(tmp_path, monkeypatch, "/path/models/google-gemma-2-9b-it")
     assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
 
@@ -1588,23 +1555,8 @@ def test_materialize_profile_sglang_no_config_non_gemma_keeps_shape_discovery(
     monkeypatch,
 ):
     """No config.json and a non-Gemma2 path -> shape-discovery stays on."""
-    import yaml
-
-    _clear_workload_env(monkeypatch)
-    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
-    _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    model = "/path/models/meta-llama-3-8b-instruct"
-    src = _profile_yaml_model(
-        tmp_path,
-        "sglang",
-        model,
-        {"CONC": 32, "ISL": 256, "OSL": 1024},
-    )
-    out = materialize_benchmark_config(src, tmp_path)
-    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
-        "EXTRA_SGLANG_ARGS",
-        "",
-    )
+    envs = _sglang_profile_envs(tmp_path, monkeypatch, "/path/models/meta-llama-3-8b-instruct")
+    extra = envs.get("EXTRA_SGLANG_ARGS", "")
     assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
 
 
@@ -1613,30 +1565,12 @@ def test_materialize_profile_sglang_skips_shape_discovery_nested_gemma2(
     monkeypatch,
 ):
     """Gemma2 declared only in text_config still trips the shape-discovery gate."""
-    import yaml
-
-    _clear_workload_env(monkeypatch)
-    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
-    _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    model = tmp_path / "wrapper_model"
-    model.mkdir()
-    (model / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": "wrapper",
-                "text_config": {"model_type": "gemma2"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    src = _profile_yaml_model(
+    envs = _sglang_profile_envs(
         tmp_path,
-        "sglang",
-        str(model),
-        {"CONC": 32, "ISL": 256, "OSL": 1024},
+        monkeypatch,
+        str(tmp_path / "wrapper_model"),
+        config=json.dumps({"model_type": "wrapper", "text_config": {"model_type": "gemma2"}}),
     )
-    out = materialize_benchmark_config(src, tmp_path)
-    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
 
@@ -1646,22 +1580,7 @@ def test_materialize_profile_sglang_residual_config_gemma2_path(
     monkeypatch,
 ):
     """Empty config.json + gemma-2 path -> heuristic still skips shape-discovery."""
-    import yaml
-
-    _clear_workload_env(monkeypatch)
-    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
-    _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    model = tmp_path / "google-gemma-2-9b-it"
-    model.mkdir()
-    (model / "config.json").write_text("{}", encoding="utf-8")
-    src = _profile_yaml_model(
-        tmp_path,
-        "sglang",
-        str(model),
-        {"CONC": 32, "ISL": 256, "OSL": 1024},
-    )
-    out = materialize_benchmark_config(src, tmp_path)
-    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    envs = _sglang_profile_envs(tmp_path, monkeypatch, str(tmp_path / "google-gemma-2-9b-it"), config="{}")
     assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
 
@@ -1671,30 +1590,7 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
     monkeypatch,
 ):
     """HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps shape-discovery on for Gemma2 (escape hatch for debugging the TraceLens root-cause fix)."""
-    import yaml
-
-    _clear_workload_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", "1")
-    _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    model = tmp_path / "gemma2_model"
-    model.mkdir()
-    (model / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": "gemma2",
-                "architectures": ["Gemma2ForCausalLM"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    src = _profile_yaml_model(
-        tmp_path,
-        "sglang",
-        str(model),
-        {"CONC": 32, "ISL": 256, "OSL": 1024},
-    )
-    out = materialize_benchmark_config(src, tmp_path)
-    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    envs = _sglang_profile_envs(tmp_path, monkeypatch, str(tmp_path / "gemma2_model"), config=_GEMMA2_CONFIG, force="1")
     assert "--enable-shape-discovery-for-cuda-graph-profile" in envs.get(
         "EXTRA_SGLANG_ARGS",
         "",
@@ -2468,35 +2364,52 @@ async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_d
         assert res["requested_route"] == str(bad_route).strip().lower()
 
 
+def _capture_tool_cmd(monkeypatch, stdout: dict | None = None) -> dict:
+    """Stub the TraceLens subprocess to print ``stdout`` and record the command it ran under ``cmd``."""
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps(stdout or {"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
+    return captured
+
+
+async def _analyze_fake_trace(session_dir, monkeypatch, *, stdout: dict | None = None, **payload):
+    """Run the handler on an empty trace dir with ``top_k=5``; return the result and the tool command."""
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured = _capture_tool_cmd(monkeypatch, stdout)
+    res = await ta.trace_analyze_handler(
+        {"trace_input": str(fake_trace), "session_id": session_dir.name, "top_k": 5, **payload},
+        session_dir=session_dir,
+    )
+    return res, captured["cmd"]
+
+
+def _stub_tracelens_root(monkeypatch, session_dir) -> None:
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
+
+
+def _save_session_framework(session_dir, framework: str) -> None:
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.framework = framework
+    state.save(session_dir)
+
+
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); ``non-llm`` is an explicit route."""
     monkeypatch.setattr(sys, "executable", "/task/deps/venv/bin/python")
     monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
-    monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-    res = await ta.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "xdit",
-            "model_name": "FLUX.1-dev",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
-    )
+    _stub_tracelens_root(monkeypatch, session_dir)
+    res, cmd = await _analyze_fake_trace(session_dir, monkeypatch, framework="xdit", model_name="FLUX.1-dev")
     assert res["status"] == "ok"
-    cmd = captured["cmd"]
     assert cmd[:3] == ["/task/deps/venv/bin/python", "-m", ta._TRACELENS_ANALYSIS_MODULE]
     assert "--tracelens-root" in cmd
     assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
@@ -2508,33 +2421,10 @@ async def test_trace_analyze_handler_xdit_state_overrides_stale_payload_framewor
     monkeypatch,
 ):
     """A stale text-generation payload must not make xDiT split its raw trace."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    state.framework = "xdit"
-    state.save(session_dir)
-
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-    res = await ta.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
-    )
+    _save_session_framework(session_dir, "xdit")
+    res, cmd = await _analyze_fake_trace(session_dir, monkeypatch, framework="sglang")
 
     assert res["status"] == "ok"
-    cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "xdit"
     assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
     warnings = res["trace_health_warnings"]
@@ -2549,33 +2439,10 @@ async def test_trace_analyze_handler_custom_state_overrides_stale_payload_framew
     monkeypatch,
 ):
     """All scriptable session frameworks preserve their raw trace."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    state.framework = "custom"
-    state.save(session_dir)
-
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-    res = await ta.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
-    )
+    _save_session_framework(session_dir, "custom")
+    res, cmd = await _analyze_fake_trace(session_dir, monkeypatch, framework="sglang")
 
     assert res["status"] == "ok"
-    cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "custom"
     assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
     assert res["trace_health_warnings"][0]["code"] == "stale_framework_overridden"
@@ -2587,33 +2454,10 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
     monkeypatch,
 ):
     """Explicit serving-framework payloads keep their existing precedence."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    state.framework = "vllm"
-    state.save(session_dir)
-
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-    res = await ta.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
-    )
+    _save_session_framework(session_dir, "vllm")
+    res, cmd = await _analyze_fake_trace(session_dir, monkeypatch, framework="sglang")
 
     assert res["status"] == "ok"
-    cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "sglang"
 
 
@@ -2621,28 +2465,14 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
 async def test_trace_analyze_handler_env_route_selects_non_llm(session_dir, monkeypatch):
     """HYPERLOOM_TRACE_ANALYSIS_ROUTE=non-llm selects the no-LLM route even for a text-gen framework (explicit env route wins over the default)."""
     monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "non-llm")
-    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
-    monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "orchestrator_mode": "non-llm", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-    res = await ta.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
+    _stub_tracelens_root(monkeypatch, session_dir)
+    res, cmd = await _analyze_fake_trace(
+        session_dir,
+        monkeypatch,
+        stdout={"status": "ok", "orchestrator_mode": "non-llm", "hot_kernels": []},
+        framework="sglang",
     )
     assert res["status"] == "ok"
-    cmd = captured["cmd"]
     assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
     assert cmd[cmd.index("--route") + 1] == "non-llm"
 
@@ -2651,28 +2481,9 @@ async def test_trace_analyze_handler_env_route_selects_non_llm(session_dir, monk
 async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route (the shipped default)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
-    monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-    res = await ta.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
-    )
+    _stub_tracelens_root(monkeypatch, session_dir)
+    res, cmd = await _analyze_fake_trace(session_dir, monkeypatch, framework="sglang")
     assert res["status"] == "ok"
-    cmd = captured["cmd"]
     assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
     assert cmd[cmd.index("--route") + 1] == "agent"
 
@@ -2731,17 +2542,10 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
 async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
     """Scriptable (xDiT) params reach the tool on both routes: --steady-state-mode generic."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
-    monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
+    _stub_tracelens_root(monkeypatch, session_dir)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
+    captured = _capture_tool_cmd(monkeypatch)
     base = {
         "trace_input": str(fake_trace),
         "session_id": session_dir.name,

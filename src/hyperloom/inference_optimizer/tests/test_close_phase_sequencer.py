@@ -1549,8 +1549,8 @@ async def test_recipe_finalize_save_serialization_defect_propagates(tmp_path, mo
             await outcome
 
 
-@pytest.mark.asyncio
-async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path: Path):
+def _remote_knowledge_plane_coordinator(tmp_path: Path) -> Coordinator:
+    """An idle coordinator on ``tmp_path/session`` backed by a remote-mode knowledge plane."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -1562,12 +1562,17 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
         mode=KnowledgeStoreMode.REMOTE,
         local_root=str(tmp_path / "knowledge"),
     )
-    coord = Coordinator(
+    return Coordinator(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
     )
+
+
+@pytest.mark.asyncio
+async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path: Path):
+    coord = _remote_knowledge_plane_coordinator(tmp_path)
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = True
     coord.shared_state.recipe_finalize_status = "written"
@@ -1590,23 +1595,7 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
 async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
     tmp_path: Path,
 ):
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-    }
-    config = KnowledgeConfig(
-        mode=KnowledgeStoreMode.REMOTE,
-        local_root=str(tmp_path / "knowledge"),
-    )
-    coord = Coordinator(
-        session_dir=session_dir,
-        backends=backends,
-        role_registry=default_role_registry(),
-        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
-    )
+    coord = _remote_knowledge_plane_coordinator(tmp_path)
     coord.shared_state.close_sequence_done = True
     coord.shared_state.recipe_finalize_status = "failed"
     coord.shared_state.recipe_finalize_outcome = {"status": "error"}

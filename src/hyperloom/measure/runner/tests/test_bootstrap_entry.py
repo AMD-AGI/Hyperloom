@@ -151,20 +151,37 @@ def _before_the_script(entry: Path) -> None:
     _rewrite_manifest(entry, "")
 
 
-@pytest.mark.parametrize("make", [_older_builder, _before_the_script], ids=["another-builder", "no-script"])
-def test_an_entry_with_another_builders_script_or_none_gets_this_one_and_a_manifest_that_pins_it(
-    rig: Rig, tmp_path: Path, make: Callable[[Path], None]
+def _files(entry: Path) -> dict[str, tuple[int, bytes]]:
+    """Every file of the entry, by its path, with its mode and content."""
+    return {
+        path.relative_to(entry).as_posix(): (path.lstat().st_mode, path.read_bytes())
+        for path in sorted(entry.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    ("make", "recorded"),
+    [(_older_builder, "SHA-256 "), (_before_the_script, "none")],
+    ids=["another-builder", "no-script"],
+)
+def test_an_entry_with_another_builders_script_or_none_is_refused_and_left_byte_identical(
+    rig: Rig, tmp_path: Path, make: Callable[[Path], None], recorded: str
 ) -> None:
     cache = copy_cache(rig, tmp_path / "cache")
     entry = _entry(cache)
     make(entry)
-    used = ensure_runner_cache(rig.repo, cache.sha, cache.root, rig.build_options())
-    assert used.reused is True
-    assert (entry / BOOTSTRAP_NAME).read_text() == BOOTSTRAP_SCRIPT
-    assert stat.S_IMODE((entry / BOOTSTRAP_NAME).stat().st_mode) == 0o755
-    assert used.manifest_sha256 == _sha256(entry / MANIFEST_NAME)
-    assert manifest_from_json((entry / MANIFEST_NAME).read_bytes()).bootstrap_sha256 == _sha256(entry / BOOTSTRAP_NAME)
-    assert check_entry(entry, cache.sha, used.manifest_sha256, verify_hash=True) == []
+    manifest = manifest_from_json((entry / MANIFEST_NAME).read_bytes())
+    pinned, before = _sha256(entry / MANIFEST_NAME), _files(entry)
+    with pytest.raises(CacheConflict, match="is left alone") as refused:
+        ensure_runner_cache(rig.repo, cache.sha, cache.root, rig.build_options())
+    this_builder = hashlib.sha256(BOOTSTRAP_SCRIPT.encode()).hexdigest()
+    assert f"its manifest records {BOOTSTRAP_NAME} {recorded}{manifest.bootstrap_sha256}" in str(refused.value)
+    assert f"this builder writes {BOOTSTRAP_NAME} SHA-256 {this_builder}" in str(refused.value)
+    assert "build into a separate HYPERLOOM_RUNNER_CACHE directory" in str(refused.value)
+    assert _files(entry) == before
+    # A campaign that pinned the entry's manifest before the refused build still starts from it.
+    assert check_entry(entry, cache.sha, pinned, verify_hash=True) == []
 
 
 def test_an_entry_whose_script_is_not_the_one_its_manifest_pins_is_refused_and_left_as_it_was(

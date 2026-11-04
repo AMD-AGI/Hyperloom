@@ -14,7 +14,6 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
 )
 from hyperloom.orchestrator.kernel import kernel_decisions
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -25,17 +24,7 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _silent_backends() -> dict[str, object]:
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {
-        "orchestration": MockBackend(silent, name="o"),
-        "critic": MockBackend(silent, name="c"),
-    }
+from .conftest import silent_backends
 
 
 @pytest.fixture
@@ -83,7 +72,7 @@ def test_lifecycle_paths_handles_non_dict():
 
 @pytest.mark.asyncio
 async def test_emit_lifecycle_records_and_persists(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         c.writeback.emit_lifecycle(
             step="report",
@@ -110,7 +99,7 @@ async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
 ):
     # Bursty START markers within the debounce window coalesce to a single state.json write; the next terminal END
     # flushes the whole tail.
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         from unittest.mock import patch as _patch
 
@@ -146,7 +135,7 @@ async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
 
 @pytest.mark.asyncio
 async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_path):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
@@ -203,7 +192,7 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
 ):
     # The lifecycle END for a trace_analyze step must carry every TraceLens report path the handler returns, not just
     # candidates_path.
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
@@ -244,7 +233,7 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
 
 @pytest.mark.asyncio
 async def test_handle_request_failed_handler_emits_error(session_dir, monkeypatch):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
@@ -353,7 +342,7 @@ def test_roofline_lifecycle_lets_a_state_serialization_bug_propagate(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         cached = {"status": "ok", "candidates_path": "/tmp/cached_kc.json"}
         monkeypatch.setattr(
@@ -387,7 +376,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
     session_dir,
     monkeypatch,
 ):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         # Bypass the execution-order gate that would deny an integrate request in the initial phase before reaching
         # the emit.
@@ -431,7 +420,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
 
 @pytest.mark.asyncio
 async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         from hyperloom.orchestrator.phases import machine_state as _ps
 
@@ -464,32 +453,43 @@ async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
         await c.stop()
 
 
+async def _enter_close(c, monkeypatch, fake_run_task) -> None:
+    """Enter CLOSE with the report and breakdown tasks queued and run through ``fake_run_task``."""
+    report_task = Task(
+        task_id="rpt-1",
+        kind="report",
+        state="queued",
+        params={},
+        idempotency_key="internal-report-close",
+        requires_lanes=[],
+    )
+    bd_task = Task(
+        task_id="bd-1",
+        kind="session_breakdown",
+        state="queued",
+        params={},
+        idempotency_key="internal-breakdown-close",
+        requires_lanes=[],
+    )
+
+    async def fake_enqueue_report(*, reason):
+        return report_task
+
+    async def fake_enqueue_breakdown(*, reason):
+        return bd_task
+
+    monkeypatch.setattr(c.phase_close, "_enqueue_internal_report_task", fake_enqueue_report)
+    monkeypatch.setattr(c.phase_close, "_enqueue_internal_session_breakdown_task", fake_enqueue_breakdown)
+    monkeypatch.setattr(c.sub, "run_task", fake_run_task)
+    monkeypatch.setattr(c.recipe_journal, "finalize_recipe_and_journal", lambda: None)
+
+    await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
+
+
 @pytest.mark.asyncio
 async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
-        report_task = Task(
-            task_id="rpt-1",
-            kind="report",
-            state="queued",
-            params={},
-            idempotency_key="internal-report-close",
-            requires_lanes=[],
-        )
-        bd_task = Task(
-            task_id="bd-1",
-            kind="session_breakdown",
-            state="queued",
-            params={},
-            idempotency_key="internal-breakdown-close",
-            requires_lanes=[],
-        )
-
-        async def fake_enqueue_report(*, reason):
-            return report_task
-
-        async def fake_enqueue_breakdown(*, reason):
-            return bd_task
 
         class _Res:
             state = "succeeded"
@@ -503,24 +503,7 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
                 (rd / "final.md").write_text("# final\n", encoding="utf-8")
             return _Res()
 
-        monkeypatch.setattr(
-            c.phase_close,
-            "_enqueue_internal_report_task",
-            fake_enqueue_report,
-        )
-        monkeypatch.setattr(
-            c.phase_close,
-            "_enqueue_internal_session_breakdown_task",
-            fake_enqueue_breakdown,
-        )
-        monkeypatch.setattr(c.sub, "run_task", fake_run_task)
-        monkeypatch.setattr(
-            c.recipe_journal,
-            "finalize_recipe_and_journal",
-            lambda: None,
-        )
-
-        await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
+        await _enter_close(c, monkeypatch, fake_run_task)
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         statuses = [e["status"] for e in rpt]
@@ -539,30 +522,8 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
     session_dir,
     monkeypatch,
 ):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
-        report_task = Task(
-            task_id="rpt-1",
-            kind="report",
-            state="queued",
-            params={},
-            idempotency_key="internal-report-close",
-            requires_lanes=[],
-        )
-        bd_task = Task(
-            task_id="bd-1",
-            kind="session_breakdown",
-            state="queued",
-            params={},
-            idempotency_key="internal-breakdown-close",
-            requires_lanes=[],
-        )
-
-        async def fake_enqueue_report(*, reason):
-            return report_task
-
-        async def fake_enqueue_breakdown(*, reason):
-            return bd_task
 
         class _Failed:
             state = "failed"
@@ -570,101 +531,14 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
         class _Succeeded:
             state = "succeeded"
 
-        # run_task_registered forwards the lease and per-task extras.
+        # sub.run_task catches executor exceptions and returns state="failed", so this also covers a raising executor.
         async def fake_run_task(task, **_kwargs):
             return _Failed() if task.kind == "report" else _Succeeded()
 
-        monkeypatch.setattr(
-            c.phase_close,
-            "_enqueue_internal_report_task",
-            fake_enqueue_report,
-        )
-        monkeypatch.setattr(
-            c.phase_close,
-            "_enqueue_internal_session_breakdown_task",
-            fake_enqueue_breakdown,
-        )
-        monkeypatch.setattr(c.sub, "run_task", fake_run_task)
-        monkeypatch.setattr(
-            c.recipe_journal,
-            "finalize_recipe_and_journal",
-            lambda: None,
-        )
-
-        await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
+        await _enter_close(c, monkeypatch, fake_run_task)
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         assert [e["status"] for e in rpt] == ["START", "ERROR"]
         assert rpt[-1]["detail"] == "task_state='failed'"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_on_enter_close_emits_report_error_for_exception(
-    session_dir,
-    monkeypatch,
-):
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        report_task = Task(
-            task_id="rpt-1",
-            kind="report",
-            state="queued",
-            params={},
-            idempotency_key="internal-report-close",
-            requires_lanes=[],
-        )
-        bd_task = Task(
-            task_id="bd-1",
-            kind="session_breakdown",
-            state="queued",
-            params={},
-            idempotency_key="internal-breakdown-close",
-            requires_lanes=[],
-        )
-
-        async def fake_enqueue_report(*, reason):
-            return report_task
-
-        async def fake_enqueue_breakdown(*, reason):
-            return bd_task
-
-        class _Succeeded:
-            state = "succeeded"
-
-        # run_task_registered forwards the lease and per-task extras.
-        class _Failed:
-            state = "failed"
-
-        # sub.run_task catches executor exceptions and returns state="failed";
-        # simulating that here exercises the same lifecycle error path.
-        async def fake_run_task(task, **_kwargs):
-            if task.kind == "report":
-                return _Failed()
-            return _Succeeded()
-
-        monkeypatch.setattr(
-            c.phase_close,
-            "_enqueue_internal_report_task",
-            fake_enqueue_report,
-        )
-        monkeypatch.setattr(
-            c.phase_close,
-            "_enqueue_internal_session_breakdown_task",
-            fake_enqueue_breakdown,
-        )
-        monkeypatch.setattr(c.sub, "run_task", fake_run_task)
-        monkeypatch.setattr(
-            c.recipe_journal,
-            "finalize_recipe_and_journal",
-            lambda: None,
-        )
-
-        await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
-
-        rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
-        assert [e["status"] for e in rpt] == ["START", "ERROR"]
-        assert "task_state" in rpt[-1]["detail"]
     finally:
         await c.stop()

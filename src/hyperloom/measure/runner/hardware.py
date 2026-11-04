@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What the machine says about its GPUs: model, power cap, partition mode, ECC counts, memory in use (design 4.8.2).
+"""What the machine says about its GPUs: model, power cap, partition mode, ECC counts, memory in use.
 
 Everything is read through ``amd-smi`` and ``rocm-smi`` and is ``None`` when it cannot be read; a value that could not
 be read is never filled in, and a check that needs it is not made (the runner records that it was not).
@@ -24,6 +24,13 @@ from hyperloom_common.gpu_identity import (
     gpu_type_for_device_id,
     normalise_device_id,
 )
+from hyperloom.common.gpu_power_settings import (
+    GpuPowerSettingsError,
+    gpu_rows,
+    reading_matches,
+    run_amd_smi,
+    socket_power_cap_w,
+)
 from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage, vram_busy
 
 __all__ = [
@@ -39,9 +46,9 @@ __all__ = [
 
 _JSON = "--json"
 #: How long a visible card that holds memory before the test is read again. A server that crashed in the test before on
-#: the card frees its memory only once its processes are torn down, and a retry that starts at once (8 s after the crash
-#: on the GPU check) found the card still held and failed three times over; a holder that lasts longer is not the last
-#: test's. The census's settle (``EXCESS_SETTLE_SEC``) is for a server that exited, which frees its memory in seconds.
+#: the card frees its memory only once its processes are torn down, and a retry that starts at once finds the card still
+#: held and fails; a holder that lasts longer is not the last test's. The census's settle (``EXCESS_SETTLE_SEC``) is for
+#: a server that exited, which frees its memory in seconds.
 CARD_RELEASE_WAIT_SEC = 60.0
 _RELEASE_STEP_SEC = 1.0
 _TIMEOUT_SEC = 30.0
@@ -81,12 +88,16 @@ def _run_tool(tool: str, args: Sequence[str]) -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
-def run_amd_smi(args: Sequence[str]) -> str | None:
-    """The stdout of ``amd-smi <args>``, or ``None`` when it is missing, fails or times out."""
-    return _run_tool("amd-smi", args)
+def amd_smi_or_none(args: Sequence[str]) -> str | None:
+    """The stdout of ``amd-smi <args>``, or ``None`` where :func:`~hyperloom.common.gpu_power_settings.run_amd_smi`
+    raises (amd-smi missing, failing or timing out): a reading the runner cannot make is recorded, not fatal."""
+    try:
+        return run_amd_smi(args)
+    except GpuPowerSettingsError:
+        return None
 
 
-def run_rocm_smi(args: Sequence[str]) -> str | None:
+def rocm_smi_or_none(args: Sequence[str]) -> str | None:
     """The stdout of ``rocm-smi <args>``, or ``None`` when it is missing, fails or times out."""
     return _run_tool("rocm-smi", args)
 
@@ -100,16 +111,10 @@ def _gpu_data(args: Sequence[str], run: Runner) -> list[dict[str, Any]] | None:
     except ValueError:
         return None
     data = document.get("gpu_data") if isinstance(document, dict) else document
-    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else None
+    return gpu_rows(data) if isinstance(data, list) else None
 
 
-def _watts(limit: Any) -> float | None:
-    value = ((limit or {}).get("ppt0") or {}).get("socket_power_limit") if isinstance(limit, dict) else None
-    number = value.get("value") if isinstance(value, dict) else None
-    return float(number) if isinstance(number, (int, float)) else None
-
-
-def read_gpu_facts(visible: Sequence[int], run: Runner = run_amd_smi) -> list[GpuFacts] | None:
+def read_gpu_facts(visible: Sequence[int], run: Runner = amd_smi_or_none) -> list[GpuFacts] | None:
     """Model, power cap and partition mode of each visible GPU, or ``None`` when ``amd-smi`` cannot say."""
     static = _gpu_data(["static", _JSON], run)
     if static is None:
@@ -130,7 +135,7 @@ def read_gpu_facts(visible: Sequence[int], run: Runner = run_amd_smi) -> list[Gp
             GpuFacts(
                 index,
                 asic.get("market_name"),
-                _watts(item.get("limit")),
+                socket_power_cap_w(item.get("limit")),
                 mode or None,
                 normalise_device_id(asic.get("device_id")),
                 arch.strip().lower() if isinstance(arch, str) and arch.strip() else None,
@@ -179,7 +184,7 @@ def _rocm_smi_ras(visible: Sequence[int], run: Runner) -> dict[int, EccCounts] |
 
 
 def ecc_counts(
-    visible: Sequence[int], run: Runner = run_amd_smi, ras: Runner = run_rocm_smi
+    visible: Sequence[int], run: Runner = amd_smi_or_none, ras: Runner = rocm_smi_or_none
 ) -> dict[int, EccCounts] | None:
     """Accumulated correctable and uncorrectable ECC counts per visible GPU, or ``None`` when they cannot be read.
 
@@ -237,8 +242,9 @@ def check_hardware(
         if _wrong_card(gpu, gpu_type):
             seen = ", ".join(x for x in (gpu.device_id and f"device id {gpu.device_id}", gpu.gfx_arch) if x)
             problems.append(f"GPU {gpu.index} is {gpu.model}{f' ({seen})' if seen else ''}, not {gpu_type}")
-        if power_cap_w is not None and gpu.power_cap_w is not None and gpu.power_cap_w != power_cap_w:
-            problems.append(f"GPU {gpu.index} power cap {gpu.power_cap_w} W, not {power_cap_w} W")
+        cap = gpu.power_cap_w
+        if power_cap_w is not None and cap is not None and not reading_matches(cap, power_cap_w):
+            problems.append(f"GPU {gpu.index} power cap {cap} W, not {power_cap_w} W")
         if partition_mode is not None and gpu.partition_mode is not None and gpu.partition_mode != partition_mode:
             problems.append(f"GPU {gpu.index} partition {gpu.partition_mode}, not {partition_mode}")
     return problems

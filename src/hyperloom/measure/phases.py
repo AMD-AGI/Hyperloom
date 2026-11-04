@@ -3,7 +3,7 @@
 
 """Where the time of a test goes: the phases a runner and the hosted backend stamp, and how they add up.
 
-A test is about ten minutes of wall time, and the measured bench is a small part of it. The runner stamps what it does
+A test is mostly setup, boot and teardown, and the measured bench is a small part of it. The runner stamps what it does
 (waiting for its sheet, checking it, rebuilding the environment, booting the server, each round, signing the result), the
 hosted backend stamps what it does around the runner (starting the sandbox, landing the result, closing the sandbox),
 and the executor reads the whole as ``TestResult.phases`` with the seconds nothing covers kept apart.
@@ -33,6 +33,7 @@ __all__ = [
     "BOOT_WEIGHTS",
     "CLIENT_START",
     "ENV_REBUILD",
+    "EVAL_DEPS",
     "JIT_CACHE",
     "KERNEL_TABLES",
     "LANDED",
@@ -82,6 +83,8 @@ PREFLIGHT = "preflight"
 ENV_REBUILD = "env_rebuild"
 KERNEL_TABLES = "kernel_tables"
 JIT_CACHE = "jit_cache"
+#: Installing the accuracy evaluator before the server boots (``measure.runner.eval_deps``).
+EVAL_DEPS = "eval_deps"
 RESULT_SIGNING = "result_signing"
 # One round.
 ROUND_SETUP = "round_setup"
@@ -113,6 +116,7 @@ PHASE_ORDER = (
     SHEET_WAIT,
     PREFLIGHT,
     ENV_REBUILD,
+    EVAL_DEPS,
     JIT_CACHE,
     KERNEL_TABLES,
     ROUND_SETUP,
@@ -207,6 +211,19 @@ class HostTimeline:
 
     def mark(self, name: str) -> None:
         self.marks[name] = self.clock()
+
+    def laps(self, since: str) -> dict[str, float]:
+        """The seconds each instant marked after ``since`` came after the one before it, by its name; empty before ``since``
+        is marked."""
+        start = self.marks.get(since)
+        if start is None:
+            return {}
+        later = sorted((at, name) for name, at in self.marks.items() if at >= start and name != since)
+        laps, previous = {}, start
+        for at, name in later:
+            laps[name] = round(at - previous, 3)
+            previous = at
+        return laps
 
     def compose(self, runner: Sequence[PhaseTiming]) -> tuple[PhaseTiming, ...]:
         """The attempt's phases: the sandbox starting, the runner's (or one wait where it stated none), what is left of the

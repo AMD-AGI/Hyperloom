@@ -324,23 +324,22 @@ def _preflight_probe(session_dir: Path, task_id: str, *, reaped: Sequence[int]) 
     # ``production_pick_probe`` disagreement: the live resolver can pick the leftover instead of what this run
     # produces, and by then there is no way to tell which run the numbers came from.
     stale: list[dict[str, Any]] = []
-    if task_id:
-        try:
-            for run_dir in sorted(session_dir.glob(f"runs/*/{task_id}")):
-                for p in sorted(run_dir.rglob("*")):
-                    if len(stale) >= _PREFLIGHT_STALE_TRACE_LIMIT:
-                        break
-                    if p.is_file() and str(p).endswith(_TRACE_SUFFIXES):
-                        info = p.stat()
-                        stale.append(
-                            {
-                                "path": str(p.relative_to(session_dir)),
-                                "size_bytes": info.st_size,
-                                "mtime_iso": _iso_from_epoch(info.st_mtime),
-                            }
-                        )
-        except OSError as exc:
-            out["stale_traces_error"] = repr(exc)
+    try:
+        for run_dir in sorted(session_dir.glob(f"runs/*/{task_id}")) if task_id else []:
+            for p in sorted(run_dir.rglob("*")):
+                if len(stale) >= _PREFLIGHT_STALE_TRACE_LIMIT:
+                    break
+                if p.is_file() and str(p).endswith(_TRACE_SUFFIXES):
+                    info = p.stat()
+                    stale.append(
+                        {
+                            "path": str(p.relative_to(session_dir)),
+                            "size_bytes": info.st_size,
+                            "mtime_iso": _iso_from_epoch(info.st_mtime),
+                        }
+                    )
+    except OSError as exc:
+        out["stale_traces_error"] = repr(exc)
     out["stale_traces"] = stale
     out["stale_trace_count"] = len(stale)
     return out

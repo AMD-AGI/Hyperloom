@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from kernelforge.utils.git import git
-from kernelforge.utils.gpu_arch import canon_arch, detect_arch
+from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_arch
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
     KernelSources,
@@ -569,8 +569,8 @@ def create_campaign_config(
         program_md_path="forge_experiments/program.md" if inputs.program_md_file else "",
         program_md_sha256=program_md_sha256,
         snr_threshold=resolved_snr_threshold,
-        gpu_target=inputs.gpu_target.strip() or detect_gpu_target(),
-        gpu_type=(inputs.gpu_type if inputs.gpu_type is not None else "mi355x").strip().lower(),
+        gpu_target=(gpu_target := inputs.gpu_target.strip() or detect_gpu_target()),
+        gpu_type=(inputs.gpu_type or canonical_gpu_type(gpu_target)).strip().lower(),
         kernel_backend=resolved_kernel_backend,
         task_type=inputs.task_type.strip() or ("repository" if len(normalized_sources) > 1 else ""),
         target_functions=resolved_targets,

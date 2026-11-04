@@ -78,27 +78,15 @@ def _rescue_candidate_paths(
             return
         except (OSError, ValueError):
             pass
-        if not path.is_file():
-            return
-        if subprocess_started_unix is not None:
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                return
-            if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
-                return
-        candidates.append(path)
+        if _is_fresh_leak_file(path, subprocess_started_unix):
+            candidates.append(path)
 
     env_raw = os.environ.get("INFERENCE_OPTIMIZER_RESCUE_PATHS", "").strip()
     env_entries = [part.strip() for part in env_raw.split(":") if part.strip()] if env_raw else []
     for entry in env_entries:
         p = Path(entry)
         if p.is_dir():
-            try:
-                for fp in sorted(p.glob("inferencex_result*.json")):
-                    _push(fp)
-            except OSError:
-                continue
+            _push_rescue_results(p, _push)
         else:
             _push(p)
 
@@ -106,13 +94,18 @@ def _rescue_candidate_paths(
     # plus $RESULT_DIR overrides.
     for derived in _env_derived_leak_roots():
         if derived.is_dir():
-            try:
-                for fp in sorted(derived.glob("inferencex_result*.json")):
-                    _push(fp)
-            except OSError:
-                continue
+            _push_rescue_results(derived, _push)
 
     return candidates
+
+
+def _push_rescue_results(directory: Path, push: Callable[[Path], None]) -> None:
+    """Push each ``inferencex_result*.json`` of ``directory`` in name order, stopping at the first OS error."""
+    try:
+        for fp in sorted(directory.glob("inferencex_result*.json")):
+            push(fp)
+    except OSError:
+        return
 
 
 def _materialize_rescue_into_workspace(
@@ -214,6 +207,30 @@ def _copy_leak_artifact(match: Path, destination: Path) -> Path | None:
     return destination_path
 
 
+def _is_existing_dir(root: Path) -> bool:
+    """Whether ``root`` exists and is a directory; an OS error reads as no."""
+    try:
+        return root.exists() and root.is_dir()
+    except OSError:
+        return False
+
+
+def _is_unseen_outside(match: Path, ws_resolved: Path, seen: set[Path]) -> bool:
+    """Record a resolvable ``match`` as seen; True when it is new and resolves outside ``ws_resolved``."""
+    try:
+        resolved = match.resolve()
+    except OSError:
+        return False
+    if resolved in seen:
+        return False
+    seen.add(resolved)
+    try:
+        resolved.relative_to(ws_resolved)
+    except ValueError:
+        return True  # Outside the workspace: harvest it.
+    return False  # Already under the workspace — nothing to harvest.
+
+
 def harvest_leaked_artifacts(
     destination: Path,
     *,
@@ -240,10 +257,7 @@ def harvest_leaked_artifacts(
 
     seen: set[Path] = set()
     for root in leak_roots:
-        try:
-            if not root.exists() or not root.is_dir():
-                continue
-        except OSError:
+        if not _is_existing_dir(root):
             continue
         for pattern in _DEFAULT_LEAK_ARTIFACT_GLOBS:
             try:
@@ -251,18 +265,8 @@ def harvest_leaked_artifacts(
             except OSError:
                 continue
             for match in matches:
-                try:
-                    resolved = match.resolve()
-                except OSError:
+                if not _is_unseen_outside(match, ws_resolved, seen):
                     continue
-                if resolved in seen:
-                    continue
-                seen.add(resolved)
-                try:
-                    resolved.relative_to(ws_resolved)
-                    continue  # Already under the workspace — nothing to harvest.
-                except ValueError:
-                    pass  # Outside the workspace; fall through to harvest below.
                 if not _is_fresh_leak_file(match, subprocess_started_unix):
                     continue
                 destination_path = _copy_leak_artifact(match, destination)

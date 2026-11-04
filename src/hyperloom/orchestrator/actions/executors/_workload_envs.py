@@ -783,10 +783,9 @@ def _visible_gpu_count() -> int:
             indices: set[str] = set()
             for line in (proc.stdout or "").splitlines():
                 stripped = line.strip()
-                if stripped.startswith("GPU["):
-                    idx, _, _ = stripped[4:].partition("]")
-                    if idx:
-                        indices.add(idx)
+                idx, _, _ = stripped[4:].partition("]")
+                if stripped.startswith("GPU[") and idx:
+                    indices.add(idx)
             return len(indices)
     return 0
 
@@ -1504,11 +1503,20 @@ def prepare_grid_benchmark_config(
     target: BenchmarkTarget = BenchmarkTarget(),
     options: MaterializeOptions = MaterializeOptions(),
 ) -> Path:
-    """Keep the verified native baseline intact until the grid composes its candidate."""
-    from .magpie_agentx import native_config
+    """Keep the verified native baseline intact until the grid composes its candidate.
+
+    A native workload YAML that was never materialized (the pre-baseline fallback) is
+    materialized first, so the operator ``--server-args`` reach every candidate.
+    """
+    from .magpie_agentx import load_benchmark, native_config
 
     if native_config(config_path):
-        return config_path
+        agentx = load_benchmark(config_path)["agentx"]
+        if isinstance(agentx, dict) and "append_args" in agentx.get("launch_overrides", {}):
+            return config_path
+        return materialize_benchmark_config(
+            config_path, output_dir, launch=LaunchLayer(args_mode=launch.args_mode), target=target, options=options
+        )
     return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
 
 
@@ -1525,15 +1533,15 @@ def materialize_benchmark_config(
 
     from hyperloom.common.benchmark_config import is_magpie_agentx
     from hyperloom_common.coerce import to_str_list
-    from .magpie_agentx import LaunchChanges, apply_launch_changes, materialize_agentx, recipe_option_names
+    from .magpie_agentx import LaunchChanges, apply_launch_changes, materialize_agentx, recipe_base_launch
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not is_magpie_agentx(config["benchmark"]):
         return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
     replacing = launch.args_mode == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
-    recipe_options = recipe_option_names(config_path)
-    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe_options=recipe_options)
+    recipe = recipe_base_launch(config_path)
+    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe=recipe, accepted=True)
     from hyperloom_common.env import is_truthy
 
     unset_envs = to_str_list(launch.unset_envs)
@@ -1559,7 +1567,7 @@ def materialize_benchmark_config(
         unset_envs,
         replacing,
     )
-    apply_launch_changes(config["benchmark"], changes, recipe_options=recipe_options)
+    apply_launch_changes(config["benchmark"], changes, recipe=recipe, accepted=True)
     return materialize_agentx(
         config,
         output_dir / options.out_name,

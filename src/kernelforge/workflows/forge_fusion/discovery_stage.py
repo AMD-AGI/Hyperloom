@@ -63,6 +63,7 @@ class _DiscoveryInputs:
     out: Path
     agent_factory: Any
     usage: Any = None
+    gpu_arch: str = ""
 
     def resolve_source(self) -> tuple[dict[str, Any], str]:
         """The decode shapes and the framework source file the model resolves to."""
@@ -112,6 +113,7 @@ def _discover_anchored(inputs: _DiscoveryInputs, fuse_kernel: str, dry_run: bool
                 shapes=shapes,
                 repo_scope=inputs.repo_scope,
                 repo_root=discovery_root,
+                gpu_arch=inputs.gpu_arch,
             ),
             anchor_report,
             category_shares=inputs.diagnosis.category_shares,
@@ -162,6 +164,7 @@ def _discover_by_llm(inputs: _DiscoveryInputs) -> _Discovery:
                 shapes=shapes,
                 repo_scope=inputs.repo_scope,
                 repo_root=discovery_workdir,
+                gpu_arch=inputs.gpu_arch,
             ),
             inputs.trace_path,
             llm_fn=registered_agent_llm_fn(

@@ -126,6 +126,18 @@ def _resolve_llm_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def _first_group_weights(qconfig: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first dict-valued ``weights`` of a compressed-tensors ``config_groups``."""
+    groups = qconfig.get("config_groups", {})
+    if not isinstance(groups, dict):
+        return None
+    for grp in groups.values():
+        weights = grp.get("weights", {})
+        if isinstance(weights, dict):
+            return weights
+    return None
+
+
 def _extract_quant_info(config: dict[str, Any]) -> tuple[str, int, int]:
     """Extract quantization method, bits, and group_size from config."""
     qconfig = config.get("quantization_config", {})
@@ -144,19 +156,14 @@ def _extract_quant_info(config: dict[str, Any]) -> tuple[str, int, int]:
             group_size = int(qconfig["group_size"])
 
         # compressed-tensors style
-        if method == "compressed-tensors":
-            groups = qconfig.get("config_groups", {})
-            if isinstance(groups, dict):
-                for _, grp in groups.items():
-                    weights = grp.get("weights", {})
-                    if isinstance(weights, dict):
-                        nb = weights.get("num_bits")
-                        gs = weights.get("group_size")
-                        if nb is not None:
-                            bits = int(nb)
-                        if gs is not None:
-                            group_size = int(gs)
-                        break
+        weights = _first_group_weights(qconfig) if method == "compressed-tensors" else None
+        if weights is not None:
+            nb = weights.get("num_bits")
+            gs = weights.get("group_size")
+            if nb is not None:
+                bits = int(nb)
+            if gs is not None:
+                group_size = int(gs)
 
     return method, bits, group_size
 
