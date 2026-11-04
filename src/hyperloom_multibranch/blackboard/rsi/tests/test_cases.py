@@ -120,7 +120,8 @@ def test_close_writes_the_registered_cases_beside_the_archive(
 ) -> None:
     monkeypatch.setenv(IMAGE_DIGEST_ENV, IMAGE)
     blobs, archive = LocalBlobStore(tmp_path / "blobs"), TreeArchive(tmp_path / "archive")
-    targets = CloseTargets(archive=archive, blobs=blobs.root)
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    targets = CloseTargets(blobs=blobs.root)
 
     done = close_knowledge(_registered(snapshot, blobs, "p1"), METRIC, targets=targets)
     without = close_knowledge(snapshot, METRIC, targets=targets)
