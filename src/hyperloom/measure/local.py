@@ -21,7 +21,6 @@ import asyncio
 import contextlib
 import dataclasses
 import json
-import logging
 import os
 import shutil
 import sys
@@ -128,8 +127,6 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
-
-log = logging.getLogger(__name__)
 
 __all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
 
