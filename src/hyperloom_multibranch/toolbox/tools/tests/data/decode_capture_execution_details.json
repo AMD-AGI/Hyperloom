@@ -1,0 +1,17 @@
+[
+  {
+    "file": "DecodeCudaGraphRunner_bs_56_rank0.json.gz",
+    "batch_size": 56,
+    "mode": "FULL"
+  },
+  {
+    "file": "DecodeCudaGraphRunner_bs_64_rank0.json.gz",
+    "batch_size": 64,
+    "mode": "FULL"
+  },
+  {
+    "file": "DecodeCudaGraphRunner_bs_72_rank0.json.gz",
+    "batch_size": 72,
+    "mode": "FULL"
+  }
+]
