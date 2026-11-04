@@ -94,7 +94,7 @@ from ..actions.executors._accuracy_gate import (
 from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
-from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
+from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX, KEEP_REASON_EXPORT_LANDED
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
@@ -1453,9 +1453,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "current_best held: %s winner refused by %s (%s)", task_kind, graded.vetoed_by, graded.veto_reason
                 )
                 return False
-            # A verified correctness fix was already bounded by the integrate gate.
-            correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
-            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
+            # A verified correctness fix, and the first export (an eager reference is not a deliverable), were already
+            # bounded by the integrate gate: neither has to beat the anchor to be recorded.
+            admitted_below_anchor = bv.get("keep_reason") in (KEEP_REASON_CORRECTNESS_FIX, KEEP_REASON_EXPORT_LANDED)
+            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not admitted_below_anchor:
                 log.info(
                     "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
                     task_kind,
@@ -1466,7 +1467,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     graded.tput_candidate,
                 )
                 return False
-            if graded.reference > 0 and graded.candidate <= graded.reference and not correctness_fix:
+            if graded.reference > 0 and graded.candidate <= graded.reference and not admitted_below_anchor:
                 log.info(
                     "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
                     graded.reference,
@@ -3130,6 +3131,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 lift["keep_reason"] = KEEP_REASON_CORRECTNESS_FIX
                 lift["resolves_finding"] = str(result.get("resolves_finding") or "")
                 lift["attribution_eligible"] = False
+            elif result.get("keep_reason") == KEEP_REASON_EXPORT_LANDED:
+                lift["keep_reason"] = KEEP_REASON_EXPORT_LANDED
             if enablement_landing:
                 lift["recipe_publishable"] = False
             if prebaseline_enablement:

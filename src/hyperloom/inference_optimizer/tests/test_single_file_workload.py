@@ -773,6 +773,36 @@ def test_export_landing_inert_without_aoti_declared(workload):
     )
 
 
+def _lift_coordinator(tmp_path):
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(baseline_tput=1000.0, model_path="/models/m", gpu_type="mi355x")
+    return coord
+
+
+def _slower_winner(**over):
+    return {"name": "aoti-export", "extra_server_args": "", "output_throughput": 850.0, **over}
+
+
+def test_first_export_is_stacked_although_slower_than_the_baseline(tmp_path):
+    """Without a stack entry nothing snapshots the hook, so the deployment export has no module to ship."""
+    coord = _lift_coordinator(tmp_path)
+
+    assert coord.writeback.lift_to_current_best("integrate_patch", 850.0, _slower_winner(keep_reason="export_landed"))
+    assert coord.shared_state.current_best["tput"] == 850.0
+    assert [entry["variant_name"] for entry in coord.shared_state.optimization_stack] == ["aoti-export"]
+
+
+def test_a_slower_winner_without_the_export_reason_is_still_held(tmp_path):
+    coord = _lift_coordinator(tmp_path)
+
+    assert not coord.writeback.lift_to_current_best("integrate_patch", 850.0, _slower_winner())
+    assert not coord.shared_state.optimization_stack
+
+
 class _SummaryState:
     def __init__(self, export_landed=False, export_attempts=0, cumulative_gain_validated=0.0):
         self.export_landed = export_landed
