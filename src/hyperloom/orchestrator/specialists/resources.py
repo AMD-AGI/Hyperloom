@@ -23,7 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.proctree import descendants
+
 __all__ = [
+    "CONTAINER_RECORD_KIND",
+    "RESOURCES_RELATIVE_PATH",
+    "SPECIALIST_RECORD_KIND",
     "ContainerSnapshot",
     "ProcessTreeSampler",
     "ResourceLog",
@@ -46,7 +51,7 @@ class TreeSample:
     rss_bytes: int
     """Resident memory summed over the live processes of the tree."""
     cpu_seconds: float
-    """CPU seconds (user + system) summed over every process ever seen in the tree."""
+    """The tree's CPU seconds so far: the largest sum yet read of its live processes' and their reaped children's."""
     live_pids: int
 
 
@@ -60,18 +65,24 @@ def _clock_ticks() -> int:
 class ProcessTreeSampler:
     """Track the memory peak and CPU time of one process tree.
 
-    A process that exits stops counting towards memory the moment it is gone, but
-    the CPU seconds it was last seen with stay in the total, so a short-lived
-    compiler child still shows up in the CPU figure.
+    The tree is the root and its descendants as :func:`hyperloom.common.proctree.descendants`
+    finds them in ``/proc``; ``proc_root`` is where each member's readings are read.
+
+    A process that exits stops counting towards memory the moment it is gone. Its CPU
+    seconds reach the total through its parent: the kernel adds a child's user and
+    system time, and its own reaped children's, to the parent's ``cutime``/``cstime``
+    when the parent waits for it. A sample sums ``utime + stime + cutime + cstime``
+    over the live processes, so a compiler that starts and exits between two samples
+    still counts, and the total keeps the largest sum read, so it never goes back when
+    a process leaves the tree without a member of it waiting for it.
     """
 
     def __init__(self, root_pid: int, *, proc_root: Path = Path("/proc"), clock_ticks: int | None = None) -> None:
         self._root = int(root_pid)
         self._proc = Path(proc_root)
         self._ticks = clock_ticks or _clock_ticks()
-        self._cpu_by_pid: dict[int, float] = {}
+        self._cpu_seconds = 0.0
         self._peak_rss = 0
-        self._children_files_ok = True
 
     @property
     def peak_rss_bytes(self) -> int:
@@ -79,12 +90,13 @@ class ProcessTreeSampler:
 
     @property
     def cpu_seconds(self) -> float:
-        return sum(self._cpu_by_pid.values())
+        return self._cpu_seconds
 
     def sample(self) -> TreeSample:
         """Read the tree once and fold the reading into the peak and the CPU total."""
         pids = self._tree_pids()
         rss = 0
+        cpu = 0.0
         live = 0
         for pid in pids:
             reading = self._read_process(pid)
@@ -92,16 +104,17 @@ class ProcessTreeSampler:
                 continue
             live += 1
             rss += reading[0]
-            self._cpu_by_pid[pid] = max(self._cpu_by_pid.get(pid, 0.0), reading[1])
+            cpu += reading[1]
         self._peak_rss = max(self._peak_rss, rss)
+        self._cpu_seconds = max(self._cpu_seconds, cpu)
         return TreeSample(rss_bytes=rss, cpu_seconds=self.cpu_seconds, live_pids=live)
 
     def _read_process(self, pid: int) -> tuple[int, float] | None:
         try:
             status = (self._proc / str(pid) / "status").read_text(encoding=UTF8, errors=DECODE_ERRORS)
             stat = (self._proc / str(pid) / "stat").read_text(encoding=UTF8, errors=DECODE_ERRORS)
-            fields = stat.rsplit(")", 1)[-1].split()
-            cpu = (int(fields[11]) + int(fields[12])) / self._ticks
+            utime, stime, cutime, cstime = (int(value) for value in stat.rsplit(")", 1)[-1].split()[11:15])
+            cpu = (utime + stime + cutime + cstime) / self._ticks
         except (OSError, ValueError, IndexError):
             return None
         rss = 0
@@ -114,69 +127,16 @@ class ProcessTreeSampler:
         return rss, cpu
 
     def _tree_pids(self) -> list[int]:
-        """The root and every descendant, by the kernel's children files when it has them."""
-        if self._children_files_ok:
-            found = self._walk_children_files()
-            if found is not None:
-                return found
-            self._children_files_ok = False
-        return self._walk_by_ppid()
+        """The root, then its descendants with every parent before its children.
 
-    def _children_of(self, pid: int) -> list[int] | None:
-        """Direct children of ``pid`` from the kernel's children files; ``None`` when the kernel has none."""
-        task_dir = self._proc / str(pid) / "task"
+        A child reaped between the read of its parent and its own is then missed by one
+        sample instead of counted twice, which the kept maximum would make permanent.
+        """
         try:
-            tids = [entry.name for entry in os.scandir(task_dir)]
-        except OSError:
-            return []  # the process is gone
-        children: list[int] = []
-        for tid in tids:
-            try:
-                text = (task_dir / tid / "children").read_text(encoding=UTF8)
-            except FileNotFoundError:
-                return None
-            except OSError:
-                continue
-            children.extend(int(token) for token in text.split() if token.isdigit())
-        return children
-
-    def _walk_children_files(self) -> list[int] | None:
-        seen = [self._root]
-        queue = [self._root]
-        while queue:
-            pid = queue.pop()
-            children = self._children_of(pid)
-            if children is None:
-                if pid == self._root:
-                    return None
-                continue
-            for child in children:
-                if child not in seen:
-                    seen.append(child)
-                    queue.append(child)
-        return seen
-
-    def _walk_by_ppid(self) -> list[int]:
-        parent_of: dict[int, int] = {}
-        try:
-            names = [entry.name for entry in os.scandir(self._proc) if entry.name.isdigit()]
+            below = descendants(self._root)
         except OSError:
             return [self._root]
-        for name in names:
-            try:
-                text = (self._proc / name / "stat").read_text(encoding=UTF8, errors=DECODE_ERRORS)
-                parent_of[int(name)] = int(text.rsplit(")", 1)[-1].split()[1])
-            except (OSError, ValueError, IndexError):
-                continue
-        seen = [self._root]
-        grew = True
-        while grew:
-            grew = False
-            for pid, ppid in parent_of.items():
-                if ppid in seen and pid not in seen:
-                    seen.append(pid)
-                    grew = True
-        return seen
+        return [self._root, *(pid for pid, _start in reversed(below))]
 
 
 @dataclass(frozen=True)
@@ -224,15 +184,15 @@ def read_container_cgroup(root: Path = Path("/sys/fs/cgroup")) -> ContainerSnaps
     base = Path(root)
     if not (base / "cgroup.controllers").exists():
         return ContainerSnapshot()
-    quota: int | None = None
-    period: int | None = None
     try:
         parts = (base / "cpu.max").read_text(encoding=UTF8).split()
-        if len(parts) == 2 and parts[1].isdigit():
-            period = int(parts[1])
-            quota = int(parts[0]) if parts[0].isdigit() else None
     except OSError:
-        pass
+        parts = []  # an unreadable cpu.max leaves both CPU fields None: unknown, not unlimited
+    quota: int | None = None
+    period: int | None = None
+    if len(parts) == 2 and parts[1].isdigit():
+        period = int(parts[1])
+        quota = int(parts[0]) if parts[0].isdigit() else None
     return ContainerSnapshot(
         memory_max_bytes=_read_int(base / "memory.max"),
         memory_peak_bytes=_read_int(base / "memory.peak"),
@@ -266,6 +226,7 @@ def _directory_blocks(directory: Path, subdirs: list[Path]) -> int:
                 if subdir is not None:
                     subdirs.append(subdir)
     except OSError:
+        # Keep the partial count: an unreadable directory adds nothing, a failed scan what it read first.
         pass
     return total
 

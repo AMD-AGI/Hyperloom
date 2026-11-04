@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 
+from hyperloom.common import proctree
 from hyperloom.orchestrator.specialists import resources
 from hyperloom.orchestrator.specialists.resources import (
     ProcessTreeSampler,
@@ -21,62 +23,131 @@ from hyperloom.orchestrator.specialists.resources import (
 
 
 def add_proc(
-    root: Path, pid: int, ppid: int, *, rss_kb: int, utime: int, stime: int = 0, children: list[int] | None = None
+    root: Path,
+    pid: int,
+    ppid: int,
+    *,
+    rss_kb: int,
+    utime: int,
+    stime: int = 0,
+    cutime: int = 0,
+    cstime: int = 0,
 ) -> None:
     pdir = root / str(pid)
-    (pdir / "task" / str(pid)).mkdir(parents=True, exist_ok=True)
+    pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "status").write_text(f"Name:\tx\nVmRSS:\t{rss_kb} kB\n", encoding="utf-8")
     # comm contains a space and a parenthesis on purpose: fields are counted after the LAST ')'.
-    stat = f"{pid} (a b) c) S {ppid} {pid} {pid} 0 0 0 0 0 0 0 {utime} {stime} 0 0 20 0 1 0 1"
+    stat = f"{pid} (a b) c) S {ppid} {pid} {pid} 0 0 0 0 0 0 0 {utime} {stime} {cutime} {cstime} 20 0 1 0 {pid}"
     (pdir / "stat").write_text(stat, encoding="utf-8")
-    if children is not None:
-        (pdir / "task" / str(pid) / "children").write_text(" ".join(map(str, children)), encoding="utf-8")
 
 
 def remove_proc(root: Path, pid: int) -> None:
-    import shutil
-
     shutil.rmtree(root / str(pid))
 
 
-def test_peak_memory_and_cpu_seconds_over_the_tree(tmp_path: Path) -> None:
-    add_proc(tmp_path, 100, 1, rss_kb=1000, utime=200, children=[101, 102])
-    add_proc(tmp_path, 101, 100, rss_kb=3000, utime=100, stime=100, children=[])
-    add_proc(tmp_path, 102, 100, rss_kb=2000, utime=0, children=[])
-    add_proc(tmp_path, 999, 1, rss_kb=777777, utime=9999, children=[])  # unrelated process
-    sampler = ProcessTreeSampler(100, proc_root=tmp_path, clock_ticks=100)
+@pytest.fixture
+def proc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A fake ``/proc`` that ``proctree.descendants`` walks and the sampler reads."""
+    root = tmp_path / "proc"
+    root.mkdir()
+
+    def identity(pid: int) -> tuple[int, int] | None:
+        try:
+            fields = (root / str(pid) / "stat").read_text(encoding="utf-8").rsplit(")", 1)[-1].split()
+        except OSError:
+            return None
+        return int(fields[1]), int(fields[19])
+
+    monkeypatch.setattr(proctree, "_PROC", root)
+    monkeypatch.setattr(proctree, "proc_identity", identity)
+    return root
+
+
+def sampler_of(proc: Path, root_pid: int = 100) -> ProcessTreeSampler:
+    return ProcessTreeSampler(root_pid, proc_root=proc, clock_ticks=100)
+
+
+def test_peak_memory_and_cpu_seconds_over_the_tree(proc: Path) -> None:
+    add_proc(proc, 100, 1, rss_kb=1000, utime=200)
+    add_proc(proc, 101, 100, rss_kb=3000, utime=100, stime=100)
+    add_proc(proc, 102, 100, rss_kb=2000, utime=0)
+    add_proc(proc, 103, 101, rss_kb=500, utime=50, stime=50)  # a grandchild
+    add_proc(proc, 999, 1, rss_kb=777777, utime=9999)  # unrelated process
+    sampler = sampler_of(proc)
     first = sampler.sample()
-    assert first.rss_bytes == (1000 + 3000 + 2000) * 1024
-    assert first.live_pids == 3
-    assert sampler.cpu_seconds == 4.0  # (200 + 200 + 0) ticks / 100
-    assert sampler.peak_rss_bytes == 6000 * 1024
+    assert first.rss_bytes == (1000 + 3000 + 2000 + 500) * 1024
+    assert first.live_pids == 4
+    assert sampler.cpu_seconds == 5.0  # (200 + 200 + 0 + 100) ticks / 100
+    assert sampler.peak_rss_bytes == 6500 * 1024
 
 
-def test_exited_child_stops_counting_memory_but_keeps_its_cpu(tmp_path: Path) -> None:
-    add_proc(tmp_path, 100, 1, rss_kb=1000, utime=100, children=[101])
-    add_proc(tmp_path, 101, 100, rss_kb=5000, utime=300, children=[])
-    sampler = ProcessTreeSampler(100, proc_root=tmp_path, clock_ticks=100)
-    sampler.sample()
-    remove_proc(tmp_path, 101)
-    add_proc(tmp_path, 100, 1, rss_kb=1500, utime=150, children=[])
+def test_exited_child_stops_counting_memory_and_its_cpu_arrives_through_the_parent(proc: Path) -> None:
+    add_proc(proc, 100, 1, rss_kb=1000, utime=100)
+    add_proc(proc, 101, 100, rss_kb=5000, utime=100)
+    sampler = sampler_of(proc)
+    assert sampler.sample().cpu_seconds == 2.0
+    remove_proc(proc, 101)  # it ran 3.0 s in all, 2.0 of them after the first sample, and the parent reaped it
+    add_proc(proc, 100, 1, rss_kb=1500, utime=150, cutime=200, cstime=100)
     after = sampler.sample()
     assert after.rss_bytes == 1500 * 1024  # the dead child is no longer counted
     assert after.live_pids == 1
     assert sampler.peak_rss_bytes == 6000 * 1024  # the peak keeps the earlier reading
-    assert sampler.cpu_seconds == 1.5 + 3.0  # the child's last-seen CPU stays in the total
+    assert sampler.cpu_seconds == 1.5 + 3.0
 
 
-def test_falls_back_to_parent_pid_scan_without_children_files(tmp_path: Path) -> None:
-    add_proc(tmp_path, 100, 1, rss_kb=1000, utime=0)
-    add_proc(tmp_path, 101, 100, rss_kb=2000, utime=0)
-    add_proc(tmp_path, 102, 101, rss_kb=4000, utime=0)  # grandchild
-    add_proc(tmp_path, 103, 1, rss_kb=9999, utime=0)
-    sampler = ProcessTreeSampler(100, proc_root=tmp_path, clock_ticks=100)
-    assert sampler.sample().rss_bytes == 7000 * 1024
+def test_a_child_that_starts_and_exits_between_two_samples_counts(proc: Path) -> None:
+    add_proc(proc, 100, 1, rss_kb=1000, utime=100)
+    sampler = sampler_of(proc)
+    sampler.sample()
+    add_proc(proc, 100, 1, rss_kb=1000, utime=150, cutime=300)  # a 3.0 s compiler came and went
+    assert sampler.sample().cpu_seconds == 1.5 + 3.0
 
 
-def test_vanished_root_reads_as_zero_not_an_error(tmp_path: Path) -> None:
-    sampler = ProcessTreeSampler(4242, proc_root=tmp_path, clock_ticks=100)
+def test_a_reused_pid_does_not_hide_either_process(proc: Path) -> None:
+    add_proc(proc, 100, 1, rss_kb=1000, utime=0)
+    add_proc(proc, 101, 100, rss_kb=1000, utime=500)
+    sampler = sampler_of(proc)
+    sampler.sample()
+    add_proc(proc, 100, 1, rss_kb=1000, utime=0, cutime=500)  # reaped the first 101 ...
+    add_proc(proc, 101, 100, rss_kb=1000, utime=200)  # ... and started another that got its pid
+    assert sampler.sample().cpu_seconds == 5.0 + 2.0
+
+
+def test_the_cpu_total_never_goes_back_when_a_process_leaves_the_tree_unreaped(proc: Path) -> None:
+    add_proc(proc, 100, 1, rss_kb=1000, utime=100)
+    add_proc(proc, 101, 100, rss_kb=1000, utime=300)
+    sampler = sampler_of(proc)
+    sampler.sample()
+    add_proc(proc, 101, 1, rss_kb=1000, utime=300)  # detached: re-parented, never waited for by the tree
+    assert sampler.sample().cpu_seconds == 4.0
+
+
+def test_a_child_reaped_in_the_middle_of_a_sample_is_not_counted_twice(
+    proc: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_proc(proc, 100, 1, rss_kb=1000, utime=100)
+    add_proc(proc, 101, 100, rss_kb=1000, utime=100)
+    add_proc(proc, 102, 101, rss_kb=1000, utime=300)
+    read = ProcessTreeSampler._read_process
+    reaped: list[int] = []
+
+    def read_then_reap(self: ProcessTreeSampler, pid: int) -> tuple[int, float] | None:
+        reading = read(self, pid)
+        if pid in (101, 102) and not reaped:  # 101 waits for 102 right after the first of the two is read
+            reaped.append(pid)
+            remove_proc(proc, 102)
+            add_proc(proc, 101, 100, rss_kb=1000, utime=100, cutime=300)
+        return reading
+
+    monkeypatch.setattr(ProcessTreeSampler, "_read_process", read_then_reap)
+    sampler = sampler_of(proc)
+    sampler.sample()
+    sampler.sample()
+    assert sampler.cpu_seconds == 5.0  # 102 counted once, through 101, never both as itself and in 101's cutime
+
+
+def test_vanished_root_reads_as_zero_not_an_error(proc: Path) -> None:
+    sampler = sampler_of(proc, 4242)
     sample = sampler.sample()
     assert (sample.rss_bytes, sample.live_pids, sampler.peak_rss_bytes) == (0, 0, 0)
 
@@ -109,6 +180,13 @@ def test_cgroup_unlimited_and_missing_files_are_null(tmp_path: Path) -> None:
     assert snap.memory_peak_bytes is None  # kernels before 5.19 have no memory.peak
     assert snap.oom_kill is None
     assert (snap.cpu_quota_us, snap.cpu_period_us) == (None, 100000)
+
+
+def test_cgroup_without_cpu_max_leaves_both_cpu_fields_null(tmp_path: Path) -> None:
+    write_cgroup(tmp_path, memory_max="8589934592", peak=None, oom=0, cpu_max=None)
+    snap = read_container_cgroup(tmp_path)
+    assert (snap.cpu_quota_us, snap.cpu_period_us) == (None, None)
+    assert (snap.memory_max_bytes, snap.oom_kill) == (8589934592, 0)  # the other readings are unaffected
 
 
 def test_cgroup_v1_or_unmounted_is_all_null(tmp_path: Path) -> None:
