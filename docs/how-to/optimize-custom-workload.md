@@ -60,6 +60,7 @@ confined without a container. Default is `off`.
 |---|---|
 | `HYPERLOOM_SANDBOX_WRITABLE` | Colon-separated read-write bind roots: your session workspace, and anything else the run needs to write. |
 | `HYPERLOOM_SANDBOX_READONLY` | Colon-separated read-only bind roots: model weights, datasets, anything the run must not edit. |
+| `HYPERLOOM_SANDBOX_TMP` | A host directory to bind over the sandbox's `/tmp`. Unset, `/tmp` is a private tmpfs, which is RAM; set this when the run writes large temporary files (compiled packages, build trees) so they land on disk. The directory must exist. |
 
 Everything else -- the venv, a source checkout on `PYTHONPATH`, the
 interpreter's support files, `/usr /lib /lib64 /bin /sbin /etc /opt /sys`, GPU

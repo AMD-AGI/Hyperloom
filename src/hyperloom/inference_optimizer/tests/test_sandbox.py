@@ -15,6 +15,7 @@ from hyperloom.common.sandbox import (
     SANDBOX_HOME,
     SANDBOX_MODE_ENV,
     SANDBOX_READONLY_ENV,
+    SANDBOX_TMP_ENV,
     SANDBOX_WRITABLE_ENV,
     SandboxError,
     build_bwrap_args,
@@ -24,6 +25,7 @@ from hyperloom.common.sandbox import (
     readonly_roots_from_env,
     reexec_if_required,
     resolve_sandbox_mode,
+    tmp_dir_from_env,
     verify_sandbox_bindings,
     writable_roots_from_env,
 )
@@ -32,7 +34,7 @@ from hyperloom.common.sandbox import (
 @pytest.fixture(autouse=True)
 def _clear_env(monkeypatch):
     """Keep the ambient environment out of every case."""
-    for key in (SANDBOX_MODE_ENV, SANDBOX_ACTIVE_ENV, SANDBOX_WRITABLE_ENV, SANDBOX_READONLY_ENV):
+    for key in (SANDBOX_MODE_ENV, SANDBOX_ACTIVE_ENV, SANDBOX_WRITABLE_ENV, SANDBOX_READONLY_ENV, SANDBOX_TMP_ENV):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -137,6 +139,19 @@ def test_tmpdir_is_redirected_into_the_sandbox(tmp_path):
     assert args[args.index("TMPDIR") + 1] == "/tmp"
 
 
+def test_tmp_is_a_tmpfs_by_default(tmp_path):
+    args = _args(tmp_path)
+    assert args[args.index("/tmp") - 1] == "--tmpfs"
+
+
+def test_a_declared_tmp_dir_is_bound_over_tmp(tmp_path):
+    """A tmpfs is RAM; large temporary files belong on disk."""
+    scratch = tmp_path / "scratch"
+    args = _args(tmp_path, tmp_dir=scratch)
+    assert args[args.index("/tmp") - 2 : args.index("/tmp") + 1] == ["--bind", str(scratch), "/tmp"]
+    assert "--tmpfs" not in args[args.index("/proc") : args.index("/tmp") + 1]
+
+
 def test_home_does_not_shadow_the_interpreter(tmp_path):
     """A tmpfs over the real home would hide ~/.local/share/uv/python."""
     support = tmp_path / "home" / "user" / ".local" / "share" / "uv" / "python" / "cpy"
@@ -199,7 +214,22 @@ def test_readonly_roots_parse_from_the_environment():
     assert readonly_roots_from_env({}) == ()
 
 
+def test_tmp_dir_parses_from_the_environment():
+    assert str(tmp_dir_from_env({SANDBOX_TMP_ENV: "/var/tmp/run"})) == "/var/tmp/run"
+    assert tmp_dir_from_env({SANDBOX_TMP_ENV: "  "}) is None
+    assert tmp_dir_from_env({}) is None
+
+
 # --- capability probe and failing closed -----------------------------------
+
+
+def test_a_missing_tmp_dir_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv(SANDBOX_MODE_ENV, "bwrap")
+    monkeypatch.setenv(SANDBOX_TMP_ENV, str(tmp_path / "absent"))
+    monkeypatch.setattr("hyperloom.common.sandbox.shutil.which", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr("hyperloom.common.sandbox.probe_sandbox_capability", lambda _bwrap: True)
+    with pytest.raises(SandboxError, match=SANDBOX_TMP_ENV):
+        reexec_if_required(["optimize"])
 
 
 def test_probe_runs_a_real_namespace_operation():
