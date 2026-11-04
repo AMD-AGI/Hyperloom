@@ -308,19 +308,37 @@ def test_named_module_and_function_export(named_workload):
 
 
 def test_export_refuses_a_module_without_its_declared_function(named_workload):
-    root, hook, session, state = named_workload
+    _, hook, session, state = named_workload
     hook.write_text("def hyperloom_optimize(model):\n    return model\n")
-    commit = ["-c", "user.name=test", "-c", "user.email=test@local", "commit", "-qam", "rename"]
-    subprocess.run(["git", "-C", str(root), *commit], check=True)
+    state["optimization_stack"] = [accept_source(session, hook, "renamed")]
     result = export_custom_inference(session, state)
     assert result["status"] != "exported"
     assert not (session / "deployment" / hook.name).exists()
 
 
+def test_a_declaration_may_name_a_function_and_declare_an_export(named_workload):
+    """Both schema-2 keys are independent: either, both or neither may appear."""
+    _, hook, _, state = named_workload
+    bench = Path(state["bypass_scripts_dir"])
+    scope = {"schema_version": 2, "file": str(hook), "function": "apply", "aoti": {"enabled": True}}
+    (bench / "optimization_scope.json").write_text(json.dumps(scope))
+
+    assert optimization_scope() == OptimizationScope(file=hook, function="apply")
+    assert aoti_config().enabled
+    assert "define apply(model)" in scope_instructions()
+
+
+def test_a_declaration_without_a_function_keeps_the_original_name(workload):
+    """An aoti-only declaration predates the configurable entry function."""
+    _, hook, _, state = workload
+    declare(Path(state["bypass_scripts_dir"]), hook, {"enabled": True})
+
+    assert optimization_scope() == OptimizationScope(file=hook, function="hyperloom_optimize")
+
+
 @pytest.mark.parametrize(
     "scope",
     [
-        {"schema_version": 2},
         {"schema_version": 2, "function": "not an identifier"},
         {"schema_version": 3, "function": "apply"},
     ],

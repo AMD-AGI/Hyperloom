@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import json
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 from ..specialists.patch_safety import parse_patch_targets
@@ -21,7 +20,7 @@ log = logging.getLogger(__name__)
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 
 
-# Schema 1 predates the configurable entry function; its workspaces are resumed and exported as they are.
+# The entry function's name before a declaration could choose one.
 _SCHEMA_1_FUNCTION = "hyperloom_optimize"
 
 
@@ -86,10 +85,12 @@ def _read_scope(directory: str | None = None) -> dict | None:
 
 
 def _scope_function(scope: dict) -> str:
-    """The entry function the user script calls, defaulted for schema 1."""
-    if scope.get("schema_version") == 1:
-        return _SCHEMA_1_FUNCTION
-    return str(scope.get("function") or "")
+    """The entry function the user script calls.
+
+    Optional in every schema: naming it and declaring an ``aoti`` block arrived in
+    schema 2 independently, so a declaration may carry either, both or neither.
+    """
+    return str(scope.get("function") or _SCHEMA_1_FUNCTION)
 
 
 def optimization_scope(directory: str | None = None) -> OptimizationScope | None:
