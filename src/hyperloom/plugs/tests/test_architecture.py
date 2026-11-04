@@ -117,8 +117,11 @@ def test_rule_2_no_module_imports_a_hosted_implementation_outside_its_owners() -
 
 
 def test_rule_2_main_imports_no_package_that_exists_only_on_the_dev_branch() -> None:
+    """No module outside a dev-only package imports it; the package's own modules import each other."""
     offenders = []
     for path in _main_modules():
+        if _under(".".join(path.relative_to(_SRC).with_suffix("").parts), _DEV_ONLY):
+            continue
         for line, module in _imports(ast.parse(path.read_text())):
             if _under(module, _DEV_ONLY):
                 offenders.append(f"{path.relative_to(_SRC)}:{line}: {module}")
