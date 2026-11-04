@@ -34,7 +34,10 @@ from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolFailure
 UPSTREAM_PR_TOOL = "upstream_pr_search"
 MAX_LIMIT = 20
 DEFAULT_LIMIT = 5
-_STATES = frozenset({"open", "merged", "closed", "all"})
+_OPEN = "open"
+_STATES = frozenset({_OPEN, "merged", "closed", "all"})
+#: What is searched when the caller names no state: open pull requests only.
+_OPEN_ONLY = (_OPEN,)
 #: The names the framework agent gives its two sources of candidates (its ``search_modes``).
 _MONITOR, _GITHUB = "pr_monitor", "github"
 _SEARCHED = frozenset(repo.lower() for repo in UPSTREAM_PR_REPOS)
@@ -50,11 +53,11 @@ class UpstreamSearch:
     """The framework agent's search ``request``, and the pull-request ``states`` the caller asked for."""
 
     request: CandidateSearchRequest
-    states: tuple[str, ...] = ("open",)
+    states: tuple[str, ...] = _OPEN_ONLY
 
     def state_qualifier(self) -> str:
         """``is:open`` when the caller asked for open pull requests only; any other state searches them all."""
-        return "is:open" if set(self.states) == {"open"} else ""
+        return "is:open" if set(self.states) == {_OPEN} else ""
 
 
 Enumerate = Callable[[UpstreamSearch], list[Candidate]]
@@ -150,7 +153,7 @@ def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
         raise InvalidRequest("limit must be an integer") from exc
     if not 1 <= limit <= MAX_LIMIT:
         raise InvalidRequest(f"limit must be between 1 and {MAX_LIMIT}")
-    states = _strings(params.get("states")) or ("open",)
+    states = _strings(params.get("states")) or _OPEN_ONLY
     if not set(states) <= _STATES:
         raise InvalidRequest(f"states must come from {sorted(_STATES)}")
     monitor_url = str(params.get("pr_monitor_url") or "").strip()
