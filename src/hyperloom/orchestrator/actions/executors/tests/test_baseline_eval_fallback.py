@@ -686,9 +686,9 @@ def test_salvage_prefers_a_measured_round_over_a_warmup(tmp_path):
 
 
 # --- eval-origin enablement routing (flag on) ------------------------------
+from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
-    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
     BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILED_KEY,
