@@ -922,6 +922,8 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
             "action_name": "explore",
             "params": {
                 "idempotency_key": "explore-round-2",
+                # Admission refuses an explore with nothing to measure.
+                "grid": [{"name": "chunked_prefill", "extra_server_args": "--chunked-prefill-size 4096"}],
             },
         },
     )
