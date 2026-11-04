@@ -15,7 +15,7 @@ import pytest
 
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
-from hyperloom_multibranch.blackboard.rsi.archive import NO_ARCHIVE, SKIPPED, TreeArchive
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, NO_ARCHIVE, SKIPPED, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import (
     CURATION_SYSTEM_PROMPT,
     NO_LESSONS,
@@ -71,8 +71,11 @@ class _Asked:
 
 
 @pytest.fixture
-def pool(tmp_path: Path) -> LessonPool:
-    return LessonPool(tmp_path / "pool")
+def pool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LessonPool:
+    """The lesson pool beside the archive the environment names, the one a session's CLOSE curates."""
+
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    return LessonPool.beside(TreeArchive(tmp_path / "archive"))
 
 
 async def test_the_curator_merges_rewrites_and_retires_what_it_may_and_says_why_it_refused_the_rest(
@@ -102,7 +105,7 @@ async def test_the_curator_merges_rewrites_and_retires_what_it_may_and_says_why_
         ]
     )
 
-    done = await curate_lessons(snapshot, asked, model="claude", pool=pool)
+    done = await curate_lessons(snapshot, asked, model="claude")
     lessons = pool.lessons()
 
     assert (done.status, done.counts) == (WRITTEN, {"refused": 6, "merged": 1, "rewritten": 1, "retired": 1})
@@ -124,7 +127,7 @@ async def test_the_curator_merges_rewrites_and_retires_what_it_may_and_says_why_
     assert asked.calls[0][0] == CURATION_SYSTEM_PROMPT
     assert f"- {wrong} [pitfall] shown to 2 branches" in asked.calls[0][1] and "retirable" in asked.calls[0][1]
 
-    again = await curate_lessons(snapshot, asked, model="claude", pool=pool)
+    again = await curate_lessons(snapshot, asked, model="claude")
     assert again.status == SKIPPED and "merged" not in again.counts
 
 
@@ -145,7 +148,7 @@ async def test_the_curator_reads_and_writes_the_pool_off_the_event_loop(
         monkeypatch.setattr(LessonPool, name, noted)
     asked = _Asked([{"action": "retire", "lesson": wrong, "why": "two sessions gained there"}])
 
-    done = await curate_lessons(snapshot, asked, model="claude", pool=pool)
+    done = await curate_lessons(snapshot, asked, model="claude")
 
     assert (done.status, done.counts) == (WRITTEN, {"refused": 0, "retired": 1})
     assert len(threads) == 2 and threading.get_ident() not in threads
@@ -157,12 +160,14 @@ async def test_the_curator_skips_without_a_profile_a_pool_or_a_lesson_and_fails_
     async def broken(_system: str, _user: str) -> str:
         raise RuntimeError("the gateway is down")
 
-    monkeypatch.delenv("HYPERLOOM_RSI_ARCHIVE", raising=False)
-    no_profile = await curate_lessons(dataclasses.replace(snapshot, profile=None), broken, model="m", pool=pool)
+    no_profile = await curate_lessons(dataclasses.replace(snapshot, profile=None), broken, model="m")
+    monkeypatch.delenv(ARCHIVE_ENV)
     no_pool = await curate_lessons(snapshot, broken, model="m")
-    empty = await curate_lessons(snapshot, broken, model="m", archive=TreeArchive(tmp_path / "empty"))
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "empty"))
+    empty = await curate_lessons(snapshot, broken, model="m")
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
     lesson(pool, "mine", "the bare --cuda-graph-max-bs is ambiguous here; use the -decode form", "sess-1")
-    failed = await curate_lessons(snapshot, broken, model="m", pool=pool)
+    failed = await curate_lessons(snapshot, broken, model="m")
 
     assert (no_profile, no_pool, empty) == (
         CloseStep(SKIPPED, NO_PROFILE),

@@ -13,6 +13,7 @@ import pytest
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeBranch
 from hyperloom_multibranch.blackboard.rsi.history import MAX_POSITION
 from hyperloom_multibranch.blackboard.rsi.playbook import H0, replaced
+from hyperloom_multibranch.blackboard.rsi import replay
 from hyperloom_multibranch.blackboard.rsi.replay import (
     ARCHIVE,
     OPTIMISTIC,
@@ -128,6 +129,7 @@ def test_a_judged_replay_asks_the_judge_every_round_and_refuses_the_stop_of_a_br
 def test_a_judges_reply_names_the_branches_to_stop_in_its_json_object() -> None:
     assert stops_in('Stop these: {"stop": [{"branch": "b1", "reason": "stalled"}, "b2"]} done') == ("b1",)
     assert stops_in("{not json}") == () == stops_in('["b1"]') == stops_in('{"stop": null}')
+    assert stops_in('{"stop": true}') == () == stops_in('{"stop": 1}') == stops_in('{"stop": "b1"}')
 
 
 def test_a_branch_the_judge_stopped_and_the_playbook_keeps_goes_on_with_sampled_tests() -> None:
@@ -214,10 +216,13 @@ def test_a_cut_ranks_the_real_outcome_among_replays_that_sample_every_outcome_af
     assert (unlucky.median_gain_pct, unlucky.rank) == (1.0, 1.0)
 
 
-def test_the_checks_say_which_sessions_the_archive_replay_reproduces_and_where_each_cut_falls() -> None:
+def test_the_checks_say_which_sessions_the_archive_replay_reproduces_and_where_each_cut_falls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sessions = [_tree(STALLED, EARLY), dataclasses.replace(_tree(STALLED), session_id="t")]
+    monkeypatch.setattr(replay, "BOOTSTRAP_DRAWS", 20)
 
-    found = check(sessions, runs=3, draws=20)
+    found = check(sessions, runs=3)
 
     assert found.reproduced == ("s", "t") and found.not_reproduced == ()
     assert [item.session_id for item in found.cuts] == ["s", "t"] and found.mean_rank is not None

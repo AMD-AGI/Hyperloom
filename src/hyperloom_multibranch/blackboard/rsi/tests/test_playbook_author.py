@@ -16,7 +16,7 @@ import pytest
 
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.blackboard.rsi import authoring
-from hyperloom_multibranch.blackboard.rsi.archive import SKIPPED, TreeArchive, tree_from_snapshot
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, SKIPPED, TreeArchive, tree_from_snapshot
 from hyperloom_multibranch.blackboard.rsi.authoring import (
     MEASURES,
     NO_CHANGE,
@@ -38,7 +38,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     Retired,
     replaced,
 )
-from hyperloom_multibranch.blackboard.rsi.session import FAILED, NO_PROFILE, WRITTEN, CloseStep
+from hyperloom_multibranch.blackboard.rsi.session import ALREADY_RECORDED, FAILED, NO_PROFILE, WRITTEN, CloseStep
 from hyperloom_multibranch.blackboard.rsi.stops import stop_audit
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC
 
@@ -49,6 +49,14 @@ ALIKE = "Of two branches whose changes are alike, stop the one further behind in
 
 def _answer(**document: object) -> str:
     return "My proposal:\n" + json.dumps(document) + "\nThat is all."
+
+
+@pytest.fixture
+def archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TreeArchive:
+    """The archive the environment names, the one a session's CLOSE writes the playbook pool beside."""
+
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    return TreeArchive(tmp_path / "archive")
 
 
 def test_an_answer_gives_one_change_to_the_champion_as_a_playbook_on_trial() -> None:
@@ -112,6 +120,10 @@ def test_an_answer_labelled_as_the_pool_would_refuse_is_registered_under_a_label
             _answer(**{**LATER, "change": {"number": "stall_tests", "value": -math.inf}}, measure="stop_value"),
             "stall_tests takes a finite number",
         ),
+        (
+            _answer(**{**LATER, "change": {"number": "probation_share", "value": 10**400}}, measure="stop_value"),
+            "probation_share takes a finite number",
+        ),
     ],
 )
 def test_an_answer_that_is_no_valid_single_change_says_why(answer: str, why: str) -> None:
@@ -154,9 +166,8 @@ def test_an_answer_aiming_at_a_measure_r3_cannot_read_here_says_so() -> None:
 
 
 async def test_close_pools_the_change_once_and_refuses_one_that_repeats_a_retired_playbook(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, archive: TreeArchive
 ) -> None:
-    archive = TreeArchive(tmp_path / "archive")
     archive.put(tree_from_snapshot(snapshot, METRIC))
     pool = PlaybookPool.beside(archive)
     asked: list[tuple[str, str]] = []
@@ -166,11 +177,11 @@ async def test_close_pools_the_change_once_and_refuses_one_that_repeats_a_retire
         asked.append((system, prompt))
         return answer
 
-    done = await author_playbook(snapshot, complete, model="claude", archive=archive)
+    done = await author_playbook(snapshot, complete, model="claude")
     (written,) = pool.playbooks()
     pool.retire(Retired(written.label, 9.0, "behind h0"))
     answer = _answer(**{**LATER, "label": "later-again"}, measure="stop_value")
-    again = await author_playbook(snapshot, complete, model="claude", archive=archive)
+    again = await author_playbook(snapshot, complete, model="claude")
 
     assert done == CloseStep(WRITTEN, "later-stops: stall_tests of h0", {"written": 1, "refused": 0})
     assert written.provenance == {"model": "claude", "session_id": "sess-1"} and asked[0][0] == PLAYBOOK_SYSTEM_PROMPT
@@ -178,10 +189,28 @@ async def test_close_pools_the_change_once_and_refuses_one_that_repeats_a_retire
     assert again == CloseStep(SKIPPED, "it repeats later-stops, retired: behind h0", {"written": 0, "refused": 1})
 
 
-async def test_close_asks_for_no_change_when_no_measure_varied_in_the_champions_sessions(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+async def test_close_writes_nothing_when_another_session_pooled_the_same_change(
+    snapshot: BlackboardSnapshot, archive: TreeArchive
 ) -> None:
-    archive = TreeArchive(tmp_path / "archive")
+    archive.put(tree_from_snapshot(snapshot, METRIC))
+    pool = PlaybookPool.beside(archive)
+    earlier = Playbook(
+        "later-stops", replaced(H0, stall_tests=8).numbers, parent=H0.label, hypothesis="h", registered_at=1.0
+    )
+    pool.register(earlier)
+
+    async def complete(system: str, prompt: str) -> str:
+        return _answer(**LATER, measure="stop_value")
+
+    done = await author_playbook(snapshot, complete, model="claude")
+
+    assert done == CloseStep(SKIPPED, ALREADY_RECORDED, {"written": 0, "refused": 0})
+    assert pool.playbooks() == (earlier,)
+
+
+async def test_close_asks_for_no_change_when_no_measure_varied_in_the_champions_sessions(
+    snapshot: BlackboardSnapshot, archive: TreeArchive
+) -> None:
     tree = tree_from_snapshot(snapshot, METRIC)
     archive.put(tree)
     pool = PlaybookPool.beside(archive)
@@ -193,15 +222,14 @@ async def test_close_asks_for_no_change_when_no_measure_varied_in_the_champions_
     async def unasked(system: str, prompt: str) -> str:
         raise AssertionError("with no measure to aim at, nothing is asked")
 
-    done = await author_playbook(snapshot, unasked, model="m", archive=archive)
+    done = await author_playbook(snapshot, unasked, model="m")
 
     assert done == CloseStep(SKIPPED, NO_MEASURE, {"written": 0, "refused": 0})
 
 
 async def test_close_pools_a_change_the_replay_reads_worse_both_ways_as_retired(
-    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    snapshot: BlackboardSnapshot, archive: TreeArchive, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    archive = TreeArchive(tmp_path / "archive")
     archive.put(tree_from_snapshot(snapshot, METRIC))
     pool = PlaybookPool.beside(archive)
     worse = StandingRow("later-stops", Difference(-2.0, -3.0, -1.0), Difference(-1.0, -1.5, -0.5))
@@ -210,7 +238,7 @@ async def test_close_pools_a_change_the_replay_reads_worse_both_ways_as_retired(
     async def complete(system: str, prompt: str) -> str:
         return _answer(**LATER, measure="stop_value")
 
-    done = await author_playbook(snapshot, complete, model="claude", archive=archive)
+    done = await author_playbook(snapshot, complete, model="claude")
 
     evidence = (
         "the scheduling replay of the archive reads it worse both ways: "
@@ -230,9 +258,8 @@ def _noting(threads: list[int], call: Callable[..., object]) -> Callable[..., ob
 
 
 async def test_close_reads_the_archive_and_replays_the_change_off_the_event_loop(
-    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    snapshot: BlackboardSnapshot, archive: TreeArchive, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    archive = TreeArchive(tmp_path / "archive")
     archive.put(tree_from_snapshot(snapshot, METRIC))
     threads: list[int] = []
     for name in ("archived_history", "r1_reading"):
@@ -241,14 +268,13 @@ async def test_close_reads_the_archive_and_replays_the_change_off_the_event_loop
     async def complete(system: str, prompt: str) -> str:
         return _answer(**LATER, measure="stop_value")
 
-    done = await author_playbook(snapshot, complete, model="claude", archive=archive)
+    done = await author_playbook(snapshot, complete, model="claude")
 
     assert done == CloseStep(WRITTEN, "later-stops: stall_tests of h0", {"written": 1, "refused": 0})
     assert len(threads) == 2 and threading.get_ident() not in threads
 
 
-async def test_close_says_why_it_wrote_no_change(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
-    archive = TreeArchive(tmp_path / "archive")
+async def test_close_says_why_it_wrote_no_change(snapshot: BlackboardSnapshot, archive: TreeArchive) -> None:
 
     async def unreachable(system: str, prompt: str) -> str:
         raise RuntimeError("the gateway is down")
@@ -256,13 +282,13 @@ async def test_close_says_why_it_wrote_no_change(snapshot: BlackboardSnapshot, t
     async def nothing(system: str, prompt: str) -> str:
         return _answer(none="nothing to try")
 
-    assert (await author_playbook(snapshot, nothing, model="m", archive=archive)).reason == NOT_ARCHIVED
+    assert (await author_playbook(snapshot, nothing, model="m")).reason == NOT_ARCHIVED
     archive.put(tree_from_snapshot(snapshot, METRIC))
     unprofiled = dataclasses.replace(snapshot, profile=None)
-    assert await author_playbook(unprofiled, nothing, model="m", archive=archive) == CloseStep(SKIPPED, NO_PROFILE)
-    assert await author_playbook(snapshot, unreachable, model="m", archive=archive) == CloseStep(
+    assert await author_playbook(unprofiled, nothing, model="m") == CloseStep(SKIPPED, NO_PROFILE)
+    assert await author_playbook(snapshot, unreachable, model="m") == CloseStep(
         FAILED, "RuntimeError: the gateway is down"
     )
-    assert await author_playbook(snapshot, nothing, model="m", archive=archive) == CloseStep(
+    assert await author_playbook(snapshot, nothing, model="m") == CloseStep(
         SKIPPED, f"{NO_CHANGE}: nothing to try", {"written": 0, "refused": 0}
     )

@@ -510,12 +510,12 @@ def archived_history(archive: TreeArchive | None = None) -> tuple[SearchTree, ..
         return ()
 
 
-def session_menus(metric: str, reports: Path | None, archive: TreeArchive | None = None) -> DirectionMenus | None:
-    """The session's direction menus, for ``SessionBriefs(menus=...)``: over ``archive``, by default the one a running
-    session reads, read once, each menu logged to ``<reports>/menus.jsonl`` for CLOSE to read; ``None`` without an
+def session_menus(metric: str, reports: Path | None) -> DirectionMenus | None:
+    """The session's direction menus, for ``SessionBriefs(menus=...)``: over the archive a running session reads,
+    read once, each menu logged to ``<reports>/menus.jsonl`` for CLOSE to read; ``None`` without an
     archive, so a session that reads none is briefed as one without the RSI."""
 
-    target = archive if archive is not None else TreeArchive.read_from_env()
+    target = TreeArchive.read_from_env()
     if target is None:
         return None
     log_to = MenuLog(reports / MENU_LOG) if reports is not None else None
@@ -528,9 +528,8 @@ def judge_history(
     metric: str,
     *,
     budget_seconds: float,
-    max_chars: int = MAX_CHARS,
 ) -> str:
-    """The stall odds the stop rule rests on, for the judge this round, in at most ``max_chars``: from the archived
+    """The stall odds the stop rule rests on, for the judge this round, in at most :data:`MAX_CHARS`: from the archived
     sessions and this one's own branches so far; empty before the session has a profile and a baseline, and without
     archived sessions, so a session that reads no archive is judged as one without the RSI.
 
@@ -542,7 +541,7 @@ def judge_history(
     if not history:
         return ""
     odds = session_stall_odds(snapshot, history, metric)
-    return odds.render(max_chars) if odds is not None else ""
+    return odds.render(MAX_CHARS) if odds is not None else ""
 
 
 def judge_open_areas(
