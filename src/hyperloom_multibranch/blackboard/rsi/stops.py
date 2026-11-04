@@ -27,16 +27,14 @@ from dataclasses import dataclass
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeBranch, TreeProbation
 from hyperloom_multibranch.blackboard.rsi.history import (
-    DEFAULT_WORKLOAD,
     HORIZON_TESTS,
     MODEL_TYPE_LABEL,
-    WORKLOAD_LABEL,
     StallOdds,
     judged_tests,
     stall_odds,
 )
 from hyperloom_multibranch.blackboard.rsi.report import NOT_AVAILABLE, number, share, table
-from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions
+from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, workload_kind
 
 #: The cause the scheduler names a judge's stop by, before the reason the judge gave: its ``StopCause.JUDGE``.
 JUDGE_CAUSE = "judge"
@@ -334,8 +332,7 @@ class StallStudy:
 
 
 def _kind(task: TaskConditions) -> str:
-    labels = task.labels
-    return f"{labels.get(MODEL_TYPE_LABEL, 'any model type')}, {labels.get(WORKLOAD_LABEL, DEFAULT_WORKLOAD)}"
+    return f"{task.labels.get(MODEL_TYPE_LABEL, 'any model type')}, {workload_kind(task)}"
 
 
 def stall_study(trees: Sequence[SearchTree]) -> StallStudy:
