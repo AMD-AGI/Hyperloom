@@ -62,6 +62,35 @@ class ProtectedPathRules:
             for pattern in (*self.globs, *extra_globs)
         )
 
+    @staticmethod
+    def is_rebuildable_bytecode(path: str | Path) -> bool:
+        """Whether absolute ``path`` is interpreter bytecode the next import rebuilds from its source.
+
+        Only a ``.pyc`` in a real ``__pycache__`` qualifies: one beside the sources may be the module itself, and one
+        reached through a linked directory may live outside the workspace.
+        """
+        candidate = Path(path)
+        return (
+            candidate.suffix == ".pyc"
+            and candidate.parent.name == "__pycache__"
+            and candidate.parent.resolve() == candidate.parent
+        )
+
+    @classmethod
+    def discard_rebuildable_bytecode(cls, paths: Iterable[str]) -> list[str]:
+        """Delete the rebuildable bytecode among absolute ``paths`` and return the rest, in order.
+
+        A session may have written that bytecode over an untouched protected module; deleting it makes the next import
+        compile the protected source instead.
+        """
+        kept: list[str] = []
+        for path in paths:
+            if cls.is_rebuildable_bytecode(path):
+                Path(path).unlink(missing_ok=True)
+            else:
+                kept.append(path)
+        return kept
+
     def inventory(
         self,
         workspace: str | Path,
