@@ -189,23 +189,31 @@ class AgentHandle:
 
 
 class AgentRunner(Protocol):
+    """Launches, polls, cancels and collects agent CLI sessions."""
+
     name: str
 
-    def launch(self, spec: AgentLaunchSpec) -> Awaitable[AgentHandle]: ...
+    def launch(self, spec: AgentLaunchSpec) -> Awaitable[AgentHandle]:
+        """Start the CLI ``spec`` describes and return the handle of its session."""
 
-    def poll(self, handle: AgentHandle) -> Awaitable[AgentStatus]: ...
+    def poll(self, handle: AgentHandle) -> Awaitable[AgentStatus]:
+        """Whether the session is running, has exited, or is lost."""
 
-    def cancel(self, handle: AgentHandle) -> Awaitable[None]: ...
+    def cancel(self, handle: AgentHandle) -> Awaitable[None]:
+        """End the session and its whole process tree."""
 
-    def collect(self, handle: AgentHandle) -> Awaitable[None]: ...
+    def collect(self, handle: AgentHandle) -> Awaitable[None]:
+        """Record an ended session; a session that still runs is refused."""
 
 
 class InteractiveAgentRunner(AgentRunner, Protocol):
     """A runner that keeps a session's stdin open when its spec asks, so one CLI takes message after message."""
 
-    def send(self, handle: AgentHandle, data: bytes) -> Awaitable[None]: ...
+    def send(self, handle: AgentHandle, data: bytes) -> Awaitable[None]:
+        """Write ``data`` to the session's stdin."""
 
-    def close_stdin(self, handle: AgentHandle) -> Awaitable[None]: ...
+    def close_stdin(self, handle: AgentHandle) -> Awaitable[None]:
+        """Close the session's stdin; its CLI ends once it has read what was sent."""
 
 
 def _infer_backend(spec: AgentLaunchSpec) -> str:
