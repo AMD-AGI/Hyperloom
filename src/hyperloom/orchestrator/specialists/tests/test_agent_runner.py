@@ -20,6 +20,7 @@ import pytest
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.proctree import descendants
 from hyperloom.orchestrator.specialists import agent_runner
+from hyperloom.orchestrator.specialists import resources
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.agent_runner import (
     LOST_AFTER_SEC,
@@ -91,8 +92,13 @@ async def inline(func, /, *args, **kwargs):
 
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
-    """Put the existing reap loop on the virtual clock; its own code path is the one under test."""
+    """Put the existing reap loop on the virtual clock; its own code path is the one under test.
+
+    The sampler reads the root alone: virtual hours take thousands of samples back to back, and each walk of the real
+    ``/proc`` would cost real time while the child that stands in for the CLI lives a fixed real-time minute.
+    """
     fake = FakeClock()
+    monkeypatch.setattr(resources, "descendants", lambda pid: [])
     monkeypatch.setattr(ss, "time", SimpleNamespace(monotonic=fake.monotonic, time=fake.time, sleep=fake.sleep))
     monkeypatch.setattr(
         ss, "asyncio", SimpleNamespace(sleep=fake.sleep, to_thread=inline, CancelledError=real_asyncio.CancelledError)
