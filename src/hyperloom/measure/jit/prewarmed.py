@@ -5,8 +5,9 @@
 
 The prewarm (:mod:`hyperloom.measure.runner.native.prewarm`) builds a module once, on CPU, for the card's ``gfx`` and CU
 count, under the environment a test's server has when nothing of the test sets a build variable, and lists it in the
-manifest :data:`PREWARM_MANIFEST` beside it with the target and the build's variables (:func:`build_record`): each
-variable the module's build reads, and the value of each that was set.
+manifest beside it (:data:`~hyperloom.orchestrator.actions.executors._aiter_jit.AITER_PREWARM_MANIFEST`, whose format the
+launch preflight owns) with the target and the build's variables (:func:`build_record`): each variable the module's
+build reads, and the value of each that was set.
 
 aiter builds a module only when its ``.so`` is missing, so a server given the image's module runs it whatever its own
 environment says. A server that would have built another one -- for another target, or under another value of one of
@@ -16,42 +17,22 @@ listed module whose entry records no variables (the target is all an older prewa
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV
 from hyperloom.measure.jit.key import plain_build_names, without_card_arch
+from hyperloom.orchestrator.actions.executors._aiter_jit import read_prewarm_manifest
 
-__all__ = ["CU_NUM", "PREWARM_MANIFEST", "PREWARM_SCHEMA", "build_record", "read_manifest", "unlike_prewarmed"]
+__all__ = ["CU_NUM", "build_record", "unlike_prewarmed"]
 
-#: The manifest in the image's ``aiter/jit``: ``{"schema", "modules": [{"name", "sha256", "gfx", "cu_num",
-#: "build_variables", "build_environment", ...}]}``.
-PREWARM_MANIFEST = "hyperloom-prewarm.json"
-PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
 #: What aiter's build reads the card's CU count from (``aiter/jit/utils/build_targets.py``).
 CU_NUM = "CU_NUM"
 #: What the CPU build sets itself: the target (an entry's ``gfx``) and the meta directory it lays.
 _SET_BY_BUILD = frozenset({"GPU_ARCHS", AITER_META_DIR_ENV})
 _READS, _VALUES = "build_variables", "build_environment"
-_MODULES = "modules"
 _SO = ".so"
-_UTF8 = "utf-8"
-
-
-def read_manifest(jit_dir: Path) -> dict[str, dict[str, Any]]:
-    """The modules :data:`PREWARM_MANIFEST` in ``jit_dir`` lists, by name; empty when there is none or it is not one."""
-    try:
-        document = json.loads((Path(jit_dir) / PREWARM_MANIFEST).read_text(encoding=_UTF8))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(document, dict) or document.get("schema") != PREWARM_SCHEMA:
-        return {}
-    entries = document.get(_MODULES)
-    if not isinstance(entries, list):
-        return {}
-    return {str(entry["name"]): entry for entry in entries if isinstance(entry, dict) and "name" in entry}
 
 
 def build_record(names: Iterable[str], environ: Mapping[str, str]) -> dict[str, Any]:
@@ -71,7 +52,7 @@ def unlike_prewarmed(jit_dir: Path, servers: Iterable[Mapping[str, str]], gfx_ar
     servers = list(servers)
     return frozenset(
         name
-        for name, entry in read_manifest(jit_dir).items()
+        for name, entry in read_prewarm_manifest(jit_dir).items()
         if (Path(jit_dir) / f"{name}{_SO}").is_file() and _unlike(entry, servers, gfx_arch)
     )
 

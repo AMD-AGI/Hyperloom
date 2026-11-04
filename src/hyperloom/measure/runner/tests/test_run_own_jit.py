@@ -21,6 +21,8 @@ import yaml
 
 from hyperloom.measure import local
 from hyperloom.measure.farm import Farm
+from hyperloom.measure.runner import run as run_module
+from hyperloom.measure.runner.native.prewarm import preflight_build
 from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
 from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtures
     Rig,
@@ -31,6 +33,7 @@ from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtur
 )
 from hyperloom.measure.runner.tests.test_run_jit_tables import (  # noqa: F401 - fixtures
     IMAGE_MODULE,
+    TABLE_VARIABLE,
     TEST_TABLE,
     _by_patch,
     _by_variable,
@@ -39,6 +42,7 @@ from hyperloom.measure.runner.tests.test_run_jit_tables import (  # noqa: F401 -
 )
 from hyperloom.measure.runner.tests.test_run_jit_variables import ARCH_FLAG, FLAG, GFX, VARIABLE
 from hyperloom.measure.socket import TestCall
+from hyperloom.orchestrator.actions.executors._aiter_serving_once import ServingPreflight
 
 BUILT = b"\x7fELF built by the test"
 PREWARMED = b"\x7fELF built once by the launch preflight"
@@ -248,6 +252,24 @@ def test_a_module_built_once_into_the_image_is_linked_by_a_later_test_it_does_no
 
     assert server.found["module_gemm"] is not touched
     assert server.held["module_gemm.so"] == ((False, BUILT) if touched else (True, PREWARMED))
+
+
+def test_the_runner_runs_the_launch_preflight_with_the_prewarm_before_its_test_is_given_jit_directories(
+    image, monkeypatch
+) -> None:
+    """The point's tables decide what the preflight moves aside, and the prewarm builds what it moved aside from the
+    image's own tables; the test's directories are made after, so they link what was built."""
+    calls: list[tuple[list[str], object, list[Path]]] = []
+
+    def preflight(envs: dict[str, str], environ, build=None) -> ServingPreflight:
+        calls.append((sorted(envs), build, list(image.host_tmp.iterdir())))
+        return ServingPreflight({"action": "skip"})
+
+    monkeypatch.setattr(run_module, "prepare_serving_so_once", preflight, raising=False)
+
+    _run(image, monkeypatch, "preflight", _deliver(image, _by_variable(TEST_TABLE)))
+
+    assert calls == [([TABLE_VARIABLE], preflight_build, [])], "once, with the prewarm, before any compile directory"
 
 
 #: What hyperloom's prewarm records of ``module_gemm``'s build (``measure.jit.prewarmed.build_record``): the variables the
