@@ -44,7 +44,8 @@ def stamp_reap_mark(env: dict[str, str]) -> str:
     """Put a reap mark unique to one launch in ``env``, in place, and return it.
 
     Every process the child starts inherits the mark however it detaches, so a sweep for it after the launch ends
-    finds them all, and none of another launch.
+    finds every process that still carries it, and none of another launch's. One that replaced its environment (an
+    exec with an empty one, say) carries no mark, and the sweep does not find it.
     """
     reap_mark = uuid.uuid4().hex
     env[REAP_MARK_ENV] = reap_mark
