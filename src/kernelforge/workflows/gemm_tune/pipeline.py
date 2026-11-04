@@ -197,7 +197,13 @@ def _attempt_tier3(gaps: list, ctx: "TuneContext") -> "TuneResult | None":
                 output_dir,
                 target=Tier3Target(model_name=model_name, gpu=ctx.gpu_type, framework=ctx.framework),
                 retiming=(
-                    Retiming(adapter.make_baseline, adapter.make_dispatch, adapter.make_correctness, adapter.sync())
+                    Retiming(
+                        adapter.make_baseline,
+                        adapter.make_dispatch,
+                        adapter.make_correctness,
+                        adapter.sync(),
+                        write_table=adapter.write_table,
+                    )
                     if adapter
                     else None
                 ),
