@@ -20,7 +20,6 @@ from typing import Any
 from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.provenance import build_provenance
-from hyperloom.orchestrator.enablement.recipe.credentials import strip_url_userinfo
 from hyperloom_common.timeutil import now_iso, utc_now_compact
 
 from . import paths as _paths
@@ -64,9 +63,17 @@ def _git_revision_at(path: Path) -> str:
     return _git_capture(path, ["rev-parse", "--short", "HEAD"])
 
 
+_URL_USERINFO_RE = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]*@")
+
+
+def _strip_url_userinfo(url: str) -> str:
+    """``url`` without the ``user[:password]@`` part of its authority."""
+    return _URL_USERINFO_RE.sub(r"\g<scheme>", url)
+
+
 def _git_remote_at(path: Path) -> str:
     """Best-effort ``origin`` remote URL at ``path`` (empty when unset/fails)."""
-    return strip_url_userinfo(_git_capture(path, ["config", "--get", "remote.origin.url"]))
+    return _strip_url_userinfo(_git_capture(path, ["config", "--get", "remote.origin.url"]))
 
 
 # Pod-local, non-persistent roots: a dependency checkout under one of these is erased on pod recycle.
