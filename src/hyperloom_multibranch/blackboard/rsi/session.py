@@ -522,22 +522,15 @@ def session_menus(metric: str, reports: Path | None) -> DirectionMenus | None:
     return DirectionMenus(archived_history(target), metric, log_to)
 
 
-def judge_history(
-    snapshot: BlackboardSnapshot,
-    history: Sequence[SearchTree],
-    metric: str,
-    *,
-    budget_seconds: float,
-) -> str:
+def judge_history(snapshot: BlackboardSnapshot, history: Sequence[SearchTree], metric: str) -> str:
     """The stall odds the stop rule rests on, for the judge this round, in at most :data:`MAX_CHARS`: from the archived
     sessions and this one's own branches so far; empty before the session has a profile and a baseline, and without
     archived sessions, so a session that reads no archive is judged as one without the RSI.
 
-    Pass the scoring's own history, so the archive is read once a session. ``budget_seconds`` is kept for the
-    scheduler's call; the odds count judged tests, not shares of the budget.
+    Pass the scoring's own history, so the archive is read once a session. The odds count judged tests, not shares of
+    the budget.
     """
 
-    del budget_seconds
     if not history:
         return ""
     odds = session_stall_odds(snapshot, history, metric)
