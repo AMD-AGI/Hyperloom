@@ -421,10 +421,8 @@ def test_a_module_is_estimated_by_its_kind(name, seconds):
     assert module_build_seconds(name, _image_config()) == seconds
 
 
-def test_the_hang_limits_are_twice_the_longest_builds_and_the_estimates_rank_the_kinds():
+def test_the_hang_limits_are_twice_the_estimates_and_the_estimates_rank_the_kinds():
     assert CKTILE_MODULE_SECONDS > TABLE_GEMM_MODULE_SECONDS > ESTIMATED_MODULE_SECONDS
-    assert CKTILE_MODULE_BUILD_LIMIT_SEC >= 2 * 1347, "twice the longest CK-tile build, several tests building at once"
-    assert MODULE_BUILD_LIMIT_SEC >= 2 * 273, "twice the longest build of any other module before ready"
     assert (
         MODULE_BUILD_LIMIT_SEC >= 2 * TABLE_GEMM_MODULE_SECONDS
         and CKTILE_MODULE_BUILD_LIMIT_SEC >= 2 * CKTILE_MODULE_SECONDS

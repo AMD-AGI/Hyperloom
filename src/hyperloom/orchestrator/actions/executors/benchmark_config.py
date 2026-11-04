@@ -94,7 +94,8 @@ def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> Prepara
         # Baseline patches its own checkout, but explore / sweep never pass through that hook: re-assert here so a
         # resumed session or a re-cloned checkout still emits the eval-start marker.
         ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
-        # The measurement runner checks out its own clean InferenceX, so the session checkout's patch never reaches it.
+        # Likewise the lm-eval install-once patch the preflight and baseline sweeps lay: without it every explore /
+        # sweep round on a re-cloned checkout reinstalls lm-eval, and a reinstall can break an eval running beside it.
         ensure_lm_eval_install_once(Path(inferencex_path))
 
     # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
