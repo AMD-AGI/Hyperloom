@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The launch preflight reads only the rows aiter compiles for this card, and, given a build, builds what it moves aside
-once per container, from the image's own tables; the launch of a boot gives none.
+"""The launch preflight reads only the rows aiter compiles for this card and leaves what it moves aside to the boot's
+servers; the check of the image's own tables for this card builds what it moves aside once per container.
 
 The image is the stand-in aiter of the measure tests with its GEMM module named as aiter's ``module_gemm_a8w8``, which is
 generated from ``AITER_CONFIG_GEMM_A8W8``'s table. The table has a row tuned for this card (gfx950, 256 CUs) and one
@@ -51,6 +51,12 @@ def module_of(*kernels: str) -> bytes:
 @pytest.fixture
 def image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The image's aiter on a gfx950 card of 256 CUs; its ``module_gemm_a8w8`` was built from an older table."""
+    return serving_image(tmp_path, monkeypatch)
+
+
+def serving_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The aiter of :func:`image`, made below ``tmp_path`` where the preflight finds it, on a gfx950 card of 256 CUs;
+    this host's lock directory is below ``tmp_path`` too."""
     package = standin.aiter_image(tmp_path / "image")
     config_file = package / "jit" / "optCompilerConfig.json"
     config = json.loads(config_file.read_text(encoding="utf-8"))
@@ -109,7 +115,7 @@ def test_only_the_rows_aiter_compiles_for_this_card_decide_whether_a_module_is_m
 def test_a_module_moved_aside_is_built_once_installed_and_kept_by_the_next_preflight(image, monkeypatch) -> None:
     runner = Prewarm()
 
-    first = once.prepare_serving_so_once({}, {}, build=runner)
+    first = once.build_image_own_once(runner)
 
     assert first.outcome["action"] == "invalidate" and first.outcome["variables"] == [VARIABLE]
     assert first.rebuild == once.Rebuild(built=(MODULE,), seconds=first.rebuild.seconds)
@@ -120,11 +126,11 @@ def test_a_module_moved_aside_is_built_once_installed_and_kept_by_the_next_prefl
     assert entry["gfx"] == GFX and entry["cu_num"] == CU
     assert "built module_gemm_a8w8 once from the image's own tables" in first.summary()
 
-    again = once.prepare_serving_so_once({}, {}, build=runner)
+    again = once.build_image_own_once(runner)
     assert again.outcome["action"] == "skip" and again.rebuild is None and len(runner.calls) == 1
 
     (image / "configs" / "a8w8_tuned_gemm.csv").write_text(TABLE + f"{GFX},{CU},1,2,3,4,{OTHER_GPU_KERNEL}\n", "utf-8")
-    newer = once.prepare_serving_so_once({}, {}, build=runner)
+    newer = once.build_image_own_once(runner)
     assert newer.outcome["action"] == "invalidate", "built from other tables than the image has now"
 
 
@@ -132,16 +138,16 @@ def test_a_prewarmed_module_is_kept_only_for_the_card_it_was_built_for(image, mo
     """With every row counting (the card unknown), the module built for gfx950/256 lacks the gfx942 row's kernel: it
     is not the module the servers would build, and is moved aside."""
     runner = Prewarm()
-    once.prepare_serving_so_once({}, {}, build=runner)
-    assert once.prepare_serving_so_once({}, {}, build=runner).outcome["action"] == "skip"
+    once.build_image_own_once(runner)
+    assert once.build_image_own_once(runner).outcome["action"] == "skip"
 
     monkeypatch.setattr(_aiter_jit, "card_target", lambda: None)
-    unknown = once.prepare_serving_so_once({}, {}, build=runner)
+    unknown = once.prepare_serving_so_once({}, {})
 
     assert unknown.outcome["action"] == "invalidate" and unknown.outcome["removed"] == [
         str(image / "jit" / f"{MODULE}.so")
     ]
-    assert unknown.rebuild == once.Rebuild(left=(MODULE,), why="this card's target is unknown")
+    assert unknown.rebuild == once.Rebuild(left=(MODULE,), why="the launch leaves them to its servers")
 
 
 def test_two_sessions_at_once_build_it_once(image, monkeypatch) -> None:
@@ -151,7 +157,7 @@ def test_two_sessions_at_once_build_it_once(image, monkeypatch) -> None:
 
     def session() -> None:
         start.wait()
-        results.append(once.prepare_serving_so_once({}, {}, build=runner))
+        results.append(once.build_image_own_once(runner))
 
     threads = [threading.Thread(target=session) for _ in range(2)]
     for thread in threads:
@@ -167,7 +173,7 @@ def test_two_sessions_at_once_build_it_once(image, monkeypatch) -> None:
 def test_a_failed_build_leaves_the_module_to_the_servers_and_is_not_tried_again(image, monkeypatch) -> None:
     runner = Prewarm(failure=prewarm.PrewarmError("the build failed: compile_error"))
 
-    failed = once.prepare_serving_so_once({}, {}, build=runner)
+    failed = once.build_image_own_once(runner)
 
     assert failed.outcome["action"] == "invalidate" and failed.rebuild.built == ()
     assert "compile_error" in failed.rebuild.why
@@ -175,7 +181,7 @@ def test_a_failed_build_leaves_the_module_to_the_servers_and_is_not_tried_again(
     assert "not built once" in failed.summary() and "each server builds them itself" in failed.summary()
 
     (image / "jit" / f"{MODULE}.so").write_bytes(module_of("a8w8_rowwise_retired"))
-    again = once.prepare_serving_so_once({}, {}, build=runner)
+    again = once.build_image_own_once(runner)
 
     assert again.outcome["action"] == "invalidate" and len(runner.calls) == 1
     assert again.rebuild.why.startswith("tried once on this container already")
@@ -192,10 +198,10 @@ def test_a_build_that_raises_is_not_tried_again_by_every_later_test(image) -> No
     """The build runs in the caller's process: what it raises reaches the caller, once, and the attempt is on record."""
     runner = _Crashing()
     with pytest.raises(RuntimeError, match="a defect of the build"):
-        once.prepare_serving_so_once({}, {}, build=runner)
+        once.build_image_own_once(runner)
     (image / "jit" / f"{MODULE}.so").write_bytes(module_of("a8w8_rowwise_retired"))
 
-    again = once.prepare_serving_so_once({}, {}, build=runner)
+    again = once.build_image_own_once(runner)
 
     assert again.outcome["action"] == "invalidate" and len(runner.calls) == 1
     assert again.rebuild.why.startswith("tried once on this container already")
@@ -203,32 +209,24 @@ def test_a_build_that_raises_is_not_tried_again_by_every_later_test(image) -> No
 
 
 def test_a_build_that_does_not_cover_the_cards_rows_is_not_installed(image, monkeypatch) -> None:
-    result = once.prepare_serving_so_once({}, {}, build=Prewarm(OTHER_GPU_KERNEL))
+    result = once.build_image_own_once(Prewarm(OTHER_GPU_KERNEL))
 
     assert result.rebuild.built == () and "lack kernels of gfx950/256 rows of a8w8_tuned_gemm.csv" in result.rebuild.why
     assert not (image / "jit" / f"{MODULE}.so").exists()
     assert _aiter_jit.read_prewarm_manifest(image / "jit") == {}
 
 
-def test_a_module_of_a_table_the_boot_names_itself_is_not_built(image, monkeypatch, tmp_path) -> None:
+def test_an_unknown_card_moves_nothing_for_a_build_once(image, monkeypatch) -> None:
+    """Every row would count, and the image's module lacks the other GPU's: moved aside, it would be built by no one,
+    as no test's server builds into the image."""
     runner = Prewarm()
-    own = tmp_path / "tuned.csv"
-    own.write_text(f"gfx,cu_num,M,N,K,kernelName\n{GFX},{CU},1,2,3,a8w8_rowwise_tuned_here\n", encoding="utf-8")
-
-    result = once.prepare_serving_so_once({VARIABLE: str(own)}, {}, build=runner)
-
-    assert result.outcome["action"] == "invalidate" and runner.calls == []
-    assert result.rebuild.why == "the boot names its own table for every module it moved aside"
-
-
-def test_an_unknown_card_builds_nothing(image, monkeypatch) -> None:
-    runner = Prewarm()
+    (image / "jit" / f"{MODULE}.so").write_bytes(module_of(CARD_KERNEL))
     monkeypatch.setattr(_aiter_jit, "card_target", lambda: None)
 
-    result = once.prepare_serving_so_once({}, {}, build=runner)
+    result = once.build_image_own_once(runner)
 
-    assert result.outcome["action"] == "invalidate" and runner.calls == []
-    assert result.rebuild.why == "this card's target is unknown"
+    assert result.outcome == {"action": "noop", "reason": "this card's target is unknown"} and runner.calls == []
+    assert (image / "jit" / f"{MODULE}.so").read_bytes() == module_of(CARD_KERNEL)
 
 
 @pytest.mark.asyncio
@@ -271,48 +269,6 @@ async def test_the_launch_moves_a_module_aside_and_starts_no_build(image, monkey
     assert _aiter_jit.read_prewarm_manifest(image / "jit") == {}
 
 
-def test_servers_that_build_for_several_targets_get_nothing_built_once(image, monkeypatch) -> None:
-    runner = Prewarm()
-
-    result = once.prepare_serving_so_once({}, {"GPU_ARCHS": f"{GFX};gfx942", "CU_NUM": str(CU)}, build=runner)
-
-    assert result.outcome["targets"] == ["gfx942/256", "gfx950/256"] and runner.calls == []
-    assert result.rebuild == once.Rebuild(left=(MODULE,), why="the servers build for 2 targets")
-
-
-_BUILD_TARGETS_PY = 'GFX_CU_NUM_MAP = {"gfx942": 304, "gfx950": 256}\n'
-
-
-@pytest.mark.parametrize(
-    ("environ", "card", "boot"),
-    [
-        ({"CU_NUM": "304"}, (GFX, CU), "gfx950/304"),
-        ({"GPU_ARCHS": "gfx942"}, ("gfx942", 256), "gfx942/304"),
-    ],
-    ids=["cu-num-304", "gpu-archs-gfx942-on-a-256-cu-card"],
-)
-def test_a_boot_whose_servers_build_for_another_target_than_the_card_gets_nothing_built_once(
-    image, monkeypatch, environ, card, boot
-) -> None:
-    """``GPU_ARCHS=gfx942`` with no ``CU_NUM`` resolved to 304 CUs on a card of 256, and the module was
-    built for 304. A test's server (which gets neither variable) builds for the card; the boot builds for its own."""
-    (image / "jit" / "utils").mkdir(parents=True, exist_ok=True)
-    (image / "jit" / "utils" / "build_targets.py").write_text(_BUILD_TARGETS_PY, encoding="utf-8")
-    gfx, cu_num = boot.split("/")
-    table = image / "configs" / "a8w8_tuned_gemm.csv"
-    table.write_text(TABLE + f"{gfx},{cu_num},1,2,3,4,a8w8_rowwise_boot\n", encoding="utf-8")
-    monkeypatch.setattr(_aiter_jit, "card_target", lambda: card)
-    runner = Prewarm()
-
-    result = once.prepare_serving_so_once({}, environ, build=runner)
-
-    assert result.outcome["action"] == "invalidate" and result.outcome["targets"] == [boot] and runner.calls == []
-    assert result.rebuild.why == (
-        f"this boot's servers build for {boot} (GPU_ARCHS or CU_NUM in its environment) and a test's for the card's "
-        f"{card[0]}/{card[1]}"
-    )
-
-
 def test_serving_modules_outside_the_images_aiter_jit_are_not_built_into_it(image, monkeypatch, tmp_path) -> None:
     elsewhere = tmp_path / "elsewhere" / "jit"
     elsewhere.mkdir(parents=True)
@@ -320,7 +276,7 @@ def test_serving_modules_outside_the_images_aiter_jit_are_not_built_into_it(imag
     monkeypatch.setattr(_aiter_jit, "resolve_serving_context", lambda *args, **kwargs: (image, elsewhere / "build"))
     runner = Prewarm()
 
-    result = once.prepare_serving_so_once({}, {}, build=runner)
+    result = once.build_image_own_once(runner)
 
     assert result.outcome["removed"] == [str(elsewhere / f"{MODULE}.so")] and runner.calls == []
     assert result.rebuild.why == f"the serving modules are not the image's own aiter/jit: {elsewhere}"
@@ -338,7 +294,7 @@ def test_a_host_directory_that_cannot_be_used_leaves_the_preflight_to_run_unlock
     runner = Prewarm()
     caplog.set_level(logging.WARNING)
 
-    result = once.prepare_serving_so_once({}, {}, build=runner)
+    result = once.build_image_own_once(runner)
 
     assert not (image / "jit" / f"{MODULE}.so").exists(), "moved aside: the boot builds it"
     assert runner.calls == [] and result.rebuild == once.Rebuild(left=(MODULE,), why="this host's lock cannot be used")
@@ -347,7 +303,7 @@ def test_a_host_directory_that_cannot_be_used_leaves_the_preflight_to_run_unlock
         line.startswith(
             f"aiter serving preflight: this host's lock {blocker / 'host' / 'preflight.lock'} cannot be used"
         )
-        and line.endswith("the launch preflight of a boot runs unlocked")
+        and line.endswith("the prewarm of the image's own serving modules runs unlocked")
         for line in lines
     )
 
@@ -367,7 +323,7 @@ def test_a_preflight_that_waits_for_the_lock_says_who_holds_it_and_what_it_does(
     monkeypatch.setattr(fcntl, "flock", held_by_another)
     caplog.set_level(logging.WARNING)
 
-    once.prepare_serving_so_once({}, {}, build=Prewarm())
+    once.prepare_serving_so_once({}, {})
 
     lines = [record.getMessage() for record in caplog.records if record.name == once.log.name]
     assert lines[0] == (
@@ -419,7 +375,7 @@ def test_a_build_says_what_it_builds_for_which_card_before_it_starts(image, monk
     runner = _Watched(caplog)
     caplog.set_level(logging.WARNING)
 
-    once.prepare_serving_so_once({}, {}, build=runner)
+    once.build_image_own_once(runner)
 
     assert (
         f"aiter serving preflight: building {MODULE} once for {GFX}/{CU} before this boot (the prewarm of {VARIABLE})"
@@ -437,7 +393,7 @@ def test_a_module_aiter_cannot_build_by_name_is_reported_as_left_to_the_servers(
     config[MODULE]["third_party"] = ["'ck'"]
     config_file.write_text(json.dumps(config), encoding="utf-8")
 
-    result = once.prepare_serving_so_once({}, {}, build=Prewarm())
+    result = once.build_image_own_once(Prewarm())
 
     assert result.rebuild == once.Rebuild(
         left=(MODULE,), seconds=result.rebuild.seconds, why="aiter cannot build them by name"
@@ -453,11 +409,11 @@ def test_a_build_that_failed_for_one_card_target_is_still_tried_for_another(imag
     table = image / "configs" / "a8w8_tuned_gemm.csv"
     table.write_text(TABLE + f"{GFX},128,64,57344,8192,47,a8w8_rowwise_partitioned\n", encoding="utf-8")
     runner = Prewarm(failure=prewarm.PrewarmError("the build failed: compile_error"))
-    once.prepare_serving_so_once({}, {}, build=runner)
+    once.build_image_own_once(runner)
     (image / "jit" / f"{MODULE}.so").write_bytes(module_of("a8w8_rowwise_retired"))
 
     monkeypatch.setattr(_aiter_jit, "card_target", lambda: (GFX, 128))
-    again = once.prepare_serving_so_once({}, {}, build=runner)
+    again = once.build_image_own_once(runner)
 
     assert again.outcome["targets"] == [f"{GFX}/128"]
     assert [call[1:] for call in runner.calls] == [(GFX, CU), (GFX, 128)]
