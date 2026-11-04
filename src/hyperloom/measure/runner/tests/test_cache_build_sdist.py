@@ -23,7 +23,13 @@ from typing import Any
 import pytest
 
 from hyperloom.measure.runner import cache_build
-from hyperloom.measure.runner.cache_build import BuildOptions, CacheConflict, WheelSource, ensure_runner_cache
+from hyperloom.measure.runner.cache_build import (
+    BuildOptions,
+    CacheConflict,
+    WheelSource,
+    WheelTarget,
+    ensure_runner_cache,
+)
 from hyperloom.measure.runner.cache_layout import (
     LOCK_FILE,
     MANIFEST_NAME,
@@ -54,6 +60,8 @@ _SDIST_WHEEL = "sdist_pkg-1.0-py3-none-any.whl"
 _RENAMED = "sdist_pkg-1.0-py2.py3-none-any.whl"
 #: The real ``lock_pkg`` wheel's names where the entry keeps a source distribution: a source distribution's two.
 _TAR_GZ, _ZIP = "lock_pkg-1.0.tar.gz", "lock_pkg-1.0.zip"
+#: A Python that has a lock of its own in a commit of the last test, and that lock.
+_CP314, _CP314_LOCK = WheelTarget(python_version="3.14"), "requirements/runner-cp314.lock"
 #: Why a reuse refuses a source distribution recorded with a hash the commit's lock does not list.
 _NOT_IN_THE_LOCK = (
     f"{SDISTS_DIR}/{_SDIST} is not the source distribution of {_SDIST_WHEEL} for sdist-pkg==1.0 that the manifest "
@@ -347,3 +355,37 @@ def test_a_reuse_builds_only_what_the_commits_lock_lists_and_compares_only_the_w
         ensure_runner_cache(rig.repo, cache.sha, cache.root, _NO_WHEELS)
     assert difference in str(refused.value)
     assert rebuilt_from == []
+
+
+def test_a_reuse_checks_the_built_wheels_against_the_lock_of_the_entrys_python_not_the_shared_one(
+    rig: Rig,
+    planted: Planted,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rebuilt_from: list[Path],
+) -> None:
+    """A commit whose shared lock lists another ``sdist_pkg`` source distribution than the lock of Python 3.14: an
+    honest entry for 3.14 is reused, and one recorded with the source distribution only the shared lock lists is
+    refused, with the entry check made to pass."""
+
+    def two_locks(repo: Path) -> None:
+        shared = repo / LOCK_FILE
+        own = shared.read_text()
+        assert rig.sdist_pkg_sha256 in own
+        (repo / _CP314_LOCK).write_text(own)
+        shared.write_text(own.replace(rig.sdist_pkg_sha256, _digest(planted.sdist)))
+
+    (tmp_path / "work").mkdir()
+    commit = commit_edit(rig, tmp_path / "work", two_locks)
+    cache, offline = tmp_path / "cache", replace(_NO_WHEELS, target=_CP314)
+    built = ensure_runner_cache(commit.repo, commit.sha, cache, replace(rig.build_options(), target=_CP314))
+    reused = ensure_runner_cache(commit.repo, commit.sha, cache, offline)
+    assert (reused.reused, reused.manifest_sha256) == (True, built.manifest_sha256)
+
+    _sdist_recorded_with_its_own_hash(built.path, planted)
+    monkeypatch.setattr(cache_build, "check_entry", lambda *args, **kwargs: [])
+    with pytest.raises(CacheConflict, match="is left alone") as refused:
+        ensure_runner_cache(commit.repo, commit.sha, cache, offline)
+    assert _NOT_IN_THE_LOCK in str(refused.value)
+    # Built once by the build and once by the honest reuse; the planted one never.
+    assert [path.name for path in rebuilt_from] == [_SDIST, _SDIST]
