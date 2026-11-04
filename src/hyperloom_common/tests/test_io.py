@@ -180,6 +180,23 @@ def test_atomic_write_bytes_mode_wins_over_preserve_mode(tmp_path):
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
 
+def test_atomic_write_group_read_new_file_is_0640(tmp_path):
+    p = tmp_path / "g.json"
+    atomic_write_text(p, "x", options=WriteOptions(group_read=True))
+    assert stat.S_IMODE(p.stat().st_mode) == 0o640
+
+
+def test_atomic_write_group_read_yields_to_mode_and_preserve(tmp_path):
+    p = tmp_path / "m.txt"
+    atomic_write_text(p, "x", options=WriteOptions(mode=0o600, group_read=True))
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    q = tmp_path / "q.txt"
+    q.write_text("old")
+    q.chmod(0o600)
+    atomic_write_text(q, "new", options=WriteOptions(preserve_mode=True, group_read=True))
+    assert stat.S_IMODE(q.stat().st_mode) == 0o600
+
+
 class TestAppendJsonl:
     def test_appends_lines(self, tmp_path):
         p = tmp_path / "log.jsonl"

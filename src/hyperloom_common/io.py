@@ -77,7 +77,9 @@ class WriteOptions:
 
     A new file is owner-only (``0o600``). ``mode`` is applied with group/other bits
     stripped; ``preserve_mode`` instead keeps an existing file's permission bits and
-    is ignored when ``mode`` is given. ``fsync`` and ``fsync_dir`` raise the
+    is ignored when ``mode`` is given. ``group_read`` makes a new file ``0o640`` instead
+    of ``0o600`` (a shared-tree file read by the directory's group; never other-readable;
+    ignored when ``mode`` is given or ``preserve_mode`` keeps an existing file's bits). ``fsync`` and ``fsync_dir`` raise the
     ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
     """
@@ -87,6 +89,7 @@ class WriteOptions:
     fsync_dir: bool = False
     mode: int | None = None
     preserve_mode: bool = False
+    group_read: bool = False
 
 
 #: A crash-safe replace: parents created, the data and the rename flushed to disk, an existing file's mode kept.
@@ -132,6 +135,8 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
             os.chmod(tmp, options.mode & 0o700)
         elif options.preserve_mode and path.is_file():
             shutil.copymode(path, tmp)
+        elif options.group_read:
+            os.chmod(tmp, 0o640)
         os.replace(tmp, path)
         if options.fsync_dir:
             fsync_directory(path.parent)
