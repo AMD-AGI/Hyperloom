@@ -7,11 +7,11 @@ Per specialist: the process-tree resident memory peak and cumulative CPU seconds
 read from ``/proc``, and the disk the worktree and its self-check venv use.
 Per container: cgroup v2 memory limit, peak, OOM-kill count and CPU limit. Every
 reader returns ``None`` for what it cannot read instead of guessing, and nothing
-here writes to or signals the processes it observes.
+here writes anything or signals the processes it observes.
 
-Records go to ``agents/resources.jsonl``; their purpose is
-to size the hosted application container and to decide when CPU specialists need a
-sub-run, so a missing reading must stay distinguishable from a zero.
+The readings are for a specialist's resource record; their purpose is to size the
+hosted application container and to decide when CPU specialists need a sub-run, so
+a missing reading must stay distinguishable from a zero.
 """
 
 from __future__ import annotations
@@ -23,9 +23,6 @@ from pathlib import Path
 from hyperloom.common.proctree import descendants
 
 __all__ = [
-    "CONTAINER_RECORD_KIND",
-    "RESOURCES_RELATIVE_PATH",
-    "SPECIALIST_RECORD_KIND",
     "ContainerSnapshot",
     "ProcessTreeSampler",
     "TreeSample",
@@ -35,9 +32,6 @@ __all__ = [
 
 UTF8 = "utf-8"
 DECODE_ERRORS = "replace"
-RESOURCES_RELATIVE_PATH = Path("agents") / "resources.jsonl"
-SPECIALIST_RECORD_KIND = "specialist_resources"
-CONTAINER_RECORD_KIND = "container_resources"
 
 
 @dataclass(frozen=True)
