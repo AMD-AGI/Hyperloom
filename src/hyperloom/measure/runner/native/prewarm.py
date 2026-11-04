@@ -104,7 +104,6 @@ _JIT_DIR = "jit"
 _SO = ".so"
 _CONFIGS_DIR = "configs"
 _MODULES = "modules"
-_INSTALLED_MODE = 0o644
 _UTF8 = "utf-8"
 _LOG_TAIL = 400
 #: Nothing is stored or signed: the build's key only names it within this process.
@@ -251,23 +250,30 @@ class _Build:
         return self.gfx if self.cu_num is None else f"{self.gfx}/{self.cu_num}"
 
 
+def _installed_mode(jit: Path) -> int:
+    """The mode of an installed module and of the manifest: the owner reads and writes, and whoever may read ``jit``
+    may read them, as the servers of the image that load them may run as another user."""
+    return stat.S_IRUSR | stat.S_IWUSR | (stat.S_IMODE(os.stat(jit).st_mode) & (stat.S_IRGRP | stat.S_IROTH))
+
+
 def _install(jit: Path, built: Mapping[str, Path], entries: Mapping[str, dict[str, Any]]) -> None:
     """Copy every built module beside its place first, then ``os.replace`` each into it and the manifest after them: a
     copy that fails leaves the image as it was, and a module installed without its manifest entry is only one the old
     flow's cleanup moves aside (it is then built at the first prefill)."""
     pending: list[tuple[Path, Path]] = []
+    mode = _installed_mode(jit)
     try:
         for name, source in sorted(built.items()):
             temporary = jit / f".{name}{_SO}.prewarm-{uuid.uuid4().hex}"
             pending.append((temporary, jit / f"{name}{_SO}"))
             shutil.copyfile(source, temporary)
-            os.chmod(temporary, _INSTALLED_MODE)
+            os.chmod(temporary, mode)
         manifest = jit / f".{PREWARM_MANIFEST}.{uuid.uuid4().hex}"
         pending.append((manifest, jit / PREWARM_MANIFEST))
         document = {"schema": PREWARM_SCHEMA, _MODULES: [entries[name] for name in sorted(entries)]}
         with open(manifest, "x", encoding=_UTF8) as out:
             json.dump(document, out, indent=2, sort_keys=True)
-        os.chmod(manifest, _INSTALLED_MODE)
+        os.chmod(manifest, mode)
     except OSError:
         for temporary, _ in pending:
             temporary.unlink(missing_ok=True)
