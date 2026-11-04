@@ -54,7 +54,7 @@ MODULE_BUILD_SEC = MODULE_BUILD_LIMIT_SEC
 WATCHDOG_MARGIN_SEC = 300
 _SGLANG = "sglang"
 _FLAG = "--watchdog-timeout"
-_FLAG_RE = re.compile(r"(?:^|\s)--watchdog-timeout(?:=|\s+|$)(?P<value>\S*)")
+_FLAG_RE = re.compile(r"(?:^|\s)--watchdog-timeout(?:(?:=|\s+)(?P<value>\S*)|$)")
 _UTF8 = "utf-8"
 
 
@@ -174,7 +174,7 @@ def _raised_line(line: str, seconds: int) -> str | None:
     if not found:
         return f"{line} {_FLAG} {seconds}".strip()
     last = found[-1]
-    value = _raised(last.group("value"), seconds)
+    value = _raised(last.group("value") or "", seconds)
     if value is None:
         return None
     return f"{line[: last.start('value')]}{value}{line[last.end('value') :]}"

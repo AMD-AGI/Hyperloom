@@ -94,7 +94,8 @@ _WORK = "work"
 _MARGIN_SEC = 300
 _STDERR_TAIL = 500
 _INFRA = "infra"
-_JOB_MODE = 0o644
+#: The job is read by its owner only: the compile user, to whom :func:`_give` hands the work directory before the compile.
+_JOB_MODE = 0o600
 #: The permission another user needs to reach a directory below one: search, not read.
 _PASS_THROUGH = stat.S_IXOTH
 
