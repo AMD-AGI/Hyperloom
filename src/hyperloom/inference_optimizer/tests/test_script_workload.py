@@ -99,7 +99,7 @@ def test_a_failing_script_keeps_its_recording_log(tmp_path, capsys):
     assert not (tmp_path / "ws" / "optimization").exists()
 
 
-NUMPY_SCRIPT = textwrap.dedent(
+OPAQUE_SCRIPT = textwrap.dedent(
     """
     from toy_opt import apply
     import torch
@@ -107,28 +107,37 @@ NUMPY_SCRIPT = textwrap.dedent(
     torch.manual_seed(0)
     inner = torch.nn.Linear(512, 512).eval()
 
+    class Mask:
+        def __init__(self, data):
+            self.data = data
+
     class Model:
         def __call__(self, x):
             with torch.no_grad():
-                return inner(x).numpy()
+                return Mask(inner(x))
 
     model = apply(Model())
     for _ in range(3):
-        print(model(torch.randn(256, 512)).shape)
+        print(type(model(torch.randn(256, 512))).__name__)
     """
 )
 
 
 def test_prepare_refuses_an_output_the_gate_cannot_compare(tmp_path):
-    """A numpy output used to stringify, and numpy elides any array over 1000 elements.
+    """A leaf that is not a tensor, container or scalar used to be stringified.
 
-    Two different masks then render identically, and an output made entirely of such
-    leaves has no tensors to compare at all, so it scored a perfect zero.
+    The motivating case is a numpy mask: numpy elides the repr of any array over
+    1000 elements, so two different 1024x1024 masks render identically and compare
+    equal. An output built only of such leaves is worse -- it has no tensors for
+    _leaves to find, so the comparison iterates nothing and scores zero.
+
+    Uses a plain object rather than an ndarray so the harness's only test file
+    needs nothing beyond torch.
     """
     with pytest.raises(subprocess.CalledProcessError):
-        _prepare(tmp_path, tmp_path / "ws", NUMPY_SCRIPT)
+        _prepare(tmp_path, tmp_path / "ws", OPAQUE_SCRIPT)
     log = (tmp_path / "ws" / "record_stderr.log").read_text()
-    assert "is a ndarray, which the accuracy gate cannot compare" in log
+    assert "is a Mask, which the accuracy gate cannot compare" in log
     assert not (tmp_path / "ws" / "benchmark").exists()
 
 
