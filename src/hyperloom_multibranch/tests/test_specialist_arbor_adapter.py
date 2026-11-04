@@ -564,7 +564,7 @@ def test_arbor_is_held_to_mb_s_accuracy_floor_unless_the_launch_or_the_recipe_se
 
 
 def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Path) -> None:
-    # Operator, 2026-11-01: the benchmark's rules are considered in validation, and are part of the dossier.
+    # The benchmark's rules are considered in validation, and are part of the dossier.
     spec = _spec(tmp_path)
     agentx = replace(spec, workload={"kind": "agentx", "conc": 8})
 

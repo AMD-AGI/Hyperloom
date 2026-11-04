@@ -79,11 +79,9 @@ TABLES_DIR = "tables"
 #: both over the root; empty when they are the same.
 SourceIncrement = Callable[[tuple[PatchRef, ...], str], Awaitable[str]]
 #: The server flags a framework variable needs off, by the variable: a keep that sets it (to anything but off) runs
-#: without them. Framework knowledge a pack's author or a weaker model will not carry; each entry says where it was
-#: found.
+#: without them. Framework knowledge a pack's author or a weaker model will not carry; each entry says why.
 FLAG_CONFLICTS: Mapping[str, tuple[str, ...]] = {
-    # SGLang: the Qwen3.8 monokernel replaces ReplaySSM's linear-attention spec path, whose server asserts with both
-    # on (found in a Qwen3.8-Flash-Next AgentX campaign: 18 failed gate attempts)
+    # SGLang: the Qwen3.8 monokernel replaces ReplaySSM's linear-attention spec path, whose server asserts with both on
     "SGLANG_ENABLE_QWEN4_MONOKERNEL": ("--enable-linear-replayssm-spec",),
 }
 #: The values that leave a variable off.

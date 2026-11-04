@@ -122,9 +122,8 @@ IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
 LOCAL = LocalCards((0, 1, 2, 3))
 HOST = MeasurementHost(LOCAL, IMAGE, "a" * 40, InferenceXCheckout("b" * 40, "/opt/InferenceX"))
 AGENTX_CHECKOUT = InferenceXCheckout("c" * 40, "/opt/InferenceX-agentx/inferencex-e2e")
-#: What the single-lineage child took to measure the GLM-5.3 TP4 AgentX baseline that a session's toolbox killed at an
-#: hour, the limit of every test then.
-SINGLE_LINEAGE_AGENTX_BASELINE_SEC = 88 * 60
+#: An AgentX baseline test that runs past an hour, the limit every test once had.
+AGENTX_TEST_PAST_AN_HOUR_SEC = 90 * 60
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 DEV_SANDBOX_TOOLS = {f"dev_sandbox_{verb}" for verb in ("lease", "run", "start", "read", "release")}
 
@@ -590,7 +589,7 @@ async def test_an_agentx_test_may_outlast_its_trace_window_and_an_inferencex_tes
         pass
 
     [agentx, inferencex] = given
-    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, SINGLE_LINEAGE_AGENTX_BASELINE_SEC)
+    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, AGENTX_TEST_PAST_AN_HOUR_SEC)
     assert inferencex.timeout_sec == DEFAULT_TEST_TIMEOUT_SEC
 
 
@@ -809,7 +808,7 @@ async def test_an_agentx_test_in_the_services_sandboxes_may_outlast_its_trace_wi
         pass
 
     [agentx] = given
-    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, SINGLE_LINEAGE_AGENTX_BASELINE_SEC)
+    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, AGENTX_TEST_PAST_AN_HOUR_SEC)
 
 
 def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
