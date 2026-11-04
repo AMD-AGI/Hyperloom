@@ -12,11 +12,13 @@ start-up script (:mod:`hyperloom.measure.runner.bootstrap`) installs from it wit
                                included
     <cache>/<sha>/source/      that archive unpacked; the builder reads it, the sandbox never does
     <cache>/<sha>/wheels/      one wheel per pin of ``requirements/runner.lock``
+    <cache>/<sha>/sdists/      the source distribution of each wheel the builder built from one, which the builder
+                               builds again before it reuses the entry; the sandbox never reads it
     <cache>/<sha>/bootstrap.sh the start-up script (``BOOTSTRAP_SCRIPT``) of the builder that made the entry, mode 0755;
                                a template step runs it with ``sh``
     <cache>/<sha>/manifest     JSON, written last: the commit and its tree, the size and SHA-256 of ``source.tar``, the
                                digest of ``source``, the SHA-256 of ``bootstrap.sh`` and, for each wheel, its pin, file,
-                               size and SHA-256 (see :class:`WheelEntry`)
+                               size and SHA-256, and the source distribution it was built from (see :class:`WheelEntry`)
 
 The sandbox runs nothing from the cache itself (:func:`stage_entry`). It reads the manifest once; it reads
 ``source.tar`` once, hashing the bytes as it reads them, and unpacks those same bytes below its own scratch directory
@@ -61,6 +63,7 @@ __all__ = [
     "MANIFEST_NAME",
     "MANIFEST_PIN_ENV",
     "REQUIREMENTS_FILE",
+    "SDISTS_DIR",
     "SOURCE_ARCHIVE",
     "SOURCE_DIR",
     "WHEELS_DIR",
@@ -101,6 +104,8 @@ SOURCE_DIR = "source"
 LOCAL_SOURCE_DIR = "hl-source"
 LOCAL_WHEELS_DIR = "hl-wheels"
 WHEELS_DIR = "wheels"
+#: The source distributions of the wheels the builder built, below an entry; only the builder reads them.
+SDISTS_DIR = "sdists"
 LOCK_FILE = "requirements/runner.lock"
 _SCHEMA = 1
 _UTF8 = "utf-8"
@@ -148,8 +153,11 @@ class WheelEntry:
     """One wheel of the cache: the pin it satisfies and the file that does.
 
     A pin that the index serves only as a source distribution is built into a wheel by the builder; ``sdist_sha256`` is
-    the hash of that source distribution, which the lock lists, and ``sha256`` is the built wheel's. Empty for a wheel
-    that was downloaded, whose own hash the lock lists.
+    the hash of that source distribution, which the lock lists, ``sdist_file`` its file in ``<entry>/sdists``, and
+    ``sha256`` is the built wheel's. The lock cannot tell a source distribution's hash from a wheel's, so the builder
+    reuses an entry with such a wheel only when that file is there with that hash and building it again makes a wheel of
+    the same content (:mod:`hyperloom.measure.runner.cache_build`). Both are empty for a wheel that was downloaded, whose
+    own hash the lock lists.
     """
 
     name: str
@@ -158,6 +166,7 @@ class WheelEntry:
     size: int
     sha256: str
     sdist_sha256: str = ""
+    sdist_file: str = ""
 
 
 @dataclass(frozen=True)

@@ -58,11 +58,12 @@ else can write the cache once the check has run. What that does not cover:
   builder's. They are, whoever can write the cache, when the template pins the manifest and the script is the
   template's own (:func:`runner_start_command`) or the entry's copy checked by :func:`runner_start_shell_line` (below);
   without the pin, or with the plain ``sh .../bootstrap.sh`` step, only when no one but the builder can write the cache.
-- A wheel the builder built from a source distribution (a pin the index serves only as one) is bound by the hash the
-  pinned manifest records, not by the lock, which lists the source distribution's: on reuse the builder checks the
-  entry's archive against the commit, but such a wheel only against the entry's own manifest
-  (:mod:`hyperloom.measure.runner.cache_build`). It too is the builder's only when no one but the builder can write the
-  cache.
+- A wheel the builder built from a source distribution (a pin the index serves only as one) is matched to its pin here
+  by the source distribution's hash, which the manifest records and the lock lists; the wheel's own bytes are bound
+  only by the pinned manifest. That manifest names the commit's wheel because the builder pins an entry with such a
+  wheel only after building the source distribution the entry keeps, a file the commit's lock lists, again into a
+  wheel of the same content (:mod:`hyperloom.measure.runner.cache_build`). Without the pin this check cannot tell such
+  a wheel from another.
 - The checked copies sit in the sandbox's scratch directory, which the sandbox's own account can write, and the server
   the runner measures (the inference server, a repro case) runs as that same account in the same sandbox. What keeps
   that server away from the runner's code and key is the account and the sandbox, not the cache.
