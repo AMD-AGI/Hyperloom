@@ -21,11 +21,13 @@ import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tarfile
 import threading
 import zipfile
+import zlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -49,8 +51,10 @@ __all__ = [
     "lock_text",
     "make_rig",
     "read_probe",
+    "rewrite_wheel",
     "run_script",
     "tripwire",
+    "unicode_path_name",
 ]
 
 PROBE_FILE = "probe.json"
@@ -259,6 +263,38 @@ def build_wheel(
         for path, text in files.items():
             archive.writestr(path, text)
     return wheel, hashlib.sha256(wheel.read_bytes()).hexdigest()
+
+
+#: A zip member edit for :func:`rewrite_wheel`: the member to write in place of the one it is given.
+MemberEdit = Callable[[zipfile.ZipInfo], zipfile.ZipInfo]
+
+
+def rewrite_wheel(wheel: Path, out: Path, edit: MemberEdit | None = None) -> Path:
+    """``wheel`` written again as ``out`` with the same contents: its members in reverse order, each with another
+    timestamp, and each passed through ``edit`` when given (which may rename it, or give it an extra field)."""
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(out, "w") as target:
+        for info in reversed(source.infolist()):
+            member = zipfile.ZipInfo(info.filename, date_time=(2001, 2, 3, 4, 5, 6))
+            member.external_attr = info.external_attr
+            target.writestr(edit(member) if edit else member, source.read(info))
+    return out
+
+
+def unicode_path_name(named: str, raw: str) -> MemberEdit:
+    """An edit that stores the member ``named`` under the raw name ``raw`` with an Info-ZIP Unicode Path extra field
+    (0x7075) naming it ``named``, whose checksum is the raw name's: the zipfile of Python 3.12 and newer reads the
+    member as ``named``, older ones and the bytes of its headers as ``raw``."""
+
+    def edit(member: zipfile.ZipInfo) -> zipfile.ZipInfo:
+        if member.filename != named:
+            return member
+        renamed = zipfile.ZipInfo(raw, date_time=member.date_time)
+        renamed.external_attr = member.external_attr
+        field = struct.pack("<BL", 1, zlib.crc32(raw.encode())) + named.encode()
+        renamed.extra = struct.pack("<HH", 0x7075, len(field)) + field
+        return renamed
+
+    return edit
 
 
 _SDIST_BACKEND = """\
