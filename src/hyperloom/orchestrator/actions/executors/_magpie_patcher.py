@@ -114,10 +114,6 @@ _LM_EVAL_REF_RE = re.compile(r'local lm_eval_ref="([^"]+)"')
 #: Succeeds when ``python3`` has the pinned lm-eval and the round's ``_install_lm_eval_deps`` would install nothing.
 LM_EVAL_READY_FN = "_hyperloom_lm_eval_ready"
 _LM_EVAL_SPARE_MARKER_FN = "_hyperloom_lm_eval_spare_marker"
-_EVAL_OUTPUT_FN = "_hyperloom_keep_eval_output"
-#: Names the file the eval's output is kept in once it is (``$RESULT_DIR/EVAL_OUTPUT_LOG``); set, nothing else is kept.
-EVAL_OUTPUT_ENV = "HYPERLOOM_EVAL_OUTPUT_LOG"
-EVAL_OUTPUT_LOG = "hyperloom_eval.log"
 
 # System-wide lock.
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
@@ -309,18 +305,9 @@ def _lm_eval_once_wrapper(ref: str) -> str:
     printf '/tmp/hyperloom-lm-eval-{ref}-%s\\n' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
 }}
 
-{_EVAL_OUTPUT_FN}() {{
-    # From here on what this shell writes is kept in $RESULT_DIR/{EVAL_OUTPUT_LOG} as it is written: Magpie holds the
-    # round's output until the round ends, so a round its watchdog ends leaves nothing of what its eval printed.
-    [[ -z "${{{EVAL_OUTPUT_ENV}:-}}" && -n "${{RESULT_DIR:-}}" && -d "${{RESULT_DIR:-}}" ]] || return 0
-    export {EVAL_OUTPUT_ENV}="$RESULT_DIR/{EVAL_OUTPUT_LOG}"
-    exec > >(tee -a "${EVAL_OUTPUT_ENV}") 2> >(tee -a "${EVAL_OUTPUT_ENV}" >&2)
-}}
-
 _install_lm_eval_deps() {{
     # {_LM_EVAL_ONCE_SENTINEL}: local tests share one Python environment, and a reinstall racing
     # another test's eval breaks it; install once per environment and lm-eval revision, under a lock.
-    {_EVAL_OUTPUT_FN}
     local prefix marker lock
     prefix="$(python3 -c 'import sys; print(sys.prefix)' 2>/dev/null)" || prefix=unknown
     marker="$prefix/.hyperloom-lm-eval-{ref}"
@@ -700,8 +687,6 @@ __all__ = [
     "client_tokenizer_hook_installed",
     "ensure_eval_concurrency_compat",
     "ensure_lm_eval_install_once",
-    "EVAL_OUTPUT_ENV",
-    "EVAL_OUTPUT_LOG",
     "LM_EVAL_READY_FN",
     "ensure_client_trust_compat",
     "live_eval_concurrency_flag_scripts",
