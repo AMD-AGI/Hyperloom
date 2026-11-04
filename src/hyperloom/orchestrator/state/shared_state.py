@@ -1104,8 +1104,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput`` so current_best has the latency metric.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
-        # Group-readable at creation: the session tree is shared with the session group, and a 0600 state.json
-        # made every other account in that group fall back to sudo to read it.
         atomic_write_json(path, self.to_dict(), options=WriteOptions(make_parents=True, group_read=True))
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
