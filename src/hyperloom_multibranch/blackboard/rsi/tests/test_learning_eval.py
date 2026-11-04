@@ -14,13 +14,13 @@ from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import Learning, LearningRecord, BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
-from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG
+from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, names
 from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
-from hyperloom_multibranch.blackboard.rsi.learning_eval import evaluate_learnings, names, read_session
+from hyperloom_multibranch.blackboard.rsi.learning_eval import evaluate_learnings, read_session
 from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock, profile
-from hyperloom_multibranch.blackboard.tests.sessions import GEMM, SPLIT_KV, scripted_session
+from hyperloom_multibranch.blackboard.tests.sessions import FP8_KV, GEMM, SPLIT_KV, scripted_session
 
 CONDITIONS = task_conditions(profile())
 CHUNKED = "chunked prefill makes the server exit during warmup on this image"
@@ -85,6 +85,23 @@ def test_a_pooled_lesson_counts_apart_matched_by_the_direction_its_revision_give
     assert (found.pitfalls_shown, found.lessons_shown) == (0, 2)
     assert "| pooled lessons: pitfalls avoided | 100% (1/1) |" in found.render()
     assert evaluate_learnings(snapshot, log).lesson_pitfalls_shown == 0
+
+
+def test_a_lesson_matches_a_later_test_of_its_family_though_their_words_differ(snapshot: BlackboardSnapshot) -> None:
+    insight = Learning(
+        "x", LearningKind.INSIGHT, "casting the kv cache to fp8 frees memory", "KV cache", "cast it to fp8"
+    )
+    pitfall = Learning("x", LearningKind.PITFALL, "an fp8 kv cache costs accuracy here", "the kv cache", "fp8 dtype")
+    shown = {"insight": insight, "pitfall": pitfall}
+    log = [{"at": _between(snapshot, "r2", "r3"), "branch": "s2", "source": "brief", "here": [], "past": list(shown)}]
+
+    found = evaluate_learnings(snapshot, log, pooled=shown)
+
+    # s2 cast the KV cache to fp8 afterwards (r5), in words neither lesson uses; r3 chunked the prefill.
+    assert not names(insight, FP8_KV) and not names(pitfall, FP8_KV)
+    assert (found.lesson_insights_shown, found.lesson_insights_taken_up) == (1, 1)
+    assert (found.lesson_pitfalls_shown, found.lesson_pitfalls_avoided) == (1, 0)
+    assert (found.tests_in_lesson_directions, found.tests_elsewhere_after_lessons) == (1, 1)
 
 
 def test_a_brief_lead_counts_once_and_is_taken_up_by_a_later_test_making_its_change(
