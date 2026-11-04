@@ -503,9 +503,10 @@ class RooflineConclusion:
     """What a succeeded roofline action promoted.
 
     ``kernel_attribution_degraded`` says that zero hot kernels are an
-    attribution artifact rather than a real absence, and ``snapshot`` is
-    passed in rather than looked up because the recorder holds no reference
-    to session state.
+    attribution artifact rather than a real absence, ``analysis_degraded``
+    that the analysis carries a degrading trace-health warning, and
+    ``snapshot`` is passed in rather than looked up because the recorder
+    holds no reference to session state.
     """
 
     snapshot_id: Any
@@ -514,6 +515,7 @@ class RooflineConclusion:
     cached: dict[str, Any] | None
     trace_path: str
     snapshot: Mapping[str, Any] | None = None
+    analysis_degraded: bool = False
 
 
 class RooflineEventRecorder:
@@ -755,15 +757,17 @@ class RooflineEventRecorder:
                 # instead of interleaving them with the ones they replaced.
                 natural_ids=(self._action_id, f"{rank:04d}"),
             )
-        # Zero routable candidates is a completed roofline that cannot advance
-        # kernel work, which is a different operational state from a clean run.
+        # Zero routable candidates, or candidates from a degraded analysis, is a
+        # completed roofline in a different operational state from a clean run.
+        degraded = conclusion.kernel_attribution_degraded or conclusion.analysis_degraded
         self._close(
-            status="degraded" if conclusion.kernel_attribution_degraded else "succeeded",
+            status="degraded" if degraded else "succeeded",
             payload={
                 "outcome": {
                     "snapshot_id": _int_or_none(promoted.get("roofline_snapshot_id") or conclusion.snapshot_id),
                     "hot_kernel_count": int(conclusion.hot_kernel_count),
                     "kernel_attribution_degraded": bool(conclusion.kernel_attribution_degraded),
+                    "analysis_degraded": bool(conclusion.analysis_degraded),
                     "profile_trace": str(conclusion.trace_path or ""),
                     "steady_state_trace": str(promoted.get("steady_state_trace") or ""),
                     "analysis_md_path": str(promoted.get("analysis_md_path") or ""),

@@ -394,6 +394,25 @@ def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status, mon
     assert reason == "kernel_no_more_leverage"
 
 
+def test_a_failed_geak_run_exits_kernel_with_its_error():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.kernel_optimizer = "geak"
+    state.geak_result = {
+        "status": "error",
+        "error_class": "workflow_parse_error",
+        "error": "connect ECONNREFUSED 127.0.0.1:4000",
+    }
+
+    target, reason, evidence = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
+    evidence.pop("predicate_inputs")
+
+    assert (target, reason, evidence) == (
+        PHASE_SWEEP,
+        "kernel_geak_failed",
+        {"geak_status": "error", "error_class": "workflow_parse_error", "error": "connect ECONNREFUSED 127.0.0.1:4000"},
+    )
+
+
 def test_kernel_exits_when_every_hot_kernel_is_rejected_or_integrated():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.last_trace_analyze = {"hot_kernels_top15": [_hot("k001", "/repo/a.py"), _hot("k002", "/repo/b.py")]}

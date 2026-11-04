@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hyperloom.orchestrator.trace_analysis import _candidate_assembly as candidate_assembly
 
 from hyperloom.common import kernel_source_contract as ksc
@@ -200,3 +202,41 @@ def test_collective_symbol_index_row_does_not_suppress_the_artifact(tmp_path):
     by_id = {e["kernel_id"]: e for e in doc["entries"]}
     assert by_id["k1"]["method"] == ksc.METHOD_SYMBOL_INDEX
     assert by_id["k1"]["source_file"] == "/csrc/custom_all_reduce.cuh"
+
+
+# --- source-resolution health warning ----------------------------------------
+
+
+def _hot_kernel(index: int, *, located: bool) -> dict:
+    return {
+        "kernel_id": f"k{index}",
+        "name": f"kernel_{index}",
+        "gpu_pct": 1.0,
+        "source_file": f"/x/kernel_{index}.py" if located else "",
+        "reusable_native_kernel": located,
+        "source_resolution_method": "symbol_index" if located else "unresolved",
+    }
+
+
+def test_no_located_source_is_a_kernel_source_unresolved_warning():
+    candidates = [_hot_kernel(i, located=False) for i in range(12)]
+
+    assert candidate_assembly.source_resolution_warning(candidates) == {
+        "code": "kernel_source_unresolved",
+        "severity": "warning",
+        "located": 0,
+        "total": 12,
+        "by_class": {ksc.CLASS_SOURCE_NOT_RESOLVED: 12},
+        "message": "none of the 12 hot kernel(s) resolved to a source file",
+    }
+
+
+@pytest.mark.parametrize(
+    "located_flags",
+    [[True] * 12, [True] + [False] * 11, []],
+    ids=["all_located", "one_located", "no_candidates"],
+)
+def test_any_located_source_raises_no_warning(located_flags):
+    candidates = [_hot_kernel(i, located=flag) for i, flag in enumerate(located_flags)]
+
+    assert candidate_assembly.source_resolution_warning(candidates) is None
