@@ -306,8 +306,9 @@ the other. KERNEL exits once no kernel work is pending, or on budget cap.
 
 Integrate KEEP'd kernel patches. With no `kernel_agent` task in flight, the
 Coordinator exits to SWEEP when kernel work is drained
-(`kernel_no_more_leverage`), when the Forge rewrite controller reports a
-terminal status for this macro cycle with nothing pending
+(`kernel_no_more_leverage`), when the last GEAK run ended in `error` with
+nothing pending (`kernel_geak_failed`), when the Forge rewrite controller
+reports a terminal status for this macro cycle with nothing pending
 (`kernel_controller_done`), or when work is still pending but the agent has
 made no progress for `idle_max_ticks` ticks and `idle_min_seconds`
 (`kernel_no_more_leverage`, `evidence=kernel_idle_no_progress`). The phase
