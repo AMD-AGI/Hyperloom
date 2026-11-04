@@ -54,7 +54,7 @@ MODULE_BUILD_SEC = MODULE_BUILD_LIMIT_SEC
 WATCHDOG_MARGIN_SEC = 300
 _SGLANG = "sglang"
 _FLAG = "--watchdog-timeout"
-_FLAG_RE = re.compile(r"(?:^|\s)--watchdog-timeout(?:=|\s+|$)(?P<value>\S*)")
+_FLAG_RE = re.compile(r"(?:^|\s)--watchdog-timeout(?:=|\s+|\Z)(?P<value>\S*)")
 _UTF8 = "utf-8"
 
 

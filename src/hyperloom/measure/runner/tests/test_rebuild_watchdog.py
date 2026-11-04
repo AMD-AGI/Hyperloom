@@ -198,6 +198,28 @@ def test_the_last_of_two_watchdogs_is_the_one_raised(image, tmp_path: Path, agen
     assert _watchdog(point, agentx) == f"{_FLAG} 4000 {_FLAG} 1500"
 
 
+#: A plain launch's argument string, and the same string once the watchdog is raised to 1500 s: in place for the flag
+#: with ``=`` or a space, among other arguments too; kept for the flag last with no value (not a number); added when the
+#: string only holds the flag's name inside another word.
+_LINES = [
+    (f"{_FLAG}=5", f"{_FLAG}=1500"),
+    (f"{_FLAG} 5", f"{_FLAG} 1500"),
+    (f"--tp 4 {_FLAG} 5 --mem 0.8", f"--tp 4 {_FLAG} 1500 --mem 0.8"),
+    (f"--tp 4 {_FLAG}", f"--tp 4 {_FLAG}"),
+    (f"--tp 4 {_FLAG}-x 5", f"--tp 4 {_FLAG}-x 5 {_FLAG} 1500"),
+    (f"--tp 4 x{_FLAG} 5", f"--tp 4 x{_FLAG} 5 {_FLAG} 1500"),
+]
+
+
+@pytest.mark.parametrize(("line", "raised"), _LINES)
+def test_a_plain_launch_names_the_flag_only_as_a_whole_argument(image, tmp_path: Path, line: str, raised: str) -> None:
+    point = _point(tmp_path, "point.yaml", args=line, **_tuned(tmp_path))
+
+    raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path)
+
+    assert _watchdog(point, agentx=False) == raised
+
+
 def test_a_test_whose_tables_are_the_images_keeps_sglangs_watchdog(image, tmp_path: Path) -> None:
     point = _point(tmp_path, "point.yaml", args="--tp 4")
 
