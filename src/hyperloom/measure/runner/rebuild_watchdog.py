@@ -33,23 +33,13 @@ from hyperloom.inference_optimizer.framework_registry import FRAMEWORKS
 from hyperloom.measure.farm import Farm, FarmError, locate_package, server_python
 from hyperloom.measure.framework.table_modules import stale_table_modules
 from hyperloom.measure.jit.key import AITER_PACKAGE
-from hyperloom.measure.jit.modules import (
-    MODULE_BUILD_LIMIT_SEC,
-    config_path,
-    env_touched_entries,
-    module_build_limit_sec,
-    read_config,
-)
+from hyperloom.measure.jit.modules import config_path, env_touched_entries, module_build_limit_sec, read_config
 from hyperloom.measure.jit.prewarmed import unlike_prewarmed
 from hyperloom.measure.runner.own_jit import point_configs, server_environments
 from hyperloom.measure.socket import TestCall
 
-__all__ = ["MODULE_BUILD_SEC", "WATCHDOG_MARGIN_SEC", "raise_rebuild_watchdog", "rebuild_watchdog_sec"]
+__all__ = ["WATCHDOG_MARGIN_SEC", "raise_rebuild_watchdog", "rebuild_watchdog_sec"]
 
-#: The seconds one stale module other than a CK-tile one is given to build: over twice the longest aiter module build
-#: (273 s), and a blockscale GEMM rebuild may not finish within sglang's 300 s.
-#: A CK-tile module gets :data:`~hyperloom.measure.jit.modules.CKTILE_MODULE_BUILD_LIMIT_SEC`.
-MODULE_BUILD_SEC = MODULE_BUILD_LIMIT_SEC
 #: Added to the builds: sglang's own default watchdog, for the step the build interrupted.
 WATCHDOG_MARGIN_SEC = 300
 _SGLANG = "sglang"

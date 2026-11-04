@@ -8,12 +8,12 @@ that does not ship a GEMM module generated from its tuned tables (:func:`~hyperl
 table_modules`) therefore compiles it at the first prefill of every fresh container, and sglang's scheduler watchdog
 (300 s unless the launch sets ``--watchdog-timeout``) can fire on every rank while it does.
 
-:func:`missing_prebuilt_modules` names those modules, and :func:`watchdog_seconds_for` the watchdog that covers building
-them at the first prefill (sized as :func:`~hyperloom.measure.runner.rebuild_watchdog.rebuild_watchdog_sec`), so a launch
-the toolbox does not make can set ``--watchdog-timeout`` with one call. :func:`prewarm` removes the cost instead: it builds
-the ones aiter can build by name (:func:`~hyperloom.measure.runner.native.aiter_modules.buildable_modules`) with the CPU
-build runner of aiter's touched modules, from the image's own tree with no root changed, and installs each into the
-image's ``aiter/jit`` with ``os.replace``, then records it in :data:`PREWARM_MANIFEST` beside them.
+:func:`missing_prebuilt_modules` names those modules, and :func:`prewarm` removes the cost: it builds the ones aiter can
+build by name (:func:`~hyperloom.measure.runner.native.aiter_modules.buildable_modules`) with the CPU build runner of
+aiter's touched modules, from the image's own tree with no root changed, and installs each into the image's
+``aiter/jit`` with ``os.replace``, then records it in the manifest beside them
+(:data:`~hyperloom.orchestrator.actions.executors._aiter_jit.AITER_PREWARM_MANIFEST`, whose format the launch preflight
+owns and reads).
 
 This writes into the image deliberately, and that is safe: no candidate's code or table takes part (the farm is laid from
 the image's package and meta directory alone, and the build drops every ``AITER_CONFIG_*``, so aiter resolves the image's
@@ -33,14 +33,16 @@ that runs this), and the manifest records the value of each variable a module's 
 (:func:`~hyperloom.measure.jit.prewarmed.build_record`): a test whose server sets one otherwise is not given the module
 (:func:`~hyperloom.measure.jit.prewarmed.unlike_prewarmed`) and builds its own.
 
-Run it before the first test of a container: ``python -m hyperloom.measure.runner.native.prewarm --gfx gfx950``. The
-launch preflight runs it for the modules it moves aside (``orchestrator.actions.executors._aiter_serving_once``).
+The measure runner runs it before each test for the modules the launch preflight moves aside from the image's own
+tables (:func:`preflight_build`, which the runner gives
+:func:`~hyperloom.orchestrator.actions.executors._aiter_serving_once.prepare_serving_so_once`): each test's servers build
+into a JIT directory of their own, so without it every test would build them again. It can also be run by hand before
+the first test of a container: ``python -m hyperloom.measure.runner.native.prewarm --gfx gfx950``.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -56,19 +58,17 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.aiter_layout import image_aiter_meta
-from hyperloom.common.outside_facts import AITER_META_MARKER_DIR
 from hyperloom.measure.compile import EnvRoot, LocalBlobStore
-from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.farm import FarmError, locate_package
 from hyperloom.measure.framework.table_modules import table_modules
 from hyperloom.measure.jit.key import AITER_PACKAGE
 from hyperloom.measure.jit.modules import build_env_names, config_path, module_build_seconds, read_config
-from hyperloom.measure.jit.prewarmed import CU_NUM, PREWARM_MANIFEST, PREWARM_SCHEMA, build_record, read_manifest
+from hyperloom.measure.jit.prewarmed import CU_NUM, build_record
 from hyperloom.measure.jit.native.record import READY
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.jit.store import BLOBS_DIR
 from hyperloom.measure.local_templates import image_env
-from hyperloom.measure.runner.cache_layout import file_sha256, tree_digest
+from hyperloom.measure.runner.cache_layout import file_sha256
 from hyperloom.measure.runner.native.aiter_modules import (
     AITER_COMPONENT,
     AITER_RECIPE_FACTORY,
@@ -78,12 +78,15 @@ from hyperloom.measure.runner.native.aiter_modules import (
 from hyperloom.measure.runner.native.builder import BuildMachine
 from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation, local_isolation
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
-from hyperloom.measure.runner.rebuild_watchdog import rebuild_watchdog_sec
 from hyperloom.orchestrator.actions.executors._aiter_jit import (
     AITER_ENV_TO_SERVING_MODULES,
     AITER_ENV_TO_TUNED_FILE,
+    AITER_PREWARM_MANIFEST,
+    AITER_PREWARM_SCHEMA,
     csvs_aiter_will_load,
+    read_prewarm_manifest,
     serving_modules_cover_csv,
+    tuned_tables_sha256,
 )
 
 __all__ = [
@@ -94,10 +97,8 @@ __all__ = [
     "isolated_builder",
     "main",
     "missing_prebuilt_modules",
+    "preflight_build",
     "prewarm",
-    "source_digest",
-    "tables_digest",
-    "watchdog_seconds_for",
 ]
 
 _JIT_DIR = "jit"
@@ -109,6 +110,8 @@ _UTF8 = "utf-8"
 _LOG_TAIL = 400
 #: Nothing is stored or signed: the build's key only names it within this process.
 _LOCAL_IMAGE = "prewarm"
+#: The image's interpreter, which imports the aiter being prewarmed.
+_IMAGE_PYTHON = "python3"
 _GFX_ENVS = ("HYPERLOOM_BUILD_GFX", "GPU_ARCHS")
 #: The distribution of the image's aiter as the build's root names it: a sheet's root must name one, and the farm lays the
 #: package from the image whatever it says.
@@ -161,12 +164,6 @@ def missing_prebuilt_modules(image_root: Path, tables: Collection[str] | None = 
     return _missing(Path(image_root) / _JIT_DIR, read_config(config_path(Path(image_root))), tables)
 
 
-def watchdog_seconds_for(modules: Collection[str]) -> int:
-    """The ``--watchdog-timeout`` that covers building ``modules`` at the first prefill, one after another: 600 s each, a
-    CK-tile module 2700 s, plus sglang's own 300 s (:func:`~hyperloom.measure.runner.rebuild_watchdog.rebuild_watchdog_sec`)."""
-    return rebuild_watchdog_sec(modules)
-
-
 def build_environment(environ: Mapping[str, str], cu_num: int | None) -> dict[str, str]:
     """The environment the modules are built under: what a test's server has when nothing of the test sets a build
     variable -- the image's variables of ``environ`` that the local runner's template carries
@@ -177,28 +174,6 @@ def build_environment(environ: Mapping[str, str], cu_num: int | None) -> dict[st
     if cu_num is not None:
         built[CU_NUM] = str(cu_num)
     return built
-
-
-def tables_digest(package: Path) -> str:
-    """The tuned tables below the package's ``configs`` as one sha256: of a line ``<relative path>\\t<sha256>\\n`` per file,
-    by path. A cleanup that keeps a prewarmed module checks the tables it was built from are still these."""
-    root = Path(package) / _CONFIGS_DIR
-    files = sorted((path.relative_to(root).as_posix(), path) for path in root.rglob("*") if path.is_file())
-    digest = hashlib.sha256()
-    for relative, path in files:
-        digest.update(f"{relative}\t{file_sha256(path)}\n".encode())
-    return digest.hexdigest()
-
-
-def source_digest(package: Path, tables: str) -> str:
-    """What the modules are built from, as one digest: the module config, the meta directory's ``csrc`` and the tables
-    (``tables``, :func:`tables_digest`)."""
-    document = {
-        "config": file_sha256(config_path(package)),
-        AITER_META_MARKER_DIR: tree_digest(image_aiter_meta(package) / AITER_META_MARKER_DIR).sha256,
-        _CONFIGS_DIR: tables,
-    }
-    return hashlib.sha256(canonical_json(document).encode(_UTF8)).hexdigest()
 
 
 def isolated_builder(
@@ -262,9 +237,9 @@ def _install(jit: Path, built: Mapping[str, Path], entries: Mapping[str, dict[st
             pending.append((temporary, jit / f"{name}{_SO}"))
             shutil.copyfile(source, temporary)
             os.chmod(temporary, _INSTALLED_MODE)
-        manifest = jit / f".{PREWARM_MANIFEST}.{uuid.uuid4().hex}"
-        pending.append((manifest, jit / PREWARM_MANIFEST))
-        document = {"schema": PREWARM_SCHEMA, _MODULES: [entries[name] for name in sorted(entries)]}
+        manifest = jit / f".{AITER_PREWARM_MANIFEST}.{uuid.uuid4().hex}"
+        pending.append((manifest, jit / AITER_PREWARM_MANIFEST))
+        document = {"schema": AITER_PREWARM_SCHEMA, _MODULES: [entries[name] for name in sorted(entries)]}
         with open(manifest, "x", encoding=_UTF8) as out:
             json.dump(document, out, indent=2, sort_keys=True)
         os.chmod(manifest, _INSTALLED_MODE)
@@ -277,23 +252,19 @@ def _install(jit: Path, built: Mapping[str, Path], entries: Mapping[str, dict[st
 
 
 def _entries(package: Path, built: Mapping[str, Path], build: _Build) -> dict[str, dict[str, Any]]:
-    """The manifest (:data:`~hyperloom.measure.jit.prewarmed.PREWARM_MANIFEST`) after installing ``built``: its earlier
-    entries, with the built modules' replaced by ``{"name", "sha256", "source_digest", "tables_sha256", "gfx",
-    "build_variables", "build_environment", "built_at"}`` and ``cu_num`` when the build was given one.
+    """The manifest (:data:`~hyperloom.orchestrator.actions.executors._aiter_jit.AITER_PREWARM_MANIFEST`) after
+    installing ``built``: its earlier entries, with the built modules' replaced by ``{"name", "sha256", "tables_sha256",
+    "gfx", "build_variables", "build_environment", "built_at"}`` and ``cu_num`` when the build was given one.
 
     A cleanup that moves session-built modules aside may leave a module listed whose file still has the listed ``sha256``
-    and whose tables are still the listed ones (:func:`tables_digest`), when the round leaves its table unset: it is what
-    aiter builds at the first call."""
-    tables = tables_digest(package)
-    common: dict[str, Any] = {
-        "source_digest": source_digest(package, tables),
-        "tables_sha256": tables,
-        "gfx": build.gfx,
-    }
+    and whose tables are still the listed ones
+    (:func:`~hyperloom.orchestrator.actions.executors._aiter_jit.tuned_tables_sha256`), when the round leaves its table
+    unset: it is what aiter builds at the first call."""
+    common: dict[str, Any] = {"tables_sha256": tuned_tables_sha256(package / _CONFIGS_DIR), "gfx": build.gfx}
     if build.cu_num is not None:
         common["cu_num"] = build.cu_num
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    entries = read_manifest(package / _JIT_DIR)
+    entries = read_prewarm_manifest(package / _JIT_DIR)
     meta = image_aiter_meta(package)
     for name, path in built.items():
         variables = build_record(build_env_names(package, meta, build.config, (name,)), build.environ)
@@ -340,7 +311,7 @@ def prewarm(
     except (PrewarmError, BuildInfraError, FarmError, OSError, ValueError) as exc:
         report = PrewarmReport(present=present, left=left, failure=f"{type(exc).__name__}: {exc}")
         return _ended(report, started)
-    report = PrewarmReport(tuple(sorted(built)), present, left, manifest=str(jit / PREWARM_MANIFEST))
+    report = PrewarmReport(tuple(sorted(built)), present, left, manifest=str(jit / AITER_PREWARM_MANIFEST))
     return _ended(report, started)
 
 
@@ -387,6 +358,25 @@ def _ended(report: PrewarmReport, started: float) -> PrewarmReport:
     return report
 
 
+def preflight_build(package: Path, tables: Sequence[str], gfx: str, cu_num: int) -> dict[str, Any]:
+    """Build into the image's aiter at ``package`` the modules of the ``AITER_CONFIG_*`` variables ``tables`` for ``gfx``
+    and ``cu_num``, with the CPU build runner and the image's interpreter, and give the report as a mapping: the ``build``
+    the measure runner hands
+    :func:`~hyperloom.orchestrator.actions.executors._aiter_serving_once.prepare_serving_so_once` for what the launch
+    preflight moved aside."""
+    return asdict(_prewarm_image(package, gfx, cu_num, tables, _IMAGE_PYTHON))
+
+
+def _prewarm_image(
+    package: Path, gfx: str, cu_num: int | None, tables: Collection[str] | None, python: str
+) -> PrewarmReport:
+    """:func:`prewarm` of the aiter at ``package`` with the CPU build runner over ``python`` (which must import it),
+    under :func:`build_environment` of this process's."""
+    environ = build_environment(os.environ, cu_num)
+    builder = isolated_builder(BuildMachine(_LOCAL_IMAGE, _LOCAL_IMAGE, gfx, python), environ=environ)
+    return prewarm(package, builder, gfx=gfx, cu_num=cu_num, tables=tables, environ=environ)
+
+
 def _gfx(given: str | None) -> str:
     gfx = given or next((os.environ[name] for name in _GFX_ENVS if os.environ.get(name, "").strip()), "")
     if not gfx or gfx == "native":
@@ -414,7 +404,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         help="the card's CU count: the build's CU_NUM, and the rows the built modules must cover (default: CU_NUM)",
     )
-    parser.add_argument("--python", default="python3", help="the image's interpreter (default: python3)")
+    parser.add_argument("--python", default=_IMAGE_PYTHON, help="the image's interpreter (default: python3)")
     parser.add_argument("--package", type=Path, help="the aiter package to prewarm (default: the one --python imports)")
     parser.add_argument("--table", action="append", dest="tables", help="only the modules of this AITER_CONFIG_* table")
     args = parser.parse_args(argv)
@@ -425,11 +415,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except FarmError as exc:
         report = PrewarmReport(failure=f"the image's aiter cannot be found: {exc}")
     else:
-        machine = BuildMachine(_LOCAL_IMAGE, _LOCAL_IMAGE, gfx, args.python)
         cu_num = args.cu_num if args.cu_num is not None else _positive(os.environ.get(CU_NUM))
-        environ = build_environment(os.environ, cu_num)
-        builder = isolated_builder(machine, environ=environ)
-        report = prewarm(package, builder, gfx=gfx, cu_num=cu_num, tables=args.tables, environ=environ)
+        report = _prewarm_image(package, gfx, cu_num, args.tables, args.python)
     json.dump(asdict(report), sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
