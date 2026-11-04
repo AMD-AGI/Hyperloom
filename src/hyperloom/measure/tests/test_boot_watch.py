@@ -227,7 +227,7 @@ def test_a_test_with_no_stamp_or_a_stamp_that_cannot_be_read_has_no_boot(tmp_pat
 
 
 #: A server whose boot is an aiter JIT build longer than the boot limit, after which it is ready: aiter prints nothing
-#: between ``start build`` and ``finish build`` (a CK-tile GEMM can take up to 1347 s).
+#: between ``start build`` and ``finish build``, which for a CK-tile GEMM is longer than any other module's.
 BUILDING_SERVER = (
     "import sys, time\n"
     "log = open(sys.argv[1], 'a', buffering=1)\n"
