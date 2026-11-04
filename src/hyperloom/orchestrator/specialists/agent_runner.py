@@ -46,7 +46,7 @@ from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs, RunAsError, redact_file_in_place
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
-from hyperloom.inference_optimizer.session.session_paths import agent_resources_path
+from hyperloom.inference_optimizer.session.session_paths import RESOURCES_RELATIVE_PATH
 from hyperloom_common.fs_utils import (
     append_text_nofollow,
     create_nofollow,
@@ -73,9 +73,11 @@ from .subprocess_ import (
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "CONTAINER_RECORD_KIND",
     "DEFAULT_MCP_TOKEN_ENV",
     "LONG_RUNNING_SESSION_SEC",
     "LOST_AFTER_SEC",
+    "SPECIALIST_RECORD_KIND",
     "AgentConfigError",
     "AgentEnded",
     "AgentHandle",
@@ -99,6 +101,11 @@ LOST_AFTER_SEC: float = 300.0
 #: Minimum session length for a long-lived (one per branch) specialist.
 LONG_RUNNING_SESSION_SEC: float = 6 * 60 * 60.0
 
+#: The ``kind`` of each line the runner appends to :data:`RESOURCES_RELATIVE_PATH`: one specialist's run, and one
+#: reading of the container.
+SPECIALIST_RECORD_KIND = "specialist_resources"
+CONTAINER_RECORD_KIND = "container_resources"
+
 #: Environment variable that carries a specialist's MCP bearer token when its endpoint names no other.
 DEFAULT_MCP_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
 
@@ -114,8 +121,6 @@ STATE_LOST = "lost"
 UTF8 = "utf-8"
 PRIVATE_FILE_MODE = 0o600
 AGENT_RUNTIME_FILENAME = "agent_runtime.json"
-SPECIALIST_RECORD_KIND = "specialist_resources"
-CONTAINER_RECORD_KIND = "container_resources"
 _PLUGIN_ENV_PREFIXES = ("CLAUDE_CODE_PLUGIN", "CLAUDE_PLUGIN")
 _MCP_BLOCK_BEGIN = "# >>> hyperloom agent_runner mcp"
 _MCP_BLOCK_END = "# <<< hyperloom agent_runner mcp"
@@ -859,8 +864,7 @@ class LocalAgentRunner:
         """Append one record to the session's resource records, refusing a link planted anywhere below the session."""
         line = json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n"
         self._session_dir.mkdir(parents=True, exist_ok=True)
-        rel = agent_resources_path(self._session_dir).relative_to(self._session_dir).parts
-        append_text_nofollow(self._session_dir, rel, line)
+        append_text_nofollow(self._session_dir, RESOURCES_RELATIVE_PATH.parts, line)
 
     def _container_record(self) -> dict[str, Any]:
         snapshot: ContainerSnapshot = read_container_cgroup(self._cgroup_root)
