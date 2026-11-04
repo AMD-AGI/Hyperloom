@@ -62,6 +62,9 @@ _CHEAP_ACTION = "profile"
 # What the orchestrator may propose in FRAMEWORK_AGENT, priced above a five-minute budget.
 _PROPOSABLE_ACTION = "explore"
 _PROPOSABLE_PHASE = "FRAMEWORK_AGENT"
+# An explore is admitted on something to measure too, at the gate after the budget one; this file is
+# about the wall clock, so the tests that reach past it hand the explore a grid.
+_PROPOSABLE_PARAMS: dict[str, Any] = {"grid": [{"name": "v1"}]}
 # An action the catalogue prices at five minutes, and what one of the two sessions that motivated the wall-clock work
 # actually measured for it.
 _BASELINE_ACTION = "baseline"
@@ -360,6 +363,11 @@ class TestTheLeaseCoversTheExpectedCost:
         assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec
 
 
+def _admission_params(action: str) -> dict[str, Any] | None:
+    """What ``action`` has to carry for the gates after the budget to pass it on."""
+    return dict(_PROPOSABLE_PARAMS) if action == _PROPOSABLE_ACTION else None
+
+
 @pytest.fixture
 def proposing_coord(coord: Coordinator) -> Coordinator:
     """A coordinator in the phase where the orchestrator may propose :data:`_PROPOSABLE_ACTION`."""
@@ -383,7 +391,10 @@ class TestAdmissionGateOrder:
 
     def test_an_action_clearing_both_gates_is_admitted(self, proposing_coord: Coordinator):
         _set_budget(proposing_coord, minutes=600)
-        assert proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION) is None
+        admitted = proposing_coord.dispatcher.admission_denial_for_action(
+            _PROPOSABLE_ACTION, params=_admission_params(_PROPOSABLE_ACTION)
+        )
+        assert admitted is None
 
 
 def _catalogue_cost_min(action: str) -> float:
@@ -439,7 +450,11 @@ class TestThePhaseBudgetGate:
 def _delegate(action_name: str, key: str) -> Intent:
     return Intent(
         type=IntentType.DELEGATE,
-        payload={"action_name": action_name, "params": {}, "idempotency_key": key},
+        payload={
+            "action_name": action_name,
+            "params": _admission_params(action_name) or {},
+            "idempotency_key": key,
+        },
     )
 
 
