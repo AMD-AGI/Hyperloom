@@ -170,14 +170,12 @@ class QuarantineAction(str, Enum):
 
 
 class LeaseKind(str, Enum):
-    """What holds a lease's cards outside the tests: an autonomous branch, a dev sandbox, a tool's job, which names its
-    tool, or a single-lineage holder whose lease the integration branch is charged: the dossier pass, and the PRELUDE
-    child of a session that ran one, whose value records keep."""
+    """What holds a lease's cards outside the tests: an autonomous run, a dev sandbox, or a tool's job, which names its
+    tool. The dossier pass is an autonomous hold charged to the integration branch."""
 
     AUTONOMOUS = "autonomous"
     DEV = "dev"
     TOOL_JOB = "tool_job"
-    PRELUDE_CHILD = "prelude_child"
 
 
 class LeaseEndReason(str, Enum):
