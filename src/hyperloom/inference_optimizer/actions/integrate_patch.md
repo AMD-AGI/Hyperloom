@@ -76,7 +76,7 @@ delegate{
    health-check until ready (≤ 20min for large MoE models).
 7. Run the Magpie throughput benchmark + GSM8K accuracy eval, graded via
    the shared `_accuracy_gate.parse_eval_results(...)` +
-   `_accuracy_gate.accuracy_passed(...)` helpers.
+   `gain_math.accuracy_passed(...)` helpers.
 8. Decide:
    - KEEP — bench tput ≥ grading anchor * (1 + keep_threshold_pct/100) AND
      accuracy did not drop more than 0.05 absolute. Append the patch + config_changes to

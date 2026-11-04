@@ -110,14 +110,12 @@ _INTERVAL_PERCENT = 95.0
 
 @dataclass(frozen=True)
 class Draws:
-    """How a replay draws: ``runs`` runs a session, each draw keyed by ``seed``, ``h(k)`` and ``g(i)`` ``beyond`` the
-    data, a comparison's intervals bootstrapped ``draws`` times; with ``decide``, the judge each playbook's replay asks
-    every round which branches to stop."""
+    """How a replay draws: ``runs`` runs a session, ``h(k)`` and ``g(i)`` ``beyond`` the data; with ``decide``, the
+    judge each playbook's replay asks every round which branches to stop. Each draw is keyed by the session, the run
+    and the branch, and a comparison's intervals are bootstrapped :data:`BOOTSTRAP_DRAWS` times."""
 
     runs: int = REPLAY_RUNS
     beyond: str = OPTIMISTIC
-    seed: str = ""
-    draws: int = BOOTSTRAP_DRAWS
     decide: Callable[[str], str] | None = None
 
 
@@ -327,7 +325,6 @@ class _Run:
     pace: Pace
     playbook: Playbook | None
     run: int
-    seed: str
     best: float = 0.0
     gpu_seconds: float = 0.0
     stops: int = 0
@@ -366,7 +363,7 @@ class _Run:
         return first[min(branch.judged + 1, MAX_POSITION) - 1]
 
     def draws(self, key: str) -> random.Random:
-        return _seeded(self.seed, self.tree.session_id, self.run, key)
+        return _seeded(self.tree.session_id, self.run, key)
 
     def start(self, branch: _Branch) -> bool:
         """Run ``branch`` from its first test; ``False`` when none lands within the budget and it ended as it opened."""
@@ -541,7 +538,7 @@ class _PlaybookRun(_Run):
     def on_probation(self, branch: _Branch) -> bool:
         """Whether ``branch``'s stall past the bar was drawn for probation and its probation runs still."""
 
-        drawn = _seeded(self.seed, self.tree.session_id, self.run, branch.key, "probation", branch.commits).random()
+        drawn = _seeded(self.tree.session_id, self.run, branch.key, "probation", branch.commits).random()
         numbers = self.numbers
         return drawn < numbers.probation_share and branch.position < self.bar + numbers.probation_tests
 
@@ -737,7 +734,7 @@ def cut_check(tree: SearchTree, pace: Pace, cut: float, *, runs: int = REPLAY_RU
     real = simulate(tree, None, pace).best_gain_pct
     replays = []
     for run in range(runs):
-        replay = _CutRun(tree, pace, None, run, "", cut=cut)
+        replay = _CutRun(tree, pace, None, run, cut=cut)
         replay.play()
         replays.append(replay.best)
     below = sum(1 for gain in replays if gain < real) + 0.5 * sum(1 for gain in replays if gain == real)
@@ -757,10 +754,7 @@ def check(trees: Sequence[SearchTree], *, runs: int = REPLAY_RUNS) -> ReplayChec
         cut = start + (end - start) * (0.2 + 0.6 * _seeded("", tree.session_id, "cut").random())
         cuts.append(cut_check(tree, pace_for(tree, trees), cut, runs=runs))
     held, dropped = (
-        {
-            row.label: row
-            for row in compare(trees, variants(), drawn=Draws(runs=runs, beyond=beyond, draws=BOOTSTRAP_DRAWS)).rows
-        }
+        {row.label: row for row in compare(trees, variants(), drawn=Draws(runs=runs, beyond=beyond)).rows}
         for beyond in (OPTIMISTIC, PESSIMISTIC)
     )
     signs = {
@@ -780,16 +774,16 @@ def check(trees: Sequence[SearchTree], *, runs: int = REPLAY_RUNS) -> ReplayChec
 def simulate(
     tree: SearchTree, playbook: Playbook | None, pace: Pace, *, run: int = 0, drawn: Draws = Draws()
 ) -> RunOutcome:
-    """One replay of ``tree`` under ``playbook``, ``None`` to follow the archive, with the draws of ``run`` from
-    ``drawn``'s seed; with its ``decide``, the judge it asks every round which branches to stop."""
+    """One replay of ``tree`` under ``playbook``, ``None`` to follow the archive, with the draws of ``run``; with
+    ``drawn``'s ``decide``, the judge it asks every round which branches to stop."""
 
     replay: _Run
     if playbook is None:
-        replay = _ArchiveRun(tree, pace, playbook, run, drawn.seed)
+        replay = _ArchiveRun(tree, pace, playbook, run)
     elif drawn.decide is None:
-        replay = _PlaybookRun(tree, pace, playbook, run, drawn.seed)
+        replay = _PlaybookRun(tree, pace, playbook, run)
     else:
-        replay = _JudgedRun(tree, pace, playbook, run, drawn.seed, decide=drawn.decide)
+        replay = _JudgedRun(tree, pace, playbook, run, decide=drawn.decide)
     replay.play()
     return RunOutcome(replay.best, replay.gpu_seconds / _SECONDS_PER_HOUR, replay.stops, replay.opened)
 
@@ -857,13 +851,13 @@ def variants() -> dict[str, Playbook]:
     return found
 
 
-def _interval(values: Sequence[float], draws: int, seed: str) -> tuple[float, float]:
+def _interval(values: Sequence[float], key: str) -> tuple[float, float]:
     if not values:
         return 0.0, 0.0
-    sampler = _seeded(seed, "bootstrap")
-    means = sorted(statistics.fmean(sampler.choices(values, k=len(values))) for _ in range(draws))
+    sampler = _seeded(key, "bootstrap")
+    means = sorted(statistics.fmean(sampler.choices(values, k=len(values))) for _ in range(BOOTSTRAP_DRAWS))
     tail = (100.0 - _INTERVAL_PERCENT) / 200.0
-    return means[int(tail * (draws - 1))], means[int((1.0 - tail) * (draws - 1))]
+    return means[int(tail * (BOOTSTRAP_DRAWS - 1))], means[int((1.0 - tail) * (BOOTSTRAP_DRAWS - 1))]
 
 
 @dataclass(frozen=True)
@@ -904,9 +898,9 @@ def _mean(values: Sequence[float]) -> float:
     return statistics.fmean(values) if values else 0.0
 
 
-def _row(label: str, sessions: Sequence[_SessionMeans], drawn: Draws) -> PolicyRow:
+def _row(label: str, sessions: Sequence[_SessionMeans]) -> PolicyRow:
     differences = [item.gain_difference for item in sessions]
-    low, high = _interval(differences, drawn.draws, f"{drawn.seed}:{label}")
+    low, high = _interval(differences, label)
     return PolicyRow(
         label,
         _mean([item.best_gain_pct for item in sessions]),
@@ -933,7 +927,7 @@ def compare(
     for tree in trees:
         for label, means in _session_means(tree, trees, playbooks, against, drawn).items():
             sessions[label].append(means)
-    rows = tuple(_row(label, means, drawn) for label, means in sessions.items())
+    rows = tuple(_row(label, means) for label, means in sessions.items())
     return SchedulingComparison(rows, tuple(tree.session_id for tree in trees), drawn.runs, drawn.beyond, against)
 
 

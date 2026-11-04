@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ from hyperloom_multibranch.contracts.blackboard.records import Learning, Learnin
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 from hyperloom_multibranch.blackboard.knowledge import experience, learnings
 from hyperloom_multibranch.blackboard.knowledge.breakdown import CloseOutcome, build_breakdown
-from hyperloom_multibranch.blackboard.knowledge.tests.kb_service import experience_service
+from hyperloom_multibranch.blackboard.knowledge.tests.kb_service import TOKEN, experience_service
 from hyperloom_multibranch.blackboard.rsi import session
 from hyperloom_multibranch.blackboard.rsi.archive import (
     ARCHIVE_ENV,
@@ -77,6 +78,7 @@ from hyperloom_multibranch.blackboard.tests.factories import START, FakeClock, p
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, scripted_session
 
 KB_URL = "HYPERLOOM_KB_URL"
+KB_TOKEN = "HYPERLOOM_KB_TOKEN"
 BUDGET = 2 * 3600.0
 PAST = tree("past", branch("s1", [(1800.0, 3.0)], test_times=(0.0, 900.0, 1800.0)), task=task_conditions(profile()))
 LEARNT = (
@@ -97,6 +99,17 @@ def unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(ARCHIVE_ENV, raising=False)
 
 
+@pytest.fixture
+def archived(monkeypatch: pytest.MonkeyPatch) -> Callable[[Path], TreeArchive]:
+    """Names ``root`` as the archive the environment gives CLOSE, as an operator names a session's."""
+
+    def name(root: Path) -> TreeArchive:
+        monkeypatch.setenv(ARCHIVE_ENV, str(root))
+        return TreeArchive(root)
+
+    return name
+
+
 @pytest.mark.usefixtures("unconfigured")
 def test_without_a_kb_or_an_archive_each_step_says_why_and_close_goes_on(snapshot: BlackboardSnapshot) -> None:
     done = close_knowledge(snapshot, METRIC)
@@ -110,12 +123,12 @@ def test_without_a_kb_or_an_archive_each_step_says_why_and_close_goes_on(snapsho
 
 
 def test_a_live_kb_and_an_archive_take_the_experiences_the_learnings_and_the_tree(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
     learnt = dataclasses.replace(snapshot, learnings=LEARNT)
     recipes = load_mapping(experience.MAPPING_PATH).declaration
     schema = load_mapping(learnings.MAPPING_PATH).declaration
-    reports, archive = tmp_path / "reports", TreeArchive(tmp_path / "archive")
+    reports, archive = tmp_path / "reports", archived(tmp_path / "archive")
     with experience_service(tmp_path, recipes) as client:
         done = close_knowledge(
             learnt,
@@ -124,7 +137,6 @@ def test_a_live_kb_and_an_archive_take_the_experiences_the_learnings_and_the_tre
             targets=CloseTargets(
                 experience_kb=RemoteExperienceKB(client, recipes),
                 learning_kb=RemoteExperienceKB(client, schema),
-                archive=archive,
                 receipts=reports,
             ),
         )
@@ -142,34 +154,32 @@ def test_a_live_kb_and_an_archive_take_the_experiences_the_learnings_and_the_tre
 
 @pytest.mark.usefixtures("unconfigured")
 def test_close_keeps_a_session_that_played_a_playbook_as_its_trial_once(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
-    archive = TreeArchive(tmp_path)
+    archive = archived(tmp_path)
     played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
     session = dataclasses.replace(snapshot, fingerprints=(*snapshot.fingerprints[:-1], played))
 
-    done = close_knowledge(session, METRIC, targets=CloseTargets(archive=archive))
-    again = close_knowledge(session, METRIC, targets=CloseTargets(archive=archive))
+    done = close_knowledge(session, METRIC)
+    again = close_knowledge(session, METRIC)
 
     (kept,) = trials(PlaybookPool.beside(archive))
     assert done.playbook_trial == CloseStep(WRITTEN, "", {"trials": 1, "settled": 0})
     assert again.playbook_trial == CloseStep(SKIPPED, ALREADY_RECORDED, {"trials": 0, "settled": 0})
     assert (kept.session_id, kept.played, kept.champion, kept.fell_back) == ("sess-1", H0.label, H0.label, False)
     assert kept.task.startswith("workload=inferencex model=") and "early_stops" in kept.measures
-    assert close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=archive)).playbook_trial == CloseStep(
-        SKIPPED, NO_PLAYBOOK_PLAYED
-    )
+    assert close_knowledge(snapshot, METRIC).playbook_trial == CloseStep(SKIPPED, NO_PLAYBOOK_PLAYED)
 
 
 @pytest.mark.usefixtures("unconfigured")
 def test_a_trial_names_the_configured_budget_so_that_sessions_of_one_budget_pair(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
-    archive = TreeArchive(tmp_path)
+    archive = archived(tmp_path)
     played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
     session = dataclasses.replace(snapshot, fingerprints=(*snapshot.fingerprints[:-1], played))
 
-    close_knowledge(session, METRIC, budget_seconds=BUDGET, targets=CloseTargets(archive=archive))
+    close_knowledge(session, METRIC, budget_seconds=BUDGET)
 
     (kept,) = trials(PlaybookPool.beside(archive))
     assert kept.task.endswith(f" budget={BUDGET / 60:g}m")
@@ -177,17 +187,15 @@ def test_a_trial_names_the_configured_budget_so_that_sessions_of_one_budget_pair
 
 @pytest.mark.usefixtures("unconfigured")
 def test_a_challenger_session_that_fell_back_to_the_champion_is_kept_as_such(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
-    archive = TreeArchive(tmp_path)
+    archive = archived(tmp_path)
     breach = "stop of s1, held by its probation"
     played = dataclasses.replace(
         snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: "patient", FALLBACK_KEY: breach}
     )
 
-    close_knowledge(
-        dataclasses.replace(snapshot, fingerprints=(played,)), METRIC, targets=CloseTargets(archive=archive)
-    )
+    close_knowledge(dataclasses.replace(snapshot, fingerprints=(played,)), METRIC)
 
     (kept,) = trials(PlaybookPool.beside(archive))
     assert (kept.played, kept.fell_back) == ("patient", True)
@@ -195,9 +203,9 @@ def test_a_challenger_session_that_fell_back_to_the_champion_is_kept_as_such(
 
 @pytest.mark.usefixtures("unconfigured")
 def test_close_reruns_the_scheduling_replay_and_says_what_moved_since_the_last_close(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
-    archive, reports = TreeArchive(tmp_path / "archive"), tmp_path / "reports"
+    archive, reports = archived(tmp_path / "archive"), tmp_path / "reports"
     assert snapshot.profile is not None
     later = dataclasses.replace(
         snapshot,
@@ -205,8 +213,8 @@ def test_close_reruns_the_scheduling_replay_and_says_what_moved_since_the_last_c
         taken_at=snapshot.taken_at + HOUR,
     )
 
-    first = close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=archive, receipts=reports / "1"))
-    second = close_knowledge(later, METRIC, targets=CloseTargets(archive=archive, receipts=reports / "2"))
+    first = close_knowledge(snapshot, METRIC, targets=CloseTargets(receipts=reports / "1"))
+    second = close_knowledge(later, METRIC, targets=CloseTargets(receipts=reports / "2"))
 
     assert first.scheduling_replay == CloseStep(WRITTEN, "", {"sessions": 1, "moved": 0})
     assert second.scheduling_replay.status == WRITTEN and second.scheduling_replay.counts["sessions"] == 2
@@ -219,10 +227,13 @@ def test_close_reruns_the_scheduling_replay_and_says_what_moved_since_the_last_c
 
 
 @pytest.mark.usefixtures("unconfigured")
-def test_close_keeps_the_judges_exchanges_beside_the_archive_once(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
+def test_close_keeps_the_judges_exchanges_beside_the_archive_once(
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
+) -> None:
     transcript = tmp_path / "MB-judge.jsonl"
     transcript.write_text(json.dumps({"at": START, "prompt": "view", "reply": "{}", "error": ""}) + "\n")
-    targets = CloseTargets(archive=TreeArchive(tmp_path / "archive"), judge_transcript=transcript)
+    archive = archived(tmp_path / "archive")
+    targets = CloseTargets(judge_transcript=transcript)
     missing = CloseTargets(judge_transcript=tmp_path / "none.jsonl")
 
     done = close_knowledge(snapshot, METRIC, targets=targets)
@@ -232,17 +243,17 @@ def test_close_keeps_the_judges_exchanges_beside_the_archive_once(snapshot: Blac
         CloseStep(WRITTEN, counts={"calls": 1}),
         CloseStep(SKIPPED, ALREADY_RECORDED),
     )
-    assert [call["prompt"] for call in decision_calls(TreeArchive(tmp_path / "archive"), "sess-1")] == ["view"]
+    assert [call["prompt"] for call in decision_calls(archive, "sess-1")] == ["view"]
     assert close_knowledge(snapshot, METRIC, targets=missing).judge_decisions == CloseStep(SKIPPED, NO_TRANSCRIPT)
 
 
 @pytest.mark.usefixtures("unconfigured")
 def test_close_counts_the_specialists_outcomes_beside_the_receipts_and_keeps_them_beside_the_archive(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
-    archive, reports = TreeArchive(tmp_path / "archive"), tmp_path / "reports"
+    archive, reports = archived(tmp_path / "archive"), tmp_path / "reports"
 
-    done = close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=archive, receipts=reports))
+    done = close_knowledge(snapshot, METRIC, targets=CloseTargets(receipts=reports))
 
     assert done.specialist_outcomes.status == WRITTEN and done.specialist_outcomes.counts["kept"] == 1
     assert done.specialist_outcomes.reason.startswith("commit rate ")
@@ -253,7 +264,7 @@ def test_close_counts_the_specialists_outcomes_beside_the_receipts_and_keeps_the
 
 @pytest.mark.usefixtures("unconfigured")
 def test_each_rsi_step_of_close_says_why_it_kept_nothing_and_close_goes_on(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
     played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
     session = dataclasses.replace(snapshot, fingerprints=(*snapshot.fingerprints[:-1], played))
@@ -266,12 +277,12 @@ def test_each_rsi_step_of_close_says_why_it_kept_nothing_and_close_goes_on(
         return close_knowledge(state, METRIC, targets=dataclasses.replace(targets, judge_transcript=transcript))
 
     bare = closed(session, CloseTargets())
-    unprofiled = closed(
-        dataclasses.replace(session, profile=None),
-        CloseTargets(archive=TreeArchive(tmp_path / "archive"), receipts=tmp_path / "reports"),
-    )
-    no_archive = closed(session, CloseTargets(archive=TreeArchive(blocked), receipts=tmp_path / "reports"))
-    no_receipts = closed(session, CloseTargets(archive=TreeArchive(tmp_path / "written"), receipts=blocked))
+    archived(tmp_path / "archive")
+    unprofiled = closed(dataclasses.replace(session, profile=None), CloseTargets(receipts=tmp_path / "reports"))
+    archived(blocked)
+    no_archive = closed(session, CloseTargets(receipts=tmp_path / "reports"))
+    archived(tmp_path / "written")
+    no_receipts = closed(session, CloseTargets(receipts=blocked))
 
     assert (bare.playbook_trial, bare.judge_decisions) == (CloseStep(SKIPPED, NO_ARCHIVE),) * 2
     assert (unprofiled.playbook_trial, unprofiled.scheduling_replay, unprofiled.judge_decisions) == (
@@ -306,11 +317,12 @@ def test_the_sessions_menus_read_the_archive_and_log_each_menu_beside_the_report
 
 @pytest.mark.usefixtures("unconfigured")
 def test_close_writes_the_stop_audit_of_the_sessions_stops_beside_the_receipts(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
     reports = tmp_path / "reports"
+    archived(tmp_path)
 
-    done = close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=TreeArchive(tmp_path), receipts=reports))
+    done = close_knowledge(snapshot, METRIC, targets=CloseTargets(receipts=reports))
 
     counts = {
         "stops": 1,
@@ -327,27 +339,29 @@ def test_close_writes_the_stop_audit_of_the_sessions_stops_beside_the_receipts(
 
 @pytest.mark.usefixtures("unconfigured")
 def test_an_agentx_sessions_experiences_go_to_the_blackboards_own_declaration(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agentx = dataclasses.replace(snapshot, profile=profile(isl=None, osl=None))
+    agentx = dataclasses.replace(snapshot, profile=profile(isl=None, osl=None), learnings=())
     own = load_mapping(experience.MULTIBRANCH_MAPPING_PATH).declaration
     reports = tmp_path / "reports"
+    for home in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(home, str(tmp_path / "home"))
     with experience_service(tmp_path, own) as client:
-        done = close_knowledge(
-            agentx, METRIC, targets=CloseTargets(multibranch_kb=RemoteExperienceKB(client, own), receipts=reports)
-        )
+        monkeypatch.setenv(KB_URL, client.config.base_url)
+        monkeypatch.setenv(KB_TOKEN, TOKEN)
+        done = close_knowledge(agentx, METRIC, targets=CloseTargets(receipts=reports))
 
     dry = collect(experience.MULTIBRANCH_MAPPING_PATH, experience.export_document(agentx, METRIC), dry_run=True)
     assert done.multibranch_experiences == CloseStep(
         WRITTEN, counts={"created": len(dry.collected), "skipped": len(dry.skipped), "errors": 0}
     )
     assert dry.collected and (reports / MULTIBRANCH_RECEIPT).is_file()
-    assert done.experiences == CloseStep(DISABLED, NO_KB)
+    assert done.experiences == CloseStep(SKIPPED, "session_not_measured_on_output_throughput")
 
 
 @pytest.mark.usefixtures("unconfigured")
 def test_close_pools_the_learnings_beside_the_archive_and_records_the_shown_lessons_standing_once(
-    snapshot: BlackboardSnapshot, tmp_path: Path
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
     pool, reports = LessonPool(tmp_path), tmp_path / "reports"
     earlier = LessonRevision(
@@ -368,7 +382,8 @@ def test_close_pools_the_learnings_beside_the_archive_and_records_the_shown_less
         before_its_tests, Retrieval("s2", RetrievalSource.BRIEF, "attention"), (), past=[earlier.lesson_id]
     )
     learnt = dataclasses.replace(snapshot, learnings=LEARNT)
-    targets = CloseTargets(archive=TreeArchive(tmp_path), receipts=reports)
+    archived(tmp_path)
+    targets = CloseTargets(receipts=reports)
 
     done = close_knowledge(learnt, METRIC, targets=targets)
     again = close_knowledge(learnt, METRIC, targets=targets)
@@ -382,23 +397,28 @@ def test_close_pools_the_learnings_beside_the_archive_and_records_the_shown_less
 
 @pytest.mark.usefixtures("unconfigured")
 def test_a_step_that_raises_is_recorded_and_the_steps_after_it_still_run(
-    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    snapshot: BlackboardSnapshot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archived: Callable[[Path], TreeArchive],
 ) -> None:
     def broken(*_args: object, **_kwargs: object) -> CollectReport:
         raise ValueError("the mapping does not load")
 
     monkeypatch.setattr(session, "publish_experiences", broken)
 
-    done = close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=TreeArchive(tmp_path)))
+    archived(tmp_path)
+    done = close_knowledge(snapshot, METRIC)
 
     assert done.experiences == CloseStep(FAILED, "ValueError: the mapping does not load")
     assert (done.learnings.status, done.archive.status) == (DISABLED, ARCHIVED)
 
 
-def test_without_a_profile_nothing_is_published_or_archived(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
-    done = close_knowledge(
-        dataclasses.replace(snapshot, profile=None), METRIC, targets=CloseTargets(archive=TreeArchive(tmp_path))
-    )
+def test_without_a_profile_nothing_is_published_or_archived(
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
+) -> None:
+    archived(tmp_path)
+    done = close_knowledge(dataclasses.replace(snapshot, profile=None), METRIC)
 
     assert done == KnowledgeClose(
         experiences=CloseStep(SKIPPED, NO_PROFILE),
@@ -471,18 +491,20 @@ async def test_frontier_scoring_sizes_its_windows_to_the_budget_reads_the_archiv
     assert len(path.read_text(encoding="utf-8").splitlines()) == 1
 
 
+@pytest.mark.usefixtures("unconfigured")
 def test_a_write_only_session_reads_no_history_menu_lesson_or_playbook_and_close_still_writes_its_learnings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     TreeArchive(tmp_path / "archive").put(PAST)
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
     monkeypatch.setenv(WRITE_ONLY_ENV, "1")
 
-    pool = CloseTargets().lesson_pool()
+    done = close_knowledge(dataclasses.replace(snapshot, learnings=LEARNT), METRIC)
 
     assert session.archived_history() == () and session_menus(METRIC, tmp_path / "reports") is None
     assert LessonPool.from_env() is None and PlaybookPool.from_env() is None
-    assert pool is not None and pool.root == LessonPool.beside(TreeArchive(tmp_path / "archive")).root
+    assert done.lessons.status == WRITTEN
+    assert LessonPool.beside(TreeArchive(tmp_path / "archive")).lessons()
 
 
 @pytest.mark.usefixtures("unconfigured")
@@ -506,8 +528,8 @@ def test_the_judge_reads_the_stall_odds_of_the_archive_and_of_the_session_itself
 
     assert odds is not None and alone is not None
     assert (odds.sessions, alone.sessions) == (1, 0)
-    assert judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET) == odds.render(MAX_CHARS)
-    assert judge_history(snapshot, (), METRIC, budget_seconds=BUDGET) == ""
-    assert judge_history(dataclasses.replace(snapshot, profile=None), (PAST,), METRIC, budget_seconds=BUDGET) == ""
+    assert judge_history(snapshot, (PAST,), METRIC) == odds.render(MAX_CHARS)
+    assert judge_history(snapshot, (), METRIC) == ""
+    assert judge_history(dataclasses.replace(snapshot, profile=None), (PAST,), METRIC) == ""
     monkeypatch.setattr(session, "MAX_CHARS", 80)
-    assert len(judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET)) <= 80
+    assert len(judge_history(snapshot, (PAST,), METRIC)) <= 80

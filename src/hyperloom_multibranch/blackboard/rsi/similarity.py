@@ -4,10 +4,10 @@
 """How much a past session says about this one: a weighted match of their task conditions.
 
 Labels match or not; sizes (parallelism, concurrency, sequence lengths) fade with their log ratio, so 1024 against 2048
-still counts two thirds; bottleneck profiles compare by cosine. A condition either side lacks is left out rather than
-counted as a mismatch, except the workload's kind (the ``workload`` label): an AgentX trace replay is graded on
-interactivity, a fixed-length InferenceX workload on throughput, so the two share nothing whatever else matches.
-Conditions without the label are InferenceX, as every session was before AgentX sessions ran.
+still counts two thirds. A condition either side lacks is left out rather than counted as a mismatch, except the
+workload's kind (the ``workload`` label): an AgentX trace replay is graded on interactivity, a fixed-length InferenceX
+workload on throughput, so the two share nothing whatever else matches. Conditions without the label are InferenceX, as
+every session was before AgentX sessions ran.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ LABEL_WEIGHTS = {
     "framework_version": MINOR_WEIGHT,
 }
 SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": MINOR_WEIGHT}
-PROFILE_WEIGHT = 2.0
 WORKLOAD = "workload"
 AGENTX = WorkloadKind.AGENTX.value
 INFERENCEX = WorkloadKind.INFERENCEX.value
@@ -47,17 +46,13 @@ _LOG2_SPAN = 3.0
 
 @dataclass(frozen=True)
 class TaskConditions:
-    """What a session optimizes, in the Experience KB identity vocabulary.
-
-    ``profile`` is the baseline's GPU-time share per operator category, in percent, when PRELUDE profiled it.
-    """
+    """What a session optimizes, in the Experience KB identity vocabulary."""
 
     labels: Mapping[str, str] = field(default_factory=dict)
     sizes: Mapping[str, float] = field(default_factory=dict)
-    profile: Mapping[str, float] = field(default_factory=dict)
 
 
-def task_conditions(profile: SessionProfile, bottlenecks: Mapping[str, float] | None = None) -> TaskConditions:
+def task_conditions(profile: SessionProfile) -> TaskConditions:
     """The conditions of a session with ``profile``."""
 
     identity = experience_identity(profile)
@@ -65,7 +60,6 @@ def task_conditions(profile: SessionProfile, bottlenecks: Mapping[str, float] | 
     return TaskConditions(
         labels={**{key: str(value) for key, value in identity.items() if key in LABEL_WEIGHTS}, WORKLOAD: kind},
         sizes={key: float(value) for key, value in identity.items() if key in SIZE_WEIGHTS and value is not None},
-        profile=dict(bottlenecks or {}),
     )
 
 
@@ -73,14 +67,6 @@ def _closeness(left: float, right: float) -> float:
     if left <= 0 or right <= 0:
         return float(left == right)
     return max(0.0, 1.0 - abs(math.log2(left / right)) / _LOG2_SPAN)
-
-
-def _cosine(left: Mapping[str, float], right: Mapping[str, float]) -> float:
-    dot = sum(value * right.get(key, 0.0) for key, value in left.items())
-    norm = math.sqrt(sum(value * value for value in left.values())) * math.sqrt(
-        sum(value * value for value in right.values())
-    )
-    return dot / norm if norm else 0.0
 
 
 def model_name(model: str) -> str:
@@ -118,9 +104,6 @@ def task_similarity(first: TaskConditions, second: TaskConditions) -> float:
         if key in first.sizes and key in second.sizes:
             total += weight
             matched += weight * _closeness(first.sizes[key], second.sizes[key])
-    if first.profile and second.profile:
-        total += PROFILE_WEIGHT
-        matched += PROFILE_WEIGHT * _cosine(first.profile, second.profile)
     return matched / total if total else 0.0
 
 
@@ -156,7 +139,6 @@ __all__ = [
     "LABEL_WEIGHTS",
     "MIN_SIMILARITY",
     "MODEL",
-    "PROFILE_WEIGHT",
     "SIZE_WEIGHTS",
     "WORKLOAD",
     "TaskConditions",

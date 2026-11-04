@@ -60,7 +60,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     PlaybookRule,
     replaced,
 )
-from hyperloom_multibranch.blackboard.rsi.replay import OLD_RULE, Draws
+from hyperloom_multibranch.blackboard.rsi.replay import OLD_RULE
 from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, model_name
 from hyperloom_multibranch.blackboard.rsi.stops import stop_audit
 from hyperloom_multibranch.blackboard.rsi.tests.trees import HOUR, branch, tree
@@ -117,7 +117,10 @@ def _call(minutes: float, *stopped: str) -> dict[str, object]:
     return {"at": 1000.0 + minutes * MINUTE, "prompt": f"view at {minutes:g} min", "reply": reply}
 
 
-async def test_r2_replays_a_rule_change_with_the_judge_asked_every_round_and_leaves_numbers_to_r1() -> None:
+async def test_r2_replays_a_rule_change_with_the_judge_asked_every_round_and_leaves_numbers_to_r1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ladder, "JUDGED_RUNS", 2)
     ruled = Playbook("ruled", rules=(ALIKE,), parent=H0.label)
     systems: set[str] = set()
 
@@ -125,8 +128,8 @@ async def test_r2_replays_a_rule_change_with_the_judge_asked_every_round_and_lea
         systems.add(system)
         return '{"stop": []}'
 
-    replayed = await r2_sessions(ruled, H0, (SESSION,), ReplayJudge(judge), drawn=Draws(runs=2))
-    skipped = await r2_sessions(PATIENT, H0, (SESSION,), ReplayJudge(judge), drawn=Draws(runs=2))
+    replayed = await r2_sessions(ruled, H0, (SESSION,), ReplayJudge(judge))
+    skipped = await r2_sessions(PATIENT, H0, (SESSION,), ReplayJudge(judge))
 
     assert replayed.rung == "R2" and not replayed.passed and systems == {JUDGE_SYSTEM_PROMPT}
     assert replayed.reason.startswith("judged replay of 1 sessions, 2 runs each: best gain +0.00 points against h0")
@@ -415,6 +418,17 @@ def test_what_moved_since_the_last_close_is_read_against_the_same_champion() -> 
     assert f"- better both ways: {OLD_RULE}" in report and "- worse both ways: none" in report
     assert f"Since the CLOSE of s: {OLD_RULE}: unclear -> better." in report
     assert "No earlier CLOSE read the replay against h0." in standing_report(second, (), None)
+
+
+def test_a_label_whose_rows_replayed_two_playbooks_has_not_moved() -> None:
+    sure, unsure = Difference(1.0, 0.5, 1.5), Difference(1.0, -0.5, 2.0)
+    other = dataclasses.replace(H0.numbers, stall_tests=5)
+    first = ReplayStanding("s", 10.0, H0.label, 1, 2, (StandingRow("stall-5", unsure, unsure, H0.numbers),))
+    replayed_again = dataclasses.replace(first, at=20.0, rows=(StandingRow("stall-5", sure, sure, H0.numbers),))
+    replayed_other = dataclasses.replace(first, at=20.0, rows=(StandingRow("stall-5", sure, sure, other),))
+
+    assert moved(first, replayed_again) == ("stall-5: unclear -> better",)
+    assert moved(first, replayed_other) == ()
 
 
 def test_a_sessions_measures_are_its_decisions_counted() -> None:

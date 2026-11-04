@@ -554,10 +554,11 @@ class SessionBriefs:
             cases=self.cases,
         )
 
-    async def text(self, branch: str, commit: str, focus: str | None = None) -> str:
-        """The brief of ``branch`` starting from ``commit``, rendered as the prompt shows it."""
+    async def text(self, branch: str, commit: str) -> str:
+        """The brief of ``branch`` starting from ``commit``, on the focus it was last given, rendered as the prompt
+        shows it."""
 
-        return render_brief(await self.for_branch(branch, focus).startup_brief(commit))
+        return render_brief(await self.for_branch(branch).startup_brief(commit))
 
 
 __all__ = [
