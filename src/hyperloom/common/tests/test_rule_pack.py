@@ -228,8 +228,8 @@ def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert pack.version == str(yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["version"])
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 19,
-        Kind.LOG_REGEX: 14,
+        Kind.NAMES: 20,
+        Kind.LOG_REGEX: 15,
         Kind.ENV_DEFAULT: 1,
         Kind.COMPONENT_LAYOUT: 9,
     }
