@@ -13,6 +13,7 @@ on this machine.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import urllib.error
@@ -25,6 +26,8 @@ from typing import TypeVar
 from hyperloom.measure.short_prompts.prompts import BATCHED, SEQUENTIAL, Prompt
 
 __all__ = ["Completion", "CompletionError", "complete", "discover_model", "post_json", "request_timeout", "run_prompts"]
+
+log = logging.getLogger(__name__)
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _JSON = {"Content-Type": "application/json"}
@@ -76,7 +79,8 @@ def _bounded(timeout_sec: float, call: Callable[[], _T]) -> _T:
     def work() -> None:
         try:
             outcome.append((True, call()))
-        except BaseException as exc:  # noqa: BLE001 - raised again, below, in the caller's thread
+        except BaseException as exc:  # raised again, below, in the caller's thread
+            log.debug("a short-prompt request raised on its own thread; the caller raises it again", exc_info=True)
             outcome.append((False, exc))
 
     thread = threading.Thread(target=work, name="hl-short-prompt-request", daemon=True)

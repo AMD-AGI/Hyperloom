@@ -121,7 +121,10 @@ _PLUGIN_METADATA = "Metadata-Version: 2.1\nName: ruppell-sglang\nVersion: 0.0\n"
 _PLUGIN_ENTRY_POINTS = "[sglang.srt.plugins]\nruppell = ruppell.adapters.sglang:register\n"
 #: What the profile's server gets on top of what ``ruppell run`` sets: the SGLang adapter on, and sampled detail.
 _TRACED_ENVS = {"RUPPELL_SGLANG": "1", "RUPPELL_DETAIL": DETAIL}
-_EARLY_HOOK = ("python", "ruppell", "_rocm_early")
+#: The package ``python -m`` runs, and the directory of the source checkout it is imported from.
+_PACKAGE = "ruppell"
+_PACKAGE_ROOT = "python"
+_EARLY_HOOK = (_PACKAGE_ROOT, _PACKAGE, "_rocm_early")
 _CHECK_SCRIPT = ("tests", "m2", "check_m2.py")
 _DUMP_ENV = "import json, os, sys; json.dump(dict(os.environ), sys.stdout)"
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
@@ -257,7 +260,7 @@ class Tracer:
         base = given[_PYTHONPATH] if _PYTHONPATH in given else environ.get(_PYTHONPATH, "")
         added = self._probe({**environ, **given, **_TRACED_ENVS, _PYTHONPATH: base})
         early = str(self.source.joinpath(*_EARLY_HOOK))
-        parts = [early, *base.split(os.pathsep), str(self.source / "python"), str(site)]
+        parts = [early, *base.split(os.pathsep), str(self.source / _PACKAGE_ROOT), str(site)]
         path = os.pathsep.join(dict.fromkeys(part for part in parts if part))
         envs = {**_TRACED_ENVS, **added, _PYTHONPATH: path}
         self.packet_capture_off |= {**given, **envs}.get(HIP_GRAPH_PACKET_CAPTURE_ENV) == "0"
@@ -267,10 +270,10 @@ class Tracer:
         """The variables ``ruppell run`` adds to or changes in ``environ`` for its command, read from a command that
         prints its environment; ``PYTHONPATH`` is left out: the server's is laid out by the caller."""
         command = [
-            sys.executable, "-m", "ruppell", "run", "--build", str(self.build), "--out", str(self.records), "--",
+            sys.executable, "-m", _PACKAGE, "run", "--build", str(self.build), "--out", str(self.records), "--",
             sys.executable, "-I", "-c", _DUMP_ENV,
         ]  # fmt: skip
-        probe = {**environ, _PYTHONPATH: _join(str(self.source / "python"), environ.get(_PYTHONPATH, ""))}
+        probe = {**environ, _PYTHONPATH: _join(str(self.source / _PACKAGE_ROOT), environ.get(_PYTHONPATH, ""))}
         probe["PYTHONDONTWRITEBYTECODE"] = "1"
         printed = _run(command, probe, _PROBE_TIMEOUT_SEC, self.log, cwd=self.work, capture=True)
         try:
@@ -305,8 +308,8 @@ class Tracer:
         records = self.records
         if not (records / "run.json").is_file():
             raise RuppellError("the server left no records")
-        env = {**os.environ, _PYTHONPATH: str(self.source / "python"), "PYTHONDONTWRITEBYTECODE": "1"}
-        ruppell = [sys.executable, "-m", "ruppell"]
+        env = {**os.environ, _PYTHONPATH: str(self.source / _PACKAGE_ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
+        ruppell = [sys.executable, "-m", _PACKAGE]
         _run([*ruppell, "census", str(records)], env, _left(deadline), self.log, cwd=self.work)
         trace = self.work / "trace.json"
         _run(
