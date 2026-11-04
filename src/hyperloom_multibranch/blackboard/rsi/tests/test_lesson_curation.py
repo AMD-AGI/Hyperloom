@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -124,6 +126,29 @@ async def test_the_curator_merges_rewrites_and_retires_what_it_may_and_says_why_
 
     again = await curate_lessons(snapshot, asked, model="claude", pool=pool)
     assert again.status == SKIPPED and "merged" not in again.counts
+
+
+async def test_the_curator_reads_and_writes_the_pool_off_the_event_loop(
+    snapshot: BlackboardSnapshot, pool: LessonPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wrong = lesson(pool, "wrong", "split kv always regresses attention on this model")
+    for session in ("p2", "p3"):
+        pool.record_standings(SessionStandings(session, START, {wrong: LessonStanding(shown=1, contradicted=1)}))
+    threads: list[int] = []
+    for name in ("lessons", "retire"):
+        call = getattr(LessonPool, name)
+
+        def noted(*args: object, call: Callable[..., object] = call) -> object:
+            threads.append(threading.get_ident())
+            return call(*args)
+
+        monkeypatch.setattr(LessonPool, name, noted)
+    asked = _Asked([{"action": "retire", "lesson": wrong, "why": "two sessions gained there"}])
+
+    done = await curate_lessons(snapshot, asked, model="claude", pool=pool)
+
+    assert (done.status, done.counts) == (WRITTEN, {"refused": 0, "retired": 1})
+    assert len(threads) == 2 and threading.get_ident() not in threads
 
 
 async def test_the_curator_skips_without_a_profile_a_pool_or_a_lesson_and_fails_soft_when_the_llm_does(

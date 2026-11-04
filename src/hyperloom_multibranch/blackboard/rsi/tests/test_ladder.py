@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import math
 from pathlib import Path
 
@@ -285,6 +286,35 @@ def test_close_retires_a_playbook_the_latest_replay_reads_worse_both_ways(tmp_pa
         "optimistic -2.00 (-3.00 to -1.00); pessimistic -1.00 (-1.50 to -0.50)"
     )
     assert pool.on_trial() == ()
+
+
+def test_close_keeps_a_playbook_on_trial_that_only_a_replay_from_before_its_registration_reads_worse(
+    tmp_path: Path,
+) -> None:
+    pool = PlaybookPool(tmp_path)
+    pool.register(dataclasses.replace(PATIENT, registered_at=10.0))
+    worse = StandingRow(PATIENT.label, Difference(-2.0, -3.0, -1.0), Difference(-1.0, -1.5, -0.5))
+    record_standing(pool, ReplayStanding("s1", 10.0, H0.label, 3, 50, (worse,)))
+
+    assert settle(pool, 50.0) == ()
+    assert [item.label for item in pool.on_trial()] == [PATIENT.label]
+
+
+def test_a_trial_or_standing_that_cannot_be_read_is_skipped_with_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pool = PlaybookPool(tmp_path)
+    record_trial(pool, _trial("c0", H0.label, 0.0, 1.0))
+    record_standing(pool, ReplayStanding("s1", 10.0, H0.label, 3, 50))
+    for folder in ("trials", "replays"):
+        (pool.root / folder / "broken.json").write_text("{", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        kept, stood = trials(pool), standings(pool)
+
+    assert [item.session_id for item in kept] == ["c0"] and [item.session_id for item in stood] == ["s1"]
+    assert "skipping unreadable trial record" in caplog.text
+    assert "skipping unreadable replay standing record" in caplog.text
 
 
 def test_close_retires_a_playbook_aiming_at_a_measure_the_champions_sessions_never_varied_in(tmp_path: Path) -> None:

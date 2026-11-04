@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -101,6 +104,14 @@ def test_an_answer_labelled_as_the_pool_would_refuse_is_registered_under_a_label
         (_answer(**{**LATER, "change": {"number": "speed", "value": 1}}, measure="stop_value"), "'speed' is no number"),
         (_answer(**{**LATER, "change": {"remove_rule": 3}}, measure="stop_value"), "a change is a number"),
         (_answer(**{**LATER, "change": {"number": "stall_tests", "value": None}}, measure="stop_value"), "it changes"),
+        (
+            _answer(**{**LATER, "change": {"number": "stall_tests", "value": math.inf}}, measure="stop_value"),
+            "stall_tests takes a finite number",
+        ),
+        (
+            _answer(**{**LATER, "change": {"number": "stall_tests", "value": -math.inf}}, measure="stop_value"),
+            "stall_tests takes a finite number",
+        ),
     ],
 )
 def test_an_answer_that_is_no_valid_single_change_says_why(answer: str, why: str) -> None:
@@ -208,6 +219,32 @@ async def test_close_pools_a_change_the_replay_reads_worse_both_ways_as_retired(
     assert done == CloseStep(SKIPPED, f"later-stops: {evidence}", {"written": 0, "refused": 1})
     assert pool.on_trial() == ()
     assert [(item.label, item.evidence) for item in pool.retired()] == [("later-stops", evidence)]
+
+
+def _noting(threads: list[int], call: Callable[..., object]) -> Callable[..., object]:
+    def noted(*args: object) -> object:
+        threads.append(threading.get_ident())
+        return call(*args)
+
+    return noted
+
+
+async def test_close_reads_the_archive_and_replays_the_change_off_the_event_loop(
+    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = TreeArchive(tmp_path / "archive")
+    archive.put(tree_from_snapshot(snapshot, METRIC))
+    threads: list[int] = []
+    for name in ("archived_history", "r1_reading"):
+        monkeypatch.setattr(authoring, name, _noting(threads, getattr(authoring, name)))
+
+    async def complete(system: str, prompt: str) -> str:
+        return _answer(**LATER, measure="stop_value")
+
+    done = await author_playbook(snapshot, complete, model="claude", archive=archive)
+
+    assert done == CloseStep(WRITTEN, "later-stops: stall_tests of h0", {"written": 1, "refused": 0})
+    assert len(threads) == 2 and threading.get_ident() not in threads
 
 
 async def test_close_says_why_it_wrote_no_change(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
