@@ -34,6 +34,7 @@ from hyperloom_common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
 from ..state.experience_citations import normalize_citations, shown_ids
+from ..state.retest_view import scrub
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -1387,8 +1388,7 @@ class SpecialistRunner:
     ) -> None:
         """Write the ``specialist_done.json`` artifact with a timestamp, group-readable (the retest runner reads it).
 
-        Writes atomically (temp + ``os.replace``) so partial files
-        are never read. No-ops when no workspace is configured.
+        Atomic (temp + ``os.replace``); every string is scrubbed of credentials. No-ops when no workspace is set.
 
         Args:
             workspace (Path | None): The per-task workspace directory.
@@ -1397,7 +1397,7 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        atomic_write_json(path, {"ts": now_iso(), **payload}, options=WriteOptions(group_read=True))
+        atomic_write_json(path, scrub({"ts": now_iso(), **payload}), options=WriteOptions(group_read=True))
 
 
 __all__ = [

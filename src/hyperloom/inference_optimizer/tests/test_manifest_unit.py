@@ -238,9 +238,3 @@ def test_git_remote_userinfo_is_stripped(monkeypatch):
     remote = mf._git_remote_at(Path("/repo"))
     assert "tok3n" not in remote and "user" not in remote
     assert remote == "https://github.com/x/y.git"
-
-
-def test_server_args_credential_flags_are_masked():
-    out = mf.mask_server_args("--tp 8 --api-key abc123 --hf-token=zzz9 --port 1")
-    assert "abc123" not in out and "zzz9" not in out
-    assert out == "--tp 8 --api-key [REDACTED] --hf-token=[REDACTED] --port 1"

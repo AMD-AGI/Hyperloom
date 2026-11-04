@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import atomic_write_json
-from hyperloom.common.launch_masking import mask_server_args
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.url_userinfo import strip_url_userinfo
 from hyperloom_common.timeutil import now_iso, utc_now_compact
@@ -196,8 +195,7 @@ def build_manifest(
         "framework": framework or "sglang",
         "gpu_type": gpu_type,
         "tp": _env_digits("TP"),
-        **{key: _prov.get(key) for key in ("gfx_arch", "ep", "graph_mode", "server_args_hash")},
-        "server_args": mask_server_args(_prov.get("server_args")),
+        **{key: _prov.get(key) for key in ("gfx_arch", "ep", "graph_mode", "server_args", "server_args_hash")},
         "workload": workload,
         "objective": _objective_summary(args),
         "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60),

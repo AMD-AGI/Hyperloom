@@ -68,6 +68,7 @@ def test_view_carries_no_credential_and_only_the_retest_fields(tmp_path):
     for secret in ("sekret_key_789", "adm_key_456", "hf_live_value_123"):
         assert secret not in text
     view = json.loads(text)
+    assert view["schema_version"] == 1
     assert view["framework"] == "sglang" and view["claw_session_id"] == "sid-1"
     assert view["optimization_stack"] == [
         {"action": "explore", "variant_name": "v1", "task_id": "t1", "workspace": "/w", "tput": 120.0}

@@ -17,6 +17,7 @@ from hyperloom.common.env_safety import redact_secret_values
 from hyperloom_common.io import WriteOptions, atomic_write_json
 
 RETEST_VIEW = "retest_view.json"
+SCHEMA_VERSION = 1
 
 #: The top-level fields retest_flow.py reads from state.json.
 VIEW_FIELDS = ("framework", "framework_version", "baseline_config_path", "baseline_tput", "claw_session_id")
@@ -38,22 +39,23 @@ STACK_ENTRY_FIELDS = (
 )
 
 
-def _scrub(value: Any) -> Any:
+def scrub(value: Any) -> Any:
     if isinstance(value, str):
         return redact_secret_values(value)
     if isinstance(value, dict):
-        return {key: _scrub(item) for key, item in value.items()}
+        return {key: scrub(item) for key, item in value.items()}
     if isinstance(value, list):
-        return [_scrub(item) for item in value]
+        return [scrub(item) for item in value]
     return value
 
 
 def write_retest_view(session_dir: Path, state: Any) -> None:
     """Write ``retest_view.json`` (group-readable inside a setgid shared tree) from ``state``'s retest fields."""
-    view = {name: getattr(state, name, None) for name in VIEW_FIELDS}
+    view: dict[str, Any] = {"schema_version": SCHEMA_VERSION}
+    view.update({name: getattr(state, name, None) for name in VIEW_FIELDS})
     view["optimization_stack"] = [
         {name: entry[name] for name in STACK_ENTRY_FIELDS if name in entry} for entry in state.optimization_stack
     ]
     atomic_write_json(
-        Path(session_dir) / RETEST_VIEW, _scrub(view), options=WriteOptions(make_parents=True, group_read=True)
+        Path(session_dir) / RETEST_VIEW, scrub(view), options=WriteOptions(make_parents=True, group_read=True)
     )
