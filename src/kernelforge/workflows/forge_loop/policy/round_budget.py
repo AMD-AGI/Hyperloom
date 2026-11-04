@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from kernelforge.workflows.forge_loop.campaign.run_state import RoundCost
 from kernelforge.workflows.forge_loop.roles.plan_critic import PLAN_CRITIC_TIMEOUT_SEC
@@ -84,7 +84,11 @@ def estimate_measurement_sec(history: list[RoundCost]) -> float:
 
 
 def estimate_planning_sec(history: list[RoundCost], *, lanes: int) -> float:
-    """A LOWER bound on what a round of ``lanes`` lanes will spend planning."""
+    """A LOWER bound on what a round of ``lanes`` lanes will spend planning.
+
+    Observed rounds count without their plan review, since the round being priced may skip it.
+    """
+    history = [replace(cost, planning_sec=cost.planning_sec - cost.review_sec, review_sec=0.0) for cost in history]
     observed = [cost.planning_sec for cost in history if cost.lanes == lanes]
     if observed:
         return min(observed)

@@ -184,6 +184,8 @@ def test_a_leaked_probe_costs_the_round_its_measurement(tmp_path, monkeypatch):
     class _ProbeLeakingService:
         """Planning that succeeded and left a probe running behind it."""
 
+        has_plan_critic = False
+
         async def run(self, _context, *, usage=None, lanes=1):
             return OrchestrationRunResult(
                 dispatch_plan=None,
