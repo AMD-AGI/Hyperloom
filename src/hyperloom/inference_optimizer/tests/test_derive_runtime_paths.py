@@ -314,3 +314,44 @@ def test_derive_runtime_paths_noop_when_no_rocm_sdk_wheel(monkeypatch):
     cli_preflight._derive_runtime_paths()
 
     assert os.environ.get("LD_LIBRARY_PATH") is None
+
+
+def _wheel_root(tmp_path: Path, name: str, *libraries: str) -> Path:
+    root = tmp_path / name
+    (root / "lib").mkdir(parents=True)
+    for library in libraries:
+        (root / "lib" / library).write_bytes(b"")
+    return root
+
+
+def test_rocm_path_is_derived_from_the_wheel_that_ray_can_load(monkeypatch, tmp_path):
+    """Only the devel wheel ships the unversioned .so Ray's detector ctypes-loads."""
+    core = _wheel_root(tmp_path, "_rocm_sdk_core", "librocm_smi64.so.1")
+    devel = _wheel_root(tmp_path, "_rocm_sdk_devel", "librocm_smi64.so", "librocm_smi64.so.1")
+    monkeypatch.setattr(cli_preflight, "_rocm_sdk_wheel_roots", lambda: [core, devel])
+    monkeypatch.setenv("ROCM_PATH", "/opt/rocm")  # Ray's default; a wheel install never creates it.
+
+    cli_preflight._derive_rocm_path()
+
+    assert os.environ["ROCM_PATH"] == str(devel)
+
+
+def test_an_existing_rocm_path_is_left_alone(monkeypatch, tmp_path):
+    devel = _wheel_root(tmp_path, "_rocm_sdk_devel", "librocm_smi64.so")
+    installed = tmp_path / "opt-rocm"
+    installed.mkdir()
+    monkeypatch.setattr(cli_preflight, "_rocm_sdk_wheel_roots", lambda: [devel])
+    monkeypatch.setenv("ROCM_PATH", str(installed))
+
+    cli_preflight._derive_rocm_path()
+
+    assert os.environ["ROCM_PATH"] == str(installed)
+
+
+def test_no_wheel_leaves_rocm_path_untouched(monkeypatch):
+    monkeypatch.setattr(cli_preflight, "_rocm_sdk_wheel_roots", list)
+    monkeypatch.delenv("ROCM_PATH", raising=False)
+
+    cli_preflight._derive_rocm_path()
+
+    assert "ROCM_PATH" not in os.environ
