@@ -45,7 +45,6 @@ setting the session tried since the menu was drawn.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import random
 import statistics
@@ -54,6 +53,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hyperloom_common.io import append_jsonl
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer, Purpose, TestKind
@@ -692,15 +692,10 @@ class MenuLog:
         """The menus logged, oldest first; a line of another format, or one that does not parse, is left out."""
 
         found = []
-        try:
-            text = self.path.read_text(encoding="utf-8")
-        except OSError:
-            return ()
-        for raw in text.splitlines():
+        for line in read_jsonl(self.path):
+            if line.get("format") != MENU_LOG_FORMAT:
+                continue
             try:
-                line = json.loads(raw)
-                if line.get("format") != MENU_LOG_FORMAT:
-                    continue
                 found.append(
                     LoggedMenu(
                         float(line["at"]),
@@ -712,7 +707,7 @@ class MenuLog:
                         tuple(str(listed) for listed in line.get("sections") or ()),
                     )
                 )
-            except (AttributeError, KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError):
                 continue
         return tuple(sorted(found, key=lambda item: item.at))
 

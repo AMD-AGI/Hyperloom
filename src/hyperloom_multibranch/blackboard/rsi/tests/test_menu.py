@@ -34,6 +34,7 @@ from hyperloom_multibranch.blackboard.rsi.menu import (
     HOT_OP_SHARE_PCT,
     MENU_ITEMS,
     MENU_LOG,
+    MENU_LOG_FORMAT,
     ON_INTEGRATION,
     OPS_LINE,
     SETTINGS,
@@ -134,6 +135,15 @@ def test_the_code_list_folds_a_familys_source_and_kernel_layers_into_one_line_an
     assert logged.families[-2:] == tuple(family.label for family in line.families)
     assert logged.sections == (*(SETTINGS,) * MENU_ITEMS, CODE, CODE)
     assert logged.odds[-2:] == (round(line.odds, 4),) * 2
+
+
+def test_the_menu_log_reads_on_past_a_line_that_is_not_utf8_json_or_a_menu(tmp_path: Path) -> None:
+    menu = {"format": MENU_LOG_FORMAT, "at": 2.0, "branch": "s1", "commit": "c1", "control": False, "families": ["kv"]}
+    earlier = {**menu, "at": 1.0, "commit": "c0"}
+    rows = [json.dumps(menu).encode(), b"\xff\xfe", json.dumps({"format": "other"}).encode(), b"[1]"]
+    (tmp_path / MENU_LOG).write_bytes(b"\n".join([*rows, json.dumps(earlier).encode()]) + b"\n")
+
+    assert [logged.commit for logged in MenuLog(tmp_path / MENU_LOG).menus()] == ["c0", "c1"]
 
 
 def test_one_branch_in_four_is_the_menus_control_and_sees_neither_list(snapshot: BlackboardSnapshot) -> None:
