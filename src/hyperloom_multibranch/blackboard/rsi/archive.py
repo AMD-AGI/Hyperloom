@@ -547,7 +547,7 @@ class TreeArchive:
     too."""
 
     def __init__(self, root: Path, as_of: float | None = None) -> None:
-        self.root = Path(root) / "trees"
+        self.root = root / "trees"
         self.as_of = as_of
 
     @classmethod
