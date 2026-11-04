@@ -10,6 +10,7 @@ importing the stand-in ``ray`` package of :class:`FakeRayHead`.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -25,8 +26,12 @@ import pytest
 from hyperloom.orchestrator.actions.executors import _ray_backend as rb
 from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 from hyperloom.orchestrator.actions.executors import _ray_serving as rs
+from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
+from ._dispatch_helpers import pump_until_settled
 from .conftest import FakeRayHead
+from .test_framework_whole_machine_gpu import _build_coord, _GpuProbe
 
 _PROBE_BOUND_SEC = 2.0
 # What a SIGKILL'd group and the reaping of its leader may take on a loaded host, on top of the bound.
@@ -121,7 +126,7 @@ def test_a_silent_head_sends_the_work_down_the_local_path_within_the_bound(
     assert enabled is False
     assert _PROBE_BOUND_SEC <= elapsed < _PROBE_BOUND_SEC + _KILL_SLACK_SEC
     assert rs.maybe_serving_lease(num_gpus=1) is None
-    assert rs.maybe_gpu_specialist_lease(num_gpus=1) is None
+    assert rs.maybe_gpu_specialist_lease(ray_exec=enabled, num_gpus=1) is None
     assert rb.serving_slot_busy() is False
     [warning] = _warnings(caplog)
     assert f"did not connect within {_PROBE_BOUND_SEC:g}s and was killed" in warning
@@ -314,6 +319,57 @@ def test_the_head_that_replaces_a_mismatched_one_is_probed_before_the_retry(
     [warning] = _warnings(caplog)
     assert "did not connect within" in warning
     assert rb.ray_exec_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_a_gpu_specialist_keeps_the_route_it_was_admitted_on_when_the_head_stops_answering_meanwhile(
+    wedgeable_head: FakeRayHead, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An actor dies while a GPU specialist's admission waits for its Ray slot, and the head no longer answers.
+
+    The worker thread handling the death drops the verdict, so a second routing question would probe again and answer
+    local. The specialist must still get what the Ray route gives -- Ray's lease, and the cards it masks from 0 -- and
+    never Ray's placeholder slot id with no lease, which every visible-devices variable would name as a card.
+    """
+    assert rb.ray_exec_enabled() is True
+    take_ray_slot = SpecialistGpuPool.try_acquire_ray_observation
+
+    async def take_ray_slot_while_an_actor_dies(pool: SpecialistGpuPool, **kwargs):
+        slot = await take_ray_slot(pool, **kwargs)
+        wedgeable_head.answers("gilhold")
+        await asyncio.to_thread(rb.mark_ray_backend_unhealthy)
+        return slot
+
+    monkeypatch.setattr(SpecialistGpuPool, "try_acquire_ray_observation", take_ray_slot_while_an_actor_dies)
+    monkeypatch.setattr(rb, "serving_slot_busy", lambda: False)
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4)
+    probe = _GpuProbe()
+    leases = []
+
+    async def specialist(ctx):
+        leases.append((ctx.extra or {}).get("gpu_specialist_lease"))
+        return await probe(ctx)
+
+    coord.sub.register_executor("specialist", specialist)
+    await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="specialist",
+            params={"scope": "freeform", "task_description": "probe a kernel", "needs_gpu": True, "gpu_count": 1},
+            idempotency_key="admitted-while-the-head-wedges",
+            requires_lanes=["gpu_research_lane"],
+            lease_ttl_sec=3600,
+        ),
+    )
+
+    await pump_until_settled(coord.dispatcher)
+
+    [gpu_ids] = probe.gpu_ids_by_task.values()
+    [lease] = leases
+    assert isinstance(lease, rs.GpuSpecialistLease), f"admitted on the Ray route with GPU ids {gpu_ids} and no lease"
+    assert gpu_ids == [0]
+    # The head was probed again and did not answer, so the next admission takes the local route.
+    assert rb.ray_exec_enabled() is False
+    assert os.getpid() not in wedgeable_head.connects()
 
 
 #: A process that probes a head with no bound of its own, and turns SIGTERM into ``SystemExit`` as a handler would.
