@@ -1397,7 +1397,7 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        atomic_write_json(path, {"ts": now_iso(), **payload}, options=WriteOptions())
+        atomic_write_json(path, {"ts": now_iso(), **payload}, options=WriteOptions(group_read=True))
 
 
 __all__ = [
