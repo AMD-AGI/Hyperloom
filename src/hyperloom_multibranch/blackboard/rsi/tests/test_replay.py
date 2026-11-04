@@ -230,13 +230,16 @@ def test_the_checks_say_which_sessions_the_archive_replay_reproduces_and_where_e
     assert found.render().startswith("Following the archive reproduces 2 of 2 sessions.")
 
 
-def test_a_comparison_reads_each_playbook_beside_the_archive_session_by_session() -> None:
+def test_a_comparison_reads_each_playbook_beside_the_archive_session_by_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(replay, "BOOTSTRAP_DRAWS", 50)
     sessions = [_tree(STALLED, EARLY), dataclasses.replace(_tree(STALLED), session_id="t")]
 
-    found = compare(sessions, {"strict": STRICT}, drawn=Draws(runs=3, draws=50))
+    found = compare(sessions, {"strict": STRICT}, drawn=Draws(runs=3))
     rows = {row.label: row for row in found.rows}
 
-    against = compare(sessions, {"h0": H0, "strict": STRICT}, drawn=Draws(runs=3, draws=50))
+    against = compare(sessions, {"h0": H0, "strict": STRICT}, drawn=Draws(runs=3))
 
     assert list(rows) == [ARCHIVE, "strict"] and found.sessions == ("s", "t") and found.baseline == ARCHIVE
     assert (rows[ARCHIVE].gain_difference, rows[ARCHIVE].difference_low) == (0.0, 0.0)

@@ -60,7 +60,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     PlaybookRule,
     replaced,
 )
-from hyperloom_multibranch.blackboard.rsi.replay import OLD_RULE, Draws
+from hyperloom_multibranch.blackboard.rsi.replay import OLD_RULE
 from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, model_name
 from hyperloom_multibranch.blackboard.rsi.stops import stop_audit
 from hyperloom_multibranch.blackboard.rsi.tests.trees import HOUR, branch, tree
@@ -117,7 +117,10 @@ def _call(minutes: float, *stopped: str) -> dict[str, object]:
     return {"at": 1000.0 + minutes * MINUTE, "prompt": f"view at {minutes:g} min", "reply": reply}
 
 
-async def test_r2_replays_a_rule_change_with_the_judge_asked_every_round_and_leaves_numbers_to_r1() -> None:
+async def test_r2_replays_a_rule_change_with_the_judge_asked_every_round_and_leaves_numbers_to_r1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ladder, "JUDGED_RUNS", 2)
     ruled = Playbook("ruled", rules=(ALIKE,), parent=H0.label)
     systems: set[str] = set()
 
@@ -125,8 +128,8 @@ async def test_r2_replays_a_rule_change_with_the_judge_asked_every_round_and_lea
         systems.add(system)
         return '{"stop": []}'
 
-    replayed = await r2_sessions(ruled, H0, (SESSION,), ReplayJudge(judge), drawn=Draws(runs=2))
-    skipped = await r2_sessions(PATIENT, H0, (SESSION,), ReplayJudge(judge), drawn=Draws(runs=2))
+    replayed = await r2_sessions(ruled, H0, (SESSION,), ReplayJudge(judge))
+    skipped = await r2_sessions(PATIENT, H0, (SESSION,), ReplayJudge(judge))
 
     assert replayed.rung == "R2" and not replayed.passed and systems == {JUDGE_SYSTEM_PROMPT}
     assert replayed.reason.startswith("judged replay of 1 sessions, 2 runs each: best gain +0.00 points against h0")
