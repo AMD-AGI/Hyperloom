@@ -15,8 +15,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from hyperloom.common.coerce import first_float, first_int, to_float, to_int
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.coerce import first_float, first_int, to_float, to_int
+from hyperloom_common.jsonio import read_json
 
 from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 
@@ -78,27 +78,15 @@ def _rescue_candidate_paths(
             return
         except (OSError, ValueError):
             pass
-        if not path.is_file():
-            return
-        if subprocess_started_unix is not None:
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                return
-            if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
-                return
-        candidates.append(path)
+        if _is_fresh_leak_file(path, subprocess_started_unix):
+            candidates.append(path)
 
     env_raw = os.environ.get("INFERENCE_OPTIMIZER_RESCUE_PATHS", "").strip()
     env_entries = [part.strip() for part in env_raw.split(":") if part.strip()] if env_raw else []
     for entry in env_entries:
         p = Path(entry)
         if p.is_dir():
-            try:
-                for fp in sorted(p.glob("inferencex_result*.json")):
-                    _push(fp)
-            except OSError:
-                continue
+            _push_rescue_results(p, _push)
         else:
             _push(p)
 
@@ -106,13 +94,18 @@ def _rescue_candidate_paths(
     # plus $RESULT_DIR overrides.
     for derived in _env_derived_leak_roots():
         if derived.is_dir():
-            try:
-                for fp in sorted(derived.glob("inferencex_result*.json")):
-                    _push(fp)
-            except OSError:
-                continue
+            _push_rescue_results(derived, _push)
 
     return candidates
+
+
+def _push_rescue_results(directory: Path, push: Callable[[Path], None]) -> None:
+    """Push each ``inferencex_result*.json`` of ``directory`` in name order, stopping at the first OS error."""
+    try:
+        for fp in sorted(directory.glob("inferencex_result*.json")):
+            push(fp)
+    except OSError:
+        return
 
 
 def _materialize_rescue_into_workspace(
@@ -155,8 +148,10 @@ def _env_derived_leak_roots() -> list[Path]:
     return out
 
 
-def _resolve_leak_roots() -> tuple[Path, ...]:
-    """Return the directory roots to scan for wrapper-side leak files."""
+def _resolve_leak_roots(leak_root: Path | None = None) -> tuple[Path, ...]:
+    """Return the directory roots to scan for wrapper-side leak files: ``leak_root`` alone when it is given."""
+    if leak_root is not None:
+        return (leak_root,)
     env_raw = os.environ.get("INFERENCE_OPTIMIZER_LEAK_ROOTS", "").strip()
     if env_raw:
         parts = [Path(p.strip()) for p in env_raw.split(":") if p.strip()]
@@ -182,14 +177,70 @@ def select_run_workspace(root: Path, *, known_before: frozenset[Path]) -> Path |
     return max(fresh, default=None)
 
 
+def _is_fresh_leak_file(match: Path, subprocess_started_unix: float | None) -> bool:
+    """Whether ``match`` is a file the round could have written (not older than its subprocess start)."""
+    if not match.is_file():
+        return False
+    if subprocess_started_unix is not None:
+        try:
+            mtime = match.stat().st_mtime
+        except OSError:
+            return False
+        if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
+            return False
+    return True
+
+
+def _copy_leak_artifact(match: Path, destination: Path) -> Path | None:
+    """Copy one leak artifact into ``destination``; return its new path, or ``None`` when the copy failed."""
+    destination_path = destination / match.name
+    try:
+        shutil.copy2(match, destination_path)
+    except OSError as exc:
+        log.warning(
+            "benchmark_result.harvest: copy %s -> %s failed: %s",
+            match,
+            destination_path,
+            exc,
+        )
+        return None
+    return destination_path
+
+
+def _is_existing_dir(root: Path) -> bool:
+    """Whether ``root`` exists and is a directory; an OS error reads as no."""
+    try:
+        return root.exists() and root.is_dir()
+    except OSError:
+        return False
+
+
+def _is_unseen_outside(match: Path, ws_resolved: Path, seen: set[Path]) -> bool:
+    """Record a resolvable ``match`` as seen; True when it is new and resolves outside ``ws_resolved``."""
+    try:
+        resolved = match.resolve()
+    except OSError:
+        return False
+    if resolved in seen:
+        return False
+    seen.add(resolved)
+    try:
+        resolved.relative_to(ws_resolved)
+    except ValueError:
+        return True  # Outside the workspace: harvest it.
+    return False  # Already under the workspace — nothing to harvest.
+
+
 def harvest_leaked_artifacts(
     destination: Path,
     *,
     subprocess_started_unix: float | None = None,
+    leak_root: Path | None = None,
 ) -> list[tuple[Path, Path]]:
-    """Copy known Magpie/InferenceX leak artifacts into ``destination``."""
+    """Copy known Magpie/InferenceX leak artifacts into ``destination``; a measurement runner names its own work
+    directory as ``leak_root`` so that nothing another test left elsewhere is copied into its signed output."""
     harvested: list[tuple[Path, Path]] = []
-    leak_roots = _resolve_leak_roots()
+    leak_roots = _resolve_leak_roots(leak_root)
     try:
         destination.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -206,10 +257,7 @@ def harvest_leaked_artifacts(
 
     seen: set[Path] = set()
     for root in leak_roots:
-        try:
-            if not root.exists() or not root.is_dir():
-                continue
-        except OSError:
+        if not _is_existing_dir(root):
             continue
         for pattern in _DEFAULT_LEAK_ARTIFACT_GLOBS:
             try:
@@ -217,39 +265,13 @@ def harvest_leaked_artifacts(
             except OSError:
                 continue
             for match in matches:
-                try:
-                    resolved = match.resolve()
-                except OSError:
+                if not _is_unseen_outside(match, ws_resolved, seen):
                     continue
-                if resolved in seen:
+                if not _is_fresh_leak_file(match, subprocess_started_unix):
                     continue
-                seen.add(resolved)
-                try:
-                    resolved.relative_to(ws_resolved)
-                    continue  # Already under the workspace — nothing to harvest.
-                except ValueError:
-                    pass  # Outside the workspace; fall through to harvest below.
-                if not match.is_file():
-                    continue
-                if subprocess_started_unix is not None:
-                    try:
-                        mtime = match.stat().st_mtime
-                    except OSError:
-                        continue
-                    if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
-                        continue
-                destination_path = destination / match.name
-                try:
-                    shutil.copy2(match, destination_path)
-                except OSError as exc:
-                    log.warning(
-                        "benchmark_result.harvest: copy %s -> %s failed: %s",
-                        match,
-                        destination_path,
-                        exc,
-                    )
-                    continue
-                harvested.append((match, destination_path))
+                destination_path = _copy_leak_artifact(match, destination)
+                if destination_path is not None:
+                    harvested.append((match, destination_path))
     # Multi-node: fold pod-side GPU sampler CSVs into this workspace and inject a flat gpu_monitor list into
     # benchmark_report.json (no-op single-node).
     try:
@@ -889,7 +911,7 @@ def _find_server_logs(slot: Path) -> list[Path]:
 
 def double_run_requested(params: dict | None) -> bool:
     """Whether baseline double-run is enabled; defaults to True when not in params."""
-    from hyperloom.common.env import is_truthy
+    from hyperloom_common.env import is_truthy
 
     if params and "baseline_double_run" in params:
         return is_truthy(params["baseline_double_run"])

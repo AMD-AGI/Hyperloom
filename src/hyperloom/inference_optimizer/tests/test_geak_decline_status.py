@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.phases.kernel import _geak_decline_status
+from hyperloom.orchestrator.phases.kernel_geak_promotion import _geak_decline_status
 
 
 def test_overlay_refusal_gets_its_own_status() -> None:

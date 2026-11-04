@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     kb_hardware_slug,
     recipe_canonical_id,
 )
+from hyperloom.orchestrator.knowledge.recipe_kb import recipe_framework_version
 
 
 def test_canonical_id_shape_is_mhfvp_with_inference_prefix() -> None:
@@ -236,6 +237,23 @@ def test_detect_framework_version_reads_the_resolved_serving_interpreter(
     monkeypatch.setitem(sys.modules, "vllm", None)
 
     assert detect_framework_version("vllm") == "0.29.0+rocm100"
+
+
+@pytest.mark.parametrize(
+    ("version", "release"),
+    [
+        ("0.30.0+rocm723", "0.30.0"),
+        ("v0.30.0", "0.30.0"),
+        ("0.30.0", "0.30.0"),
+        ("0.5.15.post1.dev20260724+g3d91a569ce", "0.5.15.post1"),
+        ("0.11.0rc1+rocm", "0.11.0rc1"),
+        ("abc123def", "abc123def"),
+        ("", ""),
+        (DEFAULT_FRAMEWORK_VERSION_SLUG, DEFAULT_FRAMEWORK_VERSION_SLUG),
+    ],
+)
+def test_recipe_framework_version_keys_on_the_release(version: str, release: str) -> None:
+    assert recipe_framework_version(version) == release
 
 
 def test_detect_framework_version_falls_back_to_VERSION_constant(

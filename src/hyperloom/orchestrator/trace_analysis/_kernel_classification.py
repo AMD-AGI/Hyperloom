@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a traced kernel is: its shape, the source file behind it, and whether that source can be patched."""
+"""What a traced kernel is: the source file behind it, and whether that source can be patched."""
 
 from __future__ import annotations
 
 import functools
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -28,11 +29,8 @@ try:
 except ImportError:
     _triton_def_line = None  # type: ignore[assignment]
 
-try:
-    import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
-except ImportError:
-    _aiter_jit_core = None
 
+_log = logging.getLogger(__name__)
 
 RUNTIME_API_NAMES = {
     "hipeventsynchronize",
@@ -68,48 +66,6 @@ def is_kernel_event(event: dict[str, Any]) -> bool:
     if name.lower() in RUNTIME_API_NAMES:
         return False
     return True
-
-
-def extract_shape(event: dict[str, Any]) -> dict[str, Any] | None:
-    """Extract a shape annotation from a trace event when present.
-
-    Checks both ``event['args']`` and the event top level for the first of
-    several known shape keys.
-
-    Args:
-        event (dict[str, Any]): A single trace event.
-
-    Returns:
-        dict[str, Any] | None: A single-key dict ``{shape_key: value}`` for
-            the first shape field found, or ``None`` when none is present.
-    """
-    args = event.get("args") if isinstance(event.get("args"), dict) else {}
-    for key in ("shape", "shapes", "input_shape", "trace_shapes"):
-        if key in args:
-            return {key: args[key]}
-        if key in event:
-            return {key: event[key]}
-    return None
-
-
-def extract_source_file(event: dict[str, Any]) -> str:
-    """Extract a source-file path from a trace event when present.
-
-    Checks both ``event['args']`` and the event top level for the first of
-    several known path keys.
-
-    Args:
-        event (dict[str, Any]): A single trace event.
-
-    Returns:
-        str: The first non-empty source path found, or ``""`` when none.
-    """
-    args = event.get("args") if isinstance(event.get("args"), dict) else {}
-    for key in ("source_file", "file", "filename", "path"):
-        value = args.get(key) or event.get(key)
-        if value:
-            return str(value)
-    return ""
 
 
 _FLYDSL_SOURCE_MARKERS = (
@@ -252,18 +208,26 @@ def _framework_source_roots() -> tuple[str, ...]:
 
 
 @functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=1)
 def _aiter_csrc_root() -> str:
     """Resolve aiter's own device-source root from the installed package.
 
-    Cached once per process.
+    aiter is imported here, not at module import: ``aiter.jit.core`` probes the GPU architecture with ``rocminfo`` when
+    it is imported and raises ``RuntimeError`` on a host with no GPU, such as a hosted run's app container, which imports
+    this module only to build the toolbox. Cached once per process.
 
     Returns:
-        The aiter csrc root (e.g. ``.../aiter_meta/csrc/``), or ``""`` when
-        aiter is not importable.
+        The aiter csrc root (e.g. ``.../aiter_meta/csrc/``), or ``""`` when aiter is not importable or cannot start
+        on this host (logged once).
     """
-    if _aiter_jit_core is None:
+    try:
+        import aiter.jit.core as aiter_jit_core  # type: ignore[import-untyped]
+    except ImportError:
         return ""
-    raw = (getattr(_aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
+    except RuntimeError as exc:
+        _log.warning("aiter cannot start on this host, so its source root is unknown: %s", exc)
+        return ""
+    raw = (getattr(aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
     return (raw.rstrip("/") + "/") if raw else ""
 
 

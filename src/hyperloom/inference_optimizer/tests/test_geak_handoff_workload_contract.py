@@ -175,7 +175,7 @@ def _launch_mock_runner(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, tmp
         process.communicate.return_value = ("", "")
         return process
 
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", _start_runner)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.subprocess.Popen", _start_runner)
     return launches
 
 
@@ -277,7 +277,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     monkeypatch.setenv("E2E_METRIC", "total")
     launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
     _gpus_at_handoff(monkeypatch, _GPUS_FREE)
-    with caplog.at_level("INFO", logger="hyperloom.orchestrator.phases.kernel"):
+    with caplog.at_level("INFO", logger="hyperloom.orchestrator.phases.kernel_geak_dispatch"):
         await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
@@ -327,7 +327,7 @@ async def test_gpus_that_cannot_be_checked_are_still_handed_to_geak(
         monkeypatch, GpuHandoff(reaped=[], busy=[], holders=[], unverified="rocm-smi could not report VRAM")
     )
 
-    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.phases.kernel"):
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.phases.kernel_geak_dispatch"):
         await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert len(launches) == 1
@@ -348,7 +348,7 @@ def _geak_returns_a_win(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, tmp
         process.communicate.return_value = ("", "")
         return process
 
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", _start_runner)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.subprocess.Popen", _start_runner)
     coord.phase_kernel._record_geak_candidate = lambda _result: True
     coord.bus = Mock(append_and_seq=AsyncMock())
 
@@ -400,7 +400,7 @@ async def test_a_measured_rebench_waits_for_its_gpus_and_runs_even_when_they_sta
 
     coord.phase_kernel._revalidate_on_geak_harness = _replay
 
-    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.kernel"):
+    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.kernel_geak_dispatch"):
         await coord.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=[6, 7])
 
     assert asked == [[6, 7]]

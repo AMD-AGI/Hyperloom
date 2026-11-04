@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors.baseline import _attach_baseline_launch_evidence
+from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _attach_baseline_launch_evidence
 from hyperloom.orchestrator.measurement.runtime_findings import (
     correctness_fix_refusal,
     persist_runtime_findings,
@@ -307,6 +307,30 @@ def test_baseline_writes_runtime_findings(tmp_path):
     ]
 
 
+def test_agentx_baseline_writes_runtime_findings(tmp_path):
+    (tmp_path / "config.yaml").write_text("benchmark:\n  framework: sglang\n  model: /m\n", encoding="utf-8")
+    (tmp_path / "server.log").write_text(
+        "[2026-10-28 03:42:18 TP0 EP0] [AR] All-reduce call path: NCCL (custom AR disabled)\n", encoding="utf-8"
+    )
+    result: dict = {
+        "benchmark_backend": "magpie_agentx",
+        "agentx_metrics": {
+            "server_launch": {
+                "effective_argv": ["python3", "-m", "sglang.launch_server", "--model-path", "/m"],
+                "effective_env": {},
+            },
+            "recipe": {"tp": 8},
+        },
+    }
+
+    _attach_baseline_launch_evidence(
+        result, config_path=tmp_path / "config.yaml", output_dir=tmp_path, framework="sglang"
+    )
+
+    out = render_runtime_findings(result)
+    assert out.splitlines()[1].startswith("- detected [perf_path] comm.custom_ar_disabled custom_all_reduce x1: ")
+
+
 def _report(*findings: tuple[str, str, str, str]) -> dict:
     return {
         "findings": [
@@ -366,7 +390,6 @@ def test_unlisted_rules_cannot_justify_a_correctness_fix():
 
 def test_persist_writes_slot_file(tmp_path):
     report = scan_server_log(None, "custom")
-    path = persist_runtime_findings(report, slot=tmp_path / "variant_00_x")
+    persist_runtime_findings(report, slot=tmp_path / "variant_00_x")
 
-    assert path == str(tmp_path / "variant_00_x" / "runtime_findings.json")
-    assert Path(path).read_text(encoding="utf-8").startswith("{")
+    assert (tmp_path / "variant_00_x" / "runtime_findings.json").read_text(encoding="utf-8").startswith("{")

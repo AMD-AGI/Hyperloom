@@ -323,6 +323,34 @@ def test_save_renders_current_setting_sh(tmp_path, monkeypatch):
     assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
 
 
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        '--moe-backend aiter --speculative-config {"method":"dspark","num_speculative_tokens":5} '
+        "--max-num-seqs 128 --no-enable-prefix-caching",
+        # A native AgentX launch records its argv through shlex.join, which single-quotes the JSON.
+        '--moe-backend aiter --speculative-config \'{"method":"dspark","num_speculative_tokens":5}\' '
+        "--max-num-seqs 128 --no-enable-prefix-caching",
+    ],
+)
+def test_current_setting_carries_the_args_the_best_was_launched_with(tmp_path, recorded):
+    """The operator's base args reach the launcher, not only the optimizer's delta over them."""
+    state = SharedState(session_id="t", framework="vllm", reference_model="/models/M")
+    state.current_best = {
+        "extra_server_args": "",
+        "extra_envs": {},
+        "measurement": {"launch_evidence": {"requested_server_args": recorded}},
+    }
+    state.save(tmp_path)
+
+    from hyperloom.inference_optimizer.reference_script import parse_reference_script
+
+    recipe = parse_reference_script(str(tmp_path / "current_setting.sh"), framework="vllm")
+    assert recipe.server_args == (
+        '--moe-backend aiter --speculative-config {"method":"dspark","num_speculative_tokens":5} --max-num-seqs 128'
+    )
+
+
 def test_save_current_setting_prefers_persisted_framework(tmp_path, monkeypatch):
     """A resumed session must not inherit an unrelated process framework."""
     monkeypatch.setenv("FRAMEWORK", "sglang")

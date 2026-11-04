@@ -57,7 +57,7 @@ pinned scripts. See
 For detailed documentation on Magpie, see [Magpie on ROCm Docs](https://rocm.docs.amd.com/projects/magpie/en/latest/).
 
 Native AgentX currently pins Magpie to
-`6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e` and InferenceX to
+`06b7cf6e185fdd49483a512e350cb3964ba3bf68` and InferenceX to
 `408c015be4b22d14c69518643609669405507077`. Magpie owns the native InferenceX
 checkout and resolves its `inferencex-e2e/` project layout. To supply a checkout,
 set `benchmark.inferencex_path` in the workload YAML or `MAGPIE_INFERENCEX_PATH`.

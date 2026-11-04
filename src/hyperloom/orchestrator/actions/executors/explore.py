@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.coerce import to_float, to_int, to_str_list
+from hyperloom_common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -35,7 +35,7 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     stamp_output_per_gpu,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
@@ -62,10 +62,11 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
+from .bypass_scriptable import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
-from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP
+from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
 from .benchmark_result import double_run_requested
 from ._grid_runner import (
     GridLaunch,
@@ -301,101 +302,6 @@ def _framework_lever_attributions(
     return out
 
 
-# Curated MTP-capable model class set (needs multi-token-prediction heads).
-_ATOM_MTP_CAPABLE_MODEL_CLASSES: frozenset[str] = frozenset(
-    {
-        "moe_mla",
-        "moe_mla_nsa",
-    }
-)
-
-
-def _atom_default_grid(
-    *,
-    model_class: str,
-    conc: int,
-) -> list[GridVariant]:
-    """Atom default explore grid, seeded from atom's known perf knobs."""
-    mc_l = (model_class or "").strip().lower()
-    is_moe = "moe" in mc_l
-    is_mla = "mla" in mc_l
-    is_fp8 = "fp8" in mc_l or mc_l.endswith("_fp8")
-    is_mtp_capable = mc_l in _ATOM_MTP_CAPABLE_MODEL_CLASSES
-
-    variants: list[GridVariant] = []
-
-    def _add(name: str, args: str) -> None:
-        """Append a ``default_grid``-provenance variant to the grid."""
-        gv = GridVariant(
-            name=name,
-            extra_server_args=args,
-            extra_envs={},
-            note="default_grid",
-        )
-        gv.provenance = "default_grid"  # type: ignore[attr-defined]
-        variants.append(gv)
-
-    # ``atom_level_3`` is atom's default, so use ``atom_level_2`` as the off-default contrast.
-    _add("atom_level_2", "--level 2")
-    _add("atom_prefix_cache", "--enable_prefix_caching")
-
-    if is_fp8:
-        _add("atom_kv_fp8", "--kv_cache_dtype fp8")
-
-    if is_moe:
-        _add("atom_ep", "--enable-expert-parallel")
-
-    if is_mla:
-        _add("atom_dp_attn", "--enable-dp-attention")
-
-    if is_mtp_capable:
-        _add(
-            "atom_mtp_3",
-            "--method mtp --num-speculative-tokens 3",
-        )
-        _add(
-            "atom_mtp_1",
-            "--method mtp --num-speculative-tokens 1",
-        )
-
-    if conc and conc > 0:
-        # Bracket the live concurrency so cudagraph captures the actual decode batch sizes the workload spends most of
-        # its time at.
-        cg_sizes = sorted({1, 2, 4, 8, 16, int(conc)})
-        cg_str = "[" + ",".join(str(s) for s in cg_sizes) + "]"
-        _add(
-            "atom_cudagraph_bracket",
-            f"--cudagraph-capture-sizes {cg_str}",
-        )
-
-    return variants
-
-
-def _xdit_default_grid() -> list[GridVariant]:
-    """xDiT (diffusion) default explore grid, seeded from the empirical KB."""
-    variants: list[GridVariant] = []
-
-    def _add(name: str, *, envs: dict[str, str]) -> None:
-        """Append a ``default_grid``-provenance env-only variant."""
-        gv = GridVariant(
-            name=name,
-            extra_server_args="",
-            extra_envs=dict(envs),
-            note="default_grid",
-        )
-        gv.provenance = "default_grid"  # type: ignore[attr-defined]
-        variants.append(gv)
-
-    # AMD buffer load/store instructions — directionally correct, BF16-safe.
-    _add("xdit_buffer_ops", envs={"AMDGCN_USE_BUFFER_OPS": "1"})
-    # torch.compile reduce-overhead: expose an explicit on/off contrast.
-    _add("xdit_compile_reduce_overhead", envs={"XDIT_USE_TORCH_COMPILE": "1"})
-    _add("xdit_no_compile", envs={"XDIT_USE_TORCH_COMPILE": "0"})
-    # Confirm the safe attention backend (aiter).
-    _add("xdit_attn_aiter", envs={"XDIT_ATTENTION_BACKEND": "aiter"})
-    return variants
-
-
 _CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
 
 
@@ -579,21 +485,6 @@ def filter_operator_pinned_envs(
     return kept, dropped
 
 
-def _default_grid_for_framework(
-    framework: str,
-    *,
-    model_class: str,
-    conc: int = 0,
-) -> list[GridVariant]:
-    """Framework-keyed default grid dispatch."""
-    fw = (framework or "").strip().lower()
-    if fw == "atom":
-        return _atom_default_grid(model_class=model_class, conc=conc)
-    if fw == "xdit":
-        return _xdit_default_grid()
-    return []
-
-
 class _RoundRefused(Exception):
     """A round that cannot start, carrying the action result that says why."""
 
@@ -692,6 +583,48 @@ def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[s
         }
         for v in seed
     ]
+
+
+def _resolved_grid_payload(
+    params: Mapping[str, Any],
+    *,
+    shared_state: Any,
+    framework: str,
+    yaml_envs: Mapping[str, Any] | None = None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """The payload a round over ``params`` measures, and the lever variants seeded into it.
+
+    The sent grid with this session's fresh lever variants in front of it; only when that leaves
+    nothing does the framework's default grid stand in. A non-empty sent grid therefore never
+    reaches the default grid, however little of it is a variant.
+    """
+    payload = params.get("grid") or []
+    if not isinstance(payload, list):
+        payload = []
+    # A stack revalidation re-measures the recorded stack on purpose. Seeding a lever
+    # into it would validate stack+lever instead, so the declarations sit this round out.
+    declared = [] if is_stack_revalidation(params) else declared_lever_payload(shared_state, framework)
+    lever_payload = framework_lever_grid(shared_state) + declared
+    payload = _lever_seeded_payload(payload, lever_payload)
+    if not payload:
+        payload = _seed_grid_payload(dict(params), framework, dict(yaml_envs or {}))
+    return payload, lever_payload
+
+
+def runnable_grid_variants(params: Mapping[str, Any] | None, shared_state: Any) -> list[GridVariant]:
+    """The variants an explore over ``params`` would have to measure, by the round's own reckoning.
+
+    Admission asks this before spending a dispatch on a round that would refuse itself. The round
+    reads its framework back from the materialized YAML, which a proposal has not got yet, so the
+    session's framework answers for it; a ``framework`` in ``params`` is not consulted, since the
+    round never seeds its grid from one and the gate would otherwise judge a grid the round will not
+    run. The config-pinned-env filter that follows in the round needs that YAML, so the variants it
+    drops stay the round's to report.
+    """
+    p = dict(params or {})
+    framework = str(getattr(shared_state, "framework", "") or "")
+    payload, _ = _resolved_grid_payload(p, shared_state=shared_state, framework=framework)
+    return _grid_variants_from_payload(payload)
 
 
 # The numbers a measured variant produced. ``base_tput`` is carried verbatim rather than left to be back-solved
@@ -839,6 +772,10 @@ class _ExploreRound:
         self.round_id = f"explore-{(to_int(params.get('explore_search_cursor'), 0) or 0) + 1:03d}"
         self.observed = observed_launch_from_state(self.ss)
         self.opening_stack = self.launched_stack()
+        self._init_round_ledgers()
+
+    def _init_round_ledgers(self) -> None:
+        """Start the round's variant lists, verdict ledgers and run-stop record empty."""
         self.lever_payload: list[dict[str, Any]] = []
         self.grid: list[GridVariant] = []
         self.runnable: list[GridVariant] = []
@@ -917,6 +854,12 @@ class _ExploreRound:
             "args_mode": self.args_mode,
         }
 
+    def _composed_args(self, args: str, remove_args: list[str]) -> str:
+        """``args`` as the run launches them: the recipe's inherited args folded in, ``remove_args`` stripped."""
+        return compose_server_args(
+            inherited_args=self.inherited_args, base_extra_args=args, remove_args=remove_args, args_mode=self.args_mode
+        )
+
     def launched_stack(self) -> dict[str, Any]:
         """The stack as it launches: its args with the recipe's inherited ones and the removals applied.
 
@@ -924,12 +867,7 @@ class _ExploreRound:
         the composed args say which settings a KEEP changed.
         """
         stack = stack_of_measured(self.measured_against())
-        stack["extra_server_args"] = compose_server_args(
-            inherited_args=self.inherited_args,
-            base_extra_args=self.args,
-            remove_args=self.remove_args,
-            args_mode=self.args_mode,
-        )
+        stack["extra_server_args"] = self._composed_args(self.args, self.remove_args)
         return stack
 
     def _recipe(self) -> GridRecipe:
@@ -952,13 +890,12 @@ class _ExploreRound:
     # ----- the grid --------------------------------------------------------
 
     def _resolve_grid(self) -> None:
-        payload = self.params.get("grid") or []
-        if not isinstance(payload, list):
-            payload = []
-        self.lever_payload = framework_lever_grid(self.ss)
-        payload = _lever_seeded_payload(payload, self.lever_payload)
-        if not payload:
-            payload = _seed_grid_payload(self.params, self.framework, self.yaml_envs)
+        payload, self.lever_payload = _resolved_grid_payload(
+            self.params,
+            shared_state=self.ss,
+            framework=self.framework,
+            yaml_envs=self.yaml_envs,
+        )
         if not payload:
             raise _RoundRefused(
                 "empty_grid",
@@ -1004,12 +941,10 @@ class _ExploreRound:
                 gpu_type=self.target.gpu_type or str(getattr(self.ss, "gpu_type", "") or ""),
                 stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
             ),
-            base_server_args=compose_server_args(
-                inherited_args=self.inherited_args,
-                base_extra_args=self.base_args,
-                remove_args=self.base_remove_args,
-                args_mode=self.args_mode,
-            ),
+            base_server_args=self._composed_args(self.base_args, self.base_remove_args),
+            # The recipe's environment under the accepted edits: the same layering the run launches with, so a
+            # TP spelled only there is the TP a draft is judged against.
+            base_envs={**self.yaml_envs, **self.envs},
         )
         # Operator-supplied --skip-variants patterns.
         runnable, skipped = apply_user_skip_list(runnable, skip_spec=resolve_skip_spec(self.params))
@@ -1528,22 +1463,30 @@ class _ExploreRound:
             }
         )
 
-    def _keep(self, gv: GridVariant, run_gv: GridVariant, r: Any, row: dict[str, Any], meas: dict[str, Any]) -> dict:
-        control_fields = controls_of(vars(gv))
-        run_remove_args = self._run_remove_args(gv)
-        next_effective_args = compose_server_args(
+    def _next_effective_args(self, gv: GridVariant, run_remove_args: list[str]) -> str:
+        """The full server argv string ``gv`` ran with on top of the inherited and accumulated args."""
+        return compose_server_args(
             inherited_args=self.inherited_args,
             base_extra_args=self.args,
             variant_extra_args=gv.extra_server_args,
             remove_args=run_remove_args,
             args_mode="replace" if self.args_mode == "replace" else gv.args_mode,
         )
-        next_stack_args = compose_server_args(
+
+    def _next_stack_args(self, gv: GridVariant) -> str:
+        """The accumulated stack args extended with ``gv``'s own delta."""
+        return compose_server_args(
             base_extra_args=self.args,
             variant_extra_args=gv.extra_server_args,
             remove_args=gv.remove_args,
             args_mode=gv.args_mode,
         )
+
+    def _keep(self, gv: GridVariant, run_gv: GridVariant, r: Any, row: dict[str, Any], meas: dict[str, Any]) -> dict:
+        control_fields = controls_of(vars(gv))
+        run_remove_args = self._run_remove_args(gv)
+        next_effective_args = self._next_effective_args(gv, run_remove_args)
+        next_stack_args = self._next_stack_args(gv)
         effective = dict(control_fields)
         if run_remove_args:
             effective["remove_args"] = list(run_remove_args)

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, cast
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+
 if TYPE_CHECKING:
     from hyperloom.orchestrator.bus.message_bus import MessageBus
     from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
@@ -126,7 +128,7 @@ class CoordinatorCollaborator:
 
     @property
     def action_registry(self):
-        return self._coord.action_registry
+        return ACTION_CATALOGUE
 
     @property
     def cursors(self):

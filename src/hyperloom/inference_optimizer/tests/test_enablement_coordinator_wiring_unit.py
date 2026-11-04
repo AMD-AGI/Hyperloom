@@ -14,6 +14,7 @@ import pytest
 
 from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
+from hyperloom.common.deadline import Deadline
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
@@ -117,13 +118,13 @@ def test_enablement_discovery_honors_pr_monitor_gate(
     monkeypatch.setattr(sources, "enumerate_candidates", lambda request: seen.append(request) or [])
     fake = _enqueue_self(tmp_path)
     fake.knowledge_plane = types.SimpleNamespace(pr_monitor_enabled=enabled)
-    request = types.SimpleNamespace(max_search_candidates=5)
     plan = types.SimpleNamespace(
         repos=("https://github.com/sgl-project/sglang.git",),
         keywords=("scheduler",),
     )
 
-    assert fake.enablement_params._discover_enablement_candidate_refs(request, plan) == ()
+    deadline = Deadline.after(60)
+    assert fake.enablement_params._discover_enablement_candidate_refs(plan, deadline=deadline) == ()
     assert seen[0].search_modes == expected_modes
 
 
@@ -347,7 +348,7 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch, tmp_path
     rows = await _queued_of_kind(fake, "specialist")
     assert [r.task_id for r in rows] == [tid]
     assert rows[0].params["enablement"] is True
-    assert rows[0].params["enablement_attempt"] == 0
+    assert "RETRY" not in rows[0].params["notes"]
 
 
 @pytest.mark.asyncio
@@ -424,10 +425,8 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch, tmp_p
     tid2 = await fake.enablement_lane._maybe_enqueue_enablement_specialist()
     assert tid2 and tid2 != tid1
     second = await fake.tasks.get(tid2)
-    # The settled failed round bumps the dispatch ordinal from 0 -> 1.
-    assert second.params["enablement_attempt"] == 1
-    # Retry mandate flags the prior revert.
-    assert "RETRY" in second.params["notes"]
+    # The settled failed round bumps the dispatch ordinal from 0 -> 1, so the retry mandate flags the prior revert.
+    assert "RETRY (1 prior round(s)" in second.params["notes"]
 
 
 @pytest.mark.asyncio
@@ -1371,7 +1370,7 @@ async def test_rearm_authored_lane_delegates_enablement(session_dir):
     coord.enablement_lane.maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
-    await coord.phase_framework._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res, {})
     assert len(called) == 1 and called[0] is res
 
 
@@ -1383,12 +1382,12 @@ async def test_rearm_authored_lane_perf_framework_increments_counter(session_dir
     res = {
         "status": "apply_failed",
         "lane": "perf_framework",
-        "candidate": {"candidate_id": cand_id, "pr_url": cand_id},
         "specialist_task_id": "spec-99",
         "retry_feedback": [],
         "prior_patches": [],
     }
-    await coord.phase_framework._maybe_rearm_authored_lane(res)
+    coord.shared_state.framework_agent_batches = [{"batch_id": "b", "candidates": [{"pr_url": cand_id}]}]
+    await coord.phase_framework._maybe_rearm_authored_lane(res, {"framework_agent_candidate_id": cand_id})
     attempts = getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})
     assert attempts.get(cand_id) == 1
     # A pending retry context should be queued.
@@ -1408,7 +1407,6 @@ async def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session
     res = {
         "status": "apply_failed",
         "lane": "perf_framework",
-        "candidate": {"candidate_id": cand_id, "pr_url": cand_id},
         "specialist_task_id": "spec-100",
         "retry_feedback": [],
         "prior_patches": [],
@@ -1417,8 +1415,9 @@ async def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session
     coord.shared_state.apply_fail_reauthor_attempts = {cand_id: _AUTHORED_LANE_MAX_ATTEMPTS}
     # Clear any pending from prior.
     coord.shared_state.apply_fail_retry_pending = []
+    coord.shared_state.framework_agent_batches = [{"batch_id": "b", "candidates": [{"pr_url": cand_id}]}]
 
-    await coord.phase_framework._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res, {"framework_agent_candidate_id": cand_id})
 
     progress = getattr(coord.shared_state, "framework_agent_phase_progress", [])
     cap_rows = [p for p in progress if p.get("status") == "apply_fail_cap"]
@@ -1441,7 +1440,7 @@ async def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_per
 
     # Even when lane=enablement is absent but enablement=True is present, should delegate.
     res = {"status": "apply_failed", "enablement": True}
-    await coord.phase_framework._maybe_rearm_authored_lane(res)
+    await coord.phase_framework._maybe_rearm_authored_lane(res, {})
     assert len(rearm_called) == 1
     # apply_fail_reauthor_attempts not touched.
     assert not getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})

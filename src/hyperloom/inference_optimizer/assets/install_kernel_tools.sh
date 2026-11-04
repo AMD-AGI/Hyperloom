@@ -134,6 +134,9 @@ if [ -n "${TRACELENS_ROOT:-}" ]; then
   if [ "$(dirname "${_tracelens_root_canonical}")" = "$(_canonicalize_path "${_open_source_root}")" ] \
      && [[ "$(basename "${_tracelens_root_canonical}")" == TraceLens@* ]]; then
     TRACELENS_ROOT=""
+  elif [ ! -e "${_tracelens_root_canonical}" ]; then
+    warn "TRACELENS_ROOT=${TRACELENS_ROOT} does not exist; using the pinned TraceLens checkout instead"
+    TRACELENS_ROOT=""
   else
     _tracelens_root_was_set=1
   fi
@@ -169,8 +172,16 @@ if [ -n "${GEAK_ROOT:-}" ]; then
   # Re-exported GEAK@* cache paths remain installer-managed across reruns.
   _geak_root_canonical="$(_canonicalize_path "${GEAK_ROOT}")"
   _geak_cache_root="$(_canonicalize_path "${_open_source_root}")"
-  if [ "$(dirname "${_geak_root_canonical}")" != "${_geak_cache_root}" ] \
-     || [[ "$(basename "${_geak_root_canonical}")" != GEAK@* ]]; then
+  if [ "$(dirname "${_geak_root_canonical}")" = "${_geak_cache_root}" ] \
+     && [[ "$(basename "${_geak_root_canonical}")" == GEAK@* ]]; then
+    # As for TraceLens: a cache path re-resolves to the current GEAK_REF, and the runner inside it follows.
+    GEAK_ROOT=""
+    GEAK_E2E_RUNNER=""
+  elif [ ! -e "${_geak_root_canonical}" ]; then
+    warn "GEAK_ROOT=${GEAK_ROOT} does not exist; using the GEAK_REF checkout instead"
+    GEAK_ROOT=""
+    GEAK_E2E_RUNNER=""
+  else
     _geak_root_is_operator_override=1
   fi
 fi
@@ -248,6 +259,30 @@ remove_dotenv_var() {
   mv "$tmp" "$DOTENV"
   chmod 600 "$DOTENV" 2>/dev/null || true
 }
+
+# Remove $1 from .env when its value ends in $2, the shape install.sh derives
+# from a USER_DATA_PATH; an operator's value of any other shape is kept.
+remove_derived_dotenv_path() {
+  local key="$1" suffix="$2" line stripped value
+  [ -f "$DOTENV" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    stripped="${stripped#export }"
+    case "$stripped" in
+      "${key}="*)
+        value="${stripped#*=}"
+        value="${value%$'\r'}"
+        value="${value%\"}"; value="${value#\"}"
+        value="${value%\'}"; value="${value#\'}"
+        value="${value%/}"
+        case "$value" in
+          *"$suffix") remove_dotenv_var "$key"; return 0 ;;
+        esac
+        ;;
+    esac
+  done < "$DOTENV"
+}
+
 # In --check-only mode, downgrade post-install verification failures to a
 # warning so report_status can still enumerate what's missing. The caller
 # explicitly asked us NOT to install; failing on the first missing piece
@@ -437,16 +472,20 @@ resolve_ray_version() {
   RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
 }
 
-ensure_ray() {
-  resolve_ray_version
-  log "ensuring ${RAY_INSTALL_SPEC}"
-  if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
-  fi
-  if [ "$DRY_RUN" -eq 0 ]; then
-    RAY_VERSION="$RAY_VERSION" RAY_START_ARGV="$RAY_START_ARGV" python3 - <<'PY'
+# Exit code of ray_cli_probe for the one failure a click hold can fix: Ray 2.44.1's
+# CLI fails to import under click 8.3+ (`ValueError: ... is not a valid Sentinel`).
+RAY_CLI_PROBE_CLICK_RC=75
+# That hold is fixed, not an operator knob, and only for the default pin.
+RAY_CLICK_HOLD_VERSION="2.44.1"
+RAY_CLICK_HOLD_SPEC="click<8.3"
+
+# Certify the installed Ray CLI with Ray's own parser (see RAY_START_ARGV above).
+ray_cli_probe() {
+  RAY_VERSION="$RAY_VERSION" RAY_START_ARGV="$RAY_START_ARGV" RAY_CLICK_HOLD_VERSION="$RAY_CLICK_HOLD_VERSION" \
+    RAY_CLI_PROBE_CLICK_RC="$RAY_CLI_PROBE_CLICK_RC" python3 - <<'PY'
 import os
 import shlex
+import sys
 
 import ray
 
@@ -459,7 +498,10 @@ try:
     import click
     from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
 except Exception as exc:
-    raise SystemExit(f"ray CLI import failed: {type(exc).__name__}: {exc}") from exc
+    print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    # Only this failure, on the pinned Ray, is one a click hold can fix.
+    sentinel = "is not a valid Sentinel" in str(exc) and ray.__version__ == os.environ["RAY_CLICK_HOLD_VERSION"]
+    raise SystemExit(int(os.environ["RAY_CLI_PROBE_CLICK_RC"]) if sentinel else 1) from exc
 try:
     _ray_start = _ray_cli.commands["start"]
     _ray_start.make_context("start", list(RAY_START_ARGV), resilient_parsing=False).close()
@@ -469,7 +511,27 @@ except Exception as exc:
     raise SystemExit(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}") from exc
 print(f"[kernel-agent] ray version: {ray.__version__}, ray start accepts {' '.join(RAY_START_ARGV)}")
 PY
+}
+
+ensure_ray() {
+  resolve_ray_version
+  log "ensuring ${RAY_INSTALL_SPEC}"
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
   fi
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  local rc=0
+  ray_cli_probe || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  # Every other failure (version mismatch, other import error, a rejected argv,
+  # a missing start command) ends the install without touching click.
+  if [ "$rc" -eq "$RAY_CLI_PROBE_CLICK_RC" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$RAY_VERSION" = "$RAY_CLICK_HOLD_VERSION" ]; then
+    warn "the ray ${RAY_VERSION} CLI cannot import under this environment's click (is not a valid Sentinel); holding ${RAY_CLICK_HOLD_SPEC}"
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_CLICK_HOLD_SPEC"
+    ray_cli_probe
+    return
+  fi
+  return "$rc"
 }
 
 # Minimum soft `ulimit -n` the Ray raylet needs to stay up (issue #433).
@@ -750,6 +812,7 @@ ensure_tracelens() {
   elif [ ! -d "$TRACELENS_ROOT/.git" ]; then
     if [ "$CHECK_ONLY" -eq 1 ]; then
       warn "TraceLens checkout missing/incomplete at ${TRACELENS_ROOT} (check-only mode, skipping clone)"
+      _STALE_KEYS+=("TRACELENS_ROOT")
     elif [ "$DRY_RUN" -eq 1 ]; then
       [ -e "$TRACELENS_ROOT" ] && log "would: rm -rf ${TRACELENS_ROOT} (incomplete, not a git repo)"
       log "would: git clone --depth 1 ${TRACELENS_REPO} ${TRACELENS_ROOT}"
@@ -957,9 +1020,17 @@ write_env_file() {
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
 
+  # .env is shared by every session run from this checkout, so it keeps only the
+  # workspace root: a later run without USER_DATA_PATH in its shell still finds
+  # this workspace, and the paths below derive from that root again. They are not
+  # persisted (the env file above carries them to this workspace's runtime), and
+  # a copy an earlier install wrote is purged, or it would pair another
+  # workspace's runtime dir with this root. A value of another shape is an
+  # operator's own and stays.
   [ -n "${USER_DATA_PATH:-}" ] && upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
-  [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && upsert_dotenv_var HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
-  [ -n "${KERNEL_AGENT_ENV:-}" ] && upsert_dotenv_var KERNEL_AGENT_ENV "$KERNEL_AGENT_ENV"
+  remove_derived_dotenv_path HYPERLOOM_RUNTIME_DIR /runtime
+  remove_derived_dotenv_path KERNEL_AGENT_ENV /runtime/kernel-agent.env.sh
+  remove_derived_dotenv_path HYPERLOOM_ROOT /runtime/source-mirrors
   # Derived from the MAGPIE_REF / INFERENCEX_REF pins; a .env copy would read back as an override that skips them.
   remove_dotenv_var MAGPIE_PATH
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
@@ -997,14 +1068,18 @@ write_env_file() {
   remove_dotenv_var SAFE_API_KEY
   remove_dotenv_var AMD_LLM_API_KEY
   remove_dotenv_var LLM_GATEWAY_KEY
-  [ -n "${TRACELENS_ROOT:-}" ] && upsert_dotenv_var TRACELENS_ROOT "$TRACELENS_ROOT"
+  # Like MAGPIE_PATH: a pinned cache path written here would read back as an override after the pin moves. The
+  # kernel-agent env file carries it to the runtime; an operator's own path is left as written.
+  [ -z "${_tracelens_root_was_set:-}" ] && remove_dotenv_var TRACELENS_ROOT
   if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
     upsert_dotenv_var TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
     upsert_dotenv_var TL_EXTENSION "TraceLens_internal"
   fi
-  [ -n "${HYPERLOOM_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_ROOT "$HYPERLOOM_ROOT"
-  [ -n "${GEAK_E2E_RUNNER}" ] && upsert_dotenv_var GEAK_E2E_RUNNER "$GEAK_E2E_RUNNER"
-  [ -n "${GEAK_ROOT}" ] && upsert_dotenv_var GEAK_ROOT "$GEAK_ROOT"
+  # The runner lives in the GEAK checkout, so it follows GEAK_ROOT out of .env.
+  if [ -z "${_geak_root_is_operator_override:-}" ]; then
+    remove_dotenv_var GEAK_ROOT
+    remove_dotenv_var GEAK_E2E_RUNNER
+  fi
   [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && upsert_dotenv_var GEAK_CLAUDE_MODEL "$GEAK_CLAUDE_MODEL_VAL"
   [ -n "${_geak_claude_bin}" ] && upsert_dotenv_var GEAK_CLAUDE_BIN "$_geak_claude_bin"
   [ -n "${GEAK_RUN_MODE_VAL}" ] && upsert_dotenv_var GEAK_RUN_MODE "$GEAK_RUN_MODE_VAL"
@@ -1033,6 +1108,9 @@ ensure_geak() {
   elif [ ! -d "${GEAK_ROOT}/.git" ]; then
     if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
       mkdir -p "${GEAK_ROOT}"
+    fi
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+      _STALE_KEYS+=("GEAK_ROOT")
     fi
     if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
       run git init -q "${GEAK_ROOT}"

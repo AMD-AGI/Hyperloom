@@ -9,7 +9,7 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from kernelforge.resources import resource_path
+from kernelforge.config.resources import resource_path
 
 # The stable logical name resolves to this package's resources in built wheels
 # and to an operator override when one is configured.

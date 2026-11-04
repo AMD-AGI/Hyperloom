@@ -1,0 +1,444 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Deterministic verification of the dual-path measurement driver contract."""
+
+from __future__ import annotations
+
+import os
+import re
+import signal
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from kernelforge.workflows.flydsl_rewrite import protocol
+from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
+
+DRIVER_MISSING = "driver_missing"
+DRIVER_NOT_INDEPENDENT = "driver_not_independent"
+SOURCE_CANDIDATE_COLLISION = "source_candidate_collision"
+REF_MODE_UNSUPPORTED = "ref_mode_unsupported"
+REF_MODE_FAILED = "ref_mode_failed"
+REF_MODE_TIMEOUT = "ref_mode_timeout"
+REF_TIMING_UNPARSEABLE = "ref_timing_unparseable"
+REF_CASE_TIMINGS_MISSING = "ref_case_timings_missing"
+CANDIDATE_MODE_UNSUPPORTED = "candidate_mode_unsupported"
+CANDIDATE_MODE_FAILED = "candidate_mode_failed"
+CANDIDATE_MODE_TIMEOUT = "candidate_mode_timeout"
+CANDIDATE_TIMING_UNPARSEABLE = "candidate_timing_unparseable"
+CANDIDATE_NOT_ISOLATED = "candidate_not_isolated"
+CANDIDATE_SHADOWED = "candidate_shadowed"
+CASE_COVERAGE_MISMATCH = "case_coverage_mismatch"
+
+REF_BENCH_FLAG = "--ref-bench-mode"
+BENCH_FLAG = "--bench-mode"
+
+# The canonical aggregate timing key.
+CANONICAL_TIMING_METRIC = "median_ms"
+DEPRECATED_TIMING_METRIC = "mean_ms"
+
+_TIMING_RE = re.compile(r"\b(median_ms|mean_ms):\s*([-+\d.eE]+)")
+_CASE_MS_RE = re.compile(r"^[^\S\n]*case_ms:[^\S\n]*(\S+)[^\S\n]+([-+\d.eE]+)", re.M)
+_CASE_COMMENT_RE = re.compile(r"^[^\S\n]*#[^\S\n]*case[^\S\n]+([^\s:]+)[^\S\n]*:", re.M)
+_SNR_RE = re.compile(r"SNR:\s*([-+\d.eE]+)\s*dB")
+_ALLCLOSE_RE = re.compile(r"allclose:\s*(True|False)", re.IGNORECASE)
+_REJECTED_ARGUMENT_RE = re.compile(
+    r"unrecognized arguments|no such option|unknown option|invalid choice|"
+    r"unexpected argument",
+    re.IGNORECASE,
+)
+
+_OUTPUT_TAIL_CHARS = 1200
+
+
+@dataclass
+class DriverRun:
+    """One driver invocation, reduced to what the contract checks look at."""
+
+    returncode: int | None
+    output: str
+    timed_out: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return not self.timed_out and self.returncode == 0
+
+    @property
+    def rejected_arguments(self) -> bool:
+        """The driver's own parser refused a mode flag it does not define."""
+        return bool(_REJECTED_ARGUMENT_RE.search(self.output))
+
+    @property
+    def tail(self) -> str:
+        return self.output[-_OUTPUT_TAIL_CHARS:].strip()
+
+
+@dataclass(frozen=True)
+class DriverMode:
+    """The mode flags one driver invocation runs with and, for a timed mode, its warmup and timed iterations."""
+
+    args: tuple[str, ...] = ()
+    warmup: int | None = None
+    iters: int | None = None
+
+
+_CANDIDATE_BENCH = DriverMode((BENCH_FLAG,), warmup=10, iters=30)
+_CANDIDATE_PROBE = DriverMode((BENCH_FLAG,), warmup=1, iters=1)
+
+
+@dataclass
+class DriverReading:
+    """Everything the contract reads out of one driver invocation's output."""
+
+    timing_ms: float | None = None
+    timing_metric: str = ""
+    case_ids: tuple[str, ...] = ()
+    case_ms: dict[str, float] = field(default_factory=dict)
+    snr_db: float | None = None
+    allclose: bool | None = None
+
+    @property
+    def has_timing(self) -> bool:
+        return self.timing_ms is not None
+
+    @property
+    def has_correctness_verdict(self) -> bool:
+        return self.snr_db is not None or self.allclose is not None
+
+
+@dataclass
+class PreflightReport:
+    """Outcome of one contract stage, carrying an explicit failure class."""
+
+    ok: bool
+    failure_class: str = ""
+    detail: str = ""
+    timing_ms: float | None = None
+    timing_metric: str = ""
+    case_ids: tuple[str, ...] = ()
+    case_ms: dict[str, float] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+
+def _failed(failure_class: str, detail: str) -> PreflightReport:
+    return PreflightReport(ok=False, failure_class=failure_class, detail=detail)
+
+
+def read_driver_output(text: str) -> DriverReading:
+    """Parse the canonical timing, case ids, and correctness verdict."""
+    reading = DriverReading()
+    for metric, raw in _TIMING_RE.findall(text or ""):
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        # A canonical key always wins over the deprecated spelling.
+        if reading.timing_ms is None or (
+            metric == CANONICAL_TIMING_METRIC and reading.timing_metric != CANONICAL_TIMING_METRIC
+        ):
+            reading.timing_ms = value
+            reading.timing_metric = metric
+
+    case_ids: list[str] = []
+    for case_id, raw in _CASE_MS_RE.findall(text or ""):
+        if case_id not in case_ids:
+            case_ids.append(case_id)
+        try:
+            reading.case_ms[case_id] = float(raw)
+        except ValueError:
+            continue
+    for case_id in _CASE_COMMENT_RE.findall(text or ""):
+        if case_id not in case_ids:
+            case_ids.append(case_id)
+    reading.case_ids = tuple(case_ids)
+
+    snr = _SNR_RE.search(text or "")
+    if snr:
+        try:
+            reading.snr_db = float(snr.group(1))
+        except ValueError:
+            reading.snr_db = None
+    allclose = _ALLCLOSE_RE.search(text or "")
+    if allclose:
+        reading.allclose = allclose.group(1).lower() == "true"
+    return reading
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    """Stop the driver and anything it spawned."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (AttributeError, OSError):
+        proc.kill()
+    try:
+        proc.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (AttributeError, OSError):
+        proc.kill()
+
+
+def export_driver_environment(spec: RewriteSpec) -> None:
+    """Publish the producer-owned variables to every driver forge launches."""
+    os.environ.update(
+        protocol.driver_environment(
+            source_kernel=spec.source_kernel,
+            candidate_kernel=spec.flydsl_kernel,
+            logical_op_name=spec.op_name,
+        )
+    )
+
+
+def run_driver(
+    spec: RewriteSpec,
+    driver_path: str,
+    mode: DriverMode,
+    *,
+    timeout_sec: int,
+) -> DriverRun:
+    """Invoke the driver once with the producer-owned environment."""
+    cmd = [sys.executable, str(driver_path), *mode.args]
+    if mode.warmup is not None:
+        cmd += ["--warmup", str(mode.warmup)]
+    if mode.iters is not None:
+        cmd += ["--iters", str(mode.iters)]
+    env = {
+        **os.environ,
+        **protocol.driver_environment(
+            source_kernel=spec.source_kernel,
+            candidate_kernel=spec.flydsl_kernel,
+            logical_op_name=spec.op_name,
+        ),
+    }
+    proc = subprocess.Popen(
+        cmd,
+        cwd=spec.workspace,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        output, _ = proc.communicate(timeout=max(1, int(timeout_sec)))
+    except subprocess.TimeoutExpired:
+        _terminate(proc)
+        try:
+            output, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            output = ""
+        return DriverRun(returncode=None, output=output or "", timed_out=True)
+    return DriverRun(returncode=proc.returncode, output=output or "", timed_out=False)
+
+
+def check_driver_independence(spec: RewriteSpec, driver_path: str) -> PreflightReport:
+    """Reject a driver or candidate layout that cannot gate anything."""
+    driver = Path(driver_path)
+    if not driver.is_file():
+        return _failed(DRIVER_MISSING, f"measurement driver not found: {driver_path}")
+
+    resolved_driver = driver.resolve()
+    source = Path(spec.source_kernel).resolve()
+    candidate = Path(spec.flydsl_kernel).resolve()
+    if resolved_driver in (source, candidate):
+        return _failed(
+            DRIVER_NOT_INDEPENDENT,
+            f"the measurement driver is the same file as the kernel it measures: {resolved_driver}",
+        )
+    if "forge_experiments" in resolved_driver.parts:
+        return _failed(
+            DRIVER_NOT_INDEPENDENT,
+            "the measurement driver is a generated forge artifact and cannot own "
+            f"the correctness gate: {resolved_driver}",
+        )
+    if source == candidate:
+        return _failed(
+            SOURCE_CANDIDATE_COLLISION,
+            f"the FlyDSL candidate would overwrite the source kernel it is compared against: {candidate}",
+        )
+
+    # Python resolves the driver's own directory before anything the producer exports, so a same-named module there
+    # would be imported instead of the candidate — typically a kernel left behind by an earlier run.
+    for directory in (resolved_driver.parent, Path(spec.workspace).resolve()):
+        if directory == candidate.parent:
+            continue
+        shadow = directory / candidate.name
+        if shadow.is_file():
+            return _failed(
+                CANDIDATE_SHADOWED,
+                f"{shadow} would be imported instead of the FlyDSL candidate at "
+                f"{candidate}; remove it so the driver measures this run's port",
+            )
+    return PreflightReport(ok=True)
+
+
+def _timing_report(reading: DriverReading) -> PreflightReport:
+    report = PreflightReport(
+        ok=True,
+        timing_ms=reading.timing_ms,
+        timing_metric=reading.timing_metric,
+        case_ids=reading.case_ids,
+        case_ms=dict(reading.case_ms),
+    )
+    if reading.timing_metric == DEPRECATED_TIMING_METRIC:
+        report.warnings.append(
+            f"the driver reports {DEPRECATED_TIMING_METRIC}; the canonical "
+            f"aggregate timing key is {CANONICAL_TIMING_METRIC}"
+        )
+    return report
+
+
+def preflight_reference(
+    spec: RewriteSpec,
+    driver_path: str,
+    *,
+    warmup: int = 10,
+    iters: int = 30,
+    timeout_sec: int,
+) -> PreflightReport:
+    """Prove the source path is measurable before any PORT budget is spent."""
+    run = run_driver(
+        spec,
+        driver_path,
+        DriverMode((REF_BENCH_FLAG,), warmup=warmup, iters=iters),
+        timeout_sec=timeout_sec,
+    )
+    if run.timed_out:
+        return _failed(
+            REF_MODE_TIMEOUT,
+            f"the driver did not finish {REF_BENCH_FLAG} within {timeout_sec}s",
+        )
+    if run.rejected_arguments:
+        return _failed(
+            REF_MODE_UNSUPPORTED,
+            f"the driver does not accept {REF_BENCH_FLAG}: {run.tail}",
+        )
+    if not run.ok:
+        return _failed(
+            REF_MODE_FAILED,
+            f"the driver failed in {REF_BENCH_FLAG} (exit {run.returncode}): {run.tail}",
+        )
+
+    reading = read_driver_output(run.output)
+    if not reading.has_timing:
+        # A driver that ignores the flag runs its correctness path instead, which is a missing mode rather than a
+        # broken timing report.
+        if reading.has_correctness_verdict:
+            return _failed(
+                REF_MODE_UNSUPPORTED,
+                f"the driver ignored {REF_BENCH_FLAG} and ran its correctness path instead of timing the source",
+            )
+        return _failed(
+            REF_TIMING_UNPARSEABLE,
+            f"the driver reported no {CANONICAL_TIMING_METRIC} in {REF_BENCH_FLAG}: {run.tail}",
+        )
+    # Every speedup this run publishes is an equal-weight mean over per-case ratios, so the source side of that ratio
+    # is a required output of the reference mode, not a nicety. Without it the run can still time the source in
+    # aggregate and would go on to publish a number measured against something else entirely, so it is refused here,
+    # before any budget is spent.
+    if not reading.case_ms:
+        return _failed(
+            REF_CASE_TIMINGS_MISSING,
+            f"the driver timed the source in {REF_BENCH_FLAG} but printed no "
+            f"'case_ms: <case_id> <ms>' line, and the per-case times are what "
+            f"every reported speedup divides by: {run.tail}",
+        )
+    return _timing_report(reading)
+
+
+def probe_candidate_arguments(
+    spec: RewriteSpec,
+    driver_path: str,
+    *,
+    timeout_sec: int,
+) -> PreflightReport:
+    """Check the candidate mode while the candidate is still an unbuilt stub."""
+    run = run_driver(spec, driver_path, _CANDIDATE_PROBE, timeout_sec=timeout_sec)
+    if run.timed_out:
+        return _failed(
+            CANDIDATE_MODE_TIMEOUT,
+            f"the driver did not finish {BENCH_FLAG} within {timeout_sec}s",
+        )
+    if run.rejected_arguments:
+        return _failed(
+            CANDIDATE_MODE_UNSUPPORTED,
+            f"the driver does not accept {BENCH_FLAG}: {run.tail}",
+        )
+
+    reading = read_driver_output(run.output)
+    if run.ok and reading.has_timing:
+        return _failed(
+            CANDIDATE_NOT_ISOLATED,
+            f"the driver timed {BENCH_FLAG} at {reading.timing_ms} ms while the "
+            "FlyDSL candidate is still an unimplemented skeleton, so it is not "
+            "running the candidate",
+        )
+    # Any other outcome is the expected "candidate not ready".
+    return PreflightReport(ok=True, case_ids=reading.case_ids)
+
+
+def check_case_coverage(
+    reference_case_ids: tuple[str, ...],
+    candidate_case_ids: tuple[str, ...],
+) -> PreflightReport:
+    """Require both benchmark paths to report the same cases."""
+    if not reference_case_ids:
+        return PreflightReport(ok=True, case_ids=candidate_case_ids)
+    missing = sorted(set(reference_case_ids) - set(candidate_case_ids))
+    unexpected = sorted(set(candidate_case_ids) - set(reference_case_ids))
+    if missing or unexpected:
+        return _failed(
+            CASE_COVERAGE_MISMATCH,
+            "the driver benchmarked different cases for the source and the "
+            f"candidate (missing: {missing or 'none'}, "
+            f"unexpected: {unexpected or 'none'})",
+        )
+    return PreflightReport(ok=True, case_ids=candidate_case_ids)
+
+
+def preflight_candidate(
+    spec: RewriteSpec,
+    driver_path: str,
+    *,
+    reference_case_ids: tuple[str, ...] = (),
+    timeout_sec: int,
+) -> PreflightReport:
+    """Measure the ported candidate and prove it covered the reference cases."""
+    run = run_driver(spec, driver_path, _CANDIDATE_BENCH, timeout_sec=timeout_sec)
+    if run.timed_out:
+        return _failed(
+            CANDIDATE_MODE_TIMEOUT,
+            f"the driver did not finish {BENCH_FLAG} within {timeout_sec}s",
+        )
+    if run.rejected_arguments:
+        return _failed(
+            CANDIDATE_MODE_UNSUPPORTED,
+            f"the driver does not accept {BENCH_FLAG}: {run.tail}",
+        )
+    if not run.ok:
+        return _failed(
+            CANDIDATE_MODE_FAILED,
+            f"the driver failed in {BENCH_FLAG} (exit {run.returncode}): {run.tail}",
+        )
+
+    reading = read_driver_output(run.output)
+    if not reading.has_timing:
+        if reading.has_correctness_verdict:
+            return _failed(
+                CANDIDATE_MODE_UNSUPPORTED,
+                f"the driver ignored {BENCH_FLAG} and ran its correctness path instead of timing the candidate",
+            )
+        return _failed(
+            CANDIDATE_TIMING_UNPARSEABLE,
+            f"the driver reported no {CANONICAL_TIMING_METRIC} in {BENCH_FLAG}: {run.tail}",
+        )
+
+    coverage = check_case_coverage(reference_case_ids, reading.case_ids)
+    if not coverage.ok:
+        return coverage
+    return _timing_report(reading)

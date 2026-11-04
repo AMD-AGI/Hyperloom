@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.llm_config import deepseek_compat_env
+from hyperloom_common.llm.llm_config import deepseek_compat_env
 from hyperloom.inference_optimizer import setup
 
 
@@ -175,7 +175,7 @@ def _credential_functions() -> str:
 
 
 def test_baremetal_setup_accepts_a_codex_only_gateway(tmp_path: Path):
-    """Hyperloom's runtime drives both claude and codex, and ``cli/preflight._provider_only_mode`` already treats an
+    """Hyperloom's runtime drives both claude and codex, and ``cli/preflight_env._provider_only_mode`` already treats an
     OpenAI-only environment as a valid single provider; the bare-metal installer must not be the one place refusing it.
     """
     dotenv = tmp_path / ".env"
@@ -2257,12 +2257,8 @@ def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
     assert (torch_lib / "libamdhip64.so").read_bytes() == b"stock-hip-bytes"
 
 
-def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: Path):
-    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under $VLLM_VENV_ROOT, so a shared-interpreter lookup patched a torch that never runs the benchmark and left the profiler unfixed."""
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
-    lib = _sourceable_installer(install_script, tmp_path)
-    rocm_lib = _fake_rocm_lib(tmp_path)
-
+def _shared_and_vllm_venv_torch(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Lay out a framework-less shared torch and an isolated vLLM venv torch, both with stock libs."""
     shared_torch_lib = tmp_path / "shared" / "torch" / "lib"
     venv_torch_lib = tmp_path / "vllm-venv" / "torch" / "lib"
     for d in (shared_torch_lib, venv_torch_lib):
@@ -2273,6 +2269,16 @@ def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: 
     venv_root = tmp_path / "vllm-venv"
     shared_py = _fake_python_for_torch_lib(tmp_path / "shared-python", shared_torch_lib, importable=frozenset())
     _fake_python_for_torch_lib(venv_root / "bin" / "python", venv_torch_lib, importable=frozenset({"vllm"}))
+    return shared_torch_lib, venv_torch_lib, venv_root, shared_py
+
+
+def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: Path):
+    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under $VLLM_VENV_ROOT, so a shared-interpreter lookup patched a torch that never runs the benchmark and left the profiler unfixed."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    rocm_lib = _fake_rocm_lib(tmp_path)
+
+    shared_torch_lib, venv_torch_lib, venv_root, shared_py = _shared_and_vllm_venv_torch(tmp_path)
 
     runner = tmp_path / "runner.sh"
     runner.write_text(
@@ -2360,16 +2366,7 @@ def test_hotfix_rerun_restores_isolated_vllm_from_dotenv(tmp_path: Path):
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
 
-    shared_torch_lib = tmp_path / "shared" / "torch" / "lib"
-    venv_torch_lib = tmp_path / "vllm-venv" / "torch" / "lib"
-    for d in (shared_torch_lib, venv_torch_lib):
-        d.mkdir(parents=True)
-        (d / "libamdhip64.so").write_bytes(b"stock-hip-bytes")
-        (d / "libroctracer64.so").write_bytes(b"stock-tracer-bytes")
-
-    venv_root = tmp_path / "vllm-venv"
-    shared_py = _fake_python_for_torch_lib(tmp_path / "shared-python", shared_torch_lib, importable=frozenset())
-    _fake_python_for_torch_lib(venv_root / "bin" / "python", venv_torch_lib, importable=frozenset({"vllm"}))
+    shared_torch_lib, venv_torch_lib, venv_root, shared_py = _shared_and_vllm_venv_torch(tmp_path)
 
     dotenv = tmp_path / ".env"
     dotenv.write_text(
@@ -2863,7 +2860,8 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
     assert "/old/workspace" not in out
 
 
-def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
+def _kernel_env_writer_sources() -> tuple[str, str, str]:
+    """The .env upsert helpers, ``_compose_pythonpath`` and ``write_env_file`` cut out of install_kernel_tools.sh."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
@@ -2872,9 +2870,15 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
     env_start = script_text.index("write_env_file() {")
     env_end = script_text.index("\nensure_geak() {")
-    dotenv_helpers = script_text[upsert_start:upsert_end]
-    compose_pythonpath = script_text[compose_start:compose_end]
-    write_env_file = script_text[env_start:env_end]
+    return (
+        script_text[upsert_start:upsert_end],
+        script_text[compose_start:compose_end],
+        script_text[env_start:env_end],
+    )
+
+
+def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
+    dotenv_helpers, compose_pythonpath, write_env_file = _kernel_env_writer_sources()
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
     dotenv.write_text(
@@ -2955,17 +2959,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     """Writing kernel-agent env must NOT wipe the Anthropic creds the operator put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL after install)."""
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
-    script_text = install_script.read_text(encoding="utf-8")
-    upsert_start = script_text.index("upsert_dotenv_var() {")
-    upsert_end = script_text.index("\n# In --check-only mode")
-    compose_start = script_text.index("_compose_pythonpath() {")
-    compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
-    env_start = script_text.index("write_env_file() {")
-    env_end = script_text.index("\nensure_geak() {")
-    dotenv_helpers = script_text[upsert_start:upsert_end]
-    compose_pythonpath = script_text[compose_start:compose_end]
-    write_env_file = script_text[env_start:env_end]
+    dotenv_helpers, compose_pythonpath, write_env_file = _kernel_env_writer_sources()
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
     dotenv.write_text(
@@ -3051,17 +3045,7 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
             return f"/mnt/{path.drive[0].lower()}{rest}"
         return text
 
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
-    script_text = install_script.read_text(encoding="utf-8")
-    upsert_start = script_text.index("upsert_dotenv_var() {")
-    upsert_end = script_text.index("\n# In --check-only mode")
-    compose_start = script_text.index("_compose_pythonpath() {")
-    compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
-    env_start = script_text.index("write_env_file() {")
-    env_end = script_text.index("\nensure_geak() {")
-    dotenv_helpers = script_text[upsert_start:upsert_end]
-    compose_pythonpath = script_text[compose_start:compose_end]
-    write_env_file = script_text[env_start:env_end]
+    dotenv_helpers, compose_pythonpath, write_env_file = _kernel_env_writer_sources()
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
     dotenv.write_text(

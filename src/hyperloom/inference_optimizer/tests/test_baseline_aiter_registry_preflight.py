@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _aiter_jit
-from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
 
 
 @pytest.fixture(autouse=True)
@@ -263,7 +263,7 @@ async def test_the_baseline_drop_stays_on_the_cache_filesystem(tmp_path, monkeyp
     run_dir.mkdir()
     monkeypatch.chdir(run_dir)
 
-    await baseline_mod._prepare_aiter_serving_so({})
+    await launch_mod._prepare_aiter_serving_so({})
 
     assert not (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
     assert list(run_dir.iterdir()) == []
@@ -286,7 +286,7 @@ async def test_the_preflight_runs_even_when_the_round_names_no_csv(tmp_path, mon
         _prepare,
     )
 
-    await baseline_mod._prepare_aiter_serving_so({"RUN_EVAL": "false"})
+    await launch_mod._prepare_aiter_serving_so({"RUN_EVAL": "false"})
 
     assert seen == [{}]
 
@@ -304,7 +304,7 @@ async def test_only_the_csv_variables_travel(tmp_path, monkeypatch):
         _prepare,
     )
 
-    await baseline_mod._prepare_aiter_serving_so(
+    await launch_mod._prepare_aiter_serving_so(
         {
             "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tuned/bpreshuffle.csv",
             "AITER_CONFIG_GEMM_BF16": "  ",
@@ -329,14 +329,14 @@ async def test_a_preflight_failure_does_not_abort_the_round(tmp_path, monkeypatc
         _prepare,
     )
 
-    await baseline_mod._prepare_aiter_serving_so({"AITER_CONFIG_GEMM_BF16": "/tuned/bf16.csv"})
+    await launch_mod._prepare_aiter_serving_so({"AITER_CONFIG_GEMM_BF16": "/tuned/bf16.csv"})
 
 
 def test_the_preflight_runs_before_the_config_is_materialized():
     """Ordering is the whole point: after the boot it is a classifier, not a fix."""
     import ast
 
-    source = Path(baseline_mod.__file__).read_text(encoding="utf-8")
+    source = Path(launch_mod.__file__).read_text(encoding="utf-8")
     run_once = next(
         node
         for node in ast.walk(ast.parse(source))

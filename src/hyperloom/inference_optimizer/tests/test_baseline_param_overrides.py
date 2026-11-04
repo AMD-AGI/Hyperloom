@@ -24,11 +24,11 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     LaunchLayer,
     MaterializeOptions,
 )
-from hyperloom.orchestrator.actions.executors.baseline import (
-    BaselineExecutor,
-    _with_cuda_graph_disabled,
-)
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
 from hyperloom.orchestrator.state.shared_state import SharedState
+
+from ._baseline_fakes import capture_launch, fake_workspace, run_baseline
 
 
 _CLI_STUB = SimpleNamespace(
@@ -175,10 +175,10 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
 
 
-def test_materialize_writes_operator_extra_env_into_vllm_yaml(tmp_path, monkeypatch):
+def test_materialize_writes_operator_extra_env_but_not_its_credentials_into_vllm_yaml(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_EXTRA_ENV",
-        '{"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}',
+        '{"VLLM_USE_BREAKABLE_CUDAGRAPH": "0", "KB_STORE_TOKEN": "kb-secret"}',
     )
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -188,6 +188,7 @@ def test_materialize_writes_operator_extra_env_into_vllm_yaml(tmp_path, monkeypa
         materialize_config_with_envs(base, out, target=BenchmarkTarget(gpu_type="mi355x")).read_text()
     )["benchmark"]["envs"]
     assert envs["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0"
+    assert "KB_STORE_TOKEN" not in envs
 
 
 def test_kimi_materialize_enables_remote_client_trust(tmp_path):
@@ -445,33 +446,6 @@ def test_materialize_config_with_envs_no_clamp_when_visible_zero(
 
 
 # BaselineExecutor.__call__ end-to-end (subprocess mocked)
-def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
-
-    import json
-
-    ws = slot / "benchmark_sglang_20260513_010101"
-    ws.mkdir(parents=True)
-    (ws / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": tput / 256,
-                    "output_throughput": tput,
-                    "total_token_throughput": tput * 2,
-                    "completed_requests": 64,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {
-                    "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
-                    "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
-                },
-            }
-        )
-    )
-    return ws
 
 
 def _make_ctx(params: dict) -> SimpleNamespace:
@@ -496,7 +470,7 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
         slot = Path(cmd[out_idx + 1])
         captured["cfg"] = yaml.safe_load(cfg_path.read_text())
         captured["env"] = dict(kwargs.get("env") or {})
-        _fake_workspace(slot)
+        fake_workspace(slot)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = BaselineExecutor(
@@ -544,7 +518,7 @@ def test_baseline_eager_fallback_records_effective_task_args(tmp_path):
 
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
-        _fake_workspace(Path(cmd[out_idx + 1]))
+        fake_workspace(Path(cmd[out_idx + 1]))
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = BaselineExecutor(
@@ -597,29 +571,15 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monke
     _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
     output_dir = tmp_path / "ws"
     captured: dict = {}
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        captured["cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        _fake_workspace(Path(cmd[out_idx + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-        shared_state=SimpleNamespace(
-            model_path="/path/models/PrimeIntellect-Qwen3-1.7B",
-        ),
-    )
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = run_baseline(
+        base,
+        tmp_path,
+        ctx,
+        capture_launch(captured),
+        shared_state=SimpleNamespace(model_path="/path/models/PrimeIntellect-Qwen3-1.7B"),
+    )
 
     assert result["status"] == "succeeded"
     assert captured["cfg"]["benchmark"]["model"] == "/path/models/PrimeIntellect-Qwen3-1.7B"
@@ -633,19 +593,6 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(tmp_p
     _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
     output_dir = tmp_path / "ws"
     captured: dict = {}
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        captured["cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        _fake_workspace(Path(cmd[out_idx + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(  # no shared_state — singleton form
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
     task = SimpleNamespace(
         task_id="t-baseline-extra",
         params={
@@ -662,11 +609,8 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(tmp_p
         },
     )
 
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    # The executor carries no shared_state: the singleton form.
+    result = run_baseline(base, tmp_path, ctx, capture_launch(captured))
 
     assert result["status"] == "succeeded"
     assert captured["cfg"]["benchmark"]["model"] == "/path/models/PrimeIntellect-Qwen3-1.7B"
@@ -678,26 +622,9 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatc
     _write_yaml(base)
     output_dir = tmp_path / "ws"
     captured: dict = {}
-
-    def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        captured["env"] = dict(kwargs.get("env") or {})
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = run_baseline(base, tmp_path, ctx, capture_launch(captured))
 
     assert result["status"] == "succeeded"
     # Default RESULT_DIR is the per-task workspace: this fixture omits benchmark_script so the cold-start double-run
@@ -716,29 +643,10 @@ def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     _write_yaml(base)
     output_dir = tmp_path / "ws"
     captured: dict = {}
-
-    def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        captured["env"] = dict(kwargs.get("env") or {})
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
-    with (
-        patch("hyperloom.orchestrator.actions.executors.baseline.failed_patch_anchors_in", return_value=[]),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-            side_effect=fake_run,
-        ),
-    ):
-        result = _run(executor(ctx))
+    with patch("hyperloom.orchestrator.actions.executors.baseline.failed_patch_anchors_in", return_value=[]):
+        result = run_baseline(base, tmp_path, ctx, capture_launch(captured))
 
     assert result["status"] == "succeeded"
     assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == str(inferencex), (

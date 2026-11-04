@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import json
 import sys
 import types
@@ -358,10 +359,10 @@ def test_session_start_masks_extra_env_pins_the_cli_exported(monkeypatch):
     # The CLI serializes --extra-env into one JSON var whose name carries no marker; each pin is masked by its own name.
     import os
 
-    from hyperloom.inference_optimizer import cli
+    from hyperloom.inference_optimizer.cli import launch_shape
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_EXTRA_ENV", raising=False)
-    cli._export_operator_launch_shape(
+    launch_shape._export_operator_launch_shape(
         server_args="",
         extra_env={
             "HF_TOKEN": "hf_plaintextvalue",
@@ -1979,3 +1980,21 @@ def test_a_failed_span_end_is_counted_as_an_error(tmp_path):
 
     assert em._counts["errors"] == 1
     assert em._unended_spans == []
+
+
+def test_a_score_the_sdk_refused_is_logged_at_warning_with_its_traceback(tmp_path, monkeypatch, caplog):
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    _append_jsonl(sd / "reports" / "trace" / "decision_trace.jsonl", _kernel_decision("k1"))
+    _install_fake_sdk(monkeypatch, _FakeClient())
+
+    def _refuse(self, **kwargs):
+        raise RuntimeError("score refused")
+
+    monkeypatch.setattr(_FakeObservation, "score", _refuse)
+    monkeypatch.setattr(_FakeClient, "create_score", _refuse)
+    caplog.set_level(logging.WARNING, logger=lfe.__name__)
+    lfe.LangfuseEmitter(sd).flush_session()
+
+    failed = [r for r in caplog.records if r.getMessage() == "langfuse: create_score failed for decision_outcome"]
+    assert [(r.levelno, repr(r.exc_info[1])) for r in failed] == [(logging.WARNING, "RuntimeError('score refused')")]

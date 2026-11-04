@@ -19,7 +19,7 @@ import subprocess
 from functools import cache
 from typing import Any, Mapping, NamedTuple
 
-from hyperloom.common.env import env_bool, env_flag, is_truthy
+from hyperloom_common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.workload_defaults import DEFAULT_CONC, DEFAULT_OSL
 from hyperloom.inference_optimizer.model_config_utils import model_is_gemma2
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
@@ -465,6 +465,11 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
     return patch_ok, sitecustomize
 
 
+#: The ``--profiler-config`` fields only TraceLens's vLLM patch adds (``_server_patcher``): a vLLM that was not patched
+#: refuses them, so the server they are passed to must run a patched vLLM.
+VLLM_PATCH_PROFILER_FIELDS: tuple[str, ...] = ("capture_torch_profiler", "detailed_trace_annotation")
+
+
 def _apply_vllm_profile(
     envs: dict[str, Any],
     *,
@@ -483,8 +488,7 @@ def _apply_vllm_profile(
     if _profiler_flag_value(existing, "profiler") is None:
         flags.append(("profiler", "--profiler-config.profiler torch"))
     if patch_ok:
-        flags.append(("capture_torch_profiler", "--profiler-config.capture_torch_profiler True"))
-        flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
+        flags.extend((field, f"--profiler-config.{field} True") for field in VLLM_PATCH_PROFILER_FIELDS)
     flags.append(("ignore_frontend", "--profiler-config.ignore_frontend True"))
     flags.append(("torch_profiler_dump_cuda_time_total", "--profiler-config.torch_profiler_dump_cuda_time_total False"))
     # Repeated flags last-win, so the computed cap replaces a YAML pin.

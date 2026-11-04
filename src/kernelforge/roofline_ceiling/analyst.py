@@ -61,7 +61,7 @@ from kernelforge.agent_backends.base import (
     AgentToolPolicy,
     watchdog_timeout_sec,
 )
-from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.roofline_ceiling.contract import CeilingContractError, CeilingReport
 from kernelforge.roofline_ceiling.evidence import OBSERVED_CAMPAIGN, EvidenceBundle, KnownCases, PerformanceRun
 from kernelforge.roofline_ceiling.report import (
@@ -70,7 +70,7 @@ from kernelforge.roofline_ceiling.report import (
     REPORT_FILENAME,
     read_report,
 )
-from kernelforge.resources import resource_path
+from kernelforge.config.resources import resource_path
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
 

@@ -78,6 +78,9 @@
 /src/hyperloom/orchestrator/kernel/keep_thresholds.py        @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/serving_log_evidence.py   @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/phases/kernel.py                    @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/phases/kernel_geak_dispatch.py      @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/phases/kernel_geak_promotion.py     @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/phases/kernel_gemm_tuning.py        @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/kernelforge/cli/                                           @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 
 # GEAK integration

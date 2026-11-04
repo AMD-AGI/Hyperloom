@@ -51,7 +51,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridStop,
 )
 
-from .conftest import enable_multi_node, launches_by_round_slot
+from .conftest import enable_multi_node, launches_by_round_slot, write_benchmark_yaml
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
@@ -477,28 +477,6 @@ def _isolate_leak_root(request, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
-def _write_baseline_yaml_mtime(path: Path) -> None:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "benchmark_script": "sglang_mi300x.sh",
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        },
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
-
-
 def _empty_workspace(slot: Path) -> Path:
     ws = slot / "benchmark_sglang_20260513_010101"
     ws.mkdir(parents=True)
@@ -535,7 +513,7 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
 ):
     monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "out"
 
     leak_dir = tmp_path / "stale_leak"
@@ -571,7 +549,7 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
 @pytest.mark.asyncio
 async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "out"
 
     leak_dir = tmp_path / "fresh_leak"
@@ -608,7 +586,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
 async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path, monkeypatch):
     """A measured round that reuses a ready server must retain its warmup log."""
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "out"
 
     def fake_run(cmd, *args, **kwargs):
@@ -660,7 +638,7 @@ async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path
 async def test_run_grid_scans_the_ready_server_log_named_by_the_caller(tmp_path):
     """Explore's warmup grid lives beside the decision slot; the caller passes its log."""
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "v02_kv_cache_fp8"
     warm_log = output_root / "warmup_round" / "variant_00_kv" / "benchmark_vllm_1" / "server.log"
     warm_log.parent.mkdir(parents=True)
@@ -698,7 +676,7 @@ async def test_run_grid_scans_the_ready_server_log_named_by_the_caller(tmp_path)
 async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tmp_path, monkeypatch):
     """Failure paths use the same narrowly scoped ready-server log fallback."""
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml_mtime(base)
+    write_benchmark_yaml(base)
     output_root = tmp_path / "out"
     # The workspace never gets a report, so the settle loop would run its full
     # deadline; this test is about the log fallback, not about settling.
@@ -1259,11 +1237,11 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
     monkeypatch.setenv("FRAMEWORK", "sglang")
     if with_overlay:
         with pytest.raises(SystemExit) as exc:
-            _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")))
+            _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")), "sglang")
         assert exc.value.code == 2
         return
     args, envs, model, controls = _resolve_reference_recipe(
-        SimpleNamespace(reference_script=str(session / "current_setting.sh"))
+        SimpleNamespace(reference_script=str(session / "current_setting.sh")), "sglang"
     )
     assert "PYTHONPATH" not in envs
     assert "overlay_pythonpath" not in controls
@@ -1456,8 +1434,8 @@ class TestDedupVllmServerArgs:
         assert dedup_vllm_server_args(raw, "vllm") == raw
 
 
-@pytest.mark.asyncio
-async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_path):
+async def _run_two_variant_grid(tmp_path: Path, stop: GridStop) -> tuple[list[str], list]:
+    """Run grid variants ``v0`` and ``v1`` under ``stop``; return the launched slot names and the results."""
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
     ran: list[str] = []
@@ -1477,8 +1455,14 @@ async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_pat
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
             recipe=GridRecipe(base_yaml_path=base),
-            stop=GridStop(session_deadline_sec=time.monotonic() - 1.0),
+            stop=stop,
         )
+    return ran, results
+
+
+@pytest.mark.asyncio
+async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_path):
+    ran, results = await _run_two_variant_grid(tmp_path, GridStop(session_deadline_sec=time.monotonic() - 1.0))
 
     assert ran == []
     assert [r.status for r in results] == ["skipped", "skipped"]
@@ -1487,28 +1471,10 @@ async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_pat
 
 @pytest.mark.asyncio
 async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml_overrides(base)
-    ran: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        ran.append(slot.name)
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
     # A measured estimate, not the hard cap, determines whether another rung fits.
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        results = await run_grid(
-            grid=[GridVariant("v0"), GridVariant("v1")],
-            output_root=tmp_path / "out",
-            recipe=GridRecipe(base_yaml_path=base),
-            stop=GridStop(session_deadline_sec=time.monotonic() + 5.0, variant_expected_sec=10.0),
-        )
+    ran, results = await _run_two_variant_grid(
+        tmp_path, GridStop(session_deadline_sec=time.monotonic() + 5.0, variant_expected_sec=10.0)
+    )
 
     assert ran == []
     assert [r.status for r in results] == ["skipped", "skipped"]
@@ -1516,27 +1482,7 @@ async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_pat
 
 @pytest.mark.asyncio
 async def test_run_grid_runs_all_when_no_session_deadline(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml_overrides(base)
-    ran: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        ran.append(slot.name)
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        results = await run_grid(
-            grid=[GridVariant("v0"), GridVariant("v1")],
-            output_root=tmp_path / "out",
-            recipe=GridRecipe(base_yaml_path=base),
-            stop=GridStop(session_deadline_sec=None),
-        )
+    ran, results = await _run_two_variant_grid(tmp_path, GridStop(session_deadline_sec=None))
 
     assert len(ran) == 2
     assert [r.status for r in results] == ["succeeded", "succeeded"]

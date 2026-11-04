@@ -13,10 +13,22 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, MutableMapping, Sequence
-from hyperloom.common.env import env_str
-from hyperloom.common.git_safety import trusted_admin_dir
-from hyperloom.common.fs_utils import rewrite_lines_nofollow
+from hyperloom_common.env import env_str
+from hyperloom_common.git_safety import trusted_admin_dir
+from hyperloom_common.fs_utils import rewrite_lines_nofollow
 
+from hyperloom.common.outside_facts import (
+    ENV_CONC,
+    ENV_EP,
+    ENV_ISL,
+    ENV_MAX_MODEL_LEN,
+    ENV_NUM_PROMPTS,
+    ENV_NUM_WARMUPS,
+    ENV_OSL,
+    ENV_RANDOM_RANGE_RATIO,
+    ENV_RUN_EVAL,
+    ENV_TP,
+)
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 import json
@@ -81,6 +93,7 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "CLAW_API_KEY",
         "DEEPSEEK_API_KEY",
         "GEAK_API_KEY",
+        "KB_STORE_TOKEN",
         "LLM_API_KEY",
         "LLM_GATEWAY_KEY",
         "LLM_PROXY_API_KEY",
@@ -165,7 +178,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         # Retired provider variables, still readable so a pre-migration .env can be normalized by
-        # hyperloom.common.llm_config.deepseek_compat_env.
+        # hyperloom_common.llm.llm_config.deepseek_compat_env.
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
@@ -274,18 +287,18 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             "HOME",
             "MODEL",
             "MODEL_PATH",
-            "TP",
-            "EP",
-            "CONC",
-            "ISL",
-            "OSL",
-            "MAX_MODEL_LEN",
+            ENV_TP,
+            ENV_EP,
+            ENV_CONC,
+            ENV_ISL,
+            ENV_OSL,
+            ENV_MAX_MODEL_LEN,
             "PRECISION",
             "PORT",
-            "NUM_PROMPTS",
-            "NUM_WARMUPS",
-            "RANDOM_RANGE_RATIO",
-            "RUN_EVAL",
+            ENV_NUM_PROMPTS,
+            ENV_NUM_WARMUPS,
+            ENV_RANDOM_RANGE_RATIO,
+            ENV_RUN_EVAL,
             "PROFILE",
             "RESULT_DIR",
             "RESULT_FILENAME",
@@ -472,11 +485,24 @@ def filter_untrusted_env_mapping(
     return allowed, dropped
 
 
-# Env vars whose value names a config file the serving stack reads unconditionally: aiter's tuned-GEMM loader skips
-# its merge default and pd.read_csv's exactly the AITER_CONFIG_* path when one is set, so a missing file kills the
-# server at config load instead of falling back to the default table. Values that are not file paths (e.g. geak's
-# JSON-payload AITER_CONFIG) do not carry the trailing underscore and stay untouched.
+# Env vars whose value names the config files the serving stack reads unconditionally: aiter's tuned-GEMM loader
+# skips its merge default and reads exactly the AITER_CONFIG_* list when one is set, so a value with nothing loadable
+# in it kills the server at config load instead of falling back to the default table. Values that are not file paths
+# (e.g. geak's JSON-payload AITER_CONFIG) do not carry the trailing underscore and stay untouched.
 FILE_REFERENCING_ENV_PREFIXES: tuple[str, ...] = ("AITER_CONFIG_",)
+
+# A set value holds one or more config files, joined the way aiter splits them again (``os.pathsep``).
+ENV_FILE_LIST_SEP = ":"
+
+
+def is_file_referencing_env_name(name: object) -> bool:
+    """Whether this env var's value names config files the serving stack reads (a ``:``-joined list of paths)."""
+    return str(name or "").strip().upper().startswith(FILE_REFERENCING_ENV_PREFIXES)
+
+
+def env_file_list_elements(value: object) -> list[str]:
+    """The non-empty paths of a file-referencing env value, in the order aiter merges them."""
+    return [part for part in (raw.strip() for raw in str(value or "").split(ENV_FILE_LIST_SEP)) if part]
 
 
 def _is_file(path: str) -> bool:
@@ -489,25 +515,33 @@ def _is_file(path: str) -> bool:
 
 
 def ungrounded_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
-    """Return why ``envs`` cannot be served if one names a config file that does not exist, else ``None``.
+    """Return why ``envs`` names a config file that is not on disk, else ``None`` -- the one grounding rule.
 
     Grounds file-like env values the way patch targets are grounded: a proposal may point a config env at an
-    artifact only a later (possibly rejected) authoring step would create, and the server would die at config load.
-    The check is existence-only; anything already on disk (a promoted, durable artifact) passes. A set value is a
-    ``:``-joined list of paths (see ``csvs_aiter_will_load``), so every non-empty element must exist, not only the
-    first.
+    artifact only a later (possibly rejected) authoring step would create, so the arm would be benched, and its
+    result recorded, against a table nothing ever wrote. The check is existence-only; anything already on disk (a
+    promoted, durable artifact) passes. A set value is a ``:``-joined list of paths (see ``csvs_aiter_will_load``),
+    and every non-empty element must exist, not only one of them: an element no stage has authored is ungrounded
+    whatever its neighbours are (#1982).
+
+    The same rule holds wherever a value is judged -- proposal admission and ``run_grid``'s preflight both ask this
+    question -- so an arm never runs against a table that is only partly there. It is deliberately stricter than
+    what the serving stack survives, where aiter merges a list element by element and dies only when no element
+    loads; a value that carries refs, such as a replayed warm recipe's, is re-grounded onto this run's downloaded
+    files before the grid sees it (``_reground_env_values``), so what reaches here names real local files.
     """
     for raw_key, raw_value in (envs or {}).items():
         key = str(raw_key or "").strip().upper()
         value = str(raw_value or "").strip()
-        if not key.startswith(FILE_REFERENCING_ENV_PREFIXES) or not value:
+        if not is_file_referencing_env_name(key) or not value:
             continue
-        missing = [p for p in (part.strip() for part in value.split(":")) if p and not _is_file(p)]
+        missing = [p for p in env_file_list_elements(value) if not _is_file(p)]
         if missing:
+            joined = ENV_FILE_LIST_SEP.join(missing)
             return (
-                f"{key} points at {value}, whose element(s) {':'.join(missing)} do not exist; the server would read it "
-                "unconditionally and die at config load. Point it at a file a stage wrote (the gemm_tuning action "
-                "writes tuned-GEMM CSVs) or leave it unset to use the default config table."
+                f"{key} points at {value}, whose element(s) {joined} do not exist; a config env may only name "
+                "tables that are on disk now. Point it at a file a stage wrote (the gemm_tuning action writes "
+                "tuned-GEMM CSVs) or leave it unset to use the default config table."
             )
     return None
 
@@ -553,6 +587,8 @@ def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
     scrub_child_process_env(env)
     for name in BENCHMARK_SECRET_ENV_NAMES:
         env.pop(name, None)
+    # The --extra-env blob repeats every pin's value, credentials included; each pin is also exported by name.
+    env.pop(OPERATOR_EXTRA_ENV_VAR, None)
     return env
 
 
@@ -577,7 +613,7 @@ def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> 
 
     The file sits in a directory a less-privileged account may write, so the
     redacted copy is staged and moved without following any link there
-    (:func:`hyperloom.common.fs_utils.rewrite_lines_nofollow`). A failure
+    (:func:`hyperloom_common.fs_utils.rewrite_lines_nofollow`). A failure
     leaves the file as it was.
     """
     try:
@@ -812,17 +848,20 @@ __all__ = [
     "BLOCKED_EXTERNAL_ENV_NAMES",
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
+    "ENV_FILE_LIST_SEP",
     "FILE_REFERENCING_ENV_PREFIXES",
     "LAUNCH_PROVIDED_ENV_NAMES",
     "LAUNCH_PROVIDED_ENV_PREFIXES",
     "OPERATOR_EXTRA_ENV_VAR",
     "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
+    "env_file_list_elements",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_allowed_variant_env_key",
+    "is_file_referencing_env_name",
     "is_launch_provided_env_name",
     "is_python_package_root",
     "is_secret_shaped_env_name",

@@ -25,9 +25,14 @@ _POLL_SEC: float = 0.05
 
 _PROC = Path("/proc")
 
+#: Set in a run's env, its value marks the run: whatever inherited it is reaped on every exit path, however it detached.
+REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
+
 __all__ = [
+    "REAP_MARK_ENV",
     "TERM_GRACE_SEC",
     "ProcessId",
+    "boot_unix",
     "Tree",
     "collect_tree",
     "descendants",
@@ -35,6 +40,7 @@ __all__ = [
     "kill_tree",
     "marked_pids",
     "proc_identity",
+    "process_uids",
     "running",
     "signal_group",
     "signal_processes",
@@ -68,6 +74,25 @@ def proc_identity(pid: int) -> tuple[int, int] | None:
         return None
 
 
+def boot_unix() -> float:
+    """Wall-clock time the host booted: the origin the start times in ``/proc/<pid>/stat`` count clock ticks from.
+
+    Raises:
+        OSError: When ``/proc/uptime`` cannot be read.
+    """
+    return time.time() - float((_PROC / "uptime").read_text(encoding="ascii").split()[0])
+
+
+def process_uids(pid: int) -> tuple[int, int] | None:
+    """Read ``(real uid, effective uid)`` for one pid from ``/proc/<pid>/status``; ``None`` when it is gone."""
+    try:
+        status = (_PROC / str(pid) / "status").read_text(encoding="utf-8", errors="replace")
+        uids = next(line.split()[1:3] for line in status.splitlines() if line.startswith("Uid:"))
+        return int(uids[0]), int(uids[1])
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+
+
 def descendants(root_pid: int) -> list[ProcessId]:
     """Return every descendant of ``root_pid``, deepest first.
 
@@ -91,14 +116,19 @@ def descendants(root_pid: int) -> list[ProcessId]:
         parent_pid, start_time = identity
         children.setdefault(parent_pid, []).append((pid, start_time))
 
+    # A sandboxed PID view can list a process as its own ancestor, so a pid is visited once; the walk keeps
+    # its own stack, so a deep tree cannot exhaust Python's.
     collected: list[ProcessId] = []
-
-    def _walk(parent_pid: int) -> None:
-        for child_pid, start_time in children.get(parent_pid, []):
-            _walk(child_pid)
-            collected.append((child_pid, start_time))
-
-    _walk(root_pid)
+    seen = {root_pid}
+    stack = [(child, False) for child in reversed(children.get(root_pid, []))]
+    while stack:
+        (pid, start_time), expanded = stack.pop()
+        if expanded:
+            collected.append((pid, start_time))
+        elif pid not in seen:
+            seen.add(pid)
+            stack.append(((pid, start_time), True))
+            stack.extend((child, False) for child in reversed(children.get(pid, [])))
     return collected
 
 

@@ -165,19 +165,16 @@ def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
 def test_orchestration_prompt_has_no_scoreboard_block():
     """DECISION FRAMEWORK must not steer toward live scoring vocab."""
     from hyperloom.orchestrator.prompts.prompt_builder import (
-        FULL_ENABLED_ACTIONS,
         build_orchestration_prompt,
         SessionContext,
     )
-    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, FULL_ENABLED_ACTIONS
 
     reg = ACTION_CATALOGUE
     prompt = build_orchestration_prompt(
         action_registry=reg,
         enabled_actions=FULL_ENABLED_ACTIONS,
-        session=SessionContext(
-            framework="sglang", kernel_enabled=True, objective_kind="gain_pct", objective_value=10.0, max_minutes=120
-        ),
+        session=SessionContext(framework="sglang", objective_kind="gain_pct", objective_value=10.0, max_minutes=120),
     )
     forbidden = (
         "eff_score=",

@@ -6,7 +6,7 @@
 Import/help/ROCm and invalid-pin failures are exercised by test_setup_selected_python
 and test_preflight_serving_framework; framework-aware PATH by test_derive_runtime_paths;
 missing runtime and in-process precedence by test_preflight_auth_override; offline
-Forge executable failures by kernelforge/tests/test_claude_cli_resolve.py.
+Forge executable failures by kernelforge/tests/agent_backends/test_claude_cli_resolve.py.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.llm_config import ANTHROPIC_SYNTHESIZABLE_KEY_ENVS, DEFAULT_CODEX_MODEL
+from hyperloom_common.llm.llm_config import ANTHROPIC_SYNTHESIZABLE_KEY_ENVS, DEFAULT_CODEX_MODEL
 from hyperloom.inference_optimizer.cli.credentials import _OFFICIAL_OPENAI_BASE_URL
 
 

@@ -33,7 +33,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.message_bus import Message
 
 from .conftest import seed_kernel_keep
@@ -570,7 +570,7 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
     )
 
     assert verdict is not None
-    assert verdict.pairs == [(100.0, 110.0), (100.0, 110.0)]
+    assert verdict.median_delta_pct == 10.0 and verdict.reason == "candidate_faster"
     assert len(payloads) == len(benchmarks) == 4
     for idx, (payload, benchmark) in enumerate(zip(payloads, benchmarks)):
         recipe = reference if idx % 2 == 0 else candidate
@@ -958,12 +958,7 @@ async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypa
             {"scanned": 1, "deleted": 1, "errors": 0},
         ]
     )
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(
-            _module,
-            "_sweep_integrate_aiter_locks",
-            lambda **_kwargs: next(sweeps),
-        )
+    monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: next(sweeps))
     calls = 0
 
     async def _executor(_ctx):
@@ -1002,12 +997,7 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
             },
         ]
     )
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(
-            _module,
-            "_sweep_integrate_aiter_locks",
-            lambda **_kwargs: next(sweeps),
-        )
+    monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: next(sweeps))
     calls = 0
 
     async def _executor(_ctx):
@@ -1036,8 +1026,9 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
         dropped.append({"envs": envs, "backup_dir": backup_dir, "also_modules": also_modules})
         return {"action": "invalidate"}
 
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0}
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         _drop,
@@ -1080,8 +1071,9 @@ async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure
         encoding="utf-8",
     )
 
-    for _module in (krh, integrate_rebaseline):
-        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0}
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         lambda *args, **kwargs: {"action": "invalidate"},
@@ -1182,12 +1174,8 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
     assert "workspace" in res
 
 
-@pytest.mark.asyncio
-async def test_integrate_handler_keeps_positive_stack_increment(
-    session_dir,
-    tmp_path,
-):
-    """When a kernel stack already exists, a positive incremental gain should KEEP."""
+async def _integrate_on_a_100_stack(session_dir: Path, tmp_path: Path, *, measured_tput: float) -> dict:
+    """Integrate k001 on top of a kept k004 stack at 100 tok/s, with the rebaseline measuring ``measured_tput``."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     state = SharedState.load_or_init(session_dir)
@@ -1209,7 +1197,7 @@ async def test_integrate_handler_keeps_positive_stack_increment(
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
-        _fake_workspace(slot, tput=100.75)
+        _fake_workspace(slot, tput=measured_tput)
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=0,
@@ -1227,7 +1215,16 @@ async def test_integrate_handler_keeps_positive_stack_increment(
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
-        res = await krh.integrate_handler(payload, session_dir=session_dir)
+        return await krh.integrate_handler(payload, session_dir=session_dir)
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_keeps_positive_stack_increment(
+    session_dir,
+    tmp_path,
+):
+    """When a kernel stack already exists, a positive incremental gain should KEEP."""
+    res = await _integrate_on_a_100_stack(session_dir, tmp_path, measured_tput=100.75)
 
     assert res["status"] == "ok"
     assert res["decision"] == "KEEP"
@@ -1244,46 +1241,7 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
     tmp_path,
 ):
     """A sub-0.5% stack increment should remain NEEDS_REVIEW, not KEEP."""
-    base_yaml = tmp_path / "base.yaml"
-    _write_baseline_yaml(base_yaml)
-    state = SharedState.load_or_init(session_dir)
-    state.baseline_tput = 90.0
-    state.current_best = {
-        "action": "integrate",
-        "kernel_id": "k004",
-        "tput": 100.0,
-    }
-    state.optimization_stack = [
-        {
-            "action": "integrate",
-            "kernel_id": "k004",
-            "tput": 100.0,
-        }
-    ]
-    state.save(session_dir)
-
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        _fake_workspace(slot, tput=100.49)
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout="ok",
-            stderr="",
-        )
-
-    target, patch_file = _write_patch_pair(tmp_path)
-    payload = {
-        "base_tput": 100.0,
-        "config_path": str(base_yaml),
-        "kernel_id": "k001",
-        "patch_path": str(patch_file),
-        "target_file": str(target),
-        "skip_rebuild": True,
-    }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
-        res = await krh.integrate_handler(payload, session_dir=session_dir)
+    res = await _integrate_on_a_100_stack(session_dir, tmp_path, measured_tput=100.49)
 
     assert res["status"] == "ok"
     assert res["decision"] == "NEEDS_REVIEW"
@@ -1298,46 +1256,7 @@ async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
     tmp_path,
 ):
     """A +0.5% stack increment should KEEP at the configured noise floor."""
-    base_yaml = tmp_path / "base.yaml"
-    _write_baseline_yaml(base_yaml)
-    state = SharedState.load_or_init(session_dir)
-    state.baseline_tput = 90.0
-    state.current_best = {
-        "action": "integrate",
-        "kernel_id": "k004",
-        "tput": 100.0,
-    }
-    state.optimization_stack = [
-        {
-            "action": "integrate",
-            "kernel_id": "k004",
-            "tput": 100.0,
-        }
-    ]
-    state.save(session_dir)
-
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        _fake_workspace(slot, tput=100.5)
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout="ok",
-            stderr="",
-        )
-
-    target, patch_file = _write_patch_pair(tmp_path)
-    payload = {
-        "base_tput": 100.0,
-        "config_path": str(base_yaml),
-        "kernel_id": "k001",
-        "patch_path": str(patch_file),
-        "target_file": str(target),
-        "skip_rebuild": True,
-    }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
-        res = await krh.integrate_handler(payload, session_dir=session_dir)
+    res = await _integrate_on_a_100_stack(session_dir, tmp_path, measured_tput=100.5)
 
     assert res["status"] == "ok"
     assert res["decision"] == "KEEP"
@@ -2263,8 +2182,7 @@ async def test_integrate_handler_rejects_zero_base_tput(session_dir):
 
 
 def test_integrate_registered_under_two_aliases():
-    assert krh.get_handler("integrate") is not None
-    assert krh.get_handler("integrate") is krh.get_handler("apply_patch")
+    assert krh.KERNEL_REQUEST_HANDLERS["integrate"] is krh.KERNEL_REQUEST_HANDLERS["apply_patch"]
 
 
 # Coordinator wiring of integrate request
@@ -2457,7 +2375,14 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "explore", "predicted_gain_pct": 5.0},
+                # Admission refuses an explore with nothing to measure.
+                payload={
+                    "action_name": "explore",
+                    "predicted_gain_pct": 5.0,
+                    "params": {
+                        "grid": [{"name": "chunked_prefill", "extra_server_args": "--chunked-prefill-size 4096"}]
+                    },
+                },
             ),
         )
         if record_alert:

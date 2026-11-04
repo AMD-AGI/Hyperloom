@@ -12,13 +12,14 @@ from fnmatch import fnmatch
 import os
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
-from kernelforge.tools.git import git, git_bytes
-from kernelforge.tools.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
-from kernelforge.tools.protected_paths import ProtectedPathRules
+from kernelforge.utils.git import git, git_bytes
+from kernelforge.utils.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
+from kernelforge.utils.protected_paths import ProtectedPathRules
 
 log = logging.getLogger(__name__)
 
@@ -491,10 +492,8 @@ class WorkspaceGuard:
         self._remove_filesystem_path(self.root / relative)
         self._run_git_restore("checkout-index", "--force", "--", relative)
 
-    def _restore_baseline(self) -> None:
-        """Reconstruct the exact pre-turn refs, index, and Git-visible files."""
-        before_unstaged, before_staged, before_untracked = self._current_changes()
-        before_protected = self._ignored_protected_paths()
+    def _restore_baseline_refs(self) -> None:
+        """Put every ref and HEAD back to the pre-turn values."""
         current_refs = self._current_refs()
 
         for ref in sorted(current_refs.keys() - self.baseline_refs.keys()):
@@ -515,6 +514,12 @@ class WorkspaceGuard:
                 "HEAD",
                 f"refs/heads/{self.branch}",
             )
+
+    def _restore_baseline(self) -> None:
+        """Reconstruct the exact pre-turn refs, index, and Git-visible files."""
+        before_unstaged, before_staged, before_untracked = self._current_changes()
+        before_protected = self._ignored_protected_paths()
+        self._restore_baseline_refs()
 
         if self.baseline_index_path is None or self.baseline_index_snapshot is None:
             raise WorkspaceSafetyError(
@@ -573,10 +578,27 @@ class WorkspaceGuard:
         if self._read_only_state() != self.read_only_state:
             violations.append("tracked, staged, or untracked files changed")
 
-        protected_ignored = self._protected_ignored_changes()
+        protected_ignored = self._discard_bytecode(self._protected_ignored_changes())
         if protected_ignored:
             violations.append("protected ignored files changed: " + ", ".join(protected_ignored))
         return violations
+
+    @staticmethod
+    def _discard_bytecode(changes: list[str]) -> list[str]:
+        """Delete the interpreter's bytecode among ``changes`` and return the rest.
+
+        The next import rebuilds a ``__pycache__`` ``.pyc`` from its protected source, instead of running bytecode the
+        session may have written over an untouched module. One reached through a linked directory may live outside the
+        workspace, so it is reported instead.
+        """
+        kept: list[str] = []
+        for change in changes:
+            path = Path(change)
+            if path.parent.name == "__pycache__" and path.suffix == ".pyc" and path.parent.resolve() == path.parent:
+                path.unlink(missing_ok=True)
+            else:
+                kept.append(change)
+        return kept
 
     def _protected_ignored_changes(self) -> list[str]:
         """Protected ignored paths whose snapshot no longer matches, then those created since the baseline."""
@@ -635,7 +657,7 @@ class WorkspaceGuard:
             try:
                 self._restore_baseline()
                 remaining = self._read_only_violations()
-            except Exception as exc:
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError) as exc:
                 raise WorkspaceSafetyError(
                     f"the read-only session changed the workspace and automatic restoration failed: {exc}"
                 ) from exc
@@ -652,7 +674,7 @@ class WorkspaceGuard:
             # mode exists to carry through a rejection, so recover the snapshot instead.
             try:
                 self._restore_baseline()
-            except Exception as exc:
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError) as exc:
                 # Not a verdict: rollback also runs on the way out of a timeout or a transport failure, so marking
                 # this one a rejection reported an expired clock as a deterministic safety stop and abandoned work a
                 # retry could have finished.
@@ -752,7 +774,7 @@ class WorkspaceGuard:
             path for path in tracked_changes if not self.spec.allow_tracked_changes or self._is_protected(path)
         ]
         protected_untracked = [path for path in untracked if self._is_protected(path)]
-        protected_ignored = self._protected_ignored_changes()
+        protected_ignored = self._discard_bytecode(self._protected_ignored_changes())
 
         violations: list[str] = []
         if index_changed:

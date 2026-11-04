@@ -137,8 +137,7 @@ class SqliteConnection:
                 the environment when omitted.
         """
         self.db_path = Path(db_path)
-        self.journal_mode = resolve_journal_mode(journal_mode)
-        self._conn = open_connection(self.db_path, journal_mode=self.journal_mode)
+        self._conn = open_connection(self.db_path, journal_mode=journal_mode)
         self._async_lock = asyncio.Lock()
         self._sync_lock = threading.RLock()
 
@@ -164,17 +163,6 @@ class SqliteConnection:
                 return cur.fetchone()
             finally:
                 cur.close()
-
-    async def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
-        """Execute a write statement asynchronously and commit."""
-        async with self._async_lock:
-            await asyncio.to_thread(self._exec_and_commit, sql, params)
-
-    def _exec_and_commit(self, sql: str, params: Sequence[Any]) -> None:
-        """Execute a statement and commit, under the sync lock."""
-        with self._sync_lock:
-            self._conn.execute(sql, params)
-            self._conn.commit()
 
     async def fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         """Run a query asynchronously and return all rows."""

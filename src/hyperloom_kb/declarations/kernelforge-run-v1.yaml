@@ -89,7 +89,7 @@ rationale:
       What the plan the candidate was built from sets out to do: the whole Summary line the plan opens with, the
       planner's statement of the problem it addresses and of its goal. For a lane, the plan is the lane's own; for a
       single session, the round's optimization plan, read from its original draft when KernelForge could not revise
-      the draft and put the critic's review in front of it (kernelforge/orchestrator/orchestration.py:1711 at
+      the draft and put the critic's review in front of it (kernelforge/workflows/forge_loop/roles/orchestration.py:1711 at
       1c14e79e1); for a merge, the stacked plans as KernelForge records them. A plan without a Summary line, as every
       plan written before KernelForge asked for one is, gives its first three sentences instead: lines a planner wrote
       before the plan's first heading are skipped, as are headings, code blocks, and tables.

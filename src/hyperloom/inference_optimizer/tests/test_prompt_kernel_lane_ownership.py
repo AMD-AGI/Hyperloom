@@ -46,7 +46,6 @@ def kernel_prompt() -> str:
         enabled_actions=default_enabled_actions(no_kernel=False),
         session=SessionContext(
             framework="sglang",
-            kernel_enabled=True,
             framework_agent_phase_enabled=True,
             objective_kind="gain_pct",
             objective_value=15.0,

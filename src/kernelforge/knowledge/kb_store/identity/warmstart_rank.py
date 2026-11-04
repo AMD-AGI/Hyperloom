@@ -15,7 +15,7 @@ from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
-from kernelforge.tools.gpu_arch import canon_arch
+from kernelforge.utils.gpu_arch import canon_arch
 
 _UNUSABLE = {"", "unknown", "none", "unspecified"}
 

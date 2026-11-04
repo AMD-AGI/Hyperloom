@@ -25,7 +25,7 @@ from hyperloom.orchestrator.actions.executors._spec_decode_context_copy import (
     context_copy_refusal,
 )
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec

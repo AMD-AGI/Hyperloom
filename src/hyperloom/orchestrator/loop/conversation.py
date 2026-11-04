@@ -23,7 +23,7 @@ from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
-from hyperloom.common.coerce import to_str_list, to_unix
+from hyperloom_common.coerce import to_str_list, to_unix
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
@@ -65,7 +65,8 @@ _FINDINGS_PROMPT_CHARS = 24_000
 _QUESTIONS_PROMPT_CHARS = 6_000
 _INBOX_PROMPT_CHARS = 40_000
 # Task kinds that queue for the benchmark lane, in the order the backlog line lists them.
-_BENCH_LANE_KINDS = ("integrate_patch", "explore")
+_EXPLORE = "explore"
+_BENCH_LANE_KINDS = ("integrate_patch", _EXPLORE)
 # Longest a KERNEL_AGENT session goes without an Orchestration turn while kernel progress is unchanged.
 _KERNEL_ORCHESTRATION_HEARTBEAT_SEC = 900.0
 
@@ -271,6 +272,48 @@ def _advisory_sections(owner: "ConversationCollaborator", blocks: tuple[_Advisor
     return sections
 
 
+def _variant_state(note: dict[str, Any]) -> tuple[str, str, bool] | None:
+    """The variant a grid-runner note is about, what it says, and whether the variant has landed."""
+    label = str(note.get("label") or "")
+    if note.get("unit") == "variant":
+        throughput = note.get("output_throughput")
+        rate = f" {throughput:.1f} tok/s" if isinstance(throughput, (int, float)) else ""
+        return label, f"{note.get('status')}{rate}", True
+    if note.get("unit") == "variant_step":
+        variant, _, step = label.rpartition(":")
+        return variant, f"{step} {note.get('status') or 'running'}", False
+    return None
+
+
+def _explore_round_parts(task: "Task", *, now_unix: float) -> list[str]:
+    """A round's grid as dispatched and each variant's latest state, from the notes its grid runner records.
+
+    The round commits its verdicts only when it ends, so these notes are the only view of a round in flight. A
+    variant's step notes describe it until its landing note does. Other kinds get nothing.
+    """
+    if task.kind != _EXPLORE:
+        return []
+    names = [str(v.get("name") or "") for v in (task.params or {}).get("grid") or () if isinstance(v, dict)]
+    states: dict[str, str] = {}
+    landed: set[str] = set()
+    last_ts = 0.0
+    for entry in task.history or ():
+        note = entry.get("progress") if isinstance(entry, dict) else None
+        state = _variant_state(note) if isinstance(note, dict) else None
+        if state is None or state[0] in landed:
+            continue
+        variant, text, has_landed = state
+        states[variant] = text
+        if has_landed:
+            landed.add(variant)
+        last_ts = max(last_ts, to_unix(entry.get("ts"), 0.0))
+    variants = ", ".join(f"{variant}: {state}" for variant, state in states.items())
+    parts = [f"grid_as_dispatched={names!r}", _flatten_for_inbox(f"variants=[{variants}]")]
+    if last_ts > 0:
+        parts.append(f"last_progress_age_sec={int(max(0.0, now_unix - last_ts))}")
+    return parts
+
+
 class ConversationCollaborator(CoordinatorCollaborator):
     """Manages conversation rounds: context tools, prompt injection, and round history."""
 
@@ -427,6 +470,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             hb_age = self._task_heartbeat_age_sec(task, now_unix=now_unix)
             if hb_age is not None:
                 parts.append(f"heartbeat_age_sec={int(hb_age)}")
+            parts.extend(_explore_round_parts(task, now_unix=now_unix))
             lines.append(" ".join(parts))
         if backlog:
             lines.append(backlog)
@@ -435,7 +479,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _queued_backlog_line(self) -> str:
         """Benchmark-lane backlog: queued integrate_patch / explore tasks in dispatch order, and untested proposals."""
         counts = self.tasks.queued_kind_counts_sync()
-        counts["untested proposals"] = len(self.shared_state.untested_proposal_rows())
+        in_grids = self._explore_grid_fingerprints()
+        counts["untested proposals"] = sum(
+            row["fingerprint"] not in in_grids for row in self.shared_state.untested_proposal_rows()
+        )
         parts = [f"{counts[kind]} {kind}" for kind in (*_BENCH_LANE_KINDS, "untested proposals") if counts.get(kind)]
         if not parts:
             return ""
@@ -513,14 +560,14 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
-    async def _explore_grid_fingerprints(self) -> set[str]:
+    def _explore_grid_fingerprints(self) -> set[str]:
         """Content fingerprints of the variants in every queued or running explore grid."""
         from ..actions.executors._proposal_identity import content_fingerprint
 
         return {
             content_fingerprint(variant)
-            for task in (*await self.tasks.queued(), *await self.tasks.running())
-            if task.kind == "explore"
+            for task in (*self.tasks.queued_context_sync(), *self.tasks.running_context_sync())
+            if task.kind == _EXPLORE
             for variant in (task.params or {}).get("grid") or ()
             if isinstance(variant, dict)
         }
@@ -552,9 +599,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
             sections.append(denial_summary)
         if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             # The predictor's rows lead the queue, so its block comes first, under the same section.
+            in_grids = self._explore_grid_fingerprints()
             blocks = (
-                queue_block(self.shared_state, in_grids=await self._explore_grid_fingerprints()),
-                self.shared_state.to_untested_proposals_summary(skip_provenance=PROVENANCE),
+                queue_block(self.shared_state, in_grids=in_grids),
+                self.shared_state.to_untested_proposals_summary(skip_provenance=PROVENANCE, in_grids=in_grids),
             )
             untested_block = "\n\n".join(block for block in blocks if block)
             if untested_block:

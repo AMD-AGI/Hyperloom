@@ -290,7 +290,7 @@ class DecisionReviewer:
         bundle.kb_priors_trace = {
             "configured": True,
             "mode": "per_proposal",
-            "client_mode": os.environ.get("CRITIC_KB_CLIENT_MODE", ""),
+            "client_mode": os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower(),
             "scope_filter": dict(scope_filter),
             "limit": prior_limit,
             "requests": priors_requests,

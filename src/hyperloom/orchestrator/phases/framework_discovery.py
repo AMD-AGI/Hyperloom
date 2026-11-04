@@ -9,7 +9,7 @@ import logging as _logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.coerce import first_str, first_text, to_float, to_list, to_mapping
+from hyperloom_common.coerce import first_str, first_text, to_float, to_list, to_mapping
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args, merge_server_args
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
@@ -32,6 +32,17 @@ log = _logging.getLogger(__name__)
 DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
+def _specialist_resolve_bases(session_dir: Any, sid: str) -> list[Path]:
+    """The specialist's worktree and run dir, which its ``patches_written`` paths are resolved against."""
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
+
+    resolve_bases: list[Path] = []
+    if session_dir is not None:
+        spec_root = _runs_dir(Path(session_dir), "specialist", sid)
+        resolve_bases = [spec_root / "worktree", spec_root]
+    return resolve_bases
+
+
 class _CandidateDiscoveryMixin:
     """Dispatches and harvests candidate-discovery rounds and routes specialist deliverables to Critic review."""
 
@@ -48,7 +59,7 @@ class _CandidateDiscoveryMixin:
         limit = int(DISCOVER_FAILURE_RETRY_LIMIT)
         empties = int(state.framework_agent_empty_discoveries or 0)
         failures = int(state.framework_agent_discover_failures or 0)
-        if empties >= limit or failures >= limit:
+        if empties >= limit or failures >= limit or int(state.research_lane_capacity or 0) <= 0:
             return False
         if await self._candidate_discovery_inflight():
             return True
@@ -223,12 +234,7 @@ class _CandidateDiscoveryMixin:
         if not sid:
             return
         # Resolve patches_written; submit only when >=1 real file exists.
-        from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
-
-        resolve_bases: list[Path] = []
-        if self.session_dir is not None:
-            spec_root = _runs_dir(Path(self.session_dir), "specialist", sid)
-            resolve_bases = [spec_root / "worktree", spec_root]
+        resolve_bases = _specialist_resolve_bases(self.session_dir, sid)
         existing_patches = [str(p) for p in patches if _patches_on_disk(Path(str(p)), resolve_bases)]
         # A non-diff tuned artifact is also a routable deliverable; route it like a patch.
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)

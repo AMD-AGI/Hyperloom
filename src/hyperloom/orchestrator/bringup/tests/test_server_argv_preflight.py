@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 from hyperloom.orchestrator.bringup import argv_preflight as pf
 
 #: The argument surface of the "installed" sglang, in the shape the adapter
@@ -49,7 +50,9 @@ def _install_sglang(root: Path, version: str) -> Path:
 def serving(tmp_path, monkeypatch):
     """A launch env whose sglang is the one the probe interpreter also sees."""
     site = _install_sglang(tmp_path / "serve", "0.5.1")
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
+    )
     return {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": str(site),
@@ -95,7 +98,9 @@ def atom_serving(tmp_path, monkeypatch, request):
     if parser_source is not None:
         # ``None`` models an installation predating the native parser module.
         (atom / "utils" / "arg_parser.py").write_text(parser_source, encoding="utf-8")
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
+    )
     return {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": str(site),
@@ -361,7 +366,9 @@ def test_a_probe_interpreter_holding_another_version_yields_unavailable(tmp_path
         encoding="utf-8",
     )
     shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: str(shim))
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: str(shim)
+    )
     env = {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": str(serve_site),
@@ -375,11 +382,42 @@ def test_a_probe_interpreter_holding_another_version_yields_unavailable(tmp_path
 
 def test_an_unreachable_framework_is_unavailable_not_invalid(tmp_path, monkeypatch):
     """Nothing importable means nothing was checked; the launch stays the only verdict."""
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
+    )
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(tmp_path), pf.SERVING_PYTHON_ENV: sys.executable}
     verdict = _check(["--tp", "8"], env)
     assert verdict.status == pf.UNAVAILABLE
     assert verdict.reason == pf.INTERPRETER_UNPROVEN
+
+
+_RAISING_ACTION_SERVER_ARGS = """
+import argparse
+
+class _Expand(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        raise RuntimeError("config expansion failed")
+
+class ServerArgs:
+    @staticmethod
+    def add_cli_args(parser):
+        parser.add_argument("--config", action=_Expand)
+        return parser
+"""
+
+
+def test_a_parser_that_raises_is_unavailable_with_its_traceback(serving):
+    """An error inside the parser is not a refusal; the record carries where it was raised."""
+    server_args = Path(serving["PYTHONPATH"]) / "sglang" / "srt" / "server_args.py"
+    server_args.write_text(_RAISING_ACTION_SERVER_ARGS, encoding="utf-8")
+    verdict = _check(["--config", "x.yaml"], serving)
+    assert verdict.status == pf.UNAVAILABLE
+    assert verdict.reason == pf.PROBE_FAILED
+    assert verdict.detail.endswith(
+        f'File "{server_args}", line 6, in __call__\n'
+        '    raise RuntimeError("config expansion failed")\n'
+        "RuntimeError: config expansion failed"
+    )
 
 
 def test_a_framework_with_no_adapter_parser_is_unavailable(serving):

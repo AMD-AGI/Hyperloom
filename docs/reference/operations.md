@@ -372,9 +372,11 @@ ray --version
 ```
 
 Where 2.44.1 has no wheel (cp314 postdates it), install `'ray[default]>=2.44.1'`;
-where the interpreter's `click` is newer than 2.44.1's CLI accepts, set
-`RAY_VERSION` to a Ray release built against it rather than downgrading
-`click`. See
+where 2.44.1's CLI fails to import under the interpreter's `click` 8.3+
+(`is not a valid Sentinel`), Hyperloom holds `click<8.3` once and certifies the
+CLI again; for any other failure, or a Ray set through `RAY_VERSION`, set
+`RAY_VERSION` to a release built against your `click`, as Hyperloom changes no
+`click` there. See
 [Ray `--num-gpus` rejected](troubleshooting.md#ray---num-gpus-rejected).
 
 ---

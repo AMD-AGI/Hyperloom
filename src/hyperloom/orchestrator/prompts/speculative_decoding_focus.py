@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from hyperloom.inference_optimizer.speculative_capability import speculative_capability_lines
+
 _ROLE: tuple[str, ...] = (
     "You are the **speculative decoding specialist**. You decide whether",
     "speculative decoding should be on for this workload, which method, and",
@@ -96,6 +98,17 @@ _CONSTRAINTS: tuple[str, ...] = (
 )
 
 
+def _stack_coverage_lines() -> list[str]:
+    """The pinned stack's draft-kernel coverage, from the same rules the grid's admission layer enforces."""
+    coverage = speculative_capability_lines()
+    header = (
+        "- The pinned stack ships kernels only for some draft shapes; a",
+        "  proposal outside that coverage is refused before it runs, so",
+        "  pick the stated alternative:",
+    )
+    return [*header, *(f"  {line}" for line in coverage)] if coverage else []
+
+
 _DRAFTER_STEPS: tuple[str, ...] = (
     "2. **Drafter-based methods (EAGLE / EAGLE-3, DFlash / DSpark, draft",
     "   model): look locally first.** Search the directories next to the",
@@ -146,6 +159,7 @@ def speculative_decoding_focus(*, model_name: str, model_path: str, model_info: 
         *_DRAFTER_STEPS,
         "",
         *_CONSTRAINTS,
+        *_stack_coverage_lines(),
     ]
 
 

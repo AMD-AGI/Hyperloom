@@ -483,16 +483,15 @@ async def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path:
         "status": "reverted",
         "error_class": "keep_commit_failed",
         "lane": "perf_framework",
-        "candidate": {"candidate_id": "c1"},
         "specialist_task_id": "t1",
     }
 
-    await stub.phase_framework._maybe_rearm_authored_lane(res)
+    await stub.phase_framework._maybe_rearm_authored_lane(res, {})
     assert stub.shared_state.apply_fail_retry_pending == []
 
     # A genuine apply failure on the same lane still queues a retry.
     await stub.phase_framework._maybe_rearm_authored_lane(
-        {**res, "status": "apply_failed", "error_class": "patch_did_not_apply"}
+        {**res, "status": "apply_failed", "error_class": "patch_did_not_apply"}, {}
     )
     assert len(stub.shared_state.apply_fail_retry_pending) == 1
 
@@ -600,3 +599,34 @@ def test_only_a_settled_candidate_reaches_the_attempt_ledger(tmp_path: Path):
     assert len(kept) == 1
     assert kept[0]["adopted"] is True
     assert kept[0]["lever_kind"] == LEVER_UPSTREAM_PR
+
+
+def test_a_closed_research_lane_declines_discovery(tmp_path: Path):
+    """A research lane of capacity 0 can run no specialist, so a discovery task would queue forever."""
+    stub = _stub(tmp_path, local_explore=False)
+    stub.shared_state.research_lane_capacity = 0
+
+    assert asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
+    assert stub.tasks.created == []
+
+
+def test_a_closed_research_lane_ends_the_phase_as_discovery_exhausted(tmp_path: Path):
+    """The phase closes on the spot instead of waiting on a discovery task that cannot start."""
+    stub = _stub(tmp_path, local_explore=False)
+    stub.shared_state.research_lane_capacity = 0
+
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+
+    assert stub.tasks.created == []
+    assert stub.shared_state.framework_agent_phase_done is True
+
+
+def test_a_closed_research_lane_dispatches_no_local_explore_specialist(tmp_path: Path):
+    """Local exploration also runs on the research lane, so it is skipped rather than queued forever."""
+    stub = _stub(tmp_path, local_explore=True)
+    stub.shared_state.research_lane_capacity = 0
+
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+
+    assert stub.tasks.created == []
+    assert stub.shared_state.framework_agent_phase_done is True

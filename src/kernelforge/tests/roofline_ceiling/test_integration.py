@@ -16,17 +16,17 @@ from click.testing import CliRunner
 
 from kernelforge import cli as cli_module
 from kernelforge.agent_backends.base import AgentProviderUnavailableError
-from kernelforge.loop.bootstrap.errors import InvalidOptionValue
-from kernelforge.loop.bootstrap.request import validate_roofline_target
-from kernelforge.loop.bootstrap.run import _make_ceiling_estimator
+from kernelforge.workflows.forge_loop.bootstrap.errors import InvalidOptionValue
+from kernelforge.workflows.forge_loop.bootstrap.request import validate_roofline_target
+from kernelforge.workflows.forge_loop.bootstrap.run import _make_ceiling_estimator
 from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingAnalysisError
 from kernelforge.roofline_ceiling import standalone
 from kernelforge.roofline_ceiling.standalone import AnalystAgent, CeilingError
 from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
-from kernelforge.loop.run_state import RunState
-from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.workflows.forge_loop.campaign.run_state import RunState
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
 
 
 def _report(cases=(("decode-t1", 12.8),)):
@@ -132,10 +132,10 @@ def test_one_reader_loads_the_ceiling_for_the_whole_loop():
     """One loader means one thing to audit if the invariant above ever bends."""
     import importlib
 
-    from kernelforge.loop import iteration
+    from kernelforge.workflows.forge_loop import iteration
 
     loaders = sum(
-        inspect.getsource(importlib.import_module(f"kernelforge.loop.iteration.{name}")).count(
+        inspect.getsource(importlib.import_module(f"kernelforge.workflows.forge_loop.iteration.{name}")).count(
             "from kernelforge.roofline_ceiling.report import read_report"
         )
         for name in iteration.ITERATION_MODULES
@@ -153,7 +153,7 @@ def test_one_reader_loads_the_ceiling_for_the_whole_loop():
 
 
 def _planning_context(*case_ids):
-    from kernelforge.orchestrator.contracts import CaseEvidence, OrchestrationContext
+    from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, OrchestrationContext
 
     return OrchestrationContext(
         analysis_commit="abc123",

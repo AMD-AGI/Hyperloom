@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import hyperloom.inference_optimizer.cli as ocli
+from hyperloom.inference_optimizer.cli import launch_shape, model_catalog
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
 from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import record_stage_reached
 from hyperloom.inference_optimizer.session.lock import SessionLock
@@ -84,7 +85,7 @@ def test_completed_close_still_gets_its_close_out_package(tmp_path: Path, monkey
 def test_optimize_has_no_supervisor_launcher_hooks() -> None:
     import inspect
 
-    source = inspect.getsource(ocli)
+    source = "".join(inspect.getsource(module) for module in (ocli, model_catalog, launch_shape))
     assert "spawn_supervisor" not in source
     assert "stop_supervisor" not in source
     assert "orchestrator.supervisor" not in source
@@ -118,3 +119,28 @@ def test_session_busy_exits_with_session_busy_code(tmp_path: Path) -> None:
         assert exc.value.code == ocli.SESSION_BUSY_EXIT_CODE == 3
     finally:
         held.release()
+
+
+def test_a_raising_stop_still_releases_the_lock_and_writes_the_terminal_artifacts(tmp_path: Path, monkeypatch) -> None:
+    calls: list[tuple] = []
+
+    class _Coordinator:
+        shared_state = SharedState()
+        stop_classification = "time_budget"
+
+        async def stop(self) -> None:
+            raise RuntimeError("cancel defect")
+
+    class _Lock:
+        def release(self) -> None:
+            calls.append(("release",))
+
+    monkeypatch.setattr(
+        ocli, "_write_cli_terminal_artifacts", lambda session_dir, _state, reason: calls.append(("terminal", reason))
+    )
+
+    with pytest.raises(RuntimeError, match="^cancel defect$"):
+        asyncio.run(ocli._close_optimize_run(_Coordinator(), _Lock(), tmp_path, None))
+
+    assert calls == [("release",), ("terminal", "time_budget")]
+    assert (tmp_path / "state.json").is_file()

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.tools.git import GitError
+from kernelforge.utils.git import GitError
 from kernelforge.evaluation.jit_rebuild import (
     JitRebuildUnavailable,
     force_jit_rebuild,

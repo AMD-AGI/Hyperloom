@@ -16,34 +16,20 @@ import pytest
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, GridRecipe
 from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
-from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
+from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
+from .conftest import make_mock_critic_coordinator
 from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 @pytest.fixture
-def coordinator(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
-    from .conftest import seed_target_analysis_marker
-
-    sd = _msd()
-    seed_target_analysis_marker(sd)
-    backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
-    }
-    return Coordinator(sd, backends=backends)
+def coordinator(session_dir):
+    return make_mock_critic_coordinator(session_dir)
 
 
 def _geak_rebench_params(**extra: object) -> dict:
@@ -970,7 +956,7 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
             return outcome()
         return await original_to_thread(func, *args, **kwargs)
 
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.asyncio.to_thread", _to_thread)
     return calls
 
 
@@ -1245,7 +1231,7 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
         pytest.fail("Invalid launch configuration must stop before runner invocation")
 
     monkeypatch.setattr(coordinator.writeback, "build_env_spec", invalid_spec)
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", must_not_launch)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.subprocess.Popen", must_not_launch)
     coordinator.shared_state.benchmark_mode = mode
     previous = {"status": "ok", "revalidation_status": "no_promote", "accepted_config": {"flags": "--old"}}
     if settled:

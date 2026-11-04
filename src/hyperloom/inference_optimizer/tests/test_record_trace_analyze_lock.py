@@ -11,10 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.state.shared_state import (
-    _ROOFLINE_SNAPSHOTS_CAP,
-    SharedState,
-)
+from hyperloom.orchestrator.state._shared_state.roofline import _ROOFLINE_SNAPSHOTS_CAP
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _record(state: SharedState, trace: str) -> None:

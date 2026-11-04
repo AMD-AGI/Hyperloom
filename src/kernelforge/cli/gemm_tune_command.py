@@ -11,8 +11,8 @@ from typing import Any
 import click
 
 from kernelforge.cli.option_groups import option_group
-from kernelforge.gemm_tune.dense_shapes import MGrid
-from kernelforge.gemm_tune.pipeline import (
+from kernelforge.workflows.gemm_tune.dense_shapes import MGrid
+from kernelforge.workflows.gemm_tune.pipeline import (
     OPT_DEMAND,
     OPT_SHAPES_MANIFEST,
     OPT_UNTUNED_CSV,
@@ -29,8 +29,8 @@ from kernelforge.gemm_tune.pipeline import (
     plan_tuning,
     run_tuning,
 )
-from kernelforge.gemm_tune.router import RoutingTarget
-from kernelforge.gemm_tune.utils import emit_result_json
+from kernelforge.workflows.gemm_tune.router import RoutingTarget
+from kernelforge.workflows.gemm_tune.utils import emit_result_json
 
 
 @click.group("gemm-tune")
@@ -75,7 +75,9 @@ def gemm_tune():
             help="Decode and demand M: aiter's multiple-of-16 bucket up to 256 (bucket), or exact batch sizes (exact)",
         ),
     ),
-    click.option("--mp", default=1, type=int, help="Number of GPUs for parallel tuning"),
+    click.option(
+        "--mp", default=0, type=int, help="GPUs to tune on in parallel; 0 (default) is every GPU this process can see"
+    ),
     click.option("--output-dir", required=True, type=click.Path(), help="Output directory for all artifacts"),
     option_group(
         "bench",
@@ -167,7 +169,7 @@ def evidence(logs: tuple[str, ...], out: str, verbose: bool):
     """Parse serving log(s) into a tuning demand list and an apply verdict."""
     import logging as _logging
 
-    from kernelforge.gemm_tune.evidence import parse_log_file, write_demand
+    from kernelforge.workflows.gemm_tune.evidence import parse_log_file, write_demand
 
     _logging.basicConfig(level=_logging.DEBUG if verbose else _logging.INFO)
 

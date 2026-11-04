@@ -13,9 +13,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.kernel_rewrite_controller import load_task, operator_directory_name
+from kernelforge.workflows.rewrite_controller import (
+    ControllerLayout,
+    load_task,
+    operator_directory_name,
+    published_operator_dirs,
+)
 
-from hyperloom.common.io import JsonFormat, atomic_write_json
+from hyperloom_common.io import JsonFormat, atomic_write_json
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
     _patch_touched_paths,
@@ -28,10 +33,9 @@ from hyperloom.orchestrator.source_snapshot import MANIFEST_NAME, SourceLayer, s
 from .controller_publication import (
     ControllerPatchPublication,
     ControllerPublicationError,
-    discover_controller_patch_dirs,
     load_controller_publication,
 )
-from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
+from .patch_conflict_merge import LandingContext, PatchMergeOutcome, apply_patch_resolving_conflicts
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +52,6 @@ class PatchIntegrationResult:
     best_commit: str = ""
     repo_root: str = ""
     integration_head_before: str = ""
-    integration_head_after: str = ""
     keep_commit: str = ""
     new_tput: float = 0.0
     gain_pct: float = 0.0
@@ -102,18 +105,16 @@ class KeepSession:
     record_keep: KeepRecorder
 
 
-def _priority_ordered_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
+def _priority_ordered_patch_dirs(layout: ControllerLayout) -> tuple[Path, ...]:
     """Order publications by their original Controller task priority."""
-    root = Path(patches_root).resolve()
-    tasks_root = root.parent.parent / "controller" / "tasks"
 
     def key(patch_dir: Path) -> tuple[int, str]:
-        parsed = load_task(tasks_root / patch_dir.name, record_state=False)
+        parsed = load_task(layout.tasks_root / patch_dir.name, record_state=False)
         if parsed.task is None:
             return (2**31 - 1, patch_dir.name)
         return (parsed.task.priority, parsed.task.operator_id)
 
-    return tuple(sorted(discover_controller_patch_dirs(root), key=key))
+    return tuple(sorted(published_operator_dirs(layout), key=key))
 
 
 def _git_output(repo: Path, *args: str) -> str:
@@ -367,6 +368,23 @@ class _ControllerIntegration:
             return _refusal(publication, "skipped_dirty_worktree", reason, head_before)
         return await self._apply_and_validate(publication, head_before, touched)
 
+    async def _apply_onto_landed(self, publication: ControllerPatchPublication) -> PatchMergeOutcome:
+        """Apply one publication's patch, resolving conflicts against the patches already landed in its repo."""
+        repo = publication.repo_root
+        # Lanes all diff against the pinned base, so every KEEP committed above
+        # makes the diffs still queued stale on the files it touched.
+        landed = self._landed.get(repo, [])
+        return await apply_patch_resolving_conflicts(
+            repo,
+            publication.patch_path,
+            LandingContext(
+                operator_id=publication.operator_id,
+                landed_operator_ids=[operator for operator, _ in landed],
+                landed_patches=[patch for _, patch in landed],
+                intent=f"{publication.operator_name} in {publication.kernel_path}",
+            ),
+        )
+
     async def _apply_and_validate(
         self,
         publication: ControllerPatchPublication,
@@ -379,19 +397,7 @@ class _ControllerIntegration:
                 operator_id=publication.operator_id, status=stop.error_class, reason=stop.never_started
             )
         repo = publication.repo_root
-        # Lanes all diff against the pinned base, so every KEEP committed above
-        # makes the diffs still queued stale on the files it touched.
-        landed = self._landed.get(repo, [])
-        merge = await apply_patch_resolving_conflicts(
-            repo,
-            publication.patch_path,
-            LandingContext(
-                operator_id=publication.operator_id,
-                landed_operator_ids=[operator for operator, _ in landed],
-                landed_patches=[patch for _, patch in landed],
-                intent=f"{publication.operator_name} in {publication.kernel_path}",
-            ),
-        )
+        merge = await self._apply_onto_landed(publication)
         if not merge.applied:
             return _refusal(
                 publication,
@@ -441,7 +447,6 @@ class _ControllerIntegration:
             record_reason + merge.note() + _settle_apply_manifest(validation, kept=True),
             head_before,
             merge_strategy=merge.strategy,
-            integration_head_after=keep_commit,
             keep_commit=keep_commit,
             **_measured(validation),
         )
@@ -469,7 +474,8 @@ async def integrate_controller_patches(
         admit_round: Asked before each patch is applied; a stop leaves the patch
             unapplied and unmeasured, recorded under the stop's class.
     """
-    integration_root = Path(patches_root).resolve().parent.parent / "integration"
+    layout = ControllerLayout(Path(patches_root).resolve().parent.parent)
+    integration_root = layout.output_dir / "integration"
     results_dir = integration_root / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -488,7 +494,7 @@ async def integrate_controller_patches(
             )
             await session.record_keep({**_keep_result(publication, validation, keep_commit), **layer})
             session.shared_state.save(Path(session.session_dir))
-        except Exception as error:  # isolation boundary: one committed publication's KEEP recording
+        except OSError as error:
             log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error, exc_info=True)
             return f"Git KEEP committed; SharedState recording failed: {error}"
         return ""
@@ -499,7 +505,7 @@ async def integrate_controller_patches(
         admit_round,
     )
     results: list[PatchIntegrationResult] = []
-    for index, patch_dir in enumerate(_priority_ordered_patch_dirs(patches_root)):
+    for index, patch_dir in enumerate(_priority_ordered_patch_dirs(layout)):
         try:
             publication = load_controller_publication(patch_dir)
         except ControllerPublicationError as error:

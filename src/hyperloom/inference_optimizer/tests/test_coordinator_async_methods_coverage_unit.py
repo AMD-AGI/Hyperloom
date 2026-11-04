@@ -11,33 +11,18 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.orchestrator.roles import (
-    Backend,
-    MockBackend,
-    ScriptedPlan,
-)
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective, TimeOnlyObjective
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _silent_plan() -> ScriptedPlan:
-    return ScriptedPlan(turns=[], default_intent=_heartbeat())
-
-
-def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
+from .conftest import make_coordinator
 
 
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
-    return Coordinator(session_dir, backends=_build_backends())
+    return make_coordinator(session_dir)
 
 
 # -- promote_to_shared_state ----------------------------------------------
@@ -1094,7 +1079,7 @@ async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypa
         lambda *a, **k: called.append(a),
     )
     intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "w", "action_name": "specialist"})
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     with pytest.raises(PolicyDenied):
         await coord.specialist_dispatch.fan_out_specialist_wave(
@@ -1244,7 +1229,7 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
 
 def _nonzero_result(output: str) -> dict:
     """A ``subprocess_nonzero`` baseline result shaped the way the baseline executor builds one."""
-    from hyperloom.orchestrator.actions.executors.baseline import nonzero_output_signature
+    from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
 
     return {
         "status": "failed",
@@ -1381,6 +1366,8 @@ async def _executor_nonzero_result(
     import types
 
     from hyperloom.orchestrator.actions.executors import baseline as bl
+    from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
+    from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
     from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 
     session = tmp_path / "session"
@@ -1390,9 +1377,9 @@ async def _executor_nonzero_result(
     run_workspace = out / "benchmark_vllm_1" if workspace else None
     if run_workspace is not None:
         run_workspace.mkdir()
-    monkeypatch.setattr(bl, "harvest_leaked_artifacts", lambda *a, **k: [])
-    monkeypatch.setattr(bl, "snapshot_workspaces", lambda *a, **k: set())
-    monkeypatch.setattr(bl, "select_run_workspace", lambda *a, **k: run_workspace)
+    monkeypatch.setattr(launch_mod, "harvest_leaked_artifacts", lambda *a, **k: [])
+    monkeypatch.setattr(launch_mod, "snapshot_workspaces", lambda *a, **k: set())
+    monkeypatch.setattr(launch_mod, "select_run_workspace", lambda *a, **k: run_workspace)
     monkeypatch.setattr(
         bl, "run_with_session_kill", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
     )
@@ -1400,7 +1387,7 @@ async def _executor_nonzero_result(
     cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
     ex = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
     return await ex._run_single_benchmark(
-        bl.BenchmarkAttempt(
+        BenchmarkAttempt(
             timeout_sec=30,
             override_result_dir=None,
             resolved_model="/tmp/m",

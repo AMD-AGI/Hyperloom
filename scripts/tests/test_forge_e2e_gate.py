@@ -31,20 +31,26 @@ gate = _load_gate()
 def test_vendored_forge_changes_trigger() -> None:
     for path in (
         "src/kernelforge/cli/forge_loop_command.py",
-        "src/kernelforge/loop/runner.py",
+        "src/kernelforge/workflows/forge_loop/iteration/runner.py",
         "src/kernelforge/examples/triton-softmax-forge-loop/driver.py",
         "pyproject.toml",
     ):
         assert gate.requires_forge_e2e([path]), path
 
 
+def test_shared_package_changes_trigger() -> None:
+    """KernelForge runs on hyperloom_common, so a change there changes what the smoke exercises."""
+    for path in ("src/hyperloom_common/io.py", "src/hyperloom_common/llm/llm_config.py"):
+        assert gate.requires_forge_e2e([path]), path
+
+
 def test_fusion_and_gemm_only_changes_do_not_trigger() -> None:
     assert not gate.requires_forge_e2e(
         [
-            "src/kernelforge/fusion/loop.py",
-            "src/kernelforge/tests/fusion/test_loop.py",
-            "src/kernelforge/gemm_tune/router.py",
-            "src/kernelforge/tests/gemm_tune/test_router.py",
+            "src/kernelforge/workflows/forge_fusion/loop.py",
+            "src/kernelforge/tests/workflows/forge_fusion/test_loop.py",
+            "src/kernelforge/workflows/gemm_tune/router.py",
+            "src/kernelforge/tests/workflows/gemm_tune/test_router.py",
         ]
     )
 
@@ -52,7 +58,7 @@ def test_fusion_and_gemm_only_changes_do_not_trigger() -> None:
 def test_shared_or_loop_change_still_triggers_alongside_excluded_changes() -> None:
     assert gate.requires_forge_e2e(
         [
-            "src/kernelforge/gemm_tune/router.py",
+            "src/kernelforge/workflows/gemm_tune/router.py",
             "src/kernelforge/agent_backends/codex.py",
         ]
     )
@@ -85,7 +91,7 @@ def test_previous_filename_can_trigger_a_rename_out_of_forge() -> None:
     assert gate.requires_forge_e2e(
         [
             "src/hyperloom/unrelated/new_home.py",
-            "src/kernelforge/loop/old_home.py",
+            "src/kernelforge/workflows/forge_loop/old_home.py",
         ]
     )
 
@@ -93,8 +99,8 @@ def test_previous_filename_can_trigger_a_rename_out_of_forge() -> None:
 def test_rename_confined_to_excluded_products_does_not_trigger() -> None:
     assert not gate.requires_forge_e2e(
         [
-            "src/kernelforge/fusion/new_home.py",
-            "src/kernelforge/gemm_tune/old_home.py",
+            "src/kernelforge/workflows/forge_fusion/new_home.py",
+            "src/kernelforge/workflows/gemm_tune/old_home.py",
         ]
     )
 

@@ -94,9 +94,11 @@ def geak_candidate_is_adjudicated(persisted: Any, recovered: Any, *, harness_can
         return False
     blocked_overlay = str(prev.get("revalidation_blocked_overlay") or "")
     if blocked_overlay:
-        from ..kernel.geak_config import geak_overlay_is_loadable, _normalize_geak_overlay_dir
+        from hyperloom.common.overlay import overlay_is_loadable
 
-        if geak_overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
+        from ..kernel.geak_config import _normalize_geak_overlay_dir
+
+        if overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
             return False
     return geak_candidate_matches(prev, recovered)
 

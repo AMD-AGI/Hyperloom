@@ -11,14 +11,12 @@ import logging
 import math
 import os
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
-from hyperloom.common.env import env_float, env_int
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.env import env_float, env_int
+from hyperloom_common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
@@ -29,6 +27,8 @@ MAINTENANCE_INTERVAL_SEC: int = 1800
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
+# Coordinator exceptions within the trailing window that end the run as ``emergency``.
+_CRASH_EMERGENCY_THRESHOLD: int = 25
 # Retry delay for an agent whose LLM backend keeps failing, doubling from the base to the ceiling, in seconds. Ints, so
 # the doubling cannot overflow a float however long a streak runs.
 _BACKEND_RETRY_BASE_SEC: int = 2
@@ -40,11 +40,10 @@ _NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
 from hyperloom.inference_optimizer.session.paths import db_path_for, stop_request_path
 from hyperloom.inference_optimizer.session.session_binding import bind_session
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
 from ..bus.cursor_store import CursorStore
-from ..bus.storage.connection import SqliteConnection, resolve_journal_mode
+from ..bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
@@ -65,7 +64,13 @@ from hyperloom.inference_optimizer.model_config_utils import infer_model_class
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
 from ..collaborator import OrchestrationPrompt
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import (
+    LLMCallRecord,
+    LLMCallSite,
+    LLMTraceRowError,
+    append_llm_call,
+    new_call_id,
+)
 from hyperloom.inference_optimizer.trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_LLM_CALL,
@@ -73,6 +78,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_SESSION,
     STATUS_CANCELLED,
     TERMINAL_STATUSES,
+    EventSpan,
     llm_call_summary,
     load_events,
     record_event,
@@ -83,7 +89,7 @@ from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
-from hyperloom.common.timeutil import format_exc_brief
+from hyperloom_common.timeutil import format_exc_brief
 
 
 log = logging.getLogger(__name__)
@@ -179,18 +185,14 @@ class RunOptions:
         max_minutes: Session wall-clock bound; unbounded when ``None``.
         tick_interval_sec: Pause between ticks.
         max_ticks: Stop after this many ticks, when set.
-        stop_when: Custom stop predicate, asked after every tick.
         install_signal_handlers: Whether to arm the stop-signal drain.
-        crash_emergency_threshold: Coordinator exceptions within the trailing 24 hours that end the run as ``emergency``.
         closing_grace_sec: Bound on the closing phase; the default when ``None``.
     """
 
     max_minutes: float | None = None
     tick_interval_sec: float = 0.0
     max_ticks: int | None = None
-    stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None = None
     install_signal_handlers: bool = False
-    crash_emergency_threshold: int = 25
     closing_grace_sec: float | None = None
 
 
@@ -216,12 +218,8 @@ class Coordinator:
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = advisory.knowledge_plane
-        from ..specialists.dispatch import SpecialistDispatchCollaborator
-
-        self._collaborator(
-            "_specialist_dispatch",
-            partial(SpecialistDispatchCollaborator, proposal_scorer=advisory.proposal_scorer),
-        )
+        # Advisory multi-model specialist-proposal scorer.
+        self.proposal_scorer: Any = advisory.proposal_scorer
         self._model_class_override: str = (settings.model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -232,52 +230,13 @@ class Coordinator:
         self.reactor_turn_timeout_sec = resolve_reactor_turn_timeout_sec()
 
         # Persistence layer
-        db_path = db_path_for(self.session_dir)
-        # The session directory can sit on a networked filesystem where WAL's
-        # shared-memory mapping corrupts the database, so the mode is resolved
-        # before the file is opened.
-        self.db = SqliteConnection(db_path, journal_mode=resolve_journal_mode())
-
-        self.bus = MessageBus(self.db)
-        self.locks = SqliteLeaseBackend(self.db)
-        self.tasks = TaskRegistry(
-            self.db,
-            dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
-        )
-        self.cursors = CursorStore(self.db)
-        self.sub = SubAgentRunner(
-            self.locks,
-            self.tasks,
-            session_dir=self.session_dir,
-        )
+        self._open_persistence()
 
         # Persistent session state (state.json) — load existing for resume.
         self.shared_state = SharedState.load_or_init(self.session_dir)
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
-        # Serving-disjoint invariant: the live serving process holds the first ``serving_tp`` cards, carved off the
-        # specialist pool.
-        self.gpu_specialist_pool = SpecialistGpuPool(
-            self.db,
-            gpu_ids=resolve_gpu_specialist_devices(
-                int(self.shared_state.gpu_specialist_capacity or 0),
-                serving_tp=serving_tp_for_policy(self.shared_state),
-            ),
-        )
-        # Whole-node pool for enablement and bench specialists.
-        self.framework_gpu_pool = SpecialistGpuPool(
-            self.db,
-            gpu_ids=resolve_whole_machine_devices(),
-        )
-        # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
-        from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
-
-        cap = int(self.shared_state.research_lane_capacity or 0)
-        if cap >= 0:
-            _set_lane_capacity(self.db.raw, "research_lane", cap)
-        # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
-        # the GPU pool partitions physical cards within that one lease.
-        # `strict_paths` defers to the env flag.
+        self._init_gpu_pools()
         # The durable bring-up mutex. The gate never reads it; ``open`` decides.
         self.rounds = RoundStore(self.db)
         self.policy = PolicyGate(
@@ -306,7 +265,6 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._stop_classification = ""
-        self._tasks_running: list[asyncio.Task] = []
 
         # Wall-clock stamp of the last maintenance pass (lease reaping + DB retention).
         self._last_maintenance_ts: float = time.monotonic()
@@ -349,6 +307,52 @@ class Coordinator:
         self.phase_machine.ensure_phase_initialised(settings.phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
         self.phase_machine.ensure_recipe_kb_t0_anchored()
+
+    def _open_persistence(self) -> None:
+        """Open the session database and the bus, lease, task, cursor and sub-agent layers over it."""
+        db_path = db_path_for(self.session_dir)
+        # The session directory can sit on a networked filesystem where WAL's
+        # shared-memory mapping corrupts the database, so the mode is resolved
+        # before the file is opened.
+        self.db = SqliteConnection(db_path)
+
+        self.bus = MessageBus(self.db)
+        self.locks = SqliteLeaseBackend(self.db)
+        self.tasks = TaskRegistry(
+            self.db,
+            dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
+        )
+        self.cursors = CursorStore(self.db)
+        self.sub = SubAgentRunner(
+            self.locks,
+            self.tasks,
+            session_dir=self.session_dir,
+        )
+
+    def _init_gpu_pools(self) -> None:
+        """Carve the specialist and whole-node GPU pools and sync the research lane's capacity."""
+        # Serving-disjoint invariant: the live serving process holds the first ``serving_tp`` cards, carved off the
+        # specialist pool.
+        self.gpu_specialist_pool = SpecialistGpuPool(
+            self.db,
+            gpu_ids=resolve_gpu_specialist_devices(
+                int(self.shared_state.gpu_specialist_capacity or 0),
+                serving_tp=serving_tp_for_policy(self.shared_state),
+            ),
+        )
+        # Whole-node pool for enablement and bench specialists.
+        self.framework_gpu_pool = SpecialistGpuPool(
+            self.db,
+            gpu_ids=resolve_whole_machine_devices(),
+        )
+        # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
+        from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
+
+        cap = int(self.shared_state.research_lane_capacity or 0)
+        if cap >= 0:
+            _set_lane_capacity(self.db.raw, "research_lane", cap)
+        # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
+        # the GPU pool partitions physical cards within that one lease.
 
     @property
     def recipe_kb(self) -> RecipeKB | None:
@@ -450,7 +454,7 @@ class Coordinator:
 
     @property
     def gap_refresh(self):
-        from ..state.gaps import GapRefreshCollaborator
+        from .gap_refresh import GapRefreshCollaborator
 
         return self._collaborator("_gap_refresh", GapRefreshCollaborator)
 
@@ -577,29 +581,14 @@ class Coordinator:
 
         write_trees(resolve_trees(), session_dir=self.session_dir)
 
-    # Action catalogue mapping action_name -> metadata.
-    action_registry: Mapping[str, ActionMetadata] = ACTION_CATALOGUE
-
     # Lifecycle
     async def stop(self) -> None:
         """Signal shutdown, cancel in-flight work, and close the DB."""
         self._stop.set()
         try:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
-        except Exception:
-            log.exception("Coordinator.stop: cancelling in-flight actions raised")
-        for t in self._tasks_running:
-            if not t.done():
-                t.cancel()
-        for t in self._tasks_running:
-            try:
-                await t
-            except asyncio.CancelledError:
-                # Expected: we just cancelled these tasks.
-                pass
-            except Exception:
-                log.exception("reactor task raised on shutdown")
-        await self.dispatcher.close_db_after_executions()
+        finally:
+            await self.dispatcher.close_db_after_executions()
 
     def _bind_session_deadline(
         self,
@@ -674,15 +663,11 @@ class Coordinator:
         await self.reconciler.run(time.time())
         # Bump the persistent tick counter — drives phase/plateau math.
         self.shared_state.increment_tick()
-        try:
-            # A phase-entry hook may have finished early (for example a GEAK no_gain run exits KERNEL immediately).
-            await self.await_within_session_bound(
-                self.phase_machine.advance_phase_if_needed,
-                stage="advance_phase_pre_reactor",
-            )
-        except Exception as exc:
-            log.exception("phase advance before reactors failed")
-            self.record_exception(stage="advance_phase_pre_reactor", exc=exc)
+        # A phase-entry hook may have finished early (for example a GEAK no_gain run exits KERNEL immediately).
+        await self.await_within_session_bound(
+            self.phase_machine.advance_phase_if_needed,
+            stage="advance_phase_pre_reactor",
+        )
         in_closing = bool(self.shared_state.closing_phase)
         # One reactor + dispatcher pass; during closing skip LLM passes, and any turn that would only hold dispatch back.
         if not in_closing:
@@ -739,7 +724,7 @@ class Coordinator:
             )
             self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("failed to persist Coordinator exception metadata")
 
     def _fault_open_phase_event(self, *, stage: str, exc: BaseException) -> None:
@@ -855,7 +840,7 @@ class Coordinator:
 
     # Long-run interface
     async def run(self, *, objective: Objective | None = None, options: RunOptions = RunOptions()) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
         session dir and the live phase / tick.
@@ -868,7 +853,11 @@ class Coordinator:
             ),
             trajectory_span(EVENT_SESSION, attributes={"name": self.session_dir.name}) as span,
         ):
-            stop_reason = await self._run_ticks(objective=objective, options=options)
+            try:
+                stop_reason = await self._run_ticks(objective=objective, options=options)
+            except BaseException:
+                self._close_undecided_proposals(self.shared_state.stop_reason)
+                raise
             self._close_undecided_proposals(stop_reason)
             span.finish(stop_reason=stop_reason)
             return stop_reason
@@ -898,8 +887,7 @@ class Coordinator:
                     continue
                 record_event(
                     EVENT_PROPOSAL,
-                    status=STATUS_CANCELLED,
-                    span_id=pending.proposal_msg_id,
+                    span=EventSpan(span_id=pending.proposal_msg_id, status=STATUS_CANCELLED),
                     attributes={
                         "name": pending.action_name,
                         "action_name": pending.action_name,
@@ -908,26 +896,21 @@ class Coordinator:
                         "stop_reason": stop_reason,
                     },
                 )
-        except Exception:  # the trace must never mask the stop reason the session is closing on
+        except (OSError, ValueError):  # the trace must never mask the stop reason the session is closing on
             log.warning("trajectory: closing undecided proposals failed", exc_info=True)
 
     def _trajectory_phase_tick(self) -> tuple[str | None, int | None]:
         """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
         return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
 
-    async def _budget_stop_reason(self, options: RunOptions, *, ticks: int) -> str:
-        """The reason the crash-rate, tick-count and caller-supplied budgets ask the loop to stop for, or ``""``."""
+    def _budget_stop_reason(self, options: RunOptions, *, ticks: int) -> str:
+        """The reason the crash-rate and tick-count budgets ask the loop to stop for, or ``""``."""
         crashes = self.shared_state.recent_crash_count(window_sec=_CRASH_EMERGENCY_WINDOW_SEC)
-        if crashes >= options.crash_emergency_threshold:
+        if crashes >= _CRASH_EMERGENCY_THRESHOLD:
             return "emergency"
         if options.max_ticks is not None and ticks >= options.max_ticks:
             return "max_ticks"
-        if options.stop_when is None:
-            return ""
-        triggered = options.stop_when(self)
-        if asyncio.iscoroutine(triggered):
-            triggered = await triggered
-        return "custom" if triggered else ""
+        return ""
 
     async def _closing_phase_spent(self, *, grace_sec: float) -> bool:
         """True once the closing report has reached a terminal state or its grace window is gone."""
@@ -963,10 +946,12 @@ class Coordinator:
             stop_reason or self.shared_state.stop_reason or ("coordinator_exception" if tick_failed else "unknown")
         )
         self.shared_state.save(self.session_dir)
+        close_error: BaseException | None = None
         try:
             await self.phase_close.ensure_close_sequence(reason=self.shared_state.stop_reason)
-        except (asyncio.CancelledError, Exception):
+        except (asyncio.CancelledError, Exception) as exc:  # re-raised once the run's resources are released
             log.exception("Coordinator: terminal close sequence did not finish")
+            close_error = exc
         await self._recipe_kb_t4_hook()
         log.info(
             "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
@@ -982,6 +967,8 @@ class Coordinator:
         # session's last act is to reap its own pidfiles.
         await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
         self.shared_state.save(self.session_dir)
+        if close_error is not None:
+            raise close_error
         return stop_reason
 
     async def _run_ticks(self, *, objective: Objective | None, options: RunOptions) -> str:
@@ -1034,7 +1021,7 @@ class Coordinator:
                 if in_closing and await self._closing_phase_spent(grace_sec=grace_sec):
                     stop_reason = "time_exhausted"
                     break
-                stop_reason = await self._budget_stop_reason(options, ticks=ticks)
+                stop_reason = self._budget_stop_reason(options, ticks=ticks)
                 if stop_reason:
                     break
                 wait_sec = (
@@ -1060,7 +1047,7 @@ class Coordinator:
                 continue
             try:
                 await closer()
-            except Exception:
+            except (OSError, RuntimeError):
                 log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
@@ -1080,14 +1067,7 @@ class Coordinator:
         prompt = f"{turn.prompt}\n\n{request}" if request else turn.prompt
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
-        _set_trace_ctx = getattr(backend, "set_trace_context", None)
-        backend_self_traces = callable(_set_trace_ctx)
-        if backend_self_traces:
-            _set_trace_ctx(
-                tick=int(self.shared_state.tick or 0),
-                phase=(self.shared_state.phase or "") or None,
-                macro_cycle=int(self.shared_state.macro_cycle or 0),
-            )
+        backend_self_traces = self._stamp_trace_context(backend)
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         call_id = new_call_id()
@@ -1131,25 +1111,11 @@ class Coordinator:
             return None
         except Exception as exc:  # isolation boundary: one agent's reactor turn
             log.exception("reactor pass for %s raised", agent_name)
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
-            )
-            self.record_exception(
-                stage="reactor_pass",
-                agent=agent_name,
-                exc=exc,
-            )
+            await self._record_reactor_exception(agent_name, exc)
             return None
         finally:
             self._trace_mcp_setup(agent_name=agent_name, backend=backend)
-        # Reset the streak — a successful turn proves the backend is alive again.
-        if self._backend_error_streak.get(agent_name):
-            self._backend_error_streak[agent_name] = 0
-            self._backend_error_alarm_armed[agent_name] = True
-            self._backend_error_since.pop(agent_name, None)
-            self._backend_retry_at.pop(agent_name, None)
+        self._reset_backend_error_streak(agent_name)
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
@@ -1158,6 +1124,45 @@ class Coordinator:
         with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
             for intent in result.intents:
                 await self.router.handle_intent(agent_name, intent)
+        await self._settle_routed_turn(agent_name, result, request=request)
+        return result
+
+    def _stamp_trace_context(self, backend: Backend) -> bool:
+        """Set the tick, phase and macro cycle on a backend that accepts them; return whether it does."""
+        _set_trace_ctx = getattr(backend, "set_trace_context", None)
+        backend_self_traces = callable(_set_trace_ctx)
+        if backend_self_traces:
+            _set_trace_ctx(
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
+            )
+        return backend_self_traces
+
+    async def _record_reactor_exception(self, agent_name: str, exc: Exception) -> None:
+        """Record an unexpected reactor-turn failure as an observation and a session exception."""
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
+        )
+        self.record_exception(
+            stage="reactor_pass",
+            agent=agent_name,
+            exc=exc,
+        )
+
+    def _reset_backend_error_streak(self, agent_name: str) -> None:
+        """Clear the agent's backend-error streak and re-arm its alarm."""
+        # Reset the streak — a successful turn proves the backend is alive again.
+        if self._backend_error_streak.get(agent_name):
+            self._backend_error_streak[agent_name] = 0
+            self._backend_error_alarm_armed[agent_name] = True
+            self._backend_error_since.pop(agent_name, None)
+            self._backend_retry_at.pop(agent_name, None)
+
+    async def _settle_routed_turn(self, agent_name: str, result: BackendTurnResult, *, request: str) -> None:
+        """Book a turn whose intents were routed: its no-intent streak, rendered cursor and last-active stamp."""
         if result.intents:
             self._no_intent_streak.pop(agent_name, None)
         elif not request:
@@ -1168,20 +1173,16 @@ class Coordinator:
             state.last_discarded_escalate_hint = ""
             state.last_discarded_escalate_hint_ts = ""
         self.shared_state.agent_last_active[agent_name] = time.time()
-        return result
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""
         if agent_name != "orchestration":
             return
-        try:
-            setup_getter = getattr(backend, "get_mcp_setup_diagnostic", None)
-            if callable(setup_getter):
-                setup = setup_getter()
-                if isinstance(setup, dict):
-                    write_mcp_setup_once(session_dir=self.session_dir, setup=setup)
-        except Exception:
-            log.debug("orchestration mcp setup trace failed", exc_info=True)
+        setup_getter = getattr(backend, "get_mcp_setup_diagnostic", None)
+        if callable(setup_getter):
+            setup = setup_getter()
+            if isinstance(setup, dict):
+                write_mcp_setup_once(session_dir=self.session_dir, setup=setup)
 
     def _trace_reactor_llm_call(
         self,
@@ -1213,7 +1214,7 @@ class Coordinator:
             )
             record = LLMCallRecord.from_metadata(site, metadata, latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:
+        except LLMTraceRowError:
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",
                 agent_name,
@@ -1240,7 +1241,7 @@ class Coordinator:
             model = getattr(self.backends.get(agent_name), "model", None)
             record = LLMCallRecord.for_failure(site, error, model=model, call_id=call_id, latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:
+        except LLMTraceRowError:
             log.debug(
                 "full-trace: reactor llm_call failure append failed for %s",
                 agent_name,

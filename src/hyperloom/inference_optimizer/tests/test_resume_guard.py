@@ -429,8 +429,8 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     before_state = state_path.read_bytes()
 
     monkeypatch.setattr(cli, "clean_stale_aiter_locks", lambda: {"dir": ""})
-    monkeypatch.setattr(cli, "_claude_model_should_follow_codex", lambda: False)
-    monkeypatch.setattr(cli, "_codex_model_should_follow_claude", lambda: False)
+    monkeypatch.setattr(cli.llm_config, "is_openai_only", lambda: False)
+    monkeypatch.setattr(cli.llm_config, "is_anthropic_only", lambda: False)
     monkeypatch.setattr(cli, "_preflight", Mock(return_value={}))
     monkeypatch.setattr(cli, "_resolve_models_for_run", Mock())
     monkeypatch.setattr(cli, "_preflight_agentx_backend", Mock())

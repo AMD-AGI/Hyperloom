@@ -9,7 +9,7 @@ CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 :class:`SpecialistRunResult`.
 
 Three agent CLIs can drive that contract, and the deployment picks one
-(:func:`hyperloom.common.llm_config.resolve_agent_backend`):
+(:func:`hyperloom_common.llm.llm_config.resolve_agent_backend`):
 ``claude --print --output-format stream-json`` authenticates against the
 Anthropic side, ``codex exec --json`` against the OpenAI side and
 ``dsh --profile headless`` through the DeepSeek Harness. An OpenAI-only deployment has no
@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import time
 from concurrent.futures import CancelledError
@@ -42,8 +43,7 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
     AGENT_BACKEND_DEEPSEEK,
@@ -53,28 +53,35 @@ from hyperloom.common.llm_config import (
 from hyperloom.common.env_safety import (
     redact_file_in_place,
 )
-from hyperloom.common.fs_utils import (
+from hyperloom_common.fs_utils import (
     create_nofollow,
     read_text_nofollow,
     regular_files_nofollow,
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAs, RunAsError
-from hyperloom.common.proctree import collect_tree, kill_tree
+from hyperloom.common.proctree import REAP_MARK_ENV, collect_tree, kill_tree, marked_pids, process_uids
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,
-    _build_specialist_env,
     _codex_mcp_config,
     _codex_provider_resolver_overlay,
     _write_private_codex_config,
 )
-from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stage_mcp_config
+from .launch_env import (
+    SpecialistLaunch,
+    apply_gpu_env,
+    compose_launch_env,
+    prepare_demote,
+    resolve_launch_user,
+    stage_mcp_config,
+)
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
-from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths
+from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths, tool_in_flight
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
-from hyperloom.common.git_safety import app_git, worktree_head
+from hyperloom_common.git_safety import app_git, worktree_head
+from ..delivery.deliverable import declared_targets
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
@@ -129,27 +136,15 @@ class SpecialistSubprocessConfig:
     mcp_config_path: str | None = None
     """Optional path to a JSON file holding ``{"mcpServers": {...}}``."""
 
-    output_format: str = "stream-json"
-    """claude-cli ``--output-format`` flag; ``stream-json`` matches Arbor.
-
-    Codex has no equivalent knob — ``codex exec --json`` is its only streaming
-    event format — so this applies to the claude backend only."""
-
-    extra_claude_args: tuple[str, ...] = ()
-    """Operator escape hatch — appended verbatim to the claude command."""
-
-    extra_codex_args: tuple[str, ...] = ()
-    """Operator escape hatch — appended verbatim to the codex command."""
-
-    leaf_agents_json: str | None = None
-    """``--agents`` JSON declaring leaf sub-agent types. None = built-in leaf."""
-
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
 
-    heartbeat_stale_seconds: float = 300.0
+    heartbeat_stale_seconds: float = 900.0
     """Liveness window for activity in any of :func:`specialist_activity_paths`.
 
+    Longer than the agent CLI's own API request timeout (600 s for Claude
+    Code), after which it logs a retry, so a CLI waiting on its model still
+    writes within it; a CLI waiting on a tool is covered by :func:`tool_in_flight`.
     A process that never creates any of them is reaped after this window.
     After one has appeared, its mtime can refresh the liveness clock
     for one window before the subsequent stale window expires, yielding about
@@ -207,15 +202,6 @@ class SpecialistSubprocessResult:
 #: Directories a specialist writes for its own use inside the worktree, never
 #: part of a deliverable.
 _SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", ".hyperloom")
-
-
-def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]:
-    """Return the worktree-relative paths the round declared it would touch."""
-    from ..delivery.deliverable import parse_deliverable
-
-    if not done_payload:
-        return ()
-    return parse_deliverable(done_payload, default_tree_id="").targets
 
 
 # Worktree management
@@ -369,6 +355,41 @@ def _local_tree_pgid(proc: Any) -> int | None:
     return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
 
+#: Prints the pids whose environment holds the entry in ``$1``; exits 3 when ``grep`` cannot read NUL-separated input.
+_LIST_MARKED_SCRIPT = (
+    'grep -qzxF -- x /dev/null; [ "$?" -eq 1 ] || exit 3; '
+    'for p in /proc/[0-9]*; do grep -qzxF -- "$1" "$p/environ" 2>/dev/null && echo "${p#/proc/}"; done; exit 0'
+)
+#: Bounds that scan; walking a few thousand /proc entries takes well under a second.
+_MARK_SCAN_TIMEOUT_SEC: float = 30.0
+
+
+def _marked_pids_as(run_as: RunAs, mark: str) -> list[int]:
+    """The pids carrying ``mark``, read as ``run_as``: the app's uid cannot read a demoted child's environ.
+
+    The scan runs as a shell under that account, because it cannot import Hyperloom from the app's tree. Any
+    process of that account can write into the scan's stdout, so only pids the account owns are believed.
+    """
+    try:
+        cp = subprocess.run(
+            run_as.command(["sh", "-c", _LIST_MARKED_SCRIPT, "sh", f"{REAP_MARK_ENV}={mark}"]),
+            capture_output=True,
+            text=True,
+            timeout=_MARK_SCAN_TIMEOUT_SEC,
+            check=False,
+            env={"PATH": os.defpath},
+            cwd="/",
+            **run_as.popen_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("specialist reap: cannot list marked processes as %s: %s", run_as.user, exc)
+        return []
+    if cp.returncode != 0:
+        log.warning("specialist reap: listing marked processes as %s exited %d", run_as.user, cp.returncode)
+    listed = (int(pid) for pid in cp.stdout.split() if pid.isdigit())
+    return [pid for pid in listed if process_uids(pid) == (run_as.uid, run_as.uid)]
+
+
 @dataclass(frozen=True)
 class SpecialistSpawn:
     """One specialist subprocess to spawn and reap.
@@ -385,9 +406,6 @@ class SpecialistSpawn:
         system_prompt: System prompt assembled by
             :func:`specialist_prompt_builder.build_specialist_prompts`.
         user_prompt: User prompt from the same builder.
-        max_turns: Turn budget, never enforced mechanically here; it reaches
-            the specialist only as advisory prompt text baked into
-            ``system_prompt``.
         disallowed_tools: Tool names to deny in the agent CLI subprocess.
             Passed as ``--disallowedTools`` to the Claude CLI; has no Codex or
             dsh equivalent (Codex containment uses ``--sandbox``).
@@ -413,12 +431,22 @@ class SpecialistSpawn:
     worktree_base: Path | None
     system_prompt: str
     user_prompt: str
-    max_turns: int
     disallowed_tools: frozenset[str] | set[str] | tuple[str, ...] = frozenset()
     gpu_ids: tuple[int, ...] = ()
     deadline: Deadline | None = None
     gpu_lease: Any = None
     progress_cb: Any = None
+
+
+def _launch_failure(process_log: Path, error: str) -> SpecialistSubprocessResult:
+    """Result of a task whose agent CLI never ran."""
+    return SpecialistSubprocessResult(
+        done_payload=None,
+        exit_code=None,
+        elapsed_seconds=0.0,
+        process_log_path=str(process_log),
+        error=error,
+    )
 
 
 # Dispatcher
@@ -472,27 +500,9 @@ class SpecialistSubprocessDispatcher:
         try:
             run_as = resolve_launch_user(request.gpu_lease)
         except RunAsError as exc:
-            return SpecialistSubprocessResult(
-                done_payload=None,
-                exit_code=None,
-                elapsed_seconds=0.0,
-                process_log_path=str(process_log),
-                error=f"specialist user refused: {exc}",
-            )
+            return _launch_failure(process_log, f"specialist user refused: {exc}")
 
-        # Compose a minimal env. Provider credentials are inherited by default
-        # for compatibility with deployments that authenticate the agent CLI
-        # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
-        env = _build_specialist_env()
-        # Keep the spawned CLI off its non-essential traffic and auto-updater.
-        from hyperloom.common.llm_stability_env import apply_llm_stability_env
-
-        apply_llm_stability_env(env)
-        # The child spends against the gateway, so tag it or its spend lands
-        # under no component at all. The task tag is what attributes the
-        # requests of a child that dies before its result row -- the only
-        # place such a child's token usage survives is the gateway's log.
-        inject_attribution_env(env, component="specialist", operation="run_agent", task=request.task_id)
+        env, reap_mark = compose_launch_env(request.task_id)
 
         backend = ""
         try:
@@ -502,15 +512,14 @@ class SpecialistSubprocessDispatcher:
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
             # task's failure rather than degrading to a CLI that cannot auth.
-            return SpecialistSubprocessResult(
-                done_payload=None,
-                exit_code=None,
-                elapsed_seconds=0.0,
-                process_log_path=str(process_log),
-                error=f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}",
+            return _launch_failure(
+                process_log, f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}"
             )
 
         apply_gpu_env(env, request.workspace, request.gpu_ids, request.gpu_lease)
+        launch = SpecialistLaunch(
+            cmd=cmd, env=env, run_as=run_as, backend=backend, prompt_file=prompt_file, process_log=process_log
+        )
 
         with cancel_scope_listener() as scope:
             log_fh: Any = None
@@ -519,71 +528,10 @@ class SpecialistSubprocessDispatcher:
             try:
                 _raise_if_cancelled(scope)
                 if request.gpu_lease is not None:
-                    # Non-blocking start: submit the actor launch, then poll for
-                    # the pid with ``asyncio.sleep`` between polls. This keeps the
-                    # Coordinator event loop responsive while Ray schedules the actor
-                    # (no blocking ``ray.get``), and — combined with the timing split
-                    # below — excludes Ray *pending* time from the specialist's running
-                    # wall budget. A bounded pending deadline turns a permanently
-                    # unschedulable request into a structured task failure instead of an
-                    # unbounded stall. The actor opens process.log inside its worker
-                    # (same host on single-node), so the reaper below reads it directly.
-                    from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
-
-                    try:
-                        request.gpu_lease.start_async(
-                            ActorLaunch(
-                                cmd,
-                                env=env,
-                                cwd=str(request.worktree or request.workspace),
-                                log_path=str(process_log),
-                                stdin_path=str(prompt_file),
-                            )
-                        )
-                    except Exception as exc:  # isolation boundary: one specialist's GPU actor submit
-                        log.warning("specialist GPU actor submit failed: %s", exc, exc_info=True)
-                        return SpecialistSubprocessResult(
-                            done_payload=None,
-                            exit_code=None,
-                            elapsed_seconds=0.0,
-                            process_log_path=str(process_log),
-                            error=f"failed to submit specialist GPU actor: {exc!r}",
-                        )
-                    pending_deadline_sec = _ray_specialist_pending_deadline_sec()
-                    pending_start = time.monotonic()
-                    pid: int | None = None
-                    while True:
-                        _raise_if_cancelled(scope)
-                        try:
-                            pid = request.gpu_lease.poll_started()
-                        except Exception as exc:  # isolation boundary: one specialist's GPU actor start
-                            log.warning("specialist GPU actor start failed: %s", exc, exc_info=True)
-                            request.gpu_lease.close()
-                            return SpecialistSubprocessResult(
-                                done_payload=None,
-                                exit_code=None,
-                                elapsed_seconds=0.0,
-                                process_log_path=str(process_log),
-                                error=f"specialist GPU actor start failed: {exc!r}",
-                            )
-                        if pid is not None:
-                            break
-                        pending_elapsed = time.monotonic() - pending_start
-                        if pending_elapsed >= pending_deadline_sec:
-                            request.gpu_lease.close()
-                            return SpecialistSubprocessResult(
-                                done_payload=None,
-                                exit_code=None,
-                                elapsed_seconds=0.0,
-                                process_log_path=str(process_log),
-                                error=(
-                                    f"specialist GPU actor did not schedule within "
-                                    f"{pending_deadline_sec:.0f}s (Ray pending deadline); "
-                                    "cluster fully occupied"
-                                ),
-                            )
-                        await asyncio.sleep(_RAY_PENDING_POLL_INTERVAL_SEC)
-                    proc = _RayLeaseProcess(request.gpu_lease, pid)
+                    started = await self._start_ray_actor(request, launch, scope)
+                    if isinstance(started, SpecialistSubprocessResult):
+                        return started
+                    proc = started
                     # Timing split: the wall-budget clock starts
                     # only now that a real pid exists — the Ray pending time above is
                     # excluded so a slow-to-schedule actor is never mis-reaped.
@@ -592,39 +540,10 @@ class SpecialistSubprocessDispatcher:
                     proc_started = time.monotonic()
                     # Created fresh, never through a name the previous run's account planted; owner-only.
                     log_fh = create_nofollow(request.workspace, (process_log.name,))
-                    stdin_fh: Any = None
-                    try:
-                        demote = await asyncio.to_thread(
-                            prepare_demote, run_as, request.workspace, request.worktree, env, (prompt_file, process_log)
-                        )
-                        stdin_fh = prompt_file.open("rb")
-                        proc = subprocess.Popen(
-                            cmd if run_as is None else run_as.command(cmd),
-                            stdin=stdin_fh,
-                            stdout=log_fh,
-                            stderr=subprocess.STDOUT,
-                            env=env,
-                            cwd=str(request.worktree or request.workspace),
-                            start_new_session=True,
-                            **demote,
-                        )
-                    except (FileNotFoundError, OSError) as exc:
-                        log_fh.close()
-                        return SpecialistSubprocessResult(
-                            done_payload=None,
-                            exit_code=None,
-                            elapsed_seconds=0.0,
-                            process_log_path=str(process_log),
-                            error=f"failed to spawn {backend} subprocess: {exc!r}",
-                        )
-                    finally:
-                        # Popen duplicates the descriptor before returning. Close the
-                        # parent's copy on success and every spawn failure.
-                        if stdin_fh is not None:
-                            try:
-                                stdin_fh.close()
-                            except OSError:
-                                log.warning("failed to close specialist prompt stdin", exc_info=True)
+                    spawned = await self._spawn_local(request, launch, log_fh)
+                    if isinstance(spawned, SpecialistSubprocessResult):
+                        return spawned
+                    proc = spawned
 
                 # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
                 outcome = await self._reap_loop(proc, watch, deadline=request.deadline, started=proc_started)
@@ -632,6 +551,7 @@ class SpecialistSubprocessDispatcher:
                 self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
+                await asyncio.to_thread(self._reap_marked, reap_mark, run_as)
                 if log_fh is not None:
                     log_fh.close()
                 try:
@@ -640,6 +560,99 @@ class SpecialistSubprocessDispatcher:
                     self._release_task(backend, request)
 
         return self._harvest_result(request, watch, backend, outcome, worktree_base_commit=worktree_base_commit)
+
+    @staticmethod
+    async def _start_ray_actor(
+        request: SpecialistSpawn, launch: SpecialistLaunch, scope: CancelScope | None
+    ) -> _RayLeaseProcess | SpecialistSubprocessResult:
+        """Submit the GPU actor launch and poll until it has a pid; a failure returns the task's result."""
+        # Non-blocking start: submit the actor launch, then poll for
+        # the pid with ``asyncio.sleep`` between polls. This keeps the
+        # Coordinator event loop responsive while Ray schedules the actor
+        # (no blocking ``ray.get``), and — combined with the timing split
+        # below — excludes Ray *pending* time from the specialist's running
+        # wall budget. A bounded pending deadline turns a permanently
+        # unschedulable request into a structured task failure instead of an
+        # unbounded stall. The actor opens process.log inside its worker
+        # (same host on single-node), so the reaper below reads it directly.
+        from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
+
+        try:
+            request.gpu_lease.start_async(
+                ActorLaunch(
+                    launch.cmd,
+                    env=launch.env,
+                    cwd=str(request.worktree or request.workspace),
+                    log_path=str(launch.process_log),
+                    stdin_path=str(launch.prompt_file),
+                )
+            )
+        except Exception as exc:  # isolation boundary: one specialist's GPU actor submit
+            log.warning("specialist GPU actor submit failed: %s", exc, exc_info=True)
+            return _launch_failure(launch.process_log, f"failed to submit specialist GPU actor: {exc!r}")
+        pending_deadline_sec = _ray_specialist_pending_deadline_sec()
+        pending_start = time.monotonic()
+        pid: int | None = None
+        while True:
+            _raise_if_cancelled(scope)
+            try:
+                pid = request.gpu_lease.poll_started()
+            except Exception as exc:  # isolation boundary: one specialist's GPU actor start
+                log.warning("specialist GPU actor start failed: %s", exc, exc_info=True)
+                request.gpu_lease.close()
+                return _launch_failure(launch.process_log, f"specialist GPU actor start failed: {exc!r}")
+            if pid is not None:
+                break
+            pending_elapsed = time.monotonic() - pending_start
+            if pending_elapsed >= pending_deadline_sec:
+                request.gpu_lease.close()
+                return _launch_failure(
+                    launch.process_log,
+                    f"specialist GPU actor did not schedule within "
+                    f"{pending_deadline_sec:.0f}s (Ray pending deadline); "
+                    "cluster fully occupied",
+                )
+            await asyncio.sleep(_RAY_PENDING_POLL_INTERVAL_SEC)
+        return _RayLeaseProcess(request.gpu_lease, pid)
+
+    @staticmethod
+    async def _spawn_local(
+        request: SpecialistSpawn, launch: SpecialistLaunch, log_fh: Any
+    ) -> subprocess.Popen | SpecialistSubprocessResult:
+        """Spawn the agent CLI as a local process logging to ``log_fh``; a failure returns the task's result."""
+        stdin_fh: Any = None
+        try:
+            demote = await asyncio.to_thread(
+                prepare_demote,
+                launch.run_as,
+                request.workspace,
+                request.worktree,
+                launch.env,
+                (launch.prompt_file, launch.process_log),
+            )
+            stdin_fh = launch.prompt_file.open("rb")
+            proc = subprocess.Popen(
+                launch.cmd if launch.run_as is None else launch.run_as.command(launch.cmd),
+                stdin=stdin_fh,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                env=launch.env,
+                cwd=str(request.worktree or request.workspace),
+                start_new_session=True,
+                **demote,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            log_fh.close()
+            return _launch_failure(launch.process_log, f"failed to spawn {launch.backend} subprocess: {exc!r}")
+        finally:
+            # Popen duplicates the descriptor before returning. Close the
+            # parent's copy on success and every spawn failure.
+            if stdin_fh is not None:
+                try:
+                    stdin_fh.close()
+                except OSError:
+                    log.warning("failed to close specialist prompt stdin", exc_info=True)
+        return proc
 
     def _harvest_result(
         self,
@@ -678,7 +691,7 @@ class SpecialistSubprocessDispatcher:
             request.workspace,
             request.worktree_base,
             worktree_base_commit=worktree_base_commit,
-            targets=_declared_targets(done_payload),
+            targets=declared_targets(done_payload),
         )
 
         trace = harvest_agent_trace(backend, request.workspace, process_log)
@@ -698,6 +711,13 @@ class SpecialistSubprocessDispatcher:
             trace=trace,
             error=outcome["error"],
         )
+
+    @staticmethod
+    def _reap_marked(mark: str, run_as: RunAs | None) -> None:
+        """End every process that inherited this launch's reap mark, including one re-parented after the CLI exited."""
+        pids = marked_pids(REAP_MARK_ENV, mark) if run_as is None else _marked_pids_as(run_as, mark)
+        if pids and not kill_tree(collect_tree(pids)):
+            log.warning("specialist reap: marked processes %s outlived SIGKILL", pids)
 
     def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
         """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""
@@ -739,7 +759,6 @@ class SpecialistSubprocessDispatcher:
                 worktree=request.worktree,
                 system_prompt=request.system_prompt,
                 base_env=env,
-                probe_sandbox=True,
             )
             env.update(launch_env_additions)
             # Per-task CODEX_HOME so concurrent specialists and the operator's
@@ -827,7 +846,6 @@ class SpecialistSubprocessDispatcher:
         worktree: Path | None,
         system_prompt: str,
         base_env: Mapping[str, str],
-        probe_sandbox: bool,
     ) -> tuple[list[str], dict[str, str]]:
         """Build secure Codex argv, private config, and child-only env values.
 
@@ -859,7 +877,7 @@ class SpecialistSubprocessDispatcher:
                 "Codex sandbox mode 'read-only' cannot run a specialist: "
                 "the specialist must write its result and may need to author patches"
             )
-        if probe_sandbox and sandbox_mode != "bypass" and not probe_codex_sandbox_capability(env=dict(base_env)):
+        if sandbox_mode != "bypass" and not probe_codex_sandbox_capability(env=dict(base_env)):
             raise SpecialistAgentUnavailableError(
                 f"Codex sandbox mode {sandbox_mode!r} requires a working bubblewrap "
                 "sandbox, but the capability probe failed; refusing to fall back to bypass"
@@ -891,6 +909,14 @@ class SpecialistSubprocessDispatcher:
                 f"cannot prepare private Codex config under {codex_home}: {exc}"
             ) from exc
 
+        cmd = self._codex_argv(executable, sandbox_mode, workspace, worktree, provider_config.overrides)
+        return cmd, env_additions
+
+    def _codex_argv(
+        self, executable: str, sandbox_mode: str, workspace: Path, worktree: Path | None, overrides: tuple[str, ...]
+    ) -> list[str]:
+        """Assemble the ``codex exec`` argv for a specialist under ``sandbox_mode``."""
+        cfg = self.config
         writable_dirs = self._writable_dirs(workspace, worktree)
         cmd: list[str] = [
             executable,
@@ -909,14 +935,12 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(["--add-dir", extra_dir])
         # ``features.memories=false`` matches the SDK session: a specialist must
         # not carry state between tasks.
-        for override in ("features.memories=false", *provider_config.overrides):
+        for override in ("features.memories=false", *overrides):
             cmd.extend(["-c", override])
         if cfg.model:
             cmd.extend(["-m", cfg.model])
-        if cfg.extra_codex_args:
-            cmd.extend(list(cfg.extra_codex_args))
         cmd.append("-")
-        return cmd, env_additions
+        return cmd
 
     def _build_claude_cmd(
         self,
@@ -951,9 +975,9 @@ class SpecialistSubprocessDispatcher:
             cfg.claude_executable,
             "--print",
             "--output-format",
-            cfg.output_format,
+            "stream-json",
             "--verbose",
-            # Unattended: any mode that prompts stops the Bash heartbeat, and the run is reaped as stale.
+            # Unattended: a permission prompt waits with no output and no tool running, so the run is reaped as stale.
             # Worktrees and the tool denylist scope behaviour but are not filesystem containment.
             "--permission-mode",
             "bypassPermissions",
@@ -969,13 +993,11 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(["--disallowedTools", ",".join(sorted(disallowed_tools))])
         from .leaf import build_leaf_agents_json
 
-        cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
+        cmd.extend(["--agents", build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
         for d in self._writable_dirs(workspace, worktree):
             cmd.extend(["--add-dir", d])
-        if cfg.extra_claude_args:
-            cmd.extend(list(cfg.extra_claude_args))
         return cmd
 
     async def _publish_partial_progress(
@@ -1013,7 +1035,7 @@ class SpecialistSubprocessDispatcher:
             newest = max(newest, mtime)
             try:
                 await progress_cb(payload, elapsed)
-            except Exception:
+            except sqlite3.Error:
                 log.exception("specialist progress callback raised")
             break
         return newest
@@ -1030,8 +1052,8 @@ class SpecialistSubprocessDispatcher:
 
         Each tick checks (in order): a done-file at any candidate path
         (graceful exit with a short grace window), natural process exit,
-        activity staleness (heartbeat.json, process.log, or the dsh session
-        log; see :func:`specialist_activity_paths`), and the hard
+        activity staleness (process.log or the dsh session log, see
+        :func:`specialist_activity_paths`, unless :func:`tool_in_flight`), and the hard
         wall-clock cap. Stale / timed-out
         runs are killed via :meth:`_kill`. Partial checkpoints written along
         the way are forwarded to ``progress_cb`` as they change.
@@ -1074,14 +1096,7 @@ class SpecialistSubprocessDispatcher:
 
             # done.json appeared — graceful exit with up to 30s grace.
             if any(p.exists() for p in watch.done_files):
-                grace_until = now + 30.0
-                while time.monotonic() < grace_until and proc.poll() is None:
-                    _raise_if_cancelled(scope)
-                    await asyncio.sleep(2.0)
-                _raise_if_cancelled(scope)
-                # Still alive after grace — reap it so no orphaned subprocess leaks.
-                if proc.poll() is None:
-                    self._kill(proc)
+                await self._reap_after_done_file(proc, now, scope)
                 outcome["exit_code"] = proc.returncode
                 outcome["elapsed"] = time.monotonic() - started
                 break
@@ -1101,11 +1116,13 @@ class SpecialistSubprocessDispatcher:
                     progress_cb=watch.progress_cb,
                 )
 
-            # Liveness check: alive if any activity signal changed within the
-            # window. The hard wall-clock cap below still bounds genuinely hung
-            # subprocesses.
+            # Liveness check: alive while the CLI's output changed within the window, or while it waits on a
+            # tool it started after that output. The hard wall-clock cap below still bounds a hung subprocess.
             a_mtime = newest_activity(specialist_activity_paths(watch.workspace))
-            if a_mtime is not None and max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
+            if a_mtime is not None and (
+                max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds
+                or await asyncio.to_thread(tool_in_flight, proc.pid, a_mtime)
+            ):
                 last_heartbeat_seen = now
 
             if (now - last_heartbeat_seen) > cfg.heartbeat_stale_seconds:
@@ -1131,6 +1148,17 @@ class SpecialistSubprocessDispatcher:
                 break
 
         return outcome
+
+    async def _reap_after_done_file(self, proc: Any, now: float, scope: CancelScope | None) -> None:
+        """Give a process that wrote its done-file up to 30s from ``now`` to exit, then kill it."""
+        grace_until = now + 30.0
+        while time.monotonic() < grace_until and proc.poll() is None:
+            _raise_if_cancelled(scope)
+            await asyncio.sleep(2.0)
+        _raise_if_cancelled(scope)
+        # Still alive after grace — reap it so no orphaned subprocess leaks.
+        if proc.poll() is None:
+            self._kill(proc)
 
     @staticmethod
     def _kill(proc: Any) -> bool:

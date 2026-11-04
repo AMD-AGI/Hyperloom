@@ -434,22 +434,13 @@ def test_ruff_rows_map_to_qualified_units(tmp_path: Path) -> None:
             "filename": str(tmp_path / "src/p.py"),
             "location": {"row": 4},
         },
-        {
-            "code": "PLR0913",
-            "message": "Too many arguments in function definition (7 > 5)",
-            "filename": str(tmp_path / "src/p.py"),
-            "location": {"row": 2},
-        },
     ]
     got = [(f.metric, f.unit, f.value, f.line) for f in collect.parse_ruff(rows, tmp_path, units)]
-    assert got == [
-        ("nested-blocks", "Planner.pick", 6, 4),
-        (collect.FUNCTION_ARGS, "Planner.pick", 7, 2),
-    ]
+    assert got == [("nested-blocks", "Planner.pick", 6, 4)]
     with pytest.raises(collect.ToolError, match="unexpected ruff diagnostic"):
         collect.parse_ruff([{**rows[0], "message": "reworded"}], tmp_path, units)
     # A rule this gate no longer selects is unexpected output, not a silently dropped row.
-    for code in ("PLR0911", "C901"):
+    for code in ("PLR0911", "C901", "PLR0913"):
         with pytest.raises(collect.ToolError, match=f"unexpected ruff diagnostic: {code}"):
             collect.parse_ruff([{**rows[0], "code": code}], tmp_path, units)
 
@@ -551,14 +542,14 @@ def test_comment_poster_never_runs_pull_request_code() -> None:
 
 def test_a_pending_metric_may_lack_a_threshold_and_is_then_not_measured(monkeypatch: pytest.MonkeyPatch) -> None:
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    without_args = text.replace("function-args = 5\n", "")
+    without_depth = text.replace("nested-blocks = 4\n", "")
     with pytest.raises(collect.ToolError, match="thresholds must name"):
-        code_metrics.parse_config(without_args)
-    monkeypatch.setattr(code_metrics, "PENDING", (collect.FUNCTION_ARGS,))
-    config = code_metrics.parse_config(without_args)
-    assert config is not None and collect.FUNCTION_ARGS not in config.thresholds
-    assert [code for code, (metric, _) in collect.RUFF_RULES.items() if metric in config.thresholds] == ["PLR1702"]
-    for broken in (text.replace("nested-blocks = 4\n", ""), text.replace("nested-blocks =", "mccabe =")):
+        code_metrics.parse_config(without_depth)
+    monkeypatch.setattr(code_metrics, "PENDING", ("nested-blocks",))
+    config = code_metrics.parse_config(without_depth)
+    assert config is not None and "nested-blocks" not in config.thresholds
+    assert [code for code, (metric, _) in collect.RUFF_RULES.items() if metric in config.thresholds] == []
+    for broken in (text.replace("function-args = 5\n", ""), text.replace("function-args =", "max-args =")):
         with pytest.raises(collect.ToolError, match="thresholds must name"):
             code_metrics.parse_config(broken)
 
@@ -1133,6 +1124,42 @@ def test_function_length_counts_body_code_lines_and_nested_functions_alone(tmp_p
     # outer: 50 assignments, the string's 3 non-blank lines and the return; inner is its own unit.
     assert got == {"outer": (54, 3), "outer.inner": (51, 66)}
     assert collect.function_line_findings(["src/f.py"], 54, units) == []
+
+
+def test_parameter_count_adds_varargs_and_keyword_only_and_skips_self_and_cls(tmp_path: Path) -> None:
+    source = (
+        "def named(a, b, c, d, e):\n    pass\n"
+        "def star(a, b, c, d, e, *args):\n    pass\n"
+        "def keywords(a, b, c, d, e, **kwargs):\n    pass\n"
+        "async def both(a, /, b, *args, c, d, e, **kwargs):\n    pass\n"
+        "class Planner:\n"
+        "    def method(self, a, b, c, d, e):\n        pass\n"
+        "    @classmethod\n    def make(cls, a, b, c, d, e):\n        pass\n"
+        "    def wide(self, a, b, c, d, *, e, f):\n        pass\n"
+        "def outer():\n    def inner(a, b, c, d, e, *rest):\n        pass\n    return inner\n"
+        "def hook(a, b, c, d, e, _unused):\n    pass\n"
+        "@overload\ndef over(a, b, c, d, e, f): ...\n"
+    )
+    units = FakeUnits(tmp_path, "src/a.py", source).units
+    got = {f.unit: (f.value, f.line) for f in collect.function_arg_findings(["src/a.py"], 5, units)}
+    assert got == {
+        "star": (6, 3),
+        "keywords": (6, 5),
+        "both": (7, 7),
+        "Planner.wide": (6, 15),
+        "outer.inner": (6, 18),
+        "hook": (6, 21),
+        "over": (6, 24),
+    }
+
+
+@pytest.mark.skipif(any(shutil.which(tool) is None for tool in ("ruff", "radon", "complexipy")), reason="tools")
+def test_the_gate_counts_varargs_in_the_parameter_count(tmp_path: Path) -> None:
+    FakeUnits(tmp_path, "src/a.py", "def f(a, b, c, d, e, *args, **kwargs):\n    pass\n")
+    config = code_metrics.parse_config((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert config is not None
+    got = code_metrics.per_file_findings(tmp_path, ["src/a.py"], config.thresholds, collect.Units(tmp_path))
+    assert got == [collect.Finding(collect.FUNCTION_ARGS, "src/a.py", "f", 7, 1)]
 
 
 def test_directory_entries_count_direct_modules_and_subdirectories() -> None:

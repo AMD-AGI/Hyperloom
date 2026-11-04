@@ -10,7 +10,7 @@ import glob
 from pathlib import Path
 
 from kernelforge.evaluation.profiling.compiler_output import parse_register_info
-from kernelforge.tools.process_group import communicate_process_group
+from kernelforge.utils.process_group import communicate_process_group
 
 
 async def check_registers(build_dir: str | None = None) -> dict:

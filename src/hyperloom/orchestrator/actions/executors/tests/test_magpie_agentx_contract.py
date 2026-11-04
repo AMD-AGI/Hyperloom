@@ -19,6 +19,7 @@ from hyperloom.orchestrator.actions.executors import _server_patcher
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
+    prepare_grid_benchmark_config,
     BenchmarkTarget,
     LaunchLayer,
 )
@@ -104,6 +105,25 @@ def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
     assert launch["env"] == {"SGLANG_NEXT": "1"}
     assert launch["unset_env"] == ["SGLANG_TEST"]
     assert load_benchmark(base)["agentx"]["launch_overrides"]["env"] == {"SGLANG_TEST": "1"}
+
+
+@pytest.mark.parametrize("seeded", [False, True], ids=["no-overrides", "cli-generated"])
+def test_pre_baseline_candidate_carries_operator_server_args(source, tmp_path, monkeypatch, seeded):
+    if seeded:
+        config = yaml.safe_load(source.read_text())
+        # The shape _generated_agentx_benchmark writes for a session driven by workload flags.
+        config["benchmark"]["agentx"]["launch_overrides"] = {"version": 1}
+        source.write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--max-num-seqs 16")
+    base = prepare_grid_benchmark_config(source, tmp_path / "integrate")
+    candidate = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base),
+        GridVariant("candidate", "--language-model-only", {}),
+        output_subdir=tmp_path / "candidate",
+    )
+    argv = load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"]
+    assert argv == ["--max-num-seqs", "16", "--language-model-only"]
+    assert prepare_grid_benchmark_config(base, tmp_path / "next") == base
 
 
 @pytest.mark.parametrize("appended,recipe", [(True, False), (False, True), (True, True)])
@@ -687,6 +707,71 @@ def test_native_baseline_refuses_an_unsplittable_argv_without_launching(vllm_sou
     assert result["status"] == "failed", result
     assert result["error_class"] == ARGV_INVALID
     assert "{1:2}" in result["error"]
+
+
+def _draft_spec_args(tmp_path, *, heads=16, **overrides):
+    """A drafting launch as one argv-splittable string, against a checkpoint declaring ``heads`` query heads."""
+    model = tmp_path / f"drafter-{heads}"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "config.json").write_text(json.dumps({"num_attention_heads": heads}), encoding="utf-8")
+    config = {
+        "model": str(model),
+        "method": "dspark",
+        "num_speculative_tokens": 2,
+        "attention_backend": "ROCM_AITER_MLA",
+        "kv_cache_dtype": "fp8",
+        **overrides,
+    }
+    return "--speculative-config " + json.dumps(config, separators=(",", ":"))
+
+
+def test_a_native_variant_drafting_without_a_kernel_is_refused_before_it_is_written(vllm_source, tmp_path):
+    from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED
+
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base")
+    output_subdir = tmp_path / "candidate"
+    with pytest.raises(ValueError) as refused:
+        _build_variant_yaml(
+            GridRecipe(base_yaml_path=base),
+            GridVariant("spec_aiter_fp8_k2", _draft_spec_args(tmp_path), {}),
+            output_subdir=output_subdir,
+        )
+    assert refused.value.error_class == CAPABILITY_UNSUPPORTED
+    assert "16 query heads per rank" in str(refused.value)
+    # The refusal lands before materialization, so the native path leaves no launch for Magpie to pick up.
+    assert not list(output_subdir.rglob("config.yaml"))
+    # A draft the pinned stack ships a kernel for is composed as any other variant is.
+    runnable = _draft_spec_args(tmp_path, heads=64)
+    candidate = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base), GridVariant("spec_64", runnable, {}), output_subdir=tmp_path / "runnable"
+    )
+    assert load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"] == runnable.split(" ")
+
+
+def test_a_native_variant_is_judged_at_the_tensor_parallel_size_its_launch_carries(vllm_source, tmp_path):
+    from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED
+
+    # The recipe spells TP only in the environment; the launcher appends it to argv, so the draft is sharded.
+    config = yaml.safe_load(vllm_source.read_text())
+    config["benchmark"]["envs"]["TP"] = "8"
+    vllm_source.write_text(yaml.safe_dump(config))
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base")
+    args = _draft_spec_args(tmp_path, heads=128)
+    with pytest.raises(ValueError) as refused:
+        _build_variant_yaml(
+            GridRecipe(base_yaml_path=base),
+            GridVariant("spec_aiter_fp8_k2_tp8", args, {}),
+            output_subdir=tmp_path / "candidate",
+        )
+    assert refused.value.error_class == CAPABILITY_UNSUPPORTED
+    assert "16 query heads per rank" in str(refused.value)
+    # The same 128-head draft on one rank is a shape the pinned build carries.
+    one_rank = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base),
+        GridVariant("spec_aiter_fp8_k2_tp1", args, {"TP": "1"}),
+        output_subdir=tmp_path / "one_rank",
+    )
+    assert load_benchmark(one_rank)["agentx"]["launch_overrides"]["env"]["TP"] == "1"
 
 
 def test_vllm_attempt_uses_python_for_magpies_module_entrypoint(source, tmp_path):

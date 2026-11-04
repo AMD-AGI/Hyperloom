@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.baseline import (
+from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
     restore_warm_kernel_snapshots,
     revert_warm_kernel_patches,
 )
@@ -180,6 +180,66 @@ def test_warm_kernel_envs_empty_without_a_recorded_env_var() -> None:
     entry = {"column": "gemm", "source_paths": ["/local/dl/t.csv"], "meta": {}}
 
     assert PreludePhase._warm_kernel_extra_envs(entry) == {}
+
+
+def test_warm_kernel_envs_reground_a_config_list_onto_this_runs_downloads(tmp_path: Path) -> None:
+    """A champion's config list names tables per session; only this run's downloads of them are readable here."""
+    local = tmp_path / "dl" / "bf16.csv"
+    local.parent.mkdir()
+    local.write_text("M,N,K\n16,512,7168\n", encoding="utf-8")
+    entry = {
+        "column": "gemm",
+        "source_paths": [str(local)],
+        "meta": {"extra_envs": {"AITER_CONFIG_GEMM_BF16": "/gone/donor/bf16.csv:/gone/donor/fp8.csv"}},
+    }
+
+    envs = PreludePhase._warm_kernel_extra_envs(entry)
+
+    # The element this run downloaded is kept and pointed at the local copy; the one it cannot read is dropped,
+    # which is what the serving stack does with it anyway.
+    assert envs["AITER_CONFIG_GEMM_BF16"] == str(local)
+
+
+def test_warm_kernel_envs_unset_a_config_list_with_nothing_readable(tmp_path: Path) -> None:
+    other = tmp_path / "dl" / "tunableop_results.csv"
+    other.parent.mkdir()
+    other.write_text("M,N,K\n", encoding="utf-8")
+    entry = {
+        "column": "gemm",
+        "source_paths": [str(other)],
+        "meta": {"extra_envs": {"AITER_CONFIG_GEMM_BF16": "/gone/donor/bf16.csv:/gone/donor/fp8.csv"}},
+    }
+
+    # No element survives, so the var is unset and the stack loads its own default config table.
+    assert PreludePhase._warm_kernel_extra_envs(entry) == {}
+
+
+def test_warm_kernel_plan_downloads_every_config_table_the_env_names(tmp_path: Path) -> None:
+    record = _kernel_record(
+        tmp_path,
+        {
+            "gemm": {
+                "optimizations": [
+                    {
+                        "tuned_file": "kernel/gemm/bf16.csv",
+                        "extra_envs": {
+                            "AITER_CONFIG_GEMM_BF16": "kernel/gemm/bf16.csv:kernel/gemm/fp8.csv",
+                        },
+                    }
+                ]
+            }
+        },
+        {"kernel/gemm/bf16.csv": "M,N,K\n16,512,7168\n", "kernel/gemm/fp8.csv": "M,N,K\n32,512,7168\n"},
+    )
+    stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
+
+    plan = stub._collect_warm_kernel_plan(stub._open_warm_kernel_section())
+
+    paths = [Path(path) for path in plan[0]["source_paths"]]
+    assert [path.name for path in paths] == ["bf16.csv", "fp8.csv"]
+    assert all(path.is_file() for path in paths)
+    envs = PreludePhase._warm_kernel_extra_envs(plan[0])
+    assert envs["AITER_CONFIG_GEMM_BF16"] == ":".join(str(path) for path in paths)
 
 
 def test_warm_kernel_apply_prefers_deploy_patch_over_source_snapshot(

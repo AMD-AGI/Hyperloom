@@ -15,11 +15,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from hyperloom.common import io as _common_io
+from hyperloom_common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, is_agentx_mode
-from hyperloom.common.timeutil import now_iso, utc_now_compact
+from hyperloom_common.timeutil import now_iso, utc_now_compact
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     GRID_MODE_DEFAULT,
     GRID_REQUESTED,
@@ -31,9 +31,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     STRATEGY_SERVER_RESTART,
     STRATEGY_SINGLE_SERVER,
     ArmStrategy,
-    SweepAnchor,
     SweepBudget,
-    SweepEnvironment,
     SweepPlan,
     SweepRung,
 )
@@ -66,10 +64,10 @@ from ..actions.executors._workload_envs import (
     num_prompts_per_conc,
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
+from .conc_sweep_setup import SweepSetup, record_sweep_setup
 from ._rung_outcomes import (
     _CANCEL_STOP,
     _SWEEP_BUDGET_STOP,
-    _budget_skip_result,
     _deadline_skip_result,
     _raised_result,
 )
@@ -141,10 +139,6 @@ def _workload_ladder(benchmark_mode: Any = "") -> _WorkloadLadder:
 def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
     """The ladder a mode sweeps when the operator names none."""
     return list(_workload_ladder(benchmark_mode).default_concs)
-
-
-# Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.
-DEFAULT_TOTAL_BUDGET_SEC = 9000
 
 
 @dataclass(frozen=True)
@@ -352,18 +346,23 @@ def _build_roofline_ceiling(
         "tp": num_gpus,
         "isl": isl,
         "osl": osl,
-        "model_meta": {
-            "weight_bytes": meta.weight_bytes,
-            "active_weight_bytes": meta.active_weight_bytes,
-            "num_experts": meta.num_experts,
-            "experts_per_tok": meta.experts_per_tok,
-            "expert_weight_bytes": meta.expert_weight_bytes,
-            "num_layers": meta.num_layers,
-            "num_kv_heads": meta.num_kv_heads,
-            "head_dim": meta.head_dim,
-            "weight_dtype_bytes": meta.weight_dtype_bytes,
-        },
+        "model_meta": _model_meta_record(meta),
         "rows": rows,
+    }
+
+
+def _model_meta_record(meta: Any) -> dict[str, Any]:
+    """The model sizes and shape the roofline ceiling was computed from."""
+    return {
+        "weight_bytes": meta.weight_bytes,
+        "active_weight_bytes": meta.active_weight_bytes,
+        "num_experts": meta.num_experts,
+        "experts_per_tok": meta.experts_per_tok,
+        "expert_weight_bytes": meta.expert_weight_bytes,
+        "num_layers": meta.num_layers,
+        "num_kv_heads": meta.num_kv_heads,
+        "head_dim": meta.head_dim,
+        "weight_dtype_bytes": meta.weight_dtype_bytes,
     }
 
 
@@ -643,7 +642,7 @@ class _SweepRun:
             reason, remaining_sec = ORCHESTRATOR_CANCELLED_CLASS, 0.0
         elif self.session_closing():
             self.budget.spend_on_session_reserve()
-            skipped = [_budget_skip_result(v) for v in grid]
+            skipped = [_deadline_skip_result(v, _SWEEP_BUDGET_STOP) for v in grid]
             reason, remaining_sec = _SESSION_RESERVE, 0.0
         else:
             return False
@@ -659,7 +658,7 @@ class _SweepRun:
             note = _RungNote(stage=STAGE_BUDGET_SKIP)
         elif self.session_closing():
             self.budget.spend_on_session_reserve()
-            skipped = [_budget_skip_result(v) for v in rest]
+            skipped = [_deadline_skip_result(v, _SWEEP_BUDGET_STOP) for v in rest]
             note = _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
         else:
             return False
@@ -852,7 +851,7 @@ class _ArmServer:
         if self.lifecycle:
             try:
                 self.teardown()
-            except Exception as teardown_exc:  # isolation boundary: one arm's server teardown, recorded as a fault
+            except OSError as teardown_exc:
                 # The last word on this arm's server: a teardown that failed here
                 # leaves it alive past the arm that owned it.
                 log.warning("conc_sweep single-server: arm=%s teardown failed", self.arm_name, exc_info=True)
@@ -889,22 +888,11 @@ def _resolve_arm_strategy(run: _SweepRun, arm_name: str, *, serving_lease_held: 
 
     recorder = run.recorder
     # Resolve lifecycle params (port, framework) from the materialized config.
-    lc_reason = "resolve_failed"
-    try:
-        lc_params = resolve_lifecycle_params(run.base_yaml_path)
-        port = int(lc_params.get("port") or 8888)
-        framework = str(lc_params.get("framework") or "")
-        lc_eligible = bool(lc_params.get("eligible"))
-        lc_reason = str(lc_params.get("reason") or "")
-    except Exception as exc:  # isolation boundary: one arm's lifecycle resolution, recorded as a fault
-        log.warning("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
-        if recorder is not None:
-            # Named per arm: both arms resolve, and two faults reading alike
-            # would collapse into one row.
-            recorder.record_fault(stage=f"resolve_lifecycle_params:{arm_name}", exc=exc)
-        lc_eligible = False
-        port = 8888
-        framework = ""
+    lc_params = resolve_lifecycle_params(run.base_yaml_path)
+    port = int(lc_params.get("port") or 8888)
+    framework = str(lc_params.get("framework") or "")
+    lc_eligible = bool(lc_params.get("eligible"))
+    lc_reason = str(lc_params.get("reason") or "")
 
     arm_strategy = ArmStrategy(
         strategy=STRATEGY_SINGLE_SERVER if lc_eligible else STRATEGY_SERVER_RESTART,
@@ -1126,10 +1114,9 @@ def _decline_before_start(
     if optimized is None:
         return _declined(recorder, "no_optimization_to_compare")
     if optimized.overlay:
-        from hyperloom.common.overlay import is_safe_path_entry
-        from ..kernel.geak_config import geak_overlay_is_loadable
+        from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 
-        if not is_safe_path_entry(optimized.overlay) or not geak_overlay_is_loadable(optimized.overlay):
+        if not is_safe_path_entry(optimized.overlay) or not overlay_is_loadable(optimized.overlay):
             return _declined(recorder, "optimized_overlay_unavailable", final_overlay=optimized.overlay)
     if not concs:
         return _declined(recorder, "empty_conc_list")
@@ -1214,40 +1201,8 @@ def _finish_sweep(run: _SweepRun) -> dict[str, Any]:
     return payload
 
 
-async def run_conc_sweep(
-    state: SharedState,
-    session_dir: Path,
-    *,
-    concs: list[int] | None = None,
-    total_budget_sec: int | None = DEFAULT_TOTAL_BUDGET_SEC,
-    recorder: Any = None,
-) -> dict[str, Any]:
-    """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
-
-    ``concs`` of ``None`` uses the default ladder. ``total_budget_sec`` of
-    ``None`` removes only the sweep budget, not the session deadline; ``<=0`` means the caller's clamp
-    left no time and the sweep skips immediately. A ``None`` recorder records
-    nothing, which is what a direct caller with no session bound wants.
-    Returns a skip envelope when prerequisites are unmet.
-    """
-    session_deadline_sec = state.grid_session_deadline_sec()
-    session_dir = Path(session_dir)
-    # Whether the ladder was handed to the sweep or picked for the workload --
-    # a distinction only this line can still see, since the two are the same
-    # list one statement later.
-    grid_source = GRID_REQUESTED if concs is not None else GRID_MODE_DEFAULT
-    # ``None`` → default ladder; an explicit empty list short-circuits below.
-    workload = _workload_ladder(getattr(state, "benchmark_mode", ""))
-    concs = list(concs) if concs is not None else list(workload.default_concs)
-    optimized = _optimized_arm(state)
-    declined = _decline_before_start(recorder, state, optimized, concs, total_budget_sec)
-    if declined is not None:
-        return declined
-    # Positive past the decline above.
-    isl = int(state.isl)
-    osl = int(state.osl)
-    baseline_tput = float(state.baseline_tput)
-
+def _prepare_sweep_setup(state: SharedState, session_dir: Path, recorder: Any) -> SweepSetup | dict[str, Any]:
+    """Create the sweep workspace and materialize its base config; a decline envelope when that cannot be done."""
     # Prefer the materialized baseline config; fall back to the shipped asset.
     base_yaml_raw = str(getattr(state, "baseline_config_path", "") or "").strip() or str(default_baseline_config())
     base_yaml_path = Path(base_yaml_raw)
@@ -1291,38 +1246,56 @@ async def run_conc_sweep(
             error=str(exc),
             workspace=str(workspace),
         )
+    return SweepSetup(
+        session_dir=session_dir,
+        task_id=task_id,
+        workspace=workspace,
+        base_yaml_path=base_yaml_path,
+        model_path=resolved_model,
+        gpu_type=resolved_gpu,
+        benchmark_script=benchmark_script,
+    )
+
+
+async def run_conc_sweep(
+    state: SharedState,
+    session_dir: Path,
+    *,
+    concs: list[int] | None = None,
+    total_budget_sec: int | None,
+    recorder: Any = None,
+) -> dict[str, Any]:
+    """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
+
+    ``concs`` of ``None`` uses the default ladder. ``total_budget_sec`` of
+    ``None`` removes only the sweep budget, not the session deadline; ``<=0`` means the caller's clamp
+    left no time and the sweep skips immediately. A ``None`` recorder records
+    nothing, which is what a direct caller with no session bound wants.
+    Returns a skip envelope when prerequisites are unmet.
+    """
+    session_deadline_sec = state.grid_session_deadline_sec()
+    session_dir = Path(session_dir)
+    # Whether the ladder was handed to the sweep or picked for the workload --
+    # a distinction only this line can still see, since the two are the same
+    # list one statement later.
+    grid_source = GRID_REQUESTED if concs is not None else GRID_MODE_DEFAULT
+    # ``None`` → default ladder; an explicit empty list short-circuits below.
+    workload = _workload_ladder(getattr(state, "benchmark_mode", ""))
+    concs = list(concs) if concs is not None else list(workload.default_concs)
+    optimized = _optimized_arm(state)
+    declined = _decline_before_start(recorder, state, optimized, concs, total_budget_sec)
+    if declined is not None:
+        return declined
+    # Positive past the decline above.
+    isl = int(state.isl)
+    osl = int(state.osl)
+
+    setup = _prepare_sweep_setup(state, session_dir, recorder)
+    if isinstance(setup, dict):
+        return setup
 
     if recorder is not None:
-        cb = state.current_best
-        recorder.record_workload(
-            session_id=getattr(state, "session_id", "") or session_dir.name,
-            isl=isl,
-            osl=osl,
-            tp=getattr(state, "tp", 0),
-            benchmark_mode=getattr(state, "benchmark_mode", ""),
-        )
-        recorder.record_anchor(
-            SweepAnchor(
-                baseline_tput=baseline_tput,
-                anchor_tput=cb.get("tput"),
-                tp=getattr(state, "tp", 0),
-                variant_id=cb.get("variant_name"),
-                action=cb.get("action"),
-                extra_server_args=optimized.args,
-                extra_envs=optimized.envs,
-            )
-        )
-        recorder.record_environment(
-            SweepEnvironment(
-                sweep_task_id=task_id,
-                workspace=workspace.as_posix(),
-                model_path=resolved_model,
-                gpu_type=resolved_gpu,
-                base_config_path=base_yaml_path.as_posix(),
-                report_json_path=(reports_dir(session_dir) / "conc_sweep_summary.json").as_posix(),
-                report_csv_path=(reports_dir(session_dir) / "conc_sweep_raw.csv").as_posix(),
-            )
-        )
+        record_sweep_setup(recorder, state, setup, extra_server_args=optimized.args, extra_envs=optimized.envs)
 
     started_at = time.time()
     window = _Window(
@@ -1342,11 +1315,11 @@ async def run_conc_sweep(
     run = _SweepRun(
         state=state,
         session_dir=session_dir,
-        workspace=workspace,
-        base_yaml_path=base_yaml_path,
-        model_path=resolved_model,
-        gpu_type=resolved_gpu,
-        benchmark_script=benchmark_script,
+        workspace=setup.workspace,
+        base_yaml_path=setup.base_yaml_path,
+        model_path=setup.model_path,
+        gpu_type=setup.gpu_type,
+        benchmark_script=setup.benchmark_script,
         isl=isl,
         osl=osl,
         concs=concs,
@@ -1367,7 +1340,6 @@ async def run_conc_sweep(
 __all__ = [
     "AGENTX_DEFAULT_CONCS",
     "DEFAULT_CONCS",
-    "DEFAULT_TOTAL_BUDGET_SEC",
     "SCHEMA_VERSION",
     "_build_arm_grid",
     "_flush_conc_sweep_report",

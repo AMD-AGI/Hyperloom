@@ -19,10 +19,8 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors.baseline import (
-    MEASURE_ROUND_DROPPED_WARNING,
-    BaselineExecutor,
-)
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import MEASURE_ROUND_DROPPED_WARNING
 from hyperloom.orchestrator.actions.executors.profile import (
     PROFILE_DEFAULT_TIMEOUT_SEC,
     ProfileExecutor,
@@ -43,6 +41,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     stamp_server_ready,
 )
 from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
+from hyperloom.orchestrator.phases.machine_state import RETRY_PAST_THE_RESERVE
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import (
@@ -180,30 +179,25 @@ def _executor(
     )
 
 
-@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
-def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch, framework):
-    """The double-run reports the HOT second-round throughput."""
+def _run_mi300x_baseline(tmp_path, fake_run, *, framework: str = "vllm", **params) -> dict:
+    """Run the baseline on mi300x into ``tmp_path/ws`` with Magpie replaced by ``fake_run``."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework=framework)
-    output_dir = tmp_path / "ws"
-
-    captured: list = []
-    launches: list = []
-    fake_run, state = _cold_then_hot_fake_run(captured, launches=launches)
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x", **params})
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
-        result = _run(executor(ctx))
+        return _run(_executor(base, tmp_path)(ctx))
+
+
+@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch, framework):
+    """The double-run reports the HOT second-round throughput."""
+    captured: list = []
+    launches: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured, launches=launches)
+    result = _run_mi300x_baseline(tmp_path, fake_run, framework=framework)
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 2
@@ -225,7 +219,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch,
     assert warmup_lc["enabled"] is True and measure_lc["enabled"] is True
     assert warmup_lc["cleanup"] is False
     assert measure_lc["cleanup"] is True
-    assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
+    assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(tmp_path / "ws")
     assert captured[0]["benchmark"]["envs"]["PORT"] == (captured[1]["benchmark"]["envs"]["PORT"])
     assert captured[0]["benchmark"]["benchmark_script"] == f"{framework}_mi300x.sh"
 
@@ -474,7 +468,7 @@ def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(t
     assert MEASURE_ROUND_DROPPED_WARNING in result["nonfatal_warnings"]
     dropped = result["measure_round_dropped"]
     assert dropped["bound"] == "session_usable"
-    assert dropped["priced_by"] == "warmup_post_ready"
+    assert dropped["priced_by"] == "warmup_post_ready_less_eval"
     assert dropped["measure_round_sec"] == pytest.approx(550.0, abs=1.0)
     assert dropped["one_more_measurement_sec"] == pytest.approx(900.0, abs=1.0)
     assert dropped["measure_round_sec"] < 1200.0, (
@@ -482,9 +476,76 @@ def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(t
     )
 
 
-def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
-    """The hot pass runs with RUN_EVAL off, so the eval the cold round spent is not part of its price."""
-    clock = _AClockOnlyThePassesMove()
+def _a_prelude_that_has_failed_a_baseline(
+    *, usable_sec: float, failure_streak: int, leg_failures: int | None = None
+) -> SimpleNamespace:
+    """A twelve-hour PRELUDE whose clock has fallen to the optimization reserve.
+
+    The failures are the live leg's unless ``leg_failures`` says otherwise, which is
+    how a session resumed on the streak an earlier leg left behind is built.
+    """
+    return SimpleNamespace(
+        baseline_double_run=True,
+        phase="PRELUDE",
+        max_minutes=720,
+        baseline_failure_streak=failure_streak,
+        baseline_failures_this_leg=failure_streak if leg_failures is None else leg_failures,
+        session_budget_usable_sec=lambda: usable_sec,
+    )
+
+
+def test_a_prelude_retry_past_the_reserve_line_is_refused_before_ignition(tmp_path):
+    """A retry PRELUDE's own allowance cannot pay for is never booted, so the terminal that reads the
+    same allowance records a refusal the executor has already made."""
+    result = _run_double_run_baseline(
+        tmp_path,
+        _a_prelude_that_has_failed_a_baseline(usable_sec=14_718.5, failure_streak=1),
+    )
+
+    assert result["_rounds_run"] == 0
+    assert result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+    shortfall = result["budget_shortfall"]
+    assert shortfall["reason"] == RETRY_PAST_THE_RESERVE
+    assert shortfall["baseline_failures_this_leg"] == 1
+    assert shortfall["affordable_sec"] == 0.0
+    assert shortfall["bound"] == "optimization_reserve"
+
+
+def test_the_first_baseline_is_what_the_optimization_reserve_is_held_for(tmp_path):
+    """Only a retry is bought out of PRELUDE's allowance; the first round is priced on the session clock."""
+    result = _run_double_run_baseline(
+        tmp_path,
+        _a_prelude_that_has_failed_a_baseline(usable_sec=14_718.5, failure_streak=0),
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["_rounds_run"] == 2
+
+
+def test_a_resumed_leg_still_gets_the_baseline_its_new_budget_was_granted_for(tmp_path):
+    """An earlier leg's streak is not this leg's retry: the first round of the resumed session is booted."""
+    result = _run_double_run_baseline(
+        tmp_path,
+        _a_prelude_that_has_failed_a_baseline(usable_sec=14_718.5, failure_streak=2, leg_failures=0),
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["_rounds_run"] == 2
+
+
+def test_a_retry_with_allowance_left_is_still_admitted(tmp_path):
+    """The line is the allowance itself: above zero the retry runs as before."""
+    result = _run_double_run_baseline(
+        tmp_path,
+        _a_prelude_that_has_failed_a_baseline(usable_sec=25_000.0, failure_streak=1),
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["_rounds_run"] == 2
+
+
+def _run_with_a_cold_round_eval(tmp_path, shared_state, clock: _AClockOnlyThePassesMove) -> tuple[dict, int]:
+    """A double-run baseline whose cold round also ran a GSM8K eval lm-eval timed at 450 s."""
     fake_run, state = _cold_then_hot_fake_run(clock=clock, boot_sec=350.0, benchmark_sec=550.0)
 
     def cold_round_also_ran_the_eval(cmd, *args, **kwargs):
@@ -509,7 +570,7 @@ def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
         magpie_python=sys.executable,
         default_config_path=base,
         session_dir=tmp_path,
-        shared_state=_prelude_shared_state(usable_sec=1200.0),
+        shared_state=shared_state,
     )
     ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
     with (
@@ -520,13 +581,41 @@ def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
         ),
     ):
         result = _run(executor(ctx))
+    return result, state["calls"]
+
+
+def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
+    """The hot pass runs with RUN_EVAL off, so the eval the cold round spent is not part of its price."""
+    result, calls = _run_with_a_cold_round_eval(
+        tmp_path, _prelude_shared_state(usable_sec=1200.0), _AClockOnlyThePassesMove()
+    )
 
     # Charged the eval, the hot pass (550 s) and a cold-priced variant (900 s) need 1450 s of the 1200 s left.
-    assert state["calls"] == 2, "the hot pass was priced with the cold round's accuracy eval"
+    assert calls == 2, "the hot pass was priced with the cold round's accuracy eval"
     assert result["status"] == "succeeded"
     assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+    assert result["eval_runtime_sec"] == pytest.approx(450.0)
     assert "measure_round_dropped" not in result
     assert MEASURE_ROUND_DROPPED_WARNING not in result.get("nonfatal_warnings", [])
+
+
+def test_both_gates_price_a_hot_pass_without_the_cold_rounds_eval(tmp_path):
+    """With no warm runtime yet, the pre-ignition and post-cold gates price the same second pass and agree."""
+    clock = _AClockOnlyThePassesMove()
+    state = _a_session_the_passes_spend(
+        usable_sec=2100.0,
+        clock=clock,
+        baseline_runtime_sec=900.0,
+        baseline_post_ready_runtime_sec=550.0,
+        baseline_eval_runtime_sec=450.0,
+    )
+
+    result, calls = _run_with_a_cold_round_eval(tmp_path, state, clock)
+
+    # Before ignition: 900 + (550 - 450) for the round and 900 for a variant fit 2100; with the eval charged,
+    # 900 + 550 + 900 would not. After the cold pass: (550 - 450) + 900 fit the 1200 s left.
+    assert calls == 2, "the gates did not price the second pass the same way"
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
 
 
 def test_a_round_admitted_before_ignition_is_not_refused_after_its_cold_pass(tmp_path):
@@ -1396,26 +1485,9 @@ def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path, with_policy
 def test_baseline_double_run_by_default(tmp_path, monkeypatch):
     """Baseline defaults to cold+hot rounds to match EXPLORE warm-decision."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", raising=False)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = _run_mi300x_baseline(tmp_path, fake_run)
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 2
@@ -2036,45 +2108,32 @@ async def test_harness_side_refusal_stops_the_baseline_on_its_first_occurrence(t
     assert transition[:2] == (machine_state.PHASE_CLOSE, "baseline_failed")
 
 
-def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
-    """A stale benchmark_* workspace from a prior attempt must not be adopted as a successful result when the current subprocess crashes (rc=1)."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-    stale = output_dir / "benchmark_vllm_20260101_000000"
+_STALE_FULL_REPORT = {
+    "throughput": {"output_throughput": 9999.0, "completed_requests": 64, "duration_seconds": 25.0},
+    "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+}
+
+
+def _seed_stale_workspace(stale: Path, report: dict) -> None:
+    """A successful vllm workspace from a prior attempt, dated well before the current run."""
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "vllm",
-                "throughput": {
-                    "output_throughput": 9999.0,
-                    "completed_requests": 64,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-            }
-        ),
+        json.dumps({"success": True, "framework": "vllm", **report}),
         encoding="utf-8",
     )
     old = 1735689600.0
     os.utime(stale / "benchmark_report.json", (old, old))
     os.utime(stale, (old, old))
 
+
+def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
+    """A stale benchmark_* workspace from a prior attempt must not be adopted as a successful result when the current subprocess crashes (rc=1)."""
+    _seed_stale_workspace(tmp_path / "ws" / "benchmark_vllm_20260101_000000", _STALE_FULL_REPORT)
+
     def fake_run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, "", "HIP out of memory")
 
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx(
-        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = _run_mi300x_baseline(tmp_path, fake_run, baseline_double_run=False)
 
     assert result["status"] == "failed", result
     assert result.get("output_throughput") is None
@@ -2082,43 +2141,12 @@ def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
 
 def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
     """A stale benchmark_* workspace must not be adopted when the subprocess exits 0 without producing any new workspace (silent no-op)."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-    stale = output_dir / "benchmark_vllm_20260101_000000"
-    stale.mkdir(parents=True)
-    (stale / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "vllm",
-                "throughput": {
-                    "output_throughput": 9999.0,
-                    "completed_requests": 64,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    old = 1735689600.0
-    os.utime(stale / "benchmark_report.json", (old, old))
-    os.utime(stale, (old, old))
+    _seed_stale_workspace(tmp_path / "ws" / "benchmark_vllm_20260101_000000", _STALE_FULL_REPORT)
 
     def fake_run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx(
-        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = _run_mi300x_baseline(tmp_path, fake_run, baseline_double_run=False)
 
     assert result["status"] == "failed", result
     assert result.get("output_throughput") is None
@@ -2126,43 +2154,12 @@ def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
 
 def test_baseline_rejects_stale_workspace_when_the_run_produced_none(tmp_path, monkeypatch):
     """A crashed run adopts no workspace, however high the stale one sorts."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-    stale = output_dir / "benchmark_vllm_29991231_235959"
-    stale.mkdir(parents=True)
-    (stale / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "vllm",
-                "throughput": {
-                    "output_throughput": 9999.0,
-                    "completed_requests": 64,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    old = 1735689600.0
-    os.utime(stale / "benchmark_report.json", (old, old))
-    os.utime(stale, (old, old))
+    _seed_stale_workspace(tmp_path / "ws" / "benchmark_vllm_29991231_235959", _STALE_FULL_REPORT)
 
     def fake_run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, "", "boom")
 
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx(
-        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = _run_mi300x_baseline(tmp_path, fake_run, baseline_double_run=False)
 
     assert result["status"] == "failed", result
     assert result.get("output_throughput") is None
@@ -2170,39 +2167,16 @@ def test_baseline_rejects_stale_workspace_when_the_run_produced_none(tmp_path, m
 
 def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, monkeypatch):
     """The fresh workspace wins even when the stale one sorts last."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-    stale = output_dir / "benchmark_vllm_29991231_235959"
-    stale.mkdir(parents=True)
-    (stale / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "vllm",
-                "throughput": {"output_throughput": 9999.0, "completed_requests": 64},
-            }
-        ),
-        encoding="utf-8",
+    _seed_stale_workspace(
+        tmp_path / "ws" / "benchmark_vllm_29991231_235959",
+        {"throughput": {"output_throughput": 9999.0, "completed_requests": 64}},
     )
-    old = 1735689600.0
-    os.utime(stale / "benchmark_report.json", (old, old))
-    os.utime(stale, (old, old))
 
     def fake_run(cmd, *args, **kwargs):
         _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=4000.0)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx(
-        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = _run_mi300x_baseline(tmp_path, fake_run, baseline_double_run=False)
 
     assert result["status"] == "succeeded", result
     assert result.get("output_throughput") == pytest.approx(4000.0)
@@ -2210,39 +2184,16 @@ def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, mon
 
 def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypatch):
     """A new workspace with valid throughput produced by the current run succeeds even when an older stale workspace is present in the same output_dir."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-    stale = output_dir / "benchmark_vllm_20260101_000000"
-    stale.mkdir(parents=True)
-    (stale / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "vllm",
-                "throughput": {"output_throughput": 1.0, "completed_requests": 1},
-            }
-        ),
-        encoding="utf-8",
+    _seed_stale_workspace(
+        tmp_path / "ws" / "benchmark_vllm_20260101_000000",
+        {"throughput": {"output_throughput": 1.0, "completed_requests": 1}},
     )
-    old = 1735689600.0
-    os.utime(stale / "benchmark_report.json", (old, old))
-    os.utime(stale, (old, old))
 
     def fake_run(cmd, *args, **kwargs):
         _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=4000.0)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx(
-        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = _run_mi300x_baseline(tmp_path, fake_run, baseline_double_run=False)
 
     assert result["status"] == "succeeded", result
     assert result.get("output_throughput") == pytest.approx(4000.0)
@@ -2286,26 +2237,9 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
 
 def test_atom_engages_double_run_like_vllm_sglang(tmp_path, monkeypatch):
     """Atom baseline engages the lifecycle double-run like vllm/sglang."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="atom")
-    output_dir = tmp_path / "ws"
-
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = _run_mi300x_baseline(tmp_path, fake_run, framework="atom")
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 2
@@ -2864,7 +2798,7 @@ class TestTheSessionBudgetReachesTheBaselineRound:
 
 # _classify_subprocess_error unit tests
 
-from hyperloom.orchestrator.actions.executors.baseline import (
+from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import (
     _classify_subprocess_error,
 )
 

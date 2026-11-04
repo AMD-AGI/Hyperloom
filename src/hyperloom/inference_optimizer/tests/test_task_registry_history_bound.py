@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state.task_registry import (
     _MAX_PROGRESS_NOTES,
     Task,

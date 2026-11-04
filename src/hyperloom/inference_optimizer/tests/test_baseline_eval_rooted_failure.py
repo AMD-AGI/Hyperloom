@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
+import hyperloom.orchestrator.actions.executors.benchmark_run.records as records_mod
 
 
 def _bare_executor() -> baseline_mod.BaselineExecutor:
@@ -132,12 +133,12 @@ def test_evidence_that_lives_only_in_this_round_s_log_still_classifies(tmp_path)
 
 
 def test_only_a_genuine_baseline_may_establish_the_quality_reference():
-    assert baseline_mod._should_establish_quality_ref("baseline") is True
+    assert records_mod._should_establish_quality_ref("baseline") is True
     # replay_warm_recipe reuses this executor but is a candidate: letting it redefine the reference would mask its own
     # deviation from the baseline.
-    assert baseline_mod._should_establish_quality_ref("replay_warm_recipe") is False
-    assert baseline_mod._should_establish_quality_ref("") is False
-    assert baseline_mod._should_establish_quality_ref(None) is False
+    assert records_mod._should_establish_quality_ref("replay_warm_recipe") is False
+    assert records_mod._should_establish_quality_ref("") is False
+    assert records_mod._should_establish_quality_ref(None) is False
 
 
 def test_measure_round_config_disables_eval(tmp_path):

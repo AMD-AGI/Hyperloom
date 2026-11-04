@@ -78,9 +78,9 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 |-----------------|-----------|-----------------|------|
 | Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it. Every `and` / `or`, ternary, comprehension and `assert` counts as a branch, so it reads higher than ruff `C901` | radon `cc` |
 | Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
-| Function length | > 50 lines | Lines of code in the body, counted as below: past 50 a function rarely does one thing | the script |
+| Function length | > 60 lines | Lines of code in the body, counted as below: past 60, about the tree's 98th percentile, a function rarely does one thing | the script |
 | Nested block depth | > 4 | Past four levels the innermost line depends on five conditions at once | ruff `PLR1702` |
-| Parameter count | > 5 | pylint `R0913` default: past five, the call site stops reading as a sentence and the values travel together anyway — pass the object they come from, or name them in a dataclass (A8). `self`/`cls` and `*args`/`**kwargs` do not count; keyword-only parameters do | ruff `PLR0913` |
+| Parameter count | > 5 | pylint `R0913` default: past five, the call site stops reading as a sentence and the values travel together anyway — pass the object they come from, or name them in a dataclass (A8). A first parameter named `self`/`cls` does not count; every other named parameter does, keyword-only and `_`-named ones included, `@overload`/`@override` signatures are counted like any other, and `*args` and `**kwargs` count one each, so it reads higher than ruff `PLR0913` | the script |
 | Module length | > 1200 lines (over 800 is a report-only warning) | Half again the 800-line review trigger; at that size a module almost always holds more than one job | the script |
 | Duplicated code | any clone of >= 100 tokens and >= 10 lines | SonarSource CPD defaults | jscpd |
 | Dead code | any finding at >= 80% confidence | vulture's recommended CI setting | vulture |
@@ -203,18 +203,19 @@ Imports between packages point one way, and CI enforces it: the `import-linter (
 | Contract | Rule |
 |----------|------|
 | `hl-top-layers` | `hyperloom.cli` > `orchestrator` > `agents` > `inference_optimizer` > `common`: a package imports only from layers below it |
-| `kf-only-common` | `kernelforge` imports nothing from `hyperloom` except `hyperloom.common` |
+| `kf-no-hyperloom` | `kernelforge` imports nothing from `hyperloom`; what the two packages share lives in `hyperloom_common` |
 | `kf-evaluation-foundation` | `kernelforge.evaluation` imports no kernelforge product or entry package |
-| `kf-tools-foundation` | `kernelforge.tools` imports neither `kernelforge.evaluation` nor any kernelforge product or entry package |
-| `kf-mcp-servers-light` | the stdio MCP server modules (`knowledge.pr_knowledge.mcp_server`, `orchestrator.specialist_probe_server`) do not reach `agent_backends`, `cli` or `loop`, so a server starts without the agent runtime |
-| `common-is-leaf` | `hyperloom.common` imports nothing else from the project, `kernelforge` included |
+| `kf-tools-foundation` | `kernelforge.utils` imports no other kernelforge package |
+| `kf-mcp-servers-light` | the stdio MCP server modules (`knowledge.pr_knowledge.mcp_server`, `workflows.forge_loop.roles.specialist_probe_server`) do not reach `agent_backends`, `cli` or the forge-loop beyond its roles, so a server starts without the agent runtime or the iteration loop |
+| `common-is-leaf` | `hyperloom_common` imports nothing else from the project: it is the floor both shipped packages stand on |
+| `hl-common-is-leaf` | `hyperloom.common` imports nothing from the project but `hyperloom_common`, `kernelforge` included |
 | `agents-independent` | `hyperloom.agents.*` packages do not import each other |
 | `kf-backends-independent` | `kernelforge.kernel_backends.*` packages do not import each other |
 | `kf-entry-protected` | `hyperloom.agents`, `inference_optimizer` and `common` do not import `kernelforge` directly; the orchestrator and `hyperloom.cli` are the way in |
-| `kf-public-interfaces` | `hyperloom` imports a kernelforge package only through what its `__init__` exports (or `kernelforge.loop.api` for the loop), never one of its modules |
+| `kf-public-interfaces` | `hyperloom` imports a kernelforge package only through what its `__init__` exports (or `kernelforge.workflows.forge_loop.api` for the loop), never one of its modules |
 | `acyclic` | no import cycle between sibling packages anywhere under `hyperloom` or `kernelforge` |
 
-Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR, a new stdio MCP server module is added to the `kf-mcp-servers-light` sources, and a new top-level kernelforge package is added to the `kf-public-interfaces` list.
+Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR, a new stdio MCP server module is added to the `kf-mcp-servers-light` sources, and a new top-level kernelforge package or workflow under `kernelforge/workflows/` is added to the `kf-public-interfaces` list.
 
 Two contracts carry the violations that existed when the gate landed, as exact `importer -> imported` lines under `ignore_imports`: `hl-top-layers` lists the upward imports of `hyperloom.inference_optimizer.cli` (an entry point that sits inside the core layer), and `acyclic` lists the imports that break today's cycles. These baselines only shrink. The contracts fail on an `ignore_imports` line that no longer matches an import, so a PR that removes one of those imports deletes its line in the same commit. Do not add a line to get a new import through: move the code to the layer it belongs in, or invert the dependency (pass a callable or a protocol down instead of importing up). The baseline is per module pair, so another import between two modules already listed is not caught; do not lean on that.
 

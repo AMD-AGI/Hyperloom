@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
 
-from hyperloom.common.coerce import first_float, recorded_float, to_float, to_int, to_mapping, to_str_list
-from hyperloom.common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.coerce import first_float, recorded_float, to_float, to_int, to_mapping, to_str_list
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     summarize_change,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, RecipeUpsert, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb.canonical_id import recipe_framework_version
 from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
@@ -216,7 +217,7 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     recorder = coord._coord.phase_framework.timeline()
     if recorder is None:
         return
-    from hyperloom.common.timeutil import now_iso
+    from hyperloom_common.timeutil import now_iso
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ROLE_CONFIG
 
     task_id = str(getattr(task, "task_id", "") or "")
@@ -285,13 +286,12 @@ def amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any],
 
 
 def _framework_identity(state: Any) -> _FrameworkIdentity:
-    # Probed from the installed framework when the session never recorded a
-    # version, so a recipe is never filed under a blank one.
+    # Probed when the session never recorded a version, so a recipe is never filed under a blank one.
     name = str(state.framework or "")
     version = str(state.framework_version or "")
     if not version and name:
         version = detect_framework_version(name)
-    return _FrameworkIdentity(name=name, version=version, precision=str(state.precision or ""))
+    return _FrameworkIdentity(name, recipe_framework_version(version), str(state.precision or ""))
 
 
 def _result_payload(result: Any) -> dict[str, Any]:
@@ -806,7 +806,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 make_parents=True,
                 fmt=JsonLineFormat(sort_keys=True),
             )
-        except Exception:
+        except OSError:
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
 
     def ensure_recipe_finalized(

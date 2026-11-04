@@ -18,7 +18,7 @@ from kernelforge.cli.options import (
     _validate_optional_agent_provider,
 )
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
-from kernelforge.loop.api import (
+from kernelforge.workflows.forge_loop.api import (
     ForgeLoopError,
     ForgeLoopUsageError,
     InvalidOptionValue,
@@ -26,7 +26,7 @@ from kernelforge.loop.api import (
     format_forge_loop_result,
     run_forge_loop,
 )
-from kernelforge.loop.bootstrap.request import (
+from kernelforge.workflows.forge_loop.bootstrap.request import (
     AgentRoleOptions,
     CampaignTarget,
     ForgeLoopRequest,

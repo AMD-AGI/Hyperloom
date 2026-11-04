@@ -6,10 +6,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import signal
+import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -17,7 +21,7 @@ from typing import Any
 import pytest
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.git_safety import worktree_head
+from hyperloom_common.git_safety import worktree_head
 from hyperloom.common.env_safety import specialist_run_as
 
 from .conftest import init_git_repo, make_fake_claude
@@ -34,6 +38,7 @@ from hyperloom.orchestrator.specialists import subprocess_, wall_budget
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists.launch_env import prepare_demote
 from hyperloom.orchestrator.specialists.agent_cli_config import _build_specialist_env
+from hyperloom.orchestrator.specialists.leaf import build_leaf_agents_json
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
@@ -732,6 +737,94 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     assert killed["v"] is True
 
 
+def _silent_log(workspace: Path, *, age_sec: float) -> Path:
+    """A ``process.log`` whose last write was ``age_sec`` ago."""
+    workspace.mkdir()
+    log = workspace / "process.log"
+    log.write_text("event\n", encoding="utf-8")
+    then = time.time() - age_sec
+    os.utime(log, (then, then))
+    return log
+
+
+def _cli(code: str) -> subprocess.Popen:
+    """An agent CLI stand-in in its own session, as the dispatcher launches one."""
+    return subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+
+
+def _end(proc: subprocess.Popen) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait(timeout=5)
+
+
+async def _reap(proc: subprocess.Popen, workspace: Path, *, deadline_sec: float) -> dict[str, Any]:
+    disp = SpecialistSubprocessDispatcher(
+        config=SpecialistSubprocessConfig(heartbeat_stale_seconds=1.0, poll_interval_seconds=0.1)
+    )
+    return await disp._reap_loop(
+        proc,
+        ReapWatch(workspace=workspace, done_files=()),
+        deadline=Deadline.after(deadline_sec),
+        started=time.monotonic(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_keeps_a_cli_waiting_on_a_tool_it_started_after_its_last_output(tmp_path: Path):
+    """A long tool call leaves process.log silent; the tool the CLI started after that output keeps it alive."""
+    workspace = tmp_path / "ws"
+    _silent_log(workspace, age_sec=60.0)
+    proc = _cli("import subprocess; subprocess.run(['sleep', '30'])")
+    try:
+        outcome = await _reap(proc, workspace, deadline_sec=3.0)
+    finally:
+        _end(proc)
+    assert (outcome["stale_heartbeat"], outcome["timed_out"]) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_reaps_a_silent_cli_whose_children_predate_its_last_output(tmp_path: Path):
+    """A child older than the CLI's last output is not a tool call in flight, so silence still reaps the CLI."""
+    from hyperloom.common.proctree import descendants
+
+    workspace = tmp_path / "ws"
+    proc = _cli("import subprocess; subprocess.run(['sleep', '30'])")
+    try:
+        deadline = time.monotonic() + 5.0
+        while not descendants(proc.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(1.0)
+        _silent_log(workspace, age_sec=0.0)
+        outcome = await _reap(proc, workspace, deadline_sec=10.0)
+    finally:
+        _end(proc)
+    assert (outcome["stale_heartbeat"], outcome["timed_out"]) == (True, False)
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_reaps_a_hung_cli_while_something_refreshes_heartbeat_json(tmp_path: Path):
+    """heartbeat.json is writable by the agent, so a loop refreshing it does not keep a hung CLI alive."""
+    workspace = tmp_path / "ws"
+    _silent_log(workspace, age_sec=60.0)
+    heartbeat = workspace / "heartbeat.json"
+    proc = _cli("import time; time.sleep(30)")
+
+    async def _refresh() -> None:
+        while True:
+            heartbeat.write_text('{"status": "running"}\n', encoding="utf-8")
+            await asyncio.sleep(0.1)
+
+    writer = asyncio.create_task(_refresh())
+    try:
+        outcome = await _reap(proc, workspace, deadline_sec=3.0)
+    finally:
+        writer.cancel()
+        await asyncio.gather(writer, return_exceptions=True)
+        _end(proc)
+    assert (outcome["stale_heartbeat"], outcome["timed_out"]) == (True, False)
+
+
 # ── extend_lease moves the live wall-clock deadline ──────────────────────────
 @pytest.fixture
 def _live_reaper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -946,7 +1039,6 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
             system_prompt="sys",
             user_prompt="usr",
             disallowed_tools=frozenset(),
-            max_turns=1,
             gpu_ids=(0, 1),
             deadline=Deadline.after(60.0),
             gpu_lease=lease,
@@ -1028,7 +1120,6 @@ async def test_a_gpu_actor_that_cannot_launch_fails_the_specialist_with_its_stac
                 system_prompt="sys",
                 user_prompt="usr",
                 disallowed_tools=frozenset(),
-                max_turns=1,
                 deadline=Deadline.after(60.0),
                 gpu_lease=lease,
             )
@@ -1070,7 +1161,6 @@ async def test_run_clears_stale_wall_budget_extension(
             system_prompt="sys",
             user_prompt="usr",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(60.0),
             gpu_lease=lease,
         )
@@ -1137,8 +1227,6 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
         model="claude-test",
         mcp_config_path="/tmp/mcp.json",
         framework_source_roots=(str(framework), str(framework)),
-        extra_claude_args=("--debug",),
-        leaf_agents_json='{"researcher": {"description": "test"}}',
     )
     cmd = SpecialistSubprocessDispatcher(cfg)._build_claude_cmd(
         system_prompt_file=system_prompt_file,
@@ -1157,9 +1245,8 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     denied = set(cmd[deny_idx].split(","))
     assert "KillShell" in denied
     assert "SlashCommand" in denied
-    assert cmd[cmd.index("--agents") + 1] == cfg.leaf_agents_json
+    assert cmd[cmd.index("--agents") + 1] == build_leaf_agents_json()
     assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/mcp.json"
-    assert cmd[-1] == "--debug"
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
     # Worktree first, workspace second, then each distinct framework root.
     # integrate_patch is the only writer of source; the specialist gets neither.
@@ -1190,7 +1277,7 @@ async def test_partial_progress_skips_invalid_payload_and_swallow_callback_error
     valid.write_text('{"summary": "still working"}', encoding="utf-8")
 
     async def _callback_fails(*_args):
-        raise RuntimeError("telemetry sink unavailable")
+        raise sqlite3.OperationalError("database is locked")
 
     newest = await disp._publish_partial_progress(
         partial_files=(valid,),
@@ -1372,7 +1459,6 @@ async def _spawn_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gpu_ids: t
             system_prompt="sys",
             user_prompt="usr",
             disallowed_tools=frozenset(),
-            max_turns=1,
             gpu_ids=gpu_ids,
             deadline=Deadline.after(5.0),
         )
@@ -1414,7 +1500,6 @@ async def _run_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **spawn_kw
         system_prompt="sys",
         user_prompt="usr",
         disallowed_tools=frozenset(),
-        max_turns=1,
         deadline=Deadline.after(5.0),
         **spawn_kwargs,
     )
@@ -1552,7 +1637,6 @@ def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, mon
         system_prompt="sys",
         user_prompt="usr",
         disallowed_tools=frozenset(),
-        max_turns=1,
         deadline=Deadline.after(5.0),
     )
     request.workspace.mkdir()
@@ -1665,7 +1749,6 @@ async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_
         system_prompt="sys",
         user_prompt="usr",
         disallowed_tools=frozenset(),
-        max_turns=1,
         deadline=Deadline.after(5.0),
     )
     refused = await disp.run(spawn)

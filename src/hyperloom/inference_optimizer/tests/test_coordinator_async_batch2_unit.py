@@ -56,11 +56,11 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
 ) -> None:
     restores: list[tuple[str, str]] = []
     kernel_restores: list[dict] = []
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches as warm_patches_module
     import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patches_module,
         "_revert_patches",
         lambda target, sha, manifest=None: restores.append((target, sha)) or {"ok": True, "errors": []},
     )
@@ -131,10 +131,10 @@ async def test_resume_retains_pending_when_any_restore_fails(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches as warm_patches_module
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patches_module,
         "_revert_patches",
         lambda *_args: {"ok": False, "errors": ["restore failed"]},
     )
@@ -2597,7 +2597,7 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
             calls.append({"proposals": proposals, "task_id": task_id})
             return {"models": ["m1"], "ranking": [0]}
 
-    coord.specialist_dispatch._proposal_scorer = _Scorer()
+    coord.proposal_scorer = _Scorer()
     task = _ptask("rec-spec-3", "specialist")
     await coord.specialist_dispatch.record_specialist_result(
         task=task,
@@ -2653,7 +2653,7 @@ async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch)
 # -- handle_intent routing -------------------------------------------------
 @pytest.mark.asyncio
 async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     recorded: list = []
 
@@ -2999,8 +2999,17 @@ async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coor
 
 
 # -- handle_delegate branches ----------------------------------------------
+# An explore is admitted on something to measure; these tests are about the other delegate branches,
+# not that grid, so they delegate one admission has no quarrel with.
+_DELEGATE_PARAMS = {"explore": {"grid": [{"name": "v1"}]}}
+
+
 def _delegate(action_name: str, key: str, params=None) -> Intent:
-    payload = {"action_name": action_name, "params": params or {}, "idempotency_key": key}
+    payload = {
+        "action_name": action_name,
+        "params": params if params is not None else dict(_DELEGATE_PARAMS.get(action_name, {})),
+        "idempotency_key": key,
+    }
     return Intent(type=IntentType.DELEGATE, payload=payload)
 
 
@@ -3016,7 +3025,7 @@ async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(

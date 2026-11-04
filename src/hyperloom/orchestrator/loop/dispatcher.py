@@ -12,11 +12,11 @@ import time
 from collections.abc import Awaitable, Callable, Collection
 from functools import partial
 from typing import Any, NamedTuple
-from hyperloom.common.coerce import to_int
+from hyperloom_common.coerce import to_int
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from hyperloom.common.framework_arm import verdict_subject
-from hyperloom.common.llm_attribution import current_action_scope
+from hyperloom_common.llm.llm_attribution import current_action_scope
 from hyperloom.common.proctree import TERM_GRACE_SEC
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
@@ -35,10 +35,10 @@ from ..actions.executors._subprocess_kill import (
 )
 from ..phases import dispatch_order, machine_state as _phase_state
 from ..bus.message_bus import Message
-from ..kernel.request_handlers import get_handler
+from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
+from ..policy.denial import PolicyDenied
 from ..policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
-    PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..policy.projection import serving_tp_for_policy
@@ -50,6 +50,7 @@ from ..bus.resource_lock import (
     KNOWN_LANES,
     _expand_lanes,
 )
+from ._explore_grid import explore_grid_denial
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
@@ -421,9 +422,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         Runs every tick and is idempotent. Four independent claims a crashed or
         vanished worker can leave behind, each reclaimed on its own so one
-        failure does not hide the next -- and every one of them best-effort,
-        because a self-heal that raises would stop the pump it exists to keep
-        running:
+        failure does not hide the next -- and every one of them absorbs its
+        store failures, because a self-heal that raises would stop the pump it
+        exists to keep running:
 
         * a running row whose holder PID is dead, so its lanes free and the task
           fails while it is still retry-eligible, this same tick;
@@ -441,21 +442,21 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                     len(dead_tasks),
                     ", ".join(t[:12] for t in dead_tasks),
                 )
-        except Exception:
+        except (sqlite3.Error, ValueError):
             log.exception("dispatcher: dead-running task reclaim failed")
         dead_tasks.extend(self._coord.reconciler.last_report.failed_tasks)
         if dead_tasks:
             try:
                 await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
-            except Exception:
+            except (OSError, sqlite3.Error):
                 log.exception("dispatcher: dead-holder failure accounting failed")
         try:
             await self.locks.reap_dead_holders()
-        except Exception:
+        except sqlite3.Error:
             log.exception("dispatcher: dead-holder lease reap failed")
         try:
             await self._reconcile_cancelled_policy_denied_integrate_tasks()
-        except Exception:
+        except sqlite3.Error:
             log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
 
     async def pump_dispatcher_once(self) -> None:
@@ -594,7 +595,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             serving_slot_busy,
         )
         from ..actions.executors._ray_serving import maybe_gpu_specialist_lease
-        from ..specialists.profile import holds_serving_slot, is_authoring_specialist, requires_gpu
+        from ..specialists.profile import is_authoring_specialist, requires_gpu, resolve_specialist_profile
         from ..specialists.profile import uses_whole_machine_gpu_lane
 
         params = task.params
@@ -647,7 +648,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # ``num_gpus`` accounting still keeps it off serving's cards.
         gpu_specialist_lease = maybe_gpu_specialist_lease(
             num_gpus=gpu_count,
-            serving_slot=holds_serving_slot(params),
+            serving_slot=resolve_specialist_profile(params).reserves_benchmark_lane,
         )
         if gpu_specialist_lease is not None:
             # Ray assigns and masks the physical cards, so the specialist sees a logical 0..N-1
@@ -1070,19 +1071,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         }
         try:
             await self.bus.append_and_seq(Message.new("coordinator", "*", "delegated_result", announcement))
-        except Exception as exc:  # isolation boundary: one settled task's delegated_result append
+        except sqlite3.Error as exc:
             log.exception("dispatcher: failed to append delegated_result for task=%s", task.task_id)
             self._coord.record_exception(stage="dispatcher_result", exc=exc)
             return
         if task.kind == "specialist":
             await self._record_specialist_settlement(task, result)
-        payload = dict(result.result)
-        # A warm replay that failed in dispatch still owes its promote handler a cleanup pass.
-        if task.kind == _REPLAY_WARM_RECIPE and result.state == "failed":
-            payload.setdefault("status", "failed")
-            payload.setdefault("error_class", "dispatch_failed")
-            if result.error:
-                payload.setdefault("error", str(result.error))
+        payload = _promotion_payload(task, result)
         promotion = await self._promote_settled_result(task, result, payload)
         verdict, adopted = promotion or (Verdict.FAILED, ())
         # Settle the dispatch row on the phase that ordered it, whichever way promotion ended.
@@ -1108,7 +1103,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 await self._coord.recipe_journal.fact_write_hook(
                     task=task, result=result, verdict=verdict, adopted_variants=adopted
                 )
-            except Exception as exc:  # isolation boundary: one settled task's fact-write hook
+            except OSError as exc:
                 log.exception("dispatcher: fact-write hook failed for task=%s", task.task_id)
                 self._coord.record_exception(stage="dispatcher_fact_write", exc=exc)
         if task.kind == "explore":
@@ -1292,10 +1287,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return time_budget_denial(action, expected_min, self.shared_state)
 
     def admission_denial_for_action(
-        self,
-        action_name: str,
-        *,
-        params: dict[str, Any] | None = None,
+        self, action_name: str, *, params: dict[str, Any] | None = None
     ) -> PolicyDenied | None:
         """Run every pre-dispatch gate for an action name, first denial wins.
 
@@ -1304,7 +1296,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         Args:
             action_name: The proposed/delegated action name.
-            params: The proposal's parameters, which price a specialist.
+            params: The proposal's parameters: a specialist's price, an explore's grid.
 
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
@@ -1314,6 +1306,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             or self._sequence_denial_for_action(action_name)
             or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
             or self.time_budget_denial_for_action(action_name, params=params)
+            # Last: a session out of time is told so before an explore is told its grid is missing.
+            or explore_grid_denial(action_name, params, self.shared_state)
         )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:
@@ -1404,7 +1398,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return None
         if req_kind == "trace_analyze":
             return None
-        if get_handler(req_kind) is None:
+        if req_kind not in KERNEL_REQUEST_HANDLERS:
             return None
         if self.shared_state.baseline_tput <= 0:
             return PolicyDenied(
@@ -1424,3 +1418,15 @@ def _dispatch_policy_denied_evidence(task: Task) -> dict[str, Any]:
         if evidence.get("reason") == "policy_denied":
             return dict(evidence)
     return {}
+
+
+def _promotion_payload(task: Task, result: SubAgentResult) -> dict[str, Any]:
+    """The settled result's payload as its promote handler reads it."""
+    payload = dict(result.result)
+    # A warm replay that failed in dispatch still owes its promote handler a cleanup pass.
+    if task.kind == _REPLAY_WARM_RECIPE and result.state == "failed":
+        payload.setdefault("status", "failed")
+        payload.setdefault("error_class", "dispatch_failed")
+        if result.error:
+            payload.setdefault("error", str(result.error))
+    return payload

@@ -11,12 +11,13 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AbstractSet, Any, Mapping
+from types import MappingProxyType
+from typing import Any, Mapping, NamedTuple, Sequence
 
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
-from hyperloom.common.unified_diff import touched_paths
+from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
@@ -51,20 +52,34 @@ def native_config(path: Path) -> bool:
     return is_magpie_agentx(load_benchmark(path))
 
 
-def recipe_option_names(config_path: Path) -> set[str]:
-    """Canonical options from this config's verified Magpie launch, when available."""
+class RecipeLaunch(NamedTuple):
+    """The launch a native recipe resolved on its own: the argv it ran and the environment it exported."""
+
+    argv: Sequence[str] = ()
+    env: Mapping[str, str] = MappingProxyType({})
+
+
+def recipe_base_launch(config_path: Path) -> RecipeLaunch:
+    """The launch this config's verified Magpie run resolved on its own, when the receipt beside it still matches.
+
+    A native recipe spells its launch in its own resolved argv and its own launch environment rather than in
+    ``launch_overrides`` or ``benchmark.envs``, so this is the only place a composing layer can read what the recipe
+    already set: which options and variables it owns, and which settings a candidate composed on top of it is not
+    free to change.
+    """
     receipt_path = config_path.parent / "launch_evidence.json"
     if not receipt_path.is_file():
-        return set()
+        return RecipeLaunch()
     receipt = json.loads(receipt_path.read_text(encoding=_ENCODING))
     digest = "sha256:" + hashlib.sha256(config_path.read_bytes()).hexdigest()
     if receipt.get("recipe_digest") != digest:
-        return set()
-    return {
-        token.partition("=")[0]
-        for token in receipt.get("magpie_server_launch", {}).get("base_argv", [])
-        if token.startswith("--")
-    }
+        return RecipeLaunch()
+    launch = receipt.get("magpie_server_launch", {})
+    return RecipeLaunch(
+        [str(token) for token in launch.get("base_argv", [])],
+        # A ``None`` value records a name the launch cleared, so it is not part of the environment it ran with.
+        {str(name): str(value) for name, value in (launch.get("effective_env") or {}).items() if value is not None},
+    )
 
 
 def _inherited_server_args(argv: list[str]) -> str:
@@ -120,13 +135,50 @@ def _server_argv(server_args: str, requested: str) -> list[str]:
     return split[1]
 
 
+def _launch_server_args(recipe: RecipeLaunch, launch: Mapping[str, Any]) -> str:
+    """The server args this launch resolves to: the recipe's own argv, less what it removes, plus what it appends.
+
+    The recipe's argv is read as text rather than validated as one, since only the settings it spells are wanted:
+    a recipe pins them whether or not a layer on top restates them.
+    """
+    from hyperloom.inference_optimizer.grid_server_args import merge_server_args, remove_server_args
+
+    appended = " ".join(launch.get("append_args", []))
+    if launch.get("replace_args"):
+        return appended
+    return merge_server_args(remove_server_args(" ".join(recipe.argv), launch.get("remove_args", [])), appended)
+
+
+def _launch_envs(recipe: RecipeLaunch, benchmark: Mapping[str, Any], launch: Mapping[str, Any]) -> dict[str, Any]:
+    """The environment this launch runs with.
+
+    Magpie layers the launch's own environment over the workload's, and a native recipe's launch already runs under
+    the environment the recipe resolved for itself: the variables its server reads live there, not in
+    ``benchmark.envs``, so they are the bottom layer a composing layer sees.
+    """
+    unset = set(launch.get("unset_env", []))
+    envs = {**recipe.env, **(benchmark.get("envs") or {}), **(launch.get("env") or {})}
+    return {name: value for name, value in envs.items() if name not in unset}
+
+
 def apply_launch_changes(
-    benchmark: dict[str, Any], changes: LaunchChanges, *, recipe_options: AbstractSet[str] = frozenset()
+    benchmark: dict[str, Any],
+    changes: LaunchChanges,
+    *,
+    recipe: RecipeLaunch = RecipeLaunch(),
+    accepted: bool = False,
 ) -> None:
     """Compose a candidate; Magpie validates protected args and environment.
 
+    This is where every AgentX launch is composed, so it is where a candidate meets the speculative-decoding pin the
+    env-composed launches meet as they compose: Magpie refuses an unpinned launch once it is already running a round.
+    ``accepted`` marks a layer that is the session's own accepted launch rather than a candidate, which is what the
+    pin is measured against, the way the base layer is on the env-composed path.
+
     Raises:
         ServerArgvInvalidError: When the composed args cannot become an argv intact.
+        SpeculativeDecodingPinnedError: When a candidate changes the draft or the simulated acceptance its accepted
+            launch pins.
     """
     from hyperloom.inference_optimizer.grid_server_args import (
         compose_server_args,
@@ -134,11 +186,16 @@ def apply_launch_changes(
         removal_option_names,
     )
 
+    from ._spec_decode_pin import refuse_unpinned_speculative_change
+
     agentx = benchmark["agentx"]
     if not isinstance(agentx, dict):
         agentx = {"enabled": True}
         benchmark["agentx"] = agentx
     launch = agentx.setdefault("launch_overrides", {"version": 1})
+    recipe_options = {token.partition("=")[0] for token in recipe.argv if token.startswith("--")}
+    accepted_args = _launch_server_args(recipe, launch)
+    accepted_envs = _launch_envs(recipe, benchmark, launch)
     appended_options = {token.partition("=")[0] for token in launch.get("append_args", []) if token.startswith("--")}
     launch["append_args"] = _server_argv(
         dedupe_extra_server_args(
@@ -164,6 +221,34 @@ def apply_launch_changes(
         env.pop(name, None)
     env.update({str(k): str(v) for k, v in changes.env.items()})
     launch["unset_env"] = sorted((set(launch.get("unset_env", [])) | set(changes.unset_env)) - env.keys())
+    if not accepted:
+        refuse_unpinned_speculative_change(
+            accepted_args, accepted_envs, _launch_server_args(recipe, launch), _launch_envs(recipe, benchmark, launch)
+        )
+
+
+def _refuse_unrunnable_speculative_launch(
+    benchmark: Mapping[str, Any], *, recipe: RecipeLaunch, model_path: str | None
+) -> None:
+    """Refuse a composed AgentX launch the pinned stack has no draft kernel for.
+
+    The native path composes its launch here rather than in ``benchmark.envs``, so this is where it meets the same
+    check the env-composed launches get.
+
+    Raises:
+        SpeculativeCapabilityUnsupportedError: When the launch drafts with a kernel the stack does not ship.
+    """
+    from hyperloom.inference_optimizer.speculative_capability import refuse_unrunnable_speculative_stack
+
+    launch = (benchmark.get("agentx") or {}).get("launch_overrides") or {}
+    refuse_unrunnable_speculative_stack(
+        _inherited_server_args(list(launch.get("append_args", []))),
+        framework=str(benchmark.get("framework") or ""),
+        # launch_server.sh reads TP from the launch environment, which Magpie layers over the workload's and the
+        # recipe's.
+        envs=_launch_envs(recipe, benchmark, launch),
+        model_path=model_path or "",
+    )
 
 
 def materialize_agentx(
@@ -324,10 +409,17 @@ def materialize_variant(
     model_path: str | None,
     base: LaunchChanges,
 ) -> Path:
-    """Compose the accepted launch and candidate, then bind its applied source."""
+    """Compose the accepted launch and candidate, then bind its applied source.
+
+    Raises:
+        SpeculativeCapabilityUnsupportedError: When the composed launch drafts with a kernel the pinned stack
+            does not ship.
+        SpeculativeDecodingPinnedError: When the candidate changes the draft or the simulated acceptance the
+            recipe and the accepted launch pin.
+    """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
-    recipe_options = recipe_option_names(config_path)
-    apply_launch_changes(config["benchmark"], base, recipe_options=recipe_options)
+    recipe = recipe_base_launch(config_path)
+    apply_launch_changes(config["benchmark"], base, recipe=recipe, accepted=True)
     apply_launch_changes(
         config["benchmark"],
         LaunchChanges(
@@ -337,9 +429,29 @@ def materialize_variant(
             variant.unset_envs,
             variant.args_mode == REPLACE,
         ),
-        recipe_options=recipe_options,
+        recipe=recipe,
     )
+    _refuse_unrunnable_speculative_launch(config["benchmark"], recipe=recipe, model_path=model_path)
     path = materialize_agentx(config, output / "config.yaml", model_path=model_path)
     bind_source_evidence(path, variant.source_patches)
     apply_native_runtime(path, variant.runtime_override, variant.overlay_pythonpath)
     return path
+
+
+def materialize_grid_variant(
+    config_path: Path, variant: Any, output: Path, *, model_path: str | None, base: Any
+) -> Path:
+    """Materialize a grid variant whose accepted launch is the grid recipe's base layer."""
+    return materialize_variant(
+        config_path,
+        variant,
+        output,
+        model_path=model_path,
+        base=LaunchChanges(
+            base.extra_server_args,
+            base.extra_envs or {},
+            base.remove_args or [],
+            base.unset_envs or [],
+            base.args_mode == "replace",
+        ),
+    )

@@ -17,9 +17,9 @@ from typing import Any, Callable, Mapping
 
 import yaml
 
-from hyperloom.common.coerce import first_text
+from hyperloom_common.coerce import first_text
 from hyperloom.common.env_safety import build_benchmark_env
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.jsonio import read_json
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
 from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
@@ -281,6 +281,19 @@ def _measured_number(value: object) -> float | int | None:
     return value if isinstance(value, (int, float)) else None
 
 
+def _sweep_point_entry(plan: _ReplayPlan, out_dir: Path, *, conc: int, isl: int, osl: int) -> dict[str, Any]:
+    """The identity fields every replay sweep point entry starts with."""
+    return {
+        "conc": conc,
+        "isl": isl,
+        "osl": osl,
+        "variant_name": out_dir.name,
+        "workspace": str(out_dir),
+        "replay_script": str(plan.script),
+        "replay_mode": plan.replay_mode,
+    }
+
+
 async def _replay_sweep_point(plan: _ReplayPlan, out_dir: Path, *, conc: int, isl: int, osl: int) -> dict[str, Any]:
     env = _sweep_point_env(plan, out_dir, conc=conc, isl=isl, osl=osl)
     cmd = ["bash", str(plan.script), str(out_dir)] if plan.use_final_launch else ["bash", str(plan.script)]
@@ -295,15 +308,7 @@ async def _replay_sweep_point(plan: _ReplayPlan, out_dir: Path, *, conc: int, is
             cwd=str(out_dir),
         )
 
-    entry: dict[str, Any] = {
-        "conc": conc,
-        "isl": isl,
-        "osl": osl,
-        "variant_name": out_dir.name,
-        "workspace": str(out_dir),
-        "replay_script": str(plan.script),
-        "replay_mode": plan.replay_mode,
-    }
+    entry = _sweep_point_entry(plan, out_dir, conc=conc, isl=isl, osl=osl)
     ttft = tpot = e2el = tput = None
     basis = ""
     succeeded = False

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 
+from hyperloom.inference_optimizer import model_config_utils
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 
 
@@ -26,24 +27,24 @@ def _args(model: str, isl: int = 1024, osl: int = 1024) -> argparse.Namespace:
 def test_loads_max_position_embeddings(tmp_path):
     m = tmp_path / "model"
     _write_config(m, model_type="llama", max_position_embeddings=2048)
-    assert cli_model_gate._load_model_max_position_embeddings(str(m)) == 2048
+    assert model_config_utils._load_model_max_position_embeddings(str(m)) == 2048
 
 
 def test_loads_alias_and_nested_text_config(tmp_path):
     m = tmp_path / "alias"
     _write_config(m, n_positions=4096)
-    assert cli_model_gate._load_model_max_position_embeddings(str(m)) == 4096
+    assert model_config_utils._load_model_max_position_embeddings(str(m)) == 4096
     n = tmp_path / "nested"
     n.mkdir()
     (n / "config.json").write_text(
         json.dumps({"text_config": {"max_position_embeddings": 8192}}),
         encoding="utf-8",
     )
-    assert cli_model_gate._load_model_max_position_embeddings(str(n)) == 8192
+    assert model_config_utils._load_model_max_position_embeddings(str(n)) == 8192
 
 
 def test_missing_config_returns_none(tmp_path):
-    assert cli_model_gate._load_model_max_position_embeddings(str(tmp_path / "nope")) is None
+    assert model_config_utils._load_model_max_position_embeddings(str(tmp_path / "nope")) is None
 
 
 # headroom resolution

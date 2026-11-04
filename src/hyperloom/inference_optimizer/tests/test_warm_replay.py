@@ -16,7 +16,7 @@ import pytest
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
-from hyperloom.orchestrator.actions.executors.baseline import restore_warm_kernel_snapshots
+from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import prelude as prelude_mod
 from hyperloom.orchestrator.phases import prelude_warm_kernel as prelude_warm_kernel_mod
@@ -2109,10 +2109,10 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(tmp_path, monkeypat
     recipe_rollbacks: list[tuple[str, str]] = []
     kernel_rollbacks: list[list[dict]] = []
 
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches as warm_patches_module
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patches_module,
         "_revert_patches",
         lambda target, sha, manifest=None: recipe_rollbacks.append((target, sha)) or {"ok": True, "errors": []},
     )
@@ -2443,10 +2443,10 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches as warm_patches_module
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patches_module,
         "_revert_patches",
         lambda *_args: {"ok": True, "errors": []},
     )
@@ -2485,8 +2485,11 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
     assert kernel_rollbacks == [[{"manifest_path": "/tmp/m"}]]
 
 
-def test_every_patched_tree_is_promoted(tmp_path):
-    """A replay spanning two checkouts has to promote both, not just the first."""
+def _promote_sglang_and_tuning_trees(tmp_path, *, tuning_snapshot_of: str):
+    """Resolve the promoted checkout of a replay that patched ``sglang`` and ``tuning`` under ``tmp_path``.
+
+    The tuning tree's snapshot manifest names the tree ``tuning_snapshot_of``.
+    """
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     sglang = tmp_path / "sglang"
     tuning = tmp_path / "tuning"
@@ -2498,19 +2501,24 @@ def test_every_patched_tree_is_promoted(tmp_path):
             "patches": [{"patch_file": "p.patch", "framework_root": str(sglang)}],
         }
     )
-
-    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+    tuning_snapshot = {"repo_path": str(tmp_path / tuning_snapshot_of)}
+    return coord.phase_prelude._resolve_promoted_recipe_checkout(
         {
             "warm_patch_trees": [
                 {"root": str(sglang), "pre_sha": "abc", "snapshot_manifest": {"repo_path": str(sglang)}},
-                {"root": str(tuning), "pre_sha": "def", "snapshot_manifest": {"repo_path": str(tuning)}},
+                {"root": str(tuning), "pre_sha": "def", "snapshot_manifest": tuning_snapshot},
             ],
         },
         task,
     )
 
+
+def test_every_patched_tree_is_promoted(tmp_path):
+    """A replay spanning two checkouts has to promote both, not just the first."""
+    ok, promotion = _promote_sglang_and_tuning_trees(tmp_path, tuning_snapshot_of="tuning")
+
     assert ok is True
-    assert promotion["target_repos"] == [str(sglang), str(tuning)]
+    assert promotion["target_repos"] == [str(tmp_path / "sglang"), str(tmp_path / "tuning")]
 
 
 def test_a_nogit_apply_counts_as_a_replayed_overlay(tmp_path):
@@ -2597,28 +2605,8 @@ def test_a_tree_that_names_no_checkout_is_still_refused(tmp_path):
 
 def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
     """The gain came from the whole set, so a half-promoted replay is not a win."""
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    sglang = tmp_path / "sglang"
-    tuning = tmp_path / "tuning"
-    sglang.mkdir()
-    tuning.mkdir()
-    task = _StubTask(
-        params={
-            "required_patch_timeline": True,
-            "patches": [{"patch_file": "p.patch", "framework_root": str(sglang)}],
-        }
-    )
-
-    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
-        {
-            "warm_patch_trees": [
-                {"root": str(sglang), "pre_sha": "abc", "snapshot_manifest": {"repo_path": str(sglang)}},
-                # Snapshot taken against a different tree than the one patched.
-                {"root": str(tuning), "pre_sha": "def", "snapshot_manifest": {"repo_path": str(sglang)}},
-            ],
-        },
-        task,
-    )
+    # Snapshot taken against a different tree than the one patched.
+    ok, promotion = _promote_sglang_and_tuning_trees(tmp_path, tuning_snapshot_of="sglang")
 
     assert ok is False
     assert promotion["failure"] == "validated_recipe_checkout_manifest_mismatch"
@@ -2724,11 +2712,11 @@ def test_an_unmutated_tree_promotes_because_it_already_carries_the_overlay(tmp_p
 
 def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
     """Leaving one tree patched would bank a mutation from a rejected replay."""
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches as warm_patches_module
 
     reverted: list[str] = []
     monkeypatch.setattr(
-        baseline_module,
+        warm_patches_module,
         "_revert_patches",
         lambda root, *_args: reverted.append(root) or {"ok": True, "errors": []},
     )
@@ -3311,7 +3299,10 @@ def _stock_sglang_tree(root: Path) -> Path:
 
 def _replayed_on_a_git_tree(tmp_path: Path) -> tuple[Coordinator, Path, dict, dict]:
     """A warm replay that applied the PPE overlay to a real SGLang checkout, measured and ready to promote."""
-    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+    from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
+        _apply_warm_patches,
+        _stamp_warm_patch_outcome,
+    )
 
     tree = _stock_sglang_tree(tmp_path / "sglang")
     params = {
@@ -3407,7 +3398,10 @@ def test_a_warm_replay_whose_overlays_cannot_be_committed_is_not_adopted(tmp_pat
 
 
 def test_a_commit_failing_on_one_tree_leaves_every_tree_stock(tmp_path):
-    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+    from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
+        _apply_warm_patches,
+        _stamp_warm_patch_outcome,
+    )
 
     trees = [_stock_sglang_tree(tmp_path / name) for name in ("sglang", "tuning")]
     stock_heads = [_tree_git(tree, "rev-parse", "HEAD").strip() for tree in trees]
@@ -3457,7 +3451,10 @@ def test_a_resume_rolls_back_a_replay_that_died_after_committing_its_overlays(tm
 
 
 def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tmp_path):
-    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+    from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
+        _apply_warm_patches,
+        _stamp_warm_patch_outcome,
+    )
 
     tree = _stock_sglang_tree(tmp_path / "sglang")
     stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()
@@ -3493,7 +3490,10 @@ def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tm
 
 def test_a_promotion_commit_that_cannot_be_undone_fails_the_rollback(tmp_path, monkeypatch):
     """A tree the replay did not write to skips the restore, so a failed undo has nothing else to catch it."""
-    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+    from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import (
+        _apply_warm_patches,
+        _stamp_warm_patch_outcome,
+    )
     from hyperloom.orchestrator.phases import warm_replay_stack
 
     tree = _stock_sglang_tree(tmp_path / "sglang")
