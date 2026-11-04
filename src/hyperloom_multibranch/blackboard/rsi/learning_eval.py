@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether the learnings shown to a branch bore on what it did next: one session's retrieval, evaluated (MB2).
+"""Whether the learnings shown to a branch bore on what it did next: one session's retrieval, evaluated.
 
 Read beside the session's retrieval log (``learnings.jsonl``, :class:`learning_search.RetrievalLog`) and its blackboard,
 each learning of this session shown to a branch counts once, at its first showing, when a direction family
@@ -24,7 +24,7 @@ lessons, a learning of this session that says one of another session again, its 
 A lead a startup brief showed counts once too, at its first showing to a branch: *taken up* when a later test of the
 branch makes every change the lead names (each word of its change, as the Experience export summarizes a change), and
 *committed* when such a test committed. A lead that names no change is counted, not matched. Every share comes with its
-counts; what they mean for the retrieval and the briefs, vector search included, is MB2's call to make with them.
+counts; what they mean for the retrieval and the briefs, vector search included, is left to whoever reads them.
 """
 
 from __future__ import annotations

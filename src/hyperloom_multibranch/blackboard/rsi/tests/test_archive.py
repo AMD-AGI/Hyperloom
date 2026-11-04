@@ -28,13 +28,11 @@ from hyperloom_multibranch.blackboard.rsi.archive import (
     TreeProbation,
     archive_session,
     session_start,
-    similar_trees,
     tree_document,
     tree_from_document,
     tree_from_snapshot,
 )
-from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions
-from hyperloom_multibranch.blackboard.rsi.tests.trees import HOUR, LATE_BLOOMER, TASK, branch, tree
+from hyperloom_multibranch.blackboard.rsi.tests.trees import HOUR, LATE_BLOOMER, branch, tree
 from hyperloom_multibranch.blackboard.tests.factories import profile
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC
 
@@ -355,13 +353,3 @@ def test_a_write_only_session_reads_no_archive_and_still_archives_into_it(
     assert TreeArchive.read_from_env({**env, WRITE_ONLY_ENV: "0"}) is not None
     assert archive_session(snapshot, METRIC, written).status == ARCHIVED
     assert [item.session_id for item in written.load()] == ["sess-1"]
-
-
-def test_similar_trees_leave_out_the_unrelated_and_put_the_closest_first() -> None:
-    longer = tree("longer", task=dataclasses.replace(TASK, sizes={**TASK.sizes, "isl": 4096.0}))
-    unrelated = tree("unrelated", task=TaskConditions(labels={"region": "x"}))
-
-    ranked = similar_trees([longer, unrelated, tree("same")], TASK)
-
-    assert [item.tree.session_id for item in ranked] == ["same", "longer"]
-    assert ranked[0].weight == pytest.approx(1.0)

@@ -13,6 +13,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin, Linea
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeCommit
 from hyperloom_multibranch.blackboard.rsi.history import (
     DEFAULT_STALL_TESTS,
+    HORIZON_TESTS,
     MAX_POSITION,
     MAX_STALL_TESTS,
     OPENING_SECONDS,
@@ -96,7 +97,7 @@ def test_the_odds_within_a_horizon_multiply_each_tests_and_need_every_one_read()
 
     assert within(curve, 1) == pytest.approx(1 - 0.9**4)
     assert within(curve, 2) is None
-    assert within({MAX_POSITION: Odds(1.0, 10.0)}, MAX_POSITION + 3, tests=2) == pytest.approx(1 - 0.9**2)
+    assert within({MAX_POSITION: Odds(1.0, 10.0)}, MAX_POSITION + 3) == pytest.approx(1 - 0.9**HORIZON_TESTS)
 
 
 def test_the_stop_bar_is_the_first_stall_less_likely_to_commit_than_a_new_branch() -> None:
