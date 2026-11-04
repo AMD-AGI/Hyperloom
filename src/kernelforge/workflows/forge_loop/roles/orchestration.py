@@ -420,21 +420,19 @@ class OrchestrationAgent:
         if not analyses:
             raise ValueError("no specialist analysis is available for synthesis")
         payload = synthesis_payload(context, specialists, analyses)
-        result = await self._run_result(
-            context,
-            _Turn(
-                SYNTHESIS_SYSTEM_PROMPT,
-                json.dumps(payload, indent=2, sort_keys=True),
-                role="orchestration synthesis",
-            ),
-            usage=usage,
+        turn = _Turn(
+            SYNTHESIS_SYSTEM_PROMPT,
+            json.dumps(payload, indent=2, sort_keys=True),
+            role="orchestration synthesis",
         )
+        result = await self._run_result(context, turn, usage=usage)
         return SynthesizedPlan(
             text=self._validated_text(
                 result,
                 role="orchestration synthesis",
             ),
             session_id=str(result.session_id or "").strip(),
+            system_prompt=turn.system_prompt,
         )
 
     async def synthesize_lane_plan_results(
@@ -464,17 +462,14 @@ class OrchestrationAgent:
 
         async def _lane(index: int, on_response_started: Callable[[], None] | None = None) -> SynthesizedPlan | None:
             prompt, shared = prompts[index]
-            result = await self._run_result(
-                context,
-                _Turn(
-                    LANE_SYNTHESIS_SYSTEM_PROMPT,
-                    prompt,
-                    role=f"orchestration lane {index + 1} synthesis",
-                    shared_prompt_prefix=shared,
-                    on_response_started=on_response_started,
-                ),
-                usage=usage,
+            turn = _Turn(
+                LANE_SYNTHESIS_SYSTEM_PROMPT,
+                prompt,
+                role=f"orchestration lane {index + 1} synthesis",
+                shared_prompt_prefix=shared,
+                on_response_started=on_response_started,
             )
+            result = await self._run_result(context, turn, usage=usage)
             text = self._validated_text(
                 result,
                 role=f"orchestration lane {index + 1} synthesis",
@@ -485,6 +480,7 @@ class OrchestrationAgent:
             return SynthesizedPlan(
                 text=text,
                 session_id=str(result.session_id or "").strip(),
+                system_prompt=turn.system_prompt,
                 ground=grounds[index].ground,
                 joint=grounds[index].joint,
                 fallback=grounds[index].fallback,
@@ -800,7 +796,7 @@ class OrchestrationAgent:
             result = await self._resume_result(
                 context,
                 _Turn(
-                    REVISION_SYSTEM_PROMPT,
+                    draft.system_prompt,
                     "",
                     role="orchestration revision",
                     max_turns=PLAN_REVISION_MAX_TURNS,
