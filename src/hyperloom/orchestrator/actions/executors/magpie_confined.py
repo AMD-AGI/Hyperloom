@@ -84,7 +84,6 @@ def main() -> None:
     from Magpie.modes.benchmark import benchmarker
 
     confine_sweep(benchmarker, os.environ.get(SANDBOX_TAG, "").encode())
-    sys.argv[0] = "Magpie"
     runpy.run_module("Magpie", run_name="__main__", alter_sys=True)
 
 

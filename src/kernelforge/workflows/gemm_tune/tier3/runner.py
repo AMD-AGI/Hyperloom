@@ -75,14 +75,14 @@ class Tier3Target:
 class Retiming:
     """How the referee re-times a table's shapes, and how the winners become rows of that table.
 
-    ``write_table(judgements, demand_shapes, path)`` returns how many rows it wrote; without it nothing is deployable.
+    ``write_table(judgements, demand_shapes, path)`` returns how many rows it wrote.
     """
 
     make_baseline: Callable[[str], Callable[[], Any]]
     make_dispatch: Callable[[str], Callable[[dict], Callable[[], Any] | None]]
+    write_table: Callable[[list[Judgement], list[dict[str, Any]], Path], int]
     make_correctness: Callable[[str], Callable[[Callable[[], Any]], bool]] | None = None
     sync: Callable[[], Any] | None = None
-    write_table: Callable[[list[Judgement], list[dict[str, Any]], Path], int] | None = None
 
 
 def attempt_generated_tuner(
@@ -158,9 +158,6 @@ def attempt_generated_tuner(
 def _write_table(outcome: Tier3Outcome, retiming: Retiming, shapes: list[dict[str, Any]], path: Path) -> None:
     """Write the improved shapes as rows of the target table; only a written table makes the outcome ``ok``."""
     improved = f"{outcome.improved_shapes} of {len(outcome.judgements)} shape(s) improved"
-    if retiming.write_table is None:
-        outcome.reason = f"{improved}, but nothing here writes rows of {outcome.table}"
-        return
     try:
         written = retiming.write_table(outcome.judgements, shapes, path)
     except (OSError, ValueError) as exc:
