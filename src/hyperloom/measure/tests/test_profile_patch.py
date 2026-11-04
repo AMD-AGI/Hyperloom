@@ -187,13 +187,16 @@ def test_this_hosts_copy_takes_the_place_of_the_copy_the_point_was_rendered_with
         "/app/tmp/hyperloom-tracelens-1000/sglang-gc-ab/site",
         "/tool",
         "/x/hyperloom-tracelens/v/site",
+        "/opt/hyperloom-tracelens-tools/lib/site",
     ]
     config = {"benchmark": {**_PROFILED, "envs": {**_PROFILED["envs"], "PYTHONPATH": os.pathsep.join(rendered)}}}
 
     placed, rewritten = _placed(tmp_path, config)
 
     assert rewritten
-    assert placed["benchmark"]["envs"]["PYTHONPATH"] == os.pathsep.join(["/farm/site", str(site), "/tool"])
+    assert placed["benchmark"]["envs"]["PYTHONPATH"] == os.pathsep.join(
+        ["/farm/site", str(site), "/tool", "/opt/hyperloom-tracelens-tools/lib/site"]
+    ), "a directory whose name only starts like the copies' is not a copy"
     assert _placed(tmp_path, placed) == (placed, False), "a point that already names this host's copy is kept"
 
 
