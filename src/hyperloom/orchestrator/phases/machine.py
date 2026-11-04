@@ -211,10 +211,13 @@ class MachinePhase(CoordinatorCollaborator):
         state = self.shared_state
         await self._release_holds_no_task_will_settle()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
+        in_prelude = str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE
         next_phase = await self._next_phase(
-            optimize_enabled=self.optimize_enabled(),
-            enablement_in_flight=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
-            kernel_work_in_flight=await self._coord.phase_kernel.agent_in_flight(),
+            in_flight=_phase_state.WorkInFlight(
+                enablement=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
+                kernel=await self._coord.phase_kernel.agent_in_flight(),
+                prelude=in_prelude and await self._prelude_work_in_flight(),
+            ),
         )
         self._coord.dispatcher.admission_frozen = self._transition_pending(next_phase)
 

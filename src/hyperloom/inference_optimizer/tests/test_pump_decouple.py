@@ -208,6 +208,16 @@ async def test_an_unbooked_completion_holds_the_phase_transition(coord):
     assert coord.dispatcher.admission_frozen
 
 
+async def test_refresh_admission_freeze_uses_current_phase_machine_api(coord):
+    coord.dispatcher._completion_queue.append((SimpleNamespace(task_id="t", kind="specialist", params={}), object()))
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.baseline_tput = 1.0
+
+    await coord.phase_machine.refresh_admission_freeze()
+
+    assert coord.dispatcher.admission_frozen
+
+
 async def test_keep_booked_before_an_unbooked_roofline_does_not_enqueue_another(coord):
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
