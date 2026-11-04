@@ -237,13 +237,16 @@ def build_wheel(
     module_source: str,
     requires: str | None = None,
     tag: str = "py3-none-any",
+    requires_python: str | None = None,
 ) -> tuple[Path, str]:
     """A wheel of one module ``name`` tagged ``tag`` (pure Python unless told) and its SHA-256 (what ``--hash`` names).
 
-    ``requires`` is a ``Requires-Dist`` the wheel declares, one the lock does not pin.
+    ``requires`` is a ``Requires-Dist`` the wheel declares, one the lock does not pin; ``requires_python`` its
+    ``Requires-Python``.
     """
     dist_info = f"{name}-{version}.dist-info"
     declared = f"Requires-Dist: {requires}\n" if requires else ""
+    declared += f"Requires-Python: {requires_python}\n" if requires_python else ""
     files = {
         f"{name}.py": module_source,
         f"{dist_info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n{declared}",

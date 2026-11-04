@@ -8,10 +8,10 @@ that the sandbox mounts; :mod:`hyperloom.measure.runner.cache_build` fills it on
 start-up script (:mod:`hyperloom.measure.runner.bootstrap`) installs from it with no index. One commit's entry is::
 
     <cache>/<sha>/source.tar   the repository tree at that commit, the ``git archive`` the builder makes with fixed
-                               settings and none of its own attributes (the commit decides the bytes), runner.lock
-                               included
+                               settings and none of its own attributes (the commit decides the bytes), its runner
+                               locks included
     <cache>/<sha>/source/      that archive unpacked; the builder reads it, the sandbox never does
-    <cache>/<sha>/wheels/      one wheel per pin of ``requirements/runner.lock``
+    <cache>/<sha>/wheels/      one wheel per pin of the lock of the entry's Python (:func:`lock_file`)
     <cache>/<sha>/bootstrap.sh the start-up script (``BOOTSTRAP_SCRIPT``) of the builder that made the entry, mode 0755;
                                a template step runs it with ``sh``
     <cache>/<sha>/manifest     JSON, written last: the commit and its tree, the size and SHA-256 of ``source.tar``, the
@@ -30,10 +30,18 @@ The sandbox installs exactly the wheels the manifest lists, each pinned to the h
 an unfinished build, and nothing uses it. ``<cache>`` is the directory
 ``HYPERLOOM_RUNNER_CACHE`` names, on the builder's machine as well as inside the sandbox (the mount point may differ).
 
+One lock per Python. A pin has wheels for the Python versions its release supports, so no one set of pins installs on
+every interpreter a framework image ships (``numpy==2.2.6`` has no CPython 3.14 wheel, and the release that has one has
+none for 3.10). A Python version with a lock of its own has it as ``requirements/runner-cpXY.lock`` (``cp314`` for 3.14);
+every other version uses ``requirements/runner.lock``. The entry's lock is the one of the Python its manifest's
+``target`` names, read from the entry's own source (the builder's ``source/``, the sandbox's checked copy of
+``source.tar``), which the manifest pins, so the builder and the sandbox always pick the same file. The sandbox also
+refuses an entry whose wheels are for another Python than its own interpreter.
+
 This module is the script's checker as well: the start-up script embeds this file's text and runs it with the sandbox's
-own interpreter before it does anything else, so it uses nothing but the standard library and the Python of the
-framework image (3.10). That interpreter must have tarfile's extraction filters (Python 3.10.12, 3.11.4, 3.12 or newer):
-on an older one the check refuses every entry and says so (:func:`_filter_problems`).
+own interpreter before it does anything else, so it uses nothing but the standard library and runs on every Python a
+framework image has (3.10 to 3.14). That interpreter must have tarfile's extraction filters (Python 3.10.12, 3.11.4, 3.12
+or newer): on an older one the check refuses every entry and says so (:func:`_filter_problems`).
 """
 
 from __future__ import annotations
@@ -75,6 +83,7 @@ __all__ = [
     "check_entry",
     "file_sha256",
     "is_full_commit",
+    "lock_file",
     "manifest_from_json",
     "manifest_to_json",
     "parse_lock",
@@ -101,7 +110,9 @@ SOURCE_DIR = "source"
 LOCAL_SOURCE_DIR = "hl-source"
 LOCAL_WHEELS_DIR = "hl-wheels"
 WHEELS_DIR = "wheels"
+#: The lock of every Python version that has none of its own (see :func:`lock_file`).
 LOCK_FILE = "requirements/runner.lock"
+_VERSION_LOCK = "requirements/runner-cp{digits}.lock"
 _SCHEMA = 1
 _UTF8 = "utf-8"
 _SHOWN = 5
@@ -205,8 +216,28 @@ def _copy_hashed(path: Path, sink: BinaryIO) -> FileDigest:
     return FileDigest(size, digest.hexdigest())
 
 
-def parse_lock(text: str) -> list[LockPin]:
-    """The pins of a ``pip-compile --generate-hashes`` file.
+def lock_file(source: Path, python_version: str | None) -> str:
+    """The lock, as a path in the source tree ``source``, whose pins are the wheels of Python ``python_version``
+    (``"3.14"``, as a wheel target records it): ``requirements/runner-cpXY.lock`` when the tree has one for that
+    version, :data:`LOCK_FILE` otherwise and when no version is named."""
+    digits = (python_version or "").replace(".", "")
+    own = _VERSION_LOCK.format(digits=digits)
+    return own if digits.isdigit() and (source / own).is_file() else LOCK_FILE
+
+
+def _python_problems(manifest: Manifest, python_version: str) -> list[str]:
+    """Why the wheels of ``manifest`` are not for the interpreter ``python_version`` (empty when either is unnamed)."""
+    wanted = manifest.target.get("python_version")
+    if not python_version or not wanted or str(wanted).replace(".", "") == python_version.replace(".", ""):
+        return []
+    return [
+        f"the cache entry's wheels are for Python {wanted}, but this interpreter is Python {python_version}: "
+        "build the cache for this interpreter (HYPERLOOM_RUNNER_WHEEL_TARGET)"
+    ]
+
+
+def parse_lock(text: str, name: str = LOCK_FILE) -> list[LockPin]:
+    """The pins of a ``pip-compile --generate-hashes`` file; ``name`` is what an error calls it.
 
     Raises:
         CacheError: For a line that is neither a pin, one of its hashes, a comment nor blank.
@@ -221,7 +252,7 @@ def parse_lock(text: str) -> list[LockPin]:
         elif digest and entries:
             entries[-1][2].add(digest["digest"])
         else:
-            raise CacheError(f"{LOCK_FILE} line {number} is not a pin or a hash")
+            raise CacheError(f"{name} line {number} is not a pin or a hash")
     return [LockPin(name, version, frozenset(hashes)) for name, version, hashes in entries]
 
 
@@ -354,41 +385,49 @@ def _archive_problems(entry: Path, manifest: Manifest, verify_hash: bool) -> lis
     return []
 
 
-def _entry_pins(source: Path) -> list[LockPin]:
-    """The pins of the entry's lock in the source tree ``source``.
+def _entry_pins(source: Path, manifest: Manifest) -> list[LockPin]:
+    """The pins of the entry's lock, the one of the manifest's Python (:func:`lock_file`), in the source tree ``source``.
 
     Raises:
-        CacheError: When the tree has no lock, or it is not a lock.
+        CacheError: When the tree has no such lock, or it is not a lock.
     """
-    if not (source / LOCK_FILE).is_file():
-        raise CacheError(f"the source in {source} has no {LOCK_FILE}")
-    return parse_lock((source / LOCK_FILE).read_text(encoding=_UTF8))
+    name = lock_file(source, manifest.target.get("python_version"))
+    if not (source / name).is_file():
+        raise CacheError(f"the source in {source} has no {name}")
+    return parse_lock((source / name).read_text(encoding=_UTF8), name)
 
 
-def _entry_problems(entry: Path, manifest: Manifest, verify_hash: bool) -> list[str]:
+def _entry_problems(entry: Path, manifest: Manifest, verify_hash: bool, python_version: str) -> list[str]:
     source, wheels = entry / SOURCE_DIR, entry / WHEELS_DIR
     if not source.is_dir() or not wheels.is_dir():
         return [f"the cache entry {entry} lacks its {SOURCE_DIR} or {WHEELS_DIR} directory"]
-    pins = _entry_pins(source)
+    wrong_python = _python_problems(manifest, python_version)
+    if wrong_python:
+        return wrong_python
+    pins = _entry_pins(source, manifest)
     problems = _archive_problems(entry, manifest, verify_hash) + _source_problems(source, manifest)
     problems += _wheels_problems(wheels, manifest, pins, verify_hash)
     return problems + (_bootstrap_problems(entry, manifest) if verify_hash else [])
 
 
-def check_entry(entry: Path, sha: str, manifest_pin: str = "", verify_hash: bool = False) -> list[str]:
+def check_entry(
+    entry: Path, sha: str, manifest_pin: str = "", verify_hash: bool = False, python_version: str = ""
+) -> list[str]:
     """Every reason the cache entry directory ``entry`` is not a whole build of ``sha``, as it lies in the cache; empty
     when it is. This is the builder's check; the sandbox's is :func:`stage_entry`.
 
     Every wheel the lock pins must be there with its recorded size, ``source.tar`` must be there with its recorded size,
-    the source must be the tree the manifest recorded and the lock the one the wheels were chosen from. The content of
-    the wheels and of ``source.tar`` is not read unless ``verify_hash``, and ``bootstrap.sh`` is read only then: the
-    script that runs the sandbox's check cannot vouch for itself (see :mod:`hyperloom.measure.runner.bootstrap`).
+    the source must be the tree the manifest recorded and the lock (the one of the manifest's Python, :func:`lock_file`)
+    the one the wheels were chosen from. With ``python_version`` (``"3.14"``, the interpreter that is to install them),
+    wheels the manifest records for another Python are refused. The content of the wheels and of ``source.tar`` is not
+    read unless ``verify_hash``, and ``bootstrap.sh`` is read only then: the script that runs the sandbox's check cannot
+    vouch for itself (see :mod:`hyperloom.measure.runner.bootstrap`).
     """
     problems, manifest = _pinned_manifest(entry, sha, manifest_pin)
     if manifest is None:
         return problems
     try:
-        return _entry_problems(entry, manifest, verify_hash)
+        return _entry_problems(entry, manifest, verify_hash, python_version)
     except (CacheError, ValueError) as exc:
         return [str(exc)]
 
@@ -432,10 +471,10 @@ def _entry_dir_problems(root: Path, sha: str) -> list[str]:
     return []
 
 
-def check_cache(root: Path, sha: str, manifest_pin: str = "") -> list[str]:
-    """Every reason the cache below ``root`` has no whole entry of the commit ``sha``; empty when it has
-    (:func:`check_entry`)."""
-    return _entry_dir_problems(root, sha) or check_entry(root / sha, sha, manifest_pin)
+def check_cache(root: Path, sha: str, manifest_pin: str = "", python_version: str = "") -> list[str]:
+    """Every reason the cache below ``root`` has no whole entry of the commit ``sha``, for the interpreter
+    ``python_version`` when it is named; empty when it has (:func:`check_entry`)."""
+    return _entry_dir_problems(root, sha) or check_entry(root / sha, sha, manifest_pin, python_version=python_version)
 
 
 def _filter_problems() -> list[str]:
@@ -497,14 +536,14 @@ def _staged_wheels(wheels: Path, manifest: Manifest, destination: Path) -> list[
     return problems
 
 
-def _stage(entry: Path, manifest: Manifest, scratch: Path) -> list[str]:
+def _stage(entry: Path, manifest: Manifest, scratch: Path, python_version: str) -> list[str]:
     wheels, source = entry / WHEELS_DIR, scratch / LOCAL_SOURCE_DIR
     if not wheels.is_dir():
         return [f"the cache entry {entry} lacks its {WHEELS_DIR} directory"]
-    problems = _staged_source(entry, manifest, source)
+    problems = _python_problems(manifest, python_version) or _staged_source(entry, manifest, source)
     if problems:
         return problems
-    pins = _entry_pins(source)
+    pins = _entry_pins(source, manifest)
     problems = _wheels_problems(wheels, manifest, pins, verify_hash=False)
     problems = problems or _staged_wheels(wheels, manifest, scratch / LOCAL_WHEELS_DIR)
     if not problems:
@@ -520,11 +559,12 @@ def _remove(paths: Iterable[Path]) -> None:
             path.unlink(missing_ok=True)
 
 
-def stage_entry(root: Path, sha: str, scratch: Path, manifest_pin: str = "") -> list[str]:
+def stage_entry(root: Path, sha: str, scratch: Path, manifest_pin: str = "", python_version: str = "") -> list[str]:
     """Check the cache entry of ``sha`` below ``root`` on the sandbox's own disk, and stage what the runner runs from it
     below ``scratch``; every reason it cannot, empty when it did.
 
-    The manifest is read once (:func:`_pinned_manifest`); ``source.tar`` is read once and unpacked into
+    The manifest is read once (:func:`_pinned_manifest`) and its wheels must be for ``python_version`` when it is named
+    (the interpreter that is to install them); ``source.tar`` is read once and unpacked into
     :data:`LOCAL_SOURCE_DIR` only when those bytes are the archive the manifest records; the lock is read from that copy;
     every wheel the manifest lists is copied into :data:`LOCAL_WHEELS_DIR`, hashed as it is copied; and
     :data:`REQUIREMENTS_FILE` pins those wheels to the hashes of the manifest that was read. Nothing of the cache is read
@@ -539,7 +579,7 @@ def stage_entry(root: Path, sha: str, scratch: Path, manifest_pin: str = "") -> 
         if not problems:
             problems, manifest = _pinned_manifest(root / sha, sha, manifest_pin)
             if manifest is not None:
-                problems = _stage(root / sha, manifest, scratch)
+                problems = _stage(root / sha, manifest, scratch, python_version)
         staged = not problems
         return problems
     except (CacheError, ValueError, tarfile.TarError) as exc:
@@ -552,10 +592,10 @@ def stage_entry(root: Path, sha: str, scratch: Path, manifest_pin: str = "") -> 
 def _checked(root: str, sha: str, scratch: str) -> list[str]:
     """What is wrong with the cache: the sandbox's check, which also stages what the runner runs (:func:`stage_entry`),
     when ``scratch`` is given, else the check of the entry as it lies in the cache (:func:`check_cache`)."""
-    pin = os.environ.get(MANIFEST_PIN_ENV, "")
+    pin, running = os.environ.get(MANIFEST_PIN_ENV, ""), f"{sys.version_info[0]}.{sys.version_info[1]}"
     if scratch:
-        return stage_entry(Path(root), sha, Path(scratch), pin)
-    return check_cache(Path(root), sha, pin)
+        return stage_entry(Path(root), sha, Path(scratch), pin, running)
+    return check_cache(Path(root), sha, pin, running)
 
 
 def main(argv: Sequence[str]) -> int:

@@ -238,6 +238,23 @@ _AGENTX_MEASURED_BEGIN_MARKERS: tuple[str, ...] = ("(profiling) started",)
 _AGENTX_MEASURED_END_MARKERS: tuple[str, ...] = ("(profiling) complete",)
 _READY_PHASE = "ready"
 
+#: aiter's line as it starts building a JIT module (``[aiter] [pid=.. pname=..] start build [<module>] under ...``). It
+#: writes nothing more until the module is built, and a server whose first request after ready reaches a module it lacks
+#: builds it inside that request: a CK-tile GEMM took up to 1347 s with eight tests building at once, past the
+#: silence window. So a log whose last line is such a line is active, each build for at most as long as a module of its
+#: kind may take; a build that hangs goes silent from there.
+_AITER_BUILD_START = re.compile(r"\[aiter\] (?:\[[^\]]*\] )*start build (?:\[([A-Za-z0-9_.-]+)\])?")
+#: How long one quiet build counts as activity: ``MODULE_BUILD_LIMIT_SEC`` and ``CKTILE_MODULE_BUILD_LIMIT_SEC`` of
+#: ``hyperloom.measure.jit.modules``, which this layer does not import (a test holds them equal).
+_AITER_BUILD_LIMIT_SEC = 600.0
+_AITER_CKTILE_BUILD_LIMIT_SEC = 2700.0
+
+
+def _aiter_build_limit_sec(module: str) -> float:
+    """How long a quiet build of the aiter module ``module`` counts as the server's activity."""
+    return _AITER_CKTILE_BUILD_LIMIT_SEC if "cktile" in module else _AITER_BUILD_LIMIT_SEC
+
+
 # aiperf writes only this file: an AgentX benchmark directory has no ``benchmark_stdout.log`` / ``benchmark_stderr.log``
 # the way a synthetic one does, so the phase lines are unreachable unless it is scanned explicitly.
 _AGENTX_LOG_RELPATH: str = "aiperf_artifacts/logs/aiperf.log"
@@ -402,9 +419,10 @@ class _StreamCapture:
             pass  # a closed or broken mirror stream must not stop the capture
 
 
+_SERVER_LOG_NAME: str = "server.log"
 # Glob (relative to the watched path's directory) for nested per-run server logs Magpie writes when its wrapper
 # ignores ``$SERVER_LOG`` and emits to a ``benchmark_<framework>_<timestamp>/server.log`` subdir instead.
-_NESTED_SERVER_LOG_GLOB: str = "benchmark_*/server.log"
+_NESTED_SERVER_LOG_GLOB: str = f"benchmark_*/{_SERVER_LOG_NAME}"
 
 
 def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
@@ -623,6 +641,8 @@ class _LogScan(NamedTuple):
     saw_warmup_begin: bool = False
     saw_measured_begin: bool = False
     saw_measured_end: bool = False
+    #: The last whole line a server log gained in this pass, ``None`` when none gained one.
+    server_line: str | None = None
 
     def including(self, scan: "_IncrementScan", path: str, previous_offset: int) -> "_LogScan":
         """What this pass has found once one log's increment is folded in."""
@@ -636,6 +656,7 @@ class _LogScan(NamedTuple):
             saw_warmup_begin=self.saw_warmup_begin or scan.saw_warmup_begin,
             saw_measured_begin=self.saw_measured_begin or scan.saw_measured_begin,
             saw_measured_end=self.saw_measured_end or scan.saw_measured_end,
+            server_line=self.server_line,
         )
 
 
@@ -651,6 +672,9 @@ class _IncrementScan(NamedTuple):
     residual: str = ""
     active: bool = True
     saw_measured_end: bool = False
+    #: The last whole line with text that the increment holds, other than a health probe's access line (a monitor's poll
+    #: is answered while the engine builds), ``None`` when it holds none.
+    last_line: str | None = None
 
 
 #: Access lines for the endpoints monitors poll on their own tick. An HTTP front end whose engine died keeps answering
@@ -722,6 +746,8 @@ class _LogCursor:
             self.offsets[path] = scan.offset
             self.residuals[path] = scan.residual
             found = found.including(scan, path, prev)
+            if scan.last_line is not None and (path == server_log_path or Path(path).name == _SERVER_LOG_NAME):
+                found = found._replace(server_line=scan.last_line)
         return found
 
 
@@ -759,7 +785,8 @@ def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") 
     saw_warmup_begin = any(marker in chunk for marker in _AGENTX_WARMUP_BEGIN_MARKERS)
     saw_measured_begin = any(marker in chunk for marker in _AGENTX_MEASURED_BEGIN_MARKERS)
     complete = [line for line in chunk[: tail_at + 1].splitlines() if line.strip()] if tail_at >= 0 else []
-    active = not complete or any(not _HEALTH_PROBE_LINE.search(line) for line in complete)
+    spoken = [line for line in complete if not _HEALTH_PROBE_LINE.search(line)]
+    active = not complete or bool(spoken)
     return _IncrementScan(
         size,
         saw_ready,
@@ -770,6 +797,7 @@ def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") 
         residual=next_residual,
         active=active,
         saw_measured_end=any(marker in chunk for marker in _AGENTX_MEASURED_END_MARKERS),
+        last_line=spoken[-1] if spoken else None,
     )
 
 
@@ -1045,6 +1073,9 @@ class _RoundActivity:
     cursor: _LogCursor
     last_activity_at: float
     ready: bool = False
+    #: The aiter module the server log's last line says is being built, and since when; ``None`` while none is.
+    building: str | None = None
+    build_since: float = 0.0
 
     def note_log_progress(
         self, server_log_path: str | None, recorders: _RecorderFanout, capture: _StreamCapture, now: float
@@ -1058,11 +1089,24 @@ class _RoundActivity:
                 recorders.note_phase(_READY_PHASE, now)
             if scan.grew:
                 self.last_activity_at = now
+            if scan.server_line is not None:
+                self._note_build(scan.server_line, now)
             recorders.note_client_phases(scan, now)
             if scan.saw_progress or scan.child_spoke:
                 capture.note_output()
+        if self.building is not None:
+            until = self.build_since + _aiter_build_limit_sec(self.building)
+            self.last_activity_at = max(self.last_activity_at, min(now, until))
         if capture.last_activity_at is not None:
             self.last_activity_at = max(self.last_activity_at, capture.last_activity_at)
+
+    def _note_build(self, line: str, now: float) -> None:
+        """Follow the build the server log's newest line says aiter started, or that none is under way."""
+        found = _AITER_BUILD_START.search(line)
+        module = None if found is None else (found.group(1) or "")
+        if module is not None and module != self.building:
+            self.build_since = now
+        self.building = module
 
     def reusing_warm_server(self, server_log_path: str | None, elapsed: float) -> bool:
         """Whether a round found no log baseline and has since run long enough to be reusing a warm server."""

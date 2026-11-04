@@ -1,0 +1,350 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""A test whose server does not report ready within its boot limit ends there, as the candidate's failure.
+
+The rounds run a real child under the launcher's own watchdog (``run_with_session_kill``), so the cancellation the
+boot guard raises, the reaping and the ready stamp are the ones a sandbox sees; only ``run_grid`` is a stand-in.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import importlib
+import os
+import re
+import sys
+import time
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+from hyperloom.measure import boot_watch, local
+from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec, boot_seconds
+from hyperloom.measure.local import LocalMeasurementBackend
+from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
+from hyperloom.measure.socket import TestCall
+from hyperloom.orchestrator.actions.executors import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundWatch,
+    VariantResult,
+    run_with_session_kill,
+)
+from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
+
+#: A server that tunes kernels for as long as it is allowed to and never says it is ready.
+TUNING_SERVER = (
+    "import sys, time\n"
+    "log = open(sys.argv[1], 'a', buffering=1)\n"
+    "log.write('[aiter] TunableOp: tuning gemm 17/4096 (M=64, N=5120, K=5120)\\n')\n"
+    "time.sleep(300)\n"
+)
+#: A server that is ready after a moment and answers for a while.
+READY_SERVER = (
+    "import sys, time\n"
+    "log = open(sys.argv[1], 'a', buffering=1)\n"
+    "time.sleep(0.3)\n"
+    "log.write('INFO:     Application startup complete.\\n')\n"
+    "time.sleep(2.5)\n"
+)
+
+
+def _point(directory: Path, framework: str = "sglang", **benchmark: Any) -> Path:
+    path = directory / "point.yaml"
+    body = {"framework": framework, "envs": {"TP": 1, "CONC": 4, "RUN_EVAL": "false"}, **benchmark}
+    path.write_text(yaml.safe_dump({"benchmark": body}), encoding="utf-8")
+    return path
+
+
+def _call(tmp_path: Path, point: Path, timeout_sec: int = 4) -> TestCall:
+    return TestCall(
+        points=(point,),
+        output_dir=tmp_path / "out",
+        timeout_sec=timeout_sec,
+        cwd=str(tmp_path),
+        magpie_python="",
+        task_id="t-1",
+    )
+
+
+class _ServerGrid:
+    """``run_grid`` with a real child process in place of Magpie and the server it starts."""
+
+    def __init__(self, script: str) -> None:
+        self.script = script
+        self.rounds: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> list[VariantResult]:
+        self.rounds.append(kwargs)
+        name = kwargs["grid"][0].name
+        slot = Path(kwargs["output_root"]) / f"variant_00_{name}"
+        slot.mkdir(parents=True, exist_ok=True)
+        log = slot / "server.log"
+        proc = await asyncio.to_thread(
+            run_with_session_kill,
+            [sys.executable, "-c", self.script, str(log)],
+            watch=RoundWatch(timeout=30, server_log_path=str(log)),
+        )
+        stopped = proc.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE
+        return [
+            VariantResult(
+                name=name,
+                extra_server_args="",
+                extra_envs={},
+                status="skipped" if stopped else "failed" if proc.returncode else "succeeded",
+                returncode=proc.returncode,
+                workspace=str(slot),
+                server_log_path=str(log),
+                error_class=ORCHESTRATOR_CANCELLED_CLASS if stopped else "",
+                error="the round was reaped" if stopped else None,
+            )
+        ]
+
+
+@pytest.fixture(autouse=True)
+def magpie_backend(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
+
+
+def _run(monkeypatch, tmp_path: Path, script: str, **point: Any):
+    grid = _ServerGrid(script)
+    monkeypatch.setattr(local, "run_grid", grid)
+    started = time.monotonic()
+    outcome = LocalMeasurementBackend().run_test(_call(tmp_path, _point(tmp_path, **point)))
+    return outcome, time.monotonic() - started, grid
+
+
+def test_a_server_that_never_gets_ready_ends_the_test_at_the_boot_limit_as_the_candidates_failure(
+    monkeypatch, tmp_path
+) -> None:
+    outcome, elapsed, _ = _run(monkeypatch, tmp_path, TUNING_SERVER)
+
+    assert outcome.returncode == SERVER_BOOT_TIMEOUT_RC
+    assert outcome.failure_class == "candidate"
+    assert outcome.failure_reason is not None
+    assert outcome.failure_reason.startswith("server_boot_timeout: the server was not ready within 2s of the 4s")
+    assert "TunableOp: tuning gemm 17/4096" in outcome.failure_reason, "the reason shows where the log stopped"
+    assert "module builds" not in outcome.failure_reason, "no build time was left out of the 2 s"
+    assert [r.returncode for r in outcome.rounds] == [SERVER_BOOT_TIMEOUT_RC]
+    assert 2 <= elapsed < 20, "the round ended at the limit, not at its 60 s cap"
+
+
+def test_a_server_that_gets_ready_in_time_is_left_alone(monkeypatch, tmp_path) -> None:
+    outcome, _, _ = _run(monkeypatch, tmp_path, READY_SERVER)
+
+    assert (outcome.returncode, outcome.failure_class, outcome.failure_reason) == (0, None, None)
+
+
+def test_a_stop_by_the_session_budget_is_not_taken_for_a_boot_timeout(monkeypatch, tmp_path) -> None:
+    async def out_of_time(**kwargs: Any) -> list[VariantResult]:
+        stopped = {"status": "skipped", "returncode": None, "error_class": "session_time_exhausted"}
+        return [VariantResult(name=kwargs["grid"][0].name, extra_server_args="", extra_envs={}, **stopped)]
+
+    monkeypatch.setattr(local, "run_grid", out_of_time)
+    monkeypatch.setattr(boot_watch.BootGuard, "expired_after", property(lambda self: 2.0))
+
+    outcome = LocalMeasurementBackend().run_test(_call(tmp_path, _point(tmp_path)))
+
+    assert outcome.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
+    assert (outcome.failure_class, outcome.failure_reason) == (None, "session_time_exhausted")
+
+
+def _record_watches(monkeypatch) -> list[float]:
+    watched: list[float] = []
+
+    @contextlib.contextmanager
+    def record(self, limit_sec: float) -> Iterator[None]:
+        watched.append(limit_sec)
+        yield
+
+    monkeypatch.setattr(boot_watch.BootGuard, "watching", record)
+    return watched
+
+
+def test_only_a_round_that_boots_a_server_is_watched(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(local, "run_grid", _ServerGrid(READY_SERVER))
+    watched = _record_watches(monkeypatch)
+
+    async def boot_then_reuse(run: local._Run) -> None:
+        run.add(0, await local._grid(run, 0, "boot"))
+        run.add(0, await local._grid(run, 0, "reuse", server_already_ready=True))
+
+    monkeypatch.setattr(local, "_runner_of", lambda call: boot_then_reuse)
+    LocalMeasurementBackend().run_test(_call(tmp_path, _point(tmp_path)))
+
+    assert watched == [2.0]
+
+
+def test_the_limit_is_a_share_of_what_the_point_allows_and_never_of_more_than_the_round_may_take() -> None:
+    assert boot_limit_sec({"framework": "sglang"}, 3600) == BOOT_SHARE * 3600 == 1800
+    point_allows = {"framework": "vllm", "server_lifecycle": {"server_ready_timeout_s": 2700}}
+    assert boot_limit_sec(point_allows, 3600) == BOOT_SHARE * 2700
+    assert boot_limit_sec({**point_allows, "server_lifecycle": {"server_ready_timeout_s": 7200}}, 3600) == 1800
+
+
+@pytest.mark.parametrize("framework", ["custom", "xdit", ""])
+def test_a_round_whose_server_never_stamps_a_ready_banner_has_no_limit(framework: str) -> None:
+    assert boot_limit_sec({"framework": framework}, 3600) is None
+
+
+def test_the_literals_the_guard_copies_equal_their_definitions() -> None:
+    kill = importlib.import_module("hyperloom.orchestrator.actions.executors._subprocess_kill")
+    engine = importlib.import_module("hyperloom.orchestrator.actions.executors.bypass_engine")
+
+    assert boot_watch._READY_STAMP == kill._READY_STAMP_NAME
+    assert set(boot_watch._SERVER_FRAMEWORKS) == set(engine.SERVER_FRAMEWORKS)
+
+
+def _stamp(directory: Path, text: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "server_ready_at").write_text(text, encoding="utf-8")
+
+
+def test_the_boot_of_a_test_is_the_longest_boot_its_round_stamps_record(tmp_path: Path) -> None:
+    _stamp(tmp_path / "variant_00_warmup", "1700000000.000 80.500\n")  # the stamps of a graded test
+    _stamp(tmp_path / "variant_00_test", "1700000100.000 0.000\n")  # its measured round found the server ready
+
+    assert boot_seconds(tmp_path) == 80.5
+
+
+def test_a_test_whose_rounds_all_found_a_server_ready_booted_none(tmp_path: Path) -> None:
+    _stamp(tmp_path / "variant_00_test", "1700000100.000 0.000\n")
+
+    assert boot_seconds(tmp_path) is None
+
+
+def test_a_test_with_no_stamp_or_a_stamp_that_cannot_be_read_has_no_boot(tmp_path: Path) -> None:
+    assert boot_seconds(tmp_path) is None
+    assert boot_seconds(tmp_path / "never_landed") is None
+    for text in ("", "1700000000.000\n", "1700000000.000 soon\n", "1700000000.000 nan\n", "1700000000.000 inf\n"):
+        _stamp(tmp_path / "bad", text)
+        assert boot_seconds(tmp_path) is None, text
+
+
+#: A server whose boot is an aiter JIT build longer than the boot limit, after which it is ready: aiter prints nothing
+#: between ``start build`` and ``finish build`` (a CK-tile GEMM can take up to 1347 s).
+BUILDING_SERVER = (
+    "import sys, time\n"
+    "log = open(sys.argv[1], 'a', buffering=1)\n"
+    "log.write('[aiter] [pid=7 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /j/build\\n')\n"
+    "time.sleep(3.5)\n"
+    "log.write('[aiter] finish build [module_gemm_a8w8_bpreshuffle_cktile], cost 3.5s\\n')\n"
+    "log.write('INFO:     Application startup complete.\\n')\n"
+    "time.sleep(2.5)\n"
+)
+#: A server whose aiter build never finishes.
+HUNG_BUILD_SERVER = (
+    "import sys, time\n"
+    "log = open(sys.argv[1], 'a', buffering=1)\n"
+    "log.write('[aiter] [pid=7 pname=Process-1] start build [module_rmsnorm] under /j/build\\n')\n"
+    "time.sleep(300)\n"
+)
+
+
+def test_a_server_building_an_aiter_module_past_the_boot_limit_is_not_ended_while_the_build_has_time(
+    monkeypatch, tmp_path
+) -> None:
+    """The boot limit is 2 s and the build takes 3.5 s: the build is progress, not a boot that hangs."""
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: 30)
+
+    outcome, elapsed, _ = _run(monkeypatch, tmp_path, BUILDING_SERVER)
+
+    assert (outcome.returncode, outcome.failure_class, outcome.failure_reason) == (0, None, None)
+    assert elapsed >= 3.5
+
+
+def test_a_build_that_hangs_ends_the_boot_once_its_module_has_had_its_time(monkeypatch, tmp_path) -> None:
+    allowed: list[str] = []
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: allowed.append(module) or 1)
+
+    outcome, elapsed, _ = _run(monkeypatch, tmp_path, HUNG_BUILD_SERVER)
+
+    assert outcome.returncode == SERVER_BOOT_TIMEOUT_RC and outcome.failure_class == "candidate"
+    assert set(allowed) == {"module_rmsnorm"}, "the module the log names is the one whose time is given"
+    assert 3 <= elapsed < 20, "the 2 s limit and the 1 s the build was given, not the round's cap"
+    waited = re.fullmatch(
+        r"server_boot_timeout: the server was not ready within 2s plus 1s of aiter module builds \((\d+)s in all\) of the 4s a"
+        r" round may take; its log ends: .*start build \[module_rmsnorm\].*",
+        outcome.failure_reason or "",
+    )
+    assert waited is not None, outcome.failure_reason
+    assert 3 <= int(waited.group(1)) <= 5, "the 2 s of boot, the 1 s of build, and the seconds the guard took to see it"
+
+
+def test_the_time_a_module_builds_is_excused_up_to_what_a_module_of_its_kind_may_take(monkeypatch) -> None:
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: 100 if "cktile" in module else 10)
+    clock = boot_watch.BuildTime(0.0)
+
+    for now, building in [(5, None), (10, "module_x"), (25, "module_x"), (30, None), (40, "module_y_cktile")]:
+        clock.observe(float(now), building)
+
+    assert clock.excused == 10 + 10, "module_x for its 10 s, the CK-tile one for its first 10; none while no build is"
+    clock.observe(150.0, "module_y_cktile")
+    assert clock.excused == 10 + 100, "the CK-tile build has had its 100 s; the 20 s past them count"
+
+
+def test_a_second_build_is_excused_for_its_own_time_from_when_it_is_first_seen(monkeypatch) -> None:
+    """The next module's build follows the previous one's with no reading between that says none was under way."""
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: 10)
+    clock = boot_watch.BuildTime(0.0)
+
+    for now, building in [(5, "module_a"), (9, "module_b"), (14, "module_b"), (16, "module_b"), (30, "module_b")]:
+        clock.observe(float(now), building)
+
+    assert clock.excused == 5 + 10, (
+        "module_a's first 5 s, then module_b's 10 s from the reading before it was first seen"
+    )
+
+
+def test_a_module_built_again_after_a_reading_that_says_none_is_under_way_has_its_time_again(monkeypatch) -> None:
+    monkeypatch.setattr(boot_watch, "module_build_limit_sec", lambda module: 10)
+    clock = boot_watch.BuildTime(0.0)
+
+    for now, building in [(5, "module_a"), (8, None), (12, "module_a"), (30, "module_a")]:
+        clock.observe(float(now), building)
+
+    assert clock.excused == 5 + 10, "the 5 s before the gap, then a second build's 10 s from the reading that began it"
+
+
+@pytest.mark.parametrize(
+    ("line", "module"),
+    [
+        (
+            "[aiter] [pid=7 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /x",
+            "module_gemm_a8w8_bpreshuffle_cktile",
+        ),
+        ("\x1b[33m[aiter] start build [module_rmsnorm] under /x\x1b[0m", "module_rmsnorm"),
+        ("[aiter] start build /x/build/libmha_fwd", ""),
+        ("[aiter] finish build [module_rmsnorm], cost 12.0s", None),
+        ("[aiter] import [module_rmsnorm] under /x", None),
+        ("INFO: loading weights", None),
+    ],
+)
+def test_the_module_a_build_line_names(line: str, module: str | None) -> None:
+    assert boot_watch.building_module(line) == module
+
+
+def test_the_guard_reads_the_last_line_of_the_newest_server_log(tmp_path: Path) -> None:
+    old, new = tmp_path / "variant_00_a" / "server.log", tmp_path / "variant_00_b" / "server.log"
+    for path, text in [
+        (old, "[aiter] start build [module_old] under /x\n"),
+        (new, "[aiter] start build [module_new]\n\n"),
+    ]:
+        path.parent.mkdir(parents=True)
+        path.write_text(text, encoding="utf-8")
+    newer = old.stat().st_mtime + 10
+    os.utime(new, (newer, newer))
+    guard = boot_watch.BootGuard(tmp_path, scope=None)  # type: ignore[arg-type]
+    started = old.stat().st_mtime - 1
+
+    assert guard._building(started) == "module_new"
+    assert guard._building(newer + 1) is None, "a log no round of this boot has written is an earlier round's"
+    new.write_text("[aiter] start build [module_new]\nINFO: capturing cuda graphs\n", encoding="utf-8")
+    os.utime(new, (newer, newer))
+    assert guard._building(started) is None
+    assert boot_watch.BootGuard(tmp_path / "missing", scope=None)._building(started) is None  # type: ignore[arg-type]

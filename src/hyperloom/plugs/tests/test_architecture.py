@@ -26,6 +26,10 @@ _HOSTED = (
     "hyperloom.measure.jit.publish",
     "hyperloom.measure.sandboxes",
     "hyperloom.measure.consistency",
+    "hyperloom.measure.consistency_resume",
+    "hyperloom.measure.local",
+    "hyperloom.measure.local_templates",
+    "hyperloom.measure.ruppell_stage",
     "hyperloom.measure.runner",
     "hyperloom_multibranch",
 )

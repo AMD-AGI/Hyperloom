@@ -48,11 +48,23 @@ When the template sets ``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``, only the entr
 accepted: the host takes the value from the builder's result and so binds the sandbox to the build it made. Without it the
 manifest vouches only for the entry it sits in, and anyone who can write the cache can write a manifest.
 
-What holds, for operators. After step 1 the runner and pip read nothing from the cache: the runner's code, every module
-it imports later included, comes from the copy unpacked on the sandbox's disk from bytes that matched the manifest, and
-pip installs the copies of the wheels that matched it. A file of the cache that changes after the check (in ``source/``,
-``source.tar``, a wheel or the manifest) never reaches the runner or pip, so for code and wheels it no longer matters who
-else can write the cache once the check has run. What that does not cover:
+What holds, for operators. After step 1 nothing the runner or pip runs comes from the cache unchecked: the runner's code,
+every module it imports later included, comes from the copy unpacked on the sandbox's disk from bytes that matched the
+manifest, and pip installs the copies of the wheels that matched it. A file of the entry that changes after the check (in
+``source/``, ``source.tar``, a wheel or the manifest) never reaches the runner or pip, so for the runner's code and
+wheels it no longer matters who else can write the cache once the check has run. Later in a test the runner reads two
+more things from the cache:
+
+- The ruppell tree (``<cache>/tools/ruppell-<commit>/source``, :mod:`hyperloom.measure.ruppell`), the one other piece of
+  code, which a profile test builds and runs in the measured server. The test copies the tree into its own directory
+  first and checks the copy against :data:`~hyperloom.measure.ruppell.RUPPELL_TREE_SHA256`, so what is built is the
+  pinned tree whatever the cache holds before, during or after the copy.
+- The prompts of an evalset (``<cache>/evalsets/<key>``, :mod:`hyperloom.measure.short_prompts.staging`), data and
+  never code. The check reads the prompts file the entry's manifest names and compares it with the SHA-256 the plan
+  names; the test then loads ``data/prompts.jsonl`` from the cache again. So whoever can write the cache can still
+  change the prompts a test sends.
+
+What that does not cover:
 
 - The check runs inside the script, so it vouches for the entry only when the script and the manifest it reads are the
   builder's. They are, whoever can write the cache, when the template pins the manifest and the script is the

@@ -5,13 +5,17 @@
 
 from __future__ import annotations
 
+import ast
 import csv
 import hashlib
 import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -456,6 +460,108 @@ AITER_ENV_TO_TUNED_FILE: dict[str, str] = {
     "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm",
 }
 
+#: The ``(gfx, cu_num)`` pairs aiter compiles a tuned table's rows for. Its module generators keep only the rows of these
+#: targets (``build_tune_dict`` over ``build_targets.filter_tune_df``, ``aiter/jit/utils``), so a row tuned for another
+#: GPU is in no module built for this one, and its absence says nothing about the module.
+BuildTargets = frozenset[tuple[str, int]]
+_BUILD_TARGETS_FILE = ("jit", "utils", "build_targets.py")
+_DEFAULT_CU_NUMS = "GFX_CU_NUM_MAP"
+_ROCMINFO_FALLBACK = "/opt/rocm/bin/rocminfo"
+_ROCMINFO_TIMEOUT_SEC = 60
+_AGENT_HEADER = re.compile(r"Agent\s*\d+")
+_GPU_AGENT = re.compile(r"Device Type:\s*GPU")
+_AGENT_GFX = re.compile(r"^\s*Name:\s*(gfx[0-9a-z]+)\s*$", re.MULTILINE)
+_AGENT_CUS = re.compile(r"Compute Unit\s*:\s*(\d+)")
+
+
+def aiter_build_targets(package_root: Path, environ: Mapping[str, str]) -> BuildTargets | None:
+    """The targets a server's aiter compiles the tuned tables' rows for, as its ``get_build_targets`` resolves them.
+
+    That is each architecture ``GPU_ARCHS`` names, with ``CU_NUM`` or the CU count the image's
+    ``build_targets.GFX_CU_NUM_MAP`` gives it; or, when ``GPU_ARCHS`` is unset or ``native``, the card's architecture and
+    CU count as ``rocminfo`` reports them (aiter reads the same tool), ``CU_NUM`` overriding the count. ``None`` when
+    that cannot be told -- a named architecture with no count, no ``rocminfo``, cards that differ -- and every row counts.
+    """
+    archs = str(environ.get("GPU_ARCHS") or "").strip()
+    cu_num = _positive_int(environ.get("CU_NUM"))
+    if archs and archs.lower() != "native":
+        defaults = _default_cu_nums(package_root)
+        targets: set[tuple[str, int]] = set()
+        for gfx in [part.strip().lower() for part in archs.split(";") if part.strip()]:
+            count = cu_num or defaults.get(gfx)
+            if count is None:
+                return None
+            targets.add((gfx, count))
+        return frozenset(targets) or None
+    card = card_target()
+    return None if card is None else frozenset({(card[0], cu_num or card[1])})
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        number = int(str(value).strip())
+    except ValueError:
+        return None
+    return number if number > 0 else None
+
+
+def _default_cu_nums(package_root: Path) -> dict[str, int]:
+    """The image's ``GFX_CU_NUM_MAP``, read as a literal and never imported; empty when it cannot be read."""
+    try:
+        tree = ast.parse(package_root.joinpath(*_BUILD_TARGETS_FILE).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == _DEFAULT_CU_NUMS for t in node.targets
+        ):
+            try:
+                value = ast.literal_eval(node.value)
+                return {str(k).lower(): int(v) for k, v in value.items()} if isinstance(value, dict) else {}
+            except (ValueError, TypeError, SyntaxError):
+                return {}
+    return {}
+
+
+#: The card :func:`card_target` read, once it was read: a card does not change under a process, a failure to read it can.
+_CARD: list[tuple[str, int]] = []
+
+
+def card_target() -> tuple[str, int] | None:
+    """This card's ``(gfx, compute units)`` as ``rocminfo`` reports them, what a server's aiter builds for when neither
+    ``GPU_ARCHS`` nor ``CU_NUM`` names another target; ``None`` when it cannot be read (and read again next time)."""
+    if not _CARD:
+        card = _read_card()
+        if card is None:
+            return None
+        _CARD.append(card)
+    return _CARD[0]
+
+
+def _read_card() -> tuple[str, int] | None:
+    """The ``(gfx, compute units)`` every GPU agent ``rocminfo`` lists shares; ``None`` when they differ or none is read."""
+    tool = shutil.which("rocminfo") or (_ROCMINFO_FALLBACK if os.path.exists(_ROCMINFO_FALLBACK) else None)
+    if tool is None:
+        return None
+    try:
+        text = subprocess.run([tool], capture_output=True, text=True, timeout=_ROCMINFO_TIMEOUT_SEC, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found: set[tuple[str, int]] = set()
+    for block in _AGENT_HEADER.split(text or ""):
+        if not _GPU_AGENT.search(block):
+            continue
+        gfx, cus = _AGENT_GFX.search(block), _AGENT_CUS.search(block)
+        if gfx is None or cus is None:
+            return None
+        found.add((gfx.group(1).lower(), int(cus.group(1))))
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def target_names(targets: BuildTargets | None) -> list[str]:
+    """``targets`` as ``<gfx>/<cu_num>`` words, sorted; empty when they are not known."""
+    return sorted(f"{gfx}/{cu_num}" for gfx, cu_num in targets or ())
+
 
 def is_aiter_jit_registry_mismatch(*texts: str) -> bool:
     """True when logs show a tuned CSV kernel name missing from the compiled .so."""
@@ -514,8 +620,21 @@ def serving_module_for_kernel(kernel_name: str, libtype: str, table_modules: tup
     return None
 
 
-def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
-    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so``.
+def _compiled_for(row: dict[str, Any], targets: BuildTargets | None) -> bool:
+    """Whether aiter compiles a table row's kernel for ``targets``. A row that names no gfx or no CU count is kept (aiter
+    fills them in from each other or from the card), as is every row when the targets are not known."""
+    gfx, cu_num = (str(row.get(column) or "").strip() for column in ("gfx", "cu_num"))
+    if targets is None or not gfx or not cu_num:
+        return True
+    try:
+        return (gfx.lower(), int(float(cu_num))) in targets
+    except ValueError:
+        return True
+
+
+def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> list[tuple[str, str]]:
+    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so``, those aiter compiles for
+    ``targets`` when they are given.
 
     The tables this reads ship with aiter, so their encoding and field sizes are not
     ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
@@ -533,22 +652,26 @@ def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
                     continue
                 if not libtype and name.startswith("_ZN"):
                     continue
-                rows.append((name, libtype))
+                if _compiled_for(row, targets):
+                    rows.append((name, libtype))
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         log.warning("aiter_jit: cannot read tuned CSV %s (%s); treating it as covered", csv_path, exc)
         return []
     return rows
 
 
-def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path: Path) -> bool:
-    """True when every JIT ``kernelName`` in the CSV appears in its serving .so.
+def serving_modules_cover_csv(
+    jit_dir: Path, modules: tuple[str, ...], csv_path: Path, targets: BuildTargets | None = None
+) -> bool:
+    """True when every JIT ``kernelName`` in the CSV that aiter compiles for ``targets`` appears in its serving .so.
 
     ``libtype=asm`` (and other non-JIT backends) names are not linked into
-    ``module_*.so``. A name is looked up in the module of ``modules`` its ``libtype``
-    names, then in the one its prefix implies, falling back to ``modules``. Missing .so files mean the next start
-    will compile from the current CSV, so that case is treated as covered.
+    ``module_*.so``, and a row tuned for another GPU than ``targets`` is in no module built for these
+    (:func:`aiter_build_targets`; every row counts when they are ``None``). A name is looked up in the module of
+    ``modules`` its ``libtype`` names, then in the one its prefix implies, falling back to ``modules``. Missing .so
+    files mean the next start will compile from the current CSV, so that case is treated as covered.
     """
-    rows = csv_jit_kernel_rows(csv_path)
+    rows = csv_jit_kernel_rows(csv_path, targets)
     if not rows:
         return True
     blobs: dict[str, bytes | None] = {}
@@ -588,6 +711,7 @@ def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path:
 #: (``hyperloom.measure.runner.native.prewarm``): ``{"schema", "modules": [{"name", "sha256", "tables_sha256", ...}]}``.
 AITER_PREWARM_MANIFEST = "hyperloom-prewarm.json"
 _PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
+_MODULE_CONFIG = "optCompilerConfig.json"
 _HASH_CHUNK_BYTES = 1024 * 1024
 
 
@@ -608,14 +732,18 @@ def _tables_sha256(configs_dir: Path) -> str:
     return digest.hexdigest()
 
 
-def image_own_modules(jit_dir: Path, configs_dir: Path, envs: dict[str, str] | None) -> frozenset[str]:
+def image_own_modules(
+    jit_dir: Path, configs_dir: Path, envs: dict[str, str] | None, targets: BuildTargets | None
+) -> frozenset[str]:
     """Serving modules the prewarm built from the image's own tree and tables that are still what it installed.
 
-    A module counts when the prewarm manifest lists it with the sha256 its ``.so`` has now and with the
-    tables ``configs_dir`` holds now, and this round leaves its ``AITER_CONFIG_*`` unset: it is then the
-    module aiter would build at the first call, so moving it aside only makes the next start compile it
-    again, past sglang's watchdog. A module of a variable the round sets reads another table and is not
-    the image's own for this round.
+    A module counts when the prewarm manifest lists it with the sha256 its ``.so`` has now, with the
+    tables ``configs_dir`` holds now and with the ``gfx`` and ``cu_num`` of the one target the servers build
+    for (``targets``, :func:`aiter_build_targets`), and this round leaves its ``AITER_CONFIG_*`` unset: it is
+    then the module aiter would build at the first call, so moving it aside only makes the next start compile
+    it again, past sglang's watchdog. A module of a variable the round sets reads another table and is not
+    the image's own for this round; one built for another card or CU count holds another card's rows, and
+    none counts when the target is not known.
     """
     try:
         document = json.loads((jit_dir / AITER_PREWARM_MANIFEST).read_bytes())
@@ -632,19 +760,59 @@ def image_own_modules(jit_dir: Path, configs_dir: Path, envs: dict[str, str] | N
     tables: str | None = None
     own: set[str] = set()
     for entry in document.get("modules") or []:
-        name = str(entry.get("name") or "") if isinstance(entry, dict) else ""
-        so_path = jit_dir / f"{name}.so"
-        if not name or name in overridden or not so_path.is_file():
+        name = _installed_for(entry, jit_dir, overridden, targets)
+        if name is None:
             continue
         try:
-            if _file_sha256(so_path) != entry.get("sha256"):
-                continue
             tables = _tables_sha256(configs_dir) if tables is None else tables
         except OSError:
             continue
         if entry.get("tables_sha256") == tables:
             own.add(name)
     return frozenset(own)
+
+
+def _installed_for(entry: object, jit_dir: Path, overridden: set[str], targets: BuildTargets | None) -> str | None:
+    """The module a manifest entry lists, when its ``.so`` is still what the prewarm installed for the one target
+    ``targets`` names and the round leaves its table unset; ``None`` otherwise."""
+    name = str(entry.get("name") or "") if isinstance(entry, dict) else ""
+    so_path = jit_dir / f"{name}.so"
+    if not name or name in overridden or not so_path.is_file() or not _built_for(entry, targets):
+        return None
+    try:
+        return name if _file_sha256(so_path) == entry.get("sha256") else None
+    except OSError:
+        return None
+
+
+def _built_for(entry: Mapping[str, Any], targets: BuildTargets | None) -> bool:
+    """Whether a manifest entry's module was built for the one target ``targets`` names."""
+    try:
+        return targets == frozenset({(str(entry.get("gfx")).lower(), int(entry.get("cu_num")))})
+    except (TypeError, ValueError):
+        return False
+
+
+def _module_config(package_root: Path) -> dict[str, Any]:
+    """aiter's module config (``jit/optCompilerConfig.json``) of the package; empty when it cannot be read."""
+    try:
+        document = json.loads((package_root / "jit" / _MODULE_CONFIG).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def _generated_from(config: Mapping[str, Any], env_var: str, modules: tuple[str, ...]) -> tuple[str, ...]:
+    """The ``modules`` of ``env_var`` that aiter generates from its table: those whose entry's code generator reads
+    ``AITER_CONFIGS.<env_var>_FILE``, and those the module config does not describe. Rebuilding one of the others (an
+    ``_asm`` module, built from the ``hsa`` kernel lists of the card's architecture or from fixed sources) adds no row of
+    the table to it."""
+    reads = f"AITER_CONFIGS.{env_var}_FILE"
+    return tuple(
+        module
+        for module in modules
+        if not isinstance(config.get(module), Mapping) or reads in str(config[module].get("blob_gen_cmd") or "")
+    )
 
 
 def _invalidate_jit_build(jit_build: Path, backup_dir: Path, modules: tuple[str, ...]) -> dict[str, Any]:
@@ -699,6 +867,7 @@ def prepare_serving_so_for_csvs(
     envs: dict[str, str],
     *,
     backup_dir: Path | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Skip when serving .so already covers the CSVs this boot loads; otherwise re-JIT.
 
@@ -706,9 +875,13 @@ def prepare_serving_so_for_csvs(
         envs: The round's ``AITER_CONFIG_*`` values; a variable it does not name is
             checked on aiter's unset branch, which is where the model overlays come in.
         backup_dir: Where to back up selected modules and ``jit/build`` for invalidation.
+        environ: The servers' environment, whose ``GPU_ARCHS`` and ``CU_NUM`` (or else the card) decide which rows
+            aiter compiles (:func:`aiter_build_targets`); this process's when ``None``.
 
     Returns:
-        A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``.
+        A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``; ``skip`` and ``invalidate`` name the
+        ``targets`` the rows were read for, and ``invalidate`` the ``variables`` whose tables outran the modules, the
+        aiter ``package`` and the ``backup`` directory the modules went to.
     """
     context = resolve_serving_context(
         os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR"), jit_probe_paths=AITER_JIT_PROBE_PATHS
@@ -718,7 +891,10 @@ def prepare_serving_so_for_csvs(
     package_root, jit_build = context
     jit_dir = jit_build.parent
     configs_dir = package_root / "configs"
+    targets = aiter_build_targets(package_root, os.environ if environ is None else environ)
+    config = _module_config(package_root)
     modules_needed: list[str] = []
+    variables: list[str] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
         tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")
         if not tuned_file_name:
@@ -726,17 +902,19 @@ def prepare_serving_so_for_csvs(
         for csv_path in csvs_aiter_will_load(configs_dir, tuned_file_name, str(envs.get(env_var) or "")):
             if not csv_path.is_file():
                 continue
-            if serving_modules_cover_csv(jit_dir, modules, csv_path):
+            if serving_modules_cover_csv(jit_dir, modules, csv_path, targets):
                 continue
-            modules_needed.extend(modules)
-            for name, libtype in csv_jit_kernel_rows(csv_path):
+            variables.append(env_var)
+            modules_needed.extend(_generated_from(config, env_var, modules))
+            for name, libtype in csv_jit_kernel_rows(csv_path, targets):
                 resolved = serving_module_for_kernel(name, libtype, modules)
                 if resolved:
                     modules_needed.append(resolved)
-    own = image_own_modules(jit_dir, configs_dir, envs) if modules_needed else frozenset()
+    own = image_own_modules(jit_dir, configs_dir, envs, targets) if modules_needed else frozenset()
     modules_needed_t = tuple(m for m in dict.fromkeys(modules_needed) if m not in own)
+    read_for = {"jit_dir": str(jit_dir), "targets": target_names(targets)}
     if not modules_needed_t:
-        skipped: dict[str, Any] = {"action": "skip", "jit_dir": str(jit_dir)}
+        skipped: dict[str, Any] = {"action": "skip", **read_for}
         if own:
             skipped["kept_image_own"] = sorted(own)
         return skipped
@@ -750,9 +928,12 @@ def prepare_serving_so_for_csvs(
     )
     return {
         "action": "invalidate",
-        "jit_dir": str(jit_dir),
+        **read_for,
         "removed": removed,
         "jit_build": invalidation,
+        "variables": list(dict.fromkeys(variables)),
+        "package": str(package_root),
+        "backup": str(dest),
     }
 
 
@@ -779,7 +960,8 @@ def drop_serving_so_for_envs(
     package_root, jit_build = context
     jit_dir = jit_build.parent
     # A module a registry mismatch named is dropped even when it is the image's own: its tables changed under it.
-    own = image_own_modules(jit_dir, package_root / "configs", envs) - set(also_modules)
+    targets = aiter_build_targets(package_root, os.environ)
+    own = image_own_modules(jit_dir, package_root / "configs", envs, targets) - set(also_modules)
     modules = tuple(m for m in dict.fromkeys((*_modules_for_envs(envs), *also_modules)) if m not in own)
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     invalidation = _invalidate_jit_build(jit_build, dest, modules)
@@ -808,10 +990,13 @@ __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
     "AITER_PREWARM_MANIFEST",
+    "BuildTargets",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
     "COMPILED_REGISTRY_MARKER",
     "NON_JIT_SO_LIBTYPES",
+    "aiter_build_targets",
+    "card_target",
     "clean_stale_aiter_locks",
     "csv_jit_kernel_rows",
     "csvs_aiter_will_load",
@@ -826,6 +1011,7 @@ __all__ = [
     "serving_module_for_kernel",
     "serving_modules_cover_csv",
     "sweep_stale_aiter_locks_if_dead",
+    "target_names",
     "_any_live_compiler",
     "_resolve_lock_sweep_dirs",
 ]

@@ -17,6 +17,18 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors import _aiter_jit as aj
 
+#: ``rocminfo``'s reader itself, and the card it caches once read: the fixture below puts an unknown card in place of the
+#: second for every test.
+_READ_CARD, _CARD_TARGET = aj._read_card, aj.card_target
+
+
+@pytest.fixture(autouse=True)
+def _targets_unknown(monkeypatch):
+    """No test here reads this host's GPU: the build targets are unknown unless a test names them."""
+    monkeypatch.setattr(aj, "card_target", lambda: None)
+    for name in ("GPU_ARCHS", "CU_NUM"):
+        monkeypatch.delenv(name, raising=False)
+
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
@@ -896,7 +908,7 @@ def test_serving_dir_uses_the_runtime_override_verbatim(tmp_path, monkeypatch, s
     monkeypatch.setenv("AITER_JIT_DIR", override)
     result = aj.prepare_serving_so_for_csvs({})
     assert result == (
-        {"action": "skip", "jit_dir": str(Path(override).absolute())}
+        {"action": "skip", "jit_dir": str(Path(override).absolute()), "targets": []}
         if override
         else {"action": "noop", "reason": "aiter jit dir not found"}
     )
@@ -952,7 +964,11 @@ def test_serving_dir_keeps_the_explicit_wrapper_override(tmp_path, monkeypatch, 
     selected.mkdir(parents=True)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", f"  {selected}  ")
     monkeypatch.setenv("AITER_JIT_DIR", str(tmp_path / "other"))
-    assert aj.prepare_serving_so_for_csvs({}) == {"action": "skip", "jit_dir": str(tmp_path / "manual/jit")}
+    assert aj.prepare_serving_so_for_csvs({}) == {
+        "action": "skip",
+        "jit_dir": str(tmp_path / "manual/jit"),
+        "targets": [],
+    }
 
 
 @pytest.mark.parametrize("initialized", [False, True])
@@ -967,7 +983,7 @@ def test_serving_dir_uses_only_the_initialized_home_cache(tmp_path, monkeypatch,
         os, "access", lambda path, mode: False if Path(path) == serving_package / "jit" else real_access(path, mode)
     )
     assert aj.prepare_serving_so_for_csvs({}) == (
-        {"action": "skip", "jit_dir": str(fallback)}
+        {"action": "skip", "jit_dir": str(fallback), "targets": []}
         if initialized
         else {"action": "noop", "reason": "aiter jit dir not found"}
     )
@@ -978,12 +994,20 @@ def test_serving_dir_retains_package_and_probe_discovery(monkeypatch, serving_pa
     if use_probe:
         monkeypatch.setattr(importlib.util, "find_spec", lambda _: None)
         monkeypatch.setattr(aj, "AITER_JIT_PROBE_PATHS", (str(serving_package / "jit"),))
-    assert aj.prepare_serving_so_for_csvs({}) == {"action": "skip", "jit_dir": str(serving_package / "jit")}
+    assert aj.prepare_serving_so_for_csvs({}) == {
+        "action": "skip",
+        "jit_dir": str(serving_package / "jit"),
+        "targets": [],
+    }
 
 
 def test_serving_dir_ignores_a_missing_wrapper_override(monkeypatch, serving_package):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(serving_package / "missing"))
-    assert aj.prepare_serving_so_for_csvs({}) == {"action": "skip", "jit_dir": str(serving_package / "jit")}
+    assert aj.prepare_serving_so_for_csvs({}) == {
+        "action": "skip",
+        "jit_dir": str(serving_package / "jit"),
+        "targets": [],
+    }
 
 
 @pytest.mark.parametrize("entrypoint", ["prepare_serving_so_for_csvs", "drop_serving_so_for_envs"])
@@ -1019,16 +1043,26 @@ def _write_prewarm_manifest(jit: Path, configs: Path, modules: tuple[str, ...]) 
     """The manifest hyperloom's prewarm writes (schema ``hyperloom.aiter_prewarm/1``), restated from its format."""
     files = sorted((p.relative_to(configs).as_posix(), p) for p in configs.rglob("*") if p.is_file())
     tables = _sha256("".join(f"{rel}\t{_sha256(p.read_bytes())}\n" for rel, p in files).encode())
-    entries = [{"name": m, "sha256": _sha256((jit / f"{m}.so").read_bytes()), "tables_sha256": tables} for m in modules]
+    entries = [
+        {"name": m, "sha256": _sha256((jit / f"{m}.so").read_bytes()), "tables_sha256": tables, **_PREWARMED_FOR}
+        for m in modules
+    ]
     (jit / "hyperloom-prewarm.json").write_text(
         json.dumps({"schema": "hyperloom.aiter_prewarm/1", "modules": entries}), encoding="utf-8"
     )
 
 
+#: The card the prewarm built the modules of :func:`prewarmed` for, and the one the servers build for there.
+_PREWARMED_FOR = {"gfx": "gfx950", "cu_num": 256}
+_CARD = frozenset({("gfx950", 256)})
+
+
 @pytest.fixture
 def prewarmed(tmp_path, monkeypatch):
-    """A package whose bpreshuffle modules the prewarm built, from a table they do not cover byte-for-byte."""
+    """A package whose bpreshuffle modules the prewarm built for this card, from a table they do not cover
+    byte-for-byte."""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(aj, "card_target", lambda: ("gfx950", 256))
     jit = tmp_path / "aiter" / "jit"
     (jit / "build").mkdir(parents=True)
     configs = jit.parent / "configs"
@@ -1045,15 +1079,33 @@ def prewarmed(tmp_path, monkeypatch):
 
 def test_image_own_modules_are_the_manifest_s_unchanged_modules_of_unset_variables(prewarmed):
     configs = prewarmed.parent / "configs"
-    assert aj.image_own_modules(prewarmed, configs, {}) == set(_BP_MODULES)
-    assert aj.image_own_modules(prewarmed, configs, {_BP_VAR: " "}) == set(_BP_MODULES)
+    assert aj.image_own_modules(prewarmed, configs, {}, _CARD) == set(_BP_MODULES)
+    assert aj.image_own_modules(prewarmed, configs, {_BP_VAR: " "}, _CARD) == set(_BP_MODULES)
     # A round that sets the variable reads another table: none of its modules is the image's own.
-    assert aj.image_own_modules(prewarmed, configs, {_BP_VAR: "/x.csv"}) == frozenset()
+    assert aj.image_own_modules(prewarmed, configs, {_BP_VAR: "/x.csv"}, _CARD) == frozenset()
     (prewarmed / f"{_BP_CK}.so").write_bytes(b"\x7fELF session build")
-    assert aj.image_own_modules(prewarmed, configs, {}) == set(_BP_MODULES) - {_BP_CK}
+    assert aj.image_own_modules(prewarmed, configs, {}, _CARD) == set(_BP_MODULES) - {_BP_CK}
     (configs / "model_configs").mkdir()
     (configs / "model_configs" / "a8w8_blockscale_bpreshuffle_tuned_gemm_glm.csv").write_text("x\n", encoding="utf-8")
-    assert aj.image_own_modules(prewarmed, configs, {}) == frozenset()
+    assert aj.image_own_modules(prewarmed, configs, {}, _CARD) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "targets",
+    [
+        frozenset({("gfx950", 80)}),
+        frozenset({("gfx942", 256)}),
+        frozenset({("gfx950", 256), ("gfx942", 304)}),
+        None,
+    ],
+    ids=["other-cu-count", "other-gfx", "two-targets", "unknown"],
+)
+def test_a_prewarmed_module_built_for_another_target_than_the_servers_is_not_the_images_own(prewarmed, targets):
+    """A module built for gfx950/256 holds that card's rows only: kept for a card of another CU count, the preflight
+    would leave a module that lacks the card's rows in place."""
+    configs = prewarmed.parent / "configs"
+    assert aj.image_own_modules(prewarmed, configs, {}, _CARD) == set(_BP_MODULES)
+    assert aj.image_own_modules(prewarmed, configs, {}, targets) == frozenset()
 
 
 @pytest.mark.parametrize("manifest", ["missing", "not-json", "other-schema"])
@@ -1065,12 +1117,17 @@ def test_image_own_modules_without_a_readable_manifest_is_empty(prewarmed, manif
         path.write_text("{not json", encoding="utf-8")
     else:
         path.write_text(json.dumps({**json.loads(path.read_text()), "schema": "other/1"}), encoding="utf-8")
-    assert aj.image_own_modules(prewarmed, prewarmed.parent / "configs", {}) == frozenset()
+    assert aj.image_own_modules(prewarmed, prewarmed.parent / "configs", {}, _CARD) == frozenset()
 
 
 def test_prepare_keeps_the_prewarm_s_modules_and_moves_a_session_build_aside(prewarmed, tmp_path):
     result = aj.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup0")
-    assert result == {"action": "skip", "jit_dir": str(prewarmed), "kept_image_own": sorted(_BP_MODULES)}
+    assert result == {
+        "action": "skip",
+        "jit_dir": str(prewarmed),
+        "kept_image_own": sorted(_BP_MODULES),
+        "targets": ["gfx950/256"],
+    }
     assert all((prewarmed / f"{m}.so").is_file() for m in _BP_MODULES)
 
     (prewarmed / f"{_BP_CK}.so").write_bytes(b"\x7fELF session build")
@@ -1143,3 +1200,167 @@ def test_prepare_reads_a_bpreshuffle_cktile_row_from_the_bpreshuffle_cktile_modu
 def test_a_shared_cktile_name_in_a_registry_mismatch_names_both_blockscale_cktile_modules():
     observed = f"gemm_a8w8_blockscale_cktile kernel '{_DSV3_CKTILE_KERNEL.decode()}' is not present"
     assert set(aj.registry_mismatch_modules(observed)) == {"module_gemm_a8w8_blockscale_cktile", _BP_CKTILE}
+
+
+#: aiter's ``jit/utils/build_targets.py`` at e7d2453f, the part the targets are read from.
+_BUILD_TARGETS_PY = 'GFX_CU_NUM_MAP = {\n    "gfx942": 304,  # MI300X\n    "gfx950": 256,  # MI350\n}\n'
+#: Two GPU agents of ``rocminfo`` on an MI355X node, with the CPU agent and an ISA name around them.
+_ROCMINFO = """
+*******
+Agent 1
+*******
+  Name:                    AMD EPYC 9575F
+  Device Type:             CPU
+  Compute Unit:            128
+*******
+Agent 2
+*******
+  Name:                    gfx950
+  Marketing Name:          AMD Instinct MI355X
+  Device Type:             GPU
+  Compute Unit:            {cus}
+  ISA Info:
+    ISA 1
+      Name:                    amdgcn-amd-amdhsa--gfx950:sramecc+:xnack-
+*******
+Agent 3
+*******
+  Name:                    gfx950
+  Device Type:             GPU
+  Compute Unit:            256
+"""
+
+
+@pytest.mark.parametrize(
+    ("environ", "targets"),
+    [
+        ({"GPU_ARCHS": "gfx950"}, {("gfx950", 256)}),
+        ({"GPU_ARCHS": "gfx942;gfx950"}, {("gfx942", 304), ("gfx950", 256)}),
+        ({"GPU_ARCHS": "gfx950", "CU_NUM": "32"}, {("gfx950", 32)}),
+        ({"GPU_ARCHS": "gfx1250"}, None),
+        ({"GPU_ARCHS": "native"}, {("gfx950", 80)}),
+        ({}, {("gfx950", 80)}),
+        ({"CU_NUM": "64"}, {("gfx950", 64)}),
+    ],
+    ids=["named", "several", "cu-num", "unmapped", "native", "card", "card-cu-num"],
+)
+def test_build_targets_are_what_aiters_get_build_targets_resolves(tmp_path, monkeypatch, environ, targets):
+    (tmp_path / "jit" / "utils").mkdir(parents=True)
+    (tmp_path / "jit" / "utils" / "build_targets.py").write_text(_BUILD_TARGETS_PY, encoding="utf-8")
+    monkeypatch.setattr(aj, "card_target", lambda: ("gfx950", 80))
+
+    assert aj.aiter_build_targets(tmp_path, environ) == (None if targets is None else frozenset(targets))
+
+
+def test_build_targets_are_unknown_without_the_images_map_or_a_card(tmp_path, monkeypatch):
+    assert aj.aiter_build_targets(tmp_path, {"GPU_ARCHS": "gfx950"}) is None, "no build_targets.py, no count"
+    monkeypatch.setattr(aj, "card_target", lambda: None)
+    assert aj.aiter_build_targets(tmp_path, {}) is None
+
+
+@pytest.mark.parametrize(("cus", "card"), [("256", ("gfx950", 256)), ("80", None)], ids=["alike", "differing"])
+def test_the_card_is_read_from_rocminfo_s_gpu_agents(monkeypatch, cus, card):
+    monkeypatch.setattr(aj.shutil, "which", lambda name: f"/opt/rocm/bin/{name}")
+    monkeypatch.setattr(
+        aj.subprocess, "run", lambda *a, **k: aj.subprocess.CompletedProcess(a, 0, _ROCMINFO.replace("{cus}", cus), "")
+    )
+    assert _READ_CARD() == card
+
+
+def test_a_card_that_could_not_be_read_is_read_again_and_one_read_is_kept(monkeypatch):
+    """A failed ``rocminfo`` (busy, timed out) kept for the process made every later preflight count every row."""
+    monkeypatch.setattr(aj, "card_target", _CARD_TARGET)
+    monkeypatch.setattr(aj, "_CARD", [])
+    reads = iter([None, ("gfx950", 256)])
+    calls: list[int] = []
+
+    def read() -> tuple[str, int] | None:
+        calls.append(1)
+        return next(reads)
+
+    monkeypatch.setattr(aj, "_read_card", read)
+
+    assert aj.card_target() is None
+    assert aj.card_target() == ("gfx950", 256), "the failure was not kept"
+    assert aj.card_target() == ("gfx950", 256) and len(calls) == 2, "the card, once read, is"
+
+
+#: The code generators of aiter's blockscale modules (``optCompilerConfig.json`` at e7d2453f): both CK modules generate
+#: from the variable's table; the asm module is built from fixed sources (``blob_gen_cmd`` empty), and the bpreshuffle
+#: asm module from the ``hsa/<gfx>/fp8gemm_blockscale`` kernel list of the build's architecture.
+_BLOCKSCALE_CONFIG = {
+    "module_gemm_a8w8_blockscale": {
+        "blob_gen_cmd": "f'{AITER_CSRC_DIR}/ck_gemm_a8w8_blockscale/gen_instances.py --working_path {{}} "
+        "--tune_file {AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE}'"
+    },
+    "module_gemm_a8w8_blockscale_cktile": {
+        "blob_gen_cmd": "f'{AITER_CSRC_DIR}/ck_gemm_a8w8_blockscale/gen_instances_cktile.py --working_path {{}} "
+        "--tune_file {AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE}'"
+    },
+    "module_gemm_a8w8_blockscale_asm": {"blob_gen_cmd": "''"},
+    "module_gemm_a8w8_blockscale_bpreshuffle": {
+        "blob_gen_cmd": "f'{AITER_CSRC_DIR}/ck_gemm_a8w8_blockscale_bpreshuffle/gen_instances.py --working_path {{}} "
+        "--tune_file {AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE}'"
+    },
+    "module_gemm_a8w8_blockscale_bpreshuffle_cktile": {
+        "blob_gen_cmd": "f'{AITER_CSRC_DIR}/ck_gemm_a8w8_blockscale/gen_instances_cktile.py --working_path {{}} "
+        "--tune_file {AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE}'"
+    },
+    "module_gemm_a8w8_blockscale_bpreshuffle_asm": {
+        "blob_gen_cmd": "f'{AITER_META_DIR}/hsa/codegen.py -m fp8gemm_blockscale --output_dir {{}}'"
+    },
+}
+
+
+@pytest.mark.parametrize("variable", ["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", _BP_VAR])
+def test_a_table_that_outran_its_modules_moves_only_the_modules_generated_from_it(tmp_path, monkeypatch, variable):
+    """An asm module reads no tuned table, and a table's ``asm`` rows are not looked for in any ``.so``: rebuilding it adds
+    nothing the table names. It was moved with the CK modules and rebuilt by every server."""
+    monkeypatch.chdir(tmp_path)
+    jit = tmp_path / "aiter" / "jit"
+    (jit / "build").mkdir(parents=True)
+    (jit / "optCompilerConfig.json").write_text(json.dumps(_BLOCKSCALE_CONFIG), encoding="utf-8")
+    modules = aj.AITER_ENV_TO_SERVING_MODULES[variable]
+    for module in modules:
+        (jit / f"{module}.so").write_bytes(b"\x7fELF image build " + module.encode())
+    configs = jit.parent / "configs"
+    configs.mkdir()
+    (configs / f"{aj.AITER_ENV_TO_TUNED_FILE[variable]}.csv").write_text(
+        "gfx,cu_num,M,N,K,libtype,kernelName\ngfx950,256,1,2,3,ck,a8w8_blockscale_k_new\n"
+        "gfx950,256,1,2,4,asm,_ZN5aiter42fp8gemm_bf16_blockscale_BpreShuffle_32x128E\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
+    monkeypatch.setattr(aj, "card_target", lambda: ("gfx950", 256))
+
+    result = aj.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
+
+    asm = f"{modules[0]}_asm"
+    assert result["action"] == "invalidate" and result["variables"] == [variable]
+    assert sorted(Path(path).name for path in result["removed"]) == sorted(f"{m}.so" for m in modules if m != asm)
+    assert (jit / f"{asm}.so").is_file(), "the asm module stays"
+
+
+def test_coverage_reads_only_the_rows_aiter_compiles_for_the_targets(tmp_path):
+    """The image's bpreshuffle modules lacked only kernels of rows tuned for gfx942, and were moved aside."""
+    jit = tmp_path / "jit"
+    jit.mkdir()
+    (jit / "module_gemm_a8w8_bpreshuffle.so").write_bytes(b"\x7fELF a8w8_bpreshuffle_card")
+    table = tmp_path / "a8w8_bpreshuffle_tuned_gemm.csv"
+    table.write_text(
+        "gfx,cu_num,M,N,K,libtype,kernelName\n"
+        "gfx950,256,1,2,3,ck,a8w8_bpreshuffle_card\n"
+        "gfx942,80,1,2,3,ck,a8w8_bpreshuffle_mi308\n",
+        encoding="utf-8",
+    )
+    modules = aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE"]
+
+    assert aj.serving_modules_cover_csv(jit, modules, table, frozenset({("gfx950", 256)}))
+    assert not aj.serving_modules_cover_csv(jit, modules, table, frozenset({("gfx942", 80)}))
+    assert not aj.serving_modules_cover_csv(jit, modules, table), "with the targets unknown, every row counts"
+    assert aj.csv_jit_kernel_rows(table, frozenset({("gfx950", 256)})) == [("a8w8_bpreshuffle_card", "ck")]
+    untargeted = tmp_path / "legacy.csv"
+    untargeted.write_text("kernelName,libtype\na8w8_bpreshuffle_mi308,ck\n", encoding="utf-8")
+    assert not aj.serving_modules_cover_csv(jit, modules, untargeted, frozenset({("gfx950", 256)})), (
+        "a row that names no target is kept"
+    )

@@ -1,0 +1,47 @@
+{
+  "processes": {
+    "rank 0 (worker)": {
+      "steps": 1010,
+      "counter_steps_left_out": 0,
+      "engine_steps": 1000,
+      "records_complete": true,
+      "kernel_ns": 90000000000,
+      "attributed_ns": 90000000000,
+      "engine_busy_over_period": 0.9,
+      "mean_running_requests_per_step": 64.0,
+      "by_client_phase": {}
+    }
+  },
+  "lines": 1010,
+  "merge": {
+    "processes": [
+      "host-101",
+      "host-102",
+      "rank 0 (worker)",
+      "host-103",
+      "host-104"
+    ],
+    "ranks_with_engine_steps": [
+      "rank 0 (worker)"
+    ],
+    "merge_ok": true
+  },
+  "incomplete_processes": [],
+  "limitations": [
+    {
+      "id": "collective-wait",
+      "applies_to": "collective kernels",
+      "text": "A collective kernel's time is transfer plus waiting for the slowest rank. Tracing changes which rank arrives last, so per-rank collective time and rank skew in a traced run do not describe the untraced server. Use the minimum across ranks per launch (the transfer estimate) for collective cost; do not rank optimization sites by collective wait."
+    },
+    {
+      "id": "traced-latency",
+      "applies_to": "latency and throughput",
+      "text": "Tracing adds host time per traced dispatch. Compare kernel time within a run, not a traced run's latency or throughput with an untraced baseline."
+    },
+    {
+      "id": "module-ops",
+      "applies_to": "op names and shapes",
+      "text": "Without the CPU op tree, ops are modules (class or path) and the shape is the first input's; FLOP and roofline models keyed on aten ops do not apply."
+    }
+  ]
+}
