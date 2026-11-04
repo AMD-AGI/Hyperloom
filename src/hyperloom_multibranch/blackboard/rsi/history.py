@@ -82,12 +82,12 @@ class Odds:
         return self if self.seen <= cap else Odds(self.hits * cap / self.seen, cap)
 
 
-def within(curve: Mapping[int, Odds], first: int, tests: int = HORIZON_TESTS) -> float | None:
-    """The odds of a commit within ``tests`` tests from position ``first`` on ``curve``; ``None`` when one of those
-    positions cannot be read."""
+def within(curve: Mapping[int, Odds], first: int) -> float | None:
+    """The odds of a commit within :data:`HORIZON_TESTS` tests from position ``first`` on ``curve``; ``None`` when one
+    of those positions cannot be read."""
 
     missed = 1.0
-    for position in range(first, first + tests):
+    for position in range(first, first + HORIZON_TESTS):
         rate = curve.get(min(position, MAX_POSITION), Odds()).rate
         if rate is None:
             return None

@@ -261,13 +261,12 @@ def publish_experiences(
     metric: str,
     *,
     kb: CollectionTarget | None = None,
-    dry_run: bool = False,
     receipt: Path | None = None,
 ) -> CollectReport:
     """Write the session's Experiences the shared declaration holds to ``kb``, or to the service ``HYPERLOOM_KB_URL``
     names."""
 
-    return collect(MAPPING_PATH, export_document(snapshot, metric), kb=kb, dry_run=dry_run, receipt=receipt)
+    return collect(MAPPING_PATH, export_document(snapshot, metric), kb=kb, receipt=receipt)
 
 
 def publish_multibranch_experiences(
@@ -275,14 +274,12 @@ def publish_multibranch_experiences(
     metric: str,
     *,
     kb: CollectionTarget | None = None,
-    dry_run: bool = False,
     receipt: Path | None = None,
 ) -> CollectReport:
     """Write the session's Experiences the shared declaration cannot hold, kernel changes and an AgentX session's,
     under ``multibranch-recipe-v1`` to ``kb``, or to the service ``HYPERLOOM_KB_URL`` names."""
 
-    export = export_document(snapshot, metric)
-    return collect(MULTIBRANCH_MAPPING_PATH, export, kb=kb, dry_run=dry_run, receipt=receipt)
+    return collect(MULTIBRANCH_MAPPING_PATH, export_document(snapshot, metric), kb=kb, receipt=receipt)
 
 
 __all__ = [

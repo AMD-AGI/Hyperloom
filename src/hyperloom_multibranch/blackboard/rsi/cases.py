@@ -186,8 +186,8 @@ def known_defects(snapshot: BlackboardSnapshot, pool: CasePool) -> tuple[PoolEnt
     return tuple(found.values())
 
 
-def image_digest_from_env(env: Mapping[str, str] | None = None) -> str:
-    return str((os.environ if env is None else env).get(IMAGE_DIGEST_ENV) or "").strip()
+def image_digest_from_env() -> str:
+    return str(os.environ.get(IMAGE_DIGEST_ENV) or "").strip()
 
 
 @dataclass(frozen=True)
