@@ -1,4 +1,4 @@
-# The serving template (operator, 2026-10-29): the `balanced` pack's method (the v2 line) for any
+# The serving template: the `balanced` pack's method (the v2 line) for any
 # model served by vLLM or SGLang, with nothing model-specific in it. The model, the framework, the
 # operating point and the correctness floor come from the config; the model's facts and the map of
 # directions come from its dossier. Used as is by a host (Hyperloom's Arbor adapter) or copied and

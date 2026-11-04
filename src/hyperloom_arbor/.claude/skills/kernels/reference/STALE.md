@@ -12,7 +12,7 @@ as copied; apply the correction when you read them.
 | `local_knowledge/framework/aiter/operators/fused_moe_grouped_gemm/tuning.md:25` | align-and-sort `BLOCK_M` decides "how tightly per-expert tiles pack the 304 CUs"; the page covers gfx942, gfx950 and gfx1250 | 304 CUs is MI300X; MI350X/MI355X have 256 (8 XCDs × 32), and AITER's `cu_num` is 256 there |
 | same file, `:65` | `ksplit` "to reach ≥1024 tiles across 304 CUs" | 256 CUs on gfx950 |
 | same file, `:68` | "per-expert tiles total should give ≈ k·304 blocks" | ≈ k·256 on gfx950 |
-| `knowledge_base/flydsl/gemm_optimization.md:326` | worked FP8 GEMM example, no arch named: "158 GB/s (well below HBM peak 5.3 TB/s)" | 5.3 TB/s is MI300X's spec; gfx950: 8.0 TB/s spec, 6.0–6.1 TB/s measured cold on MI350X (hardware skill, measured table) |
+| `knowledge_base/flydsl/gemm_optimization.md:326` | worked FP8 GEMM example, no arch named: "158 GB/s (well below HBM peak 5.3 TB/s)" | 5.3 TB/s is MI300X's spec; gfx950: 8.0 TB/s spec (hardware skill); measure achievable bandwidth on the node |
 | `knowledge_base/flydsl/gemm_optimization.md:322` | same example: "LDS = … 16 KB (well under 64 KB)" | 64 KiB is gfx942's LDS; gfx950 has 160 KiB per CU |
 
 No copied page says gfx950 has 32 LDS banks. The page that did, `knowledge_base/shared/gpu_arch_gfx950.md`

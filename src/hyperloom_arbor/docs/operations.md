@@ -63,7 +63,7 @@ touch <session>/STOP               # stop after the iteration in flight
 ## DSV4.1 campaigns (`scripts/dsv41-campaign/`)
 
 The DeepSeek-V4.1-Flash campaign line, one sbatch per pack variant. These scripts write under
-another user's `/apps` paths and were last changed on 2026-10-07; adapt one before reuse.
+cluster-specific paths; adapt one before reuse.
 
 ## Parallel mode
 

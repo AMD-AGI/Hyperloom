@@ -72,8 +72,8 @@ def _live_flags(config: dict) -> str:
 
     The consequence is larger than one KEEP: every flag-valued lever was
     unreachable. That includes ``--max-cudagraph-capture-size``, which is the
-    named fix for graph eviction at the capture ceiling — measured at +3.0 to
-    +3.4% on p90_interactivity. A campaign cannot land a flag fix through a
+    named fix for graph eviction at the capture ceiling, a measured gain on
+    p90_interactivity. A campaign cannot land a flag fix through a
     path that discards flags.
     """
     from arbor.execute.workspace import read_workspace_config

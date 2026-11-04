@@ -274,7 +274,7 @@ def derive_config(ctx, rec: Lane, tmpl: dict, others: list[str]) -> dict:
     c["identity"] = f"parallel:{cfg.run_id}:r{rec.round:02d}:{rec.direction}"
     c["session_root"] = rec.session_root
     # A lane is the run's, which a person reviewed when they submitted it: its own review gate
-    # (arbor/review.py) would hold the lane's GPU node until the job's wall (#30 c4555).
+    # (arbor/review.py) would hold the lane's GPU node until the job's wall.
     c["review_gate"] = False
     if tmpl.get("docker_container") == HOST:          # a document lane: its own workspace on the host
         c["workspace_root"] = str(d / "ws")

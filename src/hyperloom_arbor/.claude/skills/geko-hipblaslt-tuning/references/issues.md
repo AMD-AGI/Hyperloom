@@ -64,8 +64,4 @@ from `geko_build` (compresses to ~18 MB).
 |---|---|
 | Shapes | 24 decode (3 layers × M=1…8) |
 | Valid / Kept (≥3%) | 24 / 22 |
-| Median uplift | **+40.9%** |
-| Mean uplift | +40.0% |
-| Max uplift | +76.4% (M=3, N=5120, K=288) |
-| Weighted uplift | +27.0% |
 | Regressed (excluded) | 2 — M=1,8 for N=5120,K=288 |

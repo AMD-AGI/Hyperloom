@@ -1,8 +1,6 @@
 """Realtime collector: a campaign's live state, as one JSON snapshot.
 
-Ported from the Cluster A campaign dashboard's collector
-(``scripts/arbor_dashboard/collect.py`` on ``<fork>/dsv41-v2.1``,
-collector version 1), with the same top-level keys so that page can render a
+Ported from an earlier campaign dashboard's collector (collector version 1), with the same top-level keys so that page can render a
 snapshot unchanged. What differs: it runs where the campaign runs, writes the
 snapshot to a local directory, and pushes it to the share (``share.py``); it
 never samples GPU nodes (a probe during a measured replay perturbs it), and it
@@ -95,8 +93,8 @@ def warm_chain(session: Path, lessons: list, end):
     # node's bar. A rebased bar's warm reading is its record's replays after the
     # container's first, which reads low (scripts/model-m-campaign/rebase_bar.py), unless
     # the record discarded a warm-up itself. Each lesson gets the factor in force after it;
-    # returned: the factor now, and the best on this node, warm. Model M day-0 b0's chain
-    # read 1.438x the Day-0 bar this way 1.237x, and its round-end A/B 1.24x.
+    # returned: the factor now, and the best on this node, warm. On one campaign the
+    # chained reading overstated the gain; this reading agreed with its round-end A/B.
     scale = 1.0
     for x in lessons:
         d, m = x.get("decision"), x.get("metric")

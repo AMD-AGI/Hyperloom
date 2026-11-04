@@ -36,7 +36,7 @@ updated: 2026-06-08
 | LDS | **64 KiB/CU**, 32 banks | bank conflicts mod 32 |
 | L1 vector | 32 KiB/CU, 128 B line | coalesce to 128 B |
 | L2 | **4 MiB per XCD** (not global) | cross-XCD reuse misses to L3 |
-| Infinity Cache (L3/MALL) | **256 MiB**, ~218 ns, ~11.9 TB/s | the only device-shared cache |
+| Infinity Cache (L3/MALL) | **256 MiB**, ~17 TB/s theoretical | the only device-shared cache |
 | HBM3 | **192 GB**, **5.325 TB/s** | most inference kernels are HBM-bound |
 | Matrix peak | FP16/BF16 **1307 TF**, FP8/INT8 **2615 TF** | MFMA mandatory |
 | Default partition | **SPX + NPS1** | one logical 304-CU / 192 GB device |
@@ -66,7 +66,7 @@ surrounded by 8 HBM3 stacks (153 B transistors, 750 W).
 
 Each IOD hosts **2 XCDs + 2 HBM stacks**. There is **no device-wide L2**; the first device-shared
 level is the **256 MiB Infinity Cache** on the IODs. Cross-XCD sharing/atomics go through Fabric +
-Infinity Cache (measured core-to-core atomic latency ~116–202 ns). Details:
+Infinity Cache (core-to-core atomic latency of hundreds of ns). Details:
 [xcd_chiplet.md](xcd_chiplet.md).
 
 ### Compute Unit
@@ -81,7 +81,7 @@ The 8-XCD design can be spatially partitioned via `amd-smi`:
 - **CPX**: 8× (1 XCD / 38 CU / 24 GB) — many small jobs, inference density.
 - Memory: **NPS1/2/4**; memory partitions must **not exceed** compute partitions (SPX+NPS4 invalid).
 - In **CPX/NPS4** a kernel sees a 38-CU/24 GB GPU with XCD-local memory → higher effective BW/clocks
-  (AMD reports +10–15% compute-bound GEMM vs SPX) because cross-XCD traffic is eliminated. Full table
+  (faster compute-bound GEMMs than SPX) because cross-XCD traffic is eliminated. Full table
   in [xcd_chiplet.md](xcd_chiplet.md).
 
 ## The levers (architecture-level)

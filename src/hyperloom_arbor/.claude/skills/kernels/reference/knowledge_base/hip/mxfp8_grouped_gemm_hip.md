@@ -6,13 +6,8 @@ HIP dgrad + Triton wgrad) 2026-04-23.
 
 ## Result summary (MI355X, gpt_oss_20B MoE gate_up: M=65536, K=2880, N=5760, G=32 balanced)
 
-| path          | Triton TFLOPS | HIP TFLOPS | ratio |
-|---------------|---------------|------------|-------|
-| fwd kernel    | 1423          | **1610**   | 1.131×|
-| dgrad kernel  | 1574          | **2006**   | 1.274×|
-| wgrad kernel  | 1291          | (Triton)   | —     |
-| step k=1 (ms) | ~11.0 (est)   | **8.997**  | ~1.22×|
-| step k=8 with prequant (ms) | ~6.92  | **6.019**   | ~1.15×|
+The HIP fwd and dgrad kernels beat Triton's; wgrad stays on Triton. The
+training step is faster with HIP fwd + dgrad, more so with prequant.
 
 Correctness: 28.44–28.46 dB SNR on all three gradients (= fp8 e4m3 noise
 floor). Matches Triton SNR bit-for-bit.
@@ -24,8 +19,8 @@ The production HIP single-GEMM kernel
 `GEMM_Tile_MXFP8_NT_256x256x128_16x16x128_4_WAVE_GFX950` struct) is already
 compute-side optimal for this problem:
 
-- 512 MFMA insts with only 27 s_waitcnt total (0.053 waitcnt/MFMA vs Triton's
-  ~0.875) → 16× fewer serialization fences
+- 512 MFMA insts with only 27 s_waitcnt total, an order of magnitude fewer
+  serialization fences than Triton's
 - C accumulator pinned in AGPR via `reserve_agpr_range<0, 255>`
 - `buffer_load_lds` direct-to-LDS (0 `ds_write` in the dump)
 - Double-buffered A/B/scale tiles in LDS
@@ -81,7 +76,7 @@ Pass `scale_cols_padded = (scale_cols + 3) & ~3` as the stride to the GEMM kerne
   - `B_k = b_dgrad`     (kernel sees N_k=K_fwd, K_k=N_fwd)
   - Output `[M, K_fwd]` = dA ✓
 
-**1.274× over Triton dgrad** on gpt_oss_20B — bigger win than fwd because
+**Faster than Triton dgrad** on gpt_oss_20B — bigger win than fwd because
 reduction dim (N_fwd=5760) is longer, amortising per-iter overhead.
 
 ### 4. Triton scale tensor dtype reinterpret (free)
@@ -107,27 +102,19 @@ extra_cuda_cflags=[
 
 ## PMC findings (diagnostic, for future tuning)
 
-On primary shape (gpt_oss_20B):
+On primary shape (gpt_oss_20B), from PMC counters:
 
-| metric                    | HIP grouped | Triton grouped |
-|---------------------------|-------------|----------------|
-| VGPR                      | 256 (occ=1) | 124            |
-| AGPR (from ASM dump)      | Yes, used   | No (Triton)    |
-| LDS static                | 144 KB      | (dynamic)      |
-| SQ_INSTS_LDS              | 27.1M       | 52.0M          |
-| SQ_WAIT_INST_LDS          | **2.9M**    | **48.5M**      |
-| LDS stall ratio           | 10.7%       | **93.3%**      |
-| MFMA busy (MfmaUtil)      | 44.5%       | 33.5%          |
-| VALU util                 | 82.7%       | 98.6%          |
-| GRBM_GUI_ACTIVE (cycles)  | 19.6M       | 26.4M          |
+- HIP uses 256 VGPRs (occupancy 1) and AGPRs, with 144 KB static LDS;
+  Triton uses about half the VGPRs, no AGPRs and dynamic LDS.
+- Triton issues about twice the LDS instructions and spends most of its LDS
+  instructions stalled: the scale-LDS waitcnt pathology. HIP's LDS stall
+  ratio is low, the compute floor (waitcnts around barriers between
+  pipeline phases).
+- HIP's MFMA busy is higher than Triton's but still under half the wall.
 
-**Triton's 93% LDS stall ratio is the scale-LDS waitcnt pathology**. HIP's
-10.7% is the compute-floor (waitcnts around barriers between pipeline
-phases).
-
-**HIP is NOT compute-ceiling**: MfmaUtil=44.5% means MFMA engine idle ~55% of
+**HIP is NOT compute-ceiling**: the MFMA engine is idle for more than half
 the wall. Why? LDS=144KB pins occupancy=1 (gfx950 LDS/CU = 160KB). With
-occ=1 there's no latency hiding across waves. To get >44.5% MfmaUtil, need
+occ=1 there's no latency hiding across waves. To raise MfmaUtil, need
 either:
 - Shrink LDS (smaller tile / single-buffer — hurts pipeline)
 - Switch to 32×32×64 MFMA (halves inst count; same compute, fewer gaps)
@@ -136,84 +123,74 @@ either:
 ## Hybrid autograd
 
 Current shipped path:
-- fwd:   HIP (1.131× Triton)
-- dgrad: HIP via dgrad-layout B (1.274× Triton)
+- fwd:   HIP (faster than Triton)
+- dgrad: HIP via dgrad-layout B (faster than Triton)
 - wgrad: **Triton** variable-K (HIP wgrad deferred — see next section)
 
 Prequant: `MXFP8WeightPrequantHip` hoists per-forward B quant to once per
-optim-step. 1.495× step speedup on gpt_oss_20B at k=1 (8.997ms → 6.019ms).
-Matches Triton's 1.22× → 1.53× lever within 3%.
+optim-step, a large step speedup on gpt_oss_20B, matching the same lever
+on Triton.
 
 ## HIP wgrad — v0 shipped, v1 deferred
 
 ### v1.3 + v1.4 + v1.5 (current state, 2026-04-24)
 
 **v1.3 — fast fp8 permute** (`_permute_fp8.py::fp8_permute_M_to_GN`):
-PyTorch's `.permute(...).contiguous()` for fp8 runs at 12% HBM peak. LDS-tile
-Triton transpose kernel hits 85%. 9× speedup on 377 MB go permute (1534→168 us).
-This moved HIP wgrad from 0.44× → 0.99× Triton kernel-only. **Key lesson**:
-always profile before assuming the kernel is the bottleneck — 60% of HIP
-wgrad time was in a torch API call.
+PyTorch's `.permute(...).contiguous()` for fp8 runs far below HBM peak; an LDS-tile
+Triton transpose kernel gets close to it. This brought HIP wgrad to parity with
+Triton kernel-only. **Key lesson**: always profile before assuming the kernel is
+the bottleneck — most of HIP wgrad time was in a torch API call.
 
 **v1.4 — HIP wgrad as autograd default** (per user directive):
 Removed `torch.equal(group_offs, expected)` CPU-GPU sync in the HIP entry
-point (was forcing per-call host sync). Hybrid+prequant step: 6.24 ms =
-1.17× pure Triton (6.24 vs 7.28 ms).
+point (was forcing per-call host sync). The hybrid+prequant step is faster
+than pure Triton.
 
 **v1.5 — padded unbalanced fallback**
 (`grouped_gemm_mxfp8_hip_variable_k_padded`): per-expert HIP calls with
 pad-to-128 (min 384), skips zero-token experts. Correctness: 28.46 dB on
-all 8 real gpt_oss_20B shapes. Perf: 4-5× slower than Triton on normal
-unbalanced (32 per-expert launches dominate), **0.67× Triton on catastrophic
+all 8 real gpt_oss_20B shapes. Perf: several times slower than Triton on normal
+unbalanced (32 per-expert launches dominate), **faster than Triton on catastrophic
 warmup** (only 4 non-zero experts — padded HIP wins). Available as opt-in;
 not default.
 
 ### Fused-quant attempt (failed, documented)
 
 Tried `quant_mxfp8_dual_jagged_permuted` — fuse the fp8 permute into the
-Triton quant kernel. Bit-exact correctness but 20% SLOWER (1301 vs 1092 us)
+Triton quant kernel. Bit-exact correctness but SLOWER
 due to Triton's BlockedEncoding fighting the permuted-store pattern. See
 skill `triton_permuted_store_blocking_layout_pitfall`.
 
-### Final numbers (gpt_oss_20B, MI355X)
+### Final state (gpt_oss_20B, MI355X)
 
-| kernel         | Triton ms | HIP ms | ratio    |
-|----------------|----------:|-------:|---------:|
-| fwd (256 tile) | 1.56      | 1.38   | **1.14×** |
-| dgrad (reuse)  | 1.42      | 1.10   | **1.29×** |
-| wgrad (v1.3)   | 1.68      | 1.69   | 0.99×    |
-
-| step              | ms   | vs Triton |
-|-------------------|-----:|----------:|
-| pure Triton       | 7.28 | 1.00×     |
-| hybrid (no preq)  | 9.20 | 0.79×     |
-| **hybrid+prequant** | **6.24** | **1.17×** |
+fwd (256 tile) and dgrad (reuse) are faster in HIP; wgrad (v1.3) is at parity.
+The hybrid step without prequant is slower than pure Triton; hybrid+prequant
+is faster.
 
 Correctness: 28.46 dB on out/grad_a/grad_b (= fp8 e4m3 floor).
 
 ### v0 → v1 (early work, shipped)
 
 **v0 (per-expert loop)**: `grouped_gemm_mxfp8_hip_wgrad` reused the fwd kernel
-per-expert — G=32 launches. **7.733 ms = 0.215× Triton.** Launch overhead
-dominated (~50us × 32 = 1.6ms).
+per-expert — G=32 launches, far slower than Triton. Launch overhead
+dominated.
 
 **v1 (single-launch, current)**: key insight — for balanced MoE, M_g is uniform
 so `group_offs_stacked = [0, N, 2N, ..., G*N]` + A_kern `[G*N, M_g]` + B_kern
 `[G, K, M_g]` handles all experts in ONE fwd-kernel call.
-**4.100 ms = 0.404× Triton (1.88× over v0).**
+**Still slower than Triton, but well ahead of v0.**
 
 Optimization attempts that DID NOT help:
-- `quant_mxfp8_dual` (row+col outputs): 5.04 ms — wasted row writes.
-- `quant_mxfp8_colwise_for_variable_k` + fp8 permute: 4.84 ms — colwise quant slower than rowwise on this shape.
+- `quant_mxfp8_dual` (row+col outputs): slower — wasted row writes.
+- `quant_mxfp8_colwise_for_variable_k` + fp8 permute: slower — colwise quant slower than rowwise on this shape.
 
 Balanced MoE only, M_g ≥ 384, M_g % 128 == 0.
 Correctness: 28.46 dB (fp8 floor); bit-consistent with Triton.
 
 ### v2 (purpose-built kernel, deferred)
-Remaining 2.48× gap to Triton comes from the **fwd kernel at wgrad shape**:
-tile 256×256×128 tuned for fwd (M=65536, N=5760, K=2880) drops to ~690 TFLOPS
-at wgrad shape (M_stacked=G*N=184320, N=K=2880, K_red=M_g=2048) — 43% of fwd
-efficiency. 2880 is tile-unaligned (2880%256=64), short K_red loses
+The remaining gap to Triton comes from the **fwd kernel at wgrad shape**:
+tile 256×256×128 tuned for fwd (M=65536, N=5760, K=2880) loses more than half
+its efficiency at wgrad shape (M_stacked=G*N=184320, N=K=2880, K_red=M_g=2048). 2880 is tile-unaligned (2880%256=64), short K_red loses
 compute/tile amortization.
 
 v2 = dedicated variable-K kernel with jagged scales + LDS transpose per

@@ -33,8 +33,8 @@ updated: 2026-06-08
 | LDS | 64 KiB | workgroup/CU | ~20–30 cyc | highest of any tested GPU |
 | L1 vector (TCP) | 32 KiB | CU | tens of cyc | tens of TB/s |
 | L2 | 4 MiB | **per XCD** | — | XCD-local |
-| Infinity Cache (MALL/L3) | **256 MiB** | **device** | ~218 ns | ~11.9 TB/s (≈17 theoretical) |
-| HBM3 | 192 GB | device | +~47 ns TLB miss | 5.325 TB/s |
+| Infinity Cache (MALL/L3) | **256 MiB** | **device** | — | ≈17 TB/s peak |
+| HBM3 | 192 GB | device | — | 5.325 TB/s |
 
 Cache line = **128 B**. Page = **4 KiB** (use 2 MiB huge pages for >64 MB working sets to extend TLB
 reach). Infinity Cache stays 256 MiB on CDNA4 too.
@@ -48,8 +48,8 @@ bandwidth-bound relative to the bigger matrix core. See [l2_xcd_swizzle.md](l2_x
 
 ### Infinity Fabric (the chiplet/GPU interconnect)
 - **On-package (CDNA3/4):** the XCDs and I/O dies are stitched by Infinity Fabric; the device-shared
-  coherence point is the Infinity Cache. Measured global-atomic core-to-core latency on MI300X ranges
-  **~116–202 ns** depending on whether the two workgroups land on the same or different XCD.
+  coherence point is the Infinity Cache. Global-atomic core-to-core latency on MI300X is hundreds of
+  ns and depends on whether the two workgroups land on the same or different XCD.
 - **GCD↔GCD (CDNA2 MI250X):** 200 GB/s per direction (400 GB/s bidirectional) between the two GCDs in
   one OAM — the two GCDs are **separate GPU devices** to software.
 - **GPU↔GPU (inter-package):** 7 Infinity Fabric links per MI300X for an 8-GPU all-to-all ring;
@@ -64,8 +64,8 @@ bandwidth-bound relative to the bigger matrix core. See [l2_xcd_swizzle.md](l2_x
 3. **Size hot read-only data (weights, KV blocks) to live in the 256 MiB Infinity Cache** — it absorbs
    cross-XCD sharing and cuts HBM traffic.
 4. **Keep working sets XCD-local** (CDNA3/4): cross-XCD reuse misses the per-XCD L2 and falls to L3 /
-   Fabric. For device-wide reductions, stage through L3 and budget ~200 ns sync.
-5. **Use huge pages** for large working sets to avoid the ~47 ns TLB-miss penalty per access.
+   Fabric. For device-wide reductions, stage through L3 and budget hundreds of ns for the sync.
+5. **Use huge pages** for large working sets to avoid the TLB-miss penalty per access.
 6. **Cache-control flags** (`glc`/`slc`/`dlc`) bypass/stream caches for write-once data.
 
 ## Pitfalls

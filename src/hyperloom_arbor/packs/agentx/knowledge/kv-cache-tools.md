@@ -36,7 +36,7 @@ python3 packs/agentx/tools/kv_trace_simulator.py iter_N/kv_trace.jsonl \
 
 ## Key numbers to look for
 
-- **GPU→CPU BW**: PCIe on MI355X peaks at ~32 GB/s. If you see <10 GB/s, the transfers are too small (overhead-dominated) or contended
+- **GPU→CPU BW**: bounded by the PCIe link. Far below the link's rate, the transfers are too small (overhead-dominated) or contended
 - **CPU→GPU BW**: This is the stall path. Every ms here is a ms of decode stall
 - **Combined hit rate**: >95% means HiCache is working. <80% means the cache is too small for this concurrency
 - **Eviction rate**: >100/s sustained means the GPU cache is under constant pressure — increase mem-fraction-static or reduce max-running-requests

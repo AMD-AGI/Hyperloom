@@ -52,7 +52,7 @@ M is the most common mismatch, but geko's Equality match keys on the **entire** 
 transB, a_type, b_type, c_type, d_type, compute_type)`. If **any** field differs from what serving actually
 dispatches, the tuned kernel does not fire — stock fallback, silently.
 
-**Hard-won example (2026-10-02):** a tune produced 25 kept kernels with a real +12.6% GEMM uplift, yet a trace of
+**Hard-won example (2026-10-02):** a tune produced 25 kept kernels with a real GEMM uplift, yet a trace of
 the tuned serving run showed **0 of 25** firing. Ground truth from the eager `HIPBLASLT_LOG`: every real
 DSV4.1-Flash M=384 decode GEMM is `--a_type bf16_r --b_type bf16_r --c_type f32_r --d_type f32_r` — i.e. **bf16
 in, f32 OUT**. But the tuning workload yaml had `c_type: bf16_r, d_type: bf16_r` (bf16 out). So geko tuned the
@@ -124,8 +124,7 @@ that, these cost real hours to find:
 ## Context: is geko even the right lever? (measure first)
 
 For DSV4.1-Flash AgentX serving, geko hipBLASLt tuning is **flat end-to-end at every concurrency** even with the
-tuned kernels verified firing (+17-18% GEMM-level). Root cause (vLLM torch-profiler GPU-time breakdown):
-hipBLASLt `Cijk_*` is only **~3.5-3.8%** of GPU kernel time. The real cost is the **aiter** umbrella (~56%): MoE
-experts `mfma_moe*_afp8_wfp4` ~34%, dense linears `_mxfp8_linear` ~22%; plus TP all-reduce (`cross_device_reduce`)
-~15%. Tune aiter (its native autotuner: `csrc/*/*_tune.py` + `aiter/configs/*.csv`), not hipBLASLt, to move e2e.
+tuned kernels verified firing (and faster at GEMM level). Root cause (vLLM torch-profiler GPU-time breakdown):
+hipBLASLt `Cijk_*` is only **a small share** of GPU kernel time. Most of the cost is the **aiter** umbrella: MoE
+experts `mfma_moe*_afp8_wfp4`, dense linears `_mxfp8_linear`; plus TP all-reduce (`cross_device_reduce`). Tune aiter (its native autotuner: `csrc/*/*_tune.py` + `aiter/configs/*.csv`), not hipBLASLt, to move e2e.
 

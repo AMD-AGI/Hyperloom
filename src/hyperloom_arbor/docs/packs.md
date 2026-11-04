@@ -16,7 +16,7 @@ packs/<name>/
 
 Only `knowledge/`, `validator/` and `eval/` belong in a pack.
 
-**`results/` needs an opt-in** (operator, 2026-10-30).
+**`results/` needs an opt-in.**
 - **By default it is refused.** In component mode that is at start (exit 2), with the reason.
 - **Why:** a pack is the contract every campaign of its kind shares. Results kept in it reach every
   campaign that uses the pack, where an agent may read another model's, node's or image's numbers as
@@ -148,7 +148,7 @@ A serving pack starts from the serving template (below). Check a new pack with
 ## The serving template
 
 `packs/serving` is `balanced`'s method (the v2 line) for any model served by vLLM or SGLang, with
-nothing model-specific in it (operator, 2026-10-29). It is the pack a host's Arbor adapter uses for
+nothing model-specific in it. It is the pack a host's Arbor adapter uses for
 a workload with no pack of its own, and the starting point for a new one.
 
 - **Skills:** `dossier` and `profiler` by default. Add `hardware`, `serving-playbook` and

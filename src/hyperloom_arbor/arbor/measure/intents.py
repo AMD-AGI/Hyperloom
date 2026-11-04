@@ -100,7 +100,7 @@ class Intent:
 
 
 # How far below best a change may land and still count as neutral. Default 1% —
-# just above the 0.79% run-to-run spread measured on MI350X. Packs with a
+# just above the run-to-run spread measured on the reference node. Packs with a
 # noisier validator raise this in objective.measurement.
 DEFAULT_NOISE_BAND_PCT = 1.0
 

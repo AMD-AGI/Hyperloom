@@ -159,9 +159,9 @@ def outcome_metrics(steps: list[dict[str, Any]], session_json: dict[str, Any],
         if (spread is not None and isinstance(delta, (int, float))
                 and abs(delta) < spread):
             # Carry the individual runs. The spread alone can mislead: in the
-            # observed case it was 16.2% only because a hot-cache run the agent
+            # observed case it was large only because a hot-cache run the agent
             # had itself discarded as invalid was among the artifacts, while the
-            # two cold runs spread just 2.4%. A reader needs the values to judge
+            # two cold runs spread far less. A reader needs the values to judge
             # which comparison is the honest one.
             below_noise.append({"iteration": it, "delta_pct": delta,
                                 "noise_spread_pct": spread,

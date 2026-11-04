@@ -38,4 +38,4 @@ Mandatory for sparse attention — without it, LDS fill dominates latency.
 When a subkernel is too complex for pure FlyDSL (register pressure):
 1. Use FlyDSL for the compute-heavy part (e.g., preprocess + dQ)
 2. Use Triton/CK for the remainder (e.g., dKdV)
-3. This captured 80% of the total win for SLA backward
+3. This captured most of the total win for SLA backward

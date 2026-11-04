@@ -2,9 +2,9 @@
 
 A rolling chunk measures the current tree on its own node and makes that the bar
 (scripts/model-m-campaign/rebase_bar.py), so the gate and the agent compare against the
-node they run on. Read in sequence, though, the bar then jumps with the node: Model M
-day-0's b0 went 175.76 -> 155.90 on a slower node after six KEEPs, which reads as a
-regression. Operator, 2026-10-20: interpolate instead of changing 175 to 155.
+node they run on. Read in sequence, though, the bar then jumps with the node: a campaign's
+bar dropped on a slower node after six KEEPs, which reads as a regression. So the scale
+is interpolated instead of jumping with the node.
 
 Each REBASELINE lesson carries its step: the bar before it (the previous node's)
 over this node's reading of the same tree. The steps chain into a factor that puts
@@ -34,7 +34,7 @@ def applies(campaign, session=None) -> tuple[bool, str]:
     the next direction is graded against, and a round end re-baselines it before the
     dossier's update round. A campaign with no dossier (its agent lacks the dossier
     skill, map rounds are off, or the workload is a document), or whose map has no
-    directions yet, keeps the bar it was given (operator, 2026-10-28). A parallel
+    directions yet, keeps the bar it was given. A parallel
     lane's seeded map counts: its directions came from the run's dossier.
 
     Reads <session>/directions.json without loading it through arbor.directions,

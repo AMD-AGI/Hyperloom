@@ -271,7 +271,7 @@ sudo amdgpu-reset           # or reboot
 
 - `waves_per_eu` must be **re-tuned per kernel**:
   - Dense flash-attn: `wpe=3` optimal
-  - Sparse SLA fwd: `wpe=2` optimal (`wpe=3` is **1.389× slower**)
+  - Sparse SLA fwd: `wpe=2` optimal (`wpe=3` is **markedly slower**)
 - **NEVER inherit `wpe`** from another kernel — always measure both.
 - Anti-composition: `wpe=3 + ds_bpermute` regresses on BOTH dense and sparse.
   Either knob alone fine; test combinations explicitly.
@@ -284,7 +284,7 @@ sudo amdgpu-reset           # or reboot
 ### `.clone()` preserves non-contiguous strides
 `.transpose().clone()` does NOT produce a contiguous tensor. `.clone()`
 defaults to `preserve_format`.
-- **Symptom**: hidden `.contiguous()` HBM copy at first use (900 µs on MI355X)
+- **Symptom**: hidden `.contiguous()` HBM copy at first use (costly on large tensors)
 - **Fix**: `tensor.contiguous()` or `tensor.clone(memory_format=torch.contiguous_format)`
 
 ### Mark dynamic dims explicitly when known
@@ -304,9 +304,9 @@ to retrigger compilation. Stale `.o` artifacts persist across ninja runs.
 **Fix**: `rm -f` stale objects, then re-import.
 
 ### Module-switching cache eviction
-A CK kernel measured 92 µs in pure-CK chain but 99 µs in FlyDSL→CK chain due
+A CK kernel ran slower in a FlyDSL→CK chain than in a pure-CK chain due
 to instruction cache eviction at the backend boundary.
-- **Impact**: killed the hypothesis that mixing FlyDSL+CK would save 7 µs
+- **Impact**: killed the hypothesis that mixing FlyDSL+CK would save time
 - **Rule**: never trust cross-backend chain decomposition from homogeneous baselines.
 
 ## Diagnostic Workflow

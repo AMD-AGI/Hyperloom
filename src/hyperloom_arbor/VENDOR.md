@@ -92,6 +92,9 @@ Never edit it here: a change is made in Arbor and the copy is taken again, whole
 maintainers' vendoring tool, with the same omissions, placeholders, profiler skill and examples. The tool refuses a
 copy that still names any of the replaced terms.
 
+This copy also carries a text-only scrub on top of the tag: internal board, job and plan references and measured
+performance figures are removed. The vendoring tool does not apply or check it, so a re-vendor has to redo it.
+
 Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,
 `[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). Secret
 scanning (`detect-private-key`, `gitleaks`) and the licence check (`reuse`) do not.

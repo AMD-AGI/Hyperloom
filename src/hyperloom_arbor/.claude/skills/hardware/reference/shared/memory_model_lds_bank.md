@@ -58,8 +58,8 @@ For 16-bit data pad so the bank pattern breaks (e.g. `[32][32+4]` for half) or u
 4. **Bypass VGPRs with direct global→LDS** (`buffer_load ... lds` / `global_load_lds`): on CDNA3 up
    to 32 b/lane, **on CDNA4 up to 128 b/lane** (DWORD counts 1/2/4/12/16). This eliminates `ds_write`,
    staging VGPRs, and the copy index math — see [memory_hierarchy of each gen] and
-   [wavefront_simd_vgpr_agpr.md](wavefront_simd_vgpr_agpr.md). Measured: switching a reference GEMM to
-   `buffer_load_to_lds` freed ~100 VGPR/wave and moved it 697 → 1113 TFLOP/s (ROCm Triton guide).
+   [wavefront_simd_vgpr_agpr.md](wavefront_simd_vgpr_agpr.md). Switching a GEMM to
+   `buffer_load_to_lds` frees VGPRs per wave (ROCm Triton guide).
 5. **Double-buffer**: while MFMA consumes LDS buffer 0, async-load LDS buffer 1.
 
 ### LDS occupancy limit

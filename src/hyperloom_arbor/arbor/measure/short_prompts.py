@@ -2,11 +2,11 @@
 
 Hyperloom's MB found a KEEP whose tree gave wrong output on short prompts in about one server
 process in three (AITER's vectorized_5d mha_batch_prefill), and GSM8K did not see it: a long,
-batched, averaged evaluation (board #126). MB first compared each candidate with its parent and
+batched, averaged evaluation. MB first compared each candidate with its parent and
 dropped that: exact greedy matching fires on the largest gains (fp8 KV, quantized GEMMs move
 greedy tokens early). A defect that is wrong in every process is one GSM8K already sees; the
 gap is the defect that is wrong in some processes. So the check compares two processes of the
-SAME tree (operator, 2026-10-28; docs/component-mode.md §8):
+SAME tree (docs/component-mode.md §8):
 
 - **The probe**, MB's shape so the two teams' floors measure the same thing: 64 prompts of 1 to
   64 tokens, each starting with a different token (the prefix cache cannot serve one from
@@ -256,9 +256,9 @@ def check_keep(config: dict, session_dir, iter_dir, *, relaunch: Callable[[], bo
         _write(out, rec)
         return rec
     cmp = compare(first, second)
-    # Only the prompts sent one at a time gate (operator, 2026-10-28). On Model M at TP4 an
-    # unchanged tree's two processes differed on 0 of them every time, and on 19 to 23 of
-    # the 32 batched ones in their first tokens (Cluster A job 102998): which prompts share a
+    # Only the prompts sent one at a time gate. On a TP4 run an unchanged tree's two
+    # processes differed on none of them, and on most of the batched ones in their first
+    # tokens: which prompts share a
     # prefill batch changes between boots, and that flips near-tied greedy picks. A pooled
     # count hid a small single-request defect under that noise and could refuse a good KEEP
     # on a noisy boot, so the batched half is recorded for the host and refuses nothing.

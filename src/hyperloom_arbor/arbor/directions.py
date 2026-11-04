@@ -4,9 +4,8 @@ A campaign works from its dossier's part 11, a ranked list of directions, each
 with a map ID (``m-<component>``). Until now nothing tracked which of them had
 been explored: the ID was free text in DONE lines and ledger ids, and once the
 map ran out the campaign explored aimlessly until the drought notices fired.
-Operator, 2026-10-20: "if all the directions were explored already, the
-campaign should not explore aimlessly, but should run dossier and profile
-again, then continue 'like new'", with a checklist on the dashboard.
+Once every direction is explored, the campaign runs the dossier and the profile
+again, then continues like new, with a checklist on the dashboard.
 
 How it works:
 
@@ -23,15 +22,14 @@ How it works:
   dossier skill's update round (re-profile, lessons, re-ranked directions) as
   LEARNs with the LEARN cap waived. Its new map starts round K+1 in the same
   session, with the streak counters reset: the campaign continues like new.
-- With a round-end A/B hook (arbor/rounds.py; operator, 2026-10-21) a closed map
+- With a round-end A/B hook (arbor/rounds.py) a closed map
   ends the round the way a reached target does: the map waits ``verifying``
   while the driver runs a same-node A/B of the campaign's base against its
   current tree, and the update round begins once the A/B confirms the gain. A
   target reached with directions still open ends the round there too
   (``after_round_end``); the update round may carry them onto the next map.
-- A new map from an update round with no open increment does not stop the campaign
-  (operator, 2026-10-22: b0 stopped there, and "it should have started like a new
-  campaign"). A fresh start follows (``fresh``): a new dossier from the code read
+- A new map from an update round with no open increment does not stop the campaign:
+  it starts like a new campaign. A fresh start follows (``fresh``): a new dossier from the code read
   again whole and a new profile, the old map history. If that map has no open
   increment either, the harness takes the top planned rewrite as the next round's
   work (``rewrite``). It stops for the operator (``STOP``, ``MAP_STOP.md``) when no
@@ -759,7 +757,7 @@ def advance(campaign, state, root) -> str | None:
                 return _stop(campaign, state, root, doc, stop)
             from arbor import rounds
             if rounds.hook(campaign):
-                # Unified with the target (operator, 2026-10-21): an explored map ends the
+                # Unified with the target: an explored map ends the
                 # round like a reached target does, with a same-node A/B first.
                 doc.update(phase="verifying", phase_iters=0, phase_started_ts=time.time())
                 save(root, doc)
@@ -878,8 +876,8 @@ def _next_rewrite(doc: dict) -> dict | None:
 def _no_increment(campaign, state, root, doc: dict, source: str, nxt: int) -> str:
     """A new map with no open increment: "fresh", "rewrite" or "stop".
 
-    Operator, 2026-10-22: b0 stopped on such a map, and "it should have started like a
-    new campaign"; then, if that finds no increment either, the top planned rewrite.
+    Such a map starts the campaign again like a new one; then, if that finds no
+    increment either, the top planned rewrite.
     From an update round: a fresh start, the map just written kept as history. From a
     fresh start: the top planned rewrite opened as the round's work. Stop when none is left.
     """
@@ -1225,7 +1223,7 @@ def render(doc: dict, state=None, campaign=None) -> str:
             f"## FRESH START — a new dossier, as a new campaign writes one (iteration "
             f"{doc.get('phase_iters', 1)} of at most {limit})\n\n"
             f"Map round {k}'s update round found no open increment. The campaign does not stop: it "
-            "starts again like a new campaign, on the tree as it now is (operator, 2026-10-22). Run "
+            "starts again like a new campaign, on the tree as it now is. Run "
             "the dossier skill's full update (\"Updating the dossier\", the operator's version, steps "
             "1 and 3 to 5) in this session, each part its own `INTENT: LEARN` iteration with a LEDGER "
             "FACT naming its file:\n\n"
@@ -1270,7 +1268,7 @@ def render(doc: dict, state=None, campaign=None) -> str:
         taken = rw.get("taken") or {}
         lines[1:1] = [
             f"**This round carries out the rewrite `{rw['id']}`** ({rw.get('title', '')}). After a fresh "
-            "start found no increment, the harness took the top planned rewrite (operator, 2026-10-22). "
+            "start found no increment, the harness took the top planned rewrite. "
             f"Its plan: {rw.get('plan') or taken.get('why_before') or 'part 11 names it'}. Build it as the "
             "plan stages it, each stage a gated iteration held to the bar like any change. Close it `done` "
             "when the plan is delivered, `killed` on evidence, or `below_floor` when its ceiling falls "
@@ -1378,8 +1376,7 @@ SHARE_KEYS = ("id", "kind", "title", "why", "rank", "ceiling", "lane", "plan", "
 def split(dirs: list[dict], shares: int) -> list[list[dict]]:
     """A map's open directions in ``shares`` disjoint shares, one ``component.plan`` each.
 
-    A host that runs several Arbors from one set of directions (the 2026-11-04 release,
-    boards/ArborDevelopment #22) gives each a share. Directions joined by ``depends_on``
+    A host that runs several Arbors from one set of directions gives each a share. Directions joined by ``depends_on``
     stay in one share: a dependency missing from a map counts as met (``deps_met``), so
     split apart, one Arbor would start what another has not finished. A dependency on a
     closed direction is dropped, being met. The groups are dealt in rank order, each to

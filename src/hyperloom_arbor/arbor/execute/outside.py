@@ -3,7 +3,7 @@
 Model M day-0 c0's landed.patch (2026-10-24) is 208 symlinks out of 220 entries: its agent pointed
 AITER_JIT_DIR at arbor/aiter_jit/ and linked every AITER JIT module there into AITER's install
 directory, so the modules were saved nowhere and a fresh container need not have them. The
-operator's choice (2026-10-28): rebuild them, do not store them.
+operator's choice: rebuild them, do not store them.
 
 On every KEEP the driver records each link in the served tree that leaves the tree -- its path,
 its target, whether the target is there, and the sha256 and size of what it serves -- in

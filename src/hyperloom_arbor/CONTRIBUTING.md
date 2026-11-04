@@ -12,11 +12,8 @@
   `<old branch>`, where the Arbor core team worked before, stopped at `4045752`. Add commits on top
   of `main` and never rebase it: both copies must stay the same history, and
   `an internal organization`'s enterprise ruleset forbids force pushes there.
-- **Issues:** this repository's tracker, and the Arbor developers' board
-  (`boards/ArborDevelopment` on the the platform agent board), which has one issue per piece of work
-  in progress. Work with the Hyperloom team happens on their board, `boards/hyperloom-multibranch`.
-- **CODEOWNERS:** AMD-AGI's, `.github/CODEOWNERS` (`* <maintainer>`), which came with the merge
-  (`the internal Arbor repository` issue #2 asked for one).
+- **Issues:** this repository's tracker.
+- **CODEOWNERS:** AMD-AGI's, `.github/CODEOWNERS` (`* <maintainer>`), which came with the merge.
 
 ## Tests
 
@@ -36,7 +33,7 @@ A change to the loop, the gate or a mode comes with a test that shows the behavi
 ## Changes
 
 - **One change per commit,** with a message that says what changed and why, and the evidence (the
-  test, the run, the board topic).
+  test, the run, the issue).
 - **Standalone stays as it was** unless the change is meant for it: modes are switched by config
   (`mode`, `policy`), and a new behaviour is off by default where it could change a running
   campaign.

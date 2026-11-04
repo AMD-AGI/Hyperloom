@@ -17,8 +17,7 @@ updated: 2026-06-08
 ## TL;DR
 > The ladder: VGPR/AGPR → 64 KiB LDS → 32 KiB L1/CU → **4 MiB L2 per XCD** → **256 MiB Infinity Cache
 > (device)** → 192 GB HBM3 @ 5.325 TB/s. There is **no global L2**. The biggest single GEMM win is
-> **direct global→LDS** (`buffer_load ... lds`): on a reference kernel it freed ~100 VGPR/wave and
-> moved 697 → 1113 TFLOP/s.
+> **direct global→LDS** (`buffer_load ... lds`): it frees VGPRs per wave for deeper pipelining.
 
 ## Concepts
 
@@ -30,8 +29,8 @@ updated: 2026-06-08
 | LDS | **64 KiB/CU** (32 banks) | workgroup | ~20–30 cyc | highest tested | — |
 | L1 vector (TCP) | 32 KiB/CU, 128 B line | CU | tens of cyc | tens of TB/s | — |
 | L2 | **4 MiB/XCD** (16×256 KiB) | **per XCD** | — | XCD-local | — |
-| Infinity Cache (MALL/L3) | **256 MiB** | **device** | ~218 ns | ~11.9 TB/s | — |
-| HBM3 | **192 GB** | device | +~47 ns TLB miss | **5.325 TB/s** | 4 KiB page |
+| Infinity Cache (MALL/L3) | **256 MiB** | **device** | — | ~17 TB/s theoretical | — |
+| HBM3 | **192 GB** | device | TLB miss adds latency | **5.325 TB/s** | 4 KiB page |
 
 Cache line 128 B; page 4 KiB (huge pages for >64 MB working sets). FP16 roofline ridge ≈ 247 FLOP/byte
 → decode/norm/attention sit left of the ridge (HBM-bound).
@@ -50,7 +49,7 @@ buffer_load_dwordx4 ... lds        ; into LDS, no VGPR staging
 global_load_lds_dwordx4 ...        ; flat variant
 ```
 In Triton/Gluon this is `buffer_load_to_lds`. It removes the register round-trip and the copy index
-math; measured: ~100 VGPR/wave freed → 697 → 1113 TFLOP/s on a reference GEMM (ROCm Triton guide).
+math, freeing VGPRs per wave (ROCm Triton guide).
 Pair with **double buffering**: MFMA consumes LDS buffer 0 while async loads fill buffer 1.
 (CDNA4 widens this to 128 b/lane — see [../cdna4_mi350/memory.md](../cdna4_mi350/memory.md).)
 
@@ -72,7 +71,7 @@ loads, enabling deep overlap.
 |---|---|---|
 | L1 (32 KiB/CU) | write-through, 128 B line, per-CU | coalesce; reuse within a workgroup |
 | L2 (4 MiB/XCD) | coalesces XCD traffic, **per-chiplet** | keep working set XCD-local; cross-XCD reuse misses to L3 |
-| Infinity Cache (256 MiB) | device L3, ~218 ns, coherence point | size hot read-only data (weights, KV) to reside here |
+| Infinity Cache (256 MiB) | device L3, coherence point | size hot read-only data (weights, KV) to reside here |
 
 ### XCD locality & the 512 B Tagram hotspot
 8-multiple tiles spread evenly across the 8 XCDs and reuse hits the same XCD's L2. A GEMM whose LD

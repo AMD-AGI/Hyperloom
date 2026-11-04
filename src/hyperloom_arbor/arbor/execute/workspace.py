@@ -21,8 +21,8 @@ ARBOR_CONFIG_RELPATH = "arbor/config.json"
 
 # `"docker_container": "@host"` puts the workspace in a directory on this host:
 # git, the validators and the integrity digests run here, not through
-# `docker exec`. For a campaign with no server to run, a `document` workload
-# (runner plans/model-m/00 §4.11). Docker container names cannot contain "@".
+# `docker exec`. For a campaign with no server to run, a `document` workload.
+# Docker container names cannot contain "@".
 HOST = "@host"
 
 
@@ -207,7 +207,7 @@ def commit(container: str, workspace: str, message: str) -> str:
     the bench measured it and the campaign booked the number.
 
     v2 iteration 5 is the worked example: it added `configs/mxfp8_linear_tiles.json`
-    alongside a tuned-tile selector in rocm_native.py, booked +1.31% as a class-B
+    alongside a tuned-tile selector in rocm_native.py, booked it as a class-B
     win, and only rocm_native.py entered the commit. Two iterations later the
     table was gone, `_load_tuned_tiles()` was returning {} and all 99 tiles had
     fallen back to the MiniMax-M3 defaults -- so the booked best pointed at a tree
@@ -273,8 +273,8 @@ HARNESS_FILES = ("arbor/config.json",)
 # reach an export, an integration or another tree. A config's `scratch_paths` adds more.
 # `eval` is the packs' probe space at the workspace's top, which the loop already treats as
 # read-only (READONLY_PROBE_PREFIXES): under Hyperloom MB the agent kept its logs, probes and
-# a 327 MB GPU core dump there, and they rode in a KEEP's patches (<gpu host> T15, Hyperloom #155
-# c4786). Logs are never served, wherever the agent leaves one.
+# a GPU core dump there, and they rode in a KEEP's patches. Logs are never served, wherever
+# the agent leaves one.
 SCRATCH_PATHS = ("arbor/eval", "eval", "*.log")
 # A file this large is no source change. Such a file stays in the tree and out of every patch
 # (landed.patch, scratch.patch and a KEEP's), each named where its patch is written (`oversize`).
@@ -354,7 +354,7 @@ def base_commit(container: str, workspace: str, config: dict | None = None) -> s
     In component mode a host may hand over a worktree with history behind it (MB's is its
     experiment repository at the branch's start commit, with the session root and earlier
     merges before that), so ``component.root`` names the start commit, and the first commit
-    is only the fallback (board #154, c3600). A ``component.root`` that is not a commit of
+    is only the fallback. A ``component.root`` that is not a commit of
     the workspace raises: the driver refuses such a config at start.
     """
     config = config or {}
@@ -415,8 +415,8 @@ def save_landed_patch(container: str, workspace: str, out_path: str | Path,
     Served files only (``landed_pathspec``). arbor/config.json is HARNESS-WRITTEN,
     not landed work: it is seeded with different content by every fresh git-init,
     so including it makes the patch fail to apply against a new repo, and `git
-    apply` is atomic: that one file takes the real source changes down with it
-    (job 38943). Excluding all of arbor/ would be wrong the other way: it dropped
+    apply` is atomic: that one file takes the real source changes down with it.
+    Excluding all of arbor/ would be wrong the other way: it dropped
     a KEEP's own files there (campaign B3 iteration 22's TunableOp tables, which
     its kept PYTORCH_TUNABLEOP_FILENAME points at), so the next container ran
     without them. The agent's scratch goes to scratch.patch instead

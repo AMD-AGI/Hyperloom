@@ -322,7 +322,7 @@ def _main(argv: list[str] | None, held: dict) -> int:
             return rc
     elif campaign.config.get("docker_container"):
         # Not rolling, the flag KEEPs still go into a fresh container, and each KEEP's are
-        # mirrored below: b0's first iteration in a held Cluster B job (2026-10-22) ran
+        # mirrored below: a campaign's first iteration in a held job once ran
         # without them, without --enable-expert-parallel.
         from arbor.cluster import handoff
         handoff.restore_workspace_config(campaign.config, session_dir)
@@ -465,9 +465,9 @@ def _main(argv: list[str] | None, held: dict) -> int:
         #
         # That asymmetry mattered. A band narrower than the measurement noise
         # silently rejects real work, and the noise is routinely underestimated:
-        # the 0.79% spread quoted across three campaigns came from two runs on
+        # the spread quoted across three campaigns came from two runs on
         # one node, while re-measuring a byte-identical tree on its own node
-        # later differed by 3.02%. v2 widened its secondary band 1.7 -> 4.2
+        # later differed by several times that. v2 widened its secondary band
         # only at the START of the next campaign, after 47 iterations under a
         # bar it could not reach.
         #
@@ -516,7 +516,7 @@ def _main(argv: list[str] | None, held: dict) -> int:
             if not rounds.hook(campaign):
                 print(f"[arbor] Target reached: {_best_text(state, unit)} — exiting.")
                 break
-            # Not a stop (operator, 2026-10-21): the round ends, with a same-node A/B first.
+            # Not a stop: the round ends, with a same-node A/B first.
             rounds.request(session_dir, state, "target",
                            f"target {target} {unit} reached: {_best_text(state, unit)}")
             state.save(state_path)

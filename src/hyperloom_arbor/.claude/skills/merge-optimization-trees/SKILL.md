@@ -212,22 +212,17 @@ See [reference.md](reference.md) for what makes two numbers comparable.
 > #### A short single replay can REJECT a side. It cannot accept one.
 >
 > Query-to-query variance on an agentic benchmark swamps the effects being
-> chased. Measured at C32 on one node:
+> chased. On one node, four control screens of an identical config agreed
+> tightly, but the same knob on the same tree, measured twice, spread almost as
+> wide as the effects being chased.
 >
-> | | spread |
-> |---|---:|
-> | 4 control screens, identical config | 0.365% |
-> | **same knob, same tree, measured twice** | **0.89%** |
-> | effects being chased | 1–1.2% |
->
-> A candidate measured **309.130** then **306.399** on a repeat of the
-> identical configuration — 1082 vs 1081 requests, prefix-cache hit 0.90674 vs
-> 0.90664, so the workload was the same and the machine was not. The apparent
-> +1.14% was noise.
+> A candidate measured on a repeat of the identical configuration — the same
+> request count and prefix-cache hit rate, so the workload was the same and the
+> machine was not — read lower the second time. The apparent gain was noise.
 >
 > **Do not take a tight control spread as the noise floor.** Four controls
-> agreeing to 0.365% says nothing about the tail. The honest estimate is a
-> *direct replicate* — the same configuration twice — and that was 2.4× wider.
+> agreeing tightly says nothing about the tail. The honest estimate is a
+> *direct replicate* — the same configuration twice — and that was much wider.
 >
 > Keep the short screens: they legitimately reject the many candidates that do
 > nothing. Anything that survives goes to a full-duration paired A/B at the
@@ -236,9 +231,9 @@ See [reference.md](reference.md) for what makes two numbers comparable.
 ### Attribute the gain to the right thing
 
 A treatment arm beating an *old* baseline does not mean the knobs did it. Here
-the lean tree measured ~78 tok/s/chip against a stock baseline of 71.571 and
-it was tempting to call the knobs worth +9%. The paired control — same tree,
-knobs off — measured 77.968. **The gain belonged to the merged tree, and the
+the lean tree measured well above a stock baseline and it was tempting to
+credit the knobs. The paired control — same tree, knobs off — measured the
+same. **The gain belonged to the merged tree, and the
 knobs were flat.** Only the paired arm isolates the knob.
 
 ### Prove "one tree, environment only" instead of assuming it
@@ -355,9 +350,9 @@ expensive option: it destroys the comparison and nobody re-derives it.
   another had added.
 - **Cross-axis credit.** A gain on tok/s/user at C4 is not evidence for
   tok/s/chip at C32.
-- **Comparing across nodes.** Internode differences of ~1–4% have been measured
-  on identical trees.
-- **Trusting a source's self-reported number.** One tree's published +39.64%
+- **Comparing across nodes.** Internode differences as large as the effects
+  being chased have been measured on identical trees.
+- **Trusting a source's self-reported number.** One tree's published gain
   was measured on a cross-contaminated checkout, per its own review.
 
 ## Additional resources

@@ -114,8 +114,7 @@ for a person:
 
 On a shared node, each point gets its own container (`--slot`), cards and Arbor port base (`--agent-port`). Each
 point's Arbor gets its own point's `Host rule` directives. Each point ends with its own recipe; nothing merges across
-the points (ArborDevelopment #27). Verified on Cluster A, C8 and C64 on one node (2026-11-01; runner
-`plans/arbor/M08_multi_point/`). How to run it, in Hyperloom's docs on `arbor-adapter-v2`: `docs/how-to/multibranch-points.md`; the
+the points. Verified with two points (C8 and C64) on one node. How to run it, in Hyperloom's docs on `arbor-adapter-v2`: `docs/how-to/multibranch-points.md`; the
 single-session review: `docs/how-to/multibranch-review-gate.md`.
 
 ## What passes between them
@@ -152,11 +151,10 @@ single-session review: `docs/how-to/multibranch-review-gate.md`.
 - **An older MB under a newer Arbor:** an MB before `cc5fc7dca` doesn't write `component.review`. Its Arbors at
   `1fa2069` or later wait at Arbor's own gate, holding their leases.
 - **No merge across operating points:** each point's session ends with its own recipe. A rule that combines them
-  (for example, keep a change only if no point regresses) is not built (ArborDevelopment #27).
+  (for example, keep a change only if no point regresses) is not built.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
   removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `arbor-adapter-v2` `b9d65167d` and
-  after). Only on AgentX, though: there Magpie applies it; on InferenceX such a removal is refused
-  (`boards/hyperloom-multibranch#168`).
+  after). Only on AgentX, though: there Magpie applies it; on InferenceX such a removal is refused.
 - **No profile on CUDA-graph runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens
   degraded, the branches get none, though the dossier pass got kernel shares.
 - **One Arbor without the review:** with `--no-review-gate` and no `--agent-directions`, a lone Arbor gets no

@@ -3,8 +3,8 @@
 A host that runs several Arbors from one map needs that map before its branches open. A
 dossier pass measures one (``component.stop_at: "map"``); this writes one at once, with no GPU
 time, from what the host already has after its baseline: the op shares of the root's profile,
-the file it gives Arbor as ``component.profile`` (operator, 2026-10-30: a generated map, either
-a dossier-only pass or "minimal directions from Hyperloom + the v2 pack as a template").
+the file it gives Arbor as ``component.profile``: minimal directions from the host's profile,
+with the v2 pack as a template.
 
 - **The minimal directions** are the profile's op families, as Hyperloom's MB reads them for its
   open areas: each op is put in the first family whose pattern its name matches

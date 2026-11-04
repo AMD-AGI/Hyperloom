@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Arbor campaign dashboard: one campaign live (local mode), or every campaign
-// on the share (global mode). Ported from the Cluster A campaign dashboard
-// (scripts/arbor_dashboard/ on <fork>/dsv41-v2.1); README.md here
-// says what changed.
+// on the share (global mode). Ported from an earlier campaign dashboard;
+// README.md here says what changed.
 //
 //   node server.mjs local    --host <host with the session> --session <dir> [--slurm-job <name>] ...
 //   node server.mjs global   [--share-host arbor-share] [--share-root /shared/arbor]

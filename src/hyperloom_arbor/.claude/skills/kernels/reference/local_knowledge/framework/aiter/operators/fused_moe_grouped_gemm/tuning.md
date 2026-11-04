@@ -32,9 +32,9 @@ serving stacks the live lever is **aiter's `tuned_fmoe.csv`**, not hand-written 
 | `QuantType.No` (bf16) | bf16 asm fused MoE | no quant; baseline |
 | `per_Token` / `per_Tensor` fp8 (E4M3FNUZ gfx942) | CK block-scale + asm stage-1 | the MI300X MoE workhorse, **up to 3× on DeepSeek-V3** |
 | int8 | CK/asm int8 path | int8 weights |
-| A4W4 (fp4) | FlyDSL when available, else CK | gfx950 (FP4 HW); **1.6× latency @ concurrency 512 (MI355X)**; gfx942 falls back |
+| A4W4 (fp4) | FlyDSL when available, else CK | gfx950 (FP4 HW); the MI355X latency lever; gfx942 falls back |
 fp8 block-scale is the headline win on MI300X (up to 3× on DeepSeek-V3); on MI355X the **FlyDSL A4W4/MXFP4**
-path is the lever (1.6× latency cut @ concurrency 512), and MXFP4 GEMMs are ≈62% of Llama2-70B e2e. The MoE
+path is the lever, and MXFP4 GEMMs are ≈62% of Llama2-70B e2e. The MoE
 **align&sort redesign cut the sort step 10×** (so don't re-tune the sort — it's already collapsed); the sort
 now has selectable backends via `AITER_MOE_SORT_BACKEND` (`auto`/`adaptive`, default `opus` = `moe_sorting_opus`,
 `ck`, or FlyDSL via `AITER_USE_FLYDSL_MOE_SORTING`). **MoRI** fuses cross-GPU EP dispatch/combine into the
@@ -77,13 +77,13 @@ vLLM/SGLang ship **per-shape JSON** configs (`E=…,N=…,device_name=MI300X.jso
 > **vLLM int4_w4a16 — the highest-ROI, ZERO-HBM lever (don't skip it).** vLLM ships **no** tuned
 > config for an unseen `E,N,int4_w4a16` shape → the int4 expert GEMM runs on a slow default fallback
 > (the "Using default MoE config" warning). A per-M-bucket micro-sweep → `VLLM_TUNED_CONFIG_FOLDER`
-> (vLLM's env, NOT the sglang one above) gives **~1.5–1.6x** on the prefill-dominant buckets and only
-> changes Triton tile/scheduling, so it adds **no memory**. Proven: +16.4% e2e on Kimi-K2.6 (TP=8,
+> (vLLM's env, NOT the sglang one above) speeds up the prefill-dominant buckets and only
+> changes Triton tile/scheduling, so it adds **no memory**. Proven e2e on Kimi-K2.6 (TP=8,
 > int4) with `--max-num-batched-tokens 16384`. Recipe + driver: `e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md`.
 >
 > ⚠️ **Memory caveat for the quant path (§1) at e2e.** The fp8/CK block-scale path is the dominant
 > *latency* lever in isolation, but on an already-int4 model it caches a **second (fp8) weight copy** →
-> at memory parity it **OOMs at KV-cache init** (op-level 1.5x, e2e-undeployable). Before deploying any
+> at memory parity it **OOMs at KV-cache init** (faster at op level, e2e-undeployable). Before deploying any
 > quant rewrite, check the extra weight bytes fit at the run's `gpu_memory_utilization` without shrinking
 > the measured KV-cache budget. For int4 models, take the zero-HBM Triton config tune above FIRST.
 
@@ -107,7 +107,7 @@ vLLM/SGLang ship **per-shape JSON** configs (`E=…,N=…,device_name=MI300X.jso
 - MoE 2-stage tuner (`--errRatio` default 0.5): `ROCm/aiter@b467ce342:csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py`.
 - up to 3× fused MoE / block-scale fp8 (DeepSeek-V3, MI300X): https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
 - 10× align & sort (sort step): https://www.amd.com/en/blogs/2025/revolutionizing-mixture-of-experts-performance-10.html
-- FlyDSL A4W4 1.6× latency @ concurrency 512 (MI355X) + MoRI in-kernel EP fusion: https://www.lmsys.org/blog/2026-05-28-mori/
+- FlyDSL A4W4 latency (MI355X) + MoRI in-kernel EP fusion: https://www.lmsys.org/blog/2026-05-28-mori/
 - Kimi-K2.5 FlyDSL FusedMoE (−65% TTFT / −69% TPOT / +162% tput): https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
 - MXFP4 GEMMs ≈62% of Llama2-70B e2e: https://rocm.blogs.amd.com/artificial-intelligence/mlperf-inference-v6.0/README.html
 - masked/contiguous grouped GEMM concept: https://github.com/deepseek-ai/DeepGEMM

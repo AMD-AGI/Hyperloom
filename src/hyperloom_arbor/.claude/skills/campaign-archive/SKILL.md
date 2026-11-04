@@ -17,7 +17,7 @@ sha256**.
 
 | Path | Contents |
 |---|---|
-| `/data/dsv41/sessions/<campaign>/` | live session: `session.json`, `ledger.jsonl`, `landed.patch`, `stock_base/`, `iter_N/` |
+| `<sessions root>/<campaign>/` | live session: `session.json`, `ledger.jsonl`, `landed.patch`, `stock_base/`, `iter_N/` |
 | `scripts/dsv41-campaign/` | `sync_campaign_to_git.sh`, `check_review_consistency.py`, the sbatch files |
 | `results/dsv41flash-agentx-c32/runs/<campaign>/` | the archived ~2 MB slice |
 | `results/dsv41flash-agentx-c32/CAMPAIGN_REVIEW.md` | hand-written analysis |
@@ -28,12 +28,12 @@ content — patches, ledgers, verdicts, stock base — is ~2 MB. Archive that; l
 ## Sync
 
 ```bash
-bash /data/dsv41/sync_campaign_to_git.sh
+bash scripts/dsv41-campaign/sync_campaign_to_git.sh
 ```
 
 Copies `session.json`, `ledger.jsonl`, `landed.patch`, `stock_base/` and every `iter_N/patch.diff` into
 `results/dsv41flash-agentx-c32/runs/`, runs the review consistency check, commits and pushes to
-`huasha_dsv41_flash`. Safe against running campaigns: read-only except for appending a missing trailing
+the campaign's archive branch. Safe against running campaigns: read-only except for appending a missing trailing
 newline to `landed.patch`. Idempotent — prints `nothing changed` when there is nothing new.
 
 Runs every 20 minutes on a cron while campaigns are live.
@@ -114,7 +114,7 @@ half-done. The apply then fails with a misleading `No such file or directory` pe
 *any* depth. An entire archive subtree was silently swallowed once — `git add -A` reported nothing and 25
 files vanished. Hence `runs/`.
 
-**Commit from `/home/<colleague>/Arbor`, never `/data/dsv41/Arbor`.** The `/apps` tree is bind-mounted
+**Commit from a checkout of your own, never the shared Arbor checkout.** The shared tree is bind-mounted
 into both live containers as `/workspace/Arbor`, sits at an older commit, and carries local modifications.
 Running git operations there while drivers read packs and validators out of it risks the running jobs.
 

@@ -20,7 +20,7 @@
   "failures": 1,
   "success_contexts": [],
   "failure_contexts": [
-    "2026-04-24: attempted a custom 128×128×128 MX-FP8 kernel for wgrad-reshape shape. First version assumed flat lane-layout → 8.6 dB SNR. Second version tried 2-stripe split (cols 0..15 + 64..79 per lane) → still 8.6 dB. Actual ISA needs the XOR-swizzled LDS descriptor used by the 256-sibling. Aborted; kept v1 Python shim (0.44× Triton)."
+    "2026-04-24: attempted a custom 128×128×128 MX-FP8 kernel for wgrad-reshape shape. First version assumed flat lane-layout → 8.6 dB SNR. Second version tried 2-stripe split (cols 0..15 + 64..79 per lane) → still 8.6 dB. Actual ISA needs the XOR-swizzled LDS descriptor used by the 256-sibling. Aborted; kept v1 Python shim (slower than Triton)."
   ],
   "sub_skills": [],
   "decision_rules": [

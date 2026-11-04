@@ -22,7 +22,7 @@ aiter's per-shape dispatch DB**: capture the real shapes from the running server
 library kernels per shape (gradlib), keep the winners in a CSV, and deploy the CSV by env. On sglang/vLLM
 this is the **only** GEMM lever that engages the live path (`aiter.tuned_gemm.gemm_a16w16` / `tgemm.mm`);
 PyTorch TunableOp and `HIPBLASLT_TUNING_FILE` hook a dispatch layer aiter bypasses and do nothing.
-Measured: **+2.23% e2e** on Qwen3.5-27B / MI300X from DB tuning alone (246 engagement hits).
+DB tuning alone can move e2e throughput.
 
 ## The DB lookup key (every field must match the live call)
 `aiter/tuned_gemm.py` (`get_GEMM_A16W16_config`) resolves a **10-tuple** against the CSV — note the
@@ -83,7 +83,7 @@ The same "capture-shape → codegen/tune configs → install CSV" pattern applie
 - **bias mismatch = 0 engagement** (the trap that produced a false "GEMM tuning has no benefit"). Capture
   bias live; never synthesize `bias=True`.
 - **TunableOp / `HIPBLASLT_TUNING_FILE` are dead ends on sglang** (hook PyTorch `addmm`; aiter calls
-  `hipb_mm` directly). Measured −0.11%/−0.30% — wrong lever.
+  `hipb_mm` directly). Measured flat — wrong lever.
 - **Fork-storm**: the hipBLASLt path (`--with-hipblaslt` / gradlib) races ~1365 solutions/shape and across
   big prefill spawns hundreds of `rocm_agent_enumerator` procs → host OOM / corrupted e2e timing.
   Bucket-reduce big M, cap `--mp`, restrict `--libtype` while iterating; serialize heavy nested tunes.

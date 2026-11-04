@@ -14,7 +14,7 @@ The driver then reloads the campaign from disk, so the reviewed files are the on
 measured. A rejection ends the run (``review_rejected``). A session that already has
 ``session.json`` is never gated again: a resume, a host's relaunch and a crash recovery go on.
 
-On by default, everywhere (ArborDevelopment #30, a human's decision, 2026-10-31). Off with
+On by default, everywhere. Off with
 ``run --no-review-gate``, ``ARBOR_REVIEW_GATE=0`` or the config's ``"review_gate": false``;
 the flag wins over the environment, the environment over the config. A host that reviews the
 campaign itself before it starts the run says so with ``component.review: "host"`` (MB pauses

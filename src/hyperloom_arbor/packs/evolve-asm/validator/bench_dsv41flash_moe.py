@@ -39,18 +39,16 @@ def bench_moe1(args):
     # streams a full 128xK weight slab for very few rows of A, so it wants a short
     # tile_m; prefill is compute-bound and wants a tall one. One default cannot
     # serve both: pinning the prefill tile (below) made every decode-regime shape
-    # run the wrong kernel and cost 1.7x.
+    # run the wrong kernel, measurably slower.
     #
-    # Island 1 gen-3, official validator, weakest-of-3, gfx950/MI355X:
-    #                 M=192,E=128,k=3   M=32,E=384,k=6   M=512   M=1024   M=4096
-    #   t64x128x256        9.52 us          9.29 us      9.95     15.67    40.0
-    #   t16x128x256        5.68 us          5.31 us     12.18     19.77    68.8
-    # Crossover is between M=256 and M=512 -- the same place the campaign splits
-    # decode/verify (M<=256) from prefill (M>=512).
+    # Island 1 gen-3 (official validator, weakest-of-3, gfx950/MI355X) found
+    # t16x128x256 ahead of t64x128x256 at decode shapes and behind it at prefill
+    # shapes. Crossover is between M=256 and M=512 -- the same place the campaign
+    # splits decode/verify (M<=256) from prefill (M>=512).
     #
     # t16x128x256/kw1/async is the unique optimum of a full tile_m x tile_n x
-    # k_wave grid at M=192 (next distinct structure 5.96 us); it is bit-exact
-    # against the reference config under real e8m0 scales.
+    # k_wave grid at M=192; it is bit-exact against the reference config under
+    # real e8m0 scales.
     # The prefill branch is island 1 gen-1's 305-trial result, unchanged.
     # Env vars (FLYDSL_*) still override everything.
     #
@@ -60,15 +58,8 @@ def bench_moe1(args):
     # quadruples the block count (288) and drops barriers 23->10, mfma 80->20.
     # That trade only pays while the grid is under-occupied; once tile_n=128 alone
     # fills the machine, the smaller tile is pure MFMA-efficiency loss. Measured
-    # interleaved, official validator, gfx950/MI355X, median of 3 (M=32: 9 rounds):
-    #        M      t16x128x256/kw1   t16x32x256/kw4
-    #        16          5.26              4.78   win
-    #        32          5.33              4.74   win  (9/9 paired, -12.1%)
-    #        48          5.32              4.75   win
-    #        64          5.32              5.29   tie
-    #        96          5.44              5.89   LOSS
-    #       128          5.45              6.84   LOSS
-    #       192          5.69              8.70   LOSS  (-53%, DSpark verify shape)
+    # interleaved with the official validator, t16x32x256/kw4 wins for M<=48,
+    # ties at M=64 and loses from M=96 up (worst at the DSpark verify shape),
     # so the small-M tile is gated to M<=64 and M=96..256 keeps island 1 gen-3's
     # t16x128x256. Bit-exact vs the validator's reference config under real e8m0
     # scales (mse=0, coverage 1152/1152, absmax 2592).

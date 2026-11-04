@@ -37,7 +37,7 @@ Peak formula: `FLOPs_per_clock_per_CU × 304 × 2.1e9`. Example FP16: `2048 × 3
 |---|---|
 | HBM3 capacity | 192 GB (8 × 24 GB) |
 | HBM3 bandwidth | **5.325 TB/s** (5.2 Gbps × 8192-bit) |
-| Infinity Cache (L3/MALL) | 256 MiB, ~11.9 TB/s measured (~17 theoretical), ~218 ns |
+| Infinity Cache (L3/MALL) | 256 MiB, ~17 TB/s theoretical |
 | L2 | 4 MiB **per XCD** |
 | L1 vector | 32 KiB/CU, 128 B line |
 | LDS | 64 KiB/CU, 32 banks, up to 128 B/clk |
