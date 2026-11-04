@@ -72,7 +72,7 @@ def test_the_manifest_drops_the_credentials_the_records_of_every_process_drop() 
         {
             "source": SOURCE,
             "install": ["git clone https://ghp_abc123def@github.com/org/agent.git", "git clone https://bot:pw@host/a"],
-            "launch": "curl -H 'Authorization: Bearer sk-abcdefgh' http://localhost:30000/v1/models",
+            "launch": "curl -H 'Authorization: Bearer secret-token-value' http://localhost:30000/v1/models",
             "config": {
                 "secrets": {"github": "ghp_abc123def"},
                 "headers": {"Authorization": "Bearer sk-abcdefgh"},
@@ -83,7 +83,8 @@ def test_the_manifest_drops_the_credentials_the_records_of_every_process_drop() 
         }
     )
 
-    assert not any(secret in json.dumps(kept) for secret in ("abc123def", "abcdefgh", "opaque", ":pw@"))
+    secrets = ("abc123def", "abcdefgh", "secret-token-value", "opaque", ":pw@")
+    assert not any(secret in json.dumps(kept) for secret in secrets)
     assert kept["config"] == {
         "secrets": REDACTED,
         "headers": REDACTED,
