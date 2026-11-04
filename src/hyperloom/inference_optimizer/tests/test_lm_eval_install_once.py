@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""InferenceX's lm-eval install, patched by ``_magpie_patcher``, runs once per Python environment, under a lock."""
+"""InferenceX's lm-eval install, patched by ``_magpie_patcher``, runs once per Python environment, under a lock; the
+eval command's own output is kept in the round's directory as it is written."""
 
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -28,9 +32,30 @@ after() {{ :; }}
 """
 
 
-def _lib(tmp_path: Path) -> Path:
+RUN_LM_EVAL = """
+run_lm_eval() {
+    _install_lm_eval_deps
+    echo "Eval budget: 4096"
+    set -x
+    python3 -m lm_eval --tasks gsm8k \\
+      --output_path "$RESULT_DIR/eval"
+    local eval_exit=$?
+    set +x
+    return $eval_exit
+}
+"""
+#: The install-once wrapper as an earlier revision laid it: from the install on, the whole shell's output was teed.
+SHELL_WIDE_CAPTURE = """_hyperloom_keep_eval_output() {
+    [[ -n "${RESULT_DIR:-}" && -d "${RESULT_DIR:-}" ]] || return 0
+    exec > >(tee -a "$RESULT_DIR/hyperloom_eval.log") 2> >(tee -a "$RESULT_DIR/hyperloom_eval.log" >&2)
+}
+
+"""
+
+
+def _lib(tmp_path: Path, text: str = LIB) -> Path:
     lib = tmp_path / "benchmark_lib.sh"
-    lib.write_text(LIB)
+    lib.write_text(text)
     return lib
 
 
@@ -62,6 +87,20 @@ def test_the_benchmark_preparation_patches_the_runner_s_own_inferencex_checkout(
     assert prepare_benchmark_runtime(config, {}) is None
 
     assert patcher._LM_EVAL_ONCE_SENTINEL in (checkout / "benchmarks" / "benchmark_lib.sh").read_text()
+
+
+def test_the_eval_concurrency_sweep_lays_the_patch_whatever_it_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preflight and baseline reach the patch through this sweep; a library it cannot fully fix still gets it."""
+    checkout = tmp_path / "InferenceX"
+    (checkout / "benchmarks").mkdir(parents=True)
+    lib = _lib(checkout / "benchmarks")
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    patcher.ensure_eval_concurrency_compat(inferencex_dir=checkout)
+
+    assert patcher._LM_EVAL_ONCE_SENTINEL in lib.read_text()
 
 
 def test_a_library_without_the_install_is_left_alone_and_said_so(
@@ -109,6 +148,11 @@ def _python3(tmp_path: Path, prefix: Path) -> Path:
         "#!/bin/sh\n"
         f'if [ "$2" = "import sys; print(sys.prefix)" ]; then echo {prefix}; exit 0; fi\n'
         'if [ "$2" = "import lm_eval" ]; then [ -s "$INSTALLS" ]; exit $?; fi\n'
+        'if [ "$2" = "lm_eval" ]; then\n'
+        '    echo "lm_eval: 42 requests done"; echo "loading gsm8k from the Hub" >&2\n'
+        '    if [ -n "${EVAL_HANG:-}" ]; then sleep 60; fi\n'
+        "    exit 3\n"
+        "fi\n"
         "exit 0\n"
     )
     python3.chmod(0o755)
@@ -145,11 +189,8 @@ def test_an_environment_whose_prefix_cannot_be_written_installs_once_too(tmp_pat
         Path(spare).unlink(missing_ok=True)
 
 
-@pytest.mark.skipif(not (shutil.which("bash") and shutil.which("flock")), reason="needs bash and flock")
-def test_what_the_eval_prints_is_kept_in_the_round_s_directory_as_it_is_written(tmp_path: Path) -> None:
-    """Magpie holds the round's output until the round ends; a round the watchdog ends kept nothing of its eval."""
-    lib = _lib(tmp_path)
-    patcher._apply_lm_eval_install_once_patch_atomic(lib)
+def _eval_round(tmp_path: Path, text: str = LIB + RUN_LM_EVAL) -> tuple[Path, dict[str, str]]:
+    lib = _lib(tmp_path, text)
     prefix = tmp_path / "venv"
     prefix.mkdir()
     environ = {
@@ -157,33 +198,105 @@ def test_what_the_eval_prints_is_kept_in_the_round_s_directory_as_it_is_written(
         "INSTALLS": str(tmp_path / "installs"),
         "RESULT_DIR": str(tmp_path),
     }
-    log = tmp_path / patcher.EVAL_OUTPUT_LOG
-    script = (
-        f'source "{lib}"; _install_lm_eval_deps; echo "Eval budget: 4096"; echo "loading gsm8k from the Hub" >&2; '
-        f'while ! grep -q "loading gsm8k" "{log}" 2>/dev/null; do sleep 0.1; done; kill -9 $$'
-    )
+    return lib, environ
+
+
+@pytest.mark.parametrize(
+    "lay",
+    [
+        lambda checkout: patcher.ensure_lm_eval_install_once(checkout),
+        lambda checkout: patcher.ensure_eval_concurrency_compat(inferencex_dir=checkout),
+    ],
+    ids=["install_once", "eval_concurrency_sweep"],
+)
+def test_each_entry_point_lays_the_eval_output_patch_with_the_install_once_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lay
+) -> None:
+    checkout = tmp_path / "InferenceX"
+    (checkout / "benchmarks").mkdir(parents=True)
+    lib = _lib(checkout / "benchmarks", LIB + RUN_LM_EVAL)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    lay(checkout)
+
+    text = lib.read_text()
+    assert patcher._LM_EVAL_ONCE_SENTINEL in text and patcher._EVAL_OUTPUT_SENTINEL in text
+
+
+@pytest.mark.skipif(not (shutil.which("bash") and shutil.which("flock")), reason="needs bash and flock")
+def test_only_what_the_eval_command_writes_is_kept_in_the_round_s_directory(tmp_path: Path) -> None:
+    """Magpie holds the round's output until the round ends; the eval's own output is also kept as it is written, and
+    what the shell writes before or after it is not."""
+    lib, environ = _eval_round(tmp_path)
+    assert patcher._apply_eval_output_patch_atomic(lib)
+    patched = lib.read_text()
+    assert patcher._apply_eval_output_patch_atomic(lib)
+    assert lib.read_text() == patched
+    assert patched.count(f"{patcher._EVAL_OUTPUT_FN} python3 -m lm_eval --tasks gsm8k") == 1
+    assert patcher._apply_lm_eval_install_once_patch_atomic(lib)
+    script = f'source "{lib}"; run_lm_eval; echo "eval exit $?"; echo "benchmarking again"; echo "benchmarking" >&2'
 
     done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=environ, timeout=60)
 
-    assert done.returncode == -9, "the shell was killed, as the watchdog ends a round"
-    kept = log.read_text()
-    assert "installing lm-eval" in kept and "Eval budget: 4096" in kept and "loading gsm8k from the Hub" in kept
-    assert "loading gsm8k from the Hub" in done.stderr and "Eval budget: 4096" in done.stdout, "the round still sees it"
+    kept = (tmp_path / patcher.EVAL_OUTPUT_LOG).read_text()
+    assert "42 requests done" in kept and "loading gsm8k from the Hub" in kept
+    assert "benchmarking" not in kept and "Eval budget" not in kept and "installing lm-eval" not in kept
+    assert "eval exit 3" in done.stdout, "the eval's status reaches the caller of run_lm_eval"
+    assert "42 requests done" in done.stdout and "loading gsm8k from the Hub" in done.stderr, "the round still sees it"
 
 
 @pytest.mark.skipif(not (shutil.which("bash") and shutil.which("flock")), reason="needs bash and flock")
-def test_an_install_whose_output_is_kept_elsewhere_keeps_none_in_the_round_s_directory(tmp_path: Path) -> None:
-    lib = _lib(tmp_path)
+def test_what_the_eval_printed_is_kept_when_the_round_is_killed_during_it(tmp_path: Path) -> None:
+    lib, environ = _eval_round(tmp_path)
+    patcher._apply_eval_output_patch_atomic(lib)
     patcher._apply_lm_eval_install_once_patch_atomic(lib)
-    prefix = tmp_path / "venv"
-    prefix.mkdir()
-    environ = {
-        "PATH": f"{_python3(tmp_path, prefix)}:/usr/bin:/bin",
-        "INSTALLS": str(tmp_path / "installs"),
-        "RESULT_DIR": str(tmp_path),
-        patcher.EVAL_OUTPUT_ENV: str(tmp_path / "eval_deps.log"),
-    }
+    log = tmp_path / patcher.EVAL_OUTPUT_LOG
+    process = subprocess.Popen(
+        ["bash", "-c", f'source "{lib}"; run_lm_eval'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**environ, "EVAL_HANG": "1"},
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (log.is_file() and "loading gsm8k" in log.read_text()):
+            time.sleep(0.05)
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)  # as the watchdog ends a round: the whole group, mid-eval
+        process.wait()
 
-    subprocess.run(["bash", "-c", f'source "{lib}"; _install_lm_eval_deps'], check=True, env=environ)
+    assert "loading gsm8k from the Hub" in log.read_text()
 
-    assert not (tmp_path / patcher.EVAL_OUTPUT_LOG).exists()
+
+@pytest.mark.skipif(not (shutil.which("bash") and shutil.which("flock")), reason="needs bash and flock")
+def test_a_library_patched_with_the_shell_wide_capture_keeps_nothing_after_the_install(tmp_path: Path) -> None:
+    """A checkout patched by the earlier revision calls the capture bare, first thing in the install; that call now does
+    nothing, so the benchmark shell's later output stays out of the eval's log."""
+    lib, environ = _eval_round(tmp_path)
+    patcher._apply_lm_eval_install_once_patch_atomic(lib)
+    text = lib.read_text().replace(
+        "    local prefix marker lock\n", "    _hyperloom_keep_eval_output\n    local prefix marker lock\n"
+    )
+    lib.write_text(text.replace("_install_lm_eval_deps() {", SHELL_WIDE_CAPTURE + "_install_lm_eval_deps() {", 1))
+    log = tmp_path / patcher.EVAL_OUTPUT_LOG
+    script = f'source "{lib}"; _install_lm_eval_deps; echo "benchmarking again"'
+    subprocess.run(["bash", "-c", script], check=True, capture_output=True, env=environ, timeout=60)
+    assert "benchmarking again" in log.read_text(), "the fixture is the shell-wide capture"
+    log.unlink()
+
+    assert patcher._apply_eval_output_patch_atomic(lib)
+    subprocess.run(["bash", "-c", script], check=True, capture_output=True, env=environ, timeout=60)
+
+    assert not log.exists(), "the bare call keeps nothing, not even an empty log"
+
+
+def test_a_library_without_the_eval_command_is_left_alone_and_said_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    lib = _lib(tmp_path)
+
+    assert not patcher._apply_eval_output_patch_atomic(lib)
+
+    assert lib.read_text() == LIB
+    assert "no lm_eval command in run_lm_eval" in caplog.text
