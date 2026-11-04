@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -44,6 +45,8 @@ _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_server_patcher.lock")
 #: The directory, under this host's temporary directory, holding one account's patched copies, one per patch set and
 #: installed package; its name ends in the account's uid (``hyperloom-tracelens-<uid>``).
 _COPIES_DIR = "hyperloom-tracelens"
+#: The name of any account's directory of copies, or the bare name a point rendered when all accounts shared one names.
+_ANY_COPIES_DIR = re.compile(rf"{re.escape(_COPIES_DIR)}(?:-[0-9]+)?")
 #: The directory of a copy that goes on the server's ``PYTHONPATH``: it holds the patched package and nothing else.
 _SITE_DIR = "site"
 _CACHE_DIR = "__pycache__"
@@ -74,7 +77,7 @@ def is_patched_copy(entry: str) -> bool:
     """Whether the ``PYTHONPATH`` entry ``entry`` is the site of a :class:`PatchedServer`, laid on any host by any
     account."""
     path = PurePosixPath(entry)
-    return path.name == _SITE_DIR and path.parent.parent.name.startswith(_COPIES_DIR)
+    return path.name == _SITE_DIR and _ANY_COPIES_DIR.fullmatch(path.parent.parent.name) is not None
 
 
 @dataclass(frozen=True)
