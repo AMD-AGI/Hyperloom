@@ -48,7 +48,7 @@ def test_queue_state_totals() -> None:
     assert (state.queued, state.running) == (6, 3)
 
 
-def test_the_toolbox_protocol_is_the_three_calls_of_the_design() -> None:
+def test_the_toolbox_protocol_is_its_seven_calls() -> None:
     names = {name for name in vars(toolbox.Toolbox) if not name.startswith("_")}
     assert names == {
         "submit_test",

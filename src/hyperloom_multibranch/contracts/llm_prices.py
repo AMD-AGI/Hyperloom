@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What an LLM's tokens cost, so every recorded spend uses one price sheet.
+"""What an LLM's tokens cost through the LLM gateway the sessions call, so every recorded spend uses one price sheet.
 
-The sheet is ``llm_prices.json`` beside this module: the provider's published rate per million tokens of each model a
-session may run, for uncached input, output, cache reads and cache writes (5-minute, and 1-hour where the provider
-lists one). A model the provider prices by prompt length is listed at its short-prompt rate: a launch's usage does
-not say how long each of its prompts was.
+The sheet is ``llm_prices.json`` beside this module: the gateway's rate per million tokens of each model a session
+may run, for uncached input, output, cache reads and cache writes (5-minute, and 1-hour where the gateway lists one).
+A model priced by prompt length or time of day is listed at one rate, its short-prompt or standard one: a launch's
+usage does not say how long each of its prompts was or when it ran.
 A model is looked up by its name with case, dots, a date suffix and a ``[...]`` variant suffix ignored, so
 ``Claude-Opus-5.5``, ``claude-opus-5-5`` and ``claude-opus-5-5-20261001`` are one model. A model the sheet does not
 list, such as one served on premises, has no price: its usage is recorded as tokens only.
