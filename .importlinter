@@ -337,6 +337,7 @@ ancestors =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
+    hyperloom_multibranch.**.tests.** -> **
     hyperloom_common.llm.llm_config -> hyperloom_common.llm.claude_oneshot
     hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
