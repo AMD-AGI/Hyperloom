@@ -132,9 +132,12 @@ def revision_payloads(
         "Revise the draft into the final optimization plan. Address the critic's substantive concerns exactly once."
     )
     # A resume re-enters the lane's own synthesis session, which already holds the dispatch, every specialist
-    # analysis and the whole synthesis conversation.
+    # analysis and the whole synthesis conversation. It keeps the system prompt it was synthesized under, so the
+    # revision instructions travel here; Codex and DeepSeek would not apply a new system prompt to a resumed session
+    # anyway.
     resumed_payload = {
         "task": revision_task,
+        "revision_instructions": REVISION_SYSTEM_PROMPT.strip(),
         "draft_plan": draft.text,
         "critic_verdict": critic.verdict,
         "critic_review": critic.review,
@@ -143,7 +146,6 @@ def revision_payloads(
     # from.
     fresh_payload = {
         **resumed_payload,
-        "revision_instructions": REVISION_SYSTEM_PROMPT.strip(),
         "context": context.to_prompt_dict(),
         "dispatch_plan": specialists.dispatch_plan.to_dict(),
         "specialist_coverage": dict(specialists.coverage),
