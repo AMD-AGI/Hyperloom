@@ -206,7 +206,7 @@ class Readings:
     paying off, ``headroom_pct`` how far its head is below the roofline bound (:func:`headroom_pct`),
     ``amdahl_pct`` the ceiling of the head's largest op (:func:`largest_ceiling_pct`), ``pending_pct`` the gain of
     its best candidate waiting for its confirm, and ``repairing_pct`` the gain of the blocked candidate a repair branch
-    was opened to repair, both in points over the baseline.
+    was opened to repair, all four in points over the baseline, the score's unit.
     """
 
     observing: bool = False
@@ -463,10 +463,15 @@ def score_branch(
 
     branch = next(item for item in tree.branches if item.name == row.branch)
     ceiling = snapshot.profile.roofline_ceiling.get(policy.metric) if snapshot.profile is not None else None
+    of_head = (
+        headroom_pct(ceiling, row.head_value.get(policy.metric)),
+        largest_ceiling_pct(snapshot.op_shares.get(row.head_commit)),
+    )
+    headroom, amdahl = (_in_points(snapshot, row, policy.metric, bound) for bound in of_head)
     readings = Readings(
         observing=_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds),
-        headroom_pct=headroom_pct(ceiling, row.head_value.get(policy.metric)),
-        amdahl_pct=largest_ceiling_pct(snapshot.op_shares.get(row.head_commit)),
+        headroom_pct=headroom,
+        amdahl_pct=amdahl,
         pending_pct=_pending_pct(snapshot, row, policy.metric),
         repairing_pct=_repairing_pct(snapshot, row, policy.metric),
     )
@@ -476,6 +481,17 @@ def score_branch(
         return score
     evidence = stall_evidence(snapshot, row, policy.metric, stall, is_young(branch, t_s, policy))
     return replace(score, components={**score.components, **evidence})
+
+
+def _in_points(snapshot: BlackboardSnapshot, row: BranchProgress, metric: str, of_head: float | None) -> float | None:
+    """``of_head``, a gain in percent of ``row``'s head, in points over the baseline, the score's unit; ``None``
+    without it or without the head's or the baseline's value."""
+
+    anchor = snapshot.baseline.values.get(metric) if snapshot.baseline is not None else None
+    head = row.head_value.get(metric)
+    if of_head is None or not anchor or not head:
+        return None
+    return of_head * head / anchor
 
 
 def _over_head(snapshot: BlackboardSnapshot, row: BranchProgress, metric: str, values: Sequence[float]) -> float | None:
