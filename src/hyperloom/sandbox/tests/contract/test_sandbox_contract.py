@@ -190,7 +190,7 @@ def test_a_killed_sealed_sandbox_cannot_be_reused(harness) -> None:
 
 
 #: How long an ended sandbox may stay visible: the service reaps expired sandboxes on a 30 s sweep, and deleting the
-#: sandbox's workload takes a second or two more, so up to about 32 s; 35 s leaves a margin over that bound.
+#: sandbox's workload takes a little longer still; 35 s leaves a margin over that bound.
 _TIMEOUT_REAP_SEC = 35
 
 
