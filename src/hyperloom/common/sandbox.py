@@ -52,6 +52,8 @@ DEFAULT_SANDBOX_MODE = MODE_OFF
 #: would shadow the uv-managed interpreter, which lives at
 #: ``~/.local/share/uv/python/``, and the venv would stop resolving.
 SANDBOX_HOME = "/hyperloom-home"
+#: The sandbox's ``/tmp``, and what ``TMPDIR`` names inside it.
+SANDBOX_TMP = "/tmp"
 
 #: Read-only system trees. ``/sys`` is not optional: ROCm reads GPU topology
 #: from ``/sys/class/kfd``, and without it ``torch.cuda.device_count()`` returns
@@ -232,7 +234,7 @@ def build_bwrap_args(
     for device in _GPU_DEVICES:
         args += [_DEV_BIND_TRY, device, device]
     args += ["--proc", "/proc"]
-    args += [_TMPFS, "/tmp"] if tmp_dir is None else [_BIND, str(tmp_dir), "/tmp"]
+    args += [_TMPFS, SANDBOX_TMP] if tmp_dir is None else [_BIND, str(tmp_dir), SANDBOX_TMP]
     for path in (venv, support_dir, package_dir):
         if path is not None:
             args += [_RO_BIND, str(path), str(path)]
@@ -245,7 +247,7 @@ def build_bwrap_args(
     # blit kernels at device init, the compiler cannot write its temporaries, and
     # the process dies with SIGSEGV and no diagnostic.
     args += [_TMPFS, SANDBOX_HOME, _SETENV, "HOME", SANDBOX_HOME]
-    args += [_SETENV, "TMPDIR", "/tmp"]
+    args += [_SETENV, "TMPDIR", SANDBOX_TMP]
     args += [_SETENV, SANDBOX_ACTIVE_ENV, "1"]
     args.append("--")
     return args
