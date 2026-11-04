@@ -19,7 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.contracts.recipe import LaunchConfig
+from hyperloom.inference_optimizer.agentx.report import native_launch_evidence, read_agentx_report
 from hyperloom.orchestrator.actions.executors import (
     PREFIX_CACHE_OFF_ERROR_CLASS,
     CONTEXT_COPY_REFUSAL,
@@ -75,11 +79,21 @@ def baseline_prefix_cache_refusal(point: Path, round_dir: Path) -> str:
     """Why an AgentX baseline round served with the prefix cache off may not end ``succeeded``, or ``""``.
 
     ``point`` is the measurement point the round ran and ``round_dir`` the directory it landed in; the launch evidence
-    is built from both like the main flow does, and main's #1884 check reads it.
+    is built from both the way main's baseline and grid executors build it, and main's #1884 check reads it. An AgentX
+    point's launch is the one Magpie reports it ran (``native_launch_evidence`` over the round's report); a round with
+    no valid AgentX report has no launch to read and is left alone, since it is not the succeeded round main checks.
+    Any other point's launch is read from its own server args.
     """
-    evidence = build_launch_evidence(
-        RequestedLaunch(config_path=point, framework=""), actual_server_log=_server_log(round_dir), slot=round_dir
-    )
+    log = _server_log(round_dir)
+    if is_magpie_agentx(yaml.safe_load(point.read_text(encoding="utf-8"))["benchmark"]):
+        measurement = read_agentx_report(round_dir)
+        if not measurement:
+            return ""
+        evidence = native_launch_evidence(measurement, point, actual_server_log=log)
+    else:
+        evidence = build_launch_evidence(
+            RequestedLaunch(config_path=point, framework=""), actual_server_log=log, slot=round_dir
+        )
     measured: dict[str, Any] = {"status": "succeeded", "launch_evidence": evidence}
     refuse_cacheless_agentx_baseline(measured)
     return str(measured.get("error") or "") if measured["status"] != "succeeded" else ""

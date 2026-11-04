@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from hyperloom.common import proctree
+from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 
 __all__ = ["kill_launchers", "reap_sandbox_processes", "sweep_tagged"]
 
@@ -52,6 +53,8 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
     Order: freeze the launchers, SIGTERM the descendants and give them ``grace_sec``, SIGKILL what is
     left until a fresh scan finds nothing, and only then kill the launchers.
 
+    A launcher that was already waited is skipped: its pid went back to the system and may name another process.
+
     Args:
         procs: Launcher processes started by the sandbox.
         grace_sec: How long descendants get to exit on SIGTERM.
@@ -59,6 +62,7 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
     Returns:
         bool: True when no descendant is left running.
     """
+    procs = [p for p in procs if p.returncode is None]
     roots = [p.pid for p in procs]
     for pid in roots:
         # Freeze each launcher first so it cannot fork a command we have not seen yet.
@@ -87,18 +91,13 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
     return clean
 
 
-def _tagged_pids(tag: bytes) -> list[int]:
-    """Pids whose initial environment carries ``tag``; unreadable processes are skipped."""
-    found: list[int] = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit() or int(entry.name) == os.getpid():
-            continue
-        try:
-            environ = (entry / "environ").read_bytes()
-        except OSError:
-            continue
-        if tag in environ.split(b"\0"):
-            found.append(int(entry.name))
+def _tagged(sandbox_id: str) -> list[proctree.ProcessId]:
+    """The running processes, other than this one, started with this sandbox's id in their environment."""
+    found: list[proctree.ProcessId] = []
+    for pid in proctree.marked_pids(SANDBOX_TAG_ENV, sandbox_id):
+        identity = proctree.proc_identity(pid)
+        if pid != os.getpid() and identity is not None and proctree.running(pid):
+            found.append((pid, identity[1]))
     return found
 
 
@@ -109,21 +108,21 @@ def sweep_tagged(sandbox_id: str) -> bool:
     a process that cleared its environment.
 
     Returns:
-        bool: True when no tagged process is left within the window.
+        bool: True when no tagged process is left within the window; False also when ``/proc`` cannot be listed,
+        which ``proctree.marked_pids`` answers with no process.
     """
-    tag = f"E2B_SANDBOX_ID={sandbox_id}".encode()
+    try:
+        next(Path("/proc").iterdir(), None)
+    except OSError:
+        return False
     deadline = time.monotonic() + _WINDOW_SEC
     while True:
-        pids = [pid for pid in _tagged_pids(tag) if proctree.running(pid)]
-        if not pids:
+        tagged = _tagged(sandbox_id)
+        if not tagged:
             return True
         if time.monotonic() >= deadline:
             return False
-        for pid in pids:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                continue
+        proctree.signal_processes(tagged, signal.SIGKILL)
         time.sleep(_POLL_SEC)
 
 

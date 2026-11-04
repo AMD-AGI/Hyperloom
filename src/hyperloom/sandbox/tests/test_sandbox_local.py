@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -16,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common import proctree
-from hyperloom.sandbox import local_sandbox
+from hyperloom.sandbox import local_sandbox, reaper
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate, ProcessUsers
 from hyperloom.sandbox.socket import (
@@ -368,6 +369,62 @@ def test_a_command_timeout_kills_its_tree_and_raises(make) -> None:
     _wait(lambda: not proctree.running(pid), seconds=10)
     assert sb.info().sandbox_id  # the sandbox itself is still usable
     assert sb.run("echo ok").stdout == "ok\n"
+
+
+def test_kill_after_a_command_timeout_never_signals_the_launcher_the_timeout_reaped(make, monkeypatch) -> None:
+    provider = make([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    timed_out: list[int] = []
+    kill_launchers = local_sandbox.kill_launchers
+
+    def _recording(procs, **kw):
+        timed_out.extend(proc.pid for proc in procs)
+        return kill_launchers(procs, **kw)
+
+    monkeypatch.setattr(local_sandbox, "kill_launchers", _recording)
+    with pytest.raises(SandboxUnavailable, match="command timed out"):
+        sb.run("sleep 30", settings=RunSettings(timeout_sec=0.5))
+    assert len(timed_out) == 1
+    signalled: list[tuple[str, int, int]] = []
+    real = {"kill": os.kill, "killpg": os.killpg}
+
+    def _spy(name):
+        def _send(pid: int, sig: int) -> None:
+            if pid in timed_out and sig:
+                signalled.append((name, pid, sig))
+                return  # a freed pid may already be another process: record the signal, never send it
+            real[name](pid, sig)
+
+        return _send
+
+    monkeypatch.setattr(os, "kill", _spy("kill"))
+    monkeypatch.setattr(os, "killpg", _spy("killpg"))
+    sb.kill()
+    assert signalled == []
+
+
+def test_a_sweep_that_cannot_list_proc_is_not_clean(monkeypatch) -> None:
+    iterdir = Path.iterdir
+
+    def _iterdir(path: Path):
+        if str(path) == "/proc":
+            raise PermissionError(13, "Permission denied", "/proc")
+        return iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", _iterdir)
+    assert reaper.sweep_tagged("sandbox-that-never-ran") is False
+
+
+def test_a_sweep_kills_a_tagged_process_outside_any_launcher(monkeypatch) -> None:
+    monkeypatch.setenv("E2B_SANDBOX_ID", "sweep-me")
+    tagged = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(600)"])
+    try:
+        _wait(lambda: proctree.marked_pids("E2B_SANDBOX_ID", "sweep-me"))
+        assert reaper.sweep_tagged("sweep-me") is True
+        assert tagged.wait(timeout=10) == -9
+    finally:
+        tagged.kill()
+        tagged.wait()
 
 
 # -- lifecycle ---------------------------------------------------------------------
