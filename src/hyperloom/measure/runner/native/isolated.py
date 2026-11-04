@@ -94,7 +94,8 @@ _WORK = "work"
 _MARGIN_SEC = 300
 _STDERR_TAIL = 500
 _INFRA = "infra"
-_JOB_MODE = 0o644
+#: The job is read by the compile alone, which owns it once the work directory is given to it (:func:`_give`).
+_JOB_MODE = 0o600
 #: The permission another user needs to reach a directory below one: search, not read.
 _PASS_THROUGH = stat.S_IXOTH
 

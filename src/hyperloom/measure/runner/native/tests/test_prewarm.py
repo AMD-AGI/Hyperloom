@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import stat
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,8 +21,9 @@ from hyperloom.measure.jit.prewarmed import PREWARM_MANIFEST, read_manifest, unl
 from hyperloom.measure.jit.session import link_prebuilt
 from hyperloom.measure.runner.cache_layout import file_sha256
 from hyperloom.measure.runner.native import aiter_modules, prewarm
-from hyperloom.measure.runner.native.builder import BuildMachine
-from hyperloom.measure.runner.native.isolated import Isolation
+from hyperloom.measure.runner.native.aiter_modules import MODULES_FILE
+from hyperloom.measure.runner.native.builder import BuildMachine, tree_dir
+from hyperloom.measure.runner.native.isolated import JOB_FILE, Isolation
 from hyperloom.measure.runner.native.prewarm import (
     PrewarmError,
     isolated_builder,
@@ -222,6 +224,19 @@ def test_the_cpu_build_runner_builds_the_missing_modules_from_the_images_own_tre
     built = (rig.package / "jit" / f"{standin.MODULE}.so").read_bytes()
     assert built == standin.built(GFX, standin.IMAGE_KERNEL), "built for the target from the image's k.cu"
     assert set(read_manifest(rig.package / "jit")) == {standin.MODULE}
+
+
+def test_the_compile_is_handed_its_plan_and_its_job_readable_by_their_owner_alone(tmp_path, monkeypatch) -> None:
+    """The compile owns the work directory it is given, so no other user need read what it is told to build."""
+    rig = CpuRig(tmp_path, monkeypatch)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    built = rig.builder(rig.package, frozenset({standin.MODULE}), scratch)
+
+    staging = built[standin.MODULE].parent.parent
+    plan, job = tree_dir(staging) / MODULES_FILE, staging / JOB_FILE
+    assert [stat.S_IMODE(path.stat().st_mode) for path in (plan, job)] == [0o600, 0o600]
 
 
 def test_the_cpu_build_merges_a_models_tables_below_its_own_tree_not_in_the_images_tmp(tmp_path, monkeypatch) -> None:
