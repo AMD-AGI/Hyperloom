@@ -102,6 +102,7 @@ WINDOW_TESTS = 4
 #: before the floor does.
 SETTLED_TESTS = 5
 FRONTIER_V1_LABEL = "frontier-v1"
+TREND_COMPONENT = "trend_pct"
 REPAIRING_COMPONENT = "repairing_pct"
 PENDING_COMPONENT = "pending_pct"
 HEADROOM_COMPONENT = "headroom_pct"
@@ -255,7 +256,7 @@ def trend_estimate(branch: TreeBranch, t_s: float, policy: FrontierPolicy, readi
 
     trend = branch.gain_at(t_s) - branch.gain_at(trend_start(branch, t_s, policy.window_seconds))
     components = {
-        "trend_pct": trend,
+        TREND_COMPONENT: trend,
         "tests": float(len(branch.spent_times)),
         "gpu_hours": branch.gpu_seconds / HOUR,
         "observing": float(readings.observing),
@@ -627,6 +628,7 @@ __all__ = [
     "STALL_BAR_COMPONENT",
     "STRANDED_COMPONENT",
     "STRANDED_HOLD",
+    "TREND_COMPONENT",
     "WINDOW_SECONDS",
     "WINDOW_TESTS",
     "Estimate",
