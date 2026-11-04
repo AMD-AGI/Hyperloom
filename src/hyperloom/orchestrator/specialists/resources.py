@@ -24,6 +24,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 __all__ = [
+    "CONTAINER_RECORD_KIND",
+    "RESOURCES_RELATIVE_PATH",
+    "SPECIALIST_RECORD_KIND",
     "ContainerSnapshot",
     "ProcessTreeSampler",
     "ResourceLog",
@@ -224,15 +227,15 @@ def read_container_cgroup(root: Path = Path("/sys/fs/cgroup")) -> ContainerSnaps
     base = Path(root)
     if not (base / "cgroup.controllers").exists():
         return ContainerSnapshot()
-    quota: int | None = None
-    period: int | None = None
     try:
         parts = (base / "cpu.max").read_text(encoding=UTF8).split()
-        if len(parts) == 2 and parts[1].isdigit():
-            period = int(parts[1])
-            quota = int(parts[0]) if parts[0].isdigit() else None
     except OSError:
-        pass
+        parts = []  # an unreadable cpu.max leaves both CPU fields None: unknown, not unlimited
+    quota: int | None = None
+    period: int | None = None
+    if len(parts) == 2 and parts[1].isdigit():
+        period = int(parts[1])
+        quota = int(parts[0]) if parts[0].isdigit() else None
     return ContainerSnapshot(
         memory_max_bytes=_read_int(base / "memory.max"),
         memory_peak_bytes=_read_int(base / "memory.peak"),
@@ -266,6 +269,7 @@ def _directory_blocks(directory: Path, subdirs: list[Path]) -> int:
                 if subdir is not None:
                     subdirs.append(subdir)
     except OSError:
+        # Keep the partial count: an unreadable directory adds nothing, a failed scan what it read first.
         pass
     return total
 

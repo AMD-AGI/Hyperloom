@@ -111,6 +111,13 @@ def test_cgroup_unlimited_and_missing_files_are_null(tmp_path: Path) -> None:
     assert (snap.cpu_quota_us, snap.cpu_period_us) == (None, 100000)
 
 
+def test_cgroup_without_cpu_max_leaves_both_cpu_fields_null(tmp_path: Path) -> None:
+    write_cgroup(tmp_path, memory_max="8589934592", peak=None, oom=0, cpu_max=None)
+    snap = read_container_cgroup(tmp_path)
+    assert (snap.cpu_quota_us, snap.cpu_period_us) == (None, None)
+    assert (snap.memory_max_bytes, snap.oom_kill) == (8589934592, 0)  # the other readings are unaffected
+
+
 def test_cgroup_v1_or_unmounted_is_all_null(tmp_path: Path) -> None:
     (tmp_path / "memory").mkdir()  # a v1 hierarchy has controller subdirectories and no cgroup.controllers
     (tmp_path / "memory" / "memory.limit_in_bytes").write_text("123\n", encoding="utf-8")
