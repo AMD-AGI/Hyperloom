@@ -18,7 +18,7 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, RegressionCase, TestRecord
 from hyperloom_multibranch.blackboard import LocalBlackboard
-from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.briefing import KNOWN_DEFECT, CrossSessionBriefing
 from hyperloom_multibranch.blackboard.rsi.cases import (
     IMAGE_DIGEST_ENV,
@@ -136,7 +136,7 @@ def test_close_writes_the_registered_cases_beside_the_archive(
 
 
 async def test_a_session_is_handed_other_sessions_cases_of_its_image_and_model_as_they_were_packed(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
     snapshot = await blackboard.snapshot()
@@ -145,14 +145,15 @@ async def test_a_session_is_handed_other_sessions_cases_of_its_image_and_model_a
     pool_cases(_registered(_of_session(snapshot, "past-1"), blobs, "p1"), blobs, pool, IMAGE)
     pool_cases(_registered(snapshot, blobs, "p2", "a defect this very session found"), blobs, pool, IMAGE)
 
-    offered = session_cases(IMAGE, blackboard, archive)
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    offered = session_cases(IMAGE, blackboard)
     assert isinstance(offered, SessionCases)
     (case,) = await offered.cases()
 
     assert case.data == pack_case(REPRO_SH, DIAGNOSIS) and case.case_id == hashlib.sha256(case.data).hexdigest()
     assert case.origin == "past-1 c1"
     assert await SessionCases(pool, OTHER_IMAGE, blackboard).cases() == ()
-    assert session_cases("", blackboard, archive) is None
+    assert session_cases("", blackboard) is None
 
 
 async def test_a_brief_names_a_pooled_case_that_reproduced_on_the_root_as_a_defect_the_root_carries(
