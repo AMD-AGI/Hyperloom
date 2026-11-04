@@ -38,6 +38,10 @@ SANDBOX_WRITABLE_ENV = "HYPERLOOM_SANDBOX_WRITABLE"
 #: Extra paths to bind read-only, colon-separated. Inputs the operator doesn't
 #: own and the run must not edit -- model weights, datasets, reference images.
 SANDBOX_READONLY_ENV = "HYPERLOOM_SANDBOX_READONLY"
+#: Host directory to bind over the sandbox's ``/tmp``, in place of the default
+#: RAM-backed tmpfs. For runs that write large temporary files (compiled
+#: packages, build trees), which a tmpfs would charge to memory.
+SANDBOX_TMP_ENV = "HYPERLOOM_SANDBOX_TMP"
 
 MODE_OFF = "off"
 MODE_BWRAP = "bwrap"
@@ -61,6 +65,7 @@ _GPU_DEVICES: tuple[str, ...] = ("/dev/kfd", "/dev/dri")
 # bwrap flags, named so the invocation below reads as intent rather than strings.
 _RO_BIND = "--ro-bind"
 _RO_BIND_TRY = "--ro-bind-try"
+_BIND = "--bind"
 _BIND_TRY = "--bind-try"
 _DEV_BIND_TRY = "--dev-bind-try"
 _TMPFS = "--tmpfs"
@@ -173,6 +178,13 @@ def writable_roots_from_env(env: Mapping[str, str] | None = None) -> tuple[Path,
     return tuple(Path(p) for p in raw.split(os.pathsep) if p.strip())
 
 
+def tmp_dir_from_env(env: Mapping[str, str] | None = None) -> Path | None:
+    """Operator-declared directory for the sandbox's ``/tmp``, from :data:`SANDBOX_TMP_ENV`."""
+    source = os.environ if env is None else env
+    raw = (source.get(SANDBOX_TMP_ENV) or "").strip()
+    return Path(raw) if raw else None
+
+
 def readonly_roots_from_env(env: Mapping[str, str] | None = None) -> tuple[Path, ...]:
     """Operator-declared read-only paths, from :data:`SANDBOX_READONLY_ENV`."""
     source = os.environ if env is None else env
@@ -188,6 +200,7 @@ def build_bwrap_args(
     readonly_roots: Sequence[Path] = (),
     support_dir: Path | None = None,
     package_dir: Path | None = None,
+    tmp_dir: Path | None = None,
 ) -> list[str]:
     """Assemble the bubblewrap invocation that the re-exec runs under.
 
@@ -204,6 +217,8 @@ def build_bwrap_args(
             :func:`interpreter_support_dir`.
         package_dir: Source tree this Hyperloom was imported from, from
             :func:`package_root`, when it sits outside the venv.
+        tmp_dir: Host directory bound read-write over ``/tmp``. ``None`` gives a
+            private tmpfs, which is RAM.
 
     Returns:
         Argument list up to and including ``--``; the caller appends the command.
@@ -216,7 +231,8 @@ def build_bwrap_args(
     args += ["--dev", "/dev", _TMPFS, "/dev/shm"]
     for device in _GPU_DEVICES:
         args += [_DEV_BIND_TRY, device, device]
-    args += ["--proc", "/proc", _TMPFS, "/tmp"]
+    args += ["--proc", "/proc"]
+    args += [_TMPFS, "/tmp"] if tmp_dir is None else [_BIND, str(tmp_dir), "/tmp"]
     for path in (venv, support_dir, package_dir):
         if path is not None:
             args += [_RO_BIND, str(path), str(path)]
@@ -350,6 +366,9 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
             "(unprivileged user namespaces may be disabled). Refusing to continue "
             "unsandboxed."
         )
+    tmp_dir = tmp_dir_from_env()
+    if tmp_dir is not None and not tmp_dir.is_dir():
+        raise SandboxError(f"{SANDBOX_TMP_ENV} names {tmp_dir}, which is not an existing directory")
     venv = Path(sys.prefix)
     command = [sys.executable, "-m", "hyperloom", *(list(sys.argv[1:]) if argv is None else list(argv))]
     args = build_bwrap_args(
@@ -359,5 +378,6 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
         readonly_roots=readonly_roots_from_env(),
         support_dir=interpreter_support_dir(),
         package_dir=package_root(),
+        tmp_dir=tmp_dir,
     )
     os.execv(bwrap, [*args, *command])
