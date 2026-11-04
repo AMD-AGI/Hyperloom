@@ -90,6 +90,19 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
             aliases=("AMD Instinct MI325X",),
             device_ids=frozenset({"74a5", "74b9"}),
         ),
+        # The MI355X's gfx950 die at a 2.2 GHz peak engine clock instead of 2.4, so each vendor peak is the MI355X's scaled
+        # by 2.2/2.4: AMD publishes 2.3 PF for FP16 and BF16, 4.6 PF for FP8 and 9.2 PF for FP4. The device ids are the
+        # ones ``amdgpu.ids`` lists for the board and its VF.
+        GpuBoard(
+            "mi350x",
+            "gfx950",
+            256,
+            288.0,
+            8000.0,
+            _matrix_peaks(bf16=2306.9, fp8=4613.8, fp4=9227.5, fp32=144.2),
+            aliases=("AMD Instinct MI350X",),
+            device_ids=frozenset({"75a0", "75b0"}),
+        ),
         GpuBoard(
             "mi355x",
             "gfx950",

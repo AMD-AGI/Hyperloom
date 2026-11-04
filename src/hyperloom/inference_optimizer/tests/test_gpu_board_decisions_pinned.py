@@ -16,6 +16,7 @@ _BOARDS = [
     ("mi300x", "mi300x", True, "achievable"),
     ("mi308x", "mi300x", True, "vendor"),
     ("mi325x", "mi300x", True, "achievable"),
+    ("mi350x", "mi355x", True, "vendor"),
     ("mi355x", "mi355x", True, "vendor"),
     ("r9700", "gfx12", False, "vendor"),
 ]
@@ -46,7 +47,7 @@ def test_server_reuse_scripts():
     }
 
 
-@pytest.mark.parametrize("product", ["mi300x", "mi308x", "mi325x", "mi355x"])
+@pytest.mark.parametrize("product", ["mi300x", "mi308x", "mi325x", "mi350x", "mi355x"])
 @pytest.mark.parametrize("framework", ["vllm", "sglang", "atom", "xdit"])
 def test_instinct_boards_leave_the_framework_unconstrained(product, framework):
     assert gpu_types._runner_framework_error(product, framework) is None
@@ -63,7 +64,7 @@ def test_the_gfx12_runner_is_validated_for_vllm_only(framework):
 
 def test_only_r9700_pins_its_geak_identity():
     assert gpu_types.geak_identity_pin("r9700") == {"expected_target": "r9700", "expected_gfx": "gfx1201"}
-    for product in ("mi300x", "mi308x", "mi325x", "mi355x", "radeon8060s", "unknown_gpu", ""):
+    for product in ("mi300x", "mi308x", "mi325x", "mi350x", "mi355x", "radeon8060s", "unknown_gpu", ""):
         assert gpu_types.geak_identity_pin(product) == {}, product
 
 
@@ -74,6 +75,7 @@ def test_only_r9700_pins_its_geak_identity():
         ("Card Series: AMD Instinct MI300X VF", "mi300x"),
         ("Card Series: AMD Instinct MI308X OAM", "mi308x"),
         ("Card Series: AMD Instinct MI325X OAM", "mi325x"),
+        ("Card Series: AMD Instinct MI350X OAM", "mi350x"),
         ("Card Series: AMD Instinct MI355X OAM", "mi355x"),
         ("AMD_INSTINCT_MI300X", "mi300x"),
         ("Card Series: AMD Radeon AI PRO R9700", "r9700"),
