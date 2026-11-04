@@ -38,6 +38,7 @@ from hyperloom.measure.runner.cache_build import (
 from hyperloom.measure.runner.cache_layout import (
     CACHE_ENV,
     MANIFEST_NAME,
+    SDISTS_DIR,
     SOURCE_ARCHIVE,
     CacheError,
     FileDigest,
@@ -193,6 +194,10 @@ def test_a_pin_the_index_serves_only_as_a_source_distribution_is_built_and_the_s
     assert wheels["sdist-pkg"]["sha256"] != rig.sdist_pkg_sha256
     assert wheels["lock-pkg"]["sdist_sha256"] == "" and wheels["lock-pkg"]["sha256"] == rig.lock_pkg_sha256
     assert [path.name for path in (entry.path / "wheels").iterdir() if not path.name.endswith(".whl")] == []
+    # The entry keeps the source distribution it built, which a reuse builds again.
+    assert (wheels["sdist-pkg"]["sdist_file"], wheels["lock-pkg"]["sdist_file"]) == ("sdist_pkg-1.0.tar.gz", "")
+    assert [path.name for path in (entry.path / SDISTS_DIR).iterdir()] == ["sdist_pkg-1.0.tar.gz"]
+    assert _digest(entry.path / SDISTS_DIR / "sdist_pkg-1.0.tar.gz") == rig.sdist_pkg_sha256
     assert [path.name for path in entry.path.iterdir() if path.name.startswith(".")] == []
     # The source distribution declares a build requirement that no wheelhouse or index has: it was built with the
     # lock's own tools, and nothing the sdist asks for was fetched.

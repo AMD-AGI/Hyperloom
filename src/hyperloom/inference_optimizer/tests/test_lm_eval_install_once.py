@@ -64,6 +64,20 @@ def test_the_benchmark_preparation_patches_the_runner_s_own_inferencex_checkout(
     assert patcher._LM_EVAL_ONCE_SENTINEL in (checkout / "benchmarks" / "benchmark_lib.sh").read_text()
 
 
+def test_the_eval_concurrency_sweep_lays_the_patch_whatever_it_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preflight and baseline reach the patch through this sweep; a library it cannot fully fix still gets it."""
+    checkout = tmp_path / "InferenceX"
+    (checkout / "benchmarks").mkdir(parents=True)
+    lib = _lib(checkout / "benchmarks")
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    patcher.ensure_eval_concurrency_compat(inferencex_dir=checkout)
+
+    assert patcher._LM_EVAL_ONCE_SENTINEL in lib.read_text()
+
+
 def test_a_library_without_the_install_is_left_alone_and_said_so(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
