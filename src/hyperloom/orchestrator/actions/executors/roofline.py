@@ -134,6 +134,24 @@ _AUTO_RETRY_WARNING_CODES = frozenset(
     }
 )
 
+# trace_analyze warnings that mark its analysis degraded; kernel work still dispatches on it, labelled.
+_DEGRADING_WARNING_CODES = frozenset(
+    {
+        "trace_quality_poor",
+        "kernel_source_unresolved",
+        "trace_split_phase_unconfirmed",
+        "trace_split_manifest_missing",
+    }
+)
+
+
+def _analysis_degraded(ta_result: dict[str, Any]) -> bool:
+    """Whether trace_analyze recorded a warning that marks its analysis degraded."""
+    return any(
+        isinstance(w, dict) and w.get("code") in _DEGRADING_WARNING_CODES
+        for w in ta_result.get("trace_health_warnings") or []
+    )
+
 
 def _extract_steady_state_retry_mode(
     ta_result: dict[str, Any],
@@ -1156,6 +1174,7 @@ class RooflineExecutor:
         status = "succeeded" if profile.warning is None else "recovered"
         trace_path = str(analysis.payload["trace_input"])
         hot = _hot_kernels(analysis.result)
+        analysis_degraded = _analysis_degraded(analysis.result)
         self.shared_state.last_profile_trace = trace_path
         self.shared_state.last_profile_launch_evidence_path = str(profile.result.get("launch_evidence_path") or "")
         self.shared_state.last_profile_status = status
@@ -1188,6 +1207,7 @@ class RooflineExecutor:
             # True when trace_analyze produced 0 hot kernels because cuda-graph folding stripped per-kernel
             # attribution.
             "kernel_attribution_degraded": attribution_degraded,
+            "degraded": attribution_degraded or analysis_degraded,
             **({"profile_warning": profile.warning} if profile.warning is not None else {}),
         }
         if recorder is not None:
@@ -1197,6 +1217,7 @@ class RooflineExecutor:
                     snapshot_id=cached.get("roofline_snapshot_id"),
                     hot_kernel_count=len(hot),
                     kernel_attribution_degraded=attribution_degraded,
+                    analysis_degraded=analysis_degraded,
                     cached=cached,
                     trace_path=trace_path,
                     # The snapshot this run just appended. Read here rather than in the recorder because the history is

@@ -4,7 +4,7 @@
 """The toolbox as the other multi-branch modules call it: submit a test, cancel it, read the queue and its progress.
 
 A module hands the toolbox a :class:`~hyperloom.contracts.measurement.TestRequest` and gets the ``request_id`` back
-once the toolbox accepted it. Acceptance is the toolbox's checks of design section 4.17 (the request validates, the
+once the toolbox accepted it. Acceptance is the toolbox's checks (the request validates, the
 parent recipe is read, the delta applies, the measurement surface matches), so a request that cannot be measured is
 refused here and never queues. The result does not come back through this interface: the toolbox writes it to the
 blackboard, which pushes it to the submitting branch's inbox. The writer protocols it uses are the blackboard's
@@ -106,7 +106,7 @@ REJECTION_CODES = (
 
 
 class WorkloadKind(str, Enum):
-    """The kind of workload a campaign measures; the judging rule differs (multi-branch design 7.3, K2)."""
+    """The kind of workload a campaign measures; the judging rule differs."""
 
     INFERENCEX = "inferencex"  # fixed workload: the rule gate refuses a result without an accuracy score
     AGENTX = "agentx"  # accuracy is a separate ``accuracy`` test after a positive result
