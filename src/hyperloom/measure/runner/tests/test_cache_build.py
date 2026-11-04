@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -39,11 +40,15 @@ from hyperloom.measure.runner.cache_layout import (
     MANIFEST_NAME,
     SOURCE_ARCHIVE,
     CacheError,
+    FileDigest,
     LockPin,
     check_cache,
     check_entry,
+    manifest_from_json,
+    manifest_to_json,
     parse_lock,
     requirement_line,
+    stage_entry,
     tree_digest,
 )
 from hyperloom.measure.runner.tests.bootstrap_rig import (
@@ -164,11 +169,14 @@ def test_the_source_archive_is_the_same_bytes_for_the_same_commit_whoever_builds
     umask = os.umask(0o027)
     try:
         second = ensure_runner_cache(other, rig.cache.sha, tmp_path / "second", rig.build_options())
+        # The same builder reuses the first builder's entry: the archive and tree it makes again to check it agree.
+        reused = ensure_runner_cache(other, rig.cache.sha, tmp_path / "first", _NO_WHEELS)
     finally:
         os.umask(umask)
+    assert (reused.reused, reused.manifest_sha256) == (True, first.manifest_sha256)
     archive = (first.path / SOURCE_ARCHIVE).read_bytes()
     assert (second.path / SOURCE_ARCHIVE).read_bytes() == archive == reference
-    assert archives == [{"GIT_ATTR_NOSYSTEM": "1", "GIT_CONFIG_NOSYSTEM": "1"}]
+    assert archives == [{"GIT_ATTR_NOSYSTEM": "1", "GIT_CONFIG_NOSYSTEM": "1"}] * 2
     first_manifest, second_manifest = (json.loads((e.path / MANIFEST_NAME).read_text()) for e in (first, second))
     assert first_manifest["source_archive"] == second_manifest["source_archive"]
     # The unpacked tree keeps the builder's umask: nothing in it is writable by the group or readable by others.
@@ -290,6 +298,99 @@ def test_an_entry_that_differs_from_what_a_build_writes_is_refused_and_left_as_i
     assert difference in str(refused.value)
     assert (tree_digest(entry), _digest(entry / MANIFEST_NAME)) == before
     assert _names(cache.root) == {rig.cache.sha, f".{rig.cache.sha}.lock"}
+
+
+#: Runner code of the commit, and code of the same length that an account that can write the cache puts in its place,
+#: so that no size anywhere changes.
+_COMMITTED_CODE, _PLANTED_CODE = b"lock_pkg.ORIGIN", b"'planted  code'"
+
+
+def _record(entry: Path, **fields: Any) -> None:
+    """Rewrite the entry's manifest with ``fields`` changed, in the very text the builder writes."""
+    manifest = manifest_from_json((entry / MANIFEST_NAME).read_bytes())
+    (entry / MANIFEST_NAME).write_text(manifest_to_json(replace(manifest, **fields)))
+
+
+def _plant_archive(entry: Path) -> None:
+    """Other runner code in ``source.tar``, the file the sandbox runs from, recorded in the manifest."""
+    archive = entry / SOURCE_ARCHIVE
+    committed = archive.read_bytes()
+    assert committed.count(_COMMITTED_CODE) == 1
+    archive.write_bytes(committed.replace(_COMMITTED_CODE, _PLANTED_CODE))
+    _record(entry, source_archive=FileDigest(archive.stat().st_size, _digest(archive)))
+
+
+def _plant_source(entry: Path) -> None:
+    """Other code in ``source``, the tree the builder reads the lock from, recorded in the manifest."""
+    main = entry / "source" / "src/hyperloom/measure/runner/__main__.py"
+    main.write_bytes(main.read_bytes().replace(_COMMITTED_CODE, _PLANTED_CODE))
+    _record(entry, source=tree_digest(entry / "source"))
+
+
+@pytest.mark.parametrize(
+    ("plant", "difference"),
+    [(_plant_archive, f"its {SOURCE_ARCHIVE} is not the archive of"), (_plant_source, "its source is not the tree of")],
+)
+def test_an_entry_that_agrees_with_itself_but_not_with_the_commit_is_refused_on_reuse(
+    rig: Rig, tmp_path: Path, plant: Callable[[Path], None], difference: str
+) -> None:
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry = cache.root / cache.sha
+    committed = manifest_from_json((entry / MANIFEST_NAME).read_bytes())
+    plant(entry)
+    planted = manifest_from_json((entry / MANIFEST_NAME).read_bytes())
+    # The planted entry names the real commit and tree, the builder's target and script, and every size is the
+    # commit's: only what the commit makes tells it apart.
+    assert planted != committed
+    assert replace(planted, source=committed.source, source_archive=committed.source_archive) == committed
+    assert (planted.source.files, planted.source.size) == (committed.source.files, committed.source.size)
+    assert planted.source_archive is not None and committed.source_archive is not None
+    assert planted.source_archive.size == committed.source_archive.size
+    assert check_entry(entry, cache.sha, verify_hash=True) == []
+    # A sandbox handed this manifest's hash as the pin would run it.
+    pin = _digest(entry / MANIFEST_NAME)
+    assert stage_entry(cache.root, cache.sha, tmp_path / "scratch", pin) == []
+    before = (tree_digest(entry), pin)
+    with pytest.raises(CacheConflict, match="is left alone") as refused:
+        ensure_runner_cache(rig.repo, rig.cache.sha, cache.root, rig.build_options())
+    assert difference in str(refused.value)
+    assert (tree_digest(entry), _digest(entry / MANIFEST_NAME)) == before
+
+
+@pytest.mark.parametrize("reuse", [False, True], ids=["built", "reused"])
+def test_the_pin_is_the_hash_of_the_manifest_bytes_checked_not_of_the_file_read_again(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reuse: bool
+) -> None:
+    cache = copy_cache(rig, tmp_path / "cache").root if reuse else tmp_path / "cache"
+    checked: list[bytes] = []
+    check = cache_build.check_entry
+
+    def check_then_swap(entry: Path, sha: str, *args: Any, **kwargs: Any) -> list[str]:
+        problems = check(entry, sha, *args, **kwargs)
+        checked.append((entry / MANIFEST_NAME).read_bytes())
+        _record(entry, git_tree="f" * 40)
+        return problems
+
+    monkeypatch.setattr(cache_build, "check_entry", check_then_swap)
+    entry = ensure_runner_cache(rig.repo, rig.cache.sha, cache, rig.build_options())
+    assert entry.reused is reuse and len(checked) == 1
+    assert entry.manifest_sha256 == hashlib.sha256(checked[0]).hexdigest()
+    assert entry.manifest_sha256 != _digest(entry.path / MANIFEST_NAME)
+
+
+def test_a_manifest_written_over_between_its_read_and_the_check_is_refused_on_reuse(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = copy_cache(rig, tmp_path / "cache")
+    check = cache_build.check_entry
+
+    def swap_then_check(entry: Path, sha: str, *args: Any, **kwargs: Any) -> list[str]:
+        _record(entry, git_tree="f" * 40)
+        return check(entry, sha, *args, **kwargs)
+
+    monkeypatch.setattr(cache_build, "check_entry", swap_then_check)
+    with pytest.raises(CacheConflict, match="is not the one pinned"):
+        ensure_runner_cache(rig.repo, cache.sha, cache.root, rig.build_options())
 
 
 def test_an_entry_built_for_another_target_is_refused_not_overwritten(rig: Rig, tmp_path: Path) -> None:
