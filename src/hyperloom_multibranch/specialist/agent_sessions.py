@@ -34,7 +34,8 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
-from hyperloom_multibranch.specialist.agent_onboarding import AgentSandbox, AgentSpec, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_onboarding import AgentSandbox, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_sandbox import FrameworkProtection, LocalAgentSandbox, framework_protection
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, BranchPlace, Processes, SessionBlackboard
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend

@@ -2424,7 +2424,8 @@ async def test_a_user_branch_opens_first_at_the_root_and_the_judge_neither_stops
     root = await stage.root()
     assert stage.sessions.started["b01"] == stage.sessions.started["b02"] == root
     directions = {branch: set(runs) for branch, runs in stage.sessions.directions.items()}
-    assert directions.pop("b01") == {USER_DIRECTION}
+    user = directions.pop("b01")
+    assert user == {USER_DIRECTION}
     assert sorted(directions) == ["b02", "b03"]
     assert all(len(runs) == 1 and runs <= set(DIRECTIONS) for runs in directions.values())
     opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
