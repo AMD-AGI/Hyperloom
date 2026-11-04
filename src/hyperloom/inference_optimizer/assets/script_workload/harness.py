@@ -91,17 +91,30 @@ def _snapshot(value):
     return _map_tensors(value, lambda tensor: tensor.detach().clone())
 
 
-def _plain(value):
-    """Plain containers and CPU tensors only, so the parent can load them with weights_only=True."""
+def _plain(value, where: str = "output"):
+    """Plain containers and CPU tensors only, so the parent can load them with weights_only=True.
+
+    A leaf of any other type is refused rather than stringified. ``repr`` looks like
+    a comparable value and is not one: numpy elides any array over 1000 elements, so
+    two different masks render identically and the gate scores them equal. Worse, a
+    stringified leaf is invisible to ``_leaves``, so an output made entirely of them
+    has nothing to compare and scores a perfect zero.
+
+    Recording runs the unmodified model, so an unsupported output is refused there --
+    before a campaign spends its budget measuring against references it cannot judge.
+    """
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().clone()
     if isinstance(value, (list, tuple)):
-        return [_plain(item) for item in value]
+        return [_plain(item, f"{where}[{index}]") for index, item in enumerate(value)]
     if isinstance(value, dict):
-        return {str(key): _plain(item) for key, item in value.items()}
+        return {str(key): _plain(item, f"{where}[{key!r}]") for key, item in value.items()}
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
-    return repr(value)
+    raise TypeError(
+        f"{where} is a {type(value).__name__}, which the accuracy gate cannot compare. "
+        "Return tensors, or plain containers and scalars built from them."
+    )
 
 
 def _perturb(value, generator: torch.Generator | None = None):
@@ -449,6 +462,10 @@ def _structure(value):
 def rel_l2(candidate, reference) -> float:
     """Largest relative L2 error over the output's tensors; inf on a structure or finiteness mismatch."""
     if candidate is None or _structure(candidate) != _structure(reference):
+        return math.inf
+    if not _leaves(reference):
+        # Nothing numeric to compare, so there is no evidence either way; a zero here
+        # would read as a perfect score.
         return math.inf
     worst = 0.0
     for out, ref in zip(_leaves(candidate), _leaves(reference)):

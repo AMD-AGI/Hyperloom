@@ -99,6 +99,39 @@ def test_a_failing_script_keeps_its_recording_log(tmp_path, capsys):
     assert not (tmp_path / "ws" / "optimization").exists()
 
 
+NUMPY_SCRIPT = textwrap.dedent(
+    """
+    from toy_opt import apply
+    import torch
+
+    torch.manual_seed(0)
+    inner = torch.nn.Linear(512, 512).eval()
+
+    class Model:
+        def __call__(self, x):
+            with torch.no_grad():
+                return inner(x).numpy()
+
+    model = apply(Model())
+    for _ in range(3):
+        print(model(torch.randn(256, 512)).shape)
+    """
+)
+
+
+def test_prepare_refuses_an_output_the_gate_cannot_compare(tmp_path):
+    """A numpy output used to stringify, and numpy elides any array over 1000 elements.
+
+    Two different masks then render identically, and an output made entirely of such
+    leaves has no tensors to compare at all, so it scored a perfect zero.
+    """
+    with pytest.raises(subprocess.CalledProcessError):
+        _prepare(tmp_path, tmp_path / "ws", NUMPY_SCRIPT)
+    log = (tmp_path / "ws" / "record_stderr.log").read_text()
+    assert "is a ndarray, which the accuracy gate cannot compare" in log
+    assert not (tmp_path / "ws" / "benchmark").exists()
+
+
 def test_prepare_warns_on_an_import_after_torch(tmp_path, capsys):
     after_torch = SCRIPT.replace(
         "from toy_opt import apply\nimport torch\n", "import torch\nfrom toy_opt import apply\n"
