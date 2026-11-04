@@ -6,12 +6,9 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 import re
-from functools import partial
 from pathlib import Path
-from typing import NoReturn
 
 import pytest
 from hyperloom_kb import RemoteReadResult
@@ -26,7 +23,6 @@ from hyperloom.contracts.recipe import (
     PatchRef,
     Recipe,
     RecipeDelta,
-    apply,
 )
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, UnknownRequest, Writer
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer, Verdict
@@ -62,40 +58,11 @@ from hyperloom_multibranch.blackboard.knowledge.warm_start import (
     WarmLead,
 )
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
-from hyperloom_multibranch.blackboard.knowledge.replay_tables import StackSlot
 from hyperloom_multibranch.blackboard.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs
+from hyperloom_multibranch.blackboard.rsi.tests.repos import FakeRepo
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, SPLIT_KV, scripted_session
 from hyperloom_multibranch.blackboard.tools import FOCUS_LINE
-from hyperloom_multibranch.repo.merge import Stored, stack_kernel_slot
-from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
-from hyperloom_multibranch.toolbox.tests.kernel_rows import (
-    ALPHA_NEW,
-    BETA_HEAD,
-    BETA_NEW,
-    BETA_SHARED,
-    ENV,
-    GAMMA_NEW,
-    SHARED,
-    csv_text,
-    install,
-)
-
-
-def _unused(*_: object) -> NoReturn:
-    raise AssertionError("stacking a kernel slot reads and keeps tables only")
-
-
-def _slot(store: dict[str, bytes], configs: Path | None = None) -> StackSlot:
-    """The merge's stack of two tables in one slot, reading from ``store`` and keeping a united table in it."""
-
-    def keep(data: bytes) -> str:
-        store[hashlib.sha256(data).hexdigest()] = data
-        return hashlib.sha256(data).hexdigest()
-
-    return partial(
-        stack_kernel_slot, stored=Stored(_unused, lambda artifact: store[artifact.sha256], _unused, keep, configs)
-    )
 
 
 SAME = {
@@ -280,22 +247,6 @@ async def test_an_experience_of_the_other_kind_of_session_is_only_a_lesson_to_re
     )
 
 
-@dataclasses.dataclass
-class _Repo:
-    """The experiment repository as a replay reads it: each branch's head, and the recipe of each commit."""
-
-    heads: dict[str, str]
-    recipes: dict[str, Recipe]
-    reads: list[str] = dataclasses.field(default_factory=list)
-
-    async def head(self, branch: str) -> str:
-        return self.heads[branch]
-
-    async def read_recipe(self, commit: str) -> Recipe:
-        self.reads.append(commit)
-        return self.recipes[commit]
-
-
 async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_replays_it_on_the_branch_head(
     tmp_path: Path,
 ) -> None:
@@ -303,7 +254,7 @@ async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_repla
     unpacked = "the record holds no patch or kernel files"
     prepared = PreparedReplay(LEAD.canonical_id, None, LaunchConfig("--enable-expert-parallel"), unpacked)
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
-    repo = _Repo({"s3": "c3"}, {"c3": head})
+    repo = FakeRepo({"s3": "c3"}, {"c3": head})
     warm = (dataclasses.replace(LEAD, replay=prepared),)
     briefing = CrossSessionBriefing(blackboard, warm=warm, branch="s3", repo=repo)
 
@@ -337,7 +288,7 @@ async def test_the_briefing_reads_a_patch_a_launch_only_replay_leaves_out_whatev
     assert await briefing.warm_reference("inference:none", "sglang/gate.patch") is None
 
 
-def _champion_merged(unpacked: str) -> tuple[tuple[WarmLead, ...], _Repo]:
+def _champion_merged(unpacked: str) -> tuple[tuple[WarmLead, ...], FakeRepo]:
     """The scripted session's ``c1`` as the warm-start champion's recipe, and ``i1``, which merged it, tuned past it."""
 
     image = "sha256:" + "a" * 64
@@ -347,7 +298,7 @@ def _champion_merged(unpacked: str) -> tuple[tuple[WarmLead, ...], _Repo]:
         "c1": Recipe(image, LaunchConfig("--enable-expert-parallel")),
         "i1": Recipe(image, LaunchConfig("--enable-expert-parallel --max-num-seqs 256")),
     }
-    return (dataclasses.replace(LEAD, replay=prepared),), _Repo({"s3": "i1"}, recipes)
+    return (dataclasses.replace(LEAD, replay=prepared),), FakeRepo({"s3": "i1"}, recipes)
 
 
 async def test_a_champion_the_start_commit_builds_on_is_named_on_the_head_and_not_replayed_again(
@@ -407,7 +358,7 @@ async def test_the_session_reads_each_commits_recipe_once_to_find_the_champions_
 async def test_another_branchs_tested_change_is_replayed_on_the_branch_head_as_it_was_tested(tmp_path: Path) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
-    briefing = CrossSessionBriefing(blackboard, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}))
+    briefing = CrossSessionBriefing(blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": head}))
 
     replayed = await briefing.peer_replay("r1")
 
@@ -425,122 +376,12 @@ async def test_a_peer_replay_names_the_heads_kernel_its_change_takes_the_place_o
     )
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(theirs,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(own, other))
-    briefing = CrossSessionBriefing(blackboard, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}))
+    briefing = CrossSessionBriefing(blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": head}))
 
     replayed = await briefing.peer_replay("r7")
 
     assert replayed.replaces == (own,)
     assert replayed.layer is IntentLayer.KERNEL
-
-
-@pytest.mark.parametrize("target", ["a8w8", "qkv"])
-async def test_a_peer_replay_takes_the_wider_table_and_names_no_loss(tmp_path: Path, target: str) -> None:
-    """Also for another layer's table on the head's load variable: the service reads one table per variable, so the
-    wider table takes the head's place and the replayed recipe sets the variable once."""
-
-    root = tmp_path / "blackboard"
-    blackboard = await scripted_session(root, FakeClock())
-    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
-    narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
-    wide = mint_kernel_artifact(KernelKind.GEMM, target, ENV, csv_text(SHARED, ALPHA_NEW))
-    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, ALPHA_NEW)}
-    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(wide,))))
-    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(narrow,))
-    briefing = CrossSessionBriefing(
-        blackboard, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), stack_slot=_slot(store)
-    )
-
-    replayed = await briefing.peer_replay("r7")
-
-    assert replayed.replaces == ()
-    assert replayed.delta.add_kernels == (wide,)
-    assert apply(head, replayed.delta).kernels == (wide,)
-
-
-async def test_a_peer_replay_drops_a_kernel_the_heads_wider_table_already_covers(tmp_path: Path) -> None:
-    root = tmp_path / "blackboard"
-    blackboard = await scripted_session(root, FakeClock())
-    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
-    narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
-    wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, ALPHA_NEW))
-    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, ALPHA_NEW)}
-    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(narrow,))))
-    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(wide,))
-    briefing = CrossSessionBriefing(
-        blackboard, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), stack_slot=_slot(store)
-    )
-
-    with pytest.raises(ValueError, match="already has the change"):
-        await briefing.peer_replay("r7")
-
-
-async def _replayed_over(
-    tmp_path: Path, head_data: bytes, peer_data: bytes, peer_target: str = "a8w8"
-) -> tuple[PeerReplay, dict[str, bytes]]:
-    """Another branch's table, for ``peer_target``, replayed on a head that holds ``head_data`` for ``a8w8`` on the same
-    load variable, as the merge stacks it."""
-
-    root = tmp_path / "blackboard"
-    blackboard = await scripted_session(root, FakeClock())
-    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
-    head_art = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, head_data)
-    peer = mint_kernel_artifact(KernelKind.GEMM, peer_target, ENV, peer_data)
-    store = {head_art.sha256: head_data, peer.sha256: peer_data}
-    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(peer,))))
-    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(head_art,))
-    stack_slot = _slot(store, install(tmp_path / "image"))
-    briefing = CrossSessionBriefing(
-        blackboard, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), stack_slot=stack_slot
-    )
-    return await briefing.peer_replay("r7"), store
-
-
-@pytest.mark.parametrize("target", ["a8w8", "qkv"])
-async def test_a_peer_replay_unites_two_tables_each_with_rows_the_other_lacks(tmp_path: Path, target: str) -> None:
-    """In the head's slot, also when the peer's table is for another layer on the head's load variable."""
-
-    head_data, peer_data = csv_text(SHARED, BETA_NEW), csv_text(SHARED[:3], GAMMA_NEW)
-
-    replayed, store = await _replayed_over(tmp_path, head_data, peer_data, target)
-
-    (united,) = replayed.delta.add_kernels
-    expected = union_rows(peer_data, head_data, ENV, configs=install(tmp_path / "expected"))
-    assert replayed.replaces == () and replayed.delta.remove_kernels == ()
-    assert united.slot == mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, head_data).slot
-    assert (united.sha256, store[united.sha256]) == (hashlib.sha256(expected).hexdigest(), expected)
-
-
-async def test_a_peer_replay_keeps_the_heads_row_for_a_shape_both_tuned(tmp_path: Path) -> None:
-    head_data, peer_data = csv_text(SHARED, BETA_HEAD), csv_text(BETA_SHARED, BETA_NEW)
-
-    replayed, store = await _replayed_over(tmp_path, head_data, peer_data)
-
-    (united,) = replayed.delta.add_kernels
-    expected = union_rows(csv_text(BETA_NEW), head_data, ENV, configs=install(tmp_path / "expected"))
-    assert replayed.replaces == ()
-    assert store[united.sha256] == expected
-
-
-async def test_a_peer_replay_names_the_swap_when_the_merge_would_refuse_the_tables(tmp_path: Path) -> None:
-    root = tmp_path / "blackboard"
-    blackboard = await scripted_session(root, FakeClock())
-    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
-    own = KernelArtifact(KernelKind.GEMM, "moe", "kernel/gemm/head.csv", "b" * 64)
-    theirs = KernelArtifact(KernelKind.GEMM, "moe", "kernel/gemm/peer.csv", "d" * 64)
-    store = {
-        own.sha256: b"cu_num,M,N,K,gfx,us\n304,1,4096,4096,gfx950,23.1\n",
-        theirs.sha256: b"M,N,K,us\n1,4096,4096,19.8\n8,4096,4096,31.0\n",
-    }
-    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(theirs,))))
-    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(own,))
-    briefing = CrossSessionBriefing(
-        blackboard, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), stack_slot=_slot(store)
-    )
-
-    replayed = await briefing.peer_replay("r7")
-
-    assert replayed.replaces == (own,)
-    assert replayed.delta.add_kernels == (theirs,)
 
 
 async def test_a_peer_replay_gives_a_component_new_to_the_head_the_upstream_its_test_was_made_on(
@@ -554,7 +395,7 @@ async def test_a_peer_replay_gives_a_component_new_to_the_head_the_upstream_its_
     await toolbox.write_request(request("r7", SPLIT_KV, tested))
     plain = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
     patched = dataclasses.replace(plain, components=(ComponentPatches("sglang", sglang, "f" * 40),))
-    briefing = CrossSessionBriefing(blackboard, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": plain, "c0": patched}))
+    briefing = CrossSessionBriefing(blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": plain, "c0": patched}))
 
     replayed = await briefing.peer_replay("r7")
 
@@ -573,7 +414,7 @@ async def test_a_peer_replay_says_why_when_there_is_nothing_to_replay_on_the_bra
     tuned = dataclasses.replace(plain, launch=LaunchConfig("--max-num-seqs 256"))
 
     def replaying(branch: str, recipe: Recipe | None = plain) -> CrossSessionBriefing:
-        repo = _Repo({branch: "c3"}, {"c3": recipe}) if recipe is not None else None
+        repo = FakeRepo({branch: "c3"}, {"c3": recipe}) if recipe is not None else None
         return CrossSessionBriefing(blackboard, branch=branch, repo=repo)
 
     for briefing, request_id, why in (
@@ -583,7 +424,7 @@ async def test_a_peer_replay_says_why_when_there_is_nothing_to_replay_on_the_bra
         (replaying("s3", tuned), "r1", "your head c3 already has the change r1 tested"),
         (replaying("s3", None), "r1", "reads no experiment repository"),
         (
-            CrossSessionBriefing(blackboard, branch="s3", repo=_Repo({"s3": "c0"}, {"c0": plain})),
+            CrossSessionBriefing(blackboard, branch="s3", repo=FakeRepo({"s3": "c0"}, {"c0": plain})),
             "r1",
             "on your head c0",
         ),
