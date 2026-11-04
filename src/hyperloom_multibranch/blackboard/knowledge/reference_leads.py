@@ -70,10 +70,9 @@ class ReferenceLead:
         return f"- {self.describe()}"
 
 
-def reference_leads(
-    checkout: Path, profile: SessionProfile, revision: str = "", *, limit: int = MAX_REFERENCE_LEADS
-) -> tuple[ReferenceLead, ...]:
-    """The leads of ``checkout``'s matrices for ``profile``'s model, closest first; ``()`` when it holds none.
+def reference_leads(checkout: Path, profile: SessionProfile, revision: str = "") -> tuple[ReferenceLead, ...]:
+    """The leads of ``checkout``'s matrices for ``profile``'s model, at most :data:`MAX_REFERENCE_LEADS`, closest
+    first; ``()`` when it holds none.
 
     A matrix that cannot be read is logged and skipped, since a reference only adds leads. Blocks on the files."""
 
@@ -84,7 +83,7 @@ def reference_leads(
         if _name(str(entry.get("model", ""))) == wanted and not entry.get("multinode")
     ]
     leads = (_lead(checkout, config, entry, profile, revision) for config, entry in entries)
-    return tuple(sorted(leads, key=_distance))[:limit]
+    return tuple(sorted(leads, key=_distance))[:MAX_REFERENCE_LEADS]
 
 
 def _distance(lead: ReferenceLead) -> tuple[int, ...]:

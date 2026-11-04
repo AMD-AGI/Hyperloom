@@ -31,7 +31,8 @@ def stack_added_kernels(
 
     Without ``stack_slot``, every conflicting add stays a swap and is listed in the second return value. With it, a
     wider table or a union replaces the swap when the slot function accepts the pair; a pair it refuses keeps the swap
-    and the listing. A head table met on its load variable from another slot is removed in the same delta, so the
+    and the listing. A head table the slot function keeps as it is stays where it is: the delta neither adds over it
+    nor removes it. A head table met on its load variable from another slot is removed in the same delta, so the
     replayed recipe sets the variable once.
     """
 
@@ -47,6 +48,8 @@ def stack_added_kernels(
             continue
         stacked = stack_slot(artifact, current) if stack_slot is not None else None
         if stacked is current:
+            if current.ref in removed:
+                removed.remove(current.ref)
             continue
         chosen = stacked if stacked is not None else artifact
         added.append(chosen)
