@@ -17,6 +17,11 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
     SynthesizedPlan,
 )
 from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent, OrchestrationService
+from kernelforge.workflows.forge_loop.roles.plan_prompts import (
+    LANE_SYNTHESIS_SYSTEM_PROMPT,
+    REVISION_SYSTEM_PROMPT,
+    SYNTHESIS_SYSTEM_PROMPT,
+)
 from kernelforge.workflows.forge_loop.roles.specialists import SpecialistAgent, SpecialistPool
 from kernelforge.workflows.forge_loop.roles.plan_critic import PlanCriticAgent
 from kernelforge.workflows.forge_loop.roles.summary_line import PLAN_SUMMARY_RULE
@@ -164,10 +169,11 @@ async def test_plan_revision_resumes_the_synthesis_session() -> None:
     assert spec.timeout_sec == 600
     revision_payload = json.loads(feedback)
     assert revision_payload["draft_plan"] == draft
-    # The resumed session already holds the planning bundle, and the revision instructions are the system prompt;
-    # neither is copied back into the payload.
-    assert "For REPLACE, discard the dominated implementation route" in (spec.system_prompt)
-    assert "revision_instructions" not in revision_payload
+    # The resume keeps the system prompt the synthesis ran under, which opens its cached conversation, so the
+    # revision instructions travel in the message.
+    synthesis_spec = orchestration_backend.specs[1]
+    assert spec.system_prompt == synthesis_spec.system_prompt == SYNTHESIS_SYSTEM_PROMPT
+    assert revision_payload["revision_instructions"] == REVISION_SYSTEM_PROMPT.strip()
     revision_diagnostics = result.structured_output_diagnostics["plan_revision"]
     assert revision_diagnostics["status"] == "revised"
     assert revision_diagnostics["critic_verdict"] == "REVISE"
@@ -185,22 +191,25 @@ async def test_a_resumed_revision_carries_only_what_the_session_lacks() -> None:
     revised = await agent.revise_optimization_plan(
         _context(),
         specialists,
-        draft=SynthesizedPlan(text="# Draft plan", session_id="synthesis-session"),
+        draft=SynthesizedPlan(
+            text="# Draft plan",
+            session_id="synthesis-session",
+            system_prompt=LANE_SYNTHESIS_SYSTEM_PROMPT,
+        ),
         critic=PlanCriticOutcome(verdict="REVISE", review="Compare the existing GEMM path."),
     )
 
     assert revised.mode == "resumed"
     spec, session_id, feedback = backend.resumes[0]
     assert session_id == "synthesis-session"
+    assert spec.system_prompt == LANE_SYNTHESIS_SYSTEM_PROMPT
     payload = json.loads(feedback)
     assert payload["draft_plan"] == "# Draft plan"
     assert payload["critic_verdict"] == "REVISE"
     assert "existing GEMM" in payload["critic_review"]
-    # The revision instructions are the system prompt, not a second copy inside the payload; the rest of the bundle is
-    # already in the resumed session.
-    assert "For REPLACE, discard the dominated implementation route" in (spec.system_prompt)
+    assert payload["revision_instructions"] == REVISION_SYSTEM_PROMPT.strip()
+    # The rest of the bundle is already in the resumed session.
     for absent in (
-        "revision_instructions",
         "context",
         "dispatch_plan",
         "specialist_outcomes",
@@ -292,12 +301,45 @@ async def test_a_revised_plan_writes_its_own_summary_line(resumable) -> None:
         draft=SynthesizedPlan(
             text="Summary: The draft's goal.\n# Draft plan",
             session_id="synthesis-session" if resumable else "",
+            system_prompt=SYNTHESIS_SYSTEM_PROMPT,
         ),
         critic=PlanCriticOutcome(verdict="REPLACE", review="Compare the existing GEMM path."),
     )
 
-    spec = backend.resumes[0][0] if resumable else backend.specs[0]
-    assert PLAN_SUMMARY_RULE in spec.system_prompt
-    assert "for the plan as revised, not for the draft" in spec.system_prompt
+    instructions = json.loads(backend.resumes[0][2] if resumable else backend.specs[0].user_prompt)[
+        "revision_instructions"
+    ]
+    assert PLAN_SUMMARY_RULE.strip() in instructions
+    assert "for the plan as revised, not for the draft" in instructions
     if not resumable:
-        assert PLAN_SUMMARY_RULE.strip() in json.loads(spec.user_prompt)["revision_instructions"]
+        assert "for the plan as revised, not for the draft" in backend.specs[0].system_prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lanes", "replies", "system_prompt"),
+    [
+        (1, ["# Plan\nStage the scale stream."], SYNTHESIS_SYSTEM_PROMPT),
+        (
+            2,
+            [_partition(GROUND_A, GROUND_B), "# Lane A\nRetime the MFMA.", "# Lane B\nStage."],
+            LANE_SYNTHESIS_SYSTEM_PROMPT,
+        ),
+    ],
+)
+async def test_a_draft_names_the_system_prompt_its_session_ran_under(lanes, replies, system_prompt) -> None:
+    """The revision resumes the draft's session under that prompt, so the draft has to carry it."""
+    backend = _PerCallBackend(replies)
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+
+    drafts = await agent.synthesize_lane_plan_results(_context(), await _compute_and_memory_round(), lanes=lanes)
+
+    synthesis_specs = backend.specs[-len(drafts) :]
+    assert len(drafts) == lanes
+    assert [draft.system_prompt for draft in drafts] == [spec.system_prompt for spec in synthesis_specs]
+    assert {draft.system_prompt for draft in drafts} == {system_prompt}
+
+
+def test_a_draft_that_keeps_its_session_must_name_its_system_prompt() -> None:
+    with pytest.raises(ValueError, match="system prompt"):
+        SynthesizedPlan(text="# Draft plan", session_id="synthesis-session")
