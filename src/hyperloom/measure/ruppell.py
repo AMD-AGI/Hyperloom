@@ -158,8 +158,10 @@ def tree_sha256(root: Path) -> str:
     """The SHA-256 ``hyperloom.measure.runner.cache_layout.tree_digest`` gives the tree at ``root``: one line per file
     or link, in path order, of its kind (``f``, ``x`` executable, ``l`` link), size, content hash and path.
 
-    The runner cache's own digest, computed here because the runner package imports this backend; a test pins the two
-    to the same value.
+    The runner cache's own digest, computed here: the runner package imports the local backend, which imports this
+    module, so an import of ``cache_layout`` from here would close a cycle between ``hyperloom.measure``'s sibling
+    packages, which the import contracts refuse; and ``cache_layout`` imports nothing but the standard library (the
+    start-up script embeds its text), so the digest cannot move below both. A test pins the two to the same value.
     """
     outer = hashlib.sha256()
     root = Path(root)

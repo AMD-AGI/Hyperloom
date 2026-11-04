@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The modules an image's own tables need and its ``aiter/jit`` lacks: which they are, the watchdog that covers building
-them, and the prewarm that builds them on CPU and installs them into the image, over the stand-in aiter."""
+"""The modules an image's own tables need and its ``aiter/jit`` lacks: which they are, and the prewarm that builds them on
+CPU and installs them into the image, over the stand-in aiter."""
 
 from __future__ import annotations
 
@@ -17,21 +17,20 @@ import pytest
 
 from hyperloom.measure import farm as farm_module
 from hyperloom.measure.jit.native.store import BuildInfraError
-from hyperloom.measure.jit.prewarmed import PREWARM_MANIFEST, read_manifest, unlike_prewarmed
+from hyperloom.measure.jit.prewarmed import unlike_prewarmed
 from hyperloom.measure.jit.session import link_prebuilt
 from hyperloom.measure.runner.cache_layout import file_sha256
 from hyperloom.measure.runner.native import aiter_modules, prewarm
 from hyperloom.measure.runner.native.aiter_modules import MODULES_FILE
 from hyperloom.measure.runner.native.builder import BuildMachine, tree_dir
 from hyperloom.measure.runner.native.isolated import JOB_FILE, Isolation
-from hyperloom.measure.runner.native.prewarm import (
-    PrewarmError,
-    isolated_builder,
-    missing_prebuilt_modules,
-    watchdog_seconds_for,
-)
+from hyperloom.measure.runner.native.prewarm import PrewarmError, isolated_builder, missing_prebuilt_modules
 from hyperloom.measure.runner.native.tests import _aiter_standin as standin
-from hyperloom.measure.runner.rebuild_watchdog import rebuild_watchdog_sec
+from hyperloom.orchestrator.actions.executors._aiter_jit import (
+    AITER_PREWARM_MANIFEST,
+    read_prewarm_manifest,
+    tuned_tables_sha256,
+)
 
 GFX = "gfx950"
 #: A second table module, generated from another variable's table.
@@ -97,12 +96,6 @@ def test_an_image_whose_module_config_cannot_be_read_says_so_rather_than_nothing
         missing_prebuilt_modules(package)
 
 
-def test_the_watchdog_covers_each_module_build_plus_sglangs_own() -> None:
-    assert watchdog_seconds_for([]) == 300
-    assert watchdog_seconds_for(["a", "b", "c", "d"]) == 4 * 600 + 300 == rebuild_watchdog_sec(["a", "b", "c", "d"])
-    assert watchdog_seconds_for(["module_gemm_a8w8_bpreshuffle_cktile"]) == 2700 + 300, "a CK-tile module, 2700 s"
-
-
 def test_prewarm_builds_what_is_missing_installs_it_with_a_manifest_and_a_rerun_does_nothing(tmp_path: Path) -> None:
     package = image(tmp_path / "image")
     builder = StandIn()
@@ -115,14 +108,13 @@ def test_prewarm_builds_what_is_missing_installs_it_with_a_manifest_and_a_rerun_
     jit = package / "jit"
     assert (jit / f"{standin.MODULE}.so").read_bytes() == b"\x7fELF built:" + standin.MODULE.encode()
     assert not (jit / f"{FETCHING}.so").exists(), "a module aiter cannot build by name is left to the launch"
-    entries = read_manifest(jit)
+    entries = read_prewarm_manifest(jit)
     assert set(entries) == {standin.MODULE, BLOCKSCALE}
     for name, entry in entries.items():
         assert entry["sha256"] == file_sha256(jit / f"{name}.so")
         assert entry["gfx"] == GFX and entry["built_at"].endswith("Z")
-        assert entry["tables_sha256"] == prewarm.tables_digest(package)
-        assert entry["source_digest"] == prewarm.source_digest(package, entry["tables_sha256"])
-    assert report.manifest == str(jit / PREWARM_MANIFEST)
+        assert entry["tables_sha256"] == tuned_tables_sha256(package / "configs")
+    assert report.manifest == str(jit / AITER_PREWARM_MANIFEST)
     assert not [path.name for path in jit.iterdir() if path.name.startswith(".")], "no temporary file is left"
 
     before = jit_listing(package)
@@ -142,7 +134,7 @@ def test_a_rerun_after_one_more_module_went_missing_keeps_the_earlier_manifest_e
     report = prewarm.prewarm(package, builder, gfx=GFX)
 
     assert builder.calls[-1] == frozenset({BLOCKSCALE}) and report.built == (BLOCKSCALE,)
-    assert set(read_manifest(package / "jit")) == {standin.MODULE, BLOCKSCALE}
+    assert set(read_prewarm_manifest(package / "jit")) == {standin.MODULE, BLOCKSCALE}
 
 
 @pytest.mark.parametrize(
@@ -181,22 +173,12 @@ def test_an_install_that_fails_part_way_leaves_no_module_and_no_temporary_file(t
     assert jit_listing(package) == before, "the module copied before the failure is not installed either"
 
 
-def test_the_tables_digest_changes_with_a_table_and_the_source_digest_with_csrc(tmp_path: Path) -> None:
-    package = image(tmp_path / "image")
-    tables = prewarm.tables_digest(package)
-    source = prewarm.source_digest(package, tables)
-
-    (package.parent / standin.KERNEL).write_text("// changed\n", encoding="utf-8")
-    assert prewarm.tables_digest(package) == tables and prewarm.source_digest(package, tables) != source
-    (package.parent / standin.TABLE).write_text("M,N,K\n4,5,6\n", encoding="utf-8")
-    assert prewarm.tables_digest(package) != tables
-
-
 def test_a_manifest_of_another_schema_lists_nothing(tmp_path: Path) -> None:
-    (tmp_path / PREWARM_MANIFEST).write_text(json.dumps({"schema": "other/1", "modules": [{"name": "m"}]}), "utf-8")
-    assert read_manifest(tmp_path) == {}
-    (tmp_path / PREWARM_MANIFEST).write_text("not json", "utf-8")
-    assert read_manifest(tmp_path) == {}
+    manifest = tmp_path / AITER_PREWARM_MANIFEST
+    manifest.write_text(json.dumps({"schema": "other/1", "modules": [{"name": "m"}]}), "utf-8")
+    assert read_prewarm_manifest(tmp_path) == {}
+    manifest.write_text("not json", "utf-8")
+    assert read_prewarm_manifest(tmp_path) == {}
 
 
 class CpuRig:
@@ -223,7 +205,7 @@ def test_the_cpu_build_runner_builds_the_missing_modules_from_the_images_own_tre
     assert report.built == (standin.MODULE,) and not report.failure
     built = (rig.package / "jit" / f"{standin.MODULE}.so").read_bytes()
     assert built == standin.built(GFX, standin.IMAGE_KERNEL), "built for the target from the image's k.cu"
-    assert set(read_manifest(rig.package / "jit")) == {standin.MODULE}
+    assert set(read_prewarm_manifest(rig.package / "jit")) == {standin.MODULE}
 
 
 def test_the_compile_is_handed_its_plan_and_its_job_readable_by_their_owner_alone(tmp_path, monkeypatch) -> None:
@@ -324,7 +306,7 @@ def test_a_build_for_a_cards_cu_count_is_installed_only_when_it_covers_that_card
     jit = package / "jit"
     if installed:
         assert report.built == ("module_gemm_a8w8",) and not report.failure
-        assert read_manifest(jit)["module_gemm_a8w8"]["cu_num"] == cu_num
+        assert read_prewarm_manifest(jit)["module_gemm_a8w8"]["cu_num"] == cu_num
     else:
         assert report.built == () and not (jit / "module_gemm_a8w8.so").exists()
         assert report.failure == (
@@ -355,6 +337,32 @@ def test_the_command_builds_for_the_cards_cu_count_into_the_package_it_is_given(
     assert printed["failure"].endswith("lack kernels of gfx950/256 rows of a8w8_tuned_gemm.csv"), (
         "the stand-in writes no kernel name, so the coverage check refuses it"
     )
+
+
+def test_the_launch_preflights_build_is_the_commands_in_this_process_with_its_report_as_a_mapping(
+    tmp_path, monkeypatch
+) -> None:
+    """What the measure runner hands the launch preflight for the modules it moved aside: the command's build, for the
+    card's CU count, with the image's interpreter."""
+    package = _a8w8_image(tmp_path / "image", built_from="k")
+    seen: dict[str, object] = {}
+
+    def builder_for(machine: BuildMachine, *, environ: Mapping[str, str] | None = None) -> prewarm.ModuleBuilder:
+        seen.update(gfx=machine.gfx_arch, python=machine.python, cu=(environ or {}).get("CU_NUM"))
+
+        def build(_package: Path, modules: frozenset[str], scratch: Path) -> Mapping[str, Path]:
+            (scratch / "module_gemm_a8w8.so").write_bytes(b"\x7fELF k_card")
+            return {"module_gemm_a8w8": scratch / "module_gemm_a8w8.so"}
+
+        return build
+
+    monkeypatch.setattr(prewarm, "isolated_builder", builder_for)
+
+    report = prewarm.preflight_build(package, ["AITER_CONFIG_GEMM_A8W8"], GFX, 256)
+
+    assert seen == {"gfx": GFX, "python": "python3", "cu": "256"}
+    assert report["built"] == ("module_gemm_a8w8",) and report["failure"] == ""
+    assert read_prewarm_manifest(package / "jit")["module_gemm_a8w8"]["cu_num"] == 256
 
 
 def test_the_build_runs_under_what_a_tests_server_has_with_the_cards_cu_count() -> None:
@@ -418,7 +426,7 @@ def test_the_command_builds_under_a_tests_environment_and_records_what_the_build
     [environ] = built_under
     assert environ["CU_NUM"] == "256" and environ["AITER_LOG_MORE"] == "1"
     assert "FLATMM_HIP_CLANG_PATH" not in environ and "ENABLE_CK" not in environ
-    entry = read_manifest(package / "jit")["module_gemm_a8w8"]
+    entry = read_prewarm_manifest(package / "jit")["module_gemm_a8w8"]
     assert {"FLATMM_HIP_CLANG_PATH", "ENABLE_CK", "GPU_ARCHS"} <= set(entry["build_variables"])
     assert entry["build_environment"] == {} and entry["cu_num"] == 256 and entry["gfx"] == GFX
     untouched = {"AITER_LOG_MORE": "1", "ROCM_PATH": "/opt/rocm"}
@@ -489,4 +497,4 @@ def test_without_a_cu_count_the_command_takes_the_one_cu_num_names(tmp_path, mon
     monkeypatch.setenv("CU_NUM", "32")
     assert prewarm.main(["--gfx", GFX, "--package", str(package)]) == 0
     assert seen == ["32"] and json.loads(capsys.readouterr().out)["built"] == ["module_gemm_a8w8"]
-    assert read_manifest(package / "jit")["module_gemm_a8w8"]["cu_num"] == 32
+    assert read_prewarm_manifest(package / "jit")["module_gemm_a8w8"]["cu_num"] == 32
