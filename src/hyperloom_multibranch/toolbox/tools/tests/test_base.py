@@ -261,6 +261,24 @@ async def test_a_branch_a_redelivery_pushed_to_meanwhile_is_not_pushed_to_again_
     assert sorted(pointer.branch for pointer in sink.pointers) == ["a", "b"]
 
 
+async def test_a_branch_that_leaves_while_another_branch_is_pushed_to_is_not_pushed_to(tmp_path: Path) -> None:
+    sink, tool = HeldSink(), ScriptedTool()
+    tool.block = asyncio.Event()
+    runner = jobs(tmp_path, tool, sink)
+    job_id = runner.submit(request("a"))
+    await tool.started.wait()
+    await runner.join(job_id, "b")
+    tool.block.set()
+    await sink.holding.wait()
+
+    assert not runner.leave(job_id, "b"), "the job already ended, so leaving cancels nothing"
+    sink.release.set()
+    await runner.wait(job_id)
+
+    assert [pointer.branch for pointer in sink.pointers] == ["a"]
+    assert runner.undelivered() == ()
+
+
 async def test_a_branch_that_asks_while_a_cancelled_job_unwinds_gets_a_new_job_and_the_key_keeps_naming_it(
     tmp_path: Path,
 ) -> None:
