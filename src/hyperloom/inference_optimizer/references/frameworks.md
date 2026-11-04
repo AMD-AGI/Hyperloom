@@ -25,11 +25,16 @@ What this controls:
 - Which framework-specific seed grid the `explore` action falls back to when no
   `params.grid` is supplied. atom and xdit are the frameworks with programmatic
   seeds today (`_default_grid_for_framework` in
-  `src/hyperloom/orchestrator/actions/executors/explore.py` dispatches to
+  `src/hyperloom/orchestrator/actions/executors/_grid_base.py` dispatches to
   `_atom_default_grid()` / `_xdit_default_grid()`); sglang
   and vllm continue to rely on the orchestration LLM emitting
-  `provenance='default_grid'` variants and will fail with
-  `error_class="empty_grid"` on a cold-start with no LLM input.
+  `provenance='default_grid'` variants. On those two an `explore` that carries no
+  usable `params.grid` is refused at admission with
+  `rule="explore_grid_missing"` — before a task row exists — and never reaches
+  `error_class="empty_grid"`. Send `params.grid` as a non-empty list of variant
+  dicts (`{"name": ..., "extra_server_args": ..., "extra_envs": {...}}`): rows
+  that are not dicts, or dicts without a `name`, build no variant, and a grid
+  that was sent is never replaced by the seed grid.
 - Which extra-args env name `_grid_runner` writes (`EXTRA_VLLM_ARGS` /
   `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` / `EXTRA_XDIT_ARGS` /
   `EXTRA_CUSTOM_ARGS`).
@@ -50,9 +55,10 @@ PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo URL
 sglang/vllm, atom ships a programmatic cold-start seed grid
 (`_atom_default_grid`: `atom_level_{2,3}`, `atom_prefix_cache`, `atom_kv_fp8` on
 FP8, model-class-gated `atom_ep` / `atom_dp_attn` / `atom_mtp_{1,3}`,
-`atom_cudagraph_bracket`) — as does xdit (`_xdit_default_grid`), while
-sglang/vllm fail `error_class="empty_grid"` on a
-cold start with no LLM variants.
+`atom_cudagraph_bracket`) — as does xdit (`_xdit_default_grid`), so a cold-start
+`explore` on either is admitted with no grid of its own, while on sglang/vllm it
+is refused at admission with `rule="explore_grid_missing"` until the LLM sends
+variants.
 
 ### `--framework custom` specifics (your own workload)
 

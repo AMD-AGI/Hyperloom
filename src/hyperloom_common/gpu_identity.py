@@ -104,8 +104,16 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9600d.html
         GpuBoard("r9600d", "gfx1201", 48, 32.0, 640.0, _matrix_peaks(bf16=99.0, fp8=199.0, fp32=24.8)),
-        # The roofline reads TraceLens's bundled Radeon_8060S.json; Hyperloom carries no peaks for it.
-        GpuBoard("radeon8060s", "gfx1151", 40, aliases=("Radeon 8060S",)),
+        # https://www.amd.com/en/products/processors/desktops/ryzen/ryzen-ai-halo/ryzen-ai-max-plus-395.html
+        # Unified memory, so no fixed capacity. AMD publishes only the FP16 rate, read as BF16 too, as for every board.
+        GpuBoard(
+            "radeon8060s",
+            "gfx1151",
+            40,
+            hbm_bw_gbps=256.0,
+            vendor_peak_tflops={"bf16": 60.0, "fp16": 60.0},
+            aliases=("Radeon 8060S",),
+        ),
     )
 }
 

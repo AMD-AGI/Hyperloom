@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inference_optimizer import gpu_types
-from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, resolve_compute_peak_provenance
+from hyperloom.inference_optimizer.roofline_ceiling import resolve_compute_peak_provenance
 from hyperloom.orchestrator.actions.executors._server_lifecycle import MAGPIE_BUILTIN_SCRIPTS
 
 _BOARDS = [
@@ -29,11 +29,10 @@ def test_board_decisions(product, runner, build_validated, convention):
     assert resolve_compute_peak_provenance(product, "bf16")["compute_peak_convention"] == convention
 
 
-def test_radeon8060s_has_its_own_runner_and_no_published_specs():
+def test_radeon8060s_has_its_own_runner_and_no_framework_restriction():
     assert gpu_types.gpu_runner_type("radeon8060s") == "radeon8060s"
     assert gpu_types.targeted_build_validated("radeon8060s") is True
     assert gpu_types._runner_framework_error("radeon8060s", "sglang") is None
-    assert "radeon8060s" not in HW_SPECS
 
 
 def test_server_reuse_scripts():
