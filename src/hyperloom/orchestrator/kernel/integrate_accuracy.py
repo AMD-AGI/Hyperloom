@@ -74,9 +74,10 @@ def grade_integrate_accuracy(
     The staged re-baseline already ran the serving eval after hot throughput passed, so the score is read
     back rather than re-measured.
     """
+    from hyperloom.common.gain_math import accuracy_passed
+
     from ..actions.executors._accuracy_gate import (
         accuracy_keep_block,
-        accuracy_passed,
         require_kernel_accuracy_default,
         resolve_served_context,
         served_context_hosts_eval,
