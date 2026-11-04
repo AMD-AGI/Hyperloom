@@ -149,7 +149,7 @@ def test_identity_passes(workspace, tmp_path):
     [
         ("too_lossy", {"recorded[0]", "held_out[0]"}),
         ("clock", {"timing_consistent"}),
-        ("reused_buffer", {"held_output"}),
+        ("reused_buffer", {"output_buffer_reuse"}),
         ("known_inputs_only", {"held_out[0]"}),
     ],
 )

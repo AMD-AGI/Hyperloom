@@ -333,13 +333,19 @@ def _timed_passes(entry, calls, held_out, config):
     return latencies, held_out_outputs
 
 
-def _output_survives_next_call(entry, calls) -> bool:
-    """An output must not change when the next call runs; graph replay can reuse its buffers."""
+def _reuses_output_buffer(entry, calls) -> bool:
+    """Whether the next call overwrites the output the previous one returned.
+
+    A module that hands back storage it will write again is not a drop-in
+    replacement: a caller that keeps an output across calls silently gets the
+    newer value. Graph replay and AOTInductor both return static buffers, so a
+    module using either must clone before it returns.
+    """
     held = _invoke(entry, calls[0])
     copy = _snapshot(held)
     _invoke(entry, calls[0], _perturb((calls[0]["args"], calls[0]["kwargs"])))
     _synchronize()
-    return all(torch.equal(a, b) for a, b in zip(_leaves(held), _leaves(copy)))
+    return not all(torch.equal(a, b) for a, b in zip(_leaves(held), _leaves(copy)))
 
 
 def _profile(entry, calls) -> str | None:
@@ -364,10 +370,10 @@ def _measure(optimized, config: dict, inputs: Path, out: Path) -> None:
     _warm_up(entry, calls, config)
     latencies, held_out_outputs = _timed_passes(entry, calls, held_out, config)
     recorded_outputs = [_plain(_invoke(entry, call)) for call in calls]
-    survives = _output_survives_next_call(entry, calls)
+    reused = _reuses_output_buffer(entry, calls)
     trace = _profile(entry, calls)
     torch.save({"recorded": recorded_outputs, "held_out": held_out_outputs}, out / "outputs.pt")
-    summary = {"pass_latencies_ms": latencies, "held_output": survives, "profiler_trace": trace}
+    summary = {"pass_latencies_ms": latencies, "output_buffer_reused": reused, "profiler_trace": trace}
     (out / "measurement.json").write_text(json.dumps(summary) + "\n")
 
 
@@ -552,7 +558,7 @@ def _gate(errors: dict, limits: list[float], measurement: dict, timed_fraction: 
                     "passed": finite and error <= limit,
                 }
             )
-    cases.append({"case": "held_output", "passed": measurement["held_output"]})
+    cases.append({"case": "output_buffer_reuse", "passed": not measurement["output_buffer_reused"]})
     cases.append(
         {"case": "timing_consistent", "timed_fraction": timed_fraction, "passed": timed_fraction >= MIN_TIMED_FRACTION}
     )
