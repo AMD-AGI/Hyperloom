@@ -101,7 +101,8 @@ def test_a_running_specialist_branch_is_scored_and_the_others_are_not(snapshot: 
     assert s1.basis is FrontierBasis.TREND
     assert s1.components["trend_pct"] == pytest.approx(4.0)
     assert (s1.components["tests"], s1.components["gpu_hours"], s1.components["observing"]) == (2.0, 1200 / 3600, 1.0)
-    assert s1.components["headroom_pct"] == pytest.approx((1500.0 / 1040.0 - 1.0) * 100.0)
+    assert snapshot.baseline is not None
+    assert s1.components["headroom_pct"] == pytest.approx((1500.0 - 1040.0) / snapshot.baseline.values[METRIC] * 100.0)
     assert "prior_remaining_pct" not in s1.components
 
 
@@ -458,7 +459,9 @@ def test_the_headroom_caps_the_score_and_observation_keeps_a_floor(snapshot: Bla
     )
     unwatched = _scores(snapshot, policy=unwatched_policy)["s1"]
 
-    assert capped is not None and capped.expected_gain_pct == pytest.approx((1050.0 / 1040.0 - 1.0) * 100.0)
+    assert tight.baseline is not None
+    anchor = tight.baseline.values[METRIC]
+    assert capped is not None and capped.expected_gain_pct == pytest.approx((1050.0 - 1040.0) / anchor * 100.0)
     assert capped.basis is FrontierBasis.HEADROOM
     assert stalled is not None and stalled.expected_gain_pct == POLICY.observation_floor_pct
     assert stalled.basis is FrontierBasis.OBSERVING
@@ -479,13 +482,16 @@ async def test_the_largest_op_on_the_profiled_head_caps_the_score_at_its_amdahl_
         ToolResultPointer("s1", "job-2", "/a", "trace analysed", s1.head_commit, "", {"gemm": 3.0, "norm": 1.0})
     )
 
-    capped = _scores(await observer.snapshot())["s1"]
+    profiled = await observer.snapshot()
+    capped = _scores(profiled)["s1"]
 
+    assert profiled.baseline is not None
+    in_points = s1.head_value[METRIC] / profiled.baseline.values[METRIC]
     assert unprofiled is not None and unprofiled.basis is FrontierBasis.TREND
     assert "amdahl_ceiling_pct" not in unprofiled.components
     assert capped is not None and capped.basis is FrontierBasis.AMDAHL
-    assert capped.expected_gain_pct == pytest.approx(300.0 / 97.0)
-    assert capped.components["amdahl_ceiling_pct"] == pytest.approx(300.0 / 97.0)
+    assert capped.expected_gain_pct == pytest.approx(300.0 / 97.0 * in_points)
+    assert capped.components["amdahl_ceiling_pct"] == pytest.approx(300.0 / 97.0 * in_points)
     assert capped.components["headroom_pct"] > capped.expected_gain_pct
 
 
