@@ -183,8 +183,9 @@ _TARGET_TAG = re.compile(r"cp(?P<major>3)(?P<minor>[0-9]+)-manylinux_2_(?P<glibc
 #: The legacy manylinux names of a glibc 2 minor version; pip accepts both spellings and downloads only what it is told.
 _LEGACY_MANYLINUX = {17: "manylinux2014", 12: "manylinux2010", 5: "manylinux1"}
 _OLDEST_GLIBC_MINOR = 5
-#: What :mod:`zipfile` raises for an archive it cannot read: damaged or cut short, of a compression it lacks, encrypted.
-_UNREADABLE_ZIP = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)
+#: What :mod:`zipfile` raises for an archive it cannot read: damaged or cut short, of a compression it lacks, encrypted,
+#: or with a member whose name is flagged UTF-8 and is not.
+_UNREADABLE_ZIP = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError, UnicodeDecodeError)
 #: The builder's copy of a cached wheel that a reuse compares with the one it builds again.
 _CACHED_WHEEL = "cached.whl"
 #: Extra fields of a zip member that :mod:`zipfile` reads differently from one Python to another: Info-ZIP Unicode Path,
