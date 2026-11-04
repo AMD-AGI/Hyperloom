@@ -211,7 +211,6 @@ def url_userinfo(token: str) -> str:
     return match.group("userinfo") if match else ""
 
 
-
 def _class_for_pair(option: str, operand: str, *, family: str) -> str:
     """Return the credential class an ``(option, operand)`` pair carries."""
     if not url_userinfo(operand):

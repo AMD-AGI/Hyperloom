@@ -42,7 +42,10 @@ def _state_with_real_evidence(tmp_path: Path) -> SharedState:
     state.operator_extra_env = {"HF_TOKEN": "hf_live_value_123"}
     state.operator_server_args = "--tp 8 --api-key sekret_key_789"
     state.current_best_measurement = {"launch_evidence": evidence}
-    state.current_best = {"measurement": {"launch_evidence": evidence}, "extra_server_args": "--max-total-tokens 120000"}
+    state.current_best = {
+        "measurement": {"launch_evidence": evidence},
+        "extra_server_args": "--max-total-tokens 120000",
+    }
     state.optimization_stack = [
         {
             "action": "explore",
