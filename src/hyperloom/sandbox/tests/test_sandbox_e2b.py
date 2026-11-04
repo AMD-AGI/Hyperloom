@@ -5,7 +5,7 @@
 
 The sandbox contract suite covers the provider's normal behaviour against a stand-in service; this file covers what a
 stand-in cannot honestly produce: a particular status code, a server error that clears on the third try, a data plane
-that refuses with 403 or cannot be reached.
+that refuses with 403 or cannot be reached. The contract suite and the stand-in arrive in a later PR.
 """
 
 from __future__ import annotations
@@ -21,12 +21,14 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import e2b
+import httpx
 import pytest
 
 from hyperloom.sandbox import CreateOptions, OutputSinks, RunSettings
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy, _LineSink
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
+    WORKSPACE_KEY,
     SandboxCreateFailed,
     SandboxDenied,
     SandboxGone,
@@ -370,6 +372,7 @@ def test_the_retry_budget_ends_in_unavailable(service: _Service) -> None:
     short = E2BSandboxProvider(
         {"dev": KEY_DEV},
         api_url=service.url,
+        sandbox_url=service.url,
         retry=RetryPolicy(budget_sec=0.3, first_delay_sec=0.05, max_delay_sec=0.1),
     )
     service.reply("GET", "/v2/sandboxes", 503)
@@ -382,6 +385,7 @@ def test_an_unreachable_service_is_unavailable() -> None:
     nowhere = E2BSandboxProvider(
         {"dev": KEY_DEV},
         api_url="http://127.0.0.1:9",
+        sandbox_url="http://127.0.0.1:9",
         retry=RetryPolicy(budget_sec=0.2, first_delay_sec=0.05, max_delay_sec=0.1),
     )
     with pytest.raises(SandboxUnavailable):
@@ -450,6 +454,128 @@ def test_from_environ_reads_the_keys_and_both_addresses(service: _Service) -> No
     service.reply("GET", "/v2/sandboxes", (200, []))
     assert provider.find({}, role="dev") == []
     assert service.calls("GET", "/v2/sandboxes")[0].headers["x-api-key"] == KEY_DEV
+
+
+#: Addresses that resolve nowhere, for a provider that is refused before it sends anything.
+NOWHERE = {"E2B_API_URL": "http://api.invalid", "E2B_SANDBOX_URL": "http://sandboxes.invalid"}
+
+
+@pytest.mark.parametrize("missing", sorted(NOWHERE))
+@pytest.mark.parametrize("given", ["unset", "empty"])
+def test_from_environ_refuses_a_missing_service_url_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, missing: str, given: str
+) -> None:
+    """Without the URL the SDK would take its own default, the public E2B service, and send it the role's key."""
+    for name in (*NOWHERE, "E2B_DOMAIN"):
+        monkeypatch.delenv(name, raising=False)
+    sent: list[httpx.Request] = []
+
+    def send(client: httpx.Client, request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+        sent.append(request)
+        raise httpx.ConnectError("intercepted", request=request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    environ = {"HYPERLOOM_SANDBOX_KEY_DEV": KEY_DEV, **NOWHERE}
+    if given == "unset":
+        del environ[missing]
+    else:
+        environ[missing] = ""
+    with pytest.raises(ValueError, match=f"^{missing} is not set"):
+        E2BSandboxProvider.from_environ(environ, retry=FAST).find({}, role="dev")
+    assert [str(request.url) for request in sent] == []
+
+
+@pytest.mark.parametrize("blank", ["api_url", "sandbox_url"])
+def test_a_blank_service_url_is_refused(blank: str) -> None:
+    urls = {"api_url": NOWHERE["E2B_API_URL"], "sandbox_url": NOWHERE["E2B_SANDBOX_URL"], blank: " "}
+    variable = "E2B_API_URL" if blank == "api_url" else "E2B_SANDBOX_URL"
+    with pytest.raises(ValueError, match=f"^{variable} is not set"):
+        E2BSandboxProvider({"dev": KEY_DEV}, **urls)
+
+
+#: The workspace a SaFE key used directly names, and the variable that sets it.
+WORKSPACE = "top-models"
+WORKSPACE_ENV = "HYPERLOOM_SANDBOX_WORKSPACE"
+
+
+def test_the_workspace_goes_with_every_create_and_a_workspace_the_caller_names_wins(service: _Service) -> None:
+    keys = {"dev": KEY_DEV, "measurement": KEY_MEASUREMENT}
+    provider = E2BSandboxProvider(keys, api_url=service.url, sandbox_url=service.url, retry=FAST, workspace=WORKSPACE)
+    service.reply("POST", "/v2/sandboxes", (201, SANDBOX))
+    given = {"a": "b"}
+    provider.create("dev", role="dev", timeout_sec=60, metadata=given)
+    provider.create("dev", role="measurement", timeout_sec=60, metadata={IDEMPOTENCY_KEY: "k-1"})
+    provider.create("dev", role="dev", timeout_sec=60, metadata={WORKSPACE_KEY: "other"})
+    assert [call.body["metadata"] for call in service.calls("POST", "/v2/sandboxes")] == [
+        {"a": "b", WORKSPACE_KEY: WORKSPACE},
+        {IDEMPOTENCY_KEY: "k-1", WORKSPACE_KEY: WORKSPACE},
+        {WORKSPACE_KEY: "other"},
+    ]
+    assert given == {"a": "b"}, "the caller's mapping is not changed"
+
+
+@pytest.mark.parametrize(
+    ("named", "sent"),
+    [
+        ({}, {"a": "b"}),
+        ({WORKSPACE_ENV: ""}, {"a": "b"}),
+        ({WORKSPACE_ENV: WORKSPACE}, {"a": "b", WORKSPACE_KEY: WORKSPACE}),
+    ],
+    ids=["unset_as_on_claw", "empty", "set_for_a_safe_key"],
+)
+def test_from_environ_sends_a_workspace_only_when_the_variable_names_one(
+    service: _Service, named: dict[str, str], sent: dict[str, str]
+) -> None:
+    environ = {"HYPERLOOM_SANDBOX_KEY_DEV": KEY_DEV, "E2B_API_URL": service.url, "E2B_SANDBOX_URL": service.url}
+    provider = E2BSandboxProvider.from_environ({**environ, **named}, retry=FAST)
+    service.reply("POST", "/v2/sandboxes", (201, SANDBOX))
+    _create(provider, metadata={"a": "b"})
+    [call] = service.calls("POST", "/v2/sandboxes")
+    assert call.body["metadata"] == sent
+
+
+def test_a_blank_workspace_is_refused() -> None:
+    with pytest.raises(ValueError, match="workspace is blank"):
+        E2BSandboxProvider(
+            {"dev": KEY_DEV}, api_url=NOWHERE["E2B_API_URL"], sandbox_url=NOWHERE["E2B_SANDBOX_URL"], workspace="  "
+        )
+
+
+#: How the service refuses a create by a key whose user may create in several workspaces when it names none (a 400
+#: ``workspace_required``), in the E2B error body (the SDK requires its ``code`` and ``message``, and keeps only
+#: ``message``): the reason alone, or first, as the service words its other reasons.
+WORKSPACE_REQUIRED_BODIES = [
+    {"code": 400, "message": "workspace_required"},
+    {"code": 400, "reason": "workspace_required", "message": "workspace_required: the user is in 5 workspaces"},
+]
+
+
+@pytest.mark.parametrize("body", WORKSPACE_REQUIRED_BODIES, ids=["bare", "with_reason"])
+def test_a_create_refused_for_want_of_a_workspace_names_the_variable_and_is_not_replayed(
+    service: _Service, provider: E2BSandboxProvider, body: dict[str, Any]
+) -> None:
+    service.reply("POST", "/v2/sandboxes", (400, body), (201, SANDBOX))
+    with pytest.raises(SandboxDenied) as refused:
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    said = str(refused.value)
+    assert WORKSPACE_ENV in said and "'dev' key" in said and "named none" in said
+    assert "workspace_required" in said, "the service's own reason is kept"
+    assert KEY_DEV not in said
+    assert len(service.calls("POST", "/v2/sandboxes")) == 1
+
+
+def test_a_workspace_refused_although_one_was_sent_says_which_and_another_refusal_is_left_as_it_is(
+    service: _Service,
+) -> None:
+    keys = {"measurement": KEY_MEASUREMENT}
+    provider = E2BSandboxProvider(keys, api_url=service.url, sandbox_url=service.url, retry=FAST, workspace=WORKSPACE)
+    service.reply("POST", "/v2/sandboxes", (400, WORKSPACE_REQUIRED_BODIES[0]))
+    with pytest.raises(SandboxDenied, match=f"named '{WORKSPACE}': set {WORKSPACE_ENV}"):
+        provider.create("t", role="measurement", timeout_sec=60, metadata={})
+    service.reply("POST", "/v2/sandboxes", (400, {"code": 400, "message": "template_not_allowed"}))
+    with pytest.raises(SandboxDenied) as refused:
+        provider.create("t", role="measurement", timeout_sec=60, metadata={})
+    assert str(refused.value) == "400: template_not_allowed"
 
 
 class _Refusing:

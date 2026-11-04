@@ -13,6 +13,7 @@ from typing import Any
 
 from hyperloom.common import kernel_source_contract as _KSC
 from hyperloom_common.io import JsonFormat, atomic_write_json
+from hyperloom_common.kernel_names import without_model_names
 
 from ._harness_discovery import find_benchmark_files, find_repo_root
 from ._io_utils import append_log
@@ -37,7 +38,9 @@ from ._vendor_operator_playbooks import match_vendor_operator_playbook, resolve_
 log = logging.getLogger(__name__)
 
 # Kernel-name markers per GEAK category, in priority order: the first category with a marker in the name wins.
+# Norms precede the bare ``gemm`` marker, as in TraceLens: CamelCase ``GemmaRMSNorm`` still spells it.
 _NAME_CATEGORY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Normalization", ("rmsnorm", "layernorm", "norm_kernel")),
     (
         "GEMM",
         (
@@ -55,7 +58,6 @@ _NAME_CATEGORY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("SDPA", ("attention", "attn", "fmha", "paged_attention", "flash")),
-    ("Normalization", ("rmsnorm", "layernorm", "norm_kernel")),
     ("Activation", ("act_and_mul", "silu", "gelu", "activation")),
     ("MoE", ("moe", "topk", "expert")),
     ("Softmax", ("softmax",)),
@@ -83,7 +85,7 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
         return canonical_category(cat)
     if candidate.get("source_type") == "flydsl":
         return "FlyDSL"
-    name = str(candidate.get("name") or "").lower()
+    name = without_model_names(str(candidate.get("name") or "").lower())
     for category, markers in _NAME_CATEGORY_MARKERS:
         if any(marker in name for marker in markers):
             return category
@@ -362,27 +364,10 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
     dispatch path de-duplicates so only one forge-loop session actually
     runs per group per analysis session.
     """
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for item in top:
-        if not isinstance(item, dict) or item.get("patch_strategy") != "vendor_playbook":
-            continue
-        playbook = item.get("vendor_operator_playbook")
-        group_id = str(playbook.get("id") or "") if isinstance(playbook, dict) else ""
-        if not group_id:
-            continue
-        groups.setdefault(group_id, []).append(item)
-    for group_id, members in groups.items():
+    for group_id, members in _vendor_playbook_groups(top).items():
         aggregate = round(sum(float(m.get("gpu_pct") or 0.0) for m in members), 3)
         member_ids = [str(m.get("kernel_id") or "") for m in members]
-        floor: float | None = None
-        for member in members:
-            playbook = member.get("vendor_operator_playbook")
-            if isinstance(playbook, dict) and playbook.get("min_gpu_pct_floor") is not None:
-                try:
-                    floor = float(playbook["min_gpu_pct_floor"])
-                except (TypeError, ValueError):
-                    floor = None
-                break
+        floor = _vendor_playbook_floor(members)
         for member in members:
             member["vendor_playbook_group_id"] = group_id
             # Namespaced (not bare "aggregate_gpu_pct"): that name is already
@@ -403,6 +388,32 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
                 # playbook isn't dispatched below its own floor even when
                 # HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT is loosened elsewhere.
                 member["vendor_playbook_min_gpu_pct_floor"] = floor
+
+
+def _vendor_playbook_groups(top: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group the vendor-playbook candidates by their playbook id, in candidate order."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in top:
+        if not isinstance(item, dict) or item.get("patch_strategy") != "vendor_playbook":
+            continue
+        playbook = item.get("vendor_operator_playbook")
+        group_id = str(playbook.get("id") or "") if isinstance(playbook, dict) else ""
+        if not group_id:
+            continue
+        groups.setdefault(group_id, []).append(item)
+    return groups
+
+
+def _vendor_playbook_floor(members: list[dict[str, Any]]) -> float | None:
+    """Return the first member's declared GPU-share floor, or ``None`` when absent or malformed."""
+    for member in members:
+        playbook = member.get("vendor_operator_playbook")
+        if isinstance(playbook, dict) and playbook.get("min_gpu_pct_floor") is not None:
+            try:
+                return float(playbook["min_gpu_pct_floor"])
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _candidate_resolution_method(item: dict[str, Any]) -> str:

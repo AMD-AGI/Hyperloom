@@ -10,9 +10,12 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from hyperloom_common.kernel_names import without_model_names
+
 
 _SHAPE_RE = re.compile(r"\(([\d,\s]*)\)")
 _NAMED_DIMENSIONS = ("M", "N", "K", "E", "TOPK")
+_NORM_TOKENS = ("rmsnorm", "rms_norm", "layernorm", "layer_norm")
 CASE_SELECTOR_KEY = "CASE_ID"
 OPERATOR_IDENTITY_VERSION = 3
 
@@ -310,12 +313,15 @@ def _attention_dimensions(shapes: list[list[int]]) -> dict[str, int]:
 
 def named_dimensions(row: dict[str, Any]) -> dict[str, int]:
     """Derive backend-friendly dimensions while retaining a generic case ID."""
-    operation = f"{row.get('operation') or ''} {row.get('name') or ''}".lower()
+    operation = without_model_names(f"{row.get('operation') or ''} {row.get('name') or ''}".lower())
     shapes = tensor_dim_lists(row)
     if _is_attention_workload(row):
         dimensions = _attention_dimensions(shapes)
     elif "moe" in operation:
         dimensions = _moe_dimensions(shapes)
+    elif any(token in operation for token in _NORM_TOKENS):
+        # Ahead of the GEMM tokens: CamelCase ``GemmaRMSNorm`` still spells ``gemm``.
+        dimensions = {}
     elif any(token in operation for token in ("gemm", "matmul", "_mm", "linear")):
         dimensions = _gemm_dimensions(shapes)
     else:

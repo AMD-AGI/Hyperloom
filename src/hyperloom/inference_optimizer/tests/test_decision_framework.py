@@ -10,27 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    ScriptedPlan,
-)
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.kernel import _forge_lane_budget as forge_lane_budget
 
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _silent_backends() -> dict[str, object]:
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {
-        "orchestration": MockBackend(silent, name="o"),
-        "critic": MockBackend(silent, name="c"),
-    }
+from .conftest import silent_backends
 
 
 @pytest.fixture
@@ -53,7 +38,7 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
     session_dir,
 ):
     """``run_gemm_tuning`` is a Coordinator-owned lane the model can no longer REQUEST (the intent path denies it), so the recording is exercised on the live entrypoint every dispatch converges on: ``_handle_gemm_tuning_result`` records the result and persists the state."""
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
@@ -101,7 +86,7 @@ async def test_a_gemm_lane_the_phase_could_not_fund_is_no_attempt_and_stays_arme
     """The lane never started, so it neither counts as an attempt nor latches GEMM tuning off for a later entry."""
     from hyperloom.orchestrator.kernel.lane_budget import LANE_GEMM
 
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         c.shared_state.framework = "sglang"
 
@@ -117,7 +102,7 @@ async def test_a_gemm_lane_the_phase_could_not_fund_is_no_attempt_and_stays_arme
 @pytest.mark.asyncio
 async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
     """The gemm-before-run_optimization sequence deny was removed; the request-layer pre-deny no longer fires."""
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
@@ -139,7 +124,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
     session_dir,
     monkeypatch,
 ):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"

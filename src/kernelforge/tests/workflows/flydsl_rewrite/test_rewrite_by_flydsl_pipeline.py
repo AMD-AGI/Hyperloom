@@ -1172,6 +1172,35 @@ def _run_rewrite_in(tmp_path, src, driver, **kwargs):
     )
 
 
+def _run_softmax_rewrite(tmp_path, **run_kwargs):
+    """Rewrite a one-line ``softmax`` in ``tmp_path`` driven by a print-only driver."""
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    return runner.run_rewrite(
+        RewriteRun(
+            RewriteSubject("softmax", str(src), ["softmax"]),
+            DriverSetup(str(driver)),
+            RewriteWorkspace(str(tmp_path), str(tmp_path / "exp")),
+            **run_kwargs,
+        ),
+        Config.from_env(workspace=str(tmp_path)),
+    )
+
+
+def _capture_kb_writes(monkeypatch) -> list[dict]:
+    """Record every KB publication as its measurement fields plus the write's keyword arguments."""
+    writes = []
+
+    def capture_write(_target, measurement, **kwargs):
+        writes.append({**vars(measurement), **kwargs})
+        return {"written": True, "solution": "rewrite/solution"}
+
+    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
+    return writes
+
+
 def test_applyback_is_required_by_default(tmp_path, monkeypatch):
     """The framework patch stays part of a default run's success."""
     src, driver, head = _rewrite_repo(tmp_path)
@@ -1369,10 +1398,6 @@ def test_run_rewrite_reports_provider_usage_when_optimize_never_started(
     monkeypatch,
 ):
     """Skipping forge-loop leaves nothing unaccounted, so the in-process ledger stands on its own."""
-    src = tmp_path / "softmax.py"
-    src.write_text("def softmax(x):\n    return x\n")
-    driver = tmp_path / "driver.py"
-    driver.write_text("print('drive')\n")
     clock = {"now": 0.0}
     monkeypatch.setattr(runner.time, "time", lambda: clock["now"])
     _stub_preflight(monkeypatch)
@@ -1394,15 +1419,7 @@ def test_run_rewrite_reports_provider_usage_when_optimize_never_started(
         lambda *a, **k: ApplybackResult(ok=True, patch_path="/tmp/forge.patch"),
     )
 
-    out = runner.run_rewrite(
-        RewriteRun(
-            RewriteSubject("softmax", str(src), ["softmax"]),
-            DriverSetup(str(driver)),
-            RewriteWorkspace(str(tmp_path), str(tmp_path / "exp")),
-            budget=RewriteBudget(deadline_unix=1300.0),
-        ),
-        Config.from_env(workspace=str(tmp_path)),
-    )
+    out = _run_softmax_rewrite(tmp_path, budget=RewriteBudget(deadline_unix=1300.0))
 
     assert out["llm_usage"]["calls"] == 1
     assert out["llm_usage"]["cost_available"] is True
@@ -1642,27 +1659,10 @@ def test_run_rewrite_publishes_correct_port_before_optimize(
     tmp_path,
     monkeypatch,
 ):
-    src = tmp_path / "softmax.py"
-    src.write_text("def softmax(x):\n    return x\n")
-    driver = tmp_path / "driver.py"
-    driver.write_text("print('drive')\n")
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
-    writes = []
+    writes = _capture_kb_writes(monkeypatch)
 
-    def capture_write(_target, measurement, **kwargs):
-        writes.append({**vars(measurement), **kwargs})
-        return {"written": True, "solution": "rewrite/solution"}
-
-    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
-
-    out = runner.run_rewrite(
-        RewriteRun(
-            RewriteSubject("softmax", str(src), ["softmax"]),
-            DriverSetup(str(driver)),
-            RewriteWorkspace(str(tmp_path), str(tmp_path / "exp")),
-        ),
-        Config.from_env(workspace=str(tmp_path)),
-    )
+    out = _run_softmax_rewrite(tmp_path)
 
     assert out["port_ok"] is True
     assert len(writes) == 2
@@ -1679,10 +1679,6 @@ def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypat
     commit that was kept. The run's publications share a name, or an identity's history would be buried under one
     run's worth of KEEPs.
     """
-    src = tmp_path / "softmax.py"
-    src.write_text("def softmax(x):\n    return x\n")
-    driver = tmp_path / "driver.py"
-    driver.write_text("print('drive')\n")
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
 
     def fake_git(_workspace, *args):
@@ -1705,22 +1701,9 @@ def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypat
         return {"best_ms": 0.7, "best_commit": "c2", "experiment_id": "EXP"}
 
     monkeypatch.setattr(runner, "run_optimize", fake_optimize)
-    writes = []
+    writes = _capture_kb_writes(monkeypatch)
 
-    def capture_write(_target, measurement, **kwargs):
-        writes.append({**vars(measurement), **kwargs})
-        return {"written": True, "solution": "rewrite/solution"}
-
-    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
-
-    runner.run_rewrite(
-        RewriteRun(
-            RewriteSubject("softmax", str(src), ["softmax"]),
-            DriverSetup(str(driver)),
-            RewriteWorkspace(str(tmp_path), str(tmp_path / "exp")),
-        ),
-        Config.from_env(workspace=str(tmp_path)),
-    )
+    _run_softmax_rewrite(tmp_path)
 
     # The PORT publish, then one per KEEP, then the run's final result.
     port, first_keep, second_keep, final = writes
@@ -1748,10 +1731,6 @@ def test_run_rewrite_records_accuracy_only_for_the_artifact_it_measured(
     never sees. Reusing PORT's number would file accuracy evidence about one kernel against another, and the record
     does not say which kernel it came from, so a later warm start reads it as belonging to the one it adopts.
     """
-    src = tmp_path / "softmax.py"
-    src.write_text("def softmax(x):\n    return x\n")
-    driver = tmp_path / "driver.py"
-    driver.write_text("print('drive')\n")
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
 
     def fake_git(_workspace, *args):
@@ -1766,22 +1745,9 @@ def test_run_rewrite_records_accuracy_only_for_the_artifact_it_measured(
         return {"best_ms": 0.9, "best_commit": "c1", "experiment_id": "EXP"}
 
     monkeypatch.setattr(runner, "run_optimize", fake_optimize)
-    writes = []
+    writes = _capture_kb_writes(monkeypatch)
 
-    def capture_write(_target, measurement, **kwargs):
-        writes.append({**vars(measurement), **kwargs})
-        return {"written": True, "solution": "rewrite/solution"}
-
-    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
-
-    runner.run_rewrite(
-        RewriteRun(
-            RewriteSubject("softmax", str(src), ["softmax"]),
-            DriverSetup(str(driver)),
-            RewriteWorkspace(str(tmp_path), str(tmp_path / "exp")),
-        ),
-        Config.from_env(workspace=str(tmp_path)),
-    )
+    _run_softmax_rewrite(tmp_path)
 
     port, keep, final = writes
     assert port["snr_db"] == 143.0
@@ -1799,28 +1765,11 @@ def test_run_rewrite_keeps_the_port_reading_when_optimize_never_moved_the_best(
     With no best of its own the run's final record names the port commit and, sharing that name, replaces the record
     PORT wrote. Dropping the reading here would erase a measurement that was genuinely taken.
     """
-    src = tmp_path / "softmax.py"
-    src.write_text("def softmax(x):\n    return x\n")
-    driver = tmp_path / "driver.py"
-    driver.write_text("print('drive')\n")
     # The default OPTIMIZE stub reports no best_commit, so the run falls back.
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
-    writes = []
+    writes = _capture_kb_writes(monkeypatch)
 
-    def capture_write(_target, measurement, **kwargs):
-        writes.append({**vars(measurement), **kwargs})
-        return {"written": True, "solution": "rewrite/solution"}
-
-    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
-
-    runner.run_rewrite(
-        RewriteRun(
-            RewriteSubject("softmax", str(src), ["softmax"]),
-            DriverSetup(str(driver)),
-            RewriteWorkspace(str(tmp_path), str(tmp_path / "exp")),
-        ),
-        Config.from_env(workspace=str(tmp_path)),
-    )
+    _run_softmax_rewrite(tmp_path)
 
     port, final = writes
     assert final["session_key"] == port["session_key"]
@@ -1829,10 +1778,6 @@ def test_run_rewrite_keeps_the_port_reading_when_optimize_never_moved_the_best(
 
 def test_run_rewrite_skips_a_keep_whose_commit_lacks_the_kernel(tmp_path, monkeypatch):
     """An unreadable commit costs the publication, not the run."""
-    src = tmp_path / "softmax.py"
-    src.write_text("def softmax(x):\n    return x\n")
-    driver = tmp_path / "driver.py"
-    driver.write_text("print('drive')\n")
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
     monkeypatch.setattr(
         runner,
@@ -1845,22 +1790,9 @@ def test_run_rewrite_skips_a_keep_whose_commit_lacks_the_kernel(tmp_path, monkey
         return {"best_ms": 0.9, "best_commit": "gone", "experiment_id": "EXP"}
 
     monkeypatch.setattr(runner, "run_optimize", fake_optimize)
-    writes = []
+    writes = _capture_kb_writes(monkeypatch)
 
-    def capture_write(_target, measurement, **kwargs):
-        writes.append({**vars(measurement), **kwargs})
-        return {"written": True, "solution": "rewrite/solution"}
-
-    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
-
-    out = runner.run_rewrite(
-        RewriteRun(
-            RewriteSubject("softmax", str(src), ["softmax"]),
-            DriverSetup(str(driver)),
-            RewriteWorkspace(str(tmp_path), str(tmp_path / "exp")),
-        ),
-        Config.from_env(workspace=str(tmp_path)),
-    )
+    out = _run_softmax_rewrite(tmp_path)
 
     assert out["port_ok"] is True
     # The PORT publish and the final one; the KEEP had nothing to publish, so the run's final result belongs to the
@@ -1891,10 +1823,6 @@ def test_run_rewrite_skips_forge_loop_when_port_reaches_finalization_reserve(
     tmp_path,
     monkeypatch,
 ):
-    src = tmp_path / "softmax.py"
-    src.write_text("def softmax(x):\n    return x\n")
-    driver = tmp_path / "driver.py"
-    driver.write_text("print('drive')\n")
     clock = {"now": 0.0}
     monkeypatch.setattr(runner.time, "time", lambda: clock["now"])
     _stub_preflight(monkeypatch)
@@ -1916,15 +1844,7 @@ def test_run_rewrite_skips_forge_loop_when_port_reaches_finalization_reserve(
         lambda *a, **k: ApplybackResult(ok=True, patch_path="/tmp/forge.patch"),
     )
 
-    out = runner.run_rewrite(
-        RewriteRun(
-            RewriteSubject("softmax", str(src), ["softmax"]),
-            DriverSetup(str(driver)),
-            RewriteWorkspace(str(tmp_path), str(tmp_path / "exp")),
-            budget=RewriteBudget(deadline_unix=1300.0),
-        ),
-        Config.from_env(workspace=str(tmp_path)),
-    )
+    out = _run_softmax_rewrite(tmp_path, budget=RewriteBudget(deadline_unix=1300.0))
     assert out["success"] is True
     assert out["best_ms"] is None
 

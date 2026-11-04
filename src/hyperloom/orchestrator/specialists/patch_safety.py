@@ -977,8 +977,13 @@ def drop_env_ungrounded_proposals(payload: dict[str, Any]) -> list[str]:
 
     The patch gate grounds what a proposal changes; this grounds the files its envs make the server read. A proposal
     premised on an artifact some later step would write ("author the CSV, then point the env at it") is refused here,
-    where the orchestrator hears why, rather than benched as a config arm whose server dies at config load.
-    ``run_grid`` keeps the same check as the backstop.
+    where the orchestrator hears why, rather than benched as a config arm whose result stands for a table nothing
+    wrote. Every element of a ``:``-joined list must be on disk, including the ones listed beside a table that is:
+    an agent asking for one table it has not authored is asking for the same unwritten artifact (#1982).
+
+    ``run_grid``'s preflight asks the same question of the same values (``ungrounded_env_file_reason`` again), as
+    the backstop for values no proposal carried. A replayed recipe's refs are not an exception to it: warm replay
+    re-grounds them onto this run's downloaded files, dropping what it cannot read, before the grid sees them.
     """
     proposals = payload.get("proposal_set")
     if not isinstance(proposals, list):

@@ -544,6 +544,61 @@ def test_planning_share_takes_no_denominator():
     assert inspect.signature(RoundCostState.planning_share_pct).parameters.keys() == {"self"}
 
 
+# What the plan critic and its revision took of a round's planning.
+
+
+def _reviewed_history(*, planning_sec=2400.0, review_sec=600.0, lanes=3):
+    return [
+        RoundCost(
+            iteration=1,
+            lanes=lanes,
+            planning_sec=planning_sec,
+            total_sec=planning_sec + 3000.0,
+            review_sec=review_sec,
+        )
+    ]
+
+
+def test_a_round_is_priced_from_the_planning_its_predecessors_spent_outside_their_review():
+    """The round being priced may skip the review, so what reviews took is no part of its lower bound."""
+    history = _reviewed_history()
+
+    decision = _admit(3600.0, history=history)
+
+    assert decision.planning_sec == pytest.approx(2400.0 - 600.0)
+    # The history the caller holds is left as it was observed.
+    assert history[0].planning_sec == pytest.approx(2400.0)
+
+
+def test_rounds_without_a_review_price_their_whole_planning():
+    decision = _admit(3600.0, history=_reviewed_history(review_sec=0.0))
+
+    assert decision.planning_sec == pytest.approx(2400.0)
+
+
+def test_a_recorded_review_is_part_of_the_planning_it_was_charged_in():
+    state = RunState()
+
+    apply_round_cost(
+        state,
+        RoundCost(iteration=1, lanes=1, planning_sec=900.0, total_sec=1500.0, review_sec=1200.0),
+        campaign_sec=1500.0,
+    )
+
+    assert state.round_costs.recent[0].review_sec == pytest.approx(900.0)
+    assert RunState.from_dict(state.to_dict()).round_costs.recent[0].review_sec == pytest.approx(900.0)
+
+
+def test_a_state_with_a_negative_review_does_not_load():
+    state = RunState()
+    apply_round_cost(state, RoundCost(iteration=1, lanes=1, planning_sec=900.0, total_sec=1500.0), campaign_sec=1500.0)
+    payload = state.to_dict()
+    payload["round_costs"]["recent"][0]["review_sec"] = -1.0
+
+    with pytest.raises(ValueError, match="review_sec must be a non-negative finite duration"):
+        RunState.from_dict(payload)
+
+
 def test_a_state_whose_span_cannot_contain_its_planning_does_not_load():
     """The invariant is checked at load, not only at the call that maintains it."""
     state = RunState()

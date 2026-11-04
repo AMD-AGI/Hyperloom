@@ -22,30 +22,15 @@ from hyperloom.orchestrator.actions.cancel_channel import cancel_scope_listener
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
+from .conftest import make_mock_critic_coordinator
 from ._dispatch_helpers import pump_until_settled
 
 _KERNEL_AGENT_LANES = ("server_lifecycle", "workspace_mutation", "benchmark_lane")
 
 
 @pytest.fixture
-def coord(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
-    from .conftest import seed_target_analysis_marker
-
-    sd = _msd()
-    seed_target_analysis_marker(sd)
-    backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
-    }
-    c = Coordinator(sd, backends=backends)
+def coord(session_dir):
+    c = make_mock_critic_coordinator(session_dir)
 
     async def _noop(*_args, **_kwargs):
         return None

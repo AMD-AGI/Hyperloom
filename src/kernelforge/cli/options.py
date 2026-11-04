@@ -26,9 +26,9 @@ def _validate_max_hours(ctx, param, value):
 
 
 def _normalize_gpu_type(_ctx, _param, value):
-    """Canonicalize the hardware SKU used in KB identities."""
+    """Canonicalize the hardware SKU used in KB identities; unset stays unset so it is derived from the arch."""
     if value is None:
-        return "mi355x"
+        return None
     return str(value).strip().lower()
 
 

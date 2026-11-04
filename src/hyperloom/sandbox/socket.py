@@ -4,8 +4,8 @@
 """The sandbox socket: the protocol every sandbox implementation must satisfy.
 
 The socket is implementation-neutral. The local implementation
-(:mod:`hyperloom.sandbox.local`) and a hosted one both speak these types, and
-callers classify failures by the three exception classes below without knowing
+(:mod:`hyperloom.sandbox.local`, which arrives in a later PR) and a hosted one both speak these types, and
+callers classify failures by the five exception classes below without knowing
 which implementation is underneath.
 """
 
@@ -24,6 +24,7 @@ __all__ = [
     "PRIORITY_KEY",
     "SAME_NODE_KEY",
     "SIGNING_PUBLIC_KEY",
+    "WORKSPACE_KEY",
     "CommandResult",
     "Role",
     "Sandbox",
@@ -44,6 +45,9 @@ Role = Literal["measurement", "subrun", "dev"]
 IDEMPOTENCY_KEY = "agent-sandbox.io/idempotency-key"
 AVOID_NODES_KEY = "agent-sandbox.io/avoid-nodes"  # comma-separated node names
 PRIORITY_KEY = "agent-sandbox.io/priority"
+#: The workspace a sandbox is created in, which a key whose user may create in several must name (a SaFE key used
+#: directly); a Claw grant's key names its own.
+WORKSPACE_KEY = "agent-sandbox.io/workspace"
 
 #: Metadata only the platform writes; a caller that passes one is refused.
 NODE_NAME_KEY = "agent-sandbox.io/node-name"
@@ -53,7 +57,7 @@ PLATFORM_METADATA_KEYS = frozenset({NODE_NAME_KEY, SIGNING_PUBLIC_KEY, SAME_NODE
 
 
 class SandboxError(Exception):
-    """Base of the three sandbox failure classes."""
+    """Base of the five sandbox failure classes."""
 
 
 class SandboxUnavailable(SandboxError):

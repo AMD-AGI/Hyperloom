@@ -5,32 +5,43 @@
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import io
 import json
 import subprocess
 import sys
-from collections.abc import Callable
+import tarfile
+from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
 from hyperloom.measure.runner import cache_layout
 from hyperloom.measure.runner.cache_layout import (
+    LOCAL_SOURCE_DIR,
+    LOCAL_WHEELS_DIR,
     MANIFEST_NAME,
     REQUIREMENTS_FILE,
+    SOURCE_ARCHIVE,
     CacheError,
+    FileDigest,
     Manifest,
     check_cache,
     check_entry,
+    file_sha256,
     manifest_from_json,
     manifest_to_json,
     parse_lock,
     requirements_text,
+    stage_entry,
     tree_digest,
 )
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, copy_cache
 
-_REPO_ROOT = next(parent for parent in Path(__file__).resolve().parents if (parent / "pyproject.toml").is_file())
 _HASH = "a" * 64
+_RUNNER_MAIN = "src/hyperloom/measure/runner/__main__.py"
 
 
 def test_the_lock_parser_reads_pins_with_their_hashes_and_skips_comments() -> None:
@@ -57,12 +68,6 @@ def test_the_lock_parser_reads_pins_with_their_hashes_and_skips_comments() -> No
 def test_the_lock_parser_refuses_what_is_not_a_pin_or_a_hash_and_names_the_line(text: str, line: int) -> None:
     with pytest.raises(CacheError, match=f"line {line} is not a pin or a hash"):
         parse_lock(text)
-
-
-def test_the_parser_reads_the_lock_of_this_repository() -> None:
-    pins = parse_lock((_REPO_ROOT / "requirements" / "runner.lock").read_text(encoding="utf-8"))
-    assert len(pins) > 20
-    assert all(pin.hashes for pin in pins)
 
 
 def _make_tree(root: Path) -> Path:
@@ -111,9 +116,18 @@ def _manifest(rig: Rig) -> Manifest:
 def test_the_manifest_round_trips_and_says_what_was_built(rig: Rig) -> None:
     manifest = _manifest(rig)
     assert manifest.sha == rig.cache.sha and manifest.source == tree_digest(rig.source)
+    archive = rig.source.parent / SOURCE_ARCHIVE
+    assert manifest.source_archive == FileDigest(archive.stat().st_size, file_sha256(archive))
     assert sorted(wheel.name for wheel in manifest.wheels) == ["already-pkg", "lock-pkg", "sdist-pkg", "setuptools"]
     assert manifest_from_json(manifest_to_json(manifest)) == manifest
     assert json.loads(manifest_to_json(manifest))["schema"] == 1
+
+
+def test_a_manifest_written_before_entries_had_a_script_or_an_archive_still_reads(rig: Rig) -> None:
+    data = json.loads(manifest_to_json(_manifest(rig)))
+    del data["bootstrap_sha256"], data["source_archive"]
+    older = manifest_from_json(json.dumps(data))
+    assert (older.bootstrap_sha256, older.source_archive) == ("", None)
 
 
 @pytest.mark.parametrize(
@@ -149,9 +163,7 @@ def test_an_entry_whose_manifest_names_another_commit_is_refused(rig: Rig) -> No
 def test_the_checker_prints_the_first_few_problems_and_counts_the_rest(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(
-        "hyperloom.measure.runner.cache_layout.check_cache", lambda *_: [f"problem {n}" for n in range(8)]
-    )
+    monkeypatch.setattr("hyperloom.measure.runner.cache_layout._checked", lambda *_: [f"problem {n}" for n in range(8)])
     assert cache_layout.main(["/cache", "a" * 40]) == 1
     assert capsys.readouterr().out.splitlines() == [*(f"problem {n}" for n in range(5)), "... and 3 more"]
 
@@ -162,7 +174,7 @@ def test_the_checker_reports_a_cache_it_cannot_read_as_a_problem(
     def unreadable(*_: object) -> list[str]:
         raise PermissionError("denied")
 
-    monkeypatch.setattr("hyperloom.measure.runner.cache_layout.check_cache", unreadable)
+    monkeypatch.setattr("hyperloom.measure.runner.cache_layout._checked", unreadable)
     assert cache_layout.main(["/cache", "a" * 40]) == 1
     assert "could not be read: denied" in capsys.readouterr().out
 
@@ -222,12 +234,144 @@ def test_the_requirements_pin_each_manifest_wheel_to_its_recorded_hash(rig: Rig)
     assert len(parse_lock(lines)) == 4
 
 
-def test_the_checker_writes_the_requirements_only_for_a_cache_that_checks_out(rig: Rig, tmp_path: Path) -> None:
+def _staged(scratch: Path) -> list[str]:
+    return sorted(path.name for path in scratch.iterdir()) if scratch.is_dir() else []
+
+
+def test_the_checker_stages_the_source_wheels_and_requirements_only_for_a_cache_that_checks_out(
+    rig: Rig, tmp_path: Path
+) -> None:
     cache = copy_cache(rig, tmp_path / "cache")
+    entry, scratch = cache.root / cache.sha, tmp_path / "scratch"
+    assert cache_layout.main([str(cache.root), cache.sha, str(scratch)]) == 0
+    assert _staged(scratch) == sorted([LOCAL_SOURCE_DIR, LOCAL_WHEELS_DIR, REQUIREMENTS_FILE])
+    # The source is the archive unpacked, file for file the tree the builder recorded; the wheels are byte copies.
+    assert tree_digest(scratch / LOCAL_SOURCE_DIR) == _manifest(rig).source
+    assert {path.name: path.read_bytes() for path in (scratch / LOCAL_WHEELS_DIR).iterdir()} == {
+        path.name: path.read_bytes() for path in (entry / "wheels").iterdir()
+    }
+    assert (scratch / REQUIREMENTS_FILE).read_text() == requirements_text(_manifest(rig))
+    # A second check of a cache that no longer checks out leaves none of what the first one staged.
+    (entry / "wheels" / "lock_pkg-1.0-py3-none-any.whl").unlink()
+    assert cache_layout.main([str(cache.root), cache.sha, str(scratch)]) == 1
+    assert _staged(scratch) == []
+
+
+def test_a_manifest_swapped_after_it_was_read_does_not_reach_the_requirements(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The requirements pip enforces come from the manifest the check read, not from a second read of the file."""
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry = cache.root / cache.sha
+    checked = _manifest(rig)
+    swapped = dataclasses.replace(
+        checked, wheels=tuple(dataclasses.replace(wheel, sha256="0" * 64) for wheel in checked.wheels)
+    )
+    copy = cache_layout._copy_hashed
+
+    def copy_then_swap(path: Path, sink: BinaryIO) -> FileDigest:
+        (entry / MANIFEST_NAME).write_text(manifest_to_json(swapped), encoding="utf-8")
+        return copy(path, sink)
+
+    monkeypatch.setattr(cache_layout, "_copy_hashed", copy_then_swap)
     out = tmp_path / "scratch" / REQUIREMENTS_FILE
-    assert cache_layout.main([str(cache.root), cache.sha, str(out)]) == 0
-    assert out.read_text() == requirements_text(_manifest(rig))
-    (cache.root / cache.sha / "wheels" / "lock_pkg-1.0-py3-none-any.whl").unlink()
-    refused = tmp_path / "other" / REQUIREMENTS_FILE
-    assert cache_layout.main([str(cache.root), cache.sha, str(refused)]) == 1
-    assert not refused.parent.exists()
+    assert cache_layout.main([str(cache.root), cache.sha, str(out.parent)]) == 0
+    assert manifest_from_json((entry / MANIFEST_NAME).read_text(encoding="utf-8")) == swapped
+    assert out.read_text(encoding="utf-8") == requirements_text(checked)
+    assert "0" * 64 not in out.read_text(encoding="utf-8")
+
+
+Member = tuple[tarfile.TarInfo, bytes]
+
+
+def _members(raw: bytes) -> list[Member]:
+    """The members of the tar archive ``raw``, each with its content (empty for what is not a regular file)."""
+    members: list[Member] = []
+    with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
+        for info in tar:
+            handle = tar.extractfile(info) if info.isreg() else None
+            members.append((info, handle.read() if handle else b""))
+    return members
+
+
+def _tar(members: Iterable[Member]) -> bytes:
+    """A tar archive of ``members``; a regular file's size is its content's."""
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for info, content in members:
+            info.size = len(content) if info.isreg() else 0
+            tar.addfile(info, io.BytesIO(content) if info.isreg() else None)
+    return out.getvalue()
+
+
+def test_the_source_is_unpacked_from_the_bytes_that_were_hashed_not_from_the_cache_file_again(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``source.tar`` rewritten in the cache right after it was hashed, with an archive that is valid but another one:
+    the check passes on the pinned manifest and what it unpacked is the archive it hashed."""
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry, scratch = cache.root / cache.sha, tmp_path / "scratch"
+    archive = entry / SOURCE_ARCHIVE
+    pin = hashlib.sha256((entry / MANIFEST_NAME).read_bytes()).hexdigest()
+    other = _tar(
+        (info, b"raise SystemExit('the swapped runner')\n" if info.name == _RUNNER_MAIN else content)
+        for info, content in _members(archive.read_bytes())
+    )
+    assert other != archive.read_bytes() and _RUNNER_MAIN in {info.name for info, _ in _members(other)}
+    hash_and_copy = cache_layout._copy_hashed
+
+    def hash_then_swap(path: Path, sink: BinaryIO) -> FileDigest:
+        found = hash_and_copy(path, sink)
+        if path.name == SOURCE_ARCHIVE:
+            archive.write_bytes(other)
+        return found
+
+    monkeypatch.setattr(cache_layout, "_copy_hashed", hash_then_swap)
+    assert stage_entry(cache.root, cache.sha, scratch, pin) == []
+    assert archive.read_bytes() == other, "the cache's archive was not rewritten"
+    assert tree_digest(scratch / LOCAL_SOURCE_DIR) == _manifest(rig).source
+    assert (scratch / LOCAL_SOURCE_DIR / _RUNNER_MAIN).read_bytes() == (rig.source / _RUNNER_MAIN).read_bytes()
+
+
+def _file(name: str) -> Member:
+    info = tarfile.TarInfo(name)
+    info.mode = 0o644
+    return info, b"escaped\n"
+
+
+def _link(name: str, target: str) -> Member:
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname = tarfile.SYMTYPE, target
+    return info, b""
+
+
+@pytest.mark.parametrize(
+    ("escape", "refused"),
+    [
+        (lambda outside: [_file("../../escaped")], True),
+        (lambda outside: [_link("out", "../.."), _file("out/escaped")], True),
+        (lambda outside: [_file(str(outside / "escaped"))], False),
+    ],
+    ids=["parent", "link-out", "absolute"],
+)
+def test_an_archive_member_that_would_land_outside_the_staged_source_never_does(
+    rig: Rig, tmp_path: Path, escape: Callable[[Path], list[Member]], refused: bool
+) -> None:
+    """An archive the manifest records (no pin) whose extra member climbs out of ``hl-source``, through ``..`` or a
+    link, is refused and nothing is staged; an absolute member name is staged inside ``hl-source`` (the data filter
+    strips its leading ``/``). In no case is anything written outside the scratch directory."""
+    cache = copy_cache(rig, tmp_path / "cache")
+    entry, scratch = cache.root / cache.sha, tmp_path / "scratch"
+    raw = _tar([*_members((entry / SOURCE_ARCHIVE).read_bytes()), *escape(tmp_path)])
+    (entry / SOURCE_ARCHIVE).write_bytes(raw)
+    manifest = json.loads((entry / MANIFEST_NAME).read_text())
+    manifest["source_archive"] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    (entry / MANIFEST_NAME).write_text(json.dumps(manifest))
+    problems = stage_entry(cache.root, cache.sha, scratch)
+    assert not (tmp_path / "escaped").exists(), "a member was written outside the scratch directory"
+    if refused:
+        assert len(problems) == 1 and "outside the destination" in problems[0], problems
+        assert _staged(scratch) == []
+    else:
+        assert problems == []
+        assert (scratch / LOCAL_SOURCE_DIR / str(tmp_path / "escaped").lstrip("/")).read_bytes() == b"escaped\n"

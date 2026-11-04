@@ -21,6 +21,7 @@ from hyperloom_common.llm.reasoning_effort import (
     normalize_reasoning_effort,
 )
 from kernelforge.config.resources import default_project_root, resource_path
+from kernelforge.utils.gpu_arch import canonical_gpu_type
 
 
 def resolve_agent_model(agent_backend: str) -> str:
@@ -258,10 +259,10 @@ class Config:
     """Runtime configuration loaded from environment + optional overrides."""
 
     # GPU environment
-    # ROCm compilation target.
-    gpu_target: str = "gfx942"
-    # Hardware model used in KB identities.
-    gpu_type: str = "mi355x"
+    # ROCm compilation target; empty until the caller resolves the run's arch.
+    gpu_target: str = ""
+    # Hardware model used in KB identities; derived from ``gpu_target`` when unset.
+    gpu_type: str = ""
     # System owning the candidate stream this run files under; a producer has its
     # own index in the KB identity scheme. Empty means the forge-loop's own.
     producer: str = ""
@@ -349,6 +350,7 @@ class Config:
         :func:`kernelforge.agent_backends.runtime.agent_runtime`, which every session resolves through.
         """
         self.project_root = Path(self.project_root)
+        self.gpu_type = (self.gpu_type or canonical_gpu_type(self.gpu_target)).strip().lower()
         self.agent_backend = (self.agent_backend or "auto").strip().lower()
         self.agent_reasoning_effort = normalize_reasoning_effort(
             self.agent_reasoning_effort or DEFAULT_REASONING_EFFORT
@@ -410,8 +412,8 @@ class Config:
         # A harness the operator named must fail loudly rather than be replaced by Claude.
         default_fallback = "" if platform_backend else "claude"
         return cls(
-            gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "gfx942")),
-            gpu_type=str(overrides["gpu_type"] if "gpu_type" in overrides else "mi355x").strip().lower(),
+            gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "")),
+            gpu_type=str(overrides.get("gpu_type") or ""),
             producer=str(overrides.get("producer", "")).strip().lower(),
             workspace=overrides.get("workspace", os.getenv("KERNEL_WORKSPACE", "")),
             agent_backend=agent_backend,

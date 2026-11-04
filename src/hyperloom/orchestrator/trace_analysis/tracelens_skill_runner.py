@@ -520,6 +520,30 @@ class _TrajectoryCall:
         return self._span_cm.__exit__(*exc_info)
 
 
+async def _abort_idle_stream(
+    stream_iter: Any, in_flight: _InFlight, wait_for: float, log: Callable[[str], None] | None
+) -> str:
+    """Close a stream that went quiet past its bound and return the idle-timeout error naming the phase."""
+    # Tear the generator down so its transport/subprocess does not leak. Silence during a
+    # tool call means the tool overran its bound, not that the gateway died.
+    if in_flight.tool:
+        phase = "while a tool call was in flight"
+    elif in_flight.tasks:
+        phase = f"while {len(in_flight.tasks)} background task(s) were running"
+    else:
+        phase = "with no tool call in flight"
+    sdk_error = f"stream idle timeout: no SDK message for {wait_for:.0f}s {phase}"
+    if log:
+        log(f"[claude-sdk] WARNING: {sdk_error}")
+    aclose = getattr(stream_iter, "aclose", None)
+    if aclose is not None:
+        try:
+            await asyncio.wait_for(aclose(), timeout=10.0)
+        except (asyncio.TimeoutError, OSError, RuntimeError):
+            _log.debug("tracelens: stream aclose failed", exc_info=True)
+    return sdk_error
+
+
 async def _drive_sdk_stream(
     stream: Any,
     bounds: _StreamIdleBounds,
@@ -546,25 +570,7 @@ async def _drive_sdk_stream(
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
-                # Stream went quiet past its bound: abort and tear the generator
-                # down so its transport/subprocess does not leak. Name the phase —
-                # silence during a tool call means the tool overran its bound, not
-                # that the gateway died.
-                if in_flight.tool:
-                    phase = "while a tool call was in flight"
-                elif in_flight.tasks:
-                    phase = f"while {len(in_flight.tasks)} background task(s) were running"
-                else:
-                    phase = "with no tool call in flight"
-                sdk_error = f"stream idle timeout: no SDK message for {wait_for:.0f}s {phase}"
-                if log:
-                    log(f"[claude-sdk] WARNING: {sdk_error}")
-                aclose = getattr(stream_iter, "aclose", None)
-                if aclose is not None:
-                    try:
-                        await asyncio.wait_for(aclose(), timeout=10.0)
-                    except (asyncio.TimeoutError, OSError, RuntimeError):
-                        _log.debug("tracelens: stream aclose failed", exc_info=True)
+                sdk_error = await _abort_idle_stream(stream_iter, in_flight, wait_for, log)
                 break
             observe(message)
             in_flight.observe(message)

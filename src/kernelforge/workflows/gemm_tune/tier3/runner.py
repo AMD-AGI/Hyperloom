@@ -16,7 +16,7 @@ from .coverage import CoverageGap
 from .gate import GateDecision
 from .generate import generate_tuner
 from .ledger import TunerUse, record_outcome, script_digest
-from .mandate import build_mandate, write_mandate
+from .mandate import TunerMandate, build_mandate, write_mandate
 from .referee import CaptureFailed, Judgement, ShapeHarness, judge_candidates
 from .sandbox import run_generated_tuner
 
@@ -116,42 +116,8 @@ def attempt_generated_tuner(
     mandate.candidates_json = str(work_dir / "candidates.json")
     write_mandate(mandate, work_dir / "mandate.json")
 
-    retry_note = ""
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        outcome.stage = "generate"
-        gen = generate_tuner(mandate, work_dir, retry_note=retry_note)
-        if not gen.ok or gen.script_path is None:
-            outcome.reason = gen.reason
-            return outcome
-        outcome.script = str(gen.script_path)
-        outcome.digest = script_digest(gen.script_path)
-
-        outcome.stage = "sandbox"
-        run = run_generated_tuner(
-            gen.script_path,
-            work_dir,
-            expect=[Path(mandate.output_csv), Path(mandate.candidates_json)],
-        )
-        if not run.ok:
-            retry_note = (
-                f"The script did not produce both output files "
-                f"(rc={run.returncode}, timed_out={run.timed_out}). Tail:\n"
-                f"{run.stderr_tail[-800:]}"
-            )
-            outcome.reason = retry_note
-            if attempt < MAX_ATTEMPTS:
-                continue
-            return outcome
-
-        outcome.stage = "contract"
-        violations = validate_output_csv(mandate.output_csv, mandate)
-        if violations:
-            retry_note = "The output violated the contract:\n" + "\n".join(f"- {v}" for v in violations[:8])
-            outcome.reason = retry_note
-            if attempt < MAX_ATTEMPTS:
-                continue
-            return outcome
-        break
+    if not _generate_valid_output(mandate, work_dir, outcome):
+        return outcome
 
     outcome.stage = "referee"
     candidates = load_candidates(mandate.candidates_json, mandate)
@@ -159,25 +125,7 @@ def attempt_generated_tuner(
         outcome.reason = "the script proposed no candidates to re-time"
         return outcome
 
-    for shape, cands in candidates.items():
-        try:
-            baseline = retiming.make_baseline(shape)
-        except CaptureFailed as exc:
-            log.warning("tier3 %s: shape skipped, the baseline cannot be timed: %s", shape, exc)
-            outcome.judgements.append(Judgement(shape=shape, reason=f"baseline not timed: {exc}"))
-            continue
-        outcome.judgements.append(
-            judge_candidates(
-                shape,
-                cands,
-                ShapeHarness(
-                    baseline=baseline,
-                    dispatch=retiming.make_dispatch(shape),
-                    is_correct=retiming.make_correctness(shape) if retiming.make_correctness else None,
-                    sync=retiming.sync,
-                ),
-            )
-        )
+    outcome.judgements.extend(_rejudge_candidates(candidates, retiming))
 
     outcome.ok = outcome.improved_shapes > 0
     best = max(
@@ -203,3 +151,69 @@ def attempt_generated_tuner(
     )
     log.info("tier3: %s -- %s", gap.table, outcome.reason)
     return outcome
+
+
+def _generate_valid_output(mandate: TunerMandate, work_dir: Path, outcome: Tier3Outcome) -> bool:
+    """Generate and sandbox a tuner until its output meets the contract, recording each stage on ``outcome``."""
+    retry_note = ""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        outcome.stage = "generate"
+        gen = generate_tuner(mandate, work_dir, retry_note=retry_note)
+        if not gen.ok or gen.script_path is None:
+            outcome.reason = gen.reason
+            return False
+        outcome.script = str(gen.script_path)
+        outcome.digest = script_digest(gen.script_path)
+
+        outcome.stage = "sandbox"
+        run = run_generated_tuner(
+            gen.script_path,
+            work_dir,
+            expect=[Path(mandate.output_csv), Path(mandate.candidates_json)],
+        )
+        if not run.ok:
+            retry_note = (
+                f"The script did not produce both output files "
+                f"(rc={run.returncode}, timed_out={run.timed_out}). Tail:\n"
+                f"{run.stderr_tail[-800:]}"
+            )
+            outcome.reason = retry_note
+            if attempt < MAX_ATTEMPTS:
+                continue
+            return False
+
+        outcome.stage = "contract"
+        violations = validate_output_csv(mandate.output_csv, mandate)
+        if violations:
+            retry_note = "The output violated the contract:\n" + "\n".join(f"- {v}" for v in violations[:8])
+            outcome.reason = retry_note
+            if attempt < MAX_ATTEMPTS:
+                continue
+            return False
+        break
+    return True
+
+
+def _rejudge_candidates(candidates: dict[str, list[dict[str, Any]]], retiming: Retiming) -> list[Judgement]:
+    """Re-time every shape's candidates against its baseline; a shape whose baseline cannot be timed is skipped."""
+    judgements: list[Judgement] = []
+    for shape, cands in candidates.items():
+        try:
+            baseline = retiming.make_baseline(shape)
+        except CaptureFailed as exc:
+            log.warning("tier3 %s: shape skipped, the baseline cannot be timed: %s", shape, exc)
+            judgements.append(Judgement(shape=shape, reason=f"baseline not timed: {exc}"))
+            continue
+        judgements.append(
+            judge_candidates(
+                shape,
+                cands,
+                ShapeHarness(
+                    baseline=baseline,
+                    dispatch=retiming.make_dispatch(shape),
+                    is_correct=retiming.make_correctness(shape) if retiming.make_correctness else None,
+                    sync=retiming.sync,
+                ),
+            )
+        )
+    return judgements
