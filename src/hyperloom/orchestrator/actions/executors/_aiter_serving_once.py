@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The launch preflight of aiter's serving modules under this host's lock, and what a caller builds of what it moves aside.
+"""The launch preflight of aiter's serving modules under this host's lock, and the build once of what a caller whose
+servers never build into the image moves aside.
 
 :func:`~._aiter_jit.prepare_serving_so_for_csvs` moves a serving module aside when the tables a boot loads name kernels
 the module lacks for this card, so that the next server builds it. :func:`prepare_serving_so_once` runs it under a lock
@@ -10,15 +11,17 @@ in this host's ``/tmp``, never on a shared mount, so a second session's prefligh
 preflight runs unlocked. The launch of a boot builds nothing here: its servers build what was moved aside, as before.
 
 A caller whose servers each build into a directory of their own (the measure runner gives each test one, with links to
-the image's modules) would have every test build a moved-aside module again, as no server's build reaches the image. It
-passes ``build``, and the modules moved aside whose tables are the image's own (the boot leaves their ``AITER_CONFIG_*``
-unset) are built once, under the same lock: ``build`` builds them on CPU from the image's tree and tables for this
-card's gfx and CU count as ``rocminfo`` reports them (what a test's server builds for), checks them with the preflight's
-coverage test and installs them into the image's ``aiter/jit`` with the prewarm manifest. A later test links them unless
-its own tables, build variables or patch touch them, and a later preflight keeps them. A boot whose own servers build
-for another target (``GPU_ARCHS`` or ``CU_NUM`` in its environment) builds nothing once: a module for either target is
-wrong for the other. A record in the lock's directory of each attempt keeps a build that failed from being tried again
-on this container: its servers then build the modules themselves.
+the image's modules) would have every test build a moved-aside module again, as no server's build reaches the image.
+It calls :func:`build_image_own_once`, which checks the image's own tables for this card -- what a server loads and
+builds for when nothing sets an ``AITER_CONFIG_*``, ``GPU_ARCHS`` or ``CU_NUM`` -- and never a test's: no server would
+put back a module moved aside for a test's own tables or target, and such a test is not given a module they make stale
+anyway. It builds what it moved aside once, under the same lock: ``build`` builds them on CPU from the image's tree and
+tables for this card's gfx and CU count as ``rocminfo`` reports them, checks them with the preflight's coverage test and
+installs them into the image's ``aiter/jit`` with the prewarm manifest. A later test links them unless its own tables,
+build variables or patch touch them, and a later preflight keeps them. When the card's target is unknown it checks
+nothing: every row would count, and a module moved aside for another GPU's rows would be built by no one. A record in
+the lock's directory of each attempt keeps a build that failed from being tried again on this container: its servers
+then build the modules themselves.
 """
 
 from __future__ import annotations
@@ -37,7 +40,15 @@ from typing import Any, TypeVar
 from . import _aiter_jit
 from ._aiter_jit import AITER_ENV_TO_SERVING_MODULES, prepare_serving_so_for_csvs, tuned_tables_sha256
 
-__all__ = ["HOST_DIR", "ModuleBuild", "Rebuild", "ServingPreflight", "prepare_serving_so_once", "under_host_lock"]
+__all__ = [
+    "HOST_DIR",
+    "ModuleBuild",
+    "Rebuild",
+    "ServingPreflight",
+    "build_image_own_once",
+    "prepare_serving_so_once",
+    "under_host_lock",
+]
 
 log = logging.getLogger(__name__)
 
@@ -57,8 +68,8 @@ ModuleBuild = Callable[[Path, Sequence[str], str, int], Mapping[str, Any]]
 @dataclass(frozen=True)
 class Rebuild:
     """What became of building the moved-aside modules once: ``built`` were installed in ``seconds``, ``left`` are the
-    modules moved aside that the servers build (aiter cannot build them by name, the boot names their table, or nothing
-    was built), and ``why`` says why nothing was built, when nothing was."""
+    modules moved aside that the servers build (aiter cannot build them by name, or nothing was built), and ``why`` says
+    why nothing was built, when nothing was."""
 
     built: tuple[str, ...] = ()
     left: tuple[str, ...] = ()
@@ -88,12 +99,12 @@ class ServingPreflight:
                     f"{', '.join(kept)}, which the prewarm built from these same tables"
                 )
             return f"the serving .so covers the CSVs this boot loads for {targets}; nothing moved"
-        removed = [Path(path).stem for path in outcome.get("removed") or ()]
+        removed = _moved(outcome)
         line = (
             f"the CSVs this boot loads outran the serving .so for {targets}; moved {len(removed)} module(s) aside to "
             f"{outcome.get('backup')}: {', '.join(removed)}"
         )
-        rebuild = self.rebuild or Rebuild(left=tuple(removed), why="not attempted")
+        rebuild = self.rebuild or Rebuild(left=removed, why="not attempted")
         if rebuild.built:
             line += (
                 f"; built {', '.join(rebuild.built)} once from the image's own tables in {rebuild.seconds:.0f} s and "
@@ -106,26 +117,42 @@ class ServingPreflight:
         return line
 
 
-def prepare_serving_so_once(
-    envs: dict[str, str], environ: Mapping[str, str], build: ModuleBuild | None = None
-) -> ServingPreflight:
-    """Run the preflight for a boot whose ``AITER_CONFIG_*`` are ``envs`` and whose servers run in ``environ``, and, given
-    ``build``, build what it moves aside once (see the module). Blocks while another preflight on this host holds the
-    lock.
+def prepare_serving_so_once(envs: dict[str, str], environ: Mapping[str, str]) -> ServingPreflight:
+    """Run the preflight for a boot whose ``AITER_CONFIG_*`` are ``envs`` and whose servers run in ``environ``, leaving
+    what it moves aside to the boot's servers. Blocks while another preflight on this host holds the lock.
 
     Raises:
         OSError: The jit directory cannot be used.
     """
-    with _host_lock("the launch preflight of a boot") as lock:
+    with _host_lock("the launch preflight of a boot"):
         outcome = prepare_serving_so_for_csvs(envs, environ=environ)
+    if outcome.get("action") != "invalidate":
+        return ServingPreflight(outcome)
+    return ServingPreflight(outcome, Rebuild(left=_moved(outcome), why="the launch leaves them to its servers"))
+
+
+def build_image_own_once(build: ModuleBuild) -> ServingPreflight:
+    """Run the preflight on the image's own tables for this card, and build what it moves aside once for this container
+    with ``build`` (see the module); nothing is checked when the card's target is unknown. Blocks while another
+    preflight on this host holds the lock.
+
+    Raises:
+        OSError: The jit directory cannot be used.
+    """
+    card = _aiter_jit.card_target()
+    if card is None:
+        return ServingPreflight({"action": "noop", "reason": "this card's target is unknown"})
+    with _host_lock("the prewarm of the image's own serving modules") as lock:
+        outcome = prepare_serving_so_for_csvs({}, environ={})
         if outcome.get("action") != "invalidate":
             return ServingPreflight(outcome)
-        moved = tuple(Path(path).stem for path in outcome.get("removed") or ())
-        if build is None:
-            return ServingPreflight(outcome, Rebuild(left=moved, why="the launch leaves them to its servers"))
         if lock is None:
-            return ServingPreflight(outcome, Rebuild(left=moved, why="this host's lock cannot be used"))
-        return ServingPreflight(outcome, _rebuild_once(outcome, envs, moved, lock, build))
+            return ServingPreflight(outcome, Rebuild(left=_moved(outcome), why="this host's lock cannot be used"))
+        return ServingPreflight(outcome, _rebuild_once(outcome, lock, build, card))
+
+
+def _moved(outcome: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(Path(path).stem for path in outcome.get("removed") or ())
 
 
 def under_host_lock(doing: str, call: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
@@ -220,15 +247,11 @@ def _holder(descriptor: int) -> str:
     return f"pid {said.get('pid')} since {said.get('since')}: {said.get('doing')}"
 
 
-def _rebuild_once(
-    outcome: Mapping[str, Any], envs: Mapping[str, str], moved: Sequence[str], lock: _HostLock, build: ModuleBuild
-) -> Rebuild:
+def _rebuild_once(outcome: Mapping[str, Any], lock: _HostLock, build: ModuleBuild, card: tuple[str, int]) -> Rebuild:
     """Build the moved-aside modules of the image's own tables for this card, unless this container tried them already."""
-    variables = [name for name in outcome.get("variables") or () if not str(envs.get(name) or "").strip()]
-    card = _aiter_jit.card_target()
-    refusal = _refusal(outcome, variables, card)
-    if refusal or card is None:
-        return Rebuild(left=tuple(moved), why=refusal)
+    moved, variables = _moved(outcome), list(outcome.get("variables") or ())
+    if Path(outcome["jit_dir"]) != Path(outcome["package"]) / "jit":
+        return Rebuild(left=moved, why=f"the serving modules are not the image's own aiter/jit: {outcome['jit_dir']}")
     package, target = Path(outcome["package"]), _target_name(card)
     attempt = {
         "jit_dir": outcome["jit_dir"],
@@ -239,7 +262,7 @@ def _rebuild_once(
     tried = _tried(attempts, attempt)
     todo = [name for name in variables if name not in tried]
     if not todo:
-        return Rebuild(left=tuple(moved), why=f"tried once on this container already, {tried[variables[0]]}")
+        return Rebuild(left=moved, why=f"tried once on this container already, {tried[variables[0]]}")
     _announce(lock, [name for name in moved if _read_by(name, todo)], todo, target)
     # Recorded before the build: a build that raises or never returns is not tried again by every later test either.
     started = {**attempt, "variables": todo, "result": "started, and did not end", "at": _now()}
@@ -282,26 +305,6 @@ def _announce(lock: _HostLock, building: Sequence[str], variables: Sequence[str]
 
 def _target_name(card: tuple[str, int]) -> str:
     return f"{card[0]}/{card[1]}"
-
-
-def _refusal(outcome: Mapping[str, Any], variables: Sequence[str], card: tuple[str, int] | None) -> str:
-    """Why the moved-aside modules of ``variables`` are not the image's own to build here for the card ``card``; empty
-    when they are."""
-    targets = outcome.get("targets") or ()
-    if not variables:
-        return "the boot names its own table for every module it moved aside"
-    if len(targets) != 1:
-        return f"the servers build for {len(targets)} targets" if targets else "this card's target is unknown"
-    if card is None:
-        return "this card's target is unknown"
-    if targets[0] != _target_name(card):
-        return (
-            f"this boot's servers build for {targets[0]} (GPU_ARCHS or CU_NUM in its environment) and a test's for "
-            f"the card's {_target_name(card)}"
-        )
-    if Path(outcome["jit_dir"]) != Path(outcome["package"]) / "jit":
-        return f"the serving modules are not the image's own aiter/jit: {outcome['jit_dir']}"
-    return ""
 
 
 def _rebuild_of(report: Mapping[str, Any], moved: Sequence[str]) -> Rebuild:

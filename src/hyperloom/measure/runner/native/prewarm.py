@@ -33,9 +33,9 @@ that runs this), and the manifest records the value of each variable a module's 
 (:func:`~hyperloom.measure.jit.prewarmed.build_record`): a test whose server sets one otherwise is not given the module
 (:func:`~hyperloom.measure.jit.prewarmed.unlike_prewarmed`) and builds its own.
 
-The measure runner runs it before each test for the modules the launch preflight moves aside from the image's own
-tables (:func:`preflight_build`, which the runner gives
-:func:`~hyperloom.orchestrator.actions.executors._aiter_serving_once.prepare_serving_so_once`): each test's servers build
+The measure runner runs it before each test for the modules the launch preflight's check of the image's own tables moves
+aside (:func:`preflight_build`, which the runner gives
+:func:`~hyperloom.orchestrator.actions.executors._aiter_serving_once.build_image_own_once`): each test's servers build
 into a JIT directory of their own, so without it every test would build them again. It can also be run by hand before
 the first test of a container: ``python -m hyperloom.measure.runner.native.prewarm --gfx gfx950``.
 """
@@ -368,8 +368,8 @@ def preflight_build(package: Path, tables: Sequence[str], gfx: str, cu_num: int)
     """Build into the image's aiter at ``package`` the modules of the ``AITER_CONFIG_*`` variables ``tables`` for ``gfx``
     and ``cu_num``, with the CPU build runner and the image's interpreter, and give the report as a mapping: the ``build``
     the measure runner hands
-    :func:`~hyperloom.orchestrator.actions.executors._aiter_serving_once.prepare_serving_so_once` for what the launch
-    preflight moved aside."""
+    :func:`~hyperloom.orchestrator.actions.executors._aiter_serving_once.build_image_own_once` for what the launch
+    preflight's check of the image's own tables moved aside."""
     return asdict(_prewarm_image(package, gfx, cu_num, tables, _IMAGE_PYTHON))
 
 
