@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: MIT
 
 """In-memory implementations of the multi-branch contracts, for tests that need a repository or a lifecycle without
-git or processes."""
+git or processes, and :func:`quick_polls` for tests whose rule gate waits on a fake toolbox."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+
+import pytest
 
 from hyperloom.contracts.measurement import FailureClass, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import Recipe
@@ -24,6 +26,8 @@ from hyperloom_multibranch.contracts.toolbox import (
     QueueState,
     RequestRejected,
 )
+from hyperloom_multibranch.rulegate import regression
+from hyperloom_multibranch.rulegate.critic import CriticVerdict, FixReview
 
 #: How a :class:`ReproToolbox` ends a test: the case's verdict (empty for a success without one), the validity it
 #: failed with, or ``None`` to withdraw it.
@@ -104,6 +108,20 @@ class RecordingVerifier:
         self.asked.append(request_id)
         if request_id in self.rejects:
             raise ResultUnverified(request_id, "the manifest hash is not the recorded one")
+
+
+class RefusingCritic:
+    """Refuses every fix it reviews."""
+
+    async def review(self, review: FixReview) -> CriticVerdict:
+        return CriticVerdict(False, f"the test critic refuses the fix of {review.judgement.request_ids[0]}")
+
+
+@pytest.fixture(autouse=True)
+def quick_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fake toolbox ends a test within milliseconds, so the rule gate reads an in-flight record again after one."""
+
+    monkeypatch.setattr(regression, "POLL_SECONDS", 0.001)
 
 
 class ReproToolbox:

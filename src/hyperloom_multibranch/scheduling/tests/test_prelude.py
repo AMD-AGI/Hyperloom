@@ -44,9 +44,9 @@ from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILED, IntegrationProfiler
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
-from hyperloom_multibranch.rulegate.inferencex import FLOOR_PCT
+from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS, FLOOR_PCT
 from hyperloom_multibranch.rulegate.rules import AgentXRule, Rule
-from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
+from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling import prelude as prelude_module
 from hyperloom_multibranch.scheduling.prelude import (
     BASELINE_ESTABLISHED,
@@ -72,6 +72,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     measure_no_throughput,
     session_gate,
 )
+from hyperloom_multibranch.tests.fakes import quick_polls  # noqa: F401
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
 from hyperloom_multibranch.toolbox.analysis import CODE_TOOL_UNAVAILABLE
 from hyperloom_multibranch.toolbox.attempts import TestJob

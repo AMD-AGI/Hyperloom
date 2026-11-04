@@ -47,12 +47,12 @@ from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
 from hyperloom_multibranch.blackboard.tests.factories import START, delta, intent, judgement, profile, request, result
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.rulegate.critic import NoCritic
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase, read_case
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
-from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
+from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
+from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
@@ -98,6 +98,7 @@ from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSe
 from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
+from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
@@ -473,7 +474,7 @@ async def _peers(
         desk,
         ProcessRegistry(layout.pids, clock),
         blobs,
-        NoCritic(),
+        RefusingCritic(),
         {"geak": layout.reference / "geak"},
         dev_leases,
         (),

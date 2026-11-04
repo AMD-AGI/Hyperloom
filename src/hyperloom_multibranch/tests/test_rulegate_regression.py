@@ -26,7 +26,9 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import delta, judgement, result
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
+from hyperloom_multibranch.rulegate import regression
 from hyperloom_multibranch.rulegate.regression import (
+    POLL_SECONDS,
     RESUBMIT_SECONDS,
     FixNotProven,
     PooledCase,
@@ -36,7 +38,6 @@ from hyperloom_multibranch.rulegate.regression import (
     prove_fix,
     register_case,
 )
-from hyperloom_multibranch.rulegate.service import Polling
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingVerifier, ReproAnswer, ReproToolbox
 
 BASELINE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
@@ -91,6 +92,20 @@ class _Pool:
         return self.given
 
 
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The seconds the runner waited, each wait cut to one turn of the loop."""
+
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(regression, "sleep", sleep)
+    return slept
+
+
 class _Rig:
     """A toolbox that runs repro tests, writing to a local blackboard, and a runner reading it as the gate."""
 
@@ -98,12 +113,7 @@ class _Rig:
         self.toolbox = _Toolbox(LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox")), answer)
         self.blackboard = LocalBlackboard(root, Writer(Role.GATE, "gate"))
         self.verifier = verifier or RecordingVerifier()
-        self.sleeps: list[float] = []
-        self.runner = ReproRunner(self.toolbox, self.blackboard, self.verifier, polling=Polling(0.5, self._sleep))
-
-    async def _sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-        await asyncio.sleep(0)
+        self.runner = ReproRunner(self.toolbox, self.blackboard, self.verifier)
 
 
 async def test_a_case_runs_as_a_repro_test_and_its_verified_verdict_comes_back(tmp_path):
@@ -119,7 +129,7 @@ async def test_a_case_runs_as_a_repro_test_and_its_verified_verdict_comes_back(t
     assert rig.verifier.asked == ["p1"]
 
 
-async def test_a_full_queue_is_waited_out(tmp_path):
+async def test_a_full_queue_is_waited_out(tmp_path, sleeps):
     rig = _Rig(tmp_path)
     rig.toolbox.busy = 2
 
@@ -127,20 +137,20 @@ async def test_a_full_queue_is_waited_out(tmp_path):
 
     assert run.verdict == NOT_REPRODUCED
     assert len(rig.toolbox.submitted) == 1
-    assert rig.sleeps == [RESUBMIT_SECONDS, RESUBMIT_SECONDS]
+    assert sleeps == [RESUBMIT_SECONDS, RESUBMIT_SECONDS]
 
 
-async def test_the_runner_waits_for_the_test_to_end(tmp_path):
+async def test_the_runner_waits_for_the_test_to_end(tmp_path, sleeps):
     rig = _Rig(tmp_path)
     rig.toolbox.hold = True
     running = asyncio.create_task(rig.runner.run("c1", FIX, OVERFLOW, branch="s1"))
-    while not rig.sleeps:
+    while not sleeps:
         await asyncio.sleep(0)
 
     await rig.toolbox.finish()
 
     assert (await running).verdict == NOT_REPRODUCED
-    assert rig.sleeps[0] == 0.5
+    assert sleeps[0] == POLL_SECONDS
 
 
 @pytest.mark.parametrize(
@@ -177,11 +187,11 @@ async def test_a_refused_test_has_no_request(tmp_path):
     assert run == ReproRun("", failure="refused by the toolbox (unknown_parent: c9 is not in the repository)")
 
 
-async def test_a_cancelled_run_takes_its_test_back(tmp_path):
+async def test_a_cancelled_run_takes_its_test_back(tmp_path, sleeps):
     rig = _Rig(tmp_path)
     rig.toolbox.hold = True
     running = asyncio.create_task(rig.runner.run("c1", FIX, OVERFLOW, branch="s1"))
-    while not rig.sleeps:
+    while not sleeps:
         await asyncio.sleep(0)
 
     running.cancel()

@@ -64,7 +64,7 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
 from hyperloom_multibranch.rulegate.readings import inferencex_reading
 from hyperloom_multibranch.rulegate.rules import InferenceXRule, Rule
-from hyperloom_multibranch.rulegate.service import GateBlackboard, GateService, Polling
+from hyperloom_multibranch.rulegate.service import GateBlackboard, GateService
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
@@ -258,26 +258,18 @@ class HeldGitRepo(GitExperimentRepo):
             await super().checkout(commit, destination)
 
 
-#: Seconds the session gate of the tests waits between two reads of a test's record; the tests' toolbox is the fake.
-GATE_POLL_SECONDS = 0.001
 #: Virtual seconds every poller of a session on a :class:`VirtualClock` waits between two reads, as in production: a
 #: poll on real time is invisible to the clock, which then runs virtual time past deadlines while the poll waits.
 VIRTUAL_POLL_SECONDS = 5.0
 
 
-def session_gate(
-    blackboard: GateBlackboard,
-    toolbox: FakeToolbox,
-    rule: Rule | None = None,
-    *,
-    polling: Polling = Polling(GATE_POLL_SECONDS),
-) -> GateService:
+def session_gate(blackboard: GateBlackboard, toolbox: FakeToolbox, rule: Rule | None = None) -> GateService:
     """The rule gate's session service on ``rule``, by default the InferenceX rule at the conc ``toolbox`` measures a
     test at when its request names none, the workload's; ``blackboard`` writes as the gate."""
 
     (conc,) = toolbox.config.main_concurrency
     judged_on = InferenceXRule(blackboard, conc) if rule is None else rule
-    return GateService(blackboard, toolbox, judged_on, toolbox, polling=polling)
+    return GateService(blackboard, toolbox, judged_on, toolbox)
 
 
 def measure_no_throughput(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -810,7 +802,6 @@ class OneChampionKB:
 __all__ = [
     "BASE_IMAGE_DIGEST",
     "BASELINE_VALUE",
-    "GATE_POLL_SECONDS",
     "MAIN_POINT",
     "TAG_FLAG",
     "TOOLBOX_DOWN",
