@@ -51,7 +51,7 @@ INTERACTIVITY_OBJECTIVE = "e2e_interactivity@v1"
 EXPORT_PAGE = 100
 WORKLOAD_KEYS = frozenset({"tp", "ep", "conc", "isl", "osl", "max_model_len", "compute_partition_mode", "partitions"})
 DECISION = "Choose the next actions for one branch of a multi-branch inference optimization session."
-DEFAULT_LIMIT = 10
+RECALL_LIMIT = 10
 
 
 class RecallTier(str, Enum):
@@ -240,15 +240,13 @@ def recall_conditions(profile: SessionProfile, bottleneck: str) -> dict[str, obj
 
 
 def recall_context(
-    profile: SessionProfile, baseline_value: float | None, *, bottleneck: str, branch: str = "", intent: str = ""
+    profile: SessionProfile, baseline_value: float | None, *, bottleneck: str, branch: str = ""
 ) -> dict[str, Any]:
     """The read context, in the shape the Framework phase's reads use; an AgentX trace replay, which has no input
     length, asks for the interactivity objective."""
 
     identity = experience_identity(profile)
-    observations = {
-        name: text for name, text in (("bottleneck", bottleneck), ("branch", branch), ("intent", intent)) if text
-    }
+    observations = {name: text for name, text in (("bottleneck", bottleneck), ("branch", branch)) if text}
     replays_traces = profile.isl is None
     return {
         "identity": {key: value for key, value in identity.items() if key not in WORKLOAD_KEYS},
@@ -300,13 +298,10 @@ def classify(
 
 @dataclass(frozen=True)
 class RecallQuery:
-    """What one recall asks for: Experiences on ``bottleneck``, for ``branch`` about to try ``intent``, at most
-    ``limit``."""
+    """What one recall asks for: Experiences on ``bottleneck`` for ``branch``, at most :data:`RECALL_LIMIT`."""
 
     bottleneck: str
     branch: str = ""
-    intent: str = ""
-    limit: int = DEFAULT_LIMIT
 
 
 def recall_experiences(
@@ -326,10 +321,8 @@ def recall_experiences(
 
     if reader is None:
         return Recall(ReadStatus.DISABLED.value, "", (), (), ())
-    context = recall_context(
-        profile, baseline_value, bottleneck=wanted.bottleneck, branch=wanted.branch, intent=wanted.intent
-    )
-    result = reader.read(DECISION, context, limit=wanted.limit)
+    context = recall_context(profile, baseline_value, bottleneck=wanted.bottleneck, branch=wanted.branch)
+    result = reader.read(DECISION, context, limit=RECALL_LIMIT)
     query = recall_conditions(profile, wanted.bottleneck)
     objective = str(context["objective"]["id"])
     recalled = [_on_objective(classify(item, query, identities), objective, identities) for item in result.experiences]
