@@ -37,6 +37,8 @@ PERF_TERMS = (
 
 #: GitHub Search answers HTTP 422 past five boolean operators.
 _MAX_OR_TERMS = 6
+#: The encoding of every GitHub answer read here.
+_ENCODING = "utf-8"
 
 
 def _build_query(repo: str, *, terms: tuple[str, ...]) -> str:
@@ -61,7 +63,7 @@ def search_perf_prs(
     req = urllib.request.Request(url, headers=_auth_headers("application/vnd.github+json"))
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS API URL.
-            data = json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read().decode(_ENCODING))
     except (OSError, http.client.HTTPException, ValueError):  # best-effort policy
         return []
     out: list[GitHubPr] = []
@@ -94,7 +96,7 @@ def pr_patches(repo_slug: str, number: int, *, timeout_sec: float = 30.0) -> str
         req = urllib.request.Request(url, headers=_auth_headers(accept))
         try:
             with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS URL.
-                text = resp.read().decode("utf-8", "replace")
+                text = resp.read().decode(_ENCODING, "replace")
             if text.strip():
                 return text
         except (OSError, http.client.HTTPException, ValueError):  # best-effort; try the fallback URL
@@ -113,7 +115,7 @@ def fetch_raw_file(repo_slug: str, ref: str, path: str, *, timeout_sec: float = 
     req = urllib.request.Request(url, headers=_auth_headers("text/plain"))
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS URL.
-            return resp.read().decode("utf-8", "replace")
+            return resp.read().decode(_ENCODING, "replace")
     except (OSError, http.client.HTTPException, ValueError):  # best-effort policy
         return ""
 
