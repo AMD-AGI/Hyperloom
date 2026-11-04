@@ -189,14 +189,17 @@ def _acquire(doing: str) -> _HostLock | None:
         return None
     try:
         _wait_for(descriptor, path, doing)
+        lock = _HostLock(descriptor)
+        lock.doing(doing)
     except OSError as exc:
         os.close(descriptor)
         log.warning(
             "aiter serving preflight: this host's lock %s cannot be held (%s); %s runs unlocked", path, exc, doing
         )
         return None
-    lock = _HostLock(descriptor)
-    lock.doing(doing)
+    except BaseException:
+        os.close(descriptor)
+        raise
     return lock
 
 

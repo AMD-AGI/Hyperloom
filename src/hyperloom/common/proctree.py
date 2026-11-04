@@ -96,6 +96,9 @@ def process_uids(pid: int) -> tuple[int, int] | None:
 def descendants(root_pid: int) -> list[ProcessId]:
     """Return every descendant of ``root_pid``, deepest first.
 
+    A process comes after all of its own descendants, and the children of one parent are visited in pid order, so
+    the result is the same however ``/proc`` happens to list its entries.
+
     Args:
         root_pid: The root of the tree; not itself included.
 
@@ -115,6 +118,9 @@ def descendants(root_pid: int) -> list[ProcessId]:
             continue
         parent_pid, start_time = identity
         children.setdefault(parent_pid, []).append((pid, start_time))
+    # The listing order is the filesystem's to choose; ordering siblings by pid makes the walk deterministic.
+    for siblings in children.values():
+        siblings.sort(key=lambda child: child[0])
 
     # A sandboxed PID view can list a process as its own ancestor, so a pid is visited once; the walk keeps
     # its own stack, so a deep tree cannot exhaust Python's.

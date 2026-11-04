@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import importlib.util
 import logging
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -444,18 +446,29 @@ def _import_sdk() -> tuple[Any, Any]:
             ``claude_agent_sdk``.
 
     Raises:
-        RuntimeError: If the SDK is not installed or lacks the expected
-            ``query`` / ``ClaudeAgentOptions`` attributes.
+        RuntimeError: If the SDK is not installed, fails to import, or lacks
+            the expected ``query`` / ``ClaudeAgentOptions`` attributes.
     """
     try:
         import claude_agent_sdk as sdk  # type: ignore[import-not-found]
-    except ImportError as exc:  # pragma: no cover - exercised via caller fallback
+    except ImportError as exc:
+        spec = importlib.util.find_spec("claude_agent_sdk")
+        if spec is None:
+            raise RuntimeError(
+                "claude_agent_sdk not installed; run src/hyperloom/inference_optimizer/assets/install.sh first"
+            ) from exc
         raise RuntimeError(
-            "claude_agent_sdk not installed; run src/hyperloom/inference_optimizer/assets/install.sh first"
+            f"claude_agent_sdk failed to import from {spec.origin} in {sys.executable}: {type(exc).__name__}: {exc}"
         ) from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions
+
+
+def require_claude_sdk() -> None:
+    """Import-check the Claude Agent SDK when the resolved agent backend is Claude."""
+    if llm_config.resolve_agent_backend() == llm_config.AGENT_BACKEND_CLAUDE:
+        _import_sdk()
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
