@@ -703,9 +703,15 @@ class _GeakDispatchMixin:
     ) -> dict[str, Any] | None:
         result_path = self._geak_result_path()
         stderr_tail = (proc.stderr or "")[-2000:]
-        if proc.returncode != 0:
-            log.warning("GEAK runner rc=%s: %s", proc.returncode, stderr_tail)
         result = read_json(result_path, {}, require_dict=True)
+        if proc.returncode != 0:
+            log.warning(
+                "GEAK runner rc=%s: error_class=%s error=%s stderr_tail=%s",
+                proc.returncode,
+                result.get("error_class"),
+                result.get("error"),
+                stderr_tail,
+            )
         if not result:
             self._finish_geak_skip(
                 {
