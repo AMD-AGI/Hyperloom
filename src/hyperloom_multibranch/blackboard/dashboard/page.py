@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from html import escape
 from typing import Any
 
+from hyperloom_multibranch.contracts.blackboard.records import SHORT_COMMIT
 from hyperloom_multibranch.blackboard.rsi.stranded import short_reason
 
 _STYLE = """
@@ -108,7 +109,8 @@ def _played(playbook: Mapping[str, Any] | None) -> str:
 def _stranded(rows: Sequence[Mapping[str, Any]]) -> str:
     def commits(row: Mapping[str, Any]) -> str:
         return "; ".join(
-            f"{item['commit_id'][:8]}: {short_reason(item['reason']) or item['outcome']}" for item in row["commits"]
+            f"{item['commit_id'][:SHORT_COMMIT]}: {short_reason(item['reason']) or item['outcome']}"
+            for item in row["commits"]
         )
 
     return _table(
