@@ -1397,6 +1397,7 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
+        # Group-readable: the retest runner reads specialist_done.json.
         atomic_write_json(path, {"ts": now_iso(), **payload}, options=WriteOptions(group_read=True))
 
 

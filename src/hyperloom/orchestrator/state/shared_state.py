@@ -17,7 +17,7 @@ from typing import Any, ClassVar
 
 from hyperloom_common.coerce import first_text, to_float, to_int, to_str_list
 from hyperloom_common.env import env_bool
-from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.env_safety import redact_secret_env_values, redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
 from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom.common.perf_metric import (
@@ -241,6 +241,9 @@ def inject_stack_base_params(
 
 # Integration faults (environment / apply / bench crashes) are distinct from a genuine gate REVERT; a fault means the
 # patch was never fairly measured, so it gets its own small retry budget instead of burning the REVERT quota.
+#: Owner-only file beside state.json holding the operator's --extra-env pins in full (never group-readable).
+EXTRA_ENV_SIDECAR = "operator_extra_env.json"
+
 _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
     {
         "missing_integration_inputs",
@@ -973,9 +976,26 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
             inst = cls()
         else:
             inst = cls.from_dict(read_json_strict(path, require_dict=True))
+            # The sidecar holds the real pins; a state.json from before it existed still holds them itself and is
+            # read as is, then moved to the sidecar by the next save.
+            pins = cls._read_extra_env_sidecar(session_dir)
+            if pins is not None:
+                inst.operator_extra_env = pins
         # Remember the session dir for breakdown instrumentation (not serialized).
         inst._session_dir = Path(session_dir)
         return inst
+
+    @staticmethod
+    def _extra_env_sidecar_path(session_dir: Path) -> Path:
+        return Path(session_dir) / EXTRA_ENV_SIDECAR
+
+    @classmethod
+    def _read_extra_env_sidecar(cls, session_dir: Path) -> dict[str, str] | None:
+        path = cls._extra_env_sidecar_path(session_dir)
+        if not path.is_file():
+            return None
+        raw = read_json_strict(path, require_dict=True)
+        return {str(k): str(v) for k, v in raw.items()}
 
     @classmethod
     def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
@@ -1104,7 +1124,18 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput`` so current_best has the latency metric.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
-        atomic_write_json(path, self.to_dict(), options=WriteOptions(make_parents=True, group_read=True))
+        # state.json is group-readable (the retest runner reads it) but the operator's --extra-env pins may be
+        # credentials: they live in an owner-only sidecar that --resume reads, and state.json carries them masked.
+        sidecar = self._extra_env_sidecar_path(session_dir)
+        if self.operator_extra_env:
+            atomic_write_json(
+                sidecar, dict(self.operator_extra_env), options=WriteOptions(make_parents=True, mode=0o600)
+            )
+        else:
+            sidecar.unlink(missing_ok=True)
+        public = self.to_dict()
+        public["operator_extra_env"] = redact_secret_env_values(self.operator_extra_env)
+        atomic_write_json(path, public, options=WriteOptions(make_parents=True, group_read=True))
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import instrument

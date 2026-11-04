@@ -496,3 +496,40 @@ def test_save_current_setting_includes_workload_identity(tmp_path, monkeypatch):
     assert "export TP=8" in text
     assert "export MAX_MODEL_LEN=65536" in text
     assert "export GPU_TYPE=mi300x" in text
+
+
+_PINS = {"HF_TOKEN": "hf_live_value_123", "OPENAI_API_KEY": "sk-live-value-456", "SGLANG_FLAG": "1"}
+
+
+def _saved(tmp_path: Path) -> SharedState:
+    state = SharedState()
+    state.operator_extra_env = dict(_PINS)
+    state.save(tmp_path)
+    return state
+
+
+def test_state_json_carries_no_extra_env_credential(tmp_path):
+    _saved(tmp_path)
+    text = (tmp_path / "state.json").read_text()
+    for secret in ("hf_live_value_123", "sk-live-value-456"):
+        assert secret not in text
+    assert json.loads(text)["operator_extra_env"]["SGLANG_FLAG"] == "1"
+    sidecar = tmp_path / "operator_extra_env.json"
+    assert oct(sidecar.stat().st_mode & 0o777) == oct(0o600)
+
+
+def test_resume_restores_pins_from_sidecar(tmp_path):
+    _saved(tmp_path)
+    assert "hf_live_value_123" not in (tmp_path / "state.json").read_text()
+    assert SharedState.load_or_init(tmp_path).operator_extra_env == _PINS
+
+
+def test_old_session_with_plaintext_pins_migrates_on_next_save(tmp_path):
+    old = SharedState().to_dict()
+    old["operator_extra_env"] = dict(_PINS)
+    (tmp_path / "state.json").write_text(json.dumps(old))
+    state = SharedState.load_or_init(tmp_path)
+    assert state.operator_extra_env == _PINS
+    state.save(tmp_path)
+    assert "hf_live_value_123" not in (tmp_path / "state.json").read_text()
+    assert SharedState.load_or_init(tmp_path).operator_extra_env == _PINS
