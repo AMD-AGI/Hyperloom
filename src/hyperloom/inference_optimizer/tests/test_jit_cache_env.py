@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
-from hyperloom.orchestrator.actions.executors._jit_cache_env import apply_session_jit_cache, benchmark_framework
+from hyperloom.orchestrator.actions.executors._aiter_jit import apply_session_jit_cache, benchmark_framework
 
 
 def test_sglang_caches_land_under_the_session(tmp_path):

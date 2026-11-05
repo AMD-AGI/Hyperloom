@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from hyperloom_common.aiter_jit_cache import (
     invalidate_jit_cache,
     resolve_jit_build_dir,
@@ -22,7 +24,9 @@ from hyperloom_common.aiter_jit_cache import (
     resolve_serving_context,
 )
 from hyperloom_common.gpu_identity import row_dispatches_on
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_board
+from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
 
 log = logging.getLogger(__name__)
 
@@ -519,10 +523,8 @@ def serving_module_for_kernel(kernel_name: str, libtype: str, table_modules: tup
 def csv_jit_kernel_rows(csv_path: Path, target: tuple[str, int] | None) -> list[tuple[str, str]]:
     """Each ``(kernelName, libtype)`` pair linked into a serving ``module_*.so`` on ``target``, once, in first-seen order.
 
-    aiter's codegen compiles only the rows whose ``(gfx, cu_num)`` is the GPU it builds
-    for, so a row tuned for another GPU is never in the .so; counting it would call every
-    shared table uncovered and re-JIT its modules before each boot. A table without
-    those columns, or an unknown ``target``, keeps every row.
+    aiter compiles only the rows whose ``(gfx, cu_num)`` is the GPU it builds for; a table
+    without those columns, or an unknown ``target``, keeps every row.
 
     The tables this reads ship with aiter, so their encoding and field sizes are not
     ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
@@ -821,6 +823,30 @@ def result_is_aiter_jit_registry_mismatch(result: dict[str, Any] | None) -> bool
     return is_aiter_jit_registry_mismatch(str(result.get("error") or ""))
 
 
+def benchmark_framework(config_path: Path) -> str:
+    """Read the framework a rendered Magpie config benchmarks, or "" when it names none."""
+    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    return str((cfg.get("benchmark") or {}).get("framework") or "")
+
+
+def apply_session_jit_cache(env: dict[str, str], *, framework: str, session_dir: Path) -> None:
+    """Point ``framework``'s JIT cache env names at session-scoped directories, in place.
+
+    Each benchmark round then starts on the kernels earlier rounds of the session compiled, so rounds stay
+    comparable across container restarts; an operator who set a name keeps their own location.
+    """
+    names = framework_registry.jit_cache_envs(framework)
+    if not names:
+        return
+    root = jit_cache_dir(session_dir)
+    for name in names:
+        if env.get(name):
+            continue
+        path = root / name.lower()
+        path.mkdir(parents=True, exist_ok=True)
+        env[name] = str(path)
+
+
 __all__ = [
     "AITER_CPP_BUILD_PROBE_PATHS",
     "AITER_ENV_TO_SERVING_MODULES",
@@ -832,6 +858,8 @@ __all__ = [
     "COMPILER_PROCESS_NAMES",
     "COMPILED_REGISTRY_MARKER",
     "NON_JIT_SO_LIBTYPES",
+    "apply_session_jit_cache",
+    "benchmark_framework",
     "clean_stale_aiter_locks",
     "csv_jit_kernel_rows",
     "csvs_aiter_will_load",

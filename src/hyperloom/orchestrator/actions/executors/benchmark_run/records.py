@@ -16,7 +16,7 @@ import yaml
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from ...stop_attribution import StoppedByTheRun
 from .._grid_runner import stopped_by_the_run
-from .._jit_cache_env import apply_session_jit_cache, benchmark_framework
+from .._aiter_jit import apply_session_jit_cache, benchmark_framework
 from .._subprocess_kill import post_ready_runtime_sec
 
 if TYPE_CHECKING:
