@@ -543,7 +543,17 @@ class Coordinator:
     def dispatcher(self):
         from .dispatcher import DispatcherCollaborator
 
-        return self._collaborator("_dispatcher", DispatcherCollaborator)
+        return self._collaborator(
+            "_dispatcher",
+            lambda coordinator: DispatcherCollaborator(
+                coordinator, refresh_admission_freeze=self._refresh_admission_freeze_unless_closing
+            ),
+        )
+
+    async def _refresh_admission_freeze_unless_closing(self) -> None:
+        # CLOSE's closing report is dispatched by the pump, which a freeze would hold back.
+        if not self.shared_state.closing_phase:
+            await self.phase_machine.refresh_admission_freeze()
 
     @property
     def writeback(self):

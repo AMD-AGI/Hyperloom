@@ -299,6 +299,52 @@ async def test_work_queued_while_the_exit_hold_lifts_is_not_spawned_by_the_same_
     baseline.gate.set()
 
 
+async def test_a_roofline_finished_but_not_booked_does_not_let_the_same_tick_spawn_work(coord):
+    roofline_run, baseline = _Gated(), _Gated()
+    coord.sub.register_executor("roofline", roofline_run)
+    coord.sub.register_executor("baseline", baseline)
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.baseline_tput = 1.0
+    roofline, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="roofline", params={}, idempotency_key="roofline", requires_lanes=[], lease_ttl_sec=600)
+    )
+    coord.shared_state.auto_roofline_pending_task_id = roofline.task_id
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(roofline_run.entered.wait(), timeout=5)
+    await _enqueue(coord, "baseline", "baseline-retry")
+    roofline_run.gate.set()
+    await _settle(coord)
+    assert coord.dispatcher.owes_result(roofline.task_id) and coord.dispatcher.has_unbooked_completions()
+
+    async def idle_reactor_pass(name: str) -> None:
+        return None
+
+    coord.reactor_pass = idle_reactor_pass
+
+    await coord._tick_once()
+    await asyncio.sleep(0.05)
+
+    assert not baseline.entered.is_set()
+    assert _in_flight_kinds(coord) == []
+    assert coord.shared_state.auto_roofline_pending_task_id == ""
+    baseline.gate.set()
+
+
+async def test_the_freeze_refresh_the_pump_runs_is_skipped_while_closing(coord):
+    refreshes: list[bool] = []
+
+    async def refresh() -> None:
+        refreshes.append(bool(coord.shared_state.closing_phase))
+
+    coord.phase_machine.refresh_admission_freeze = refresh
+
+    await coord._refresh_admission_freeze_unless_closing()
+    coord.shared_state.closing_phase = True
+    await coord._refresh_admission_freeze_unless_closing()
+
+    assert refreshes == [False]
+
+
 async def test_work_queued_while_the_exit_hold_still_holds_is_spawned(coord):
     baseline = _Gated()
     coord.sub.register_executor("baseline", baseline)
