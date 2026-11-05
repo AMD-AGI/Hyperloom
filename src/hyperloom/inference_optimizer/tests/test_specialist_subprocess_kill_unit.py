@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import CancelledError
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -320,6 +321,39 @@ def test_kill_missing_process_identity_cannot_confirm_tree(monkeypatch):
     with pytest.raises(ExecutionCleanupUnconfirmed, match="tree cleanup unconfirmed"):
         SpecialistSubprocessDispatcher._kill(proc)
     kill.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["deadline", "silence"])
+async def test_reap_loop_kill_left_unconfirmed_raises_the_kills_error_carrying_the_decision(
+    monkeypatch, tmp_path, ending
+):
+    """A caller of the base class sees the kill's own message and group; the loop's decision rides on the raise."""
+
+    def doubt(proc):
+        raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: tree cleanup unconfirmed", tree_pgid=proc.pid)
+
+    monkeypatch.setattr(SpecialistSubprocessDispatcher, "_kill", staticmethod(doubt))
+    monkeypatch.setattr(ss, "cli_alive", lambda *args, **kwargs: ending == "deadline")
+    dispatcher = SpecialistSubprocessDispatcher(
+        ss.SpecialistSubprocessConfig(
+            poll_interval_seconds=0.01, heartbeat_stale_seconds=0.0 if ending == "silence" else 300.0
+        )
+    )
+    proc = Mock(pid=4242, returncode=None)
+    proc.poll.return_value = None
+    with pytest.raises(ExecutionCleanupUnconfirmed, match=r"^specialist pid=4242: tree cleanup unconfirmed$") as caught:
+        await dispatcher._reap_loop(
+            proc,
+            ss.ReapWatch(workspace=tmp_path, done_files=()),
+            deadline=Deadline.after(0.0 if ending == "deadline" else 600.0),
+            started=time.monotonic(),
+        )
+    assert isinstance(caught.value, ss.ReapKillUnconfirmed)
+    assert caught.value.tree_pgid == 4242
+    outcome = caught.value.outcome
+    assert (outcome["timed_out"], outcome["stale_heartbeat"]) == (ending == "deadline", ending == "silence")
+    assert ("at its deadline" if ending == "deadline" else "heartbeat stale") in outcome["error"]
 
 
 @pytest.mark.parametrize("confirmed_dead", [True, False])
