@@ -146,7 +146,8 @@ PYTHONPATH=src python -m hyperloom.measure.ruppell_stage --archive <tar.gz path 
 ```
 
 `--commit` of the second command defaults to the commit a profile test pins, and `--archive` is `git archive`'s tarball
-of that commit, a file or a URL.
+of that commit, a file or a URL. Run both with `umask 022` too: they create the entry's directories and manifest with
+the process's umask, and the sandbox's account must be able to read them.
 
 On a cluster whose sandboxes mount the shared volume at, say, `/data`, keep the app host's values and set the
 template's `HYPERLOOM_RUNNER_CACHE=/data/hyperloom/runner-cache` (and the mirrors below `/data`).
