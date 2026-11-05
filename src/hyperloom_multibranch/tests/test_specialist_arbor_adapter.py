@@ -446,6 +446,16 @@ def test_a_launch_file_is_served_with_the_recipe_s_launch_added_to_it(tmp_path: 
     assert "bench_command" not in config["component"]
 
 
+def test_a_launch_file_flag_the_recipe_removes_is_not_served(tmp_path: Path) -> None:
+    launch = _launch_file(tmp_path, RESOLVED)
+    spec = _spec(tmp_path, framework="sglang", server_args="", tp=1, client="", launch=launch)
+    spec = replace(spec, remove_args=("--chunked-prefill-size",))
+
+    config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
+
+    assert config["server_flags"] == "--mem-fraction-static 0.8 --tp-size 1"
+
+
 def test_arbor_is_held_to_mb_s_accuracy_floor_unless_the_launch_or_the_recipe_sets_its_own(tmp_path: Path) -> None:
     # Without a floor the serving pack books every iteration whose accuracy it must judge as invalid; MB's eval and the
     # pack's score one model points apart, so the floor is MB's absolute one, not its baseline less its tolerance.

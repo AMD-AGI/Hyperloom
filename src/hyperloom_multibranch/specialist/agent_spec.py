@@ -30,6 +30,7 @@ class AgentSpec:
     the expert-parallel size the workload is served at, and may be given ``plan``, the file of the branch's share of
     the session's directions, ``pack``, the name of the pack it runs (``None`` for the adapter's default),
     ``launch``, the file of the launch the recipe's adds to (``None`` when the recipe's is the whole launch),
+    ``remove_args``, the flags of that launch the recipe removes,
     ``dossier``, the dossier the session's dossier pass wrote, for its checkout (``None`` without one), and
     ``review``, how its review gate is handed over (:data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_HOST`
     when MB reviews before its branches open, :data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_OFF` when
@@ -61,6 +62,7 @@ class AgentSpec:
     dossier: str | None = None
     root_shares_source: str = ROOT_PROFILE_SOURCE
     review: str = ""
+    remove_args: tuple[str, ...] = ()
 
     def to_document(self) -> dict[str, object]:
         return {
