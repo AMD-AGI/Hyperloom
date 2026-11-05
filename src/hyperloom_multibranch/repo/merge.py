@@ -53,7 +53,7 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.framework.rows import cell
 from hyperloom.measure.compile import KernelLoadError, PatchApplyError, kernel_load_env, kernel_rows_only
 from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, ReplacedPatch, RepoMerge, UnitedTable
-from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between, renames
+from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between, renames, rewrites
 from hyperloom_multibranch.toolbox.kernel_artifacts import (
     KernelRowsConflict,
     KernelRowsError,
@@ -114,16 +114,31 @@ class _Settled:
 class _Sides:
     """The files a candidate's patch touches, three ways: ``original`` under the candidate's stack before it,
     ``changed`` with it, and ``current`` under the stack it now lands on, which also holds every file that stack
-    touches. ``moved`` are the files the patch renames to a path the stack leaves empty, each new path with its old.
+    touches. ``renamed`` are the files the patch renames, each new path with its old.
 
-    A rename merges as one file, as git merges it: the new path's base and ours are the old path's, so what the stack
-    changed in the old file lands in the new one, and deleting the old path is no change of its own.
+    A rename of a file the stack keeps onto a path the stack leaves empty (``moved``) merges as one file, as git merges
+    it: the new path's base and ours are the old path's, so what the stack changed in the old file lands in the new
+    one, and deleting the old path is no change of its own. A rename overlaps the stack (``clashing``) where the stack
+    took the old file away and left the new path empty, or kept the old file and filled the new path, as git's
+    rename/delete, rename/rename and rename/add conflicts do.
     """
 
     original: Files
     changed: Files
     current: Files
-    moved: Mapping[str, str] = field(default_factory=dict)
+    renamed: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def moved(self) -> dict[str, str]:
+        return {
+            new: old for new, old in self.renamed.items() if self.current[new] is None and self.current[old] is not None
+        }
+
+    @property
+    def clashing(self) -> frozenset[str]:
+        return frozenset(
+            new for new, old in self.renamed.items() if (self.current[new] is None) == (self.current[old] is None)
+        )
 
     @property
     def base(self) -> Files:
@@ -138,16 +153,18 @@ class _Sides:
         return {**self.current, **{new: self.current[old] for new, old in self.moved.items()}}
 
     def merged(self, paths: Collection[str]) -> dict[str, bytes | None] | None:
-        """``ours`` with the patch's change to ``paths`` merged in; ``None`` when a line overlaps."""
+        """``ours`` with the patch's change to ``paths`` merged in; ``None`` when a line or a rename overlaps."""
+        if not self.clashing.isdisjoint(paths):
+            return None
         return merge_files(self.base, self.ours, {path: self.changed[path] for path in paths})
 
     def units(self) -> list[tuple[str, ...]]:
         """The paths the patch changes, a rename's two paths as one."""
         touched = [path for path, content in self.changed.items() if content != self.original[path]]
         return [
-            (path, self.moved[path]) if path in self.moved else (path,)
+            (path, self.renamed[path]) if path in self.renamed else (path,)
             for path in touched
-            if path not in self.moved.values()
+            if path not in self.renamed.values()
         ]
 
 
@@ -567,8 +584,7 @@ def _sides(stack: ComponentPatches, theirs: ComponentPatches, patch: PatchRef, s
         current = stored.stack_files(stack, changed)
     except PatchApplyError:
         return None
-    moved = renames({path: original[path] for path in changed}, changed)
-    return _Sides(original, changed, current, {new: old for new, old in moved.items() if current[new] is None})
+    return _Sides(original, changed, current, renames({path: original[path] for path in changed}, changed))
 
 
 def _rebased_text(stack: ComponentPatches, sides: _Sides) -> str | None:
@@ -620,23 +636,24 @@ def _replacement(
 
     Two branches that wrote the same lines independently cannot be merged by text, but one version can be picked by
     measurement: the head patch X is taken out with every later patch that applies only on top of it, and ``patch``
-    goes in as it is. That is a replacement only when nothing of X survives on its own: every file must equal, byte for
-    byte, the three-way merge that takes the candidate's side of every overlap. Otherwise both changes are needed
-    together, and the patch stays a conflict for the integrator's resolver. A dependent the candidate brought or a
-    foundation fix contributed is never taken out.
+    goes in as it is. That is a replacement only when nothing of what comes out survives on its own: ``patch`` must
+    change every line those patches changed (``rewrites``), in each file through the rename ``patch`` makes of it.
+    Otherwise both changes are needed together, and the patch stays a conflict for the integrator's resolver. A
+    dependent the candidate brought or a foundation fix contributed is never taken out.
     """
-    wanted = merge_files(sides.base, sides.ours, sides.changed, theirs_wins=True)
-    if wanted is None:
-        return None
+    moves = {old: new for new, old in sides.renamed.items()}
     for head in (head for head in reversed(stack.patches) if head in heads):
         kept = _without_dependents(stack, head, stored)
         if any(gone not in heads for gone in stack.patches if gone not in kept):
             continue
         try:
-            files = stored.stack_files(replace(stack, patches=(*kept, patch)), wanted)
+            before = stored.stack_files(replace(stack, patches=kept), sides.current)
+            after = stored.stack_files(replace(stack, patches=(*kept, patch)), sides.current)
         except PatchApplyError:
             continue
-        if all(files.get(path) == content for path, content in wanted.items()):
+        if all(
+            rewrites(before[path], content, after[moves.get(path, path)]) for path, content in sides.current.items()
+        ):
             return kept
     return None
 
