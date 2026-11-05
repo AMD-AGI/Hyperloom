@@ -567,16 +567,6 @@ async def test_poll_reads_a_files_activity_as_the_reap_loop_does(
     assert {spec.heartbeat_path, spec.workspace / reap_watch.PROCESS_LOG_NAME} <= set(read)
 
 
-async def test_a_failing_heartbeat_sink_does_not_stop_the_session(tmp_path: Path) -> None:
-    def broken(beat) -> None:
-        raise RuntimeError("sink down")
-
-    runner = make_runner(tmp_path / "session")
-    handle = await runner.launch(make_spec(tmp_path / "w", heartbeat_sink=broken))
-    assert (await runner.poll(handle)).state == "running"
-    await stop_and_collect(runner, handle)
-
-
 ECHO_LINES = "import sys\nfor line in sys.stdin:\n    print('got ' + line.strip(), flush=True)\n"
 
 

@@ -136,7 +136,7 @@ Beat = Callable[[], None]
 
 #: Receives the session's ``beat`` at launch. The MCP service calls it periodically while a call made with
 #: that session's token is in flight, so ``poll`` does not judge a session lost while it waits on the call. The reap loop
-#: does not read the beat.
+#: does not read the beat. An error it raises fails the launch, once the CLI it started is ended.
 HeartbeatSink = Callable[[Beat], None]
 
 
@@ -168,7 +168,7 @@ class AgentLaunchSpec:
     backend: str = ""
     """``claude`` or ``codex``; empty infers it from ``argv[0]``."""
     heartbeat_sink: HeartbeatSink | None = None
-    """Called once at launch with the session's ``beat`` function."""
+    """Called once at launch with the session's ``beat`` function; an error it raises fails the launch."""
     stdin_open: bool = False
     """Keep the CLI's stdin open after prompt.md, so :meth:`LocalAgentRunner.send` reaches the same session later; the
     CLI ends once :meth:`LocalAgentRunner.close_stdin` closes it."""
@@ -197,7 +197,8 @@ class AgentRunner(Protocol):
     name: str
 
     def launch(self, spec: AgentLaunchSpec) -> Awaitable[AgentHandle]:
-        """Start the CLI ``spec`` describes and return the handle of its session."""
+        """Start the CLI ``spec`` describes and return the handle of its session. A launch that fails once the CLI has
+        started ends it, and what it started, before the error is raised."""
 
     def poll(self, handle: AgentHandle) -> Awaitable[AgentStatus]:
         """Whether the session is running, has exited, or is lost. A session reads as ended once its CLI's root has
@@ -493,14 +494,15 @@ class LocalAgentRunner:
         except BaseException:
             self._release(claim)
             raise
-        session = self._supervised(spec, backend, spawned, claim)
-        if spec.heartbeat_sink is not None:
-            try:
+        session = self._session(spec, backend, spawned, claim)
+        try:
+            self._write_runtime(session, plugins=None)
+            if spec.heartbeat_sink is not None:
                 spec.heartbeat_sink(lambda: self._beat(session))
-            except Exception:
-                log.exception(
-                    "agent %s: heartbeat sink failed; MCP calls will not keep the session alive", spec.task_id
-                )
+        except BaseException:
+            await self._abandon(session)
+            raise
+        self._supervise_from_now(session)
         return AgentHandle(
             task_id=spec.task_id, pid=spawned.proc.pid, started_unix=session.started_unix, session=session
         )
@@ -520,12 +522,12 @@ class LocalAgentRunner:
         command = argv if run_as is None else run_as.command(argv)
         return _Spawned(self._spawn(spec, command, env, demote), tokens, reap_mark, run_as, version)
 
-    def _supervised(self, spec: AgentLaunchSpec, backend: str, spawned: _Spawned, claim: str | None) -> _Session:
-        """The live session of the CLI just ``spawned``, sampled and supervised from now on."""
+    def _session(self, spec: AgentLaunchSpec, backend: str, spawned: _Spawned, claim: str | None) -> _Session:
+        """The session of the CLI just ``spawned``, not yet supervised."""
         proc = spawned.proc
         started_mono = self._monotonic()
         started_unix = self._wall()
-        session = _Session(
+        return _Session(
             spec=spec,
             backend=backend,
             proc=proc,
@@ -541,14 +543,28 @@ class LocalAgentRunner:
             run_as=spawned.run_as,
             version=spawned.version,
         )
-        self._live[proc.pid] = session
+
+    def _supervise_from_now(self, session: _Session) -> None:
+        """Count ``session`` live, and sample and supervise it from now on."""
+        task_id = session.spec.task_id
+        self._live[session.proc.pid] = session
         session.concurrent_at_start = len(self._live)
         self._max_concurrent = max(self._max_concurrent, len(self._live))
-        self._write_runtime(session, plugins=None)
-        session.sampler_task = asyncio.create_task(self._sample_loop(session), name=f"agent-sampler-{spec.task_id}")
-        session.task = asyncio.create_task(self._supervise(session), name=f"agent-{spec.task_id}")
+        session.sampler_task = asyncio.create_task(self._sample_loop(session), name=f"agent-sampler-{task_id}")
+        session.task = asyncio.create_task(self._supervise(session), name=f"agent-{task_id}")
         session.task.add_done_callback(lambda task: self._on_supervision_done(session, task))
-        return session
+
+    async def _abandon(self, session: _Session) -> None:
+        """End a session whose launch failed after its CLI started, before it was supervised: its tree and every
+        process carrying its reap mark go as at the end of supervision, a beat its sink kept does nothing, and its
+        config dir claim is released as a failed spawn's is."""
+        session.finished_mono = self._monotonic()
+        session.torn_down = True
+        try:
+            await asyncio.to_thread(self._tear_down, session)
+        finally:
+            _close_stdin(session)
+            self._release(session.config_claim)
 
     async def poll(self, handle: AgentHandle) -> AgentStatus:
         session: _Session = handle.session
@@ -729,8 +745,8 @@ class LocalAgentRunner:
             return
         try:
             self._dispatcher._kill(session.proc)
-        except Exception as exc:  # noqa: BLE001 -- the failure is recorded for poll(), the caller decides what to do
-            log.error("agent %s: tree cleanup unconfirmed: %r", session.spec.task_id, exc)
+        except Exception as exc:  # recorded for poll(); the caller decides what to do
+            log.exception("agent %s: tree cleanup unconfirmed: %r", session.spec.task_id, exc)
             session.outcome["error"] = f"{session.outcome.get('error', '')}; tree cleanup unconfirmed: {exc!r}".strip(
                 "; "
             )

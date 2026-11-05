@@ -7,8 +7,10 @@ session ends."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -95,6 +97,30 @@ async def _end(runner, handles: list) -> None:
             await runner.cancel(handle)
             await wait_finished(runner, handle)
             await runner.collect(handle)
+
+
+def _kill_left_unconfirmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tree kill kills, then cannot confirm it, as when a re-parented descendant is out of its reach."""
+    kill = ss.SpecialistSubprocessDispatcher._kill
+
+    def kill_then_doubt(proc: Any) -> bool:
+        kill(proc)
+        raise ss.ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: tree cleanup unconfirmed")
+
+    monkeypatch.setattr(ss.SpecialistSubprocessDispatcher, "_kill", staticmethod(kill_then_doubt))
+
+
+def _fail_the_reaper_once_the_sleep_is_started(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
+    """The reap loop's look (not ``poll``'s) raises once the stand-in CLI has started its sleep."""
+    look = ss.cli_alive
+
+    def look_that_fails(*args: Any, **kwargs: Any) -> bool:
+        pid_file = workspace / "sleep.pid"
+        if pid_file.exists() and pid_file.read_text().strip():
+            raise RuntimeError("the reaper's look failed")
+        return look(*args, **kwargs)
+
+    monkeypatch.setattr(ss, "cli_alive", look_that_fails)
 
 
 @pytest.mark.parametrize("how", ["group", "session", "detached"])
@@ -211,15 +237,7 @@ async def test_what_a_cli_detached_does_not_outlive_a_failed_reap_loop(
     tmp_path: Path, started: _Started, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ws = tmp_path / "w"
-    look = ss.cli_alive
-
-    def look_that_fails_once_the_sleep_is_started(*args: Any, **kwargs: Any) -> bool:
-        pid_file = ws / "sleep.pid"
-        if pid_file.exists() and pid_file.read_text().strip():
-            raise RuntimeError("the reaper's look failed")
-        return look(*args, **kwargs)
-
-    monkeypatch.setattr(ss, "cli_alive", look_that_fails_once_the_sleep_is_started)  # the reap loop's look, not poll's
+    _fail_the_reaper_once_the_sleep_is_started(monkeypatch, ws)
     runner = make_runner(tmp_path / "session")
     handle = await runner.launch(make_spec(ws, code=_cli(ws, "detached", _STAY)))
     try:
@@ -252,3 +270,65 @@ async def test_what_a_cli_detached_does_not_outlive_its_cancelled_supervisor(tmp
             proc.wait()
     assert status.state == "exited" and status.returncode is not None
     assert not running(sleep_pid)
+
+
+async def test_a_tree_kill_left_unconfirmed_at_teardown_is_logged_with_its_traceback(
+    tmp_path: Path, started: _Started, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reap loop fails with the CLI's root still up, so teardown kills its tree, and that kill cannot confirm."""
+    ws = tmp_path / "w"
+    _fail_the_reaper_once_the_sleep_is_started(monkeypatch, ws)
+    _kill_left_unconfirmed(monkeypatch)
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(make_spec(ws, code=_cli(ws, "detached", _STAY)))
+    with caplog.at_level(logging.ERROR, logger=agent_runner.__name__):
+        try:
+            sleep_pid = await started.read(ws)
+            status = await wait_finished(runner, handle)
+            await runner.collect(handle)
+        finally:
+            await _end(runner, [handle])
+    unconfirmed = [r for r in caplog.records if "tree cleanup unconfirmed" in r.getMessage()]
+    assert "tree cleanup unconfirmed" in status.error
+    assert unconfirmed and all(r.exc_info and r.exc_info[0] is ss.ExecutionCleanupUnconfirmed for r in unconfirmed)
+    assert not running(sleep_pid)
+
+
+async def test_a_failed_heartbeat_sink_fails_the_launch_and_leaves_nothing_running(
+    tmp_path: Path, started: _Started
+) -> None:
+    """The sink fails once the CLI has detached its sleep: the launch raises the sink's error, and the CLI, what it
+    detached, its beat and its claim on the config dir end with it, as when the spawn itself fails."""
+    ws = tmp_path / "w"
+    pid_file = ws / "sleep.pid"
+    clis: list[subprocess.Popen] = []
+    beats: list = []
+
+    def popen(*args: Any, **kwargs: Any) -> subprocess.Popen:
+        clis.append(subprocess.Popen(*args, **kwargs))
+        return clis[-1]
+
+    def sink_down(beat: Any) -> None:
+        beats.append(beat)
+        end = time.monotonic() + 20.0
+        while not (pid_file.exists() and pid_file.read_text().strip()):
+            assert time.monotonic() < end, "the stand-in CLI did not start its sleep"
+            time.sleep(0.02)
+        raise RuntimeError("sink down")
+
+    runner = make_runner(tmp_path / "session", popen=popen)
+    try:
+        with pytest.raises(RuntimeError, match="sink down"):
+            await runner.launch(make_spec(ws, code=_cli(ws, "detached", _STAY), heartbeat_sink=sink_down))
+        sleep_pid = await started.read(ws)
+        assert clis[0].poll() is not None and not running(sleep_pid)
+        beats[0]()
+        assert not (ws / "heartbeat.json").exists()
+        handle = await runner.launch(make_spec(ws, code=_STAY))  # the config dir is free, and nothing else is live
+        await _end(runner, [handle])
+        assert handle.session.concurrent_at_start == 1
+    finally:
+        for cli in clis:
+            if cli.poll() is None:
+                cli.kill()
+                cli.wait()
