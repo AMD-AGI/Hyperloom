@@ -62,7 +62,6 @@ from hyperloom_common.fs_utils import read_text_nofollow, write_text_nofollow
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom.orchestrator.specialists.agent_runner import (
-    PROCESS_LOG,
     STATE_LOST,
     AgentEnded,
     AgentHandle,
@@ -73,6 +72,7 @@ from hyperloom.orchestrator.specialists.agent_runner import (
     InteractiveAgentRunner,
     McpEndpoint,
 )
+from hyperloom.orchestrator.specialists.reap_watch import PROCESS_LOG_NAME
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
@@ -162,7 +162,7 @@ _SHARED_MODE = 0o644
 
 def _keep_process_log(workspace: Path) -> None:
     """Move the previous launch's stream to the next numbered sibling, counting on from those already there."""
-    log = workspace / PROCESS_LOG
+    log = workspace / PROCESS_LOG_NAME
     if not log.exists():
         return
     stem, suffix = log.stem, log.suffix
@@ -456,7 +456,7 @@ class AgentSession:
         clock, started = self._setup.clock, self._setup.clock()
         self._recorded = {}
         if self._setup.command.interactive:
-            launch.turns = TurnLog(self._place.workspace / PROCESS_LOG)
+            launch.turns = TurnLog(self._place.workspace / PROCESS_LOG_NAME)
         handle = self._handle = await self._setup.runner.launch(spec)
         self._adopt(handle, spec.argv)
         status = await self._converse(handle, launch)
@@ -526,7 +526,7 @@ class AgentSession:
         try:
             return _CliState.parse(json.loads(read_text_nofollow(path)))
         except FileNotFoundError:
-            if (workspace / PROCESS_LOG).exists():
+            if (workspace / PROCESS_LOG_NAME).exists():
                 logger.warning("%s has no conversation record after a launch; a fresh session starts", workspace)
             return None
         except (OSError, ValueError, TypeError):
@@ -835,7 +835,7 @@ class AgentSession:
 
     async def _record_cost(self) -> None:
         """Record what the launch used since its last record."""
-        used = await asyncio.to_thread(launch_usage, self._place.workspace / PROCESS_LOG)
+        used = await asyncio.to_thread(launch_usage, self._place.workspace / PROCESS_LOG_NAME)
         added = {
             model: _less(counts, self._recorded.get(model, TokenCounts())) for model, counts in used.tokens.items()
         }
