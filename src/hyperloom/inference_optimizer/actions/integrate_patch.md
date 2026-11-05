@@ -68,8 +68,8 @@ delegate{
    so far: first `git apply -3` (strategy `three_way`), then both sides
    of every conflict region whose merge base is empty (strategy
    `union_disjoint`). A union must keep every line the patch adds and,
-   in a `.py` file, parse and define no module-level name more often
-   than HEAD does. A merged patch is benched like any other and listed
+   in a `.py` file, parse and define no module-level name twice unless
+   HEAD already does. A merged patch is benched like any other and listed
    under `patches_merged`. A region where both sides changed the same
    lines is declined, never resolved: the files the merge touched are
    restored to HEAD and the round ends `apply_failed`, its `error`
