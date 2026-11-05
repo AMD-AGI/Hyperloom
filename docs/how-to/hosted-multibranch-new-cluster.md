@@ -56,8 +56,8 @@ that same path.
 
 Only a session that lends dev sandboxes (`multibranch.dev_leases`, `--dev-leases`) or runs autonomous agents
 (`multibranch.autonomous_agents`, `--autonomous-agent`) uses the `dev` template; it then also needs the grant's `dev` key
-(`HYPERLOOM_SANDBOX_KEY_DEV`), and refuses to start without it, and a `dev` template of the session's TP in
-`HYPERLOOM_SANDBOX_TEMPLATES`. The session runs only processes in a `dev` sandbox: their
+(`HYPERLOOM_SANDBOX_KEY_DEV`) and its limits (`HYPERLOOM_GRANT_LIMITS`), and refuses to start without them, and a `dev`
+template of the session's TP in `HYPERLOOM_SANDBOX_TEMPLATES`. The session runs only processes in a `dev` sandbox: their
 files stay in the session directory, so the template must mount the storage `USER_DATA_PATH` is on at the same path, read
 and write, and the model at the path the campaign spec names. The sandbox's commands run as root and are given the app
 host's LLM gateway variables (`ANTHROPIC_*`, `OPENAI_*`) and its CA bundle variables (`SSL_CERT_FILE` and the like), whose
