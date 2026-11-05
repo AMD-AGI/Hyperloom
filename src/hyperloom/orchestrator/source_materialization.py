@@ -21,6 +21,12 @@ from typing import Any
 from hyperloom_common.git_safety import safe_directory_args
 
 SCHEMA_VERSION = 1
+_GIT_BLOB = "blob"
+_PYTHON_SUFFIX = ".py"
+_DELETE_OPERATION = "delete"
+_BYTECODE_SUFFIX = ".pyc"
+_CORRUPT_MATERIALIZATION = "corrupt_materialization"
+_MANIFEST_NAME = "manifest.json"
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 _NATIVE_SUFFIXES = {".so", ".pyd", ".dll", ".dylib", ".a", ".o", ".co", ".hsaco"}
 
@@ -81,7 +87,7 @@ def _tree(root: Path, commit: str) -> tuple[dict[str, tuple[str, str]], list[str
         header, raw_path = record.split(b"\t", 1)
         mode, kind, object_id = header.decode().split()
         path = _relative(raw_path.decode())
-        if kind != "blob" or mode not in ("100644", "100755"):
+        if kind != _GIT_BLOB or mode not in ("100644", "100755"):
             unsupported.append(path)
         else:
             entries[path] = (mode, object_id)
@@ -93,7 +99,7 @@ def _module(path: str, prefix: str, tree: Mapping[str, Any], *, deleted: bool = 
         relative = PurePosixPath(path).relative_to(prefix or ".")
     except ValueError as exc:
         raise SourceMaterializationError("path_outside_import_root", path) from exc
-    if relative.suffix != ".py":
+    if relative.suffix != _PYTHON_SUFFIX:
         raise SourceMaterializationError("unsupported_runtime_change", path)
     parts = list(relative.with_suffix("").parts)
     if not all(part.isidentifier() for part in parts):
@@ -124,7 +130,7 @@ def _verify_artifact_coverage(entry: Mapping[str, Any], extra: Mapping[str, Any]
 
 
 def _snapshot_manifest(entry: Mapping[str, Any], snapshot: Path, layer_id: str) -> dict[str, Any]:
-    manifest = json.loads(_regular(snapshot / "manifest.json", snapshot))
+    manifest = json.loads(_regular(snapshot / _MANIFEST_NAME, snapshot))
     if (
         not isinstance(manifest, dict)
         or type(manifest.get("schema_version")) is not int
@@ -175,15 +181,15 @@ def _snapshot_operations(layer: Mapping[str, Any], rows: Any, snapshot: Path) ->
             raise SourceMaterializationError("invalid_snapshot", layer_id)
         path = _relative(row.get("rel") or "")
         op = row.get("op")
-        if path in operations or op not in ("upsert", "delete"):
+        if path in operations or op not in ("upsert", _DELETE_OPERATION):
             raise SourceMaterializationError("invalid_snapshot_operation", path)
-        _module(path, prefix, tree, deleted=op == "delete")
-        if op == "delete":
+        _module(path, prefix, tree, deleted=op == _DELETE_OPERATION)
+        if op == _DELETE_OPERATION:
             if path in tree:
                 raise SourceMaterializationError("deletion_commit_mismatch", path)
         else:
             content = _regular(snapshot / "files" / path, snapshot)
-            if path not in tree or content != _git(root, "cat-file", "blob", tree[path][1]):
+            if path not in tree or content != _git(root, "cat-file", _GIT_BLOB, tree[path][1]):
                 raise SourceMaterializationError("payload_commit_mismatch", path)
         operations[path] = op
     return operations
@@ -213,7 +219,7 @@ def _export(root: Path, tree: Mapping[str, tuple[str, str]], destination: Path) 
     blobs = io.BytesIO(_git(root, "cat-file", "--batch", input_data=queries))
     for relative, (mode, object_id) in tree.items():
         header = blobs.readline().decode().split()
-        if len(header) != 3 or header[:2] != [object_id, "blob"]:
+        if len(header) != 3 or header[:2] != [object_id, _GIT_BLOB]:
             raise SourceMaterializationError("missing_git_payload", relative)
         size = int(header[2])
         content = blobs.read(size)
@@ -234,7 +240,11 @@ def _in_import_scope(path: str, prefix: str) -> bool:
         return path == prefix or path.startswith(prefix + "/") or prefix.startswith(path + "/")
     # A repo-root PYTHONPATH exposes modules/packages, not ancillary dot/tool directories.
     owner = PurePosixPath(path).parts[0]
-    return owner.isidentifier() or _native(owner) or PurePosixPath(owner).suffix in {".py", ".pyc", ".pyo"}
+    return (
+        owner.isidentifier()
+        or _native(owner)
+        or PurePosixPath(owner).suffix in {_PYTHON_SUFFIX, _BYTECODE_SUFFIX, ".pyo"}
+    )
 
 
 def _check_untracked_runtime(root: Path, group: list[dict[str, Any]]) -> None:
@@ -243,7 +253,7 @@ def _check_untracked_runtime(root: Path, group: list[dict[str, Any]]) -> None:
         for raw in _git(root, "ls-files", *flags, "--exclude-standard", "-z", "--", *prefixes).split(b"\0"):
             if raw:
                 path = PurePosixPath(raw.decode())
-                if path.parent.name != "__pycache__" or path.suffix != ".pyc":
+                if path.parent.name != "__pycache__" or path.suffix != _BYTECODE_SUFFIX:
                     raise SourceMaterializationError("unsupported_untracked_runtime", str(path))
 
 
@@ -274,8 +284,8 @@ def _record_effective_modules(
         effective.update({path: (op, layer["prefix"]) for path, op in layer["ops"].items()})
     for path, (op, prefix) in sorted(effective.items()):
         relative = f"{root_rel}/{path}"
-        name = _module(path, prefix, latest["tree"], deleted=op == "delete")
-        if op == "delete":
+        name = _module(path, prefix, latest["tree"], deleted=op == _DELETE_OPERATION)
+        if op == _DELETE_OPERATION:
             if (staging / relative).exists():
                 raise SourceMaterializationError("deletion_commit_mismatch", path)
             manifest["deleted_paths"].append(relative)
@@ -354,7 +364,7 @@ def _check_import_candidates(prefixes: list[str], files: Mapping[str, Any]) -> N
             parts = path[len(prefix) + 1 :].split("/")
             if parts[0].split(".")[0] in ("sitecustomize", "usercustomize"):
                 raise SourceMaterializationError("unsupported_startup_hook", prefix)
-            name = parts[0] if len(parts) > 1 else PurePosixPath(parts[0]).stem if path.endswith(".py") else ""
+            name = parts[0] if len(parts) > 1 else PurePosixPath(parts[0]).stem if path.endswith(_PYTHON_SUFFIX) else ""
             if name.isidentifier() and candidates.setdefault(name, prefix) != prefix:
                 raise SourceMaterializationError("ambiguous_import_roots", name)
 
@@ -364,9 +374,9 @@ def _check_package_files(owner: str, prefix: str, files: Mapping[str, Any], dele
     for path in files:
         if not path.startswith(f"{prefix}/{owner}/"):
             continue
-        if _native(path) or PurePosixPath(path).suffix.lower() in (".pyc", ".pyo"):
+        if _native(path) or PurePosixPath(path).suffix.lower() in (_BYTECODE_SUFFIX, ".pyo"):
             raise SourceMaterializationError("unsupported_native_runtime", path)
-        if path.endswith(".py"):
+        if path.endswith(_PYTHON_SUFFIX):
             name = _module(path, prefix, files)
             if name in module_paths or name in deleted:
                 raise SourceMaterializationError("ambiguous_module_ownership", name)
@@ -394,23 +404,23 @@ def _validate_import_ownership(manifest: Mapping[str, Any]) -> None:
 def _verify_cached_bundle(destination: Path, manifest: Mapping[str, Any], content: bytes) -> None:
     nodes = list(destination.rglob("*"))
     if destination.is_symlink() or any(path.is_symlink() for path in nodes):
-        raise SourceMaterializationError("corrupt_materialization", str(destination))
+        raise SourceMaterializationError(_CORRUPT_MATERIALIZATION, str(destination))
     existing = {p.relative_to(destination).as_posix(): p for p in nodes if not p.is_dir()}
-    expected = {row["path"] for row in manifest["files"]} | {"manifest.json"}
+    expected = {row["path"] for row in manifest["files"]} | {_MANIFEST_NAME}
     directories = {
         parent.as_posix() for name in expected for parent in PurePosixPath(name).parents if parent.as_posix() != "."
     }
     if {p.relative_to(destination).as_posix() for p in nodes if p.is_dir()} != directories:
-        raise SourceMaterializationError("corrupt_materialization", str(destination))
-    if set(existing) != expected or _regular(destination / "manifest.json", destination) != content:
-        raise SourceMaterializationError("corrupt_materialization", str(destination))
+        raise SourceMaterializationError(_CORRUPT_MATERIALIZATION, str(destination))
+    if set(existing) != expected or _regular(destination / _MANIFEST_NAME, destination) != content:
+        raise SourceMaterializationError(_CORRUPT_MATERIALIZATION, str(destination))
     for row in manifest["files"]:
         path = existing[row["path"]]
         if (
             hashlib.sha256(_regular(path, destination)).hexdigest() != row["sha256"]
             or path.stat().st_mode & 0o777 != row["mode"]
         ):
-            raise SourceMaterializationError("corrupt_materialization", row["path"])
+            raise SourceMaterializationError(_CORRUPT_MATERIALIZATION, row["path"])
 
 
 def materialize_source_stack(current_best: Mapping[str, Any], output_dir: Path) -> dict[str, Any] | None:
@@ -442,7 +452,7 @@ def materialize_source_stack(current_best: Mapping[str, Any], output_dir: Path) 
         manifest = _assemble(layers, staging)
         content = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
         digest = hashlib.sha256(content).hexdigest()
-        (staging / "manifest.json").write_bytes(content)
+        (staging / _MANIFEST_NAME).write_bytes(content)
         destination = output_dir / digest
         if destination.exists():
             _verify_cached_bundle(destination, manifest, content)
@@ -453,7 +463,7 @@ def materialize_source_stack(current_best: Mapping[str, Any], output_dir: Path) 
             "schema_version": SCHEMA_VERSION,
             "status": "ready",
             "bundle_root": str(destination.resolve()),
-            "manifest_path": "manifest.json",
+            "manifest_path": _MANIFEST_NAME,
             "manifest_sha256": digest,
             "required_layer_ids": ids,
             "pythonpath_prefixes": manifest["pythonpath_prefixes"],

@@ -20,6 +20,7 @@ from typing import IO
 from hyperloom.common.proctree import signal_group
 
 _TAIL_CHARS = 4000
+_ERROR_STATUS = "error"
 
 
 def _tail(stream: IO[bytes]) -> str:
@@ -65,13 +66,13 @@ def _source_reader_error(handoff: dict, runner: str) -> dict | None:
     baseline = handoff.get("baseline_env_spec") or {}
     if baseline.get("source_snapshots") and "source_materialization" not in baseline:
         return {
-            "status": "error",
+            "status": _ERROR_STATUS,
             "error_class": "unresolved_baseline_source",
             "error": "Accepted source layers require a complete source materialization before GEAK launches",
         }
     if "source_materialization" in baseline and not _supports_source_materialization(Path(runner)):
         return {
-            "status": "error",
+            "status": _ERROR_STATUS,
             "error_class": "unsupported_source_materialization_reader",
             "error": "GEAK must advertise SOURCE_MATERIALIZATION_SCHEMA_VERSION = 1 for accepted source trees",
         }
@@ -131,7 +132,7 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int) -> dict:
             pass
     if not result:
         result = {
-            "status": "error",
+            "status": _ERROR_STATUS,
             "error": f"no parseable result.json (rc={returncode})",
         }
     result.update(
@@ -189,7 +190,7 @@ def main(argv: list[str]) -> int:
             }
         )
     )
-    return 0 if out.get("status") not in ("error", None) else 1
+    return 0 if out.get("status") not in (_ERROR_STATUS, None) else 1
 
 
 if __name__ == "__main__":
