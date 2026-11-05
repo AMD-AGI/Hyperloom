@@ -175,7 +175,10 @@ class ProcessRegistry:
 
     async def _kill(self, registered: Sequence[ProcessRecord], extra: Sequence[int] = ()) -> bool:
         gone = await asyncio.to_thread(_kill_trees, tuple(registered), tuple(extra))
-        self._registered = list(await asyncio.to_thread(_alive, tuple(self._registered)))
+        scanned = tuple(self._registered)
+        # A process adopted while the scan runs is not in it and must stay registered.
+        dead = set(scanned) - set(await asyncio.to_thread(_alive, scanned))
+        self._registered = [r for r in self._registered if r not in dead]
         return gone
 
 
