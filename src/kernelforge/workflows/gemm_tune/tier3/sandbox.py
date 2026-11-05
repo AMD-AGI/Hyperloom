@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import resource
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Iterator
 from typing import Any
 
 from ..utils import cap_build_parallelism
@@ -20,6 +23,25 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 1800
 _TAIL_CHARS = 4000
+# A candidate that faults the GPU makes ROCr dump the process's GPU memory into the cwd (35 GB in one run). ROCr reads
+# this flag once at runtime load and also skips the dump whenever RLIMIT_CORE's soft limit is 0 at fault time.
+NO_GPU_COREDUMP_ENV = {"HSA_DISABLE_COREDUMP_ON_EXCEPTION": "1"}
+
+
+def _forbid_core_dumps() -> None:
+    # Hard limit too, so a generated script cannot raise it back for its workers.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+@contextlib.contextmanager
+def core_dumps_off() -> Iterator[None]:
+    """Turn core dumps off in this process for candidates launched in-process, then restore the soft limit."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_CORE, (soft, hard))
 
 
 @dataclass
@@ -54,6 +76,24 @@ class SandboxLimits:
     env_overrides: dict[str, str] | None = None
 
 
+def _sandbox_env(limits: SandboxLimits) -> dict[str, str]:
+    env = dict(os.environ)
+    env.update(
+        {
+            "HIP_VISIBLE_DEVICES": limits.gpu_id,
+            "CUDA_VISIBLE_DEVICES": limits.gpu_id,
+            # A generated script has no business reaching the network, and saying so costs nothing even though it is
+            # not enforcement.
+            "no_proxy": "*",
+        }
+    )
+    env.update(limits.env_overrides or {})
+    env.update(NO_GPU_COREDUMP_ENV)
+    # Preserve caller overrides while bounding compiler memory for the one-shot sandbox run.
+    cap_build_parallelism(env)
+    return env
+
+
 def run_generated_tuner(
     script: Path,
     work_dir: Path,
@@ -71,19 +111,7 @@ def run_generated_tuner(
         except OSError as exc:
             log.warning("could not clear %s before the sandbox run: %s", path, exc)
 
-    env = dict(os.environ)
-    env.update(
-        {
-            "HIP_VISIBLE_DEVICES": limits.gpu_id,
-            "CUDA_VISIBLE_DEVICES": limits.gpu_id,
-            # A generated script has no business reaching the network, and saying so costs nothing even though it is
-            # not enforcement.
-            "no_proxy": "*",
-        }
-    )
-    env.update(limits.env_overrides or {})
-    # Preserve caller overrides while bounding compiler memory for the one-shot sandbox run.
-    cap_build_parallelism(env)
+    env = _sandbox_env(limits)
 
     log_path = work_dir / "sandbox.log"
     started = time.perf_counter()
@@ -99,6 +127,7 @@ def run_generated_tuner(
                 stderr=subprocess.STDOUT,
                 timeout=limits.timeout_s,
                 check=False,
+                preexec_fn=_forbid_core_dumps,
             )
         rc = proc.returncode
     except subprocess.TimeoutExpired:

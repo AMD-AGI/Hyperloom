@@ -14,6 +14,7 @@ import pytest
 
 from kernelforge.workflows.gemm_tune import utils
 from kernelforge.workflows.gemm_tune.tier3 import gate, ledger, sandbox
+from kernelforge.workflows.gemm_tune.tier3 import runner as runner_mod
 from kernelforge.workflows.gemm_tune.tier3.coverage import CoverageGap
 from kernelforge.workflows.gemm_tune.tier3.referee import CaptureFailed
 from kernelforge.workflows.gemm_tune.tier3.runner import Retiming, Tier3Target, attempt_generated_tuner
@@ -196,6 +197,37 @@ open({str(out)!r}, "w").write(os.environ.get("MAX_JOBS", "?"))
             script, tmp_path, expect=[out], limits=sandbox.SandboxLimits(timeout_s=60, env_overrides={"MAX_JOBS": "8"})
         )
         assert out.read_text(encoding="utf-8") == "8"
+
+    def test_the_script_and_its_workers_cannot_write_core_dumps(self, tmp_path, monkeypatch):
+        # A candidate that faults the GPU makes ROCr dump its memory into the cwd; one run left 35 GB there.
+        monkeypatch.delenv("HSA_DISABLE_COREDUMP_ON_EXCEPTION", raising=False)
+        out = tmp_path / "core.json"
+        script = self._script(
+            tmp_path,
+            f"""
+import json, os, resource, subprocess, sys
+worker = subprocess.run(
+    [sys.executable, "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_CORE)[0])"],
+    capture_output=True, text=True, check=True,
+)
+json.dump(
+    {{
+        "env": os.environ.get("HSA_DISABLE_COREDUMP_ON_EXCEPTION"),
+        "core": list(resource.getrlimit(resource.RLIMIT_CORE)),
+        "worker_core": int(worker.stdout),
+    }},
+    open({str(out)!r}, "w"),
+)
+""",
+        )
+        sandbox.run_generated_tuner(
+            script,
+            tmp_path,
+            expect=[out],
+            limits=sandbox.SandboxLimits(timeout_s=60, env_overrides={"HSA_DISABLE_COREDUMP_ON_EXCEPTION": "0"}),
+        )
+        seen = json.loads(out.read_text(encoding="utf-8"))
+        assert seen == {"env": "1", "core": [0, 0], "worker_core": 0}
 
 
 class TestLedger:
@@ -575,6 +607,7 @@ class TestTheWholeChain:
         correct=True,
         with_dispatch=True,
         uncapturable_shapes=(),
+        write_table=None,
     ):
         _, _, fake_gen = self._writes(tmp_path, rows, cands)
         monkeypatch.setattr("kernelforge.workflows.gemm_tune.tier3.runner.generate_tuner", fake_gen)
@@ -604,6 +637,7 @@ class TestTheWholeChain:
                 make_baseline=_baseline,
                 make_dispatch=lambda shape: lambda c: _call(dispatch_cost),
                 make_correctness=lambda shape: lambda call: correct,
+                write_table=write_table or self._one_row_per_win,
             )
         return attempt_generated_tuner(
             gate.should_generate([_gap()]),
@@ -613,12 +647,35 @@ class TestTheWholeChain:
             retiming=retiming,
         )
 
+    @staticmethod
+    def _one_row_per_win(judgements, shapes, path):
+        wins = [j.shape for j in judgements if j.improved]
+        path.write_text("shape\n" + "".join(f"{w}\n" for w in wins), encoding="utf-8")
+        return len(wins)
+
     def test_a_genuinely_faster_candidate_passes(self, tmp_path, monkeypatch, open_gate):
         out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS)
         assert out.stage == "referee" and out.ok
         assert out.improved_shapes == 1
+        # The deployable file is the table the adapter wrote, not the generated script's report.
+        assert Path(out.output_csv).name == "odd.csv"
+        assert Path(out.output_csv).read_text(encoding="utf-8") == "shape\n16x1536x7168\n"
         # Recorded, but still a candidate until a person says otherwise.
         assert not out.operator_signed
+
+    def test_a_win_no_table_row_can_express_is_not_deployable(self, tmp_path, monkeypatch, open_gate):
+        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, write_table=lambda j, s, p: 0)
+        assert out.improved_shapes == 1
+        assert not out.ok and not out.output_csv
+        assert "none of them is expressible" in out.reason
+
+    def test_a_table_that_cannot_be_written_is_a_reason_not_a_crash(self, tmp_path, monkeypatch, open_gate):
+        def unwritable(judgements, shapes, path):
+            raise FileNotFoundError("aiter is not installed")
+
+        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, write_table=unwritable)
+        assert not out.ok and not out.output_csv
+        assert "aiter is not installed" in out.reason
 
     def test_the_scripts_own_claim_does_not_survive_re_timing(self, tmp_path, monkeypatch, open_gate):
         # Its CSV says 2x. Our clock says it is slower.
@@ -671,6 +728,23 @@ class TestTheWholeChain:
         )
         assert not out.attempted and out.stage == "gate"
 
+    def test_the_referee_re_times_with_core_dumps_off_and_restores_the_limit(self, tmp_path, monkeypatch, open_gate):
+        # The referee launches candidates in this process; ROCr checks RLIMIT_CORE when it is about to dump.
+        import resource
+
+        before = resource.getrlimit(resource.RLIMIT_CORE)
+        seen = []
+        real_judge = runner_mod.judge_candidates
+
+        def _judge(*args, **kwargs):
+            seen.append(resource.getrlimit(resource.RLIMIT_CORE)[0])
+            return real_judge(*args, **kwargs)
+
+        monkeypatch.setattr(runner_mod, "judge_candidates", _judge)
+        self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS)
+        assert seen == [0]
+        assert resource.getrlimit(resource.RLIMIT_CORE) == before
+
     def test_the_outcome_is_written_where_a_human_can_read_it(self, tmp_path, monkeypatch, open_gate):
         self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS)
         written = list((tmp_path / "tier3").rglob("outcome.json"))
@@ -690,3 +764,106 @@ def test_the_generator_degrades_when_no_agent_provider_is_installed(tmp_path, mo
     result = generate_tuner(m, tmp_path)
     assert not result.ok
     assert "no agent provider" in result.reason or "unusable" in result.reason
+
+
+class TestTheDeployedBf16TableIsAnAiterTable:
+    """What tier3 hands to ``AITER_CONFIG_GEMM_BF16`` is read by aiter, so it must be aiter's schema."""
+
+    _KEY = ("gfx", "cu_num", "M", "N", "K", "bias", "dtype", "outdtype", "scaleAB", "bpreshuffle")
+
+    @staticmethod
+    def _aiter_bf16_header() -> list[str]:
+        import importlib.util
+
+        spec = importlib.util.find_spec("aiter")
+        if spec is None or not spec.submodule_search_locations:
+            pytest.skip("aiter is not installed")
+        table = Path(next(iter(spec.submodule_search_locations))) / "configs" / "bf16_tuned_gemm.csv"
+        return table.read_text(encoding="utf-8").splitlines()[0].split(",")
+
+    def test_a_verified_hipblaslt_win_lands_as_a_row_aiter_can_look_up(self, tmp_path, monkeypatch):
+        pd = pytest.importorskip("pandas")
+        from kernelforge.workflows.gemm_tune import evidence, pipeline
+        from kernelforge.workflows.gemm_tune.tier3 import dispatch
+
+        header = self._aiter_bf16_header()
+        monkeypatch.setenv(gate.ALLOW_ENV, "*")
+        monkeypatch.delenv(ledger.TRUST_ENV, raising=False)
+        report = evidence.parse_log(
+            "[aiter] shape is M:16, N:151936, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' "
+            "bias=False, scaleAB=False, bpreshuffle=False, "
+            "not found tuned config in /tmp/aiter_configs/bf16_tuned_gemm.csv, will use default config!"
+        )
+        demand_json = evidence.write_demand(report, tmp_path / "demand.json")
+        shape = "16x151936x4096"
+        contract_rows = (
+            "M,N,K,dtype,otype,bias,scaleAB,bpreshuffle,backend,config,default_us,tuned_us,improved\n"
+            "16,151936,4096,torch.bfloat16,torch.bfloat16,False,False,False,hipblaslt,solidx=7,40.0,30.0,True\n"
+        )
+
+        def fake_generate(mandate, work_dir, **kw):
+            from kernelforge.workflows.gemm_tune.tier3.generate import GeneratedTuner
+
+            script = work_dir / "tuner.py"
+            script.write_text("# generated\n", encoding="utf-8")
+            Path(mandate.output_csv).write_text(contract_rows, encoding="utf-8")
+            Path(mandate.candidates_json).write_text(
+                json.dumps({shape: [{"backend": "hipblaslt", "config": "solidx=7"}]}), encoding="utf-8"
+            )
+            return GeneratedTuner(True, script, "", "fake", "s1")
+
+        monkeypatch.setattr("kernelforge.workflows.gemm_tune.tier3.runner.generate_tuner", fake_generate)
+        monkeypatch.setattr(
+            "kernelforge.workflows.gemm_tune.tier3.runner.run_generated_tuner",
+            lambda script, wd, **kw: sandbox.SandboxResult(True, 0, 1.0, produced=[str(p) for p in kw["expect"]]),
+        )
+        now = {"t": 0.0}
+        monkeypatch.setattr("kernelforge.workflows.gemm_tune.tier3.referee.time.perf_counter", lambda: now["t"])
+
+        def costs(seconds):
+            def call():
+                now["t"] += seconds
+
+            return call
+
+        class OffGpuAdapter(dispatch._Bf16DenseAdapter):
+            """The real adapter, with only the GPU work replaced by a clock."""
+
+            def make_baseline(self, shape):
+                return costs(40e-6 * dispatch.GRAPH_INNER)
+
+            def make_dispatch(self, shape):
+                return lambda cand: costs(30e-6 * dispatch.GRAPH_INNER)
+
+            def make_correctness(self, shape):
+                return lambda call: True
+
+            def sync(self):
+                return lambda: None
+
+            def _gfx(self):
+                return "gfx950"
+
+            def _cu_num(self):
+                return 256
+
+        monkeypatch.setattr(dispatch, "adapters_for", lambda table: OffGpuAdapter())
+
+        gap = _gap(table="bf16_tuned_gemm.csv")
+        gap.key_schema = list(evidence.TABLE_KEY_SCHEMA["bf16_tuned_gemm.csv"])
+        result = pipeline._attempt_tier3(
+            [gap],
+            SimpleNamespace(
+                profile=None, output_dir=tmp_path, demand_json=demand_json, gpu_type="MI355X", framework="sglang"
+            ),
+        )
+
+        assert result is not None and result.status == "ok", result
+        assert result.env_value == result.artifact_path
+        with open(result.artifact_path, encoding="utf-8") as fh:
+            assert fh.readline().strip().split(",") == header
+        # The lookup aiter's get_GEMM_A16W16_config_ builds, keyed the way gemm_a16w16 asks.
+        table = pd.read_csv(result.artifact_path).drop_duplicates().set_index(list(self._KEY)).to_dict("index")
+        row = table[("gfx950", 256, 16, 151936, 4096, False, "torch.bfloat16", "torch.bfloat16", False, False)]
+        assert row["libtype"] == "hipblaslt" and row["solidx"] == 7
+        assert row["us"] == pytest.approx(30.0)

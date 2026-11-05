@@ -39,6 +39,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
+    _map_native_capture,
+    _record_workspace_traces,
     _sanitize_profile_server_args,
     _trace_rank,
     _trace_files_for_dir,
@@ -1248,7 +1250,8 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     size fallback over a small trace.
     """
     from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
-    from hyperloom.orchestrator.trace_analysis._trace_reader import _trace_candidates, resolve_trace_file
+    from hyperloom.orchestrator.trace_analysis._trace_inputs import discover_trace_inputs
+    from hyperloom.orchestrator.trace_analysis._trace_reader import _trace_candidates
 
     # A lone unranked trace: the certificate must not become a second candidate beside it.
     single = tmp_path / "single" / "torch_trace"
@@ -1274,7 +1277,7 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
 
     assert Path(tiny_cert).stat().st_size > tiny.stat().st_size
     assert _trace_candidates(tiny_dir) == [tiny]
-    assert resolve_trace_file(tiny_dir) == tiny
+    assert discover_trace_inputs(tiny_dir).files == [tiny]
 
     # One workspace can certify more than one trace dir; the names must not collide.
     other = tmp_path / "single" / "capture_traces"
@@ -3900,6 +3903,25 @@ def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tm
     assert chunk not in found, "trace_split chunks must be excluded"
     assert sidecar not in found, "capture_traces sidecars must stay excluded"
     assert found[0] == capture
+
+
+@pytest.mark.parametrize("entry", ["workspace", "native"])
+def test_certificate_selects_the_trace_profile_hands_the_analysis(tmp_path, entry):
+    trace_dir = tmp_path / "torch_trace"
+    if entry == "workspace":
+        _gz_trace(trace_dir / "merged-a.trace.json.gz", 32)
+        _gz_trace(trace_dir / "merged-b.trace.json.gz", 40_000)
+        result: dict = {}
+        _record_workspace_traces(result, str(tmp_path), "sglang", None)
+    else:
+        files = [
+            _gz_trace(trace_dir / "rank_0.trace.json.gz", 32),
+            _gz_trace(trace_dir / "merged-all.trace.json.gz", 40_000),
+        ]
+        capture = {"capture_id": "c0", "trace_files": [str(p) for p in files]}
+        result = _map_native_capture(capture, {"framework": "sglang", "tp": 2})
+
+    assert result["trace_validate"]["trace_dir_level"]["selected_path"] == result["main_trace_path"]
 
 
 def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):

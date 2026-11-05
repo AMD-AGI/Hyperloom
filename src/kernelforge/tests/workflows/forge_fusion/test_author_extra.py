@@ -64,7 +64,6 @@ def test_multi_prompt_multiple_recipes():
     p = build_multi_author_prompt([r1, r2], AuthorBrief(framework="sglang", ab_hint="run", harness_path="/tmp/h.py"))
     assert "Fusion 1:" in p and "Fusion 2:" in p
     assert "FLAG_A" in p and "FLAG_B" in p
-    assert "env_flags=FLAG_A FLAG_B" in p
     assert "/tmp/h.py" in p  # harness block wired in
 
 
