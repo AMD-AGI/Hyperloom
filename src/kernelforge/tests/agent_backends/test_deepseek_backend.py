@@ -23,6 +23,7 @@ from kernelforge.agent_backends.deepseek import (
     resolve_deepseek_reasoning_effort,
 )
 from kernelforge.agent_backends.registry import get_agent_provider
+from kernelforge.agent_backends.structured_output import AgentAnswer, schema_instruction
 from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
 from kernelforge.agent_backends.usage import UsageAccumulator
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
@@ -207,6 +208,24 @@ def test_run_sends_the_system_prompt_with_the_task_and_names_the_route(tmp_path:
     assert "Optimize the kernel." in prompt
     assert "Make the change now." in prompt
     assert session_id == result.session_id
+
+
+class _Findings(AgentAnswer):
+    findings: list[str]
+
+
+def test_a_session_held_to_an_answer_schema_is_shown_it_on_every_turn(tmp_path: Path) -> None:
+    """The harness cannot constrain its own answer, so the schema rides the prompt of the turn and of a resume."""
+    repo, kernel = _make_repo(tmp_path)
+    backend = _backend()
+    spec = _spec(repo, kernel, output_schema=_Findings)
+
+    first = asyncio.run(backend.run(spec))
+    asyncio.run(backend.resume(spec, first.session_id, "gate feedback"))
+
+    first_prompt, resumed_prompt = (prompt for prompt, _session in _FakeHarness.instances[0].prompts)
+    assert first_prompt.endswith(schema_instruction(_Findings))
+    assert resumed_prompt == "gate feedback\n\n" + schema_instruction(_Findings)
 
 
 def test_resume_continues_the_same_session_on_the_same_runtime(tmp_path: Path) -> None:

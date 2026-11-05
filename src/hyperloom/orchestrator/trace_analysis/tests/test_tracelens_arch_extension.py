@@ -12,7 +12,7 @@ import pytest
 
 from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
 
-#: A platform TraceLens (cf0221e3) does not bundle, so only the served extension can resolve it.
+#: A platform TraceLens (45c2dac) does not bundle, so only the served extension can resolve it.
 _PLATFORM = "MI355X"
 _PROBE = (
     f"from TraceLens.Agent.Analysis.utils.arch_utils import load_arch;print(load_arch({_PLATFORM!r})['probe_peak'])"

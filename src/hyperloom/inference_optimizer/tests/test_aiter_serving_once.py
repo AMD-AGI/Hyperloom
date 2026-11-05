@@ -98,7 +98,9 @@ class Prewarm:
 
 def covers_the_card(image: Path) -> bool:
     table = image / "configs" / "a8w8_tuned_gemm.csv"
-    return _aiter_jit.serving_modules_cover_csv(image / "jit", (MODULE,), table, frozenset({(GFX, CU)}))
+    return _aiter_jit.serving_modules_cover_rows(
+        image / "jit", (MODULE,), _aiter_jit.csv_jit_kernel_rows(table, frozenset({(GFX, CU)}))
+    )
 
 
 def test_only_the_rows_aiter_compiles_for_this_card_decide_whether_a_module_is_moved_aside(image, monkeypatch) -> None:

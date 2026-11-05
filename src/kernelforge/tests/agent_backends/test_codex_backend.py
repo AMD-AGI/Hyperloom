@@ -29,6 +29,7 @@ from kernelforge.agent_backends.base import (
     StdioMcpServer,
 )
 from kernelforge.agent_backends.registry import resolve_agent_runtime
+from kernelforge.agent_backends.structured_output import AgentAnswer, output_json_schema
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import (
     is_api_failure,
@@ -475,6 +476,20 @@ def test_codex_sdk_sandbox_keeps_runtime_and_write_policy_separate(
     sandbox = backend._sdk_sandbox(_FakeCodexSdk, spec)
 
     assert sandbox == expected
+
+
+class _Findings(AgentAnswer):
+    findings: list[str]
+
+
+def test_a_codex_turn_is_held_to_the_answer_schema_its_spec_names() -> None:
+    """Codex constrains the turn's final message itself; a free-form turn is given no schema."""
+    backend = CodexBackend(runtime=AgentRuntimeConfig(provider="codex", model="gpt-test"))
+    held = AgentRunSpec(system_prompt="Inspect only.", user_prompt="Return findings.", cwd=".", output_schema=_Findings)
+    free = AgentRunSpec(system_prompt="Inspect only.", user_prompt="Return findings.", cwd=".")
+
+    assert backend._turn_options(_FakeCodexSdk, held)["output_schema"] == output_json_schema(_Findings)
+    assert "output_schema" not in backend._turn_options(_FakeCodexSdk, free)
 
 
 def test_normalize_codex_sdk_result() -> None:
