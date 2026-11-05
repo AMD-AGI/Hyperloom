@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
@@ -16,6 +18,7 @@ from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, LineageKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
 
 #: What the installed package's one file holds at the root.
@@ -37,8 +40,10 @@ async def branch_rig(tmp_path: Path, recipe: Recipe, branch: str) -> BranchRig:
     package.mkdir(parents=True)
     (package / "config.py").write_bytes(ROOT_CONFIG)
     installed = PackageBase("vllm", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
-    base.build(["vllm"])
+    base = SourceBase(tmp_path / "source")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+        base.build(["vllm"])
     repo = GitExperimentRepo(
         tmp_path / "experiments.git", LocalBlobStore(tmp_path / "blobs"), lambda _layout: installed
     )

@@ -11,7 +11,9 @@ from hyperloom.hosted.mcp_server import InvalidParamsError, ToolError
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.specialist import tools as tools_module
 from hyperloom_multibranch.specialist.tools import register_worktree_tools
+from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
 
 BRANCH = "s1"
@@ -36,13 +38,14 @@ class _Server:
 
 
 @pytest.fixture
-async def rig(tmp_path):
+async def rig(tmp_path, monkeypatch):
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)
     (package / "__init__.py").write_bytes(b"")
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     blobs = LocalBlobStore(tmp_path / "blobs")
     repo = GitExperimentRepo(tmp_path / "experiments.git", blobs, lambda _layout: installed)
@@ -53,7 +56,8 @@ async def rig(tmp_path):
     def worktrees(branch):
         return base.worktree(branch, tmp_path / "worktrees" / branch)
 
-    register_worktree_tools(server, repo=repo, worktrees=worktrees, locator=lambda _layout: installed)
+    monkeypatch.setattr(tools_module, "locate_installed_package", lambda _layout: installed)
+    register_worktree_tools(server, repo=repo, worktrees=worktrees)
     return SimpleNamespace(
         server=server, repo=repo, blobs=blobs, root=root, config=worktrees(BRANCH).path / "vllm/config.py"
     )
@@ -126,9 +130,10 @@ def _installed_checkout(tmp_path, version_suffix: str = "") -> PackageBase:
     return PackageBase("vllm", package, "vllm", version)
 
 
-async def _new_component_rig(tmp_path, installed: PackageBase):
+async def _new_component_rig(tmp_path, installed: PackageBase, monkeypatch):
     bare = Recipe(ROOT.base_image_digest, ROOT.launch)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     blobs = LocalBlobStore(tmp_path / "blobs")
     repo = GitExperimentRepo(tmp_path / "experiments.git", blobs, lambda _layout: installed)
@@ -139,15 +144,16 @@ async def _new_component_rig(tmp_path, installed: PackageBase):
     def worktrees(branch):
         return base.worktree(branch, tmp_path / "worktrees" / branch)
 
-    register_worktree_tools(server, repo=repo, worktrees=worktrees, locator=lambda _layout: installed)
+    monkeypatch.setattr(tools_module, "locate_installed_package", lambda _layout: installed)
+    register_worktree_tools(server, repo=repo, worktrees=worktrees)
     await server.call("worktree_sync")
     (worktrees(BRANCH).path / "vllm/config.py").write_bytes(b"max_num_seqs = 256\n")
     return server, bare
 
 
-async def test_a_patch_to_a_component_new_on_the_head_names_the_installed_upstream_commit(tmp_path):
+async def test_a_patch_to_a_component_new_on_the_head_names_the_installed_upstream_commit(tmp_path, monkeypatch):
     installed = _installed_checkout(tmp_path)
-    server, bare = await _new_component_rig(tmp_path, installed)
+    server, bare = await _new_component_rig(tmp_path, installed, monkeypatch)
     built = subprocess.run(["git", "rev-parse", "HEAD"], cwd=installed.path, check=True, capture_output=True, text=True)
 
     taken = await server.call("worktree_patch", component="vllm")
@@ -160,8 +166,10 @@ async def test_a_patch_to_a_component_new_on_the_head_names_the_installed_upstre
     assert "note" not in taken
 
 
-async def test_a_new_component_whose_install_names_no_commit_is_said_so_with_the_patch(tmp_path):
-    server, _bare = await _new_component_rig(tmp_path, _installed_checkout(tmp_path, version_suffix="0.11.0"))
+async def test_a_new_component_whose_install_names_no_commit_is_said_so_with_the_patch(tmp_path, monkeypatch):
+    server, _bare = await _new_component_rig(
+        tmp_path, _installed_checkout(tmp_path, version_suffix="0.11.0"), monkeypatch
+    )
 
     taken = await server.call("worktree_patch", component="vllm")
 
@@ -170,14 +178,17 @@ async def test_a_new_component_whose_install_names_no_commit_is_said_so_with_the
     assert "set upstream_repo and upstream_ref" in taken["note"]
 
 
-async def test_a_patch_to_a_component_with_a_native_tree_names_the_commit_that_tree_was_laid_out_from(tmp_path):
+async def test_a_patch_to_a_component_with_a_native_tree_names_the_commit_that_tree_was_laid_out_from(
+    tmp_path, monkeypatch
+):
     installed = _installed_checkout(tmp_path, version_suffix="0.11.0")
     checkout = tmp_path / "sources" / "vllm" / ("2" * 40)
     (checkout / "csrc").mkdir(parents=True)
     (checkout / "csrc" / "cache.cu").write_bytes(b"int block = 16;\n")
     tree = NativeTree(SourceRoot("csrc", checkout / "csrc"), "https://github.com/vllm-project/vllm.git", "2" * 40)
     bare = Recipe(ROOT.base_image_digest, ROOT.launch)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, native={"vllm": tree})
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source", native={"vllm": tree})
     base.build(["vllm"])
     repo = GitExperimentRepo(
         tmp_path / "experiments.git",
@@ -191,7 +202,8 @@ async def test_a_patch_to_a_component_with_a_native_tree_names_the_commit_that_t
     def worktrees(branch):
         return base.worktree(branch, tmp_path / "worktrees" / branch)
 
-    register_worktree_tools(server, repo=repo, worktrees=worktrees, locator=lambda _layout: installed)
+    monkeypatch.setattr(tools_module, "locate_installed_package", lambda _layout: installed)
+    register_worktree_tools(server, repo=repo, worktrees=worktrees)
     await server.call("worktree_sync")
     (worktrees(BRANCH).path / "csrc" / "cache.cu").write_bytes(b"int block = 32;\n")
 
