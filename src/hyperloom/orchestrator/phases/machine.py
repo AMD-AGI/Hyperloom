@@ -200,9 +200,7 @@ class MachinePhase(CoordinatorCollaborator):
     async def _framework_round_fits(self) -> bool:
         """Whether FRAMEWORK_AGENT has a round left: work queued or running, or one it admits fits the time left.
 
-        A remainder shorter than every round the phase admits never admits another; a resumed GLM-5.3 session sat
-        out the last 44 minutes of its FRAMEWORK_AGENT budget that way with every GPU idle. Priced through the
-        dispatcher's own gate, as the orchestration prompt's affordability line is.
+        Priced through the dispatcher's own time gate, as the orchestration prompt's affordability line is.
         """
         if str(self.shared_state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return True

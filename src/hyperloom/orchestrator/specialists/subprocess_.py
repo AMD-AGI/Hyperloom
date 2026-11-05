@@ -127,12 +127,7 @@ class SpecialistSubprocessConfig:
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
 
     framework_source_roots: tuple[str, ...] = ()
-    """Framework trees the task may read, and the seed for ``git worktree add``.
-
-    The first root that is a checkout becomes the worktree base; every root
-    that exists is passed to the CLI as an ``--add-dir`` entry, which is the
-    only way either CLI can open it at all.
-    """
+    """Framework trees the task may read; the first checkout among them seeds ``git worktree add``."""
 
     mcp_config_path: str | None = None
     """Optional path to a JSON file holding ``{"mcpServers": {...}}``."""
@@ -824,16 +819,9 @@ class SpecialistSubprocessDispatcher:
         """Return the dirs an agent CLI may open, in precedence order.
 
         Worktree first (where patches are authored), then the workspace (where
-        ``specialist_done.json`` lands), then the framework source trees the
-        task named. ``--add-dir`` is the only filesystem grant either CLI
-        takes and it does not separate reads from writes, so a tree left out
-        of it cannot be read at all -- and only one root can seed a worktree,
-        which leaves the rest invisible. A specialist pointed at a
-        pip-installed framework has no checkout to seed one from, so it could
-        see none of the source it was asked to change.
-
-        Authoring still belongs in the worktree, and the patch-safety gate,
-        not the filesystem, is what keeps a specialist's output grounded.
+        ``specialist_done.json`` lands), then every existing framework source
+        tree: ``--add-dir`` is the CLIs' only filesystem grant and does not
+        separate reads from writes. The patch-safety gate keeps output grounded.
 
         Args:
             workspace (Path): Task workspace.
@@ -846,10 +834,8 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             dirs.append(str(worktree))
         dirs.append(str(workspace))
-        for root in self.config.framework_source_roots:
-            path = str(root or "").strip()
-            if path and path not in dirs and Path(path).is_dir():
-                dirs.append(path)
+        roots = dict.fromkeys(str(root or "").strip() for root in self.config.framework_source_roots)
+        dirs.extend(path for path in roots if path and path not in dirs and Path(path).is_dir())
         return dirs
 
     def _build_codex_launch(

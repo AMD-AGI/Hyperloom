@@ -662,7 +662,6 @@ def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
     if kernel_decisions.has_keep_pending_integrate(state):
         return True
-
     if kernel_controller_settled(state) or _geak_phase_terminal(state):
         return False
 
@@ -1226,10 +1225,8 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     plateau = dict(inputs.get("plateau") or {})
     agent_in_flight = bool(pending.get("kernel_agent_in_flight"))
     work_pending = bool(pending.get("kernel_work_pending"))
-    # The one exit that does not wait for an idle queue. ``kernel_agent`` holds every serving lane until the phase
-    # budget ends it, so a controller that has already reported terminal with nothing pending would otherwise spend
-    # the rest of the phase on work that cannot produce a KEEP. The transition barrier stops the in-flight task, so
-    # the next phase still starts on quiet GPUs.
+    # The one exit that does not wait for an idle queue: ``kernel_agent`` holds the serving lanes until the phase
+    # budget ends it, and the transition barrier stops it so the next phase starts on quiet GPUs.
     if _controller_round_settled(pending, inputs.get("macro_cycle")) and not work_pending:
         return "kernel_controller_done", {
             "controller_status": pending.get("controller_status"),

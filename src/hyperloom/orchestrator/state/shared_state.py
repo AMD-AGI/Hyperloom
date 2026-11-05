@@ -399,8 +399,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # Baseline AgentX perf snapshot: the slow-tail e2e_norm_intvty_p90 objective plus total_throughput and the
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
-    # Run directory the anchor's axes were measured in; the per-request exports under it back the reported interval.
-    baseline_workspace: str = ""
+    baseline_workspace: str = ""  # Run directory of the anchor's axes; its per-request exports back the interval.
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
     # The live leg's share of ``baseline_failure_streak``; ``begin_leg`` and every reset of the streak zero it.
@@ -499,16 +498,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     warm_replay_min_confidence: float = 0.7
     # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
-    # Authored patches this session spent a benchmark round on, keyed by the lines they changed rather than by what
-    # they were named, so a later proposal can be told it repeats one. Newest last, capped.
+    # Benchmarked authored patches keyed by the lines they changed (``framework.patch_overlap``); newest last, capped.
     measured_patch_sets: list[dict[str, Any]] = field(default_factory=list)
-    # The last valid cycle batch's base2 cycle (``cycle_ms`` per batch size) and the stack length it ran; the next
-    # batch's base runs the tree with every dormant switch off and is held to it.
+    # The last valid cycle batch's base2 ``cycle_ms`` and stack length; the next batch's base is held to it.
     cycle_reference: dict[str, Any] = field(default_factory=dict)
-    # Why dormant admission for the cycle screen is closed for the rest of the session; empty while it is open.
-    cycle_screen_refused: str = ""
-    # The cycle verdict of each dormant-lever bundle's switches on together, keyed by the bundle round's key.
-    cycle_bundle_screens: dict[str, str] = field(default_factory=dict)
+    cycle_screen_refused: str = ""  # Why dormant admission for the cycle screen is closed; empty while open.
+    cycle_bundle_screens: dict[str, str] = field(default_factory=dict)  # Cycle verdict per dormant-lever bundle key.
     # The newest cycle-bench profiler capture (``trace``) and the stack length it ran; the module table's source.
     last_attribution_trace: dict[str, Any] = field(default_factory=dict)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
@@ -1759,35 +1754,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len) or int(
             self.working_recipe_generation
         ) != int(self.validated_recipe_generation)
-
-    def record_measured_patch_set(
-        self,
-        *,
-        task_id: str,
-        patch_name: str,
-        identity: dict[str, list[str]],
-        outcome: str,
-        landed: bool = False,
-    ) -> None:
-        """Record that a round measured the patch *identity* (``files``, ``line_keys``) describes, and if it stayed."""
-        from ..framework.patch_overlap import MAX_MEASURED
-
-        line_keys = list(identity.get("line_keys") or [])
-        if not line_keys:
-            return
-        self.measured_patch_sets.append(
-            {
-                "task_id": task_id,
-                "patch_name": patch_name,
-                "files": list(identity.get("files") or []),
-                "line_keys": line_keys,
-                "outcome": outcome,
-                "landed": landed,
-                "ts": now_iso(),
-            }
-        )
-        if len(self.measured_patch_sets) > MAX_MEASURED:
-            self.measured_patch_sets = self.measured_patch_sets[-MAX_MEASURED:]
 
 
 __all__ = ["SharedState"]

@@ -298,11 +298,13 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
     def _record_measured_patch_set(self, task: "Task", result: Any, verdict: Verdict) -> None:
         """Note the lines this round's patch changed and whether it stayed, so a later proposal can be told it repeats them."""
         from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
+        from ..framework.patch_overlap import record_measured_patch_set
 
         params = task.params or {}
         identity = params.get("patch_identity") if isinstance(params.get("patch_identity"), dict) else {}
         status = str((getattr(result, "result", None) or {}).get("status") or "")
-        self.shared_state.record_measured_patch_set(
+        record_measured_patch_set(
+            self.shared_state,
             task_id=str(task.task_id or ""),
             patch_name=str(params.get("patch_name") or ""),
             identity=identity,

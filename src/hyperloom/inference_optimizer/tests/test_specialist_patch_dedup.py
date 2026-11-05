@@ -215,7 +215,8 @@ async def test_only_a_landed_repeat_is_refused_a_reverted_one_is_reviewed(sessio
     coord = _coordinator(session_dir)
     try:
         keys = po.changed_line_keys([_FIX_A])
-        coord.shared_state.record_measured_patch_set(
+        po.record_measured_patch_set(
+            coord.shared_state,
             task_id="old-landed",
             patch_name="a",
             identity={"files": ["f"], "line_keys": keys},
@@ -224,7 +225,8 @@ async def test_only_a_landed_repeat_is_refused_a_reverted_one_is_reviewed(sessio
         )
         await _specialist_wrote(coord, "s1", _FIX_B)
         coord.shared_state.measured_patch_sets.clear()
-        coord.shared_state.record_measured_patch_set(
+        po.record_measured_patch_set(
+            coord.shared_state,
             task_id="old-reverted",
             patch_name="a",
             identity={"files": ["f"], "line_keys": keys},
@@ -259,7 +261,8 @@ async def test_an_edit_of_a_landed_line_is_reviewed_not_refused(session_dir: Pat
     coord = _coordinator(session_dir)
     try:
         landed = po.changed_line_keys([_FIX_A])
-        coord.shared_state.record_measured_patch_set(
+        po.record_measured_patch_set(
+            coord.shared_state,
             task_id="old-landed",
             patch_name="a",
             identity={"files": ["f"], "line_keys": landed},

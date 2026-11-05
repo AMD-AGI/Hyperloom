@@ -72,6 +72,7 @@ from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from ._magpie_patcher import ensure_agentic_prefix_cache
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -322,18 +323,6 @@ def build_agentx_workload_spec(
     }
 
 
-def _declare_agentic_run(envs: dict[str, Any]) -> None:
-    """Tell the harness the run is a replay, not a fixed-sequence throughput sweep.
-
-    The harness decides several things by run type -- whether a context cap applies, and whether the server keeps its
-    prefix cache -- and reads this, its own signal, to tell them apart. Naming the client script is not that signal,
-    so without these an AgentX replay was served as a fixed-sequence sweep. Offloading is the one setting the harness
-    then demands; AgentX keeps its reuse in the GPU KV pool.
-    """
-    envs["IS_AGENTIC"] = "1"
-    envs["KV_OFFLOADING"] = "none"
-
-
 def apply_agentx_switch(
     bench: dict[str, Any],
     model_path: str | None = None,
@@ -379,12 +368,8 @@ def apply_agentx_switch(
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
-    _declare_agentic_run(envs)
-    # WEKA_LOADER_OVERRIDE is upstream's own per-recipe corpus pin, so it has no
-    # AGENTX_ prefix and would not survive the loop below. aiperf_client.sh
-    # documents it as a supported knob; without forwarding it only works when
-    # the benchmark process happens to inherit the full parent environment,
-    # which is exactly the kind of silent difference this path exists to remove.
+    # The harness's own run-type signal, and the KV offloading it then demands off: AgentX reuses the GPU KV pool.
+    envs.update(IS_AGENTIC="1", KV_OFFLOADING="none")
     for key, value in _agentx_env.items():
         if _is_agentx_client_key(key, _agentx_env):
             envs[key] = value
@@ -442,13 +427,7 @@ def prepare_agentx_runtime(
         return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
-    # The generic SGLang scripts inject ``--disable-radix-cache``, which an
-    # agentic replay must not carry. This is the one AgentX preparation step
-    # every launch path reaches -- baseline and profile shell out without going
-    # through the grid runner -- so it is where the scripts can be kept honest
-    # for all of them.
-    from ._magpie_patcher import ensure_agentic_prefix_cache
-
+    # Every AgentX launch path reaches this step, so the generic SGLang scripts drop ``--disable-radix-cache`` here.
     ensure_agentic_prefix_cache(runtime_env.get("MAGPIE_PATH") or None, inferencex_path or None)
     try:
         from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
