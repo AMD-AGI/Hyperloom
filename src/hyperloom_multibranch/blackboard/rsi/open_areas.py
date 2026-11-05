@@ -9,8 +9,9 @@ family of a claim it holds or of its last explore test, which is all a branch op
 spent ones: those the playbook's ``failed_op_limit`` branches opened on the integration head as it stands were focused
 on and stopped without a commit. A spent op opens again once the integration head moves. With too little of EXPLORE
 left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a new branch took to
-it, it says that no branch should open. The direction families' odds are the specialists' menu (:mod:`rsi.menu`), not
-the judge's: a family has too few tests to rank ops by.
+it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
+the head's. The direction families' odds are the specialists' menu (:mod:`rsi.menu`), not the judge's: a family has
+too few tests to rank ops by.
 """
 
 from __future__ import annotations
@@ -63,7 +64,8 @@ class OpenAreas:
     """Where a new branch could open: the ``ops`` of the profile of ``profiled`` left open, the ops left out because
     running branches work on them (``covered``, by op, the branches) or they are spent (``spent``, by op, the
     history of the branches focused on it), the minutes left of EXPLORE and those a new branch takes to its first
-    commit."""
+    commit. ``head`` is the integration head; a ``profiled`` commit other than it is one it builds on, because no
+    commit of the head's recipe was profiled."""
 
     profiled: str = ""
     ops: tuple[OpenOp, ...] = ()
@@ -71,6 +73,7 @@ class OpenAreas:
     spent: Mapping[str, FocusHistory] = field(default_factory=dict)
     minutes_left: float | None = None
     first_commit_minutes: float | None = None
+    head: str = ""
 
     @property
     def too_late(self) -> bool:
@@ -81,7 +84,13 @@ class OpenAreas:
 
     def render(self) -> str:
         if self.profiled:
-            lines = [f"Open areas for a new branch, from the profile of {self.profiled}:"]
+            source = self.profiled
+            if self.head and self.head != self.profiled:
+                source += (
+                    f", which the integration head {self.head} builds on: the head's own recipe has no profile, so its "
+                    "shares may differ"
+                )
+            lines = [f"Open areas for a new branch, from the profile of {source}:"]
             lines += [
                 f"- {item.op} ({item.family or 'no op family'}): {item.share_pct:.1f}% of GPU time, at most "
                 f"+{item.ceiling_pct:.1f}%"
@@ -179,7 +188,7 @@ def open_areas(
     left = max(0.0, seconds_left) / _MINUTE
     needed = numbers.last_open_minutes if numbers.last_open_minutes is not None else first_commit_minutes
     open_ops = tuple(item for item in ops if item.op not in covered and item.op not in spent)[:OPEN_OPS]
-    return OpenAreas(profiled, open_ops, covered, spent, left, needed)
+    return OpenAreas(profiled, open_ops, covered, spent, left, needed, head)
 
 
 __all__ = ["OPEN_OPS", "FocusHistory", "OpenAreas", "OpenOp", "open_areas"]
