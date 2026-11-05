@@ -444,8 +444,10 @@ class Session:
             ending = replace(ending, error=f"{type(exc).__name__}: {exc}")
             raise
         finally:
-            ending = await self._close(ending, hard_stop)
-            self._signals.uninstall()
+            try:
+                ending = await self._close(ending, hard_stop)
+            finally:
+                self._signals.uninstall()
         return ending
 
     async def _until_stopped(
@@ -787,7 +789,7 @@ class Session:
 
     async def _dossier_map(self, source: str, start_commit: str, shares: RootShares | None) -> DossierOutcome | None:
         """How the dossier pass of the Arbor ``source`` on ``start_commit``, given ``shares`` as its profile, ended;
-        ``None`` when none ran (no runner, or no minutes for it) or it crashed. Each step is a ``PRELUDE`` decision."""
+        ``None`` when none ran (no runner, or no minutes for it). Each step is a ``PRELUDE`` decision."""
 
         from hyperloom_multibranch.specialist.dossier_pass import DossierStart
 
@@ -800,13 +802,7 @@ class Session:
         start = DossierStart(source, start_commit, self._clock.now() + minutes * MINUTE, *given)
         detail = {"source": source, "start_commit": start_commit, "minutes": minutes, "profile": given[1]}
         self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_STARTED, INTEGRATION_BRANCH, detail))
-        try:
-            outcome = await self._dossier_pass(start)
-        except Exception as exc:  # an optional step: the generic map stands in for it
-            logger.exception("the dossier pass crashed")
-            failed = {"reason": f"it crashed: {exc}", "map": "", "dossier": ""}
-            self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_ENDED, INTEGRATION_BRANCH, failed))
-            return None
+        outcome = await self._dossier_pass(start)
         ended = {"reason": outcome.reason, "map": str(outcome.map or ""), "dossier": str(outcome.dossier or "")}
         self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_ENDED, INTEGRATION_BRANCH, ended))
         return outcome
@@ -930,11 +926,15 @@ class Session:
         )
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
-        self._phase("close", stop_reason=ending.stop_reason.value, error=ending.error)
         if ending.stop_reason is SessionStopReason.ABORTED:
             hard_stop.bring_forward()
         close_by = hard_stop.at
-        closer = self._closer()
+        try:
+            self._phase("close", stop_reason=ending.stop_reason.value, error=ending.error)
+            closer = self._closer()
+        except BaseException:  # re-raised: nothing is stopped yet, so the sandboxes and processes go first
+            await self._stopper.release(TOOLBOX_CLOSE_SECONDS)
+            raise
         closing = asyncio.ensure_future(closer.close(ending.stop_reason, ending.final, ending.error, close_by))
         cut = asyncio.ensure_future(self._cut(hard_stop, close_by))
         try:

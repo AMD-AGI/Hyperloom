@@ -17,7 +17,8 @@ from typing import Any, Mapping
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 
-from .credentials import classify_credential_value, strip_url_userinfo
+from .credentials import classify_credential_value
+from hyperloom.common.url_userinfo import strip_url_userinfo
 from .launch_flags import requested_setting_names
 
 #: ``accepted_config`` keys Hyperloom's own revalidation applies. Two of the five

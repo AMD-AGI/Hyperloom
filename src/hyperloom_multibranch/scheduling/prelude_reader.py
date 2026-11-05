@@ -4,8 +4,8 @@
 """The framework checkout a session runs on, read as its root :class:`~hyperloom.contracts.recipe.Recipe`.
 
 The root is the checkout the operator named in :data:`MB_FRAMEWORK_REPO_ENV`, at its ``HEAD``, launched as the main
-flow launches it, without a patch (:func:`launched_root`); a framework installed as a package, not a git checkout, is
-pinned to nothing.
+flow launches it, without a patch (:func:`launched_root`); a session that names no checkout, its framework installed as
+a package, is pinned to nothing.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.url_userinfo import strip_url_userinfo
 from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeError
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_FRAMEWORK_VERSION_SLUG,
@@ -66,7 +67,7 @@ def launched_framework_version(framework: str, env: Mapping[str, str]) -> str:
 
 
 def framework_pin(root: Path | None) -> UpstreamPin | None:
-    """The framework checkout ``root``'s remote at its ``HEAD``; ``None`` without a checkout."""
+    """The framework checkout ``root``'s remote, without its userinfo, at its ``HEAD``; ``None`` without a checkout."""
 
     if root is None:
         return None
@@ -74,7 +75,8 @@ def framework_pin(root: Path | None) -> UpstreamPin | None:
     if not remotes:
         raise PreludeReadError(f"{root} has no git remote to pin the framework to")
     remote = DEFAULT_REMOTE if DEFAULT_REMOTE in remotes else remotes[0]
-    return UpstreamPin(repo_url=_git(root, "remote", "get-url", remote), ref=_git(root, "rev-parse", "HEAD"))
+    url = strip_url_userinfo(_git(root, "remote", "get-url", remote))
+    return UpstreamPin(repo_url=url, ref=_git(root, "rev-parse", "HEAD"))
 
 
 def root_recipe(framework: str, pin: UpstreamPin | None, base_image_digest: str) -> Recipe:
@@ -89,16 +91,16 @@ def root_recipe(framework: str, pin: UpstreamPin | None, base_image_digest: str)
 
 
 def _checkout(path: str) -> Path | None:
-    root = Path(path.strip()) if path.strip() else None
-    return root if root is not None and _is_checkout(root) else None
+    """The checkout ``path`` names, ``None`` when it names none; a path that is not the top of a checkout git can
+    read is refused, so a session never roots on no framework, or on an enclosing repository, by accident."""
 
-
-def _is_checkout(root: Path) -> bool:
-    try:
-        _git(root, "rev-parse", "--show-toplevel")
-    except PreludeReadError:
-        return False
-    return True
+    if not path.strip():
+        return None
+    root = Path(path.strip())
+    top = Path(_git(root, "rev-parse", "--show-toplevel"))
+    if top.resolve() != root.resolve():
+        raise PreludeReadError(f"{root} is not the top of its git checkout {top}")
+    return root
 
 
 def _git(root: Path, *args: str) -> str:
