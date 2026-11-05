@@ -40,7 +40,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot, wider_table
-from hyperloom_multibranch.repo.rebase import Files
+from hyperloom_multibranch.repo.rebase import Files, patch_between
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
 from hyperloom_multibranch.toolbox.tests.kernel_rows import (
     ALPHA_NEW,
@@ -677,6 +677,43 @@ async def test_a_change_the_head_already_holds_is_not_carried_twice(tmp_path):
 
     assert merge.clean and merge.rebased_patches == ()
     assert [change.add_patches for change in merge.delta.components] == [()]
+
+
+@pytest.fixture
+def hostile_git_home(tmp_path, monkeypatch) -> None:
+    """An operator whose git config defaults to sha256 objects, runs a hook that vetoes every ref move and ignores every
+    file the session's patches touch."""
+
+    home, hooks = tmp_path / "home", tmp_path / "hooks"
+    hooks.mkdir()
+    veto = hooks / "reference-transaction"
+    veto.write_text("#!/bin/sh\nexit 1\n")
+    veto.chmod(0o755)
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "ignore").write_text("*.py\n")
+    (home / ".gitconfig").write_text(f"[init]\n\tdefaultObjectFormat = sha256\n[core]\n\thooksPath = {hooks}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+
+async def test_the_operator_s_git_config_hooks_and_ignore_rules_never_shape_a_merge(tmp_path, hostile_git_home):
+    repo, installed, head, merge = await _merged_onto(tmp_path, _edit(c="30"), _edit(e="50"))
+
+    (rebased,) = merge.rebased_patches
+    assert merge.clean
+    stack = (await repo.read_recipe(await repo.commit_integration(head, merge.delta, ()))).component("vllm")
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    (entry,) = apply_patch_stack(stack, COMPONENT_LAYOUTS["vllm"], installed, blobs).entries
+    assert blobs.get(entry.blob).decode() == "".join(_config(c="30", e="50"))
+
+
+@pytest.mark.parametrize("rules", [{"vllm/.gitignore": b"*.py\n"}, {"vllm/.gitattributes": b"*.py binary\n"}])
+def test_a_patch_holds_the_change_to_a_file_the_tree_s_own_rules_would_ignore_or_hide(rules):
+    before = {**rules, "vllm/config.py": b"a = 1\n"}
+
+    text = patch_between(before, {**before, "vllm/config.py": b"a = 2\n"})
+
+    assert "--- a/vllm/config.py\n+++ b/vllm/config.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n" in text
 
 
 def _on(lines: list[str], before: list[str] | None = None) -> str:

@@ -10,11 +10,12 @@ yields a patch: an overlap is a choice between two edits, which a merge of text 
 
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
+
+from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 
 #: A file's content by its path in the component's upstream repository, ``None`` where there is no file.
 Files = Mapping[str, bytes | None]
@@ -61,8 +62,9 @@ def _merge_file(base: bytes | None, ours: bytes | None, theirs: bytes | None, th
         for side, data in zip(sides, (ours, base, theirs)):
             side.write_bytes(data)
         done = subprocess.run(
-            ["git", "merge-file", "-p", "--quiet", *side_flag, *map(str, sides)],
-            env=_env(Path(scratch)),
+            git_argv("merge-file", "-p", "--quiet", *side_flag, *map(str, sides)),
+            cwd=scratch,
+            env=git_env(GIT_CEILING_DIRECTORIES=str(Path(scratch).parent)),
             capture_output=True,
             timeout=_GIT_TIMEOUT_S,
             check=False,
@@ -83,42 +85,48 @@ def patch_between(before: Files, after: Files) -> str:
     if all(before.get(path) == content for path, content in after.items()):
         return ""
     with tempfile.TemporaryDirectory(prefix="hl-rebase-") as scratch:
-        tree = Path(scratch)
-        _git(tree, "init", "--quiet")
-        trees = [_write_tree(tree, files) for files in (before, after)]
-        return _git(tree, "diff", "--no-color", "--no-ext-diff", "--no-renames", *trees)
+        root = Path(scratch)
+        _git(root, *INIT, "--bare", "--quiet")
+        blobs = _hash_objects(
+            root, {content for files in (before, after) for content in files.values() if content is not None}
+        )
+        trees = [_write_tree(root, name, files, blobs) for name, files in (("before", before), ("after", after))]
+        return _git(root, "diff", "--no-color", "--no-ext-diff", "--no-renames", *trees)
 
 
-def _write_tree(tree: Path, files: Files) -> str:
-    for path, content in files.items():
-        target = tree / path
-        if content is None:
-            target.unlink(missing_ok=True)
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-    _git(tree, "add", "--all")
-    return _git(tree, "write-tree").strip()
+def _hash_objects(root: Path, contents: set[bytes]) -> dict[bytes, str]:
+    """Each of ``contents`` written as a blob, by its object id."""
+    ordered = list(contents)
+    sources = [root / f"blob-{number}" for number in range(len(ordered))]
+    for source, content in zip(sources, ordered):
+        source.write_bytes(content)
+    listing = "".join(f"{source}\n" for source in sources).encode()
+    ids = _git(root, "hash-object", "-w", "--no-filters", "--stdin-paths", stdin=listing).split()
+    return dict(zip(ordered, ids, strict=True))
 
 
-def _git(tree: Path, *args: str) -> str:
+def _write_tree(root: Path, name: str, files: Files, blobs: Mapping[bytes, str]) -> str:
+    """The tree of ``files`` built in an index of its own: with no working tree, no ignore or attributes file in
+    ``files`` decides what the tree holds."""
+    index = str(root / f"{name}.index")
+    entries = b"".join(
+        f"100644 {blobs[content]}\t{path}".encode() + b"\0" for path, content in files.items() if content is not None
+    )
+    _git(root, "update-index", "-z", "--index-info", stdin=entries, GIT_INDEX_FILE=index)
+    return _git(root, "write-tree", GIT_INDEX_FILE=index).strip()
+
+
+def _git(root: Path, *args: str, stdin: bytes = b"", **pinned: str) -> str:
     done = subprocess.run(
-        ["git", *args], cwd=tree, env=_env(tree), capture_output=True, timeout=_GIT_TIMEOUT_S, check=True
+        git_argv(*args),
+        cwd=root,
+        env=git_env(GIT_DIR=str(root / "scratch.git"), **pinned),
+        input=stdin,
+        capture_output=True,
+        timeout=_GIT_TIMEOUT_S,
+        check=True,
     )
     return done.stdout.decode()
-
-
-def _env(scratch: Path) -> dict[str, str]:
-    """The environment of a git command in ``scratch``: neither the operator's configuration nor an inherited
-    ``GIT_DIR`` may shape the merge or the patch."""
-    inherited = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
-    return {
-        **inherited,
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CEILING_DIRECTORIES": str(scratch.parent),
-        "LC_ALL": "C",
-    }
 
 
 __all__ = ["Files", "merge_files", "patch_between"]

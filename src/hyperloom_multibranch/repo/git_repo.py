@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -41,6 +40,7 @@ from hyperloom.measure.compile import (
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, BundleMerge, RepoMerge
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, source_roots
+from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
 from hyperloom_multibranch.repo.stack import ScratchBlobs, stack_files
@@ -107,14 +107,11 @@ class GitExperimentRepo:
         self._locator = locator
         self._aiter_configs = aiter_configs
         self._native = dict(native or {})
-        # An inherited GIT_* (GIT_DIR inside a hook or `git rebase --exec`) would aim every command at another
-        # repository, so none reaches git and GIT_DIR names this one.
-        inherited = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
-        self._env = {**inherited, **_IDENTITY, "GIT_DIR": str(self._path)}
+        self._env = git_env(**_IDENTITY, GIT_DIR=str(self._path))
 
     async def init_root(self, recipe: Recipe) -> str:
         await asyncio.to_thread(self._path.mkdir, parents=True)
-        await self._git("init", "--bare", "--quiet", f"--initial-branch={INTEGRATION_BRANCH}")
+        await self._git(*INIT, "--bare", "--quiet", f"--initial-branch={INTEGRATION_BRANCH}")
         root = await self._write(recipe, (), "baseline")
         await self._git(_UPDATE_REF, _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
         return root
@@ -360,8 +357,7 @@ class GitExperimentRepo:
 
     async def _run(self, *args: str, stdin: bytes | None = None) -> _Completed:
         process = await asyncio.create_subprocess_exec(
-            "git",
-            *args,
+            *git_argv(*args),
             cwd=self._path,
             env=self._env,
             stdin=asyncio.subprocess.DEVNULL if stdin is None else asyncio.subprocess.PIPE,
