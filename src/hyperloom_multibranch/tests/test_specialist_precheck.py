@@ -9,6 +9,7 @@ import pytest
 from hyperloom.common.outside_facts.component_layout import META_BASE, LayoutSection
 from hyperloom.measure.compile import ComponentLayout, PackageBase
 from hyperloom_multibranch.specialist.precheck import CheckFailed, check_change
+from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
 
 # A package below its upstream root, as sglang's python/sglang is.
@@ -16,13 +17,15 @@ LAYOUTS = {"demo": ComponentLayout("demo_pkg", "src/demo_pkg")}
 
 
 @pytest.fixture
-def rig(tmp_path):
+def rig(tmp_path, monkeypatch):
     package = tmp_path / "site-packages" / "demo_pkg"
     package.mkdir(parents=True)
     (package / "__init__.py").write_bytes(b"from .config import VALUE\n")
     (package / "config.py").write_bytes(b"VALUE = 1\n")
     installed = PackageBase("demo_pkg", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, layouts=LAYOUTS)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "COMPONENT_LAYOUTS", LAYOUTS)
+    base = SourceBase(tmp_path / "source")
     base.build(["demo"])
     worktree = base.worktree("s1", tmp_path / "s1")
     worktree.sync("c0", [])
@@ -101,7 +104,9 @@ def test_a_patched_aiter_imports_its_csrc_from_the_image(tmp_path, monkeypatch, 
     (meta / "csrc" / "pa.py").write_bytes(b"KERNEL = 'pa'\n")
     layouts = {"aiter": ComponentLayout("aiter", "aiter")}
     installed = PackageBase("aiter", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, layouts=layouts)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "COMPONENT_LAYOUTS", layouts)
+    base = SourceBase(tmp_path / "source")
     base.build(["aiter"])
     worktree = base.worktree("s1", tmp_path / "s1")
     worktree.sync("c0", [])
@@ -114,7 +119,7 @@ def _git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, check=True).stdout.decode().strip()
 
 
-def test_a_change_to_the_source_beside_the_package_does_not_stop_the_check(tmp_path):
+def test_a_change_to_the_source_beside_the_package_does_not_stop_the_check(tmp_path, monkeypatch):
     checkout = tmp_path / "checkout"
     package = checkout / "demo_pkg"
     package.mkdir(parents=True)
@@ -129,7 +134,9 @@ def test_a_change_to_the_source_beside_the_package_does_not_stop_the_check(tmp_p
     installed = PackageBase("demo_pkg", package, "demo-pkg", version)
     sections = (LayoutSection("src/demo_pkg"), LayoutSection("src/csrc", META_BASE, "csrc"))
     layouts = {"demo": ComponentLayout("demo_pkg", "src/demo_pkg", sections)}
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, layouts=layouts)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "COMPONENT_LAYOUTS", layouts)
+    base = SourceBase(tmp_path / "source")
     base.build(["demo"])
     worktree = base.worktree("s1", tmp_path / "s1")
     (worktree.path / "src" / "csrc" / "kernel.cu").write_bytes(b"__global__ void k() { return; }\n")

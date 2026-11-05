@@ -38,6 +38,7 @@ from hyperloom_multibranch.specialist.framework_guard import FrameworkGuard, Gua
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
+from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.subprocess_sandbox import SubprocessSandbox
@@ -701,13 +702,14 @@ print("imported", vllm.__file__)
 """
 
 
-def _worktree(tmp_path):
+def _worktree(tmp_path, monkeypatch):
     """A worktree of an installed vllm whose ``__init__`` the branch changed."""
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)
     (package / "__init__.py").write_bytes(b"")
     installed = PackageBase("vllm", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     worktree = base.worktree(B1, tmp_path / "worktrees" / B1)
     (worktree.path / "vllm" / "__init__.py").write_text("CHANGED = True\n")
@@ -716,7 +718,7 @@ def _worktree(tmp_path):
 
 async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _local_temp, monkeypatch):
     monkeypatch.setattr(dev_sandbox, "framework_protection", FrameworkProtection)
-    worktree = _worktree(tmp_path)
+    worktree = _worktree(tmp_path, monkeypatch)
     before = worktree.diff("vllm")
     script = tmp_path / "writer.py"
     script.write_text(CACHE_WRITER)
@@ -736,9 +738,11 @@ async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _loca
 
 
 async def test_a_host_whose_frameworks_cannot_be_protected_refuses_dev_commands(tmp_path, _local_temp, monkeypatch):
-    guard = FrameworkGuard((GuardedPackage("vllm", _worktree(tmp_path).path / "missing"),))
+    guard = FrameworkGuard((GuardedPackage("vllm", _worktree(tmp_path, monkeypatch).path / "missing"),))
     monkeypatch.setattr(dev_sandbox, "framework_protection", lambda: FrameworkProtection(guard=guard))
-    sandboxes = local_dev_sandboxes(lambda branch: _worktree(tmp_path / "other"), processes=None, limits=LIMITS)
+    sandboxes = local_dev_sandboxes(
+        lambda branch: _worktree(tmp_path / "other", monkeypatch), processes=None, limits=LIMITS
+    )
     leases = DevLeases(_Toolbox(tmp_path / "leases"), sandboxes, lambda _branch: _Logs(), limits=replace(LIMITS, cap=1))
     await leases.lease(B1, 1, 5)
     try:
@@ -810,8 +814,8 @@ class _HostedToolbox(_Toolbox):
         )
 
 
-async def test_a_hosted_lease_runs_in_its_sandbox_rooted_below_the_branch_importing_the_worktree(tmp_path):
-    worktree = _worktree(tmp_path)
+async def test_a_hosted_lease_runs_in_its_sandbox_rooted_below_the_branch_importing_the_worktree(tmp_path, monkeypatch):
+    worktree = _worktree(tmp_path, monkeypatch)
     before = worktree.diff("vllm")
     script = tmp_path / "writer.py"
     script.write_text(CACHE_WRITER)

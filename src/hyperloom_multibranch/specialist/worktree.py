@@ -26,13 +26,11 @@ from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     ComponentLayout,
     PackageBase,
-    PackageLocator,
     UnsupportedComponentError,
     locate_installed_package,
 )
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
 
-#: Built files a text patch can never change.
 #: The file in a base's git directory that names the paths each worktree links rather than holds.
 LINKED_PATHS = "hyperloom-third-party"
 #: A Python extension module (``_C.abi3.so``, ``ops.cpython-312-x86_64-linux-gnu.so``): what importing the package
@@ -42,6 +40,7 @@ _EXTENSION = re.compile(r"\.(abi3|cpython-[^.]+)\.so$")
 THIRD_PARTY_COPY = "hyperloom-third-party-trees"
 _EXCLUDE = ":(exclude)"
 _DIFF_HEADER = re.compile(r'^diff --git "?a/(?P<old>.+?)"? "?b/(?P<new>.+?)"?\r?\n?$')
+#: Built files a text patch can never change.
 SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsaco")
 BASE_BRANCH = "installed"
 HEAD_SUBJECT = "head "
@@ -130,13 +129,9 @@ class SourceBase:
         self,
         path: Path,
         *,
-        locator: PackageLocator = locate_installed_package,
-        layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS,
         native: Mapping[str, NativeTree] | None = None,
     ) -> None:
         self.path = path
-        self._locator = locator
-        self._layouts = layouts
         self._native = dict(native or {})
 
     def build(self, components: Sequence[str]) -> None:
@@ -155,7 +150,7 @@ class SourceBase:
         links: list[tuple[str, str]] = []
         for component in components:
             layout = self._layout(component)
-            package, *metas = source_roots(layout, _with_checkout(component, self._locator(layout), layout))
+            package, *metas = source_roots(layout, _with_checkout(component, locate_installed_package(layout), layout))
             target = self.path / package.prefix
             # An earlier component's tree may hold this one's (SGLang's checkout holds sgl-kernel's); the package a test
             # loads is the installed one.
@@ -190,7 +185,7 @@ class SourceBase:
             if not (path / prefix).exists():
                 (path / prefix).parent.mkdir(parents=True, exist_ok=True)
                 (path / prefix).symlink_to(target)
-        return BranchWorktree(path, self._layouts, self._native)
+        return BranchWorktree(path, self._native)
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
         """Copy ``native`` to its upstream path, but for what ``laid`` already put there: the package a test loads is
@@ -201,7 +196,7 @@ class SourceBase:
         shutil.copytree(native.path, self.path / native.prefix, ignore=_ignore(native.path, kept), dirs_exist_ok=True)
 
     def _layout(self, component: str) -> ComponentLayout:
-        layout = self._layouts.get(component)
+        layout = COMPONENT_LAYOUTS.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout; its source cannot be laid out")
         return layout
@@ -293,16 +288,14 @@ class BranchWorktree:
     def __init__(
         self,
         path: Path,
-        layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS,
         native: Mapping[str, NativeTree] | None = None,
     ) -> None:
         self.path = path
-        self._layouts = layouts
         self._native = dict(native or {})
 
     def holds(self, component: str) -> bool:
         """Whether the source base laid out ``component``; a recipe's patches to any other component are not here."""
-        layout = self._layouts.get(component)
+        layout = COMPONENT_LAYOUTS.get(component)
         return layout is not None and (self.path / layout.upstream_prefix).is_dir()
 
     def native_upstream(self, component: str) -> Upstream | None:
@@ -422,7 +415,7 @@ class BranchWorktree:
     def _paths(self, component: str) -> tuple[str, ...]:
         """``component``'s package, the meta trees the source base laid out beside it, and its native tree, less the
         trees of other components inside them."""
-        layout = self._layouts.get(component)
+        layout = COMPONENT_LAYOUTS.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
         native = self._native.get(component)
@@ -434,7 +427,7 @@ class BranchWorktree:
 
     def _nested(self, component: str, own: Sequence[str]) -> list[str]:
         """The trees of the other components that lie inside ``own``: a change there is theirs."""
-        others = [other.upstream_prefix for name, other in self._layouts.items() if name != component]
+        others = [other.upstream_prefix for name, other in COMPONENT_LAYOUTS.items() if name != component]
         others += [tree.root.prefix for name, tree in self._native.items() if name != component]
         inside = [PurePosixPath(path) for path in own]
         return [tree for tree in others if any(root in PurePosixPath(tree).parents for root in inside)]

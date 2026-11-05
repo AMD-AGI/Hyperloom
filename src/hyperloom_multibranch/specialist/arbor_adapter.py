@@ -61,7 +61,6 @@ from hyperloom.inference_optimizer.framework_registry import EXPERT_PARALLEL_FLA
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args, tokenize_server_args_preserving_json
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
-    PackageLocator,
     UnsupportedComponentError,
     locate_installed_package,
 )
@@ -297,19 +296,17 @@ def fit_keys(config: Mapping[str, Any], checkout: Path) -> tuple[dict[str, Any],
     return {**config, "component": component}, notes
 
 
-def arbor_manifest(
-    spec: AgentSpec, checkout: ArborCheckout, run: ArborRun, locator: PackageLocator = locate_installed_package
-) -> AgentManifest:
+def arbor_manifest(spec: AgentSpec, checkout: ArborCheckout, run: ArborRun) -> AgentManifest:
     """The manifest of ``run`` of Arbor in ``checkout`` for the branch ``spec`` names, its session made and its
-    workspace given the installed framework's built files (:func:`link_built`, ``locator`` finding the package);
-    raise :class:`ArborRefused` with every reason Arbor would refuse its config for.
+    workspace given the installed framework's built files (:func:`link_built`); raise :class:`ArborRefused` with every
+    reason Arbor would refuse its config for.
 
     The root's op shares are its caller's to add, as the preflight does for every agent run as a component; the
     dossier pass profiles only what they do not cover."""
 
     path = checkout.path.absolute()
     if Path(spec.workspace).is_dir():
-        link_built(Path(spec.workspace), spec.framework, locator)
+        link_built(Path(spec.workspace), spec.framework)
     if spec.dossier:
         carry_dossier(path, Path(spec.dossier))
     config = arbor_config(spec, path, run)
@@ -342,7 +339,7 @@ def arbor_manifest(
     )
 
 
-def link_built(workspace: Path, framework: str, locator: PackageLocator = locate_installed_package) -> int:
+def link_built(workspace: Path, framework: str) -> int:
     """Link the built files of ``framework``'s installed package (:data:`BUILT`) into ``workspace``, a branch's
     worktree, where the package's upstream layout puts them; how many it linked.
 
@@ -355,7 +352,7 @@ def link_built(workspace: Path, framework: str, locator: PackageLocator = locate
     if layout is None:
         return 0
     try:
-        package = locator(layout)
+        package = locate_installed_package(layout)
     except UnsupportedComponentError:
         return 0
     target, linked = workspace / layout.upstream_prefix, 0
