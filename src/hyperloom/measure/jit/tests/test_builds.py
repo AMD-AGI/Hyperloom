@@ -186,7 +186,8 @@ def test_a_line_longer_than_any_build_line_is_skipped_whole_and_the_next_line_is
     monkeypatch.setattr(builds, "_MAX_LINE_BYTES", 128)
     assert max(len(line) for line in MODULE.splitlines(keepends=True)) < 128
     cut = "x" * (128 - len("start build [")) + "start build [module_cut] under /j\n"  # a piece ends inside the name
-    built = scan_builds([_log(tmp_path, cut + "y" * 300 + "\n" + MODULE)])
+    tail = "x" * 128 + "start build [module_tail] under /j\n"  # a later piece reads as a whole build line
+    built = scan_builds([_log(tmp_path, cut + tail + "y" * 300 + "\n" + MODULE)])
 
     assert built.started == {"module_gemm_a8w8"}, "no module is named by a piece of a line"
     assert built.seconds == {"module_gemm_a8w8": 33.5}

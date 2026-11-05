@@ -333,8 +333,27 @@ def test_a_sweep_point_nested_deep_by_a_chain_of_anchors_is_refused_by_the_reade
 _BOUND = spec_module._MAX_YAML_DEPTH
 
 
-def test_a_yaml_as_deep_as_the_bound_is_fingerprinted() -> None:
-    _fp(_edit(lambda d: _yaml(d, _anchor_chain(_BOUND - 1))))  # the mapping at the top is a level too
+def _pair_chain(tag: str, first: str = "[x]") -> str:
+    """A chain of ``!!omap`` or ``!!pairs`` links after ``first``, each a list of pairs: two levels per link. With the
+    mapping at the top and ``first`` one list, it nests exactly as deep as the bound."""
+    links = (_BOUND - 2) // 2
+    return f"a0: &a0 {first}\n" + "".join(f"a{i}: &a{i} {tag} [{{k: *a{i - 1}}}]\n" for i in range(1, links + 1))
+
+
+def _lists(levels: int) -> str:
+    """Lists nested ``levels`` deep, written out, with no anchor."""
+    return "k: " + "[" * levels + "x" + "]" * levels + "\n"
+
+
+# The mapping at the top is a level too.
+@pytest.mark.parametrize(
+    "text",
+    [_anchor_chain(_BOUND - 1), _pair_chain("!!omap"), _pair_chain("!!pairs"), _lists(_BOUND - 1)],
+    ids=["a-chain-of-anchors", "a-chain-of-omap", "a-chain-of-pairs", "lists-written-out"],
+)
+def test_a_yaml_as_deep_as_the_bound_is_fingerprinted(text: str) -> None:
+    assert _BOUND % 2 == 0, "the chains of pairs reach the bound exactly"
+    _fp(_edit(lambda d: _yaml(d, text)))
 
 
 @pytest.mark.parametrize(
@@ -343,8 +362,18 @@ def test_a_yaml_as_deep_as_the_bound_is_fingerprinted() -> None:
         _anchor_chain(_BOUND),
         _anchor_chain(_BOUND - 1) + f"again: [*a{_BOUND - 2}]\n",
         "a: &a [x, *a]\n",
+        _pair_chain("!!omap", first="[[x]]"),
+        _pair_chain("!!pairs", first="[[x]]"),
+        _lists(_BOUND),
     ],
-    ids=["a-longer-chain", "an-alias-a-level-deeper-than-where-its-anchor-was-measured", "an-anchor-in-its-own-value"],
+    ids=[
+        "a-longer-chain",
+        "an-alias-a-level-deeper-than-where-its-anchor-was-measured",
+        "an-anchor-in-its-own-value",
+        "a-chain-of-omap-on-a-deeper-first-link",
+        "a-chain-of-pairs-on-a-deeper-first-link",
+        "lists-written-out",
+    ],
 )
 def test_a_yaml_a_level_deeper_than_the_bound_is_refused(text: str) -> None:
     with pytest.raises(DocumentError, match="levels deep"):
