@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from pathlib import Path
 
 import pytest
@@ -166,6 +167,7 @@ async def test_codex_refuses_a_server_the_config_already_defines(tmp_path: Path)
     ("spec_kwargs", "message"),
     [
         ({"env": {TOKEN_ENV: ""}}, "is not set in spec.env"),
+        ({"env": {TOKEN_ENV: "tok\nen"}}, "holds a line break"),
         ({"deadline_unix": 1.0}, "already in the past"),
         ({"argv": ()}, "argv is empty"),
         ({"backend": "gemini"}, "is not claude or codex"),
@@ -253,26 +255,33 @@ async def test_cancel_then_collect_leaves_no_process_behind(tmp_path: Path) -> N
         os.kill(pid, 0)
 
 
-async def test_the_token_is_gone_from_the_log_before_the_pattern_redaction_copies_it(
+async def test_the_log_loses_its_tokens_and_its_secret_shapes_in_one_staged_rewrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The existing redaction writes a temporary copy with default permissions; it must never see the token."""
+    """A token no pattern recognises and a value the pattern redaction does go in the same staged copy of the log."""
     from hyperloom.orchestrator.specialists import agent_runner
 
-    seen: list[bytes] = []
-    real = agent_runner.redact_file_in_place
+    rewrites: list[Path] = []
+    real = agent_runner.rewrite_lines_nofollow
 
-    def spy(path, **kwargs):
-        seen.append(Path(path).read_bytes())
-        real(path, **kwargs)
+    def counted(path, transform, **kwargs):
+        rewrites.append(Path(path))
+        real(path, transform, **kwargs)
 
-    monkeypatch.setattr(agent_runner, "redact_file_in_place", spy)
+    monkeypatch.setattr(agent_runner, "rewrite_lines_nofollow", counted)
+    shaped = "sk-" + secrets.token_hex(12)  # built at run time: no key-shaped literal in the repo
     ws = tmp_path / "w"
-    code = f"import os\nprint(os.environ['{TOKEN_ENV}'], flush=True)\nopen('specialist_done.json', 'w').write('{{}}')\n"
+    code = (
+        f"import os\nprint(os.environ['{TOKEN_ENV}'], {shaped!r}, flush=True)\n"
+        "open('specialist_done.json', 'w').write('{}')\n"
+    )
     await run_to_end(tmp_path, make_spec(ws, code=code))
-    assert seen and all(TOKEN.encode() not in data for data in seen)
-    assert b"[REDACTED]" in (ws / "process.log").read_bytes()
-    assert not list(ws.glob("process.log.*"))  # no temporary copy left behind
+    data = (ws / "process.log").read_bytes()
+    assert rewrites == [ws / "process.log"]
+    assert TOKEN.encode() not in data and shaped.encode() not in data
+    assert data.count(b"[REDACTED]") == 2
+    assert oct((ws / "process.log").stat().st_mode & 0o777) == "0o600"
+    assert not list(ws.glob("process.log.*"))  # no staged copy left behind
 
 
 async def test_a_shared_codex_home_in_the_callers_env_is_replaced_by_the_task_private_one(tmp_path: Path) -> None:
