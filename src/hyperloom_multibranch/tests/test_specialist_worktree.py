@@ -241,3 +241,44 @@ def test_source_only_keeps_the_component_s_files_byte_for_byte_and_names_the_res
 
     assert kept == own
     assert outside == ("eval/run.log", "vllm_extra/x.py")
+
+
+@pytest.fixture
+def hostile_home(tmp_path, monkeypatch):
+    """An operator whose git signs every commit, runs a pre-commit hook that refuses it, ignores ``lpm.py``, prefixes
+    diff paths with c/ and i/, and seeds every new repository with that hook."""
+    home = tmp_path / "home"
+    hooks = home / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n")
+    (hooks / "pre-commit").chmod(0o755)
+    (home / "ignore").write_text("lpm.py\n")
+    (home / ".gitconfig").write_text(
+        "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n"
+        f"[core]\n\thooksPath = {hooks}\n\texcludesFile = {home / 'ignore'}\n"
+        f"[diff]\n\tmnemonicPrefix = true\n[init]\n\ttemplateDir = {home}\n"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
+    return home
+
+
+def test_the_operator_s_git_config_changes_nothing_a_worktree_builds_or_patches(
+    tmp_path, installed, monkeypatch, hostile_home
+):
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
+    base.build(["vllm"])
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    root = worktree.commit()
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+    (worktree.path / "vllm" / "lpm.py").write_bytes(b"policy = 'lpm'\n")
+
+    patch = worktree.diff("vllm")
+
+    assert "b/vllm/config.py" in patch and "b/vllm/lpm.py" in patch
+    kept, outside = worktree.source_only("vllm", worktree.diff_from(root, "vllm"))
+    assert ("b/vllm/config.py" in kept, "b/vllm/lpm.py" in kept, outside) == (True, True, ())
+    worktree.sync("c1", [patch.encode()])
+    assert (worktree.head(), (worktree.path / "vllm" / "lpm.py").exists()) == ("c1", True)

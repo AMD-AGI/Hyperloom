@@ -13,7 +13,6 @@ against its head, a patch the toolbox applies where it applies every other.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -30,6 +29,7 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
+from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 
 #: The file in a base's git directory that names the paths each worktree links rather than holds.
 LINKED_PATHS = "hyperloom-third-party"
@@ -52,7 +52,16 @@ _GIT_IDENTITY = {
     "GIT_COMMITTER_NAME": "hyperloom-multibranch",
     "GIT_COMMITTER_EMAIL": "multibranch@hyperloom.invalid",
 }
-_FIXED_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "diff.noprefix=false")
+_FIXED_CONFIG = (
+    "-c",
+    "core.autocrlf=false",
+    "-c",
+    "core.safecrlf=false",
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicPrefix=false",
+)
 _STAGE = ("add", "--all", "--")
 _HEAD = "HEAD"
 _REV_PARSE = "rev-parse"
@@ -89,23 +98,22 @@ def installed_upstream(package: PackageBase) -> Upstream | None:
     named = _BUILT_FROM.search(package.dist_version or "")
     if named is None:
         return None
+    # The image's checkout may belong to another user, and the system or global config that trusted it is not read.
+    trusted = ("-c", "safe.directory=*")
     try:
-        commit = _git(package.path, _REV_PARSE, "--verify", _QUIET, f"{named.group(1)}^{{commit}}").strip()
-        repo = _git(package.path, "remote", "get-url", "origin").strip()
+        commit = _git(package.path, *trusted, _REV_PARSE, "--verify", _QUIET, f"{named.group(1)}^{{commit}}").strip()
+        repo = _git(package.path, *trusted, "remote", "get-url", "origin").strip()
     except WorktreeError:
         return None
     return Upstream(repo, commit) if commit and repo else None
 
 
 def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
-    # An inherited GIT_* (GIT_DIR inside a hook) would aim the command at another repository.
-    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
-    if index is not None:
-        env["GIT_INDEX_FILE"] = str(index)
+    pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
     done = subprocess.run(
-        ["git", *_FIXED_CONFIG, *args],
+        git_argv(*_FIXED_CONFIG, *args),
         cwd=cwd,
-        env={**env, **_GIT_IDENTITY},
+        env=git_env(**pinned),
         input=stdin,
         capture_output=True,
         timeout=GIT_TIMEOUT_S,
@@ -145,7 +153,7 @@ class SourceBase:
                 commit its version names (aiter from a wheel).
         """
         self.path.mkdir(parents=True)
-        _git(self.path, "init", f"--initial-branch={BASE_BRANCH}")
+        _git(self.path, *INIT, f"--initial-branch={BASE_BRANCH}")
         excluded = list(SKIPPED)
         links: list[tuple[str, str]] = []
         for component in components:
