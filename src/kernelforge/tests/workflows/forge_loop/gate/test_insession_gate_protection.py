@@ -680,6 +680,12 @@ def test_a_stop_after_an_import_under_a_protected_dir_reaches_validation(tmp_pat
     created = _bytecode_of(tests / "layer_ut_utils.py")
     assert created.exists() and rewritten.read_bytes() != b"stale"
 
+    # A tracked implementation edit (the committed kernel, as _edit_kernel in
+    # test_insession_gate_logic.py), so the stop has a candidate and must reach
+    # validation rather than end as no_changes; the protected-dir bytecode
+    # above is what must not block that path.
+    (workspace / "aiter" / "csrc" / "kernel.cu").write_text("__global__ void kernel() { /* faster */ }\n")
+
     result = asyncio.run(gate._on_stop({}, None, None))
 
     assert "Protected benchmark harness" not in result.get("reason", "")
