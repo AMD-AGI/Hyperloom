@@ -50,6 +50,7 @@ torch = None
 
 CONFIG = "script_workload.json"
 SCOPE = "optimization_scope.json"
+SCORER = "scorer.py"
 DEVICE = "cuda"
 MS_PER_S = 1000
 # The child subcommand, its two modes, and the directory layout they exchange.
@@ -89,6 +90,41 @@ def _leaves(value) -> list[torch.Tensor]:
 
 def _snapshot(value):
     return _map_tensors(value, lambda tensor: tensor.detach().clone())
+
+
+_SCORER = None
+
+
+def _use_scorer(directory: Path) -> None:
+    """Load the operator's optional scorer from the frozen benchmark directory.
+
+    It lives beside this file, which the candidate cannot write to, so it is
+    operator code throughout: a candidate cannot soften its own grading.
+    """
+    global _SCORER
+    path = Path(directory) / SCORER
+    if not path.is_file():
+        return
+    spec = importlib.util.spec_from_file_location("hl_script_scorer", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"{path} is not importable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _SCORER = module
+
+
+def _capture(value, where: str = "output"):
+    """One model output, reduced to data the parent can load and compare.
+
+    A scorer's ``capture`` runs first when it defines one: an output whose shape
+    depends on its input -- generated token ids, surviving detections, a transcript
+    -- cannot be compared as a fixed structure, so the operator turns it into
+    whatever their ``score`` reads. ``_plain`` still runs afterwards, so the result
+    must still be tensors and plain containers.
+    """
+    if _SCORER is not None and hasattr(_SCORER, "capture"):
+        value = _SCORER.capture(value)
+    return _plain(value, where)
 
 
 def _plain(value, where: str = "output"):
@@ -233,7 +269,7 @@ class _Recorder:
                 "grad": torch.is_grad_enabled(),
                 "inference_mode": torch.is_inference_mode_enabled(),
                 "autocast": str(autocast).removeprefix("torch.") if autocast is not None else None,
-                "output": _plain(output),
+                "output": _capture(output),
             }
         )
         return output
@@ -267,7 +303,7 @@ def _finish_recording(recorder: _Recorder, config: dict, out: Path) -> None:
 
     def held_out_outputs(autocast=None):
         return [
-            [_plain(_invoke(entry, call, inputs, autocast)) for inputs in variants]
+            [_capture(_invoke(entry, call, inputs, autocast)) for inputs in variants]
             for call, variants in zip(calls, held_out)
         ]
 
@@ -280,7 +316,7 @@ def _finish_recording(recorder: _Recorder, config: dict, out: Path) -> None:
     autocast = config["tolerance"].get("autocast")
     if autocast:
         calibration = {
-            "recorded": [_plain(_invoke(entry, call, autocast=autocast)) for call in calls],
+            "recorded": [_capture(_invoke(entry, call, autocast=autocast)) for call in calls],
             "held_out": held_out_outputs(autocast),
         }
         torch.save(calibration, out / REFERENCES_DIR / "calibration.pt")
@@ -356,7 +392,7 @@ def _timed_passes(entry, calls, held_out, config):
             latencies.append(elapsed * MS_PER_S)
         _send_mark("stop")
         for index, variant, output in kept:
-            held_out_outputs[index][variant] = _plain(output)
+            held_out_outputs[index][variant] = _capture(output)
     return latencies, held_out_outputs
 
 
@@ -396,7 +432,7 @@ def _measure(optimized, config: dict, inputs: Path, out: Path) -> None:
     held_out = torch.load(inputs / "held_out.pt", weights_only=False)
     _warm_up(entry, calls, config)
     latencies, held_out_outputs = _timed_passes(entry, calls, held_out, config)
-    recorded_outputs = [_plain(_invoke(entry, call)) for call in calls]
+    recorded_outputs = [_capture(_invoke(entry, call)) for call in calls]
     reused = _reuses_output_buffer(entry, calls)
     trace = _profile(entry, calls)
     torch.save({"recorded": recorded_outputs, "held_out": held_out_outputs}, out / OUTPUTS_FILE)
@@ -482,12 +518,27 @@ def rel_l2(candidate, reference) -> float:
     return worst
 
 
+def _score(candidate, reference) -> float:
+    """The error between one captured output and its reference; lower is better.
+
+    ``rel_l2`` unless the operator supplied a scorer. A scorer that raises or
+    returns a non-number stops the run: every candidate would otherwise be graded
+    by a broken instrument, which reads as the model being wrong.
+    """
+    if _SCORER is None or not hasattr(_SCORER, "score"):
+        return rel_l2(candidate, reference)
+    value = _SCORER.score(candidate, reference)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{SCORER}.score returned {value!r}; it must return a number, lower being better")
+    return float(value)
+
+
 def _errors(outputs: dict, references: dict) -> dict[str, list[float]]:
     """Per recorded call: its own error and the worst error over its held-out variants."""
     return {
-        "recorded": [rel_l2(o, r) for o, r in zip(outputs["recorded"], references["recorded"])],
+        "recorded": [_score(o, r) for o, r in zip(outputs["recorded"], references["recorded"])],
         "held_out": [
-            max(rel_l2(o, r) for o, r in zip(outs, refs))
+            max(_score(o, r) for o, r in zip(outs, refs))
             for outs, refs in zip(outputs["held_out"], references["held_out"])
         ],
     }
@@ -495,8 +546,8 @@ def _errors(outputs: dict, references: dict) -> dict[str, list[float]]:
 
 def _limits(tolerance: dict, references: Path) -> list[float]:
     outputs = torch.load(references / OUTPUTS_FILE, weights_only=True)
-    if "rel_l2" in tolerance:
-        return [float(tolerance["rel_l2"])] * len(outputs["recorded"])
+    if "limit" in tolerance:
+        return [float(tolerance["limit"])] * len(outputs["recorded"])
     errors = _errors(torch.load(references / "calibration.pt", weights_only=True), outputs)
     return [
         max(max(recorded, held_out) * tolerance["headroom"], tolerance["floor"])
@@ -561,6 +612,8 @@ def record(directory: Path) -> dict:
     """Record the references and accuracy limits once, with the identity module."""
     config_path = directory / CONFIG
     config = json.loads(config_path.read_text())
+    _verify_scorer(directory, config)
+    _use_scorer(directory)
     store = directory / "reference"
     if store.exists():
         raise ValueError(f"{store} exists; references are recorded once and never replaced")
@@ -584,8 +637,9 @@ def _gate(errors: dict, limits: list[float], measurement: dict, timed_fraction: 
             cases.append(
                 {
                     "case": f"{kind}[{index}]",
-                    "rel_l2": error if finite else None,
-                    "rel_l2_max": limit,
+                    # Not named for relative L2: with a scorer these are its units.
+                    "error": error if finite else None,
+                    "error_max": limit,
                     "passed": finite and error <= limit,
                 }
             )
@@ -594,6 +648,15 @@ def _gate(errors: dict, limits: list[float], measurement: dict, timed_fraction: 
         {"case": "timing_consistent", "timed_fraction": timed_fraction, "passed": timed_fraction >= MIN_TIMED_FRACTION}
     )
     return {"passed": all(case["passed"] for case in cases), "cases": cases}
+
+
+def _verify_scorer(directory: Path, config: dict) -> None:
+    """The scorer is pinned like the script: both decide whether a candidate passes."""
+    recorded = config.get("scorer_sha256")
+    path = Path(directory) / SCORER
+    actual = _sha256(path) if path.is_file() else None
+    if recorded != actual:
+        raise ValueError(f"{path} does not match the scorer the references were recorded with")
 
 
 def _candidate_file(directory: Path) -> Path:
@@ -609,6 +672,8 @@ def measure(directory: Path, result_dir: Path) -> dict:
     config = json.loads(config_path.read_text())
     if _sha256(Path(config["script"])) != config["script_sha256"]:
         raise ValueError(f"{config['script']} changed since its references were recorded")
+    _verify_scorer(directory, config)
+    _use_scorer(directory)
     store = directory / "reference"
     result_dir.mkdir(parents=True, exist_ok=True)
     (result_dir / "inferencex_result.json").unlink(missing_ok=True)
@@ -656,6 +721,9 @@ def main() -> None:
     directory = Path(__file__).resolve().parent
     if args.command == CHILD:
         config = json.loads(args.config.read_text())
+        # The child captures outputs, so it needs the scorer too; the parent already
+        # checked the pin before spawning it.
+        _use_scorer(directory)
         child(args.mode, config, args.candidate, args.inputs, args.out)
         return
     _load_torch()

@@ -27,6 +27,7 @@ from .session.paths import asset_root
 
 _HARNESS = "harness.py"
 _CONFIG = "script_workload.json"
+_SCORER = "scorer.py"
 _IDENTITY = '''"""Optimizations for {script}; the identity until Hyperloom accepts a change."""
 
 
@@ -36,9 +37,18 @@ def {function}(model):
 
 
 def _tolerance(args: argparse.Namespace) -> dict:
-    if args.rel_l2 is not None:
-        return {"rel_l2": args.rel_l2}
+    if args.error_limit is not None:
+        return {"limit": args.error_limit}
     return {"autocast": args.calibrate_autocast, "headroom": args.headroom, "floor": args.floor}
+
+
+def _copy_scorer(benchmark: Path, scorer: Path | None) -> str | None:
+    """Freeze the operator's scorer beside the harness; return its digest, or None."""
+    if scorer is None:
+        return None
+    body = scorer.resolve().read_bytes()
+    (benchmark / _SCORER).write_bytes(body)
+    return hashlib.sha256(body).hexdigest()
 
 
 def _write_benchmark(benchmark: Path, module_file: Path, args: argparse.Namespace) -> None:
@@ -60,6 +70,7 @@ def _write_benchmark(benchmark: Path, module_file: Path, args: argparse.Namespac
         "warmup_passes": 3,
         "timed_passes": args.timed_passes,
         "tolerance": _tolerance(args),
+        "scorer_sha256": _copy_scorer(benchmark, args.scorer),
     }
     (benchmark / _CONFIG).write_text(json.dumps(config, indent=2) + "\n")
     scope = {"schema_version": 2, "file": str(module_file), "function": args.function}
@@ -149,16 +160,29 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--python", default=sys.executable, help="interpreter of the model's environment")
     parser.add_argument("--cwd", type=Path, default=Path.cwd(), help="directory the script is run from")
     parser.add_argument("--runner", default="gfx11", help="runner label of the custom_<runner>.sh entrypoint")
+    parser.add_argument(
+        "--scorer",
+        type=Path,
+        help="your own accuracy measure: a Python file defining score(candidate, reference), "
+        "and optionally capture(output). Without it, outputs are compared by relative L2",
+    )
     parser.add_argument("--record-calls", type=int, default=4, help="calls of the model recorded as references")
     parser.add_argument("--held-out", type=int, default=4, help="hidden perturbed inputs per recorded call")
     parser.add_argument("--timed-passes", type=int, default=100)
     parser.add_argument("--warmup-s", type=float, default=5.0)
     tolerance = parser.add_mutually_exclusive_group(required=True)
-    tolerance.add_argument("--rel-l2", type=float, help="fixed relative-L2 limit per call")
+    tolerance.add_argument(
+        "--error-limit",
+        "--rel-l2",
+        dest="error_limit",
+        type=float,
+        help="fixed error limit per call, in the scorer's units (relative L2 unless --scorer is given)",
+    )
     tolerance.add_argument(
         "--calibrate-autocast",
         choices=("bfloat16", "float16"),
-        help="limit = error of the model under this autocast dtype x headroom",
+        help="limit = the error this autocast dtype costs the unmodified model, x headroom; "
+        "measured in the scorer's units, so it reads as 'allow as much error as bfloat16 costs'",
     )
     parser.add_argument("--headroom", type=float, default=1.15)
     parser.add_argument("--floor", type=float, default=1e-4, help="smallest calibrated limit")

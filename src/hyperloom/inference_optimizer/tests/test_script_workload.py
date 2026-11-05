@@ -63,12 +63,17 @@ CANDIDATES = {
 }
 
 
-def _prepare(user: Path, workspace: Path, script: str) -> int:
+def _prepare(user: Path, workspace: Path, script: str, scorer: str | None = None, limit: str = "1e-5") -> int:
+    user.mkdir(parents=True, exist_ok=True)
     (user / "toy.py").write_text(script)
     (user / "toy_opt.py").write_text("def apply(model):\n    return model\n")
     argv = ["prepare", "--workspace", str(workspace), "--script", str(user / "toy.py"), "--cwd", str(user)]
-    argv += ["--python", sys.executable, "--rel-l2", "1e-5", "--held-out", "2", "--timed-passes", "8"]
+    argv += ["--python", sys.executable, "--error-limit", limit, "--held-out", "2", "--timed-passes", "8"]
     argv += ["--warmup-s", "0"]
+    if scorer is not None:
+        path = user / "scorer.py"
+        path.write_text(textwrap.dedent(scorer))
+        argv += ["--scorer", str(path)]
     return script_main(argv)
 
 
@@ -213,6 +218,94 @@ def test_a_recycled_buffer_does_not_corrupt_the_held_out_samples(workspace, tmp_
     calls = str(workspace / "benchmark" / "reference" / "inputs" / "calls.pt")
     result = _measure(workspace, tmp_path, textwrap.dedent(CANDIDATES["reused_buffer"].format(calls=calls)))
     assert _failed(result) == {"output_buffer_reuse"}
+
+
+# An output whose shape follows its input: the number of rows depends on a threshold,
+# so the default comparison sees a structure mismatch and scores every candidate inf.
+COUNTING_SCRIPT = textwrap.dedent(
+    """
+    from toy_opt import apply
+    import torch
+
+    torch.manual_seed(0)
+    inner = torch.nn.Linear(512, 512).eval()
+
+    class Model:
+        def __call__(self, x):
+            with torch.no_grad():
+                out = inner(x)
+            return out[out[:, 0] > 0]
+
+    model = apply(Model())
+    for _ in range(3):
+        print(model(torch.randn(256, 512)).shape)
+    """
+)
+
+# Counts rather than compares elementwise, so a varying number of rows is fine.
+COUNT_SCORER = """
+import torch
+
+
+def capture(output):
+    return {"rows": torch.tensor(output.shape[0]), "total": output.sum()}
+
+
+def score(candidate, reference):
+    return abs(int(candidate["rows"]) - int(reference["rows"]))
+"""
+
+
+DROP_A_ROW = """
+    def apply(model):
+        inner = model.__call__
+        return lambda x: inner(x)[:-1]
+"""
+
+
+def test_the_default_comparison_cannot_grade_a_varying_output(tmp_path):
+    """One row fewer is a structure mismatch, which scores infinite however close it is."""
+    workspace = tmp_path / "ws"
+    assert _prepare(tmp_path / "u", workspace, COUNTING_SCRIPT) == 0
+
+    result = _measure(workspace, tmp_path / "out", textwrap.dedent(DROP_A_ROW))
+
+    assert not result["quality_gate"]["passed"]
+    recorded = next(c for c in result["quality_gate"]["cases"] if c["case"] == "recorded[0]")
+    assert recorded["error"] is None  # infinite: the two outputs are not comparable at all
+
+
+def test_a_scorer_grades_what_the_default_cannot(tmp_path):
+    """The same candidate, judged on a number the operator chose: one row out, limit one."""
+    workspace = tmp_path / "ws"
+    assert _prepare(tmp_path / "u", workspace, COUNTING_SCRIPT, COUNT_SCORER, limit="1") == 0
+
+    result = _measure(workspace, tmp_path / "out", textwrap.dedent(DROP_A_ROW))
+
+    assert result["quality_gate"]["passed"], result["quality_gate"]
+    recorded = next(c for c in result["quality_gate"]["cases"] if c["case"] == "recorded[0]")
+    assert recorded["error"] == 1.0
+
+
+def test_a_scorer_still_rejects_a_wrong_candidate(tmp_path):
+    """Same scorer, limit zero: the operator's own measure is what refuses it."""
+    workspace = tmp_path / "ws"
+    assert _prepare(tmp_path / "u", workspace, COUNTING_SCRIPT, COUNT_SCORER, limit="0") == 0
+
+    result = _measure(workspace, tmp_path / "out", textwrap.dedent(DROP_A_ROW))
+
+    assert not result["quality_gate"]["passed"]
+    assert "recorded[0]" in _failed(result)
+
+
+def test_an_edited_scorer_stops_the_run(tmp_path):
+    """Pinned like the script: both decide whether a candidate passes."""
+    workspace = tmp_path / "ws"
+    assert _prepare(tmp_path / "u", workspace, COUNTING_SCRIPT, COUNT_SCORER, limit="0") == 0
+    frozen = workspace / "benchmark" / "scorer.py"
+    frozen.write_text(frozen.read_text() + "\n# tampered\n")
+    with pytest.raises(subprocess.CalledProcessError):
+        _measure(workspace, tmp_path / "out")
 
 
 def test_measure_refuses_an_edited_script(workspace, tmp_path):

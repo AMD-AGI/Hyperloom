@@ -408,7 +408,7 @@ model = apply(model)
 
 ```bash
 hyperloom script prepare --workspace "$WS" --script encoder.py --python /path/to/model/env/python \
-  --calibrate-autocast bfloat16 -- --frames 6     # or --rel-l2 0.01; arguments after -- go to the script
+  --calibrate-autocast bfloat16 -- --frames 6   # or --error-limit 0.01; arguments after -- go to the script
 ```
 
 It runs the script once with the identity module, records the calls of the
@@ -419,6 +419,44 @@ and compares outputs in a process that never imports the candidate. Your script
 needs no timing or validation code. Preparation refuses a script that imports
 the module after the GPU is initialized or `torch._inductor`/`torch._dynamo`
 are loaded, and warns if it imports it after `torch`, naming both lines.
+
+#### Judging an output whose shape changes
+
+By default two outputs are compared element by element, which needs them to have
+the same shape. Many models do not: anything that generates text stops at a
+different length, a detector returns however many objects passed its threshold, a
+transcriber returns a different number of words. A candidate that is only slightly
+different can produce one row fewer, and the default comparison then reports an
+infinite error -- not because the answer is bad, but because it cannot line the
+two up at all.
+
+Pass `--scorer my_scorer.py` to judge such a workload your own way. The file
+defines one required function and one optional one:
+
+```python
+def score(candidate, reference):
+    # How wrong the candidate is. Any number, lower being better.
+    return word_error_rate(candidate["text"], reference["text"])
+
+
+def capture(output):
+    # Optional: turn one model output into tensors the comparison can load.
+    return {"text": tokens_of(output)}
+```
+
+`capture` runs next to the model and decides what is worth keeping -- the number
+of detections, the transcript, whatever your `score` reads. `score` runs in the
+separate process that never loads the candidate, so the model cannot influence
+its own mark. Whatever units `score` returns are the units of `--error-limit`,
+and of `--calibrate-autocast` too: with a word error rate,
+`--calibrate-autocast bfloat16` means "allow as much extra error as bfloat16
+costs this model".
+
+The file is copied into the frozen benchmark directory and its checksum is
+recorded, so editing it after preparation stops the run rather than quietly
+changing what passes. Everything else is unchanged: the clock, the hidden
+held-out inputs, the input perturbation and the output-buffer check all still
+apply.
 
 The normal custom entrypoint still emits the InferenceX report. A script runner
 can translate the user's final `{"latency_ms": 1.2, "validation_passed": true}`
