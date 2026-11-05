@@ -19,6 +19,7 @@ from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
+from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver, LineageKind
@@ -220,6 +221,7 @@ async def test_a_batch_briefs_and_logs_the_judges_focus_as_written_and_names_its
     assert start.start_commit == bench.root
     assert {branch: briefs.for_branch(branch).focus for branch in ("b01", "b02")} == {"b01": ASKED, "b02": ""}
     assert bench.sessions.briefs == {"b01": "", "b02": ""}
+    assert bench.sessions.directions == {"b01": [""], "b02": [DIRECTIONS[0]]}
     opened = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
     assert [(row["branch"], row["detail"]["focus"]) for row in opened if row["kind"] == "open"] == [
         ("b01", ASKED),

@@ -105,7 +105,8 @@ PLAYBOOK_OPEN_CUT_REASON = "the playbook opens no more branches now"
 def gave_up_reason(status: SpecialistStatus) -> str:
     """Why a branch whose specialist gave up is stopped, from what the runtime keeps: why it could not be started, why
     its agent's run ended of itself, the crashes it gave up after and how many of them lost their heartbeat, or no
-    crash at all, which leaves the sessions that found nothing to test as the only way it gives up.
+    crash at all, which leaves the sessions that found nothing to test as the only way it gives up, quoting the
+    specialist's last exhausted record when it wrote one.
 
     The counts are reported rather than the limit they crossed, which is the runtime's own to name.
     """
@@ -115,7 +116,8 @@ def gave_up_reason(status: SpecialistStatus) -> str:
     if status.finished:
         return status.finished
     if not status.crashes:
-        return "its specialist gave up: its sessions in a row found nothing to test"
+        why = status.exhausted or "its sessions in a row found nothing to test"
+        return f"its specialist gave up: {why}"
     lost = f", {status.lost} of them with a lost heartbeat" if status.lost else ""
     return f"its specialist gave up after {status.crashes} crashes{lost}"
 
