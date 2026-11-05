@@ -34,6 +34,7 @@ from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.specialist import agent_import
 from hyperloom_multibranch.specialist.agent_import import SourceIncrement
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource
+from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import BranchWorktree, SourceBase, Upstream
 
 SGLANG = "https://github.com/sgl-project/sglang"
@@ -431,12 +432,13 @@ def _named(lines: list[str]) -> list[tuple[str, str]]:
     return [(line, line.split(" = ")[0]) for line in lines]
 
 
-async def _source(tmp_path: Path) -> Source:
+async def _source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Source:
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)
     (package / "config.py").write_text("".join(LINES))
     installed = PackageBase("vllm", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     workspace = base.worktree("b01", tmp_path / "workspace")
     blobs = LocalBlobStore(tmp_path / "blobs")
@@ -450,8 +452,10 @@ def _expected(**lines: str) -> str:
     return "".join(f"{name} = {lines[name]}\n" if name in lines else line for line, name in _named(LINES))
 
 
-async def test_a_later_keep_stacks_only_its_own_change_on_the_imports_the_head_committed(tmp_path: Path) -> None:
-    source = await _source(tmp_path)
+async def test_a_later_keep_stacks_only_its_own_change_on_the_imports_the_head_committed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = await _source(tmp_path, monkeypatch)
     first = await source.imported(_kept(1, source.keep(line_2="20")), "b01", source.root)
 
     second = _kept(2, source.keep(line_2="20", line_25="250"))
@@ -471,8 +475,9 @@ async def test_a_later_keep_stacks_only_its_own_change_on_the_imports_the_head_c
 
 async def test_a_rejected_keep_s_change_rides_in_the_next_import_against_the_head_that_never_took_it(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = await _source(tmp_path)
+    source = await _source(tmp_path, monkeypatch)
     source.keep(line_2="20")
     second = _kept(2, source.keep(line_2="20", line_25="250"))
 
@@ -482,8 +487,8 @@ async def test_a_rejected_keep_s_change_rides_in_the_next_import_against_the_hea
     assert source.config(apply(BARE, delta)) == _expected(line_2="20", line_25="250")
 
 
-async def test_a_keep_the_head_already_is_imports_nothing(tmp_path: Path) -> None:
-    source = await _source(tmp_path)
+async def test_a_keep_the_head_already_is_imports_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = await _source(tmp_path, monkeypatch)
     first = await source.imported(_kept(1, source.keep(line_2="20")), "b01", source.root)
 
     again = _kept(2, source.keep(line_2="20"))
@@ -494,12 +499,13 @@ async def test_a_keep_the_head_already_is_imports_nothing(tmp_path: Path) -> Non
 
 async def test_a_keep_carries_an_earlier_unmerged_keep_that_clashes_with_integration_as_its_one_conflict(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Integration holds b04's patch over the lines of b01's first keep, so that keep never merged.
     A merge carries b01's lineage from the merge base, so the first keep's patch is the conflict and the second keep's
     hunk lands beside b04's."""
 
-    source = await _source(tmp_path)
+    source = await _source(tmp_path, monkeypatch)
     b04_text = source.keep(line_2="2000", line_10="1000")
     await source.repo.create_branch("b04", source.root)
     b04 = await source.imported(_kept(1, b04_text), "b04", source.root)

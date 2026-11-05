@@ -7,6 +7,7 @@ import subprocess
 import pytest
 
 from hyperloom.measure.compile import PackageBase, UnsupportedComponentError
+from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase, Upstream, installed_upstream
 
 KERNEL, HEADER = b"__global__ void k() {}\n", b"#pragma once\n"
@@ -63,8 +64,9 @@ def editable(tmp_path):
 
 
 @pytest.fixture
-def worktree(tmp_path, editable):
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: editable)
+def worktree(tmp_path, editable, monkeypatch):
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: editable)
+    base = SourceBase(tmp_path / "source")
     base.build(["aiter"])
     worktree = base.worktree("s1", tmp_path / "s1")
     worktree.sync("c0", [])
@@ -74,8 +76,9 @@ def worktree(tmp_path, editable):
 EXPECTED = ["aiter/__init__.py", "aiter/jit/core.py", "csrc/include/gemm.h", "csrc/kernels/gemm.cu", "hsa/codegen.py"]
 
 
-def test_the_base_lays_out_aiter_s_package_and_its_csrc_without_build_outputs(tmp_path, editable):
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: editable)
+def test_the_base_lays_out_aiter_s_package_and_its_csrc_without_build_outputs(tmp_path, editable, monkeypatch):
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: editable)
+    base = SourceBase(tmp_path / "source")
     base.build(["aiter"])
 
     assert _tracked(base.path) == EXPECTED
@@ -87,10 +90,11 @@ def test_a_rebuilt_code_object_never_becomes_a_change(worktree):
     assert worktree.diff("aiter") == ""
 
 
-def test_a_wheel_install_of_aiter_is_refused_as_it_names_no_full_upstream_commit(tmp_path):
+def test_a_wheel_install_of_aiter_is_refused_as_it_names_no_full_upstream_commit(tmp_path, monkeypatch):
     site = tmp_path / "site-packages"
     installed = _aiter_install(site, site / "aiter_meta", "0.1.23.dev183+ge7d2453f2.d20261008")
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
 
     with pytest.raises(UnsupportedComponentError, match="no git checkout") as refused:
         base.build(["aiter"])
@@ -104,12 +108,13 @@ def test_a_develop_install_s_upstream_is_its_checkout_s_commit(tmp_path):
     assert installed_upstream(installed) == Upstream(AITER, commit)
 
 
-def test_an_aiter_without_meta_trees_lays_out_its_package_alone(tmp_path):
+def test_an_aiter_without_meta_trees_lays_out_its_package_alone(tmp_path, monkeypatch):
     checkout = tmp_path / "aiter-checkout"
     installed, _ = _develop_install(checkout)
     shutil.rmtree(checkout / "csrc")
     shutil.rmtree(checkout / "hsa")
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
     base.build(["aiter"])
     worktree = base.worktree("s1", tmp_path / "s1")
     _write(worktree.path / "aiter" / "ops.py", b"y = 2\n")
@@ -174,11 +179,12 @@ def test_a_sync_lays_a_csrc_patch_over_the_installed_sources(worktree):
     assert worktree.diff("aiter") == ""
 
 
-def test_a_worktree_reads_the_checkout_s_third_party_headers_without_tracking_them(tmp_path):
+def test_a_worktree_reads_the_checkout_s_third_party_headers_without_tracking_them(tmp_path, monkeypatch):
     checkout = tmp_path / "aiter-checkout"
     _write(checkout / "3rdparty" / "composable_kernel" / "include" / "ck" / "ck.hpp", HEADER)
     editable = _develop_install(checkout)[0]
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: editable)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: editable)
+    base = SourceBase(tmp_path / "source")
     base.build(["aiter"])
     worktree = base.worktree("s1", tmp_path / "s1")
 
@@ -189,12 +195,13 @@ def test_a_worktree_reads_the_checkout_s_third_party_headers_without_tracking_th
     assert (worktree.path / "3rdparty" / "composable_kernel" / "include" / "ck" / "ck.hpp").exists(), "a sync keeps it"
 
 
-def test_an_edit_through_a_worktree_s_third_party_tree_never_reaches_the_installed_checkout(tmp_path):
+def test_an_edit_through_a_worktree_s_third_party_tree_never_reaches_the_installed_checkout(tmp_path, monkeypatch):
     checkout = tmp_path / "aiter-checkout"
     installed = checkout / "3rdparty" / "composable_kernel" / "include" / "ck" / "ck.hpp"
     _write(installed, HEADER)
     editable = _develop_install(checkout)[0]
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: editable)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: editable)
+    base = SourceBase(tmp_path / "source")
     base.build(["aiter"])
     worktree = base.worktree("s1", tmp_path / "s1")
 

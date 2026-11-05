@@ -35,7 +35,9 @@ from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 from hyperloom_multibranch.specialist.model_sessions import SESSION_DIR, model_sessions
 from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRuntime
+from hyperloom_multibranch.specialist import tools as tools_module
 from hyperloom_multibranch.specialist.tools import register_worktree_tools
+from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
 from hyperloom_multibranch.tests.fakes import RecordingScheduler, RecordingVerifier
 from hyperloom_multibranch.toolbox.fake import FakeExecutor
@@ -168,12 +170,14 @@ async def _prelude(repo, toolbox, blackboard_root, gate_blackboard) -> str:
     return root
 
 
-async def test_a_model_backed_specialist_lands_a_source_change_through_the_session_s_tools(tmp_path):
+async def test_a_model_backed_specialist_lands_a_source_change_through_the_session_s_tools(tmp_path, monkeypatch):
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)
     (package / "__init__.py").write_bytes(b"")
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(tools_module, "locate_installed_package", lambda _layout: installed)
     blackboard_root, blobs = tmp_path / "blackboard", LocalBlobStore(tmp_path / "blobs")
     repo = GitExperimentRepo(tmp_path / "experiments.git", blobs, lambda _layout: installed)
     toolbox = _toolbox(tmp_path, LocalBlackboard(blackboard_root, Writer(Role.TOOLBOX, "toolbox")), repo)
@@ -202,13 +206,13 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
     )
     sessions = model_sessions(
         setup,
-        base=SourceBase(tmp_path / "MB-source", locator=lambda _layout: installed),
+        base=SourceBase(tmp_path / "MB-source"),
         components=("vllm",),
         branch_dir=lambda branch: tmp_path / "MB-branches" / branch,
         blackboard_for=blackboard_for,
     )
     register_specialist_tools(server, toolbox=toolbox, blackboards=blackboard_for)
-    register_worktree_tools(server, repo=repo, worktrees=sessions.worktrees, locator=lambda _layout: installed)
+    register_worktree_tools(server, repo=repo, worktrees=sessions.worktrees)
     gate = RuleGate(gate_blackboard, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
     judging = Judging(gate, toolbox, InferenceXRule(reader, CONC))
     runtime = SpecialistRuntime(blackboard_for, judging, sessions.factory, pacing=RuntimePacing(poll_seconds=0.05))

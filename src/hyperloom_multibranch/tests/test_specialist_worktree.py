@@ -8,6 +8,7 @@ import pytest
 from hyperloom.contracts.recipe import ComponentPatches, PatchRef
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, LocalBlobStore, PackageBase, apply_patch_stack
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
+from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase, Upstream
 
 VLLM = "https://github.com/vllm-project/vllm"
@@ -26,8 +27,9 @@ def installed(tmp_path):
 
 
 @pytest.fixture
-def base(tmp_path, installed):
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+def base(tmp_path, installed, monkeypatch):
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     return base
 
@@ -108,12 +110,13 @@ def test_each_branch_edits_its_own_worktree(tmp_path, base):
     assert base.worktree("s1", tmp_path / "s1").head() == "c1"
 
 
-def test_a_diff_from_a_commit_holds_new_files_under_a_nested_package_and_leaves_out_built_ones(tmp_path):
+def test_a_diff_from_a_commit_holds_new_files_under_a_nested_package_and_leaves_out_built_ones(tmp_path, monkeypatch):
     package = tmp_path / "site-packages" / "sglang"
     (package / "srt").mkdir(parents=True)
     (package / "srt" / "a.py").write_bytes(b"x = 1\n")
     installed = PackageBase("sglang", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
     base.build(["sglang"])
     worktree = base.worktree("s1", tmp_path / "s1")
     worktree.sync("c0", [])
@@ -136,7 +139,7 @@ AOT = "python/sglang/kernels/aot"
 SGLANG = "https://github.com/sgl-project/sglang.git"
 
 
-def _native_base(tmp_path):
+def _native_base(tmp_path, monkeypatch):
     """sgl-kernel installed as a wheel, and the native build's checkout of its sources at the image's commit."""
     package = tmp_path / "site-packages" / "sgl_kernel"
     package.mkdir(parents=True)
@@ -152,21 +155,22 @@ def _native_base(tmp_path):
         (checkout / AOT / path).write_bytes(text)
     tree = NativeTree(SourceRoot(AOT, checkout / AOT), SGLANG, "2" * 40)
     installed = PackageBase("sgl_kernel", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, native={"sgl_kernel": tree})
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source", native={"sgl_kernel": tree})
     base.build(["sgl_kernel"])
     return base
 
 
-def test_the_base_lays_the_native_tree_beside_the_installed_package_without_replacing_it(tmp_path):
-    base = _native_base(tmp_path)
+def test_the_base_lays_the_native_tree_beside_the_installed_package_without_replacing_it(tmp_path, monkeypatch):
+    base = _native_base(tmp_path, monkeypatch)
 
     assert (base.path / AOT / "csrc" / "gemm.cu").read_bytes() == b"int tile = 64;\n"
     assert (base.path / AOT / "python" / "sgl_kernel" / "gemm.py").read_bytes() == b"installed = True\n"
     assert not (base.path / AOT / "python" / "sgl_kernel" / "common_ops.so").exists()
 
 
-def test_a_change_to_the_native_tree_is_in_the_component_s_diff_and_names_its_commit(tmp_path):
-    base = _native_base(tmp_path)
+def test_a_change_to_the_native_tree_is_in_the_component_s_diff_and_names_its_commit(tmp_path, monkeypatch):
+    base = _native_base(tmp_path, monkeypatch)
     worktree = base.worktree("s1", tmp_path / "s1")
     worktree.sync("c0", [])
     (worktree.path / AOT / "csrc" / "gemm.cu").write_bytes(b"int tile = 128;\n")
@@ -179,7 +183,7 @@ def test_a_change_to_the_native_tree_is_in_the_component_s_diff_and_names_its_co
     assert worktree.native_upstream("vllm") is None
 
 
-def test_a_native_tree_inside_the_framework_s_tree_is_the_native_component_s_alone(tmp_path):
+def test_a_native_tree_inside_the_framework_s_tree_is_the_native_component_s_alone(tmp_path, monkeypatch):
     """SGLang's develop install holds sgl-kernel's tree, so the framework lays it out first: a change there is
     sgl_kernel's, and the framework's diff leaves it out."""
     sglang = tmp_path / "checkout" / "python" / "sglang"
@@ -194,9 +198,8 @@ def test_a_native_tree_inside_the_framework_s_tree_is_the_native_component_s_alo
         "sgl_kernel": PackageBase("sgl_kernel", kernel, None, None),
     }
     tree = NativeTree(SourceRoot(AOT, sglang / "kernels" / "aot"), SGLANG, "2" * 40)
-    base = SourceBase(
-        tmp_path / "source", locator=lambda layout: installed[layout.import_name], native={"sgl_kernel": tree}
-    )
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda layout: installed[layout.import_name])
+    base = SourceBase(tmp_path / "source", native={"sgl_kernel": tree})
     base.build(["sglang", "sgl_kernel"])
     worktree = base.worktree("s1", tmp_path / "s1")
     worktree.sync("c0", [])
@@ -209,11 +212,14 @@ def test_a_native_tree_inside_the_framework_s_tree_is_the_native_component_s_alo
     assert f"b/{AOT}/csrc/gemm.cu" in native and "srt/server.py" not in native
 
 
-def test_a_worktree_links_the_installed_package_s_compiled_extensions_without_tracking_them(tmp_path, installed):
+def test_a_worktree_links_the_installed_package_s_compiled_extensions_without_tracking_them(
+    tmp_path, installed, monkeypatch
+):
     (installed.path / "_C.abi3.so").write_bytes(b"\x7fELF ext")
     (installed.path / "attn").mkdir()
     (installed.path / "attn" / "_fa_C.cpython-312-x86_64-linux-gnu.so").write_bytes(b"\x7fELF fa")
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     worktree = base.worktree("s1", tmp_path / "s1")
 

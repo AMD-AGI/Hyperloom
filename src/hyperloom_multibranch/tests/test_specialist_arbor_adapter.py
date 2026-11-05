@@ -277,33 +277,35 @@ def _located(installed: Path) -> PackageLocator:
 
 
 def test_the_workspace_is_given_the_installed_framework_s_built_files_and_keeps_them_out_of_its_stage(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     files = {"config.py": "max_num_seqs = 64\n", "_C.abi3.so": "elf", "attention/_moe_C.abi3.so": "elf"}
     installed = _write(tmp_path / "site-packages" / "vllm", {**files, "__pycache__/config.cpython-314.pyc": "pyc"})
     spec, checkout = _spec(tmp_path), _write(tmp_path / "checkout", CHECKOUT_FILES)
     workspace = Path(spec.workspace)
     (workspace / ".git" / "info" / "exclude").write_text("".join(f"{pattern}\n" for pattern in SKIPPED))
+    monkeypatch.setattr(arbor_adapter, "locate_installed_package", _located(installed))
 
-    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN, _located(installed))
+    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN)
 
     assert (workspace / "vllm" / "_C.abi3.so").resolve() == (installed / "_C.abi3.so").resolve()
     assert (workspace / "vllm" / "attention" / "_moe_C.abi3.so").is_symlink()
     assert (workspace / "vllm" / "config.py").read_text() == "max_num_seqs = 128\n"
     assert not (workspace / "vllm" / "__pycache__").exists()
     assert _git(workspace, "status", "--porcelain") == ""
-    assert link_built(workspace, "vllm", _located(installed)) == 0
+    assert link_built(workspace, "vllm") == 0
 
 
 def test_a_branch_given_the_session_s_dossier_finds_it_in_its_checkout_where_arbor_looks_one_up(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dossier = _write(tmp_path / "pass" / "docs" / "dossier" / "qwen3-8b", {"README.md": "# the pass's\n"})
     spec, checkout = _spec(tmp_path, dossier=str(dossier)), _write(tmp_path / "checkout", CHECKOUT_FILES)
+    monkeypatch.setattr(arbor_adapter, "locate_installed_package", _located(tmp_path / "none"))
 
-    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN, _located(tmp_path / "none"))
+    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN)
     (dossier / "README.md").write_text("# edited after\n")
-    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN, _located(tmp_path / "none"))
+    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN)
 
     assert (checkout / DOSSIER_DIR / "qwen3-8b" / "README.md").read_text() == "# the pass's\n"  # a copy there stays
 
@@ -334,12 +336,16 @@ async def test_a_branch_whose_dossier_is_gone_starts_without_one_and_says_so(tmp
     assert not (ready.source_dir / DOSSIER_DIR / "qwen3-8b").exists()
 
 
-def test_a_framework_not_installed_or_with_no_layout_links_nothing(tmp_path: Path) -> None:
+def test_a_framework_not_installed_or_with_no_layout_links_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def missing(layout: ComponentLayout) -> PackageBase:
         raise UnsupportedComponentError(f"package {layout.import_name} is not installed in this image")
 
-    assert link_built(tmp_path, "vllm", missing) == 0
-    assert link_built(tmp_path, "no-such-framework", _located(tmp_path)) == 0
+    monkeypatch.setattr(arbor_adapter, "locate_installed_package", missing)
+    assert link_built(tmp_path, "vllm") == 0
+    monkeypatch.setattr(arbor_adapter, "locate_installed_package", _located(tmp_path))
+    assert link_built(tmp_path, "no-such-framework") == 0
     assert list(tmp_path.iterdir()) == []
 
 

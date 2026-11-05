@@ -20,7 +20,6 @@ from hyperloom.contracts.recipe import ComponentChange, RecipeDelta
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
-    PackageLocator,
     UnsupportedComponentError,
     locate_installed_package,
 )
@@ -65,7 +64,6 @@ def register_worktree_tools(
     *,
     repo: ExperimentRepo,
     worktrees: WorktreeFor,
-    locator: PackageLocator = locate_installed_package,
 ) -> None:
     own = {"scopes": frozenset({SCOPE_SPECIALIST})}
     server.register(
@@ -79,7 +77,7 @@ def register_worktree_tools(
         "worktree_check",
         description="Check your worktree's change to one component: its files compile and the package imports with it.",
         schema=_PATCH,
-        handler=_check(worktrees, locator),
+        handler=_check(worktrees),
         **own,
     )
     server.register(
@@ -89,7 +87,7 @@ def register_worktree_tools(
             "new on your head gets the upstream commit its installed package was built from."
         ),
         schema=_PATCH,
-        handler=_patch(repo, worktrees, locator),
+        handler=_patch(repo, worktrees),
         **own,
     )
 
@@ -103,7 +101,7 @@ def _sync(repo: ExperimentRepo, worktrees: WorktreeFor) -> Callable[[dict[str, A
     return handle
 
 
-def _check(worktrees: WorktreeFor, locator: PackageLocator) -> Callable[[dict[str, Any], CallContext], Any]:
+def _check(worktrees: WorktreeFor) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         component = arguments["component"]
         worktree = worktrees(ctx.principal.branch)
@@ -111,7 +109,9 @@ def _check(worktrees: WorktreeFor, locator: PackageLocator) -> Callable[[dict[st
         if layout is None or not worktree.holds(component):
             raise InvalidParamsError(f"your worktree holds no source of {component}")
         try:
-            compiled = await asyncio.to_thread(check_change, worktree, component, layout, locator(layout))
+            compiled = await asyncio.to_thread(
+                check_change, worktree, component, layout, locate_installed_package(layout)
+            )
         except (CheckFailed, UnsupportedComponentError) as error:
             raise ToolError(str(error)) from error
         return {"component": component, "compiled": compiled, "imported": layout.import_name}
@@ -119,9 +119,7 @@ def _check(worktrees: WorktreeFor, locator: PackageLocator) -> Callable[[dict[st
     return handle
 
 
-def _patch(
-    repo: ExperimentRepo, worktrees: WorktreeFor, locator: PackageLocator
-) -> Callable[[dict[str, Any], CallContext], Any]:
+def _patch(repo: ExperimentRepo, worktrees: WorktreeFor) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         branch, component = ctx.principal.branch, arguments["component"]
         worktree = worktrees(branch)
@@ -138,7 +136,7 @@ def _patch(
         taken: dict[str, Any] = {"parent_commit": head, "patch": ref.to_document()}
         if all(present.component != component for present in (await repo.read_recipe(head)).components):
             upstream = worktree.native_upstream(component) or await asyncio.to_thread(
-                installed_upstream, locator(COMPONENT_LAYOUTS[component])
+                installed_upstream, locate_installed_package(COMPONENT_LAYOUTS[component])
             )
             if upstream is None:
                 taken["note"] = (
