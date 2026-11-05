@@ -216,7 +216,7 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
         "certified_ranks": certified,
     }
     if isinstance(rank_count, int) and rank_count > len(ranks):
-        # The probe certifies the file the live resolver would open, so on a tensor-parallel capture the other ranks
+        # The probe certifies the file the analysis reads, so on a tensor-parallel capture the other ranks
         # are unmeasured rather than measured and equal.
         rows.append(
             _check_row(
@@ -279,11 +279,10 @@ def _build_trace_validate(
 def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
     """Write the full certificate beside the trace it describes, returning the path (empty when unwritable).
 
-    Deliberately written *outside* ``trace_dir``: the resolver's ``_trace_candidates`` rglobs that directory for
-    anything ending in ``_TRACE_EXTS``, which includes a bare ``.json``, so a certificate stored among the traces
-    becomes a trace candidate itself and can outrank a small real trace in the size fallback. A subdirectory would
-    not help, the scan is recursive. The name carries ``trace_dir``'s so the ``torch_trace`` and ``capture_traces``
-    certificates of one workspace do not collide.
+    Deliberately written *outside* ``trace_dir``: trace discovery rglobs that directory for anything ending in a trace
+    extension, including a bare ``.json``, so a certificate stored among the traces becomes a candidate itself and can
+    outrank a small real trace in the size fallback; a subdirectory would not help, the scan is recursive. The name
+    carries ``trace_dir``'s so the ``torch_trace`` and ``capture_traces`` certificates of one workspace do not collide.
     """
     target = trace_dir.parent / f"{trace_dir.name}.selfcert.json"
     try:
@@ -294,13 +293,12 @@ def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
     return str(target)
 
 
-def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
-    """Run the capture-time self-certification probe over a profile trace."""
+def _certify_trace_dir(trace_dir: Path, trace_input: Path, framework: str) -> dict[str, Any]:
+    """Run the capture-time self-certification probe over the trace the analysis will read."""
     from hyperloom.orchestrator.trace_analysis import trace_selfcert
 
     return trace_selfcert.certify_trace_dir(
-        trace_dir,
-        framework=framework or trace_selfcert.read_framework(trace_dir),
+        trace_dir, trace_input, framework=framework or trace_selfcert.read_framework(trace_dir)
     )
 
 
@@ -786,13 +784,15 @@ def _first_trace_dir_with(workspace: Path, finder: Any) -> tuple[Path | None, li
     return None, []
 
 
-def _record_trace_validation(result: dict[str, Any], trace_dir: Path, framework: str, preflight: Any) -> None:
+def _record_trace_validation(
+    result: dict[str, Any], trace_dir: Path, main_trace: Path, framework: str, preflight: Any
+) -> None:
     health = _validate_trace_structure(trace_dir, framework)
     result["trace_health"] = health
     certificate: dict[str, Any] = {}
     probe_error = ""
     try:
-        certificate = _certify_trace_dir(trace_dir, framework)
+        certificate = _certify_trace_dir(trace_dir, main_trace, framework)
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
         probe_error = f"{type(exc).__name__}: {exc}"
         log.debug("profile_executor: trace self-certification failed: %s", probe_error)
@@ -854,7 +854,7 @@ def _record_workspace_traces(result: dict[str, Any], workspace_str: str, framewo
         )
     result["main_trace_path"] = str(main_trace)
     try:
-        _record_trace_validation(result, trace_dir, framework, preflight)
+        _record_trace_validation(result, trace_dir, main_trace, framework, preflight)
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
         log.debug("profile_executor: trace structure validator failed: %s", exc)
 
@@ -1285,7 +1285,7 @@ def _map_native_capture(capture: dict[str, Any], measurement: dict[str, Any]) ->
     result.update(main_trace_path=str(main), primary_rank=_trace_rank(main), trace_input_ready=True)
     framework = measurement["framework"]
     health = _validate_trace_structure(trace_dir, framework)
-    certificate = _certify_trace_dir(trace_dir, framework)
+    certificate = _certify_trace_dir(trace_dir, main, framework)
     result["trace_health"] = health
     result["trace_validate"] = _build_trace_validate(health, _TraceProbe(trace_dir, framework, certificate=certificate))
     result["trace_validate_path"] = _write_trace_certificate(trace_dir, result["trace_validate"])

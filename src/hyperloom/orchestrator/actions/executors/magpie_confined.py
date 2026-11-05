@@ -79,6 +79,10 @@ def confine_sweep(module: ModuleType, sandbox: bytes) -> None:
 
 
 def main() -> None:
+    # Run as a script, this file's directory leads sys.path, and its profile.py shadows the standard library's, which
+    # cProfile imports. ``python -P`` would drop it but needs Python 3.11; the floor is 3.10.
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path[:] = [entry for entry in sys.path if os.path.abspath(entry or os.curdir) != here]
     from Magpie.modes.benchmark import benchmarker
 
     confine_sweep(benchmarker, os.environ.get(SANDBOX_TAG, "").encode())

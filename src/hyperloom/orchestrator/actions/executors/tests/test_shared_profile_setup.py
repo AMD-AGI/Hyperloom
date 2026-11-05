@@ -11,10 +11,15 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.orchestrator.actions.executors import _server_patcher
+from hyperloom.orchestrator.actions.executors import PatchedServer, _server_patcher
 from hyperloom.orchestrator.actions.executors._profile_setup import prepare_profile, speculative_tokens_per_step
 from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_config_with_envs
 from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime, enable_profile, load_benchmark
+
+
+#: A patch laid where this host's server needs no copy of its framework, so the launch's ``PYTHONPATH`` is the one under
+#: test.
+_PATCHED = PatchedServer(None)
 
 
 @pytest.fixture(autouse=True)
@@ -33,8 +38,8 @@ def profile_environment(monkeypatch):
         "TP",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", lambda: True)
-    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: True)
+    monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", lambda *checkout: _PATCHED)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: _PATCHED)
 
 
 def _fixed_profile(framework: str) -> dict:
@@ -65,7 +70,9 @@ def _native_config(tmp_path: Path, framework: str, **fields) -> Path:
 def test_native_and_fixed_profiles_share_patches_not_launch_controls(tmp_path, monkeypatch, framework):
     calls = []
     monkeypatch.setattr(
-        _server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda: calls.append(framework) or True
+        _server_patcher,
+        f"ensure_{framework}_patched_for_tracelens",
+        lambda *checkout: calls.append(framework) or _PATCHED,
     )
     fixed = _fixed_profile(framework)
     path = _native_config(tmp_path, framework)
@@ -179,6 +186,20 @@ def test_missing_shape_tool_keeps_native_pythonpath(tmp_path, monkeypatch):
     assert environment["TRACELENS_SHAPE_DISCOVERY"] == "0"
 
 
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+def test_native_profile_server_imports_the_patched_copy_first(tmp_path, monkeypatch, framework):
+    copy = tmp_path / "hyperloom-tracelens" / f"{framework}-0123" / "site"
+    patched = PatchedServer(copy)
+    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda *checkout: patched)
+    launch = {"version": 1, "env": {"PYTHONPATH": "/candidate/overlay:/runtime"}}
+    path = _native_config(tmp_path, framework, agentx={"enabled": True, "launch_overrides": launch})
+
+    enable_profile(path)
+
+    environment = load_benchmark(path)["agentx"]["launch_overrides"]["env"]
+    assert environment["PYTHONPATH"] == f"{copy}:/candidate/overlay:/runtime"
+
+
 def test_shape_tool_does_not_reintroduce_an_explicitly_unset_pythonpath(tmp_path, monkeypatch):
     monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
     monkeypatch.setenv("PYTHONPATH", "/ambient/client")
@@ -264,7 +285,7 @@ def test_fixed_shape_setup_preserves_request_options_and_capture_window(tmp_path
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 def test_native_profile_drops_annotations_when_the_patch_did_not_apply(tmp_path, monkeypatch, framework):
     """Magpie raises rather than degrading when the server lacks the fields, so an unreached patch means false."""
-    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda: False)
+    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda *checkout: None)
     path = _native_config(tmp_path, framework)
     enable_profile(path)
     native = load_benchmark(path)
@@ -274,7 +295,7 @@ def test_native_profile_drops_annotations_when_the_patch_did_not_apply(tmp_path,
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 def test_native_profile_keeps_the_operator_annotation_choice_through_a_failed_patch(tmp_path, monkeypatch, framework):
-    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda: False)
+    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda *checkout: None)
     requested = {"enabled": False, "detailed_annotations": True}
     path = _native_config(tmp_path, framework, profiler={"torch_profiler": deepcopy(requested)})
     enable_profile(path)
@@ -284,13 +305,13 @@ def test_native_profile_keeps_the_operator_annotation_choice_through_a_failed_pa
 @pytest.mark.parametrize("enable_patch,expected_status", [("1", "ok"), ("0", "not_attempted")])
 def test_native_patch_retry_clears_its_stale_failure(tmp_path, monkeypatch, enable_patch, expected_status):
     path = _native_config(tmp_path, "sglang")
-    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: False)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: None)
     enable_profile(path)
     failed = load_benchmark(path)["envs"]
     assert failed["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
     assert failed["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
     calls = []
-    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: calls.append(True) or True)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: calls.append(True) or _PATCHED)
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", enable_patch)
     enable_profile(path)
     retried = load_benchmark(path)["envs"]

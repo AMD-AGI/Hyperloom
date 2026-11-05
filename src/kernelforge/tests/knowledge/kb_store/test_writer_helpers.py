@@ -5,6 +5,9 @@ from __future__ import annotations
 import pytest
 
 from kernelforge.knowledge.kb_store.identity import source_resolution
+from kernelforge.agent_backends import AgentRunResult
+from kernelforge.agent_backends.structured_output import StructuredOutputError
+from kernelforge.knowledge.kb_store import run_summary
 from kernelforge.knowledge.kb_store import writer as sink
 
 
@@ -215,52 +218,59 @@ def test_parse_param_c_reference_marker():
 
 # --------------------------------------------------------------------------- # LLM summary helpers
 # --------------------------------------------------------------------------- #
-def test_extract_json_from_code_fence():
-    text = 'noise\n```json\n{"category": "GEMM", "strategy": "x"}\n```\ntail'
-    assert sink._extract_json(text) == {"category": "GEMM", "strategy": "x"}
-
-
-def test_extract_json_bare_object():
-    assert sink._extract_json('prefix {"a": 1} suffix') == {"a": 1}
-
-
-def test_extract_json_bad_inputs():
-    assert sink._extract_json("") == {}
-    assert sink._extract_json("no json here") == {}
-    assert sink._extract_json("{not valid}") == {}
-    assert sink._extract_json("[1,2,3]") == {}
-
-
 def test_normalize_summary_defaults_and_category_clamp():
-    assert sink._normalize_summary({}) == {
+    assert run_summary.normalize_summary({}) == {
         "category": "others",
         "strategy": "",
         "recipe": "",
         "lessons": "",
     }
-    out = sink._normalize_summary({"category": "GEMM", "strategy": " s ", "recipe": 5, "lessons": ""})
+    out = run_summary.normalize_summary({"category": "GEMM", "strategy": " s ", "recipe": 5, "lessons": ""})
     assert out["category"] == "gemm"
     assert out["strategy"] == "s"
     assert out["recipe"] == ""
 
 
-def test_summarize_run_parses_reply(monkeypatch):
-    """Parse the provider reply and forward the shared usage accumulator."""
+def test_summarize_run_reads_the_answer_it_asked_for(monkeypatch):
+    """Read the summary back in its shape and forward the shared usage accumulator."""
     captured = {}
 
     async def reply(*_a, **kwargs):
         captured.update(kwargs)
-        return '{"category": "attention", "strategy": "tile"}'
+        return AgentRunResult(
+            structured_output={"category": "attention", "strategy": "tile", "recipe": "", "lessons": ""}
+        )
 
-    monkeypatch.setattr(sink, "_query_llm", reply)
+    monkeypatch.setattr(run_summary, "_query_llm", reply)
     usage = object()
-    out = sink.summarize_run(config=object(), workspace="/w", prompt=sink._summary_prompt("op", "d", "s"), usage=usage)
-    assert out["category"] == "attention"
-    assert out["strategy"] == "tile"
+    out = run_summary.summarize_run(
+        config=object(), workspace="/w", prompt=run_summary.summary_prompt("op", "d", "s"), usage=usage
+    )
+    assert out == {"category": "attention", "strategy": "tile", "recipe": "", "lessons": ""}
     assert captured["usage"] is usage
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        AgentRunResult(text='{"category": "attention", "strategy": "tile"}'),
+        AgentRunResult(text='{"category": "GEMM", "strategy": "", "recipe": "", "lessons": ""}'),
+        AgentRunResult(text="no json here"),
+    ],
+    ids=["missing-fields", "category-not-in-vocabulary", "prose"],
+)
+def test_a_summary_in_no_usable_shape_is_no_summary(monkeypatch, result):
+    """A summary the LLM did not give is not filed as an empty one."""
+
+    async def reply(*_a, **_k):
+        return result
+
+    monkeypatch.setattr(run_summary, "_query_llm", reply)
+    with pytest.raises(StructuredOutputError):
+        run_summary.summarize_run(config=object(), workspace="/w", prompt="p")
+
+
 def test_summary_prompt_truncates_inputs():
-    prompt = sink._summary_prompt("op", "d" * 20000, "s" * 20000)
-    assert prompt.count("d") <= sink._MAX_DIGEST_CHARS + 50
+    prompt = run_summary.summary_prompt("op", "d" * 20000, "s" * 20000)
+    assert prompt.count("d") <= run_summary.MAX_DIGEST_CHARS + 50
     assert "Operator under optimization: op" in prompt

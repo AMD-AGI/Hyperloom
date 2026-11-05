@@ -7,7 +7,7 @@ import re
 
 from kernelforge.agent_backends import AgentRunResult
 from kernelforge.agent_backends.session_resume import is_api_failure
-
+from kernelforge.agent_backends.structured_output import AnswerT, structured_answer
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +41,23 @@ def _without_compaction_recap(text: str, *, role: str) -> str:
     return stripped.strip()
 
 
+def _require_answered(result: AgentRunResult, *, role: str) -> None:
+    """Refuse a session the API failed before the model answered."""
+    if is_api_failure(result):
+        detail = result.stderr_tail or result.end_reason or f"{role} backend failed before producing an answer"
+        raise AgentResponseInfrastructureError(str(detail))
+
+
+def _require_finished(result: AgentRunResult, *, role: str) -> None:
+    """Refuse a session the API failed or a caller-controlled limit cut short."""
+    _require_answered(result, role=role)
+    end_reason = str(result.end_reason or "").strip()
+    if end_reason in {"turn_cap", "timeout"}:
+        raise AgentResponseIncompleteError(f"{role} session ended before completing its answer: {end_reason}")
+    if "[session ended with sdk error:" in str(result.text or "").lower():
+        raise AgentResponseIncompleteError(f"{role} session returned a truncated SDK error transcript")
+
+
 def validated_agent_text(
     result: AgentRunResult,
     *,
@@ -49,16 +66,18 @@ def validated_agent_text(
     allow_incomplete: bool = False,
 ) -> str:
     """Return complete response text or classify why it is unusable."""
-    if is_api_failure(result):
-        detail = result.stderr_tail or result.end_reason or f"{role} backend failed before producing an answer"
-        raise AgentResponseInfrastructureError(str(detail))
-
+    (_require_answered if allow_incomplete else _require_finished)(result, role=role)
     text = _without_compaction_recap(str(result.text or "").strip(), role=role)
-    end_reason = str(result.end_reason or "").strip()
-    if end_reason in {"turn_cap", "timeout"} and not allow_incomplete:
-        raise AgentResponseIncompleteError(f"{role} session ended before completing its answer: {end_reason}")
-    if "[session ended with sdk error:" in text.lower() and not allow_incomplete:
-        raise AgentResponseIncompleteError(f"{role} session returned a truncated SDK error transcript")
     if not text and not allow_empty:
         raise AgentResponseIncompleteError(f"{role} returned no answer")
     return text
+
+
+def validated_agent_answer(result: AgentRunResult, model: type[AnswerT], *, role: str) -> AnswerT:
+    """Return a finished session's answer in ``model``'s shape, or raise why there is none.
+
+    A session that did not finish raises as in :func:`validated_agent_text`; one that finished with an answer that is
+    not a ``model`` raises :class:`~kernelforge.agent_backends.StructuredOutputError`.
+    """
+    _require_finished(result, role=role)
+    return structured_answer(result, model)
