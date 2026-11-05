@@ -106,8 +106,9 @@ def test_an_append_that_fails_partway_leaves_no_torn_line_for_the_next_one(
     with pytest.raises(OSError, match="No space"):
         writer.append(_entry(writer.writer, START + 2))
     monkeypatch.undo()
+    appended = writer.append(_entry(writer.writer, START + 3))
 
-    assert writer.append(_entry(writer.writer, START + 3)).seq == 2
+    assert appended.seq == 2
     assert [entry.at for entry in SegmentReader(tmp_path).entries()] == [START + 1, START + 3]
 
 
