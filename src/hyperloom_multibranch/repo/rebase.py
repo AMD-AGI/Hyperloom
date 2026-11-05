@@ -20,6 +20,7 @@ from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 #: A file's content by its path in the component's upstream repository, ``None`` where there is no file.
 Files = Mapping[str, bytes | None]
 # Both commands work on the few files one patch touches; this only bounds a wedged filesystem.
+_SCRATCH_PREFIX = "hl-rebase-"
 _GIT_TIMEOUT_S = 60.0
 # git merge-file exits with the number of conflicts, capped at 127; above that it failed.
 _MAX_CONFLICTS = 127
@@ -57,7 +58,7 @@ def _merge_file(base: bytes | None, ours: bytes | None, theirs: bytes | None, th
             return theirs
         raise _Overlap
     side_flag = ["--theirs"] if theirs_wins else []
-    with tempfile.TemporaryDirectory(prefix="hl-rebase-") as scratch:
+    with tempfile.TemporaryDirectory(prefix=_SCRATCH_PREFIX) as scratch:
         sides = [Path(scratch) / name for name in ("ours", "base", "theirs")]
         for side, data in zip(sides, (ours, base, theirs)):
             side.write_bytes(data)
@@ -84,7 +85,7 @@ def patch_between(before: Files, after: Files) -> str:
     """
     if all(before.get(path) == content for path, content in after.items()):
         return ""
-    with tempfile.TemporaryDirectory(prefix="hl-rebase-") as scratch:
+    with tempfile.TemporaryDirectory(prefix=_SCRATCH_PREFIX) as scratch:
         root = Path(scratch)
         return _git(root, "diff", "--no-color", "--no-ext-diff", "--no-renames", *_trees(root, before, after))
 
@@ -105,7 +106,7 @@ def renames(before: Files, after: Files) -> dict[str, str]:
 
     ``after`` holds every path of ``before``.
     """
-    with tempfile.TemporaryDirectory(prefix="hl-rebase-") as scratch:
+    with tempfile.TemporaryDirectory(prefix=_SCRATCH_PREFIX) as scratch:
         root = Path(scratch)
         fields = _git(root, "diff", "--name-status", "-z", "-M", "--diff-filter=R", *_trees(root, before, after))
     # Each rename is three fields: its status (R and a similarity), the old path and the new one.
