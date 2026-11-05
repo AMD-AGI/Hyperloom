@@ -51,12 +51,18 @@ def reroot_requested(content: str) -> bool:
     return content.lstrip().startswith(REROOT)
 
 
-async def integration_holdings(repo: ExperimentRepo, snapshot: BlackboardSnapshot, head: str) -> str:
-    """What the integration head ``snapshot`` records holds, and what of it the branch head ``head`` lacks; the branch's
-    own commits that are not on it, with their merges. The head is the blackboard's, as :func:`follow` moves onto it:
-    the repository's may be a merge whose judgement is not written yet, of which ``snapshot`` knows no commit."""
+def integration_head(snapshot: BlackboardSnapshot) -> str:
+    """The integration head ``snapshot`` records, the one a specialist is shown and follows: the integrator lands a
+    merge in the repository before it writes the judgement, so the repository's head may be a commit the blackboard
+    knows nothing of yet."""
+    return {node.branch: node for node in snapshot.lineage.branches}[INTEGRATION_BRANCH].head_commit
 
-    onto = {node.branch: node for node in snapshot.lineage.branches}[INTEGRATION_BRANCH].head_commit
+
+async def integration_holdings(repo: ExperimentRepo, snapshot: BlackboardSnapshot, head: str) -> str:
+    """What the integration head ``snapshot`` records (:func:`integration_head`) holds, and what of it the branch head
+    ``head`` lacks; the branch's own commits that are not on it, with their merges."""
+
+    onto = integration_head(snapshot)
     integration, own = await repo.read_recipe(onto), await repo.read_recipe(head)
     on_head = set(snapshot.lineage.ancestry(head))
     on_integration = set(snapshot.lineage.ancestry(onto))
@@ -229,4 +235,12 @@ def _carried(snapshot: BlackboardSnapshot, head: str, onto: str, carried: RepoMe
     return "\n".join(lines)
 
 
-__all__ = ["MERGED_SHOWN", "REROOT", "Followed", "follow", "integration_holdings", "reroot_requested"]
+__all__ = [
+    "MERGED_SHOWN",
+    "REROOT",
+    "Followed",
+    "follow",
+    "integration_head",
+    "integration_holdings",
+    "reroot_requested",
+]
