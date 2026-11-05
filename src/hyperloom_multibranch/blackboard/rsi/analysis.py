@@ -42,14 +42,9 @@ _TIER_ORDER = list(FailureTier)
 class FailedTest:
     tier: FailureTier
     request_id: str
-    branch: str
     parent_commit: str
     direction: str
     outcome: str
-    gain_pct: float | None
-
-    def render(self) -> str:
-        return f"- [{self.tier.value}] {self.direction} on {self.parent_commit}: {self.outcome} ({self.request_id})"
 
 
 def failures_at(snapshot: BlackboardSnapshot, head: str) -> tuple[FailedTest, ...]:
@@ -75,11 +70,9 @@ def failures_at(snapshot: BlackboardSnapshot, head: str) -> tuple[FailedTest, ..
             FailedTest(
                 tier,
                 record.request_id,
-                record.request.branch,
                 lesson.parent_commit,
                 lesson.direction,
                 lesson.outcome,
-                lesson.gain_pct,
             )
         )
     return tuple(sorted(failed, key=lambda item: _TIER_ORDER.index(item.tier)))
@@ -104,16 +97,6 @@ class DirectionCoverage:
     committed_on: tuple[str, ...]
     claimed_by: tuple[str, ...]
     best_gain_pct: float | None
-
-    @property
-    def name(self) -> str:
-        return f"{self.target} / {self.mechanism}"
-
-    def render(self) -> str:
-        best = "n/a" if self.best_gain_pct is None else f"{self.best_gain_pct:+.2f}%"
-        held = f"; claimed by {', '.join(self.claimed_by)}" if self.claimed_by else ""
-        carried = f"; on the heads of {', '.join(self.committed_on)}" if self.committed_on else ""
-        return f"- {self.name} ({self.layer.value}): tried on {len(self.tried_on)} states, best {best}{carried}{held}"
 
 
 def _coverage(
@@ -175,10 +158,6 @@ class HypothesisRow:
     status: HypothesisStatus
     evidence: tuple[str, ...]
     updated_at: float
-
-    def render(self) -> str:
-        cited = f" [{', '.join(self.evidence)}]" if self.evidence else ""
-        return f"- {self.status.value}: {self.statement} ({self.branch}){cited}"
 
 
 def hypothesis_ledger(snapshot: BlackboardSnapshot) -> tuple[HypothesisRow, ...]:
