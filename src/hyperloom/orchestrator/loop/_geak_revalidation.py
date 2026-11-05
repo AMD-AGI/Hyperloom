@@ -9,6 +9,7 @@ import logging as _logging
 from typing import Any, Mapping, NamedTuple
 
 from hyperloom_common.env import env_int
+from hyperloom.common.gain_math import accuracy_passed
 from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FAILED,
@@ -22,7 +23,7 @@ from hyperloom.common.perf_metric import GradedComparison
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GeakRebenchAttempt
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
-from ..actions.executors._accuracy_gate import EVAL_KIND_ACCURACY_UNAVAILABLE, accuracy_passed
+from ..actions.executors._accuracy_gate import EVAL_KIND_ACCURACY_UNAVAILABLE
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE
 from ..collaborator import CoordinatorCollaborator
 from ..kernel.geak_config import (

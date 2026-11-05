@@ -224,6 +224,22 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch,
     assert captured[0]["benchmark"]["benchmark_script"] == f"{framework}_mi300x.sh"
 
 
+def test_a_ray_head_that_never_answers_a_driver_leaves_the_rounds_on_the_local_path(
+    tmp_path, monkeypatch, fake_ray_head
+):
+    """With Ray on, a head that never registers a driver costs the probe's bound, not the session."""
+    fake_ray_head.answers("silent")
+    monkeypatch.setenv("HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC", "2")
+    fake_ray_head.import_in_process()
+    fake_run, state = _cold_then_hot_fake_run()
+
+    result = _run_mi300x_baseline(tmp_path, fake_run)
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2, "both rounds must run on the local path"
+    assert os.getpid() not in fake_ray_head.connects(), "this process must not connect to the head"
+
+
 def _run_capturing_rounds(executor, ctx, notes):
     """Run ``executor`` and record which round notes existed at each launch."""
     at_launch: list[list[str]] = []
