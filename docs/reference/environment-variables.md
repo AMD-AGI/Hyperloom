@@ -1163,7 +1163,7 @@ A hosted run is configured by the host that launches it. `src/hyperloom/hosted/h
 it checks them once at start-up and names **every** missing or malformed variable in one error (variable names and reasons, never
 values), so a bad input stops the run before it starts. Which variables are required depends on what the run hosts; the run, state
 and input variables are always required except for a session started by hand on a grant handed to it
-(`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
+(`hyperloom-multibranch run --measurement hosted`, a command that lands with the multi-branch CLI), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
 `HYPERLOOM_GRANT_LIMITS` (all four totals: a multi-branch session refuses a grant that states only some of them),
 `HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
 required.
