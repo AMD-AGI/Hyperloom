@@ -53,6 +53,7 @@ import asyncio
 import hashlib
 from collections.abc import Awaitable, Sequence, Set
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from functools import partial
 
 from hyperloom_common.jsonio import extract_last_json_with_key
@@ -96,6 +97,16 @@ CONFLICT_UNRESOLVED = "unresolved patch conflict"
 RESOLVER_UNREACHED = "the patch resolver could not be asked"
 #: The same conflict, lost to an answer the output token cap cut off: a longer cap, not another model, would settle it.
 CONFLICT_TRUNCATED = "the patch resolver's answer was cut off at its output cap"
+
+
+class ConflictLoss(str, Enum):
+    """Why a merge was lost to a conflicting patch, as the merge log records it."""
+
+    UNRESOLVED = "unresolved"
+    TRUNCATED = "truncated"
+    RESOLVER_UNREACHED = "resolver_unreached"
+
+
 #: The JSON key the resolver's reply carries the rewritten patch under; ``null`` means it cannot be combined.
 PATCH_KEY = "patch"
 #: The resolver's answers per conflicting patch: a rewrite that does not apply is asked for once more, with why.
@@ -125,7 +136,8 @@ class MergeReport:
     loads a table neither branch measured, and the gain below was measured on it. ``replaced_patches`` are the head
     patches the merge took out for a candidate's patch that rewrites them, and the reason names them;
     ``rebased_patches`` the candidate's patches the three-way rebase settled, and ``resolved_patches`` those a model
-    rewrote. A skipped candidate carries what the repository's merge found before the skip.
+    rewrote. A skipped candidate carries what the repository's merge found before the skip, and ``lost_to`` says why
+    when a conflicting patch lost it.
 
     A merged candidate carries the gain its merge test was judged to make and the bar it was judged against;
     ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain; a tested one is judged as
@@ -148,6 +160,7 @@ class MergeReport:
     adopts: str = ""
     rebased_patches: tuple[RebasedPatch, ...] = ()
     resolved_patches: tuple[ResolvedPatch, ...] = ()
+    lost_to: ConflictLoss | None = None
 
 
 def _found(report: MergeReport, merge: RepoMerge) -> MergeReport:
@@ -367,12 +380,13 @@ def _verdict_on_head(judgement: Judgement) -> str:
 
 
 class _Skipped(Exception):
-    """A merge that cannot be tested; ``reason`` says why."""
+    """A merge lost to a conflicting patch; ``reason`` says why."""
 
-    def __init__(self, reason: str, merge: RepoMerge) -> None:
+    def __init__(self, reason: str, merge: RepoMerge, lost_to: ConflictLoss) -> None:
         super().__init__(reason)
         self.reason = reason
         self.merge = merge
+        self.lost_to = lost_to
 
 
 @dataclass(frozen=True)
@@ -421,7 +435,7 @@ class Integrator:
         self._regression = checks.regression
         self._resolver = resolver
         self._decisions = records.merges
-        self._recording: asyncio.Future[str] | None = None
+        self._recording: asyncio.Future[MergeReport] | None = None
         self._adopted: set[tuple[str, str]] = set()
 
     async def integrate_next(self, width: int, tick: float, leads: Sequence[StrandedLead]) -> tuple[MergeReport, ...]:
@@ -452,10 +466,8 @@ class Integrator:
                     running.append(asyncio.create_task(self._test(_pending(commit, head))))
                 while running and running[0].done():
                     item = running.pop(0).result()
-                    report = item if isinstance(item, MergeReport) else await self._conclude(item, merged)
-                    report = _naming_replaced(_naming_adoption(report))
+                    report = self._logged(item) if isinstance(item, MergeReport) else await self._conclude(item, merged)
                     merged = merged or report.outcome is MergeOutcome.MERGED
-                    self._decisions.record(_decision(report))
                     reports.append(report)
                 if not running:
                     return tuple(reports)
@@ -527,7 +539,8 @@ class Integrator:
                 pending, f"the toolbox refused the merge test: {exc}", MergeOutcome.CONFLICT_SKIPPED
             )
         except _Skipped as exc:
-            return await self._skip(pending, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
+            skipped = await self._skip(pending, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
+            return replace(skipped, lost_to=exc.lost_to)
 
     async def _foundation_fixes(self) -> frozenset[str]:
         """The foundation fixes merged onto the integration branch, as the blackboard records them: no later merge may
@@ -562,11 +575,11 @@ class Integrator:
         try:
             return await self._resolver.resolve(merge, candidate)
         except CompletionFailed as exc:
-            raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}", merge) from exc
+            raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}", merge, ConflictLoss.RESOLVER_UNREACHED) from exc
         except ReplyTruncated as exc:
-            raise _Skipped(f"{CONFLICT_TRUNCATED}: {conflicts}: {exc}", merge) from exc
+            raise _Skipped(f"{CONFLICT_TRUNCATED}: {conflicts}: {exc}", merge, ConflictLoss.TRUNCATED) from exc
         except (BlobError, PatchUnresolved) as exc:
-            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}", merge) from exc
+            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}", merge, ConflictLoss.UNRESOLVED) from exc
 
     async def _skip(
         self, pending: MergeReport, reason: str, outcome: MergeOutcome, merge: RepoMerge | None = None
@@ -583,41 +596,38 @@ class Integrator:
         await self._blackboard.record_merge_attempt(attempt)
         return report if merge is None else _found(report, merge)
 
+    def _logged(self, report: MergeReport) -> MergeReport:
+        """``report`` as the merge log names it, recorded there."""
+
+        named = _naming_replaced(_naming_adoption(report))
+        self._decisions.record(_decision(named))
+        return named
+
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
         """A superseded candidate gets no integration judgement and runs no regression set: it stays pending and is
         tried on the new head, as does one whose regression set did not run clean. Any other candidate that may be
-        merged is merged once the regression set passes on the merge."""
+        merged is merged once the regression set passes on the merge. The report is logged."""
 
         report, judgement = tested.report, tested.judgement
         reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
         if reason:
             await self._blackboard.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
-            return replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason)
+            return self._logged(replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason))
         if superseded:
-            return replace(report, reason=SUPERSEDED)
+            return self._logged(replace(report, reason=SUPERSEDED))
         failed = await self._regression_failure(report, tested.delta)
         if failed:
-            return replace(report, reason=failed)
+            return self._logged(replace(report, reason=failed))
         self._recording = asyncio.ensure_future(self._record_merge(report, tested.delta, judgement))
-        merged = await asyncio.shield(self._recording)
-        reason = _verdict_on_head(judgement)
-        if report.foundation_fix:
-            reason = f"a foundation fix, {reason}"
-        return replace(
-            report,
-            outcome=MergeOutcome.MERGED,
-            reason=reason,
-            merged_commit=merged,
-            gain_pct=judgement.gain_pct,
-            threshold_pct=judgement.threshold_pct,
-        )
+        return await asyncio.shield(self._recording)
 
     async def _regression_failure(self, report: MergeReport, delta: RecipeDelta) -> str:
         outcome = await self._regression.check(report.onto, delta, sources=(report.candidate,))
         return "" if outcome.passed else f"the regression set failed: {outcome.reason}"
 
-    async def _record_merge(self, tested: MergeReport, delta: RecipeDelta, judgement: Judgement) -> str:
-        """Commit the merge and record it; runs shielded, so a cancelled merge never moves only one of the two.
+    async def _record_merge(self, tested: MergeReport, delta: RecipeDelta, judgement: Judgement) -> MergeReport:
+        """Commit the merge, record it on the blackboard and in the merge log; runs shielded, so a cancelled merge
+        never moves only one of the repository and the records.
 
         A commit whose judgement could not be written is rewound: the blackboard would not know the commit the
         integration head is at.
@@ -632,7 +642,19 @@ class Integrator:
         finally:
             if not written:
                 await self._repo.rewind(INTEGRATION_BRANCH, merged, tested.onto)
-        return merged
+        reason = _verdict_on_head(judgement)
+        if tested.foundation_fix:
+            reason = f"a foundation fix, {reason}"
+        return self._logged(
+            replace(
+                tested,
+                outcome=MergeOutcome.MERGED,
+                reason=reason,
+                merged_commit=merged,
+                gain_pct=judgement.gain_pct,
+                threshold_pct=judgement.threshold_pct,
+            )
+        )
 
     async def replay_champion(
         self, champion: PreparedReplay, root: str, anchored: Awaitable[object]
@@ -726,6 +748,7 @@ def _decision(report: MergeReport) -> Decision:
         "adopts": report.adopts,
         "gain_pct": report.gain_pct,
         "threshold_pct": report.threshold_pct,
+        "lost_to": None if report.lost_to is None else report.lost_to.value,
         "config_conflicts": [
             {"name": change.name, "before": change.before, "after": change.after} for change in report.config_conflicts
         ],
@@ -769,6 +792,7 @@ __all__ = [
     "RESOLVER_ATTEMPTS",
     "RESOLVER_UNREACHED",
     "RESOLVER_UNREACHED_RETRIES",
+    "ConflictLoss",
     "Integrator",
     "LlmPatchResolver",
     "MergeRecords",

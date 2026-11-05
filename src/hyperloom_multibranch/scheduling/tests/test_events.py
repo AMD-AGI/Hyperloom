@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -366,6 +367,7 @@ class _AnalysingToolbox(FakeToolbox):
 
 
 BEFORE = {"attn": 60.0, "gemm": 30.0}
+WAIT_SECONDS = 10.0
 
 
 def _moved_onto(head: str) -> MergeReport:
@@ -375,11 +377,21 @@ def _moved_onto(head: str) -> MergeReport:
 
 
 async def _until(condition: Any) -> None:
-    for _ in range(200):
-        if condition():
-            return
+    """Bounded by wall time, not a count of yields, which a loaded CI runner can exhaust. It yields without
+    sleeping, so it sees a state the next step of the event loop would leave, such as a profile still running."""
+
+    deadline = time.monotonic() + WAIT_SECONDS
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("the condition never held")
         await asyncio.sleep(0)
-    raise AssertionError("the condition never held")
+
+
+async def test_until_waits_for_a_condition_that_holds_only_after_wall_time_passes() -> None:
+    held: list[bool] = []
+    asyncio.get_running_loop().call_later(0.1, held.append, True)
+
+    await _until(lambda: held)
 
 
 async def test_a_large_merge_profiles_the_integration_head_and_a_moved_bottleneck_is_an_event(log: Path) -> None:

@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -127,6 +128,36 @@ async def test_an_adopted_process_is_recorded_and_killed_with_its_branch(
     finally:
         agent.kill()
         agent.wait()
+
+
+@pytest.mark.parametrize("kill", ["kill_branch", "kill_all"])
+async def test_a_process_adopted_while_a_kill_scans_proc_stays_registered(
+    registry: ProcessRegistry, monkeypatch: pytest.MonkeyPatch, kill: str
+) -> None:
+    scanning, adopted = threading.Event(), threading.Event()
+    scan = processes._alive
+
+    def slow_scan(registered: tuple[ProcessRecord, ...]) -> tuple[ProcessRecord, ...]:
+        scanning.set()
+        assert adopted.wait(timeout=5.0)
+        return scan(registered)
+
+    _adopted(registry, LONG_SLEEP, "b01")
+    monkeypatch.setattr(processes, "_alive", slow_scan)
+    killing = asyncio.create_task(registry.kill_branch("b01") if kill == "kill_branch" else registry.kill_all())
+    assert await asyncio.to_thread(scanning.wait, 5.0)
+    sibling = _adopted(registry, LONG_SLEEP, "b02")
+    try:
+        adopted.set()
+        assert await killing
+        monkeypatch.setattr(processes, "_alive", scan)
+
+        assert [(r.pid, r.branch) for r in await registry.leftovers()] == [(sibling.pid, "b02")]
+        assert await registry.kill_branch("b02")
+        assert not running(sibling.pid)
+    finally:
+        sibling.kill()
+        sibling.wait()
 
 
 async def test_a_process_that_leads_no_group_of_its_own_is_not_adopted(registry: ProcessRegistry) -> None:
