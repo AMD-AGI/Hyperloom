@@ -28,7 +28,7 @@ from hyperloom_multibranch.tests.test_specialist_autonomous_session import ROOT,
 
 #: Arbor's entry point in a fake checkout, run as a dossier pass: what it does is fake-dossier.json's ``do``. ``mapped``
 #: writes a dossier, the map and exits 0 with ``mapped``; ``nomap`` writes the dossier and ends with ``deadline``;
-#: ``hang`` writes the dossier and waits to be stopped; ``crash`` dies after its start; ``refuse`` refuses its config
+#: ``hang`` writes the dossier and waits to be stopped; ``crash`` dies with exit 1; ``refuse`` refuses its config
 #: (exit 2). Every run keeps the config it was given in seen-config.json.
 FAKE_DOSSIER = """
 import json, pathlib, sys, time
@@ -49,7 +49,6 @@ if do == "refuse":
     (session / "component_refused.json").write_text(json.dumps({"reasons": ["the pack has no dossier skill"]}))
     sys.exit(2)
 if do == "crash":
-    time.sleep(0.5)
     print("Traceback: the profiler died", flush=True)
     sys.exit(1)
 dossier = (session if fake.get("in_session") else pathlib.Path(".")) / "docs/dossier/qwen3-8b-1k1k-c64"
@@ -66,8 +65,24 @@ leave("mapped")
 SHARES = OpShares("c0ffee", "prelude:p1", "", {"paged_attention_ll4mi_QKV_mfma4_kernel": 32.5, "Cijk_Alik": 27.3})
 
 
-async def _tick(_seconds: float) -> None:
-    await asyncio.sleep(0.05)
+DOSSIER = Path("docs/dossier/qwen3-8b-1k1k-c64/README.md")
+
+
+class _Clock:
+    """The pass's clock, which moves only once the fake Arbor wrote its dossier in ``checkout``: its deadline then
+    passes on the pass's polls, never while a slow host is still starting the fake."""
+
+    def __init__(self, checkout: Path) -> None:
+        self.now, self._checkout = time.time(), checkout
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(0.05)
+        session = self._checkout / DOSSIER_PASS.session_dir
+        if (self._checkout / DOSSIER).exists() or (session / DOSSIER).exists():
+            self.now += seconds
 
 
 async def _pass(
@@ -76,13 +91,14 @@ async def _pass(
     *,
     cards: int = 1,
     seconds: float = 30.0,
+    start_seconds: float = 0.2,
     arbor: bool = True,
     in_session: bool = False,
     held_by: tuple[str, LeaseCharge] = (DOSSIER_HOLDER, DOSSIER_CHARGE),
 ) -> tuple[DossierOutcome, Toolbox, Path, DossierSetup]:
-    """The dossier pass of a fake Arbor doing ``do``, on a rig whose toolbox has ``cards`` free, given ``seconds``,
-    writing its dossier in its session (``in_session``) or, by default, in its checkout, its lease held as ``held_by``
-    says."""
+    """The dossier pass of a fake Arbor doing ``do``, on a rig whose toolbox has ``cards`` free, given ``seconds`` and
+    ``start_seconds`` of wall time to start in, writing its dossier in its session (``in_session``) or, by default, in
+    its checkout, its lease held as ``held_by`` says."""
 
     rig = await branch_rig(tmp_path, ROOT, "a1")
     files = {
@@ -96,21 +112,24 @@ async def _pass(
     toolbox.cards_left = cards
     sandbox = LocalSandbox(tmp_path / "logs")
     worktree = rig.base.worktree(DOSSIER_HOLDER, tmp_path / DOSSIER_HOLDER / "worktree")
+    agent_dir = tmp_path / DOSSIER_HOLDER / "session" / "agent"
+    clock = _Clock(agent_dir / "src")
     setup = DossierSetup(
         _spec(tmp_path, tp=1),
         rig.repo,
         toolbox,  # type: ignore[arg-type]
         lambda _lease: sandbox,
         worktree,
-        tmp_path / DOSSIER_HOLDER / "session" / "agent",
-        sleep=_tick,
+        agent_dir,
+        clock=clock,
+        sleep=clock.sleep,
         poll_seconds=0.05,
-        start_seconds=0.2,
+        start_seconds=start_seconds,
         exit_grace_seconds=0.3,
         holder=held_by[0],
         charge=held_by[1],
     )
-    start = DossierStart(str(source), rig.root, time.time() + seconds, SHARES, "kernel shares")
+    start = DossierStart(str(source), rig.root, clock() + seconds, SHARES, "kernel shares")
     outcome = await run_dossier_pass(start, setup)
     return outcome, toolbox, setup.agent_dir / "src", setup
 
@@ -154,23 +173,26 @@ async def test_a_pass_whose_agent_writes_the_dossier_in_its_session_is_found_the
     assert (outcome.reason, outcome.dossier) == (MAPPED, session / "docs" / "dossier" / "qwen3-8b-1k1k-c64")
 
 
+#: Arbor run as a component has no keep file, so it counts as started only after ``start_seconds`` of wall time: a
+#: start window of 0 has a crash land after it, and one far longer than the fake's run has a refusal land inside it.
 @pytest.mark.parametrize(
-    ("do", "said", "wrote"),
+    ("do", "start_seconds", "said", "wrote"),
     [
-        ("nomap", "it ended without a map: deadline", True),
-        ("hang", "it set no map by its deadline and was stopped", True),
-        ("crash", "it exited 1: Traceback: the profiler died", False),
+        ("nomap", 0.2, "it ended without a map: deadline", True),
+        ("hang", 0.2, "it set no map by its deadline and was stopped", True),
+        ("crash", 0.0, "it exited 1: Traceback: the profiler died", False),
         (
             "refuse",
+            60.0,
             "it did not start: attempt 1: `python3 -m arbor run --config hyperloom-mb/dossier.json` refused",
             False,
         ),
     ],
 )
 async def test_a_pass_that_sets_no_map_says_why_keeps_its_dossier_and_gives_the_cards_back(
-    tmp_path: Path, do: str, said: str, wrote: bool
+    tmp_path: Path, do: str, start_seconds: float, said: str, wrote: bool
 ) -> None:
-    outcome, toolbox, checkout, _ = await _pass(tmp_path, do, seconds=0.6)
+    outcome, toolbox, checkout, _ = await _pass(tmp_path, do, seconds=0.6, start_seconds=start_seconds)
 
     assert outcome.map is None and outcome.reason.startswith(said)
     assert (outcome.dossier is not None) == wrote
@@ -200,7 +222,7 @@ async def test_a_pass_whose_arbor_exited_is_still_killed_before_its_cards_go_bac
         await kill(self)
 
     monkeypatch.setattr(LocalProcess, "kill", recorded)
-    outcome, toolbox, _, _ = await _pass(tmp_path, "crash", seconds=0.6)
+    outcome, toolbox, _, _ = await _pass(tmp_path, "crash", seconds=0.6, start_seconds=0.0)
 
     assert outcome.map is None and killed and killed[-1] is not None
     assert toolbox.released == ["L1"]
