@@ -25,7 +25,8 @@ from hyperloom.contracts.recipe import (
     RecipeDelta,
 )
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, UnknownRequest, Writer
-from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer, Verdict
+from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX
+from hyperloom_multibranch.contracts.blackboard.peers import BranchLogEntry, BranchLogType, IntentLayer, Verdict
 from hyperloom_multibranch.contracts.blackboard.records import (
     BaselineRecord,
     Learning,
@@ -61,9 +62,17 @@ from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, Retr
 from hyperloom_multibranch.blackboard.rsi import briefing as briefing_module
 from hyperloom_multibranch.blackboard.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs
 from hyperloom_multibranch.blackboard.rsi.tests.repos import FakeRepo
-from hyperloom_multibranch.blackboard.tests.factories import FakeClock, judgement, profile, request, result
-from hyperloom_multibranch.blackboard.tests.sessions import METRIC, SPLIT_KV, scripted_session
-from hyperloom_multibranch.blackboard.tools import FOCUS_LINE
+from hyperloom_multibranch.blackboard.tests.factories import (
+    FakeClock,
+    delta,
+    intent,
+    judgement,
+    profile,
+    request,
+    result,
+)
+from hyperloom_multibranch.blackboard.tests.sessions import METRIC, SPLIT_KV, Writers, scripted_session
+from hyperloom_multibranch.blackboard.tools import FOCUS_BRANCHES, FOCUS_HISTORY_TITLE, FOCUS_LINE, render_brief
 
 
 SAME = {
@@ -593,3 +602,84 @@ async def test_each_branch_keeps_its_focus_and_every_branch_shares_one_index_and
 
     assert (s3.focus, s4.focus) == ("attention", "")
     assert s3.recalls is s4.recalls and s3.identities is s4.identities
+
+
+ACT_MUL = "_act_mul_and_dynamic_fp8_group_quant_kernel"
+GAVE_UP = "gave_up: its specialist gave up: its sessions in a row found nothing to test"
+FUSED = {
+    "why": "no_ceiling_above_bar",
+    "detail": "already fused, at 5 TB/s",
+    "reopen_if": "a profile shows it above 3%",
+}
+
+
+async def _stopped_on(w: Writers, branch: str, focus: str, tests: tuple[str, ...] = (), **exhausted: str) -> None:
+    """``branch`` opened on ``c1`` with ``focus``, its ``tests`` measured, its ``exhausted`` record written, stopped."""
+
+    scheduler = w.as_role(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c1", focus=focus))
+    for request_id in tests:
+        await w.measure(branch, request_id, intent(branch, "c1", ACT_MUL, request_id), delta(f"--{request_id}"))
+    if exhausted:
+        record = {"direction": "Fusion", "head": "c1", "tried": list(tests), **exhausted}
+        entry = BranchLogEntry(branch, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+        await w.as_role(Role.SPECIALIST_RUNTIME, branch).append_branch_log(entry)
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, branch, reason=GAVE_UP))
+
+
+async def test_the_brief_lists_the_stopped_branches_on_its_focus_op_with_their_exhausted_records(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    w = Writers(tmp_path / "blackboard", clock)
+    await _stopped_on(w, "s5", f"{ACT_MUL}.kd (activation mul + fp8 quant)", ("x1", "x2"), **FUSED)
+    await _stopped_on(w, "s6", f"{ACT_MUL}: fuse it into the GEMM epilogue")
+    await _stopped_on(w, "s7", "aiter::add_rmsnorm_quant_kernel")
+    await w.as_role(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, "s8", from_commit="c1", focus=ACT_MUL)
+    )
+    briefs = SessionBriefs(blackboard)
+    briefs.for_branch("s9", f"{ACT_MUL}.kd")
+
+    text = await briefs.text("s9", "c1")
+
+    under = "from c1 to c1 (your start builds on its head)"
+    assert text.splitlines()[2:7] == [
+        FOCUS_HISTORY_TITLE,
+        f"- s6 {under}: 0 tests, no commit, stopped: {GAVE_UP}",
+        f"- s5 {under}: 2 tests, no commit, stopped: {GAVE_UP}",
+        "  exhausted no_ceiling_above_bar: already fused, at 5 TB/s",
+        "  worth again if a profile shows it above 3%",
+    ]
+    assert "- s7 " not in text and "- s8 " not in text
+
+
+async def test_a_brief_without_a_focus_or_with_no_branch_before_it_on_the_focus_has_no_history(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    await _stopped_on(Writers(tmp_path / "blackboard", clock), "s5", ACT_MUL, ("x1",), **FUSED)
+    briefs = SessionBriefs(blackboard)
+    briefs.for_branch("s8", "aiter::add_rmsnorm_quant_kernel")
+
+    for branch in ("s8", "s9"):
+        brief = await briefs.for_branch(branch).startup_brief("c1")
+        assert brief.focus_history == ()
+        assert FOCUS_HISTORY_TITLE not in render_brief(brief)
+
+
+async def test_the_brief_lists_the_newest_branches_on_the_focus_and_counts_the_rest(tmp_path: Path) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    w = Writers(tmp_path / "blackboard", clock)
+    opened = [f"t{index}" for index in range(FOCUS_BRANCHES + 2)]
+    for branch in opened:
+        await _stopped_on(w, branch, ACT_MUL)
+
+    brief = await CrossSessionBriefing(blackboard, focus=ACT_MUL, branch="s9").startup_brief("c1")
+    shown = render_brief(brief).splitlines()
+
+    assert [line.split()[1] for line in shown if line.startswith("- t")] == opened[::-1][:FOCUS_BRANCHES]
+    assert f"... 2 earlier branches on it, {len(opened)} in all" in shown

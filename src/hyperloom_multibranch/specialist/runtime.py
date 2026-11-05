@@ -413,7 +413,7 @@ class SpecialistRuntime:
         """Deal the given-up branch's direction to no new branch on its start commit or on the head its specialist's
         last exhausted record names; that record as the give-up notice quotes it, ``""`` without one."""
         self._closed.add((state.start_commit, state.task.direction))
-        exhausted = latest_exhausted(await state.blackboard.branch_log(state.name))
+        exhausted = latest_exhausted(record.entry for record in await state.blackboard.branch_log(state.name))
         if exhausted is None:
             return ""
         self._closed.add((exhausted.head, state.task.direction))
@@ -421,7 +421,7 @@ class SpecialistRuntime:
 
     async def _learn_exhausted(self, state: _Branch) -> None:
         """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
-        for exhausted in exhausted_records(await state.blackboard.branch_log(state.name)):
+        for exhausted in exhausted_records(record.entry for record in await state.blackboard.branch_log(state.name)):
             direction = session_direction(exhausted.direction)
             if direction is None:
                 logger.warning(

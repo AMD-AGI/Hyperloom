@@ -19,7 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord
+from hyperloom_multibranch.contracts.branch_log import BranchLogEntry
 
 EXHAUSTED_PREFIX = "EXHAUSTED "
 
@@ -112,16 +112,16 @@ def _parsed(content: str) -> Exhausted | None:
         return None
 
 
-def exhausted_records(records: Iterable[BranchLogRecord]) -> list[Exhausted]:
-    """The well-formed records among a branch's log entries that are not refused, oldest first."""
+def exhausted_records(entries: Iterable[BranchLogEntry]) -> list[Exhausted]:
+    """The well-formed records among a branch's log ``entries`` that are not refused, oldest first."""
 
-    return [found for record in records if (found := read_exhausted(record.entry.content)) is not None]
+    return [found for entry in entries if (found := read_exhausted(entry.content)) is not None]
 
 
-def latest_exhausted(records: Iterable[BranchLogRecord]) -> Exhausted | None:
-    """The latest well-formed record among a branch's log entries that is not refused."""
+def latest_exhausted(entries: Iterable[BranchLogEntry]) -> Exhausted | None:
+    """The latest well-formed record among a branch's log ``entries`` that is not refused."""
 
-    found = exhausted_records(records)
+    found = exhausted_records(entries)
     return found[-1] if found else None
 
 
