@@ -108,7 +108,7 @@ import math
 import os
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -1082,26 +1082,28 @@ def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
 
 @dataclass(frozen=True)
 class HandedGrant:
-    """The grant ``run --measurement hosted`` measures in, and how much of it is left."""
+    """The grant ``run --measurement hosted`` measures in, how much of it is left, and the session's ``--max-hours``
+    cut to what it leaves."""
 
     host: HostInfo
     deadline: GrantDeadline
+    max_hours: float
 
 
 def _handed_grant(args: argparse.Namespace) -> HandedGrant:
-    """The grant handed to ``run --measurement hosted``, taken out of the environment; ``args.max_hours`` is cut to
-    what it leaves. Raises ValueError naming what is missing or refused, never a value."""
+    """The grant handed to ``run --measurement hosted``, taken out of the environment. Raises ValueError naming what
+    is missing or refused, never a value."""
 
     host = take_host_info(os.environ, require=HANDED_GRANT, require_run=False)
     deadline = grant_deadline(host, datetime.now(timezone.utc))
-    args.max_hours = deadline.session_hours(args.max_hours)
-    return HandedGrant(host, deadline)
+    return HandedGrant(host, deadline, deadline.session_hours(args.max_hours))
 
 
 def _run_settings(args: argparse.Namespace, grant: HandedGrant | None) -> RunSettings:
-    settings = settings_from(args) if grant is None else settings_from(args, grant_tests_that_fit(grant.host))
-    if grant is not None:
-        refuse_unhosted_branches(settings, grant.host, os.environ)
+    if grant is None:
+        return settings_from(args)
+    settings = replace(settings_from(args, grant_tests_that_fit(grant.host)), max_hours=grant.max_hours)
+    refuse_unhosted_branches(settings, grant.host, os.environ)
     return settings
 
 
