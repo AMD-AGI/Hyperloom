@@ -9,14 +9,12 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
+    GRADED_REQUESTS_TOTAL,
+    GRADED_UNSERVED_REQUESTS,
 )
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Verdict
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD, compare, confirm
-from hyperloom_multibranch.rulegate.readings import (
-    GRADED_REQUESTS_TOTAL,
-    GRADED_SHORT_REQUESTS,
-    GRADED_UNSERVED_REQUESTS,
-)
+from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS
 
 PARENT = {
     GRADED_INTVTY_P50: 100.0,
