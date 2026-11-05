@@ -414,9 +414,7 @@ class GridLaunch:
 class GridStop:
     """When a grid must stop: the session deadline and its owner, a variant's expected cost, and failure policy.
 
-    ``phase_deadline`` is the end of the phase budget the grid runs under. It bounds only a discarded warmup round,
-    which measures nothing: a measured round runs to completion, since a phase transition waits for it to be booked.
-    """
+    ``phase_deadline`` bounds only a discarded warmup; a measured round completes, as a phase change awaits booking."""
 
     session_deadline_sec: float | None = None
     variant_expected_sec: float | None = None
