@@ -53,7 +53,7 @@ def stub_install_steps(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli_preflight.shutil, "which", _fake_which)
     # The sandbox gate is orthogonal to the auth block under test.
-    monkeypatch.setattr(cli_preflight, "probe_codex_sandbox_capability", lambda: True)
+    monkeypatch.setattr(cli_preflight, "_check_codex_sandbox", lambda: None)
 
     def _fake_run(cmd, *args, **kwargs):
         stdout = "Claude Code test\n" if cmd[1:] == ["--version"] else ""
