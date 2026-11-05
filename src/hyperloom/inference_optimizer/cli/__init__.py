@@ -133,6 +133,7 @@ from ..session.paths import ENV_USER_DATA_PATH, asset_system_prompts_dir, make_s
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
 from .gpu_power_apply import gpu_power_restore_guard
+from .stack_dump import dump_thread_stacks_on_sigusr1
 from .custom_specialist import (
     CUSTOM_SPECIALIST_ONLY_ENV,
     _apply_custom_specialist_resume as _apply_custom_specialist_resume,
@@ -1835,11 +1836,9 @@ def main(argv: list[str] | None = None) -> int:
     # Strict on purpose.
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
-    )
+    logging.basicConfig(level=level, format="%(asctime)s %(name)s [%(levelname)s] %(message)s")
     if args.command == "optimize":
+        dump_thread_stacks_on_sigusr1()
         # Resolve any --*-prompt that point at a file.
         for attr in ("orch_prompt", "critic_prompt"):
             v = getattr(args, attr)
