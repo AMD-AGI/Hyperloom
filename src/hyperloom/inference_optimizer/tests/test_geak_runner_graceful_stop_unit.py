@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.geak_checkout import resolve_e2e_runner
 from hyperloom.orchestrator.kernel import geak_runner as psr
 
 
@@ -45,7 +46,7 @@ def test_resolve_runner_falls_back_to_cache_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("GEAK_ROOT", raising=False)
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
 
-    assert psr._resolve_runner() == str(runner)
+    assert resolve_e2e_runner() == str(runner)
 
 
 def test_resolve_runner_prefers_newest_pinned_geak_in_cache(tmp_path, monkeypatch):
@@ -63,7 +64,7 @@ def test_resolve_runner_prefers_newest_pinned_geak_in_cache(tmp_path, monkeypatc
     monkeypatch.delenv("GEAK_ROOT", raising=False)
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(cache))
 
-    assert psr._resolve_runner() == str(new_runner)
+    assert resolve_e2e_runner() == str(new_runner)
 
 
 def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):

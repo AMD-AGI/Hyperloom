@@ -6,10 +6,21 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 import pytest
 
 from hyperloom.inference_optimizer.cli import geak_binaries, preflight
+
+NODE, CODEX, CLAUDE = geak_binaries.GEAK_BINARY_ENVS
+
+_REGISTRY = {
+    "agents": {
+        "claude": {"bin": "claude", "bin_env": CLAUDE},
+        "codex": {"bin": "codex", "bin_env": CODEX},
+    },
+    "profiles": {"claude": {"agent": "claude"}, "codex-gpt56": {"agent": "codex", "model": "openai_gpt56"}},
+}
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +37,20 @@ def _geak_commands_on_path(tmp_path, monkeypatch):
     for command in ("node", "codex"):
         _executable(bin_dir, command)
     monkeypatch.setenv("PATH", str(bin_dir))
+
+
+@pytest.fixture(autouse=True)
+def geak_registry(tmp_path, monkeypatch):
+    """A minimal GEAK checkout; returns the path of its registry.json."""
+    interface = tmp_path / "geak" / "interface"
+    (interface / "runtime" / "engine").mkdir(parents=True)
+    (interface / "run_e2e.py").write_text("", encoding="utf-8")
+    registry = interface / "runtime" / "engine" / "registry.json"
+    registry.write_text(json.dumps(_REGISTRY), encoding="utf-8")
+    monkeypatch.setenv("GEAK_ROOT", str(tmp_path / "geak"))
+    for name in ("GEAK_E2E_RUNNER", "HYPERLOOM_CACHE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    return registry
 
 
 def _executable(tmp_path, name):
@@ -137,11 +162,15 @@ def test_a_pinned_directory_or_non_executable_refuses_to_start(tmp_path, monkeyp
     ("env", "openai_only", "required"),
     [
         ({}, False, []),
-        ({}, True, ["GEAK_NODE_BIN", "GEAK_CODEX_BIN"]),
+        ({}, True, [NODE, CODEX]),
         ({"GEAK_AGENT_AUTO": "0"}, True, []),
-        ({"GEAK_AGENT_BACKEND": "claude"}, True, ["GEAK_NODE_BIN"]),
-        ({"GEAK_AGENT_PROFILE": "p"}, False, ["GEAK_NODE_BIN"]),
-        ({"GEAK_AGENT_BACKEND": "codex"}, False, ["GEAK_NODE_BIN", "GEAK_CODEX_BIN"]),
+        ({"GEAK_AGENT_BACKEND": "claude"}, True, [NODE, CLAUDE]),
+        ({"GEAK_AGENT_BACKEND": "codex"}, False, [NODE, CODEX]),
+        ({"GEAK_AGENT_PROFILE": "codex-gpt56"}, False, [NODE, CODEX]),
+        ({"GEAK_AGENT_PROFILE": "claude"}, False, [NODE, CLAUDE]),
+        ({"GEAK_AGENT_PROFILE": "claude"}, True, [NODE, CLAUDE]),
+        ({"GEAK_AGENT_BACKEND": "claude", "GEAK_AGENT_PROFILE": "codex-gpt56"}, False, [NODE, CLAUDE]),
+        ({"GEAK_AGENT_BACKEND": "codex", "GEAK_AGENT_PROFILE": "claude"}, False, [NODE, CODEX]),
     ],
 )
 def test_only_the_binaries_of_the_backend_geak_selects_are_required(
@@ -161,6 +190,77 @@ def test_only_the_binaries_of_the_backend_geak_selects_are_required(
         geak_binaries.check_geak_binaries()
     err = capsys.readouterr().err
     assert [name for name in geak_binaries.GEAK_BINARY_ENVS if f"{name}=" in err] == required
+
+
+@pytest.mark.parametrize(
+    ("env", "command"),
+    [({"GEAK_AGENT_PROFILE": "codex-gpt56"}, "codex"), ({"GEAK_AGENT_BACKEND": "claude"}, "claude")],
+)
+def test_the_selected_agents_cli_on_path_passes(tmp_path, monkeypatch, env, command):
+    monkeypatch.delenv("GEAK_AGENT_BACKEND")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    _executable(tmp_path, "node")
+    _executable(tmp_path, command)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert geak_binaries.check_geak_binaries()["status"] == "applied"
+
+
+def test_a_pinned_cli_of_the_selected_agent_replaces_its_default_command(tmp_path, monkeypatch):
+    monkeypatch.delenv("GEAK_AGENT_BACKEND")
+    monkeypatch.setenv("GEAK_AGENT_PROFILE", "codex-gpt56")
+    monkeypatch.setenv(CODEX, str(_executable(tmp_path, "my-codex")))
+    _executable(tmp_path, "node")
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert geak_binaries.check_geak_binaries()["status"] == "applied"
+
+
+@pytest.mark.parametrize("content", [None, "not json", json.dumps({"agents": {}, "profiles": {}}), json.dumps([])])
+@pytest.mark.parametrize("env", [{"GEAK_AGENT_PROFILE": "codex-gpt56"}, {"GEAK_AGENT_BACKEND": "claude"}])
+def test_a_registry_that_cannot_name_the_agent_refuses_to_start(monkeypatch, capsys, geak_registry, env, content):
+    monkeypatch.delenv("GEAK_AGENT_BACKEND")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    if content is None:
+        geak_registry.unlink()
+    else:
+        geak_registry.write_text(content, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        geak_binaries.check_geak_binaries()
+
+    assert excinfo.value.code == 2
+    assert next(iter(env.values())) in capsys.readouterr().err
+
+
+def test_a_profile_the_registry_does_not_define_refuses_to_start(monkeypatch, capsys):
+    monkeypatch.delenv("GEAK_AGENT_BACKEND")
+    monkeypatch.setenv("GEAK_AGENT_PROFILE", "no-such-profile")
+
+    with pytest.raises(SystemExit) as excinfo:
+        geak_binaries.check_geak_binaries()
+
+    assert excinfo.value.code == 2
+    assert "no-such-profile" in capsys.readouterr().err
+
+
+def test_a_missing_geak_checkout_refuses_to_start_when_an_agent_is_selected(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEAK_ROOT", str(tmp_path / "absent"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        geak_binaries.check_geak_binaries()
+
+    assert excinfo.value.code == 2
+
+
+def test_the_registry_is_not_read_when_no_agent_is_selected(tmp_path, monkeypatch):
+    monkeypatch.delenv("GEAK_AGENT_BACKEND")
+    monkeypatch.setattr(geak_binaries, "is_openai_only", lambda: False)
+    monkeypatch.setenv("GEAK_ROOT", str(tmp_path / "absent"))
+
+    assert geak_binaries.check_geak_binaries()["status"] == "applied"
 
 
 def _checked_steps(monkeypatch, *, no_kernel: bool) -> list[str]:
