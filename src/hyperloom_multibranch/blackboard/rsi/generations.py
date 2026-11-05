@@ -22,9 +22,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree
 from hyperloom_multibranch.blackboard.rsi.authoring import PLAYBOOK_SYSTEM_PROMPT, read_change
-from hyperloom_multibranch.blackboard.rsi.history import MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.rsi.ladder import (
     JUDGED_SESSIONS,
     Complete,

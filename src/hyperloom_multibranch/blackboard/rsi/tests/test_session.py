@@ -15,6 +15,8 @@ from hyperloom_kb import RemoteExperienceKB
 from hyperloom_kb.collect import collect, load_mapping
 from hyperloom_kb.collect.engine import CollectReport, FailedUnit
 
+from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.pins import IMAGE_DIGEST_VAR, IMAGE_REF_VAR
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import Learning, LearningRecord, BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
@@ -31,6 +33,7 @@ from hyperloom_multibranch.blackboard.rsi.archive import (
     TreeArchive,
     archive_session,
 )
+from hyperloom_multibranch.blackboard.rsi.cases import CasePool
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, Retrieval, RetrievalLog, RetrievalSource
 from hyperloom_multibranch.blackboard.rsi.history import MAX_CHARS, session_stall_odds
@@ -38,7 +41,17 @@ from hyperloom_multibranch.blackboard.rsi.decisions import decision_calls
 from hyperloom_multibranch.blackboard.rsi.ladder import standings, trials
 from hyperloom_multibranch.blackboard.rsi.menu import MENU_LOG, MenuLog
 from hyperloom_multibranch.blackboard.rsi.outcomes import OUTCOMES_REPORT, OutcomePool
-from hyperloom_multibranch.blackboard.rsi.playbook import FALLBACK_KEY, H0, PLAYBOOK_KEY, PlaybookPool
+from hyperloom_multibranch.blackboard.rsi.playbook import (
+    FALLBACK_KEY,
+    H0,
+    PLAYBOOK_KEY,
+    Crowned,
+    Playbook,
+    PlaybookPlay,
+    PlaybookPool,
+    replaced,
+    session_playbook,
+)
 from hyperloom_multibranch.blackboard.rsi.lessons import (
     LessonPool,
     LessonRevision,
@@ -73,6 +86,7 @@ from hyperloom_multibranch.blackboard.rsi.session import (
     session_menus,
 )
 from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
+from hyperloom_multibranch.blackboard.rsi.tests.test_cases import IMAGE, _registered
 from hyperloom_multibranch.blackboard.rsi.tests.trees import HOUR, branch, tree
 from hyperloom_multibranch.blackboard.tests.factories import START, FakeClock, profile
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, scripted_session
@@ -199,6 +213,40 @@ def test_a_challenger_session_that_fell_back_to_the_champion_is_kept_as_such(
 
     (kept,) = trials(PlaybookPool.beside(archive))
     assert (kept.played, kept.fell_back) == ("patient", True)
+
+
+PATIENT = Playbook("patient", replaced(H0, stall_tests=8).numbers, parent=H0.label, measure="early_stops")
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_a_trial_is_read_against_the_champion_its_session_played_beside_though_its_playbook_was_crowned_since(
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
+) -> None:
+    pool = PlaybookPool.beside(archived(tmp_path))
+    pool.register(PATIENT)
+    play = PlaybookPlay(session_playbook(pool, challenger=True))
+    pool.crown(Crowned(PATIENT.label, snapshot.taken_at - HOUR, "won its pairs"))
+    played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions=play.versions())
+
+    close_knowledge(dataclasses.replace(snapshot, fingerprints=(played,)), METRIC)
+
+    (kept,) = trials(pool)
+    assert (pool.champion(), kept.played, kept.champion) == (PATIENT, PATIENT.label, H0.label)
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_a_trial_whose_policy_versions_name_no_champion_is_read_against_the_pools_champion_at_close(
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
+) -> None:
+    pool = PlaybookPool.beside(archived(tmp_path))
+    pool.register(PATIENT)
+    pool.crown(Crowned(PATIENT.label, snapshot.taken_at - HOUR, "won its pairs"))
+    played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
+
+    close_knowledge(dataclasses.replace(snapshot, fingerprints=(played,)), METRIC)
+
+    (kept,) = trials(pool)
+    assert (kept.played, kept.champion) == (H0.label, PATIENT.label)
 
 
 @pytest.mark.usefixtures("unconfigured")
@@ -335,6 +383,29 @@ def test_close_writes_the_stop_audit_of_the_sessions_stops_beside_the_receipts(
     assert done.stop_audit == CloseStep(WRITTEN, "the judge stopped no branch", counts)
     assert (reports / STOP_AUDIT_REPORT).read_text(encoding="utf-8").startswith("# Stop audit of sess-1\n")
     assert close_knowledge(snapshot, METRIC).stop_audit == CloseStep(SKIPPED, NO_REPORTS)
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_close_writes_the_registered_cases_beside_the_archive(
+    snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(IMAGE_REF_VAR, "rocm/vllm:v0.11")
+    monkeypatch.setenv(IMAGE_DIGEST_VAR, IMAGE)
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    targets = CloseTargets(blobs=blobs.root)
+
+    done = close_knowledge(_registered(snapshot, blobs, "p1"), METRIC, targets=targets)
+    without = close_knowledge(snapshot, METRIC, targets=targets)
+
+    assert (done.regression_cases.status, done.regression_cases.counts) == (WRITTEN, {"written": 1, "skipped": 0})
+    assert len(CasePool.beside(TreeArchive(tmp_path / "archive")).entries()) == 1
+    assert done.document()["regression_cases"] == {
+        "status": WRITTEN,
+        "reason": "",
+        "counts": {"written": 1, "skipped": 0},
+    }
+    assert without.regression_cases.reason == NO_CASE
 
 
 @pytest.mark.usefixtures("unconfigured")

@@ -15,6 +15,7 @@ from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
 from hyperloom_multibranch.blackboard.rsi.frontier import StopRule
 from hyperloom_multibranch.blackboard.rsi.playbook import (
     CHALLENGER_SHARE,
+    CHAMPION_KEY,
     FALLBACK_KEY,
     H0,
     MAX_RULES,
@@ -75,14 +76,16 @@ def test_a_challenger_session_plays_the_champion_from_its_first_breach_on_and_re
     champion = PlaybookPlay(PlaybookChoice(H0, H0))
     breach = "stop of b1, held by its probation"
 
-    assert (play.stop_rule(), play.versions()) == (StopRule(stall_tests=8), {PLAYBOOK_KEY: LONGER.label})
+    started = {PLAYBOOK_KEY: LONGER.label, CHAMPION_KEY: H0.label}
+    assert (play.stop_rule(), play.versions()) == (StopRule(stall_tests=8), started)
     assert "on trial in this session" in play.render()
     assert not play.fall_back(()) and play.fall_back((breach, "stop of b2, held by a near-bar lead"))
     assert not play.fall_back(("stop of b3, held by a stranded lead",))
     assert (play.playbook, play.stop_rule()) == (H0, StopRule())
-    assert play.versions() == {PLAYBOOK_KEY: LONGER.label, FALLBACK_KEY: breach}
+    assert play.versions() == {**started, FALLBACK_KEY: breach}
     assert play.render() == H0.render()
-    assert not champion.fall_back((breach,)) and champion.versions() == {PLAYBOOK_KEY: H0.label}
+    assert not champion.fall_back((breach,))
+    assert champion.versions() == {PLAYBOOK_KEY: H0.label, CHAMPION_KEY: H0.label}
 
 
 @pytest.mark.parametrize(
