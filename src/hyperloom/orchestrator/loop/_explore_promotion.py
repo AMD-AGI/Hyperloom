@@ -30,7 +30,7 @@ _OBSERVATION = "observation"
 
 def _cycle_attribution(verdict: Mapping[str, Any]) -> tuple[float | None, str]:
     """The ``(gain, source)`` one arm's verdict in a valid batch records; a broken arm falls back to replay."""
-    if verdict.get("verdict") == VERDICT_BROKEN or "gain_pct" not in verdict:
+    if verdict["verdict"] == VERDICT_BROKEN:
         return None, ATTRIBUTION_CYCLE_BROKEN
     return float(verdict["gain_pct"]), ATTRIBUTION_CYCLE_BENCH
 
@@ -125,44 +125,36 @@ class ExplorePromotionMixin:
 
     def _record_cycle_batch(self, result: Mapping[str, Any]) -> None:
         """Write a cycle batch's verdict onto every lever its arms switched on, and keep its base2 as the reference."""
-        if result.get("parity_broken"):
-            self._close_cycle_screen(str(result.get("reason") or "the switched-off tree moved"))
+        state = self.shared_state
+        if result["parity_broken"]:
+            self._close_cycle_screen(result["reason"])
         # The base's capture describes the stack whether or not the batch's timing holds.
-        capture = ((result.get("arms") or {}).get("base") or {}).get("attribution_trace")
-        if capture:
-            stack_len = len(self.shared_state.optimization_stack or [])
-            self.shared_state.last_attribution_trace = {"stack_len": stack_len, "trace": str(capture)}
-        if not result.get("valid"):
-            release_unscreened_levers(self.shared_state, result)
+        if capture := result["arms"]["base"]["attribution_trace"]:
+            state.last_attribution_trace = {"stack_len": len(state.optimization_stack), "trace": capture}
+        if not result["valid"]:
+            release_unscreened_levers(state, result)
             return
-        self._keep_cycle_reference(result)
-        verdicts = result.get("verdicts") or {}
-        for arm in result.get(CYCLE_ARMS_PARAM) or []:
-            verdict = verdicts.get(str(arm.get("name") or "")) or {}
+        state.cycle_reference = {
+            "stack_len": len(state.optimization_stack),
+            "cycle_ms": {str(bs): float(ms) for bs, ms in result["arms"]["base2"]["cycle_ms"].items()},
+        }
+        for arm in result[CYCLE_ARMS_PARAM]:
+            verdict = result["verdicts"][arm["name"]]
             if arm.get(BUNDLE_ARM_KEY):
-                self._record_bundle_screen(arm, str(verdict.get("verdict") or VERDICT_BROKEN))
+                self._record_bundle_screen(arm, verdict["verdict"])
                 continue
             gain, source = _cycle_attribution(verdict)
-            for switch in arm.get("envs") or {}:
-                self.shared_state.record_framework_lever_attribution(str(switch), gain_pct=gain, source=source)
+            for switch in arm["envs"]:
+                state.record_framework_lever_attribution(switch, gain_pct=gain, source=source)
 
     def _record_bundle_screen(self, arm: Mapping[str, Any], verdict: str) -> None:
         """Keep a bundle arm's verdict on its bundle; its levers keep the verdicts they earned alone."""
-        key = str(arm[BUNDLE_ARM_KEY])
-        self.shared_state.cycle_bundle_screens = {**(self.shared_state.cycle_bundle_screens or {}), key: verdict}
+        key = arm[BUNDLE_ARM_KEY]
+        self.shared_state.cycle_bundle_screens = {**self.shared_state.cycle_bundle_screens, key: verdict}
         if verdict in BUNDLE_REFUSED:
-            switches = sorted(arm.get("envs") or {})
             log.warning(
-                "cycle bench: lever bundle %s is %s with %s on together; it stays dormant", key, verdict, switches
+                "cycle bench: lever bundle %s is %s with %s on together; it stays dormant", key, verdict, arm["envs"]
             )
-
-    def _keep_cycle_reference(self, result: Mapping[str, Any]) -> None:
-        base2 = ((result.get("arms") or {}).get("base2") or {}).get("cycle_ms") or {}
-        if base2:
-            self.shared_state.cycle_reference = {
-                "stack_len": len(self.shared_state.optimization_stack or []),
-                "cycle_ms": {str(bs): float(ms) for bs, ms in base2.items()},
-            }
 
     def _close_cycle_screen(self, reason: str) -> None:
         """Stop admitting patches dormant: one already admitted moved the tree with its switches off."""

@@ -1528,7 +1528,6 @@ async def test_a_cycle_batch_writes_its_verdicts_onto_the_levers_its_arms_switch
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
     from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
-    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
 
     from .conftest import make_coordinator
 
@@ -1541,12 +1540,8 @@ async def test_a_cycle_batch_writes_its_verdicts_onto_the_levers_its_arms_switch
             [_entry_parsed(name)], default_on=False, specialist_task_id=f"t{i}"
         )
         coord.shared_state.record_framework_lever_attribution(name, gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
-    result = {
-        "status": STATUS_SCREENED,
-        "cycle_arms": [{"name": "a", "envs": {"HL_A": "1"}}, {"name": "b", "envs": {"HL_B": "1"}}],
-        "valid": valid,
-        "verdicts": verdicts,
-    }
+    arms = [{"name": "a", "envs": {"HL_A": "1"}}, {"name": "b", "envs": {"HL_B": "1"}}]
+    result = _batch_result(arms, valid=valid, verdicts=verdicts)
     outcome = _PromoteOutcome(verdict=Verdict.RECORDED)
 
     await coord.writeback._promote_explore(result, None, outcome)
@@ -1557,11 +1552,27 @@ async def test_a_cycle_batch_writes_its_verdicts_onto_the_levers_its_arms_switch
     assert coord.shared_state.gain_gated_action_count == 0
 
 
+def _batch_result(cycle_arms: list, **over) -> dict:
+    """A cycle-bench explore result in the shape ``_screen_cycle_batch`` returns."""
+    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+
+    arms = {"base": {}, "base2": {}, **over.pop("arms", {})}
+    return {
+        "status": STATUS_SCREENED,
+        "cycle_arms": cycle_arms,
+        "valid": True,
+        "parity_broken": False,
+        "reason": "",
+        "verdicts": {},
+        **over,
+        "arms": {name: {"cycle_ms": {}, "attribution_trace": "", **arm} for name, arm in arms.items()},
+    }
+
+
 async def _promote_cycle_batch(tmp_path, result: dict, *, held: dict | None = None):
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
     from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
-    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
 
     from .conftest import make_coordinator
 
@@ -1578,7 +1589,7 @@ async def _promote_cycle_batch(tmp_path, result: dict, *, held: dict | None = No
     coord.shared_state.record_framework_lever_attribution("HL_A", gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
     arms = [{"name": "a", "envs": {"HL_A": "1"}}]
     await coord.writeback._promote_explore(
-        {"status": STATUS_SCREENED, "cycle_arms": arms, **result}, None, _PromoteOutcome(verdict=Verdict.RECORDED)
+        _batch_result(arms, **result), None, _PromoteOutcome(verdict=Verdict.RECORDED)
     )
     return coord.shared_state
 
@@ -1698,10 +1709,9 @@ async def test_a_bundle_arm_records_its_verdict_on_the_bundle_and_leaves_its_lev
 ):
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
     from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
-    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
 
     coord, arms = _screened_bundle(tmp_path)
-    result = {"status": STATUS_SCREENED, "cycle_arms": arms, "valid": valid, "verdicts": verdicts, "arms": {}}
+    result = _batch_result(arms, valid=valid, verdicts=verdicts)
 
     await coord.writeback._promote_explore(result, None, _PromoteOutcome(verdict=Verdict.RECORDED))
 

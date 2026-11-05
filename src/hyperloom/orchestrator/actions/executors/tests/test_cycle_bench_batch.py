@@ -37,13 +37,10 @@ def test_candidates_are_graded_against_the_mean_of_two_agreeing_bases():
     assert summary["verdicts"]["faster"]["gain_pct"] == pytest.approx(5.0)
 
 
-@pytest.mark.parametrize(
-    ("base2", "weights"), [pytest.param(_arm(10.5, 21.0), _WEIGHTS, id="bases-disagree"), (_arm(12.0, 24.0), {})]
-)
-def test_a_batch_its_bases_cannot_anchor_grades_nothing(base2, weights):
-    arms = {"base": _arm(10.0, 20.0), "c": _arm(9.0, 18.0), "base2": base2}
+def test_bases_that_disagree_void_the_batch_and_grade_nothing():
+    arms = {"base": _arm(10.0, 20.0), "c": _arm(9.0, 18.0), "base2": _arm(10.5, 21.0)}
 
-    summary = cba.summarize_batch(arms, ["c"], weights, bands=_BANDS)
+    summary = cba.summarize_batch(arms, ["c"], _WEIGHTS, bands=_BANDS)
 
     assert (summary["valid"], summary["verdicts"]) == (False, {})
 
@@ -218,7 +215,7 @@ def test_a_session_batch_takes_the_previous_base2_of_the_same_stack_as_its_refer
     assert spec.reference == {1: 10.0, 4: 30.0}
 
 
-@pytest.mark.parametrize("reference", [None, {}, {"stack_len": 0, "cycle_ms": {"1": 10.0}}])
+@pytest.mark.parametrize("reference", [{}, {"stack_len": 0, "cycle_ms": {"1": 10.0}}])
 def test_a_session_batch_has_no_reference_from_another_stack_or_none_at_all(tmp_path, reference):
     state = _referenced_state(tmp_path, reference, [{"kind": "config"}])
 

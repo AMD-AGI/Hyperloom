@@ -24,7 +24,7 @@ class _Tasks:
             outcome = {"outcome": {"result": self.results.get(key, {"status": "ok"})}}
             return SimpleNamespace(state=self.ended[key], history=[{"to": self.ended[key], "evidence": outcome}])
         created = any(c["idempotency_key"] == key for c in self.created)
-        return SimpleNamespace(state="queued") if created else None
+        return SimpleNamespace(state="queued", history=[]) if created else None
 
     async def queued(self):
         return self._queued

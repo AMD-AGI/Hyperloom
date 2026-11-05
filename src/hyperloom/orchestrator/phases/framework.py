@@ -1814,7 +1814,6 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         )
         if etask is None:
             return False
-        log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
         from ..loop.proposals import record_config_proposal
 
         record_config_proposal(

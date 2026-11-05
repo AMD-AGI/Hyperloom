@@ -38,7 +38,7 @@ def _never_ran(task: Any) -> bool:
     """Whether a cycle batch's task ended without a batch: cancelled, failed, or settled on a failed result."""
     if str(task.state) in _UNRUN_STATES:
         return True
-    last = (list(getattr(task, "history", None) or []) or [{}])[-1]
+    last = (task.history or [{}])[-1]
     result = ((last.get("evidence") or {}).get("outcome") or {}).get("result") or {}
     return str(result.get("status") or "") == "failed"
 
@@ -68,7 +68,7 @@ def _holds_cycle_batch(tasks: Iterable[Any]) -> bool:
     """Whether a cycle-bench batch is among *tasks*; a reference batch carries an empty arm list."""
     from ..actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
 
-    return any(CYCLE_ARMS_PARAM in (getattr(task, "params", None) or {}) for task in tasks)
+    return any(CYCLE_ARMS_PARAM in (task.params or {}) for task in tasks)
 
 
 def _screen_on(state: Any) -> bool:
@@ -121,7 +121,15 @@ class ProposalBench(CoordinatorCollaborator):
                 dispatch_class="coordinator",
             )
         )
-        return None if was_existing else task
+        if was_existing:
+            return None
+        log.info(
+            "coordinator explore: enqueued task_id=%s key=%s reason=%s",
+            task.task_id,
+            idempotency_key,
+            params.get("reason"),
+        )
+        return task
 
     async def enqueue_dormant_lever_bundle(self) -> bool:
         """Enqueue one round benching every dormant rewrite lever together; whether a new round was enqueued.
@@ -144,10 +152,6 @@ class ProposalBench(CoordinatorCollaborator):
         task = await self._enqueue_coordinator_explore(
             {"source": _COORDINATOR_SOURCE, "reason": LEVER_BUNDLE_REASON, "grid": [variant]}, idempotency_key=round_key
         )
-        if task is not None:
-            log.info(
-                "lever bundle: enqueued explore task_id=%s over %s", task.task_id, variant["framework_lever_bundle"]
-            )
         return task is not None
 
     async def _bundle_screened(self, key: str, variant: Mapping[str, Any]) -> bool:
@@ -158,7 +162,7 @@ class ProposalBench(CoordinatorCollaborator):
         state = self.shared_state
         if not _screen_on(state):
             return True
-        verdict = (state.cycle_bundle_screens or {}).get(key)
+        verdict = state.cycle_bundle_screens.get(key)
         if verdict is not None:
             return verdict not in cba.BUNDLE_REFUSED
         screen = await self.tasks.find_by_idempotency_key(f"{key}-cycle")
@@ -172,11 +176,7 @@ class ProposalBench(CoordinatorCollaborator):
             "reason": cba.CYCLE_BATCH_REASON,
             cba.CYCLE_ARMS_PARAM: [cba.bundle_arm(key, variant["extra_envs"])],
         }
-        task = await self._enqueue_coordinator_explore(params, idempotency_key=f"{key}-cycle")
-        if task is not None:
-            log.info(
-                "cycle bench: enqueued batch task_id=%s over bundle %s", task.task_id, variant["framework_lever_bundle"]
-            )
+        await self._enqueue_coordinator_explore(params, idempotency_key=f"{key}-cycle")
         return False
 
     async def on_task_settled(self, task: Task, result: Any, verdict: Verdict) -> None:
@@ -202,7 +202,7 @@ class ProposalBench(CoordinatorCollaborator):
         """
         from ..actions.executors import cycle_bench_arm as cba
 
-        arms = cba.cycle_arms(list(self.shared_state.authored_framework_levers or []))
+        arms = cba.cycle_arms(self.shared_state.authored_framework_levers)
         if not arms:
             return await self._enqueue_cycle_reference()
         if self._coord.dispatcher.admission_frozen:
@@ -213,7 +213,7 @@ class ProposalBench(CoordinatorCollaborator):
         if _holds_cycle_batch(live):
             return False
         serving = ("server_lifecycle", "benchmark_lane")
-        if len(arms) < 2 and any(lane in serving for t in live for lane in (getattr(t, "requires_lanes", ()) or ())):
+        if len(arms) < 2 and any(lane in serving for t in live for lane in t.requires_lanes):
             return False
         names = sha1(",".join(arm["name"] for arm in arms).encode(), usedforsecurity=False).hexdigest()[:12]
         key = await self._fresh_batch_key(f"cycle-batch-c{int(self.shared_state.macro_cycle or 0)}-{names}")
@@ -225,10 +225,7 @@ class ProposalBench(CoordinatorCollaborator):
             "reason": cba.CYCLE_BATCH_REASON,
             cba.CYCLE_ARMS_PARAM: arms,
         }
-        task = await self._enqueue_coordinator_explore(params, idempotency_key=key)
-        if task is not None:
-            log.info("cycle bench: enqueued batch task_id=%s over %s", task.task_id, [arm["name"] for arm in arms])
-        return task is not None
+        return await self._enqueue_coordinator_explore(params, idempotency_key=key) is not None
 
     async def _enqueue_cycle_reference(self) -> bool:
         """Enqueue the two bases alone for an AgentX stack no batch has measured, so the patches admitted dormant
@@ -236,10 +233,10 @@ class ProposalBench(CoordinatorCollaborator):
         from ..actions.executors import cycle_bench_arm as cba
 
         state = self.shared_state
-        stack_len = len(state.optimization_stack or [])
+        stack_len = len(state.optimization_stack)
         if (
             not _screen_on(state)
-            or (state.cycle_reference or {}).get("stack_len") == stack_len
+            or state.cycle_reference.get("stack_len") == stack_len
             or self._coord.dispatcher.admission_frozen
         ):
             return False
@@ -249,12 +246,7 @@ class ProposalBench(CoordinatorCollaborator):
         if key is None:
             return False
         params = {"source": _COORDINATOR_SOURCE, "reason": cba.CYCLE_BATCH_REASON, cba.CYCLE_ARMS_PARAM: []}
-        task = await self._enqueue_coordinator_explore(params, idempotency_key=key)
-        if task is not None:
-            log.info(
-                "cycle bench: enqueued the reference batch task_id=%s for stack length %d", task.task_id, stack_len
-            )
-        return task is not None
+        return await self._enqueue_coordinator_explore(params, idempotency_key=key) is not None
 
     async def _fresh_batch_key(self, base: str) -> str | None:
         """The key of the next coordinator round on ``base``: a new attempt only once the last ended without running."""

@@ -94,8 +94,7 @@ def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     arms: dict[str, dict[str, str]] = {}
     for row in levers:
         if row.get("attribution_source") == ATTRIBUTION_CYCLE_PENDING:
-            patch = str(row.get("specialist_task_id") or row.get("switch") or "")
-            arms.setdefault(patch, {})[str(row["switch"])] = str(row.get("value") or "1")
+            arms.setdefault(row["specialist_task_id"] or row["switch"], {})[row["switch"]] = row["value"]
     return [{"name": name, "envs": envs} for name, envs in arms.items()][:CYCLE_BATCH_MAX_ARMS]
 
 
@@ -104,16 +103,15 @@ def bundle_arm(key: str, envs: dict[str, str]) -> dict[str, Any]:
     return {"name": "lever-bundle", "envs": dict(envs), BUNDLE_ARM_KEY: key}
 
 
-def release_unscreened_levers(state: Any, params: Mapping[str, Any] | None) -> None:
+def release_unscreened_levers(state: Any, params: Mapping[str, Any]) -> None:
     """Hand a cycle batch's levers back to replay attribution, and its bundle to its replay round, when the batch
     ended without verdicts."""
-    for arm in (params or {}).get(CYCLE_ARMS_PARAM) or []:
+    for arm in params.get(CYCLE_ARMS_PARAM, ()):
         if arm.get(BUNDLE_ARM_KEY):
-            screens = state.cycle_bundle_screens or {}
-            state.cycle_bundle_screens = {**screens, str(arm[BUNDLE_ARM_KEY]): BUNDLE_INCONCLUSIVE}
+            state.cycle_bundle_screens = {**state.cycle_bundle_screens, arm[BUNDLE_ARM_KEY]: BUNDLE_INCONCLUSIVE}
             continue
-        for switch in arm.get("envs") or {}:
-            state.record_framework_lever_attribution(str(switch), gain_pct=None, source=ATTRIBUTION_CYCLE_INCONCLUSIVE)
+        for switch in arm["envs"]:
+            state.record_framework_lever_attribution(switch, gain_pct=None, source=ATTRIBUTION_CYCLE_INCONCLUSIVE)
 
 
 def _weighting_log(launch_dir: Path, baseline: str) -> Path:
@@ -129,7 +127,7 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
 
     Until a round moves the current best that is the baseline's; after, the kept stack is what a candidate joins.
     """
-    best = str((state.current_best or {}).get("workspace") or "")
+    best = str(state.current_best.get("workspace") or "")
     root = best or state.baseline_workspace
     if not root:
         raise FileNotFoundError("the session has no baseline workspace to take the bench launch from")
@@ -143,7 +141,6 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
     if not weights:
         raise ValueError(f"no decode line in {log_path} to weight batch sizes by")
     config = json.loads((Path(str(state.model_path)) / "config.json").read_text(encoding=_ENCODING))
-    isl = (state.agentx_corpus_shape or {}).get("isl") or {}
     return BatchSpec(
         argv=list(launch["effective_argv"]),
         env={**(launch.get("runtime_environment") or {}), **(launch.get("effective_env") or {})},
@@ -151,7 +148,7 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
         candidates=list(candidates),
         out_dir=out_dir,
         port=port,
-        prompt_tokens=int(isl["p50"]),
+        prompt_tokens=int(state.agentx_corpus_shape["isl"]["p50"]),
         vocab_size=int(config["vocab_size"]),
         bands=CYCLE_BANDS,
         reference=_reference(state),
@@ -161,9 +158,8 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
 
 def _attribution_bs(state: Any, weights: dict[int, float]) -> int:
     """The heaviest batch size when a kept round moved the stack and no capture describes it yet, else 0."""
-    stack_len = len(state.optimization_stack or [])
-    held = state.last_attribution_trace or {}
-    if not stack_len or held.get("stack_len") == stack_len:
+    stack_len = len(state.optimization_stack)
+    if not stack_len or state.last_attribution_trace.get("stack_len") == stack_len:
         return 0
     return max(weights, key=lambda bs: weights[bs])
 
@@ -192,10 +188,10 @@ def screen_open(state: Any) -> bool:
 
 def _reference(state: Any) -> dict[int, float] | None:
     """The previous valid batch's base2 cycle, when it ran the stack the session holds now."""
-    ref = state.cycle_reference or {}
-    if not ref or int(ref.get("stack_len", -1)) != len(state.optimization_stack or []):
+    ref = state.cycle_reference
+    if ref.get("stack_len") != len(state.optimization_stack):
         return None
-    return {int(bs): float(ms) for bs, ms in (ref.get("cycle_ms") or {}).items()} or None
+    return {int(bs): float(ms) for bs, ms in ref["cycle_ms"].items()} or None
 
 
 def run_batch(spec: BatchSpec, stop: threading.Event | None = None) -> dict[str, Any]:
@@ -237,7 +233,7 @@ def _boot(
             env=cb.bench_env({**os.environ, **spec.env, **switches}),
             out_dir=spec.out_dir / name,
             port=spec.port,
-            batch_sizes=tuple(bs for bs in BATCH_GRID if spec.weights.get(bs, 0) > 0) or BATCH_GRID,
+            batch_sizes=tuple(bs for bs in BATCH_GRID if spec.weights.get(bs, 0) > 0),
             prompt_tokens=spec.prompt_tokens,
             vocab_size=spec.vocab_size,
             attribution_bs=attribution_bs,
@@ -249,20 +245,18 @@ def summarize_batch(
     arms: dict[str, ArmResult], candidates: list[str], weights: dict[int, float], *, bands: cb.Bands
 ) -> dict[str, Any]:
     """Grade each candidate against the mean of the two bases, once the bases agree within *bands*."""
-    base, base2 = arms.get(_BASES[0]), arms.get(_BASES[1])
-    if base is None or base2 is None or base.error or base2.error:
+    base, base2 = arms[_BASES[0]], arms.get(_BASES[1])
+    if base.error or base2 is None or base2.error:
         return {"valid": False, "reason": "a base arm produced no cycle", "verdicts": {}}
-    if not {bs for bs, w in weights.items() if w > 0} & set(base.cycle_ms) & set(base2.cycle_ms):
-        return {"valid": False, "reason": "no weighted batch size was measured by both bases", "verdicts": {}}
     gap = cb.weighted_gain_pct(base.cycle_ms, base2.cycle_ms, weights)
     if not cb.batch_valid(base.cycle_ms, base2.cycle_ms, weights, bands=bands):
         return {"valid": False, "reason": f"bases disagree by {gap:+.2f}%", "verdicts": {}}
     mean = {bs: (base.cycle_ms[bs] + base2.cycle_ms[bs]) / 2 for bs in base.cycle_ms if bs in base2.cycle_ms}
     verdicts: dict[str, dict[str, Any]] = {}
     for name in candidates:
-        arm = arms.get(name)
-        if arm is None or arm.error:
-            verdicts[name] = {"verdict": cb.VERDICT_BROKEN, "error": arm.error if arm else "arm did not run"}
+        arm = arms[name]
+        if arm.error:
+            verdicts[name] = {"verdict": cb.VERDICT_BROKEN, "error": arm.error}
             continue
         gain = cb.weighted_gain_pct(mean, arm.cycle_ms, weights)
         verdict = cb.screen_verdict(gain, regress_pct=bands.regress_pct)
@@ -473,9 +467,7 @@ async def run_cycle_batch(params: dict[str, Any], state: Any, output_root: Path)
         raise
 
 
-def _screen_cycle_batch(
-    params: dict[str, Any], state: Any, output_root: Path, stop: threading.Event | None = None
-) -> dict[str, Any]:
+def _screen_cycle_batch(params: dict[str, Any], state: Any, output_root: Path, stop: threading.Event) -> dict[str, Any]:
     """Run one cycle-bench batch of the task's arms on the session baseline's launch; no replay, no grading round."""
     from hyperloom.common.ports import pick_server_port
 
