@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from hyperloom_multibranch.contracts.blackboard import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin, LineageKind
+from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeBranch, tree_from_snapshot
 from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, workload_kind
 
@@ -56,7 +57,6 @@ MIN_SEEN = 5.0
 #: this, and every branch after it opened mid-session.
 OPENING_SECONDS = 15 * 60.0
 MAX_CHARS = 1500
-MODEL_TYPE_LABEL = "model_type"
 _SECONDS_PER_MINUTE = 60.0
 
 
@@ -378,7 +378,6 @@ __all__ = [
     "MAX_STALL_TESTS",
     "MIN_SEEN",
     "MIN_STALL_TESTS",
-    "MODEL_TYPE_LABEL",
     "OPENING_SECONDS",
     "OTHER_MODEL_WEIGHT",
     "PRIOR_TESTS",

@@ -103,6 +103,7 @@ IMAGE_CHARS = 19
 #: How much of a blob's sha256 or an upstream commit a lead's line shows.
 SHORT_REF = 12
 MODEL_LABEL = "model"
+MODEL_TYPE_LABEL = "model_type"
 #: The one label a lead may differ in and still be read: a recipe measured on another framework release.
 FRAMEWORK_VERSION_LABEL = "framework_version"
 #: The KB labels of a recipe identity, in the order :func:`recipe_canonical_id` writes their slugs after the scheme.
@@ -110,7 +111,7 @@ IDENTITY_LABELS = (
     MODEL_LABEL,
     "hardware",
     "framework_name",
-    "model_type",
+    MODEL_TYPE_LABEL,
     "architectures",
     FRAMEWORK_VERSION_LABEL,
     "precision",
@@ -153,9 +154,13 @@ class RecipeReader(Protocol):
         match: dict[str, str],
         offset: int = 0,
         limit: int = 50,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """The identities of ``scheme`` whose dimensions named in ``match`` equal it, ``limit`` of them from
+        ``offset``."""
 
-    def get_view(self, canonical_id: str, scope: RecipeScope) -> dict[str, Any] | None: ...
+    def get_view(self, canonical_id: str, scope: RecipeScope) -> dict[str, Any] | None:
+        """The validated View of ``canonical_id`` in ``scope``, its files not downloaded; ``None`` when there is
+        none."""
 
 
 class RecipeDownloader(RecipeReader, Protocol):
@@ -164,7 +169,9 @@ class RecipeDownloader(RecipeReader, Protocol):
 
     def read(
         self, canonical_id: str, destination: str | Path, *, scope: RecipeScope, envelope: dict[str, Any] | None = None
-    ) -> dict[str, Any] | None: ...
+    ) -> dict[str, Any] | None:
+        """The View of ``canonical_id`` in ``scope``, ``envelope`` when it was read already, with its verified files
+        under ``destination``; ``None`` when there is none."""
 
 
 @dataclass(frozen=True)
@@ -685,6 +692,7 @@ __all__ = [
     "LAUNCH_ONLY_REASON",
     "MAX_CANDIDATES",
     "MODEL_LABEL",
+    "MODEL_TYPE_LABEL",
     "PATCH_REFERENCE",
     "REPLAY_LEADS",
     "SHORT_REF",
