@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from importlib import resources
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,7 +18,7 @@ from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_docum
 from jsonschema import Draft202012Validator
 
 from hyperloom.contracts.measurement import PhaseTiming
-from hyperloom.measure import signing
+from hyperloom.measure import docs, signing
 from hyperloom.measure.docs import DocumentError, parse_json_object
 from hyperloom.measure.manifest import (
     CardOccupancyFacts,
@@ -271,3 +275,74 @@ def test_the_reader_refuses_a_number_or_string_no_document_holds_wherever_it_sit
 
 def test_the_reader_takes_an_escaped_surrogate_pair_as_the_one_character_it_spells() -> None:
     assert parse_json_object(b'{"a":["\\ud83d\\ude00"]}', what="doc") == {"a": ["\U0001f600"]}
+
+
+@pytest.mark.parametrize(
+    ("raw", "path"),
+    [
+        (b'{"\\ud800":{"\\udc00":1}}', "doc"),
+        (b'{"a":{"\\ud800":["\\udc00"]}}', "doc.a"),
+        (b'{"a":[{"b":"\\udfff"}]}', "doc.a[0].b"),
+    ],
+    ids=["a-key-below-a-key", "a-string-below-a-key", "a-string-below-an-index"],
+)
+def test_a_lone_surrogate_is_refused_with_a_path_that_holds_none(raw: bytes, path: str) -> None:
+    with pytest.raises(DocumentError) as raised:
+        parse_json_object(raw, what="doc")
+    assert str(raised.value).startswith(f"{path}: "), "the path names where it sits, up to a key that holds one"
+    str(raised.value).encode("utf-8")
+
+
+#: Run in a child process, so the address-space limit binds that process alone: build a document of the given shape,
+#: allow the process its present size and 64 MiB more, and read the document. Prints how the reading ended.
+_READ_UNDER_A_MEMORY_LIMIT = """
+import resource, sys
+
+from hyperloom.measure.docs import DocumentError, parse_json_object
+
+shape, leaf = sys.argv[1], sys.argv[2].encode()
+if shape == "long-keys":  # 900 levels, each key 1000 bytes long: 0.9 MB
+    raw = (b'{"' + b"k" * 1000 + b'":') * 900 + leaf + b"}" * 900
+elif shape == "deep-and-wide":  # 200000 values in an array 500 levels down: 0.4 MB
+    raw = b'{"kkkkkkkkkk":' * 500 + b"[" + b"0," * 200_000 + leaf + b"]" + b"}" * 500
+else:  # that many levels: an interpreter whose parser goes this deep reads it, an older one refuses it
+    raw = b'{"aaaaaaaaaa":' * int(shape) + leaf + b"}" * int(shape)
+with open("/proc/self/status") as status:
+    size = next(int(line.split()[1]) * 1024 for line in status if line.startswith("VmSize:"))
+hard = resource.getrlimit(resource.RLIMIT_AS)[1]
+soft = size + 64 * 1024**2
+resource.setrlimit(resource.RLIMIT_AS, (soft if hard == resource.RLIM_INFINITY else min(soft, hard), hard))
+try:
+    parse_json_object(raw, what="doc")
+except DocumentError as exc:
+    print("surrogate" if "UTF-8" in str(exc) else "refused")
+else:
+    print("read")
+"""
+
+
+@pytest.mark.parametrize(
+    ("shape", "leaf", "outcomes"),
+    [
+        ("long-keys", "0", {"read"}),
+        ("long-keys", '"\\ud800"', {"surrogate"}),
+        ("deep-and-wide", "0", {"read"}),
+        ("deep-and-wide", '"\\ud800"', {"surrogate"}),
+        ("8000", "0", {"read", "refused"}),
+        ("30000", "0", {"read", "refused"}),
+    ],
+)
+def test_a_deeply_nested_document_is_read_in_little_more_memory_than_its_size(
+    shape: str, leaf: str, outcomes: set[str]
+) -> None:
+    source_root = Path(docs.__file__).resolve().parents[2]
+    child = subprocess.run(
+        [sys.executable, "-c", _READ_UNDER_A_MEMORY_LIMIT, shape, leaf],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "PYTHONPATH": str(source_root)},
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr[-2000:]
+    assert child.stdout.strip() in outcomes
