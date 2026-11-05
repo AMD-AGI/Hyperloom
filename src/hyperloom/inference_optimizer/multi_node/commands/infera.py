@@ -129,11 +129,14 @@ def _infera_fanout_launch(
     *,
     label: str,
     options: _FanoutOptions,
+    role: str = "",
 ) -> tuple[int, list[dict]]:
-    """Ship + run launch_infera_node.py on each GPU pod over SSH."""
+    """Ship + run launch_infera_node.py on each GPU pod over SSH; a PD ``role`` gets its own torch profiler subdir."""
     poll_timeout = options.poll_timeout
     script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
     forward_env = _collect_forward_env()
+    if role and forward_env.get("SGLANG_TORCH_PROFILER_DIR"):
+        forward_env["SGLANG_TORCH_PROFILER_DIR"] = str(Path(forward_env["SGLANG_TORCH_PROFILER_DIR"]) / role)
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
@@ -327,7 +330,7 @@ def _infera_launch_pd_groups(
             f"nnodes={rnnodes} pods={len(targets)} kv={kv} extra={rextra!r}"
         )
         rc, all_results[role] = _infera_fanout_launch(
-            state, launch_args, list(targets), label=f"restart-{role}", options=fanout
+            state, launch_args, list(targets), label=f"restart-{role}", options=fanout, role=role
         )
         rc_total = rc_total or rc
     # Persist inferred PD topology so resume fast-path and KB keys match launch.

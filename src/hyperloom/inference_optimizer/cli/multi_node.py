@@ -104,6 +104,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
             sys.exit(2)
+        _settle_pd_baseline_args(ext_state)
         stamp_pd_cluster(ext_state, handoff_lookup())
         os.environ["HYPERLOOM_MN_WORKER_PORT"] = "8000"
     _reject_unusable_backend(ext_state)
@@ -145,6 +146,29 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         args,
         str(ext_state["backend"]),
         head_ip=str(ext_state.get("head_pod_ip") or ""),
+    )
+
+
+def _settle_pd_baseline_args(ext_state: dict[str, Any]) -> None:
+    """Resolve atom/sglangrouter baseline args (manual > magpie > InferenceX); exit 2 when none applies."""
+    from ..multi_node._internal.baseline_args import (
+        BaselineArgsMissing,
+        export_baseline_args,
+        record_baseline_args,
+        resolve_baseline_args,
+    )
+    from ..multi_node._internal.pd_cluster import previous_cluster_state
+
+    try:
+        choice = resolve_baseline_args(previous=previous_cluster_state(ext_state))
+    except BaselineArgsMissing as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    export_baseline_args(choice)
+    record_baseline_args(ext_state, choice)
+    print(
+        f"multi-node: baseline args source={choice.source} ({choice.detail}) "
+        f"prefill={choice.prefill!r} decode={choice.decode!r}"
     )
 
 

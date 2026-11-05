@@ -574,6 +574,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # Roofline-v2 trace-analyze cache written by record_trace_analyze. roofline_snapshot_id is a property derived from
     # this dict.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    # PD cluster only: compact TraceLens summary per role ("prefill" / "decode") from the latest roofline.
+    last_trace_analyze_by_role: dict[str, Any] = field(default_factory=dict)
     # Append-only compact roofline snapshots for report.py; capped at ``_ROOFLINE_SNAPSHOTS_CAP`` (snapshot #1 always retained as the report's baseline anchor).
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.
@@ -610,6 +612,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # candidate-free authoring specialist that authors a throughput patch from the live source + profile evidence
     # instead of skipping the phase.
     framework_local_explore_enabled: bool = True
+    # False when only the configuration lever runs: no discovery, authoring, integrate_patch or scout.
+    framework_source_enabled: bool = True
     # Maps an authoring specialist task_id -> originating FRAMEWORK candidate id (PR URL), so the authored-outcome
     # bridge can key the progress row on the PR-URL that ``_select_next_framework_agent_candidate`` checks.
     framework_agent_specialist_candidate_map: dict[str, str] = field(

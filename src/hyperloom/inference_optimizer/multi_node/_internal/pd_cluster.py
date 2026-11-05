@@ -61,7 +61,8 @@ def engine_command(role: str, spec: LaunchSpec) -> str:
     """sglang prefill or decode command for one pod."""
     tp = spec.prefill_tp if role == "prefill" else spec.decode_tp
     bootstrap = PREFILL_BOOTSTRAP_PORT if role == "prefill" else DECODE_BOOTSTRAP_PORT
-    extra = _words(spec.server_args) + _words(spec.prefill_extra if role == "prefill" else spec.decode_extra)
+    # Shared args go last: the engine keeps the last value of a repeated flag, so a candidate overrides the baseline.
+    extra = _words(spec.prefill_extra if role == "prefill" else spec.decode_extra) + _words(spec.server_args)
     argv = [
         "python3",
         "-m",
@@ -314,6 +315,14 @@ def _disk_state() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def previous_cluster_state(state: dict[str, Any]) -> dict[str, Any]:
+    """The state file a prior launch wrote for the same cluster, or an empty dict."""
+    disk = _disk_state()
+    if not disk or disk.get("service_url") != state.get("service_url"):
+        return {}
+    return disk
+
+
 def _keep_profile_bookkeeping(state: dict[str, Any]) -> None:
     """Keep an already-recorded steady trace when this is the same cluster."""
     disk = _disk_state()
@@ -357,8 +366,13 @@ def stamp_pd_cluster(state: dict[str, Any], get: Lookup) -> None:
     _keep_profile_bookkeeping(state)
 
 
-def record_profile_paths(*, profile_trace: str = "", steady_state_trace: str = "") -> None:
-    """Write TraceLens inputs back into the multi-node state file."""
+def record_profile_paths(
+    *,
+    profile_trace: str = "",
+    steady_state_trace: str = "",
+    role_traces: dict[str, str] | None = None,
+) -> None:
+    """Write TraceLens inputs (shared, steady-state and per-role ``<role>_trace``) back into the multi-node state file."""
     try:
         path = resolve_state_file()
     except RuntimeError:
@@ -375,6 +389,9 @@ def record_profile_paths(*, profile_trace: str = "", steady_state_trace: str = "
         data["profile_trace"] = profile_trace
     if steady_state_trace:
         data["steady_state_trace"] = steady_state_trace
+    for role, trace in (role_traces or {}).items():
+        if trace:
+            data[f"{role}_trace"] = trace
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     try:
         path.chmod(0o600)

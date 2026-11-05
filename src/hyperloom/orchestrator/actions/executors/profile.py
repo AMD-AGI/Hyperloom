@@ -742,8 +742,11 @@ async def _infera_profile_window(round_trace_root: str):
             await trigger_pd_engine_profile("stop")
 
 
-# Attaches this round's multi-node trace files, selecting the heaviest as the main trace.
+# Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-role subdirs and
+# are recorded as ``role_traces``, decode's being the main trace; otherwise the heaviest file is the main trace.
 def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_started_unix: float) -> None:
+    from ._multi_node_server_lifecycle import select_pd_role_traces
+
     trace_dir = Path(round_trace_root)
     if not trace_dir.is_dir():
         result["trace_dir"] = None
@@ -753,11 +756,16 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
             round_trace_root,
         )
         return
+    role_traces = select_pd_role_traces(str(trace_dir), task_started_unix)
     all_files = sorted(trace_dir.glob("*.trace.json.gz"))
     trace_files = [p for p in all_files if safe_mtime(p) >= task_started_unix]
     result["trace_dir"] = str(trace_dir)
-    result["trace_files"] = [str(p) for p in trace_files]
-    if trace_files:
+    result["trace_files"] = [str(p) for p in trace_files] + sorted(role_traces.values())
+    if role_traces:
+        result["role_traces"] = role_traces
+        result["main_trace_path"] = role_traces.get("decode") or role_traces["prefill"]
+        log.info("profile_executor: multi-node role traces selected: %s", role_traces)
+    elif trace_files:
         main_trace = max(trace_files, key=_trace_size_bytes)
         result["main_trace_path"] = str(main_trace)
         log.info(
@@ -779,7 +787,11 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
         )
     from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import record_profile_paths
 
-    record_profile_paths(profile_trace=str(trace_dir), steady_state_trace=str(result.get("main_trace_path") or ""))
+    record_profile_paths(
+        profile_trace=str(trace_dir),
+        steady_state_trace=str(result.get("main_trace_path") or ""),
+        role_traces=role_traces,
+    )
 
 
 def _first_trace_dir_with(workspace: Path, finder: Any) -> tuple[Path | None, list[Path]]:

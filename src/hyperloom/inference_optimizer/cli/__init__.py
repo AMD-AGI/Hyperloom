@@ -365,6 +365,7 @@ class OrchestrationPromptContext:
     objective: Objective
     max_minutes: int
     no_framework_agent: bool = False
+    no_framework_source: bool = False
     transport: str = TRANSPORT_TOOLS
     benchmark_mode: str = ""
     agentx_corpus_shape: Mapping[str, Any] | None = None
@@ -382,7 +383,11 @@ def _build_orchestration_prompt(
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     no_kernel, no_framework_agent, framework = context.no_kernel, context.no_framework_agent, context.framework
-    enabled = default_enabled_actions(no_kernel=no_kernel, no_optimize=no_framework_agent)
+    enabled = default_enabled_actions(
+        no_kernel=no_kernel,
+        no_optimize=no_framework_agent,
+        no_source=context.no_framework_source,
+    )
     kind, value = _objective_summary_for_prompt(context.objective)
     return build_orchestration_prompt(
         action_registry=ACTION_CATALOGUE,
@@ -985,6 +990,15 @@ def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -
                 f"session is already in phase={cur_phase!r} "
                 f"(cannot retroactively skip)"
             )
+    # The FRAMEWORK source lever follows the same contract: a resume can turn it off, never back on.
+    if not bool(getattr(state, "framework_source_enabled", True)):
+        args.no_framework_source = True
+        print("  framework source      : DISABLED (persisted from original run)")
+    elif bool(getattr(args, "no_framework_source", False)):
+        state.framework_source_enabled = False
+        state.research_scout_enabled = False
+        state.save(session_dir)
+        print("  framework source      : DISABLING for resume (--no-framework-source)")
 
 
 @dataclass(frozen=True)
@@ -1504,6 +1518,7 @@ def _install_system_prompts(
     prompt_context = OrchestrationPromptContext(
         no_kernel=lineup.no_kernel,
         no_framework_agent=lineup.no_framework_agent,
+        no_framework_source=not bool(getattr(state, "framework_source_enabled", True)),
         framework=state.framework,
         objective=objective,
         max_minutes=int(round(float(args.max_hours) * 60)),

@@ -101,12 +101,12 @@ _SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _merge_sglang_defaults(extra_args: str) -> str:
-    """Append Magpie's DEFAULT_ARGS that the user did not already set."""
+def _merge_sglang_defaults(extra_args: str, role_args: str = "") -> str:
+    """Append Magpie's DEFAULT_ARGS that neither the shared args nor the per-role args already set."""
     user = (extra_args or "").strip()
     parts = [user] if user else []
     for flag_name, default_token in _SGLANG_DEFAULT_TOKENS:
-        if flag_name in user:
+        if flag_name in user or flag_name in (role_args or ""):
             continue
         parts.append(default_token)
     return " ".join(p for p in parts if p)
@@ -437,7 +437,10 @@ async def restart_server_for_round(
         )
 
     # Apply Magpie's sglang DEFAULT_ARGS only for sglang (vllm has its own).
-    extra_server_args = _merge_sglang_defaults(server.extra_server_args) if fw == "sglang" else server.extra_server_args
+    role_args = f"{pd.get('pd_prefill_extra_args') or ''} {pd.get('pd_decode_extra_args') or ''}"
+    extra_server_args = (
+        _merge_sglang_defaults(server.extra_server_args, role_args) if fw == "sglang" else server.extra_server_args
+    )
 
     # Compute-bound profile override (multi-node only; already gated by the is_multi_node() no-op above).
     if os.environ.get(_COMPUTE_BOUND_PROFILE_ENV, "").strip() == "1":
@@ -577,6 +580,12 @@ async def _restart_with_reclaim_retry(restart_and_wait: Callable[..., Awaitable[
 # Infera frontend profiling API (infera.server --enable-profiling).
 
 
+def _is_pd_disaggregated(state: dict) -> bool:
+    """Whether the multi-node state records a PD-disaggregated launch."""
+    mode = str(state.get("last_restart_pd_mode") or state.get("pd_mode") or "").strip().lower()
+    return mode == "disaggregated"
+
+
 async def trigger_infera_engine_profile(
     action: str,
     body: dict | None = None,
@@ -602,6 +611,9 @@ async def trigger_infera_engine_profile(
     route = "start" if action == "start" else "stop"
     url = f"{service_url}/v1/admin/profile/{route}"
     payload = dict(body or {}) if action == "start" else {}
+    if _is_pd_disaggregated(state):
+        # PD workers were launched with a per-role SGLANG_TORCH_PROFILER_DIR; a shared output_dir would merge them.
+        payload.pop("output_dir", None)
     if action == "start":
         client_timeout = 30.0
     else:
@@ -619,6 +631,31 @@ async def trigger_infera_engine_profile(
             log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
 
 
+PD_PROFILE_ROLES = ("prefill", "decode")
+
+
+def pd_role_trace_dir(root: str, role: str) -> str:
+    """Return the per-role torch trace dir under a profiling round's trace root."""
+    return str(Path(root) / role)
+
+
+def select_pd_role_traces(root: str, since_unix: float) -> dict[str, str]:
+    """Return the heaviest ``*.trace.json.gz`` written since ``since_unix`` under each ``<root>/<role>`` dir."""
+    selected: dict[str, str] = {}
+    for role in PD_PROFILE_ROLES:
+        sized: list[tuple[int, str]] = []
+        for path in Path(pd_role_trace_dir(root, role)).glob("*.trace.json.gz"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if stat.st_mtime >= since_unix:
+                sized.append((stat.st_size, str(path)))
+        if sized:
+            selected[role] = max(sized)[1]
+    return selected
+
+
 async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
     """POST /start_profile or /stop_profile on every atom/sglangrouter prefill and decode pod.
 
@@ -631,9 +668,11 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
     state = _read_state() or {}
     if str(state.get("backend") or "").strip().lower() not in ("atom", "sglangrouter"):
         return
-    pods: list[dict] = []
-    for key in ("prefill_pods", "decode_pods"):
-        pods.extend(pod for pod in (state.get(key) or []) if isinstance(pod, dict) and pod.get("podIP"))
+    pods: list[tuple[str, dict]] = []
+    for role in PD_PROFILE_ROLES:
+        pods.extend(
+            (role, pod) for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict) and pod.get("podIP")
+        )
     if not pods:
         log.warning("trigger_pd_engine_profile(%s): no prefill/decode pods in state", action)
         return
@@ -644,21 +683,26 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
         return
     route = "start_profile" if action == "start" else "stop_profile"
     port = str(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "8000") or "8000").strip() or "8000"
-    payload: dict = {}
-    if action == "start":
-        output_dir = str((body or {}).get("output_dir") or "").strip()
-        if output_dir:
-            payload["output_dir"] = output_dir
+    output_dir = str((body or {}).get("output_dir") or "").strip() if action == "start" else ""
     if action == "start":
         client_timeout = 30.0
     else:
         client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
     async with _httpx.AsyncClient(timeout=client_timeout) as client:
-        for pod in pods:
+        for role, pod in pods:
             url = f"http://{pod['podIP']}:{port}/{route}"
+            payload: dict = {}
+            if output_dir:
+                # Each role writes under <output_dir>/<role> so its traces stay attributable.
+                role_dir = pd_role_trace_dir(output_dir, role)
+                try:
+                    Path(role_dir).mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    log.debug("pd-cluster profile: cannot mkdir %s: %s", role_dir, exc)
+                payload["output_dir"] = role_dir
             try:
                 resp = await client.post(url, json=payload)
-                log.info("pd-cluster profile %s %s -> %s HTTP %d", pod.get("role") or "", route, url, resp.status_code)
+                log.info("pd-cluster profile %s %s -> %s HTTP %d", role, route, url, resp.status_code)
             except _httpx.HTTPError as exc:
                 log.warning("pd-cluster profile %s -> %s failed (%s); continuing", route, url, exc)
 
