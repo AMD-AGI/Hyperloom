@@ -1907,6 +1907,7 @@ async def test_the_judge_sees_each_live_specialist_as_the_runtime_reports_it(tmp
         "gave_up": False,
         "judge_failed": False,
         "unready": "",
+        "exhausted": "",
     }
     assert "specialist" not in steering[INTEGRATION_BRANCH]
     assert later and all("specialist" not in rows.get("b02", {}) for rows in later)
