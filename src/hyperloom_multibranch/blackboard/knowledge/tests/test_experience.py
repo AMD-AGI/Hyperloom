@@ -363,6 +363,20 @@ def test_a_test_whose_eval_did_not_run_exports_its_accuracy_as_not_passed(snapsh
     assert rows["r1"]["accuracy"] == {"required": True, "passed": False, "value": None}
 
 
+def test_a_candidate_that_failed_before_any_judgement_did_not_pass_the_eval_it_asked_for(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    def asked(record: TestRecord) -> TestRecord:
+        if record.request.request_id != "r3":
+            return record
+        return dataclasses.replace(record, request=dataclasses.replace(record.request, accuracy=True))
+
+    rows = _rows(dataclasses.replace(snapshot, records=tuple(map(asked, snapshot.records))))
+
+    assert (rows["r3"]["decision"], rows["r3"]["conclusion"]) == ("failed", "")
+    assert rows["r3"]["accuracy"] == {"required": True, "passed": False, "value": None}
+
+
 def test_a_commit_whose_explore_skipped_its_eval_exports_the_accuracy_its_confirm_measured(
     snapshot: BlackboardSnapshot,
 ) -> None:
