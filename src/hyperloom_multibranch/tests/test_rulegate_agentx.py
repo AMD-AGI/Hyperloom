@@ -97,6 +97,19 @@ def test_a_pair_missing_a_comparability_input_counts_as_regressed():
     assert judgement.refused_by == ("comparability_inputs_missing",)
 
 
+@pytest.mark.parametrize(("guard", "broken"), [(GRADED_INTVTY, "p90_regressed"), (GRADED_OUTPUT, "output_regressed")])
+@pytest.mark.parametrize("side", ["candidate", "parent"])
+def test_a_guard_axis_either_side_did_not_report_counts_as_broken(guard, broken, side):
+    gain = {**PARENT, GRADED_INTVTY_P50: 104.0}
+    unreported = {key: value for key, value in (gain if side == "candidate" else PARENT).items() if key != guard}
+    candidate, parent = (unreported, PARENT) if side == "candidate" else (gain, unreported)
+
+    judgement = compare(candidate, parent, "r1")
+
+    assert judgement.verdict is Verdict.NEEDS_CONFIRM
+    assert judgement.refused_by == (broken,)
+
+
 def test_a_run_without_a_p50_is_not_compared():
     candidate = {key: value for key, value in PARENT.items() if key != GRADED_INTVTY_P50}
     with pytest.raises(ValueError, match="cannot compare"):

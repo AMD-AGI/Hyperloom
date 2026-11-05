@@ -10,6 +10,7 @@ from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_DURATION,
     GRADED_ERROR_RATE,
+    GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
 )
@@ -33,7 +34,13 @@ from hyperloom_multibranch.tests.short_prompt_checks import short_prompt_check
 ROOT = "c0"
 CONC = 64
 STRICT = ACCURACY_METRICS[0]
-AGENTX = {GRADED_INTVTY_P50: 40.0, GRADED_DURATION: 600.0, GRADED_ERROR_RATE: 1.0}
+AGENTX = {
+    GRADED_INTVTY_P50: 40.0,
+    GRADED_INTVTY: 30.0,
+    GRADED_OUTPUT: 900.0,
+    GRADED_DURATION: 600.0,
+    GRADED_ERROR_RATE: 1.0,
+}
 
 
 class _Session:
@@ -135,7 +142,7 @@ async def test_an_agentx_baseline_is_its_one_root_test(session):
     assert await session.gate.baseline() == record
 
 
-@pytest.mark.parametrize("dropped", [GRADED_INTVTY_P50, GRADED_DURATION, GRADED_ERROR_RATE])
+@pytest.mark.parametrize("dropped", list(AGENTX))
 async def test_an_agentx_root_test_without_what_every_comparison_reads_anchors_nothing(session, dropped):
     partial = {key: value for key, value in AGENTX.items() if key != dropped}
     root_test = await session.measured("b0", metrics=partial)

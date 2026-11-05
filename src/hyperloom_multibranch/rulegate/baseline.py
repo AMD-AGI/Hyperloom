@@ -18,6 +18,7 @@ from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_DURATION,
     GRADED_ERROR_RATE,
+    GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
 )
@@ -32,7 +33,7 @@ from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_rea
 logger = logging.getLogger(__name__)
 
 # Without these an AgentX comparison is graded on nothing, or found incomparable for every candidate.
-_AGENTX_REQUIRED = (GRADED_INTVTY_P50, GRADED_DURATION, GRADED_ERROR_RATE)
+_AGENTX_REQUIRED = (GRADED_INTVTY_P50, GRADED_INTVTY, GRADED_OUTPUT, GRADED_DURATION, GRADED_ERROR_RATE)
 
 
 async def write_inferencex_baseline(
