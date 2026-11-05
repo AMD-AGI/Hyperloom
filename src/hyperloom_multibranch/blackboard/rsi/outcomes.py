@@ -31,10 +31,10 @@ from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.families import Family
+from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.family_stats import FamilyStat, family_stats
-from hyperloom_multibranch.blackboard.rsi.history import MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.rsi.lessons import published_records
 from hyperloom_multibranch.blackboard.rsi.menu import LoggedMenu, explored, in_control, record_family
 from hyperloom_multibranch.blackboard.rsi.report import table

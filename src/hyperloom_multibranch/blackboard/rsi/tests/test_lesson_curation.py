@@ -19,9 +19,11 @@ from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, NO_ARCHIVE
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import (
     CURATION_SYSTEM_PROMPT,
     NO_LESSONS,
+    RETIRE,
     curate_lessons,
     curation_prompt,
     offer,
+    read_steps,
 )
 from hyperloom_multibranch.blackboard.rsi.lessons import (
     LessonPool,
@@ -129,6 +131,20 @@ async def test_the_curator_merges_rewrites_and_retires_what_it_may_and_says_why_
 
     again = await curate_lessons(snapshot, asked, model="claude")
     assert again.status == SKIPPED and "merged" not in again.counts
+
+
+def test_the_curators_answer_is_read_from_its_json_object_though_prose_with_braces_follows_it(
+    pool: LessonPool,
+) -> None:
+    wrong = lesson(pool, "wrong", "split kv always regresses attention on this model")
+    for session in ("p2", "p3"):
+        pool.record_standings(SessionStandings(session, START, {wrong: LessonStanding(shown=1, contradicted=1)}))
+    found = offer("sess-1", pool.lessons(), pool.standings())
+    answer = json.dumps({"actions": [{"action": RETIRE, "lesson": wrong, "why": "two sessions gained there"}]})
+
+    steps, refused = read_steps(answer + "\nThe others {merge, rewrite} can wait.", found)
+
+    assert ([(step.action, step.lesson) for step in steps], refused) == ([(RETIRE, wrong)], [])
 
 
 async def test_the_curator_reads_and_writes_the_pool_off_the_event_loop(

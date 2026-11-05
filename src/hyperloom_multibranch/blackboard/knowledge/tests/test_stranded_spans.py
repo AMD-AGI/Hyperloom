@@ -62,6 +62,22 @@ async def test_a_lead_over_the_bar_holds_from_its_first_failed_merge_until_integ
     assert stranded_spans(snapshot, "another_metric") == ()
 
 
+async def test_a_lead_a_branch_takes_again_after_its_failed_commit_merged_is_not_stranded(tmp_path: Path) -> None:
+    root, clock = tmp_path / "blackboard", FakeClock()
+    _, failed_at = await _stranded_then_merged(root, clock)
+    w = Writers(root, clock)
+    await w.measure("s3", "u2", intent("s3", "c3", "attention", "fused rope"), delta("--attention fused-rope"))
+    ahead = judgement(7.7, ("u2",), recorded={METRIC: 1210.0})
+    await w.as_role(Role.GATE).write_judgement("u2", ahead, Conclusion.COMMITTED, "c5")
+    clock.advance(40 * MINUTE)
+    snapshot = await w.as_role(Role.OBSERVER).snapshot()
+
+    (span,) = stranded_spans(snapshot, METRIC)
+
+    assert span.first_at == pytest.approx(failed_at, abs=1.0)
+    assert span.minutes == pytest.approx(30.0, abs=0.1)
+
+
 async def test_a_commit_keeps_when_its_first_merge_failed_once_a_later_one_merges_it(tmp_path: Path) -> None:
     snapshot, failed_at = await _stranded_then_merged(tmp_path / "blackboard", FakeClock())
 

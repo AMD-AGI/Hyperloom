@@ -28,7 +28,6 @@ import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.blackboard.records import LearningRecord, BlackboardSnapshot, is_lesson_id
 from hyperloom_multibranch.blackboard.families import Family, note_family
 from hyperloom_multibranch.blackboard.knowledge.learning_recall import (
@@ -201,23 +200,6 @@ class LessonRecall(LearningRecall):
                 item = _item(head, task, loaded.confirmations.get(head.lesson_id, 0))
                 found.append((Match(kin, overlap * weight, head.written_at), item))
         return found
-
-    def pooled(self, snapshot: BlackboardSnapshot, query: str, *, limit: int) -> tuple[PastLearning, ...]:
-        """The pool's live lessons that bear on ``query``, the best ``limit`` first."""
-
-        return tuple(_ranked([], self._scored(snapshot, query, None), limit))
-
-    def past_for(self, snapshot: BlackboardSnapshot, query: str, *, limit: int) -> PastLearnings | None:
-        """The pool's lessons for ``query``, after the Experience KB's when one is configured; ``None`` before the
-        session's profile, or with neither."""
-
-        read = super().past_for(snapshot, query, limit=limit)
-        if snapshot.profile is None or self._pool is None:
-            return read
-        kept = read.items if read is not None and read.available else ()
-        items = (*kept, *self.pooled(snapshot, query, limit=limit))[:limit]
-        warnings = read.warnings if read is not None else ()
-        return PastLearnings(ReadStatus.COMPLETED.value, read.read_id if read is not None else "", items, warnings)
 
     def notes(self, snapshot: BlackboardSnapshot, query: str, *, limit: int, family: Family | None = None) -> Notes:
         """This session's learnings and the pool's lessons that bear on ``query``, in one list of ``limit``."""

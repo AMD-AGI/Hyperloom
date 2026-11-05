@@ -38,7 +38,6 @@ from __future__ import annotations
 import bisect
 import hashlib
 import heapq
-import json
 import math
 import random
 import statistics
@@ -46,13 +45,14 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin
+from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeBranch
 from hyperloom_multibranch.blackboard.rsi.history import (
     MAX_POSITION,
     MAX_STALL_TESTS,
     MIN_STALL_TESTS,
-    MODEL_TYPE_LABEL,
     Odds,
     judged_tests,
     opened_with,
@@ -279,15 +279,11 @@ def _seeded(*parts: object) -> random.Random:
 
 
 def stops_in(reply: str) -> tuple[str, ...]:
-    """The branches a judge's reply stops, as :data:`STOP_REPLY` asks; none when it holds no JSON object with a stop
-    list."""
+    """The branches a judge's reply stops, as :data:`STOP_REPLY` asks: those the stop list of its last JSON object with
+    a stop names; none when it holds no such object, or its stop is no list."""
 
-    start, end = reply.find("{"), reply.rfind("}")
-    try:
-        document = json.loads(reply[start : end + 1]) if 0 <= start < end else None
-    except json.JSONDecodeError:
-        return ()
-    orders = document.get(_STOP_KEY) if isinstance(document, dict) else None
+    document = extract_last_json_with_key(reply, _STOP_KEY)
+    orders = document[_STOP_KEY] if document is not None else None
     if not isinstance(orders, list):
         return ()
     return tuple(str(item.get("branch")) for item in orders if isinstance(item, Mapping))

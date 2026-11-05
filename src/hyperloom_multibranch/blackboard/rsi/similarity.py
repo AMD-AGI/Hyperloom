@@ -13,7 +13,7 @@ every session was before AgentX sessions ran.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
@@ -24,14 +24,13 @@ from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_LABEL, l
 
 #: The weight of a condition that changes little on its own: a framework release, expert parallelism.
 MINOR_WEIGHT = 0.5
-MODEL = "model"
 LABEL_WEIGHTS = {
     "gpu": 3.0,
     "framework": 2.0,
     "architecture": 2.0,
     "model_type": 1.0,
     "precision": 1.0,
-    MODEL: 1.0,
+    MODEL_LABEL: 1.0,
     "framework_version": MINOR_WEIGHT,
 }
 SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": MINOR_WEIGHT}
@@ -81,7 +80,7 @@ def model_name(model: str) -> str:
 
 
 def _label(key: str, value: str) -> str:
-    return model_name(value) if key == MODEL else value.lower()
+    return model_name(value) if key == MODEL_LABEL else value.lower()
 
 
 def workload_kind(task: TaskConditions) -> str:
@@ -125,25 +124,15 @@ def differing_conditions(first: TaskConditions, second: TaskConditions) -> tuple
     return (*labels, *sizes)
 
 
-def effective_sessions(weights: Iterable[float]) -> float:
-    """How many equally similar sessions ``weights`` are worth: the square of their sum over their sum of squares."""
-
-    values = [weight for weight in weights if weight > 0]
-    squares = sum(weight * weight for weight in values)
-    return sum(values) ** 2 / squares if squares else 0.0
-
-
 __all__ = [
     "AGENTX",
     "INFERENCEX",
     "LABEL_WEIGHTS",
     "MIN_SIMILARITY",
-    "MODEL",
     "SIZE_WEIGHTS",
     "WORKLOAD",
     "TaskConditions",
     "differing_conditions",
-    "effective_sessions",
     "model_name",
     "task_conditions",
     "task_similarity",

@@ -105,7 +105,9 @@ def _revised_lesson(record: LearningRecord, by_id: Mapping[str, LearningRecord])
 
 
 class _Publication:
-    """One session's learnings on their way into ``pool``, against the pool as it stood when CLOSE began."""
+    """One session's learnings on their way into ``pool``, against the pool as it stood when CLOSE began; a lesson it
+    retires is live no more, and the lessons an earlier run of CLOSE started for the session count toward
+    :data:`MAX_NEW_LESSONS`."""
 
     def __init__(self, snapshot: BlackboardSnapshot, pool: LessonPool) -> None:
         profile = _profile(snapshot)
@@ -117,6 +119,8 @@ class _Publication:
         self._lessons = pool.lessons()
         self._said = {_normal(head.content) for head in self._live_heads()}
         self._worded = [words(head.content) for head in self._live_heads()]
+        started = {lesson_id_for(self._session, record.entry_id) for record in snapshot.learnings}
+        self._started = len(started & self._lessons.keys())
         self.counts: Counter[str] = Counter()
         self.reasons: list[str] = []
 
@@ -137,13 +141,17 @@ class _Publication:
         cited = (self._records[request_id] for request_id in learning.request_ids if request_id in self._records)
         return tuple(LessonEvidence(self._session, test.request_id, outcome_of(test), measures(test)) for test in cited)
 
-    def _write(self, outcome: str, write: Callable[[], bool]) -> None:
+    def _write(self, outcome: str, write: Callable[[], bool]) -> bool:
+        """Count what ``write`` wrote as ``outcome``, or its failure; whether the pool holds the record now."""
+
         try:
             if write():
                 self.counts[outcome] += 1
         except (OSError, ValueError) as exc:
             self.counts[FAILED] += 1
             self.reasons.append(f"{type(exc).__name__}: {exc}")
+            return False
+        return True
 
     def retire(self, record: LearningRecord) -> None:
         lesson = self._live(record.learning.retires)
@@ -153,7 +161,8 @@ class _Publication:
         retirement = LessonRetirement(
             lesson.lesson_id, author, record.at, record.learning.content, self._evidence(record.learning)
         )
-        self._write(RETIRED, lambda: self._pool.retire(retirement))
+        if self._write(RETIRED, lambda: self._pool.retire(retirement)):
+            del self._lessons[lesson.lesson_id]
 
     def publish(self, record: LearningRecord) -> None:
         learning = record.learning
@@ -161,7 +170,7 @@ class _Publication:
             self.counts[DUPLICATE] += 1
             return
         lesson = self._live(_revised_lesson(record, self._by_id))
-        if lesson is None and self.counts[NEW] >= MAX_NEW_LESSONS:
+        if lesson is None and self._started + self.counts[NEW] >= MAX_NEW_LESSONS:
             self.counts[CAPPED] += 1
             return
         revision = LessonRevision(

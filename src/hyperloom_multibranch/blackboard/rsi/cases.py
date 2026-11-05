@@ -18,13 +18,13 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.contracts.measurement import REPRODUCED, TestKind
 from hyperloom.measure.compile import BlobError, BlobStore
+from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.blackboard.interfaces import SessionRecords
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
@@ -36,8 +36,6 @@ from hyperloom_multibranch.rulegate.regression import PooledCase
 
 log = logging.getLogger(__name__)
 
-#: The digest of the image the session runs, which the cli requires.
-IMAGE_DIGEST_ENV = "HYPERLOOM_ACTIVE_IMAGE_DIGEST"
 CASES_DIR = "cases"
 CASE_FORMAT = "multibranch.regression-case"
 NO_IMAGE_DIGEST = "no_image_digest"
@@ -187,7 +185,13 @@ def known_defects(snapshot: BlackboardSnapshot, pool: CasePool) -> tuple[PoolEnt
 
 
 def image_digest_from_env() -> str:
-    return str(os.environ.get(IMAGE_DIGEST_ENV) or "").strip()
+    """The digest of the image the session runs, as :func:`~hyperloom.measure.pins.active_image` names it from the
+    environment; empty when it names none."""
+
+    try:
+        return active_image().digest
+    except ImagePinError:
+        return ""
 
 
 @dataclass(frozen=True)
@@ -226,7 +230,6 @@ def session_cases(image_digest: str, blackboard: SessionRecords) -> SessionCases
 __all__ = [
     "CASES_DIR",
     "CASE_FORMAT",
-    "IMAGE_DIGEST_ENV",
     "NO_IMAGE_DIGEST",
     "NO_PROFILE",
     "CasePool",

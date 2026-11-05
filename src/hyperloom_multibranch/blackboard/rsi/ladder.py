@@ -6,8 +6,9 @@
 * R0, :func:`r0`: the static check (:func:`~hyperloom_multibranch.blackboard.rsi.playbook.problems`).
 * R1, :func:`r1`: the scheduling replay of :mod:`rsi.replay`, no LLM and no GPU. A change to a number the replay plays
   (:data:`~hyperloom_multibranch.blackboard.rsi.replay.REPLAYED_NUMBERS`) passes when its paired gain over the champion
-  stays above 0 across the archived sessions both ways beyond the data; a change to a rule cannot be replayed and goes
-  on to R2, and a change to any other number only sessions run under it tell.
+  stays above 0 across the archived sessions both ways beyond the data, :data:`MIN_REPLAYED_SESSIONS` of them at
+  least, since the interval is bootstrapped over sessions; a change to a rule cannot be replayed and goes on to R2,
+  and a change to any other number only sessions run under it tell.
 * R2, :func:`r2`: the judge's own decision points (:func:`archived_points`), the prompts the archived sessions' judge
   was asked, asked again with the candidate's playbook and the champion's. A point counts where its outcome is known:
   a stop at most :data:`EARLY_STOP_TESTS` judged tests past a commit, which the playbook should have prevented, and a
@@ -23,13 +24,15 @@
   its sessions have not. The noise band of a measure is its spread within a task over the champion's sessions of the
   pairs' tasks (:func:`noise_band`), the repeats the run entry runs to measure it: until there are :data:`MIN_TRIALS`
   of one task, nothing is crowned. A challenger session that broke the safety envelope played the champion from then
-  on, and pairs with nothing.
+  on: it pairs with nothing, and once its playbook is crowned no pair, noise band or measure reads it as a session of
+  the champion.
 
 At every CLOSE the replay reruns over the archive with the session's tree in it, against the champion
 (:func:`replay_standing`), and says which of its conclusions moved since the last CLOSE (:func:`moved`). No session is
-spent on a playbook that cannot win: CLOSE retires one the latest standing reads worse both ways beyond the data, or
-one aiming at a measure the champion's sessions of the task never varied in (:func:`measured`), which R3 could never
-read; authoring holds a new one to the same two tests (:func:`r1_reading`).
+spent on a playbook that cannot win: CLOSE retires one the latest standing reads worse both ways beyond the data, which
+takes :data:`MIN_REPLAYED_SESSIONS` archived sessions at least, or one aiming at a measure the champion's sessions of
+the task never varied in (:func:`measured`), which R3 could never read; authoring holds a new one to the same two tests
+(:func:`r1_reading`).
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ from pathlib import Path
 
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.blackboard.codec import encode
+from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_LABEL as MODEL
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, written_by
 from hyperloom_multibranch.blackboard.rsi.history import judged_tests, stall_odds
@@ -70,7 +74,7 @@ from hyperloom_multibranch.blackboard.rsi.replay import (
     stops_in,
     variants,
 )
-from hyperloom_multibranch.blackboard.rsi.similarity import MODEL, WORKLOAD, model_name, workload_kind
+from hyperloom_multibranch.blackboard.rsi.similarity import WORKLOAD, model_name, workload_kind
 from hyperloom_multibranch.blackboard.rsi.stops import EARLY_STOP_TESTS, StopAudit
 
 #: Asks the LLM with a system prompt and a prompt, and returns its answer.
@@ -96,6 +100,9 @@ TASK_LABELS = (MODEL, "gpu", "framework", "framework_version", "precision")
 TASK_SIZES = ("tp", "conc", "isl", "osl")
 #: How many runs a session gets when CLOSE reruns the scheduling replay, fewer than a study's so CLOSE stays short.
 CLOSE_REPLAY_RUNS = 50
+#: The fewest archived sessions R1 and a standing read the replay's interval over: it is bootstrapped over sessions, so
+#: over one its ends are that session's mean, and over two its low end is the smaller of their means.
+MIN_REPLAYED_SESSIONS = 3
 STANDING_FORMAT = "multibranch.scheduling-replay-standing"
 BETTER = "better"
 WORSE = "worse"
@@ -134,7 +141,8 @@ def r0(candidate: Playbook, parent: Playbook | None) -> Rung:
 
 
 def r1(candidate: Playbook, champion: Playbook, trees: Sequence[SearchTree], *, runs: int = REPLAY_RUNS) -> Rung:
-    """R1: ``candidate`` beside ``champion`` in the scheduling replay of ``trees``, both ways beyond the data."""
+    """R1: ``candidate`` beside ``champion`` in the scheduling replay of ``trees``, both ways beyond the data; over
+    fewer than :data:`MIN_REPLAYED_SESSIONS` trees it cannot tell, and does not pass."""
 
     changed = changes(champion, candidate)
     if "rules" in changed:
@@ -150,6 +158,9 @@ def r1(candidate: Playbook, champion: Playbook, trees: Sequence[SearchTree], *, 
         lows.append((beyond, row.gain_difference, row.difference_low))
     passed = all(low > 0 for _, _, low in lows)
     said = "; ".join(f"{beyond} {gain:+.2f} points (low {low:+.2f})" for beyond, gain, low in lows)
+    if len(trees) < MIN_REPLAYED_SESSIONS:
+        needs = f"{len(trees)} of the {MIN_REPLAYED_SESSIONS} archived sessions its interval needs"
+        return Rung("R1", False, f"best gain against {champion.label}: {said}; {needs}", skipped=True)
     return Rung("R1", passed, f"best gain against {champion.label}: {said}")
 
 
@@ -286,9 +297,10 @@ async def r2_sessions(
 
 @dataclass(frozen=True)
 class Trial:
-    """One session under ``played``, with ``champion`` the champion then: the ``task`` it ran (:func:`session_task`),
-    when it started, whether it ``fell_back`` to the champion on a breach of the safety envelope, and its decision
-    measures and gain per GPU hour; a measure is missing where the session gave it nothing to count."""
+    """One session under ``played``, with ``champion`` the champion it played beside: the ``task`` it ran
+    (:func:`session_task`), when it started, whether it ``fell_back`` to the champion on a breach of the safety
+    envelope, and its decision measures and gain per GPU hour; a measure is missing where the session gave it nothing
+    to count."""
 
     session_id: str
     played: str
@@ -381,9 +393,9 @@ def trials(pool: PlaybookPool) -> tuple[Trial, ...]:
 
 
 def pairs(candidate: str, champion: str, kept: Sequence[Trial]) -> tuple[Pair, ...]:
-    """Each session that played ``candidate`` against ``champion`` and kept to it, beside the session of ``champion``
-    on its task that started nearest it, within :data:`PAIR_SECONDS`; a champion session pairs once at most, and the
-    challenger sessions take theirs in the order they started."""
+    """Each session that played ``candidate`` against ``champion`` and kept to it, beside the session that kept to
+    ``champion`` on its task and started nearest it, within :data:`PAIR_SECONDS`; a champion session pairs once at
+    most, and the challenger sessions take theirs in the order they started."""
 
     started = {trial.session_id: trial.started_at for trial in kept if trial.started_at is not None}
 
@@ -398,7 +410,7 @@ def pairs(candidate: str, champion: str, kept: Sequence[Trial]) -> tuple[Pair, .
         and trial.champion == champion
         and not trial.fell_back
     ]
-    free = [trial for trial in kept if trial.session_id in started and trial.played == champion]
+    free = [trial for trial in kept if trial.session_id in started and trial.played == champion and not trial.fell_back]
     found = []
     for trial in sorted(mine, key=lambda item: started[item.session_id]):
         near = [item for item in free if item.task == trial.task and gap(item, trial) <= PAIR_SECONDS]
@@ -429,11 +441,15 @@ def _untimed(task: str) -> str:
 
 
 def measured(kept: Sequence[Trial], champion: str, task: str) -> frozenset[str] | None:
-    """The decision measures the sessions of ``champion`` on ``task`` recorded with a spread, one value differing from
-    another; ``None`` while fewer than two of them were kept, when nothing can be told yet. The task is read without its
-    budget: an older trial carries the time its blackboard spanned instead of the configured budget."""
+    """The decision measures the sessions that kept to ``champion`` on ``task`` recorded with a spread, one value
+    differing from another; ``None`` while fewer than two of them were kept, when nothing can be told yet. The task is
+    read without its budget: an older trial carries the time its blackboard spanned instead of the configured budget."""
 
-    alike = [trial for trial in kept if trial.played == champion and _untimed(trial.task) == _untimed(task)]
+    alike = [
+        trial
+        for trial in kept
+        if trial.played == champion and not trial.fell_back and _untimed(trial.task) == _untimed(task)
+    ]
     if len(alike) < 2:
         return None
     found = set()
@@ -451,7 +467,7 @@ def _fell(sessions: Sequence[Trial], label: str) -> str:
 
 def r3(candidate: Playbook, champion: Playbook, kept: Sequence[Trial]) -> Rung:
     """R3: ``candidate``'s sessions paired with ``champion``'s (:func:`pairs`), on the measure it named and on gain per
-    GPU hour, each against its noise band over ``champion``'s sessions of the pairs' tasks."""
+    GPU hour, each against its noise band over the sessions that kept to ``champion`` on the pairs' tasks."""
 
     measure = candidate.measure
     if measure not in DIRECTION:
@@ -465,7 +481,7 @@ def r3(candidate: Playbook, champion: Playbook, kept: Sequence[Trial]) -> Rung:
     if len(measured) < MIN_TRIALS:
         return Rung("R3", False, f"{len(measured)} of its {MIN_TRIALS} paired sessions so far{fell}", skipped=True)
     tasks = {task for task, _, _ in measured}
-    theirs = [trial for trial in kept if trial.played == champion.label and trial.task in tasks]
+    theirs = [trial for trial in kept if trial.played == champion.label and not trial.fell_back and trial.task in tasks]
     band, floor_band = noise_band(theirs, measure), noise_band(theirs, GAIN_PER_GPU_HOUR)
     if band is None or floor_band is None:
         return Rung(
@@ -545,14 +561,16 @@ class Difference:
 
 @dataclass(frozen=True)
 class StandingRow:
-    """One playbook's paired difference from the champion with h(k) optimistic and pessimistic beyond the data, and
-    the ``numbers`` and ``rules`` it replayed; a row kept before rows held them has no ``numbers``."""
+    """One playbook's paired difference from the champion with h(k) optimistic and pessimistic beyond the data, the
+    ``numbers`` and ``rules`` it replayed, and how many archived ``sessions`` it was read over; a row kept before rows
+    held them has no ``numbers``, and one kept before they held their sessions no ``sessions``."""
 
     label: str
     optimistic: Difference
     pessimistic: Difference
     numbers: PlaybookNumbers | None = None
     rules: tuple[PlaybookRule, ...] = ()
+    sessions: int | None = None
 
     def replays(self, playbook: Playbook) -> bool:
         """Whether this row replayed ``playbook``'s numbers and rules."""
@@ -567,8 +585,11 @@ class StandingRow:
     @property
     def reading(self) -> str:
         """:data:`BETTER` when both intervals sit above 0, :data:`WORSE` when both sit below, :data:`UNCLEAR`
-        otherwise."""
+        otherwise, and whenever they were read over fewer than :data:`MIN_REPLAYED_SESSIONS` sessions; a row without
+        its ``sessions`` reads on its intervals alone."""
 
+        if self.sessions is not None and self.sessions < MIN_REPLAYED_SESSIONS:
+            return UNCLEAR
         if self.optimistic.low > 0 and self.pessimistic.low > 0:
             return BETTER
         if self.optimistic.high < 0 and self.pessimistic.high < 0:
@@ -600,12 +621,14 @@ class ReplayStanding:
         return {row.label: row.reading for row in self.rows}
 
 
-def _standing_row(label: str, held: PolicyRow, dropped: PolicyRow, playbook: Playbook | None) -> StandingRow:
-    """``label``'s row of the standing, with the numbers and rules it replayed when a playbook is behind it; the
-    archived sessions' own row has none."""
+def _standing_row(
+    label: str, held: PolicyRow, dropped: PolicyRow, playbook: Playbook | None, sessions: int
+) -> StandingRow:
+    """``label``'s row of the standing over ``sessions`` archived sessions, with the numbers and rules it replayed when
+    a playbook is behind it; the archived sessions' own row has none."""
 
     numbers, rules = (playbook.numbers, playbook.rules) if playbook is not None else (None, ())
-    return StandingRow(label, Difference.of(held), Difference.of(dropped), numbers, rules)
+    return StandingRow(label, Difference.of(held), Difference.of(dropped), numbers, rules, sessions)
 
 
 def replay_standing(
@@ -622,7 +645,7 @@ def replay_standing(
     )
     held, dropped = ({row.label: row for row in comparison.rows} for comparison in found)
     rows = tuple(
-        _standing_row(label, row, dropped[label], playbooks.get(label))
+        _standing_row(label, row, dropped[label], playbooks.get(label), len(trees))
         for label, row in held.items()
         if label != champion.label
     )
@@ -631,7 +654,8 @@ def replay_standing(
 
 def r1_reading(candidate: Playbook, champion: Playbook, trees: Sequence[SearchTree]) -> StandingRow | None:
     """R1 as CLOSE reads a new playbook: ``candidate`` beside ``champion`` in the scheduling replay of ``trees``, both
-    ways beyond the data; ``None`` for a change the replay does not play, or without a tree to replay."""
+    ways beyond the data, :data:`UNCLEAR` over fewer than :data:`MIN_REPLAYED_SESSIONS` of them; ``None`` for a change
+    the replay does not play, or without a tree to replay."""
 
     changed = changes(champion, candidate)
     if not trees or not changed or any(name not in REPLAYED_NUMBERS for name in changed):
@@ -648,7 +672,12 @@ def r1_reading(candidate: Playbook, champion: Playbook, trees: Sequence[SearchTr
         for beyond in (OPTIMISTIC, PESSIMISTIC)
     ]
     return StandingRow(
-        candidate.label, Difference.of(found[0]), Difference.of(found[1]), candidate.numbers, candidate.rules
+        candidate.label,
+        Difference.of(found[0]),
+        Difference.of(found[1]),
+        candidate.numbers,
+        candidate.rules,
+        len(trees),
     )
 
 
@@ -714,6 +743,7 @@ __all__ = [
     "DIRECTION",
     "GAIN_PER_GPU_HOUR",
     "MAX_TRIALS",
+    "MIN_REPLAYED_SESSIONS",
     "MIN_TRIALS",
     "PAIR_SECONDS",
     "JUDGED_RUNS",

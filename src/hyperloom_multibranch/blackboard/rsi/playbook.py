@@ -49,6 +49,9 @@ PLAYBOOK_KEY = "playbook"
 #: The key the scheduler records beside :data:`PLAYBOOK_KEY` when a challenger session broke the safety envelope and
 #: played the champion for the rest of it, the breach as its value.
 FALLBACK_KEY = "playbook_fallback"
+#: The key of the champion beside the playbook a session played, as the scheduler records it: the champion when the
+#: session started, which its trial is read against.
+CHAMPION_KEY = "playbook_champion"
 #: The share of sessions their id draws as challenger sessions: an even split, so a challenger session finds a session
 #: of the champion on its task to pair with soonest.
 CHALLENGER_SHARE = 0.5
@@ -410,10 +413,10 @@ class PlaybookPlay:
         return True
 
     def versions(self) -> dict[str, str]:
-        """What the session's policy versions record of the play: the playbook it started with and, after a fallback,
-        the breach under :data:`FALLBACK_KEY`."""
+        """What the session's policy versions record of the play: the playbook it started with, the champion beside it
+        under :data:`CHAMPION_KEY` and, after a fallback, the breach under :data:`FALLBACK_KEY`."""
 
-        found = {PLAYBOOK_KEY: self.choice.playbook.label}
+        found = {PLAYBOOK_KEY: self.choice.playbook.label, CHAMPION_KEY: self.choice.champion.label}
         if self.breach:
             found[FALLBACK_KEY] = self.breach
         return found
@@ -440,6 +443,7 @@ def playbook_label(text: str) -> str:
 __all__ = [
     "BOUNDS",
     "CHALLENGER_SHARE",
+    "CHAMPION_KEY",
     "CROWNED_FORMAT",
     "FALLBACK_KEY",
     "H0",
