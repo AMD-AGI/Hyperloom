@@ -42,6 +42,15 @@ checked like any other merge, its merge test with the short-prompt consistency c
 foundation fix. A branch's head is adopted at most once per integration head, and its report and merge-log entry say
 it is an adoption.
 
+On a workload that bundles its merges (:attr:`~hyperloom_multibranch.scheduling.settings.Workload.bundles_merges`,
+AgentX), whose integrator is a :class:`BundlingIntegrator`, the commits a look finds to start, two or more of them, are carried onto the head together in the order they
+were offered and take one slot: one merge test of the bundle, judged, checked and recorded as any merge is, so a
+bundle that may be merged lands as one integration commit whose source commits are every member's. A member that does
+not combine with the head and the members before it is left out, and a bundle that does not merge sends its members
+back: each of them then takes the single path on that head, tested on its own as on any other workload, so a bundle
+never merges what single tests would not. A foundation fix is never bundled, since it merges without the gain a bundle
+is judged on.
+
 Before EXPLORE opens, :meth:`Integrator.replay_champion` carries the Recipe KB champion PRELUDE prepared onto the
 root the same way and by the same rule, judged once PRELUDE has anchored the baseline. It is nobody's candidate, so no merge attempt records it and the regression
 set it would run is still empty; what it leaves the integration branch at is the commit EXPLORE opens on.
@@ -51,7 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Awaitable, Sequence, Set
+from collections.abc import Awaitable, Callable, Sequence, Set
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
@@ -90,6 +99,10 @@ EXPLORATION_ENDED = "exploration ended"
 ALREADY_ON_HEAD = "its change is already on the integration head"
 #: How a lead adoption's reason begins, naming the branch whose head it merges.
 ADOPTING_LEAD = "adopting the lead of {}"
+#: How a bundle's reason begins, naming its members.
+BUNDLING = "a bundle of {}"
+#: The fewest commits a merge test carries together as a bundle.
+BUNDLE_MIN_MEMBERS = 2
 #: A patch the three-way rebase could not settle and the resolver's answer did not resolve either.
 CONFLICT_UNRESOLVED = "unresolved patch conflict"
 #: The same conflict, lost before any answer: no call about it reached the resolver. Counted apart from
@@ -142,7 +155,8 @@ class MergeReport:
     A merged candidate carries the gain its merge test was judged to make and the bar it was judged against;
     ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain; a tested one is judged as
     one only when its merge carries no other commit. ``adopts`` names the branch of a lead adoption, whose head
-    ``candidate`` is; it is empty for any other candidate.
+    ``candidate`` is; it is empty for any other candidate. ``members`` are the commits of a bundle, in the order they
+    were offered, ``candidate`` the first of them; it is empty for a single candidate.
     """
 
     candidate: str
@@ -161,6 +175,13 @@ class MergeReport:
     rebased_patches: tuple[RebasedPatch, ...] = ()
     resolved_patches: tuple[ResolvedPatch, ...] = ()
     lost_to: ConflictLoss | None = None
+    members: tuple[str, ...] = ()
+
+    @property
+    def sources(self) -> tuple[str, ...]:
+        """The commits the merge is of: a bundle's members, or the candidate alone."""
+
+        return self.members or (self.candidate,)
 
 
 def _found(report: MergeReport, merge: RepoMerge) -> MergeReport:
@@ -189,6 +210,14 @@ def _naming_adoption(report: MergeReport) -> MergeReport:
     if not report.adopts:
         return report
     return replace(report, reason=f"{ADOPTING_LEAD.format(report.adopts)}: {report.reason}")
+
+
+def _naming_bundle(report: MergeReport) -> MergeReport:
+    """``report`` with its reason naming a bundle's members, when it is one."""
+
+    if not report.members:
+        return report
+    return replace(report, reason=f"{BUNDLING.format(', '.join(report.members))}: {report.reason}")
 
 
 def _naming_replaced(report: MergeReport) -> MergeReport:
@@ -403,6 +432,48 @@ _Tested = MergeReport | _TestedMerge
 
 
 @dataclass(frozen=True)
+class _Start:
+    """A merge test to start: ``pending``'s report, and how the merge it tests is carried onto the head."""
+
+    pending: MergeReport
+    merging: Callable[[], Awaitable[RepoMerge]]
+
+
+async def _carried(merge: RepoMerge) -> RepoMerge:
+    """``merge``, carried already: a bundle's, which the look that started it carried to learn its members."""
+
+    return merge
+
+
+class _SinglePath:
+    """The commits a bundle sent the single path on one integration head, in the order they were offered: left out of
+    it, or the members of a bundle that was not merged. Each is started on its own on that head once, and none of them
+    joins another bundle there; a head the integration branch moved on from holds none."""
+
+    def __init__(self) -> None:
+        self._head = ""
+        self._waiting: list[str] = []
+        self._sent: set[str] = set()
+
+    def send(self, head: str, commits: Sequence[str]) -> None:
+        if head != self._head:
+            self._head, self._waiting, self._sent = head, [], set()
+        self._waiting.extend(commit for commit in commits if commit not in self._sent)
+        self._sent.update(commits)
+
+    def take(self, head: str, free: int) -> tuple[str, ...]:
+        """Up to ``free`` of the commits waiting on ``head``, removed from the wait."""
+
+        if head != self._head:
+            return ()
+        taken, self._waiting = self._waiting[:free], self._waiting[free:]
+        return tuple(taken)
+
+    def holds(self, head: str, commit: str) -> bool:
+        return head == self._head and commit in self._sent
+
+
+@dataclass(frozen=True)
 class MergeRecords:
     """Where the integrator records its rounds: its blackboard handle, which writes as the integrator, and the merge log."""
 
@@ -427,6 +498,7 @@ class Integrator:
         clock: Clock,
     ) -> None:
         self._clock = clock
+        self._single_path = _SinglePath()
         self._blackboard = records.blackboard
         self._repo = repo
         self._candidates = Candidates(records.blackboard, repo)
@@ -446,8 +518,9 @@ class Integrator:
 
         A slot the round has nothing to fill takes a commit committed while it runs, looked for every ``tick`` clock
         seconds, instead of standing idle until the round ends. The head stays where the round found it, so that
-        commit is tested on the same head as the rest. At most one commit is merged, and once one is the round starts
-        no more: the head has moved under the rest, which are offered again on the head it moved to.
+        commit is tested on the same head as the rest. At most one merge lands, of one commit or of a bundle, and once
+        one does the round starts no more: the head has moved under the rest, which are offered again on the head it
+        moved to.
 
         A test that ends waits for the tests the round started before it, so which commit a round merges follows the
         order the blackboard offers them in rather than how long each one took to measure.
@@ -455,18 +528,17 @@ class Integrator:
 
         head = await self._repo.head(INTEGRATION_BRANCH)
         adoptions = await self._claim_adoption(leads, head)
-        running = [asyncio.create_task(self._test(adoption)) for adoption in adoptions]
+        running = [asyncio.create_task(self._test(self._single(adoption))) for adoption in adoptions]
         started = {adoption.candidate for adoption in adoptions}
         reports: list[MergeReport] = []
         merged = False
         try:
             while True:
-                for commit in await self._to_test(head, 0 if merged else width - len(started), started):
-                    started.add(commit.commit_id)
-                    running.append(asyncio.create_task(self._test(_pending(commit, head))))
+                for start in await self._to_start(head, 0 if merged else width - len(running) - len(reports), started):
+                    started.update(start.pending.sources)
+                    running.append(asyncio.create_task(self._test(start)))
                 while running and running[0].done():
-                    item = running.pop(0).result()
-                    report = self._logged(item) if isinstance(item, MergeReport) else await self._conclude(item, merged)
+                    report = await self._concluded(running.pop(0).result(), merged)
                     merged = merged or report.outcome is MergeOutcome.MERGED
                     reports.append(report)
                 if not running:
@@ -505,8 +577,10 @@ class Integrator:
         finally:
             timer.cancel()
 
-    async def _to_test(self, head: str, free: int, started: Set[str]) -> tuple[CommittedCommit, ...]:
-        """The commits to start now on ``head``: those it offers, less the ones this round has already started.
+    async def _to_start(self, head: str, free: int, started: Set[str]) -> tuple[_Start, ...]:
+        """The merge tests to start now on ``head``, ``free`` at most: first the commits the single path holds there,
+        then those it offers, less the ones this round has already started. On a workload that bundles its merges,
+        the offered commits but foundation fixes go into one bundle, when there are enough of them and a slot is left.
 
         A test records its merge attempt once the toolbox has taken it, which is what stops the blackboard offering it
         again; until then it still reads as offered, so the round remembers what it started rather than racing that
@@ -515,16 +589,68 @@ class Integrator:
 
         if free <= 0:
             return ()
-        offered = await self._candidates.offered_on(head)
-        return tuple(commit for commit in offered if commit.commit_id not in started)[:free]
+        starts = [
+            self._single(MergeReport(commit, head, MergeOutcome.PENDING, ""))
+            for commit in self._single_path.take(head, free)
+        ]
+        offered = [
+            commit
+            for commit in await self._candidates.offered_on(head)
+            if commit.commit_id not in started and not self._single_path.holds(head, commit.commit_id)
+        ]
+        bundled = self._bundleable(offered)
+        if len(bundled) < BUNDLE_MIN_MEMBERS:
+            bundled = []
+        starts.extend(self._single(_pending(commit, head)) for commit in offered if commit not in bundled)
+        if bundled and len(starts) < free:
+            starts.extend(await self._bundle(head, bundled))
+        return tuple(starts[:free])
 
-    async def _test(self, pending: MergeReport) -> _Tested:
-        """Test ``pending``'s candidate merged onto its integration head, or skip it; a lead adoption's merge test
+    def _bundleable(self, offered: Sequence[CommittedCommit]) -> list[CommittedCommit]:
+        """The ``offered`` commits that may go into a bundle: none, on a workload that does not bundle its merges."""
+
+        return []
+
+    async def _bundle(self, head: str, commits: Sequence[CommittedCommit]) -> tuple[_Start, ...]:
+        """The merge test of ``commits`` carried onto ``head`` together; none when fewer than
+        :data:`BUNDLE_MIN_MEMBERS` of them combine, and those take the single path, as the ones left out do."""
+
+        offered = [commit.commit_id for commit in commits]
+        bundle = await self._repo.merge_many(offered, head, await self._foundation_fixes())
+        if len(bundle.members) < BUNDLE_MIN_MEMBERS:
+            self._single_path.send(head, offered)
+            return ()
+        self._single_path.send(head, bundle.left_out)
+        pending = MergeReport(bundle.members[0], head, MergeOutcome.PENDING, "", members=bundle.members)
+        return (_Start(pending, partial(_carried, bundle.merge)),)
+
+    def _single(self, pending: MergeReport) -> _Start:
+        """The merge test of ``pending``'s candidate alone."""
+
+        return _Start(pending, partial(self._merged, pending.candidate, pending.onto))
+
+    async def _merged(self, candidate: str, onto: str) -> RepoMerge:
+        """``candidate`` carried onto ``onto``, every conflicting patch resolved."""
+
+        carried = await self._repo.merge(candidate, onto, await self._foundation_fixes())
+        return await self._resolved(carried, candidate)
+
+    async def _concluded(self, item: _Tested, merged: bool) -> MergeReport:
+        """What came of a merge test that ended, logged; the members of a bundle that was not merged take the single
+        path on its head."""
+
+        report = self._logged(item) if isinstance(item, MergeReport) else await self._conclude(item, merged)
+        if report.members and report.outcome is not MergeOutcome.MERGED:
+            self._single_path.send(report.onto, report.members)
+        return report
+
+    async def _test(self, start: _Start) -> _Tested:
+        """Test the merge ``start`` carries onto its integration head, or skip it; a lead adoption's merge test
         forces the short-prompt consistency check."""
 
+        pending = start.pending
         try:
-            carried = await self._repo.merge(pending.candidate, pending.onto, await self._foundation_fixes())
-            merge = await self._resolved(carried, pending.candidate)
+            merge = await start.merging()
             onto = await self._repo.read_recipe(pending.onto)
             if apply(onto, merge.delta).digest() == onto.digest():
                 return await self._skip(pending, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD, merge)
@@ -592,14 +718,14 @@ class Integrator:
 
         report = replace(pending, outcome=outcome, reason=reason)
         skipped = _naming_adoption(report).reason
-        attempt = MergeAttempt((pending.candidate,), pending.onto, skipped_reason=skipped, skipped_outcome=outcome)
+        attempt = MergeAttempt(pending.sources, pending.onto, skipped_reason=skipped, skipped_outcome=outcome)
         await self._blackboard.record_merge_attempt(attempt)
         return report if merge is None else _found(report, merge)
 
     def _logged(self, report: MergeReport) -> MergeReport:
         """``report`` as the merge log names it, recorded there."""
 
-        named = _naming_replaced(_naming_adoption(report))
+        named = _naming_replaced(_naming_bundle(_naming_adoption(report)))
         self._decisions.record(_decision(named))
         return named
 
@@ -622,7 +748,7 @@ class Integrator:
         return await asyncio.shield(self._recording)
 
     async def _regression_failure(self, report: MergeReport, delta: RecipeDelta) -> str:
-        outcome = await self._regression.check(report.onto, delta, sources=(report.candidate,))
+        outcome = await self._regression.check(report.onto, delta, sources=report.sources)
         return "" if outcome.passed else f"the regression set failed: {outcome.reason}"
 
     async def _record_merge(self, tested: MergeReport, delta: RecipeDelta, judgement: Judgement) -> MergeReport:
@@ -633,7 +759,7 @@ class Integrator:
         integration head is at.
         """
 
-        merged = await self._repo.commit_integration(tested.onto, delta, (tested.candidate,))
+        merged = await self._repo.commit_integration(tested.onto, delta, tested.sources)
         written = False
         try:
             digest = (await self._repo.read_recipe(merged)).digest()
@@ -737,9 +863,18 @@ class Integrator:
             await self._recording
 
 
+class BundlingIntegrator(Integrator):
+    """The integrator of a workload that bundles its merges: every commit offered but a foundation fix, which merges
+    without the gain a bundle is judged on, may go into a bundle."""
+
+    def _bundleable(self, offered: Sequence[CommittedCommit]) -> list[CommittedCommit]:
+        return [commit for commit in offered if not commit.foundation_fix]
+
+
 def _decision(report: MergeReport) -> Decision:
     detail: dict[str, object] = {
         "candidate": report.candidate,
+        "members": list(report.members),
         "onto": report.onto,
         "outcome": report.outcome.value,
         "request_id": report.request_id,
@@ -785,6 +920,9 @@ def _decision(report: MergeReport) -> Decision:
 
 __all__ = [
     "ADOPTING_LEAD",
+    "BUNDLE_MIN_MEMBERS",
+    "BUNDLING",
+    "BundlingIntegrator",
     "CONFLICT_TRUNCATED",
     "CONFLICT_UNRESOLVED",
     "FOUNDATION_FIX_VERDICTS",
