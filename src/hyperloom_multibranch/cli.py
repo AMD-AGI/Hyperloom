@@ -117,6 +117,7 @@ from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_co
 from hyperloom_common.env import EnvValueError
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
@@ -578,9 +579,11 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
     if len(sources) > free:
         raise ValueError(f"--autonomous-agent is given {len(sources)} times, more than the {free} branches left")
     for source in sources:
-        scheme, found, rest = source.partition("://")
-        user, at, _host = rest.split("/", 1)[0].rpartition("@")
-        if found and at and (":" in user or scheme.lower() not in SSH_SCHEMES):
+        credentialed = CREDENTIALED_URL_RE.match(source)
+        if credentialed is None:
+            continue
+        scheme = credentialed["scheme"].removesuffix("://")
+        if ":" in credentialed["userinfo"] or scheme.lower() not in SSH_SCHEMES:
             raise ValueError(f"--autonomous-agent {scheme}://... carries credentials; give them in the environment")
     if ARBOR_KEYWORD in sources and not VENDORED_ARBOR.is_dir():
         raise ValueError(
