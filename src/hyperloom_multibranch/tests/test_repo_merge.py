@@ -1018,3 +1018,118 @@ async def test_only_the_files_of_a_patch_that_overlap_the_head_stay_a_conflict(t
     assert (change.add_patches, change.remove_patches) == ((rebased.patch,), ())
     built = _built(apply(await repo.read_recipe(head), merge.delta).component("vllm"), installed, tmp_path)
     assert built == {"config.py": "".join(_config(a="10", g="70")), "scheduler.py": "policy = 'lpm'\n"}
+
+
+MODULE = {f"value_{number}": str(number) for number in range(1, 21)}
+
+
+def _module(**values: str) -> list[str]:
+    return [f"{name} = {value}\n" for name, value in {**MODULE, **values}.items()]
+
+
+def _module_edit(file: str, **values: str) -> str:
+    body = difflib.unified_diff(_module(), _module(**values), f"a/vllm/{file}", f"b/vllm/{file}")
+    return f"diff --git a/vllm/{file} b/vllm/{file}\n" + "".join(body)
+
+
+def _moved(to: str, **values: str) -> str:
+    """``old.py`` renamed to ``to`` with each named line set, as ``git diff -M`` writes it."""
+
+    body = difflib.unified_diff(_module(), _module(**values), "a/vllm/old.py", f"b/vllm/{to}")
+    similarity = 90 if values else 100
+    rename = f"similarity index {similarity}%\nrename from vllm/old.py\nrename to vllm/{to}\n"
+    return f"diff --git a/vllm/old.py b/vllm/{to}\n{rename}" + "".join(body)
+
+
+def _deleted_and_created(to: str, **values: str) -> str:
+    """``old.py`` renamed to ``to`` with each named line set, as ``git diff --no-renames`` writes it."""
+
+    gone = difflib.unified_diff(_module(), [], "a/vllm/old.py", "/dev/null")
+    made = difflib.unified_diff([], _module(**values), "/dev/null", f"b/vllm/{to}")
+    return (
+        "diff --git a/vllm/old.py b/vllm/old.py\ndeleted file mode 100644\n"
+        + "".join(gone)
+        + f"diff --git a/vllm/{to} b/vllm/{to}\nnew file mode 100644\n"
+        + "".join(made)
+    )
+
+
+async def _moved_onto(tmp_path, head_patch: str, candidate_patch: str):
+    installed = _installed(tmp_path, old="".join(_module()))
+    repo = _repository(tmp_path, installed)
+    root = await repo.init_root(BASE)
+    first = await _candidate(repo, "s1", root, head_patch)
+    head = await repo.commit_integration(root, (await repo.merge(first, root)).delta, (first,))
+    merge = await repo.merge(await _candidate(repo, "s2", root, candidate_patch), head)
+    return repo, installed, head, merge
+
+
+def _files(stack: ComponentPatches, installed: PackageBase, tmp_path) -> dict[str, str | None]:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    entries = apply_patch_stack(stack, COMPONENT_LAYOUTS["vllm"], installed, blobs).entries
+    return {entry.path: None if entry.blob is None else blobs.get(entry.blob).decode() for entry in entries}
+
+
+@pytest.mark.parametrize("written", [_moved, _deleted_and_created])
+async def test_a_head_edit_to_a_file_the_candidate_renamed_survives_in_the_renamed_file(tmp_path, written):
+    """The candidate's context over line 13 holds the line the head changed, so its patch does not apply as written."""
+
+    repo, installed, head, merge = await _moved_onto(
+        tmp_path, _module_edit("old.py", value_13="1300"), written("new.py", value_15="1500")
+    )
+
+    assert merge.clean and merge.replaced_patches == ()
+    stack = apply(await repo.read_recipe(head), merge.delta).component("vllm")
+    files = _files(stack, installed, tmp_path)
+    assert files["new.py"] == "".join(_module(value_13="1300", value_15="1500"))
+    assert files.get("old.py") is None
+
+
+async def test_a_rename_whose_edit_overlaps_the_head_s_is_a_conflict_that_drops_nothing_of_the_head(tmp_path):
+    *_, merge = await _moved_onto(
+        tmp_path, _module_edit("old.py", value_5="500", value_15="1501"), _moved("new.py", value_15="1500")
+    )
+
+    (conflict,) = merge.patch_conflicts
+    assert "does not apply" in conflict.detail
+    assert merge.replaced_patches == () and merge.rebased_patches == ()
+    assert [(change.add_patches, change.remove_patches) for change in merge.delta.components] == [((), ())]
+
+
+async def test_a_rename_of_a_file_the_head_renamed_elsewhere_is_a_conflict_where_both_edited_it(tmp_path):
+    *_, merge = await _moved_onto(tmp_path, _moved("other.py", value_15="1501"), _moved("new.py", value_15="1500"))
+
+    (conflict,) = merge.patch_conflicts
+    assert merge.replaced_patches == () and merge.rebased_patches == ()
+    assert [(change.add_patches, change.remove_patches) for change in merge.delta.components] == [((), ())]
+
+
+async def test_a_pure_rename_carries_the_head_s_edit_to_the_new_path(tmp_path):
+    repo, installed, head, merge = await _moved_onto(
+        tmp_path, _module_edit("old.py", value_13="1300"), _moved("new.py")
+    )
+
+    assert merge.clean and merge.replaced_patches == ()
+    files = _files(apply(await repo.read_recipe(head), merge.delta).component("vllm"), installed, tmp_path)
+    assert files["new.py"] == "".join(_module(value_13="1300")) and files.get("old.py") is None
+
+
+async def test_a_rename_that_overlaps_the_head_stays_whole_in_the_split_off_conflict(tmp_path):
+    installed = _installed(tmp_path, old="".join(_module()), scheduler=SCHEDULER)
+    repo = _repository(tmp_path, installed)
+    root = await repo.init_root(BASE)
+    first = await _candidate(repo, "s1", root, _module_edit("old.py", value_5="500", value_15="1501"))
+    head = await repo.commit_integration(root, (await repo.merge(first, root)).delta, (first,))
+    wide = _moved("new.py", value_15="1500") + _git_patch("scheduler.py", "policy = 'fcfs'", "policy = 'lpm'")
+    candidate = await _candidate(repo, "s2", root, wide)
+
+    merge = await repo.merge(candidate, head)
+
+    (rebased,) = merge.rebased_patches
+    (conflict,) = merge.patch_conflicts
+    carried = LocalBlobStore(tmp_path / "blobs").get(rebased.patch.sha256).decode()
+    assert "scheduler.py" in carried and "old.py" not in carried and "new.py" not in carried
+    rest = await repo.patch_text(candidate, conflict.path)
+    assert "old.py" in rest and "new.py" in rest and "scheduler.py" not in rest
+    built = _files(apply(await repo.read_recipe(head), merge.delta).component("vllm"), installed, tmp_path)
+    assert built == {"old.py": "".join(_module(value_5="500", value_15="1501")), "scheduler.py": "policy = 'lpm'\n"}
