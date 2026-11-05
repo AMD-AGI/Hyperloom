@@ -723,11 +723,14 @@ def _on(lines: list[str], before: list[str] | None = None) -> str:
     return "diff --git a/vllm/config.py b/vllm/config.py\n" + "".join(body)
 
 
-async def _replaced_onto(tmp_path, head_patches: list[str], candidate_patch: str, *, protect: bool = False):
+async def _replaced_onto(
+    tmp_path, head_patches: list[str], candidate_patch: str, *, protect: bool = False, config: list[str] | None = None
+):
     """The candidate's merge from the root onto a head that merged each of ``head_patches`` in turn, each branched off
-    the head before it; ``protect`` passes the first of those merges as a foundation fix."""
+    the head before it; ``protect`` passes the first of those merges as a foundation fix. ``config`` is the installed
+    ``config.py``, ``_config()`` by default."""
 
-    installed = _installed(tmp_path, config="".join(_config()))
+    installed = _installed(tmp_path, config="".join(config or _config()))
     repo = _repository(tmp_path, installed)
     head = root = await repo.init_root(BASE)
     merged = []
@@ -793,6 +796,33 @@ async def test_a_head_patch_beside_the_replaced_one_stays(tmp_path):
     (replaced,) = merge.replaced_patches
     assert merge.clean and replaced.removed == (x,)
     assert _paths(repo, apply(await repo.read_recipe(head), merge.delta)) == [kept, replaced.by.path]
+
+
+BRACED = [*_config(), *["}\n"] * 4]
+
+
+async def test_a_repeated_line_the_candidate_left_in_place_keeps_the_head_s_edit_of_it(tmp_path):
+    """git aligns the candidate's new line with the first ``}``, so the head's edit of the last one is its own change."""
+
+    head_patch = _on([*_config(c="30"), *["}\n"] * 3, "}  # end\n"], BRACED)
+    candidate = _on([*_config(c="31"), "x = 9\n", *["}\n"] * 3], BRACED)
+    repo, installed, head, merge = await _replaced_onto(tmp_path, [head_patch], candidate, config=BRACED)
+
+    (conflict,) = merge.patch_conflicts
+    assert "does not apply" in conflict.detail and merge.replaced_patches == ()
+    stack = apply(await repo.read_recipe(head), merge.delta).component("vllm")
+    assert _built(stack, installed, tmp_path)["config.py"].endswith("}\n}  # end\n")
+
+
+async def test_a_repeated_line_the_candidate_rewrote_where_the_head_did_is_replaced(tmp_path):
+    head_patch = _on([*_config(c="30"), *["}\n"] * 3, "}  # end\n"], BRACED)
+    candidate = _on([*_config(c="31"), *["}\n"] * 3, "}  # done\n"], BRACED)
+    repo, installed, head, merge = await _replaced_onto(tmp_path, [head_patch], candidate, config=BRACED)
+
+    (replaced,) = merge.replaced_patches
+    assert merge.clean and replaced.removed == tuple(_paths(repo, await repo.read_recipe(head)))
+    stack = apply(await repo.read_recipe(head), merge.delta).component("vllm")
+    assert _built(stack, installed, tmp_path)["config.py"] == "".join([*_config(c="31"), *["}\n"] * 3, "}  # done\n"])
 
 
 def test_a_merge_replaces_no_head_patch_unless_the_tier_settles_one():
