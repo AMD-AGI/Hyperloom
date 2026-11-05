@@ -923,13 +923,15 @@ class GpuSpecialistLease:
         return True
 
 
-def maybe_gpu_specialist_lease(*, num_gpus: float, serving_slot: bool = False) -> GpuSpecialistLease | None:
-    """Return a :class:`GpuSpecialistLease` when single-node Ray execution is active."""
-    if num_gpus <= 0:
-        return None
-    from ._ray_backend import ray_exec_enabled
+def maybe_gpu_specialist_lease(
+    *, ray_exec: bool, num_gpus: float, serving_slot: bool = False
+) -> GpuSpecialistLease | None:
+    """Return a :class:`GpuSpecialistLease` when the admission was routed to single-node Ray.
 
-    if not ray_exec_enabled():
+    ``ray_exec`` is the admission's one ``ray_exec_enabled()`` answer, which already chose its GPU ids. It is not
+    asked again here: the answer can change in between, when the head's verdict is dropped and re-probed.
+    """
+    if not ray_exec or num_gpus <= 0:
         return None
     return GpuSpecialistLease(num_gpus=num_gpus, serving_slot=serving_slot)
 

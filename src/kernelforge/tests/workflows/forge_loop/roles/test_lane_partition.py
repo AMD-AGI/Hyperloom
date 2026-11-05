@@ -328,60 +328,26 @@ async def test_a_partition_that_named_no_widest_move_reports_that(caplog) -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_move_named_as_a_plain_string_is_still_a_named_move(
-    caplog,
-) -> None:
-    """The schema shows an object; a model answering it with prose is ordinary."""
+async def test_a_partition_answered_in_no_usable_shape_collapses_the_round(caplog) -> None:
+    """A move given as prose names no lane to own it, so the answer cannot divide the round."""
     backend = _PerCallBackend(
         [
-            _partition_lanes([_lane(GROUND_A), _lane(GROUND_B)], _CROSS_CUTTING),
-            "# Lane A",
-            "# Lane B",
+            json.dumps({"lanes": [_lane(GROUND_A), _lane(GROUND_B)], "cross_cutting_move": _CROSS_CUTTING}),
+            "# The one lane",
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
     with caplog.at_level("WARNING", logger=orchestration_module.log.name):
-        await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
+        results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
+    assert [result.text for result in results] == ["# The one lane"]
     diagnostics = agent.structured_output_diagnostics["partition"]
-    assert diagnostics["cross_cutting_move"] == {
-        "status": "unassigned",
-        "move": _CROSS_CUTTING,
-        "lane_id": 0,
-        "unassigned_reason": "",
-    }
-    assert any("came back as a string" in note for note in diagnostics["notes"])
-    assert _CROSS_CUTTING in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_a_move_field_of_the_wrong_shape_is_not_reported_as_no_move(
-    caplog,
-) -> None:
-    """A shape the parser cannot read is not evidence the partition looked."""
-    backend = _PerCallBackend(
-        [
-            _partition_lanes(
-                [_lane(GROUND_A), _lane(GROUND_B)],
-                [{"move": _CROSS_CUTTING}],
-            ),
-            "# Lane A",
-            "# Lane B",
-        ]
-    )
-    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    specialists = await _compute_and_memory_round()
-
-    with caplog.at_level("WARNING", logger=orchestration_module.log.name):
-        await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
-
-    move = agent.structured_output_diagnostics["partition"]["cross_cutting_move"]
-    assert move["status"] == "unreadable"
-    assert "came back as a list" in move["field"]
-    assert "came back as a list" in caplog.text
-    assert "the partition named none" not in caplog.text
+    assert diagnostics["status"] == "fallback"
+    assert diagnostics["cross_cutting_move"] == {"status": "unavailable"}
+    assert any("PartitionAnswer" in note for note in diagnostics["notes"])
+    assert "round partition unavailable" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -408,57 +374,14 @@ async def test_an_owned_move_records_the_ground_that_owns_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_move_naming_a_lane_that_is_not_a_number_is_unowned() -> None:
-    """A lane_id that is not a lane number is not a lane, and says so."""
-    backend = _PerCallBackend(
-        [
-            _partition_lanes(
-                [_lane(GROUND_A), _lane(GROUND_B)],
-                {"move": _CROSS_CUTTING, "lane_id": "lane 2"},
-            ),
-            "# Lane A",
-            "# Lane B",
-        ]
-    )
-    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    specialists = await _compute_and_memory_round()
-
-    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
-
-    diagnostics = agent.structured_output_diagnostics["partition"]
-    assert diagnostics["cross_cutting_move"]["status"] == "unassigned"
-    assert any("not a lane number" in note for note in diagnostics["notes"])
-
-
-@pytest.mark.asyncio
-async def test_an_unreadable_joint_answer_is_recorded_not_just_narrowed() -> None:
-    """Falling back to narrow ground is right; doing it without a word is not."""
-    backend = _PerCallBackend(
-        [
-            _partition_lanes([_lane(JOINT_GROUND, joint="partial"), _lane(GROUND_B)]),
-            "# Lane A",
-            "# Lane B",
-        ]
-    )
-    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    specialists = await _compute_and_memory_round()
-
-    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
-
-    diagnostics = agent.structured_output_diagnostics["partition"]
-    assert diagnostics["joint"] == []
-    assert any("'partial', which is not a boolean" in note for note in diagnostics["notes"])
-
-
-@pytest.mark.asyncio
 async def test_a_lane_that_declined_joint_ground_does_not_get_it() -> None:
-    """A quoted \"false\" is a no, and the flag it sets is the one that widens."""
+    """Only the lane that answered joint is widened."""
     backend = _PerCallBackend(
         [
             _partition_lanes(
                 [
-                    _lane(GROUND_A, joint="false"),
-                    _lane(JOINT_GROUND, joint="true", fallback="re-tune only"),
+                    _lane(GROUND_A),
+                    _lane(JOINT_GROUND, joint=True, fallback="re-tune only"),
                 ]
             ),
             "# Lane A",
@@ -471,42 +394,6 @@ async def test_a_lane_that_declined_joint_ground_does_not_get_it() -> None:
     await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert agent.structured_output_diagnostics["partition"]["joint"] == [2]
-
-
-def test_an_answer_that_is_not_a_boolean_is_read_as_the_note_promises() -> None:
-    """The flag stored and the note written have to describe one reading."""
-    assert orchestration_module._as_bool(True) == (True, True)
-    assert orchestration_module._as_bool("true") == (True, True)
-    assert orchestration_module._as_bool(None) == (False, True)
-    assert orchestration_module._as_bool("false") == (False, True)
-    # Not booleans, whichever way they would have gone through ``bool``.
-    assert orchestration_module._as_bool(1) == (False, False)
-    assert orchestration_module._as_bool(0) == (False, False)
-    assert orchestration_module._as_bool(2.5) == (False, False)
-    assert orchestration_module._as_bool({"a": 1}) == (False, False)
-    assert orchestration_module._as_bool([]) == (False, False)
-
-
-@pytest.mark.asyncio
-async def test_a_lane_that_answered_joint_with_a_number_keeps_narrow_ground() -> None:
-    """The lane list and the note are read by the same operator."""
-    backend = _PerCallBackend(
-        [
-            _partition_lanes([_lane(JOINT_GROUND, joint=1), _lane(GROUND_B)]),
-            "# Lane A",
-            "# Lane B",
-        ]
-    )
-    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    specialists = await _compute_and_memory_round()
-
-    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
-
-    diagnostics = agent.structured_output_diagnostics["partition"]
-    assert diagnostics["joint"] == []
-    assert diagnostics["grounds"][0]["joint"] is False
-    assert json.loads(backend.specs[1].user_prompt)["lane"]["joint"] is False
-    assert any("1, which is not a boolean" in note for note in diagnostics["notes"])
 
 
 @pytest.mark.asyncio
