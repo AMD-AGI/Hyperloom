@@ -7,7 +7,8 @@ What is pinned, against a fixture tree of the files a real image holds (and, for
 each kind of check passes on what confirms the fact, fails on what contradicts it in the image the fact is about, and is
 unverifiable everywhere else (a package that is not installed, a variable that is not set, a command that did not run);
 a fact is a pass only when all its checks are; a session warns by default, stops under ``strict`` and does nothing under
-``off``; the report names what failed, and the check runs on its own from the command line.
+``off``, the mode ``HYPERLOOM_IMAGE_CHECK`` names; the report names what failed and the mode it ran under; and the check
+runs on its own from the command line, which always checks.
 """
 
 from __future__ import annotations
@@ -508,19 +509,22 @@ def test_the_report_is_json_for_close_and_lines_for_people_and_is_written_whole(
 
 
 def test_a_failing_fact_is_one_warning_by_default_and_a_healthy_image_logs_nothing(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv(MODE_ENV, raising=False)
     pack = load_pack(DEFAULT_PACK_PATH)
     with caplog.at_level(logging.INFO, logger=_LOGGER):
-        healthy = run_image_check(mode=ImageCheckMode.WARN, pack=pack, image=_reference_image(tmp_path, _OLD_AITER))
+        healthy = run_image_check(pack=pack, image=_reference_image(tmp_path, _OLD_AITER))
     assert healthy.failed() == ()
     assert [record for record in caplog.records if record.name == _LOGGER] == []
 
     other = tmp_path / "other"
     other.mkdir()
     with caplog.at_level(logging.INFO, logger=_LOGGER):
-        report = run_image_check(mode=ImageCheckMode.WARN, pack=pack, image=_reference_image(other, _NEW_AITER))
+        report = run_image_check(pack=pack, image=_reference_image(other, _NEW_AITER))
     assert len(report.failed()) == 1
+    assert (report.summary()["mode"], report.to_json()["mode"]) == ("warn", "warn")
+    assert report.markdown_lines()[0].startswith(f"Image check (warn) of rule pack {pack.version}: ")
     (record,) = [record for record in caplog.records if record.name == _LOGGER]
     assert record.levelno == logging.WARNING
     assert "aiter_merged_view (aiter)" in record.getMessage()
@@ -528,10 +532,13 @@ def test_a_failing_fact_is_one_warning_by_default_and_a_healthy_image_logs_nothi
     assert f"{MODE_ENV}=strict" in record.getMessage()
 
 
-def test_a_failing_fact_stops_the_session_under_strict_and_carries_the_report(tmp_path: Path) -> None:
+def test_a_failing_fact_stops_the_session_under_strict_and_carries_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(MODE_ENV, "strict")
     pack = load_pack(DEFAULT_PACK_PATH)
     with pytest.raises(ImageCheckFailed, match="aiter_merged_view") as stopped:
-        run_image_check(mode=ImageCheckMode.STRICT, pack=pack, image=_reference_image(tmp_path, _NEW_AITER))
+        run_image_check(pack=pack, image=_reference_image(tmp_path, _NEW_AITER))
     report = stopped.value.report
     assert [fact.fact for fact in report.failed()] == ["aiter_merged_view"]
     assert (report.summary()["mode"], report.to_json()["mode"]) == ("strict", "strict")
@@ -539,25 +546,9 @@ def test_a_failing_fact_stops_the_session_under_strict_and_carries_the_report(tm
 
     other = tmp_path / "other"
     other.mkdir()
-    healthy = run_image_check(mode=ImageCheckMode.STRICT, pack=pack, image=_reference_image(other, _OLD_AITER))
+    healthy = run_image_check(pack=pack, image=_reference_image(other, _OLD_AITER))
     assert healthy.failed() == ()
     assert (healthy.summary()["mode"], healthy.to_json()["mode"]) == ("strict", "strict")
-
-
-def test_a_session_given_no_mode_runs_under_the_one_the_session_input_names_and_a_given_mode_wins(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pack = load_pack(DEFAULT_PACK_PATH)
-    monkeypatch.setenv(MODE_ENV, "strict")
-    with pytest.raises(ImageCheckFailed) as stopped:
-        run_image_check(pack=pack, image=_reference_image(tmp_path, _NEW_AITER))
-    assert (stopped.value.report.summary()["mode"], stopped.value.report.to_json()["mode"]) == ("strict", "strict")
-
-    other = tmp_path / "other"
-    other.mkdir()
-    given = run_image_check(mode=ImageCheckMode.WARN, pack=pack, image=_reference_image(other, _NEW_AITER))
-    assert [fact.fact for fact in given.failed()] == ["aiter_merged_view"]
-    assert (given.summary()["mode"], given.to_json()["mode"]) == ("warn", "warn")
 
 
 class _Untouchable:
@@ -571,13 +562,27 @@ class _Untouchable:
         raise AttributeError(name)
 
 
-def test_nothing_is_evaluated_under_off_and_the_report_says_so() -> None:
+def test_nothing_is_evaluated_under_off_and_the_report_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(MODE_ENV, "off")
     image = _Untouchable()
-    report = run_image_check(mode=ImageCheckMode.OFF, image=image)  # type: ignore[arg-type]
+    report = run_image_check(image=image)  # type: ignore[arg-type]
     assert image.asked == [], "the environment was asked for something"
     assert report.facts == ()
-    assert report.summary()["mode"] == "off"
+    assert (report.summary()["mode"], report.to_json()["mode"]) == ("off", "off")
     assert report.summary()["fail"] == []
+    assert report.markdown_lines() == [
+        f"Image check (off) of rule pack {report.pack['version']}: 0 pass, 0 fail, 0 unverifiable"
+    ]
+
+
+def test_a_session_input_that_names_no_mode_stops_the_check_before_the_environment_is_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(MODE_ENV, "stict")
+    image = _Untouchable()
+    with pytest.raises(ValueError, match=r"HYPERLOOM_IMAGE_CHECK='stict' is not one of"):
+        run_image_check(image=image)  # type: ignore[arg-type]
+    assert image.asked == [], "the environment was asked for something"
 
 
 @pytest.mark.parametrize(
@@ -606,7 +611,7 @@ def test_the_command_line_prints_the_report_and_exits_one_when_a_fact_fails(
     pack = load_pack(DEFAULT_PACK_PATH)
     assert main([], pack=pack, image=_reference_image(tmp_path, _OLD_AITER)) == 0
     assert capsys.readouterr().out.startswith(
-        f"Image check (warn) of rule pack {pack.version}: 12 pass, 0 fail, 33 unverifiable"
+        f"Image check (strict) of rule pack {pack.version}: 12 pass, 0 fail, 33 unverifiable"
     )
 
     other = tmp_path / "other"
@@ -616,6 +621,26 @@ def test_the_command_line_prints_the_report_and_exits_one_when_a_fact_fails(
     printed = json.loads(capsys.readouterr().out)
     assert printed == json.loads(saved.read_text(encoding="utf-8"))
     assert printed["counts"]["fail"] == 1
+    assert printed["mode"] == "strict"
+
+
+@pytest.mark.parametrize("given", ["off", "warn", "stict"])
+def test_the_command_line_always_checks_whatever_the_session_input_says(
+    given: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(MODE_ENV, given)
+    pack = load_pack(DEFAULT_PACK_PATH)
+    assert main([], pack=pack, image=_reference_image(tmp_path, _NEW_AITER)) == 1
+    assert capsys.readouterr().out.startswith(
+        f"Image check (strict) of rule pack {pack.version}: 11 pass, 1 fail, 33 unverifiable\n- FAIL aiter_merged_view"
+    )
+
+
+def test_the_command_line_help_says_it_always_checks(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as shown:
+        main(["--help"])
+    assert shown.value.code == 0
+    assert f"The command line always checks: it does not read {MODE_ENV}," in " ".join(capsys.readouterr().out.split())
 
 
 def test_the_module_runs_on_its_own_against_the_pack_the_session_names(tmp_path: Path) -> None:
