@@ -74,13 +74,18 @@ def _read(candidate: Mapping[str, float], parent: Mapping[str, float]) -> _Readi
     gain = gain_pct(p50, parent_p50)
     if gain is None:
         raise ValueError(f"cannot compare a P50 of {p50!r} against a parent P50 of {parent_p50!r}")
-    defects = [name for name, key in _GUARDS if not holds_within_band(candidate, parent, key)]
+    defects = [name for name, key in _GUARDS if not _guard_holds(candidate, parent, key)]
     incomparable = incomparability_reason(candidate, parent)
     if incomparable == _EXTRA_FAILED_REQUESTS:
         incomparable = ""
         if _more_unserved(candidate, parent):
             defects.append(_EXTRA_FAILED_REQUESTS)
     return _Reading(gain, tuple(defects), incomparable, agentx_accuracy_ok(candidate.get(GRADED_ERROR_RATE)))
+
+
+def _guard_holds(candidate: Mapping[str, float], parent: Mapping[str, float], key: str) -> bool:
+    """A side that did not report the guard's axis breaks it: ``holds_within_band`` reads it as 0.0, which holds."""
+    return key in candidate and key in parent and holds_within_band(candidate, parent, key)
 
 
 def _more_unserved(candidate: Mapping[str, float], parent: Mapping[str, float]) -> bool:
