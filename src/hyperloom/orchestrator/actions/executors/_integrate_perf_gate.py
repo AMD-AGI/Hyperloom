@@ -296,7 +296,11 @@ class PerfGateMixin:
                 ),
                 dest_dir=self.session_dir / "optimization_stack" / "src" / slot,
                 provenance="integrate_patch",
-                extra={"specialist_task_id": attempt.specialist_task_id},
+                extra={
+                    "specialist_task_id": attempt.specialist_task_id,
+                    "commit_semantics": "accepted",
+                    "artifacts_outside_root": outside,
+                },
             )
             if not snap:
                 return evidence

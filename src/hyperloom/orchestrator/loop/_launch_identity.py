@@ -41,6 +41,9 @@ class LaunchIdentityMixin:
             "overlay_pythonpath": str(env_spec.get("overlay_pythonpath") or ""),
             "overlay_digest": str(env_spec.get("overlay_digest") or ""),
         }
+        source = env_spec.get("source_materialization")
+        if isinstance(source, Mapping):
+            payload["source_materialization_digest"] = str(source.get("manifest_sha256") or "")
         # Keep legacy identities unchanged for launches with default controls.
         for key in ("remove_args", "unset_envs"):
             values = sorted(set(to_str_list(config.get(key))))
@@ -290,6 +293,7 @@ class LaunchIdentityMixin:
         measurement: Mapping[str, Any] | None = None,
         server_launch_flags: str | None = None,
         server_launch_envs: Mapping[str, str] | None = None,
+        source_materialization: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fully-reproducible descriptor of ``current_best``'s launch environment.
 
@@ -297,10 +301,10 @@ class LaunchIdentityMixin:
         stack ``current_best`` was measured on:
 
           * ``config``  — cumulative server args + env vars (the reversible layer).
-          * ``source_snapshots`` — ordered durable source-layer snapshots
-            (``scope=source_patch`` entries), each a self-contained directory
-            (see :mod:`source_snapshot`) that reconstructs the patched framework
-            tree independent of the mutable live checkout.
+          * ``source_snapshots`` — ordered durable source-layer identities.
+          * ``source_materialization`` — the complete verified accepted Python
+            source trees prepared at GEAK handoff; sparse snapshots alone do not
+            reconstruct a Python package's import closure.
           * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
           * ``base_launch_recipe`` — the baseline Magpie recipe to launch from.
 
@@ -354,5 +358,7 @@ class LaunchIdentityMixin:
                 "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
             },
         }
+        if source_materialization is not None:
+            env_spec["source_materialization"] = dict(source_materialization)
         env_spec["launch_identity"] = self._handoff_launch_identity(env_spec)
         return env_spec

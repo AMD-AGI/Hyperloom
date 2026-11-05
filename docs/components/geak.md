@@ -115,6 +115,37 @@ lose the ability to say why. A consumer must treat those ids as placeholders and
 not launch on them; the orchestrator also logs the condition at ERROR, because a
 GEAK run that dies on an invalid device ordinal is otherwise unexplainable.
 
+## Accepted Python source at handoff
+
+Accepted source patches are recorded as sparse snapshots for reinstalling their
+touched files. A sparse directory on `PYTHONPATH` is insufficient to reconstruct
+a package: an installed regular package can hide its patched submodules, and a
+deleted file can fall through to the installed copy.
+
+Before GEAK delegation, Hyperloom exports each accepted Git tree into a
+content-addressed bundle. Snapshot payloads must match their recorded accepted
+commits, and each layer must explicitly account for artifacts outside its root.
+Ordered layer IDs, complete file hashes and modes, import roots and deletions
+are recorded in the bundle manifest. The manifest digest joins the handoff
+launch identity; the live checkout's later HEAD is not used as the accepted
+source. If current best changes while export runs, the handoff is refused.
+
+`baseline_env_spec.source_materialization` carries the version-1 descriptor.
+The installed GEAK entry point must advertise
+`SOURCE_MATERIALIZATION_SCHEMA_VERSION = 1` and verify this descriptor before
+launch. Deploy the compatible consumer before enabling this producer: older
+readers and sparse-only source handoffs are refused, without affecting
+source-free handoffs. Historical snapshots without explicit artifact-coverage
+evidence remain unresolved and must be recaptured; missing evidence is not
+treated as zero outside-root artifacts.
+
+Version 1 covers regular Python packages. Namespace packages, unsupported
+native/build changes, ambiguous import roots, unexplained intermediate edits
+and untracked runtime files are refused. This establishes reproducible source
+transport, not actual loaded-module provenance or serving performance. Native
+AgentX launch receipts, GEAK's proposal-proxy scope and Hyperloom's canonical
+remeasurement remain authoritative.
+
 ## GEAK documentation
 
 For detailed documentation on GEAK, see [GEAK on ROCm Docs](https://rocm.docs.amd.com/projects/geak/en/latest/).
