@@ -261,7 +261,8 @@ measured not stackable on the new head is done. Keep your head instead while you
 commit of yours not merged yet, or while your head's recorded value is above the integration head's.
 
 Your launch prompt names your branch's direction: work on it first. When the brief names a "Focus", start from \
-that operator within your direction: the scheduler opened your branch on it. When the first idea fails, profile and dig \
+that operator within your direction: the scheduler opened your branch on it. When the brief lists earlier branches \
+on it, start from where they ended rather than verify what they found again. When the first idea fails, profile and dig \
 deeper in it rather than switching to settings. Settings are a small space the settings branch sweeps; the larger \
 ceilings are in source: a patch, a fused or tuned kernel, or a port of an aiter or framework PR, on the operators the \
 profile ranks highest. That every setting near your direction was tried never means your direction is done. A \

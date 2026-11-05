@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from hyperloom.contracts.recipe import KernelArtifact, RecipeDelta
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
+from hyperloom_multibranch.contracts.blackboard.exhausted import Exhausted
 from hyperloom_multibranch.contracts.blackboard.peers import (
     BranchLogEntry,
     Intent,
@@ -729,6 +730,24 @@ class UnfinishedLead:
 
 
 @dataclass(frozen=True)
+class FocusBranch:
+    """A stopped branch the scheduler opened on the same focus as the brief's, as the brief recalls it.
+
+    ``tests`` counts its tests not withdrawn, ``gains_pct`` the gain of each commit it made, ``exhausted`` its latest
+    exhausted record, and ``under_start`` whether the brief's start commit builds on its head.
+    """
+
+    branch: str
+    start_commit: str
+    head_commit: str
+    tests: int
+    gains_pct: tuple[float, ...]
+    stop_reason: str
+    exhausted: Exhausted | None = None
+    under_start: bool = False
+
+
+@dataclass(frozen=True)
 class StartupBrief:
     """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall.
 
@@ -737,7 +756,7 @@ class StartupBrief:
     on any branch. ``focus`` is the bottleneck the scheduler opened the branch on, empty when it named none.
     ``settings_menu`` is the settings this session has not tried and ``code_menu`` the source and kernel changes, each
     ranked for the branch, a line each, the ops it acts on and its family's note indented under it; none for a branch
-    of the menu's control.
+    of the menu's control. ``focus_history`` are the stopped branches opened on the same focus op, newest first.
     """
 
     start_commit: str
@@ -749,6 +768,7 @@ class StartupBrief:
     focus: str = ""
     settings_menu: tuple[str, ...] = ()
     code_menu: tuple[str, ...] = ()
+    focus_history: tuple[FocusBranch, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -931,6 +951,7 @@ __all__ = [
     "CommittedCommit",
     "DedupAnswer",
     "EnvironmentChange",
+    "FocusBranch",
     "FrontierScore",
     "InboxItem",
     "InboxPage",
