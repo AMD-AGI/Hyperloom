@@ -5,15 +5,14 @@ import json
 
 import pytest
 
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
-from hyperloom_multibranch.specialist.exhausted import (
+from hyperloom_multibranch.contracts.blackboard.exhausted import (
     EXHAUSTED_PREFIX,
     Exhausted,
     ExhaustedWhy,
     exhausted_refusal,
     read_exhausted,
-    session_direction,
 )
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, session_direction
 
 RECORD = {
     "direction": "Fusion",
