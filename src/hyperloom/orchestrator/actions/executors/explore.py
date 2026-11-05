@@ -1219,7 +1219,7 @@ class _ExploreRound:
             stop=GridStop(
                 session_deadline_sec=self.session_deadline_sec,
                 variant_expected_sec=self.decision_expected_sec,
-                checkpoint=round_checkpoint(self.running_perf, may_stop=True),
+                checkpoint=round_checkpoint(self.running_perf),
             ),
         )
         return None if self._stopped_by_the_run(results[0], gv, idx, "decision") else results[0]

@@ -19,6 +19,7 @@ from hyperloom_common.coerce import optional_positive_float
 from hyperloom_common.env import EnvValueError, env_str
 from hyperloom_common.io import atomic_write_json
 from hyperloom_common.jsonio import read_json
+from hyperloom.common.outside_facts import AIPERF_PROFILING_PHASE
 from hyperloom.common.perf_metric import (
     AGENTX_CHECKPOINT_MAX_DROP_PCT,
     AGENTX_CHECKPOINT_SEC,
@@ -50,15 +51,13 @@ _MODES = (_ENFORCE, _SHADOW, _OFF)
 #: Written into the round's slot when the checkpoint rules.
 CHECKPOINT_ARTIFACT_NAME = "agentx_checkpoint.json"
 
-_PROFILING = "profiling"
-
 # aiperf flushes its export about once a second, so a window still open on one read has closed on a later one.
 _REREAD_SEC = 30.0
 
 
 def checkpoint_p50(records: Iterable[RequestRecord], at_sec: float = AGENTX_CHECKPOINT_SEC) -> float | None:
     """Median e2e-normalised interactivity of profiling requests done ``at_sec`` in; None until that window closed."""
-    profiling = [r for r in records if r.phase == _PROFILING]
+    profiling = [r for r in records if r.phase == AIPERF_PROFILING_PHASE]
     if not profiling:
         return None
     cutoff = min(r.start for r in profiling) + at_sec
@@ -91,7 +90,7 @@ class AgentxCheckpoint:
         return CheckpointJudge(self, slot)
 
 
-def round_checkpoint(reference: Mapping[str, Any] | None, *, may_stop: bool) -> AgentxCheckpoint | None:
+def round_checkpoint(reference: Mapping[str, Any] | None) -> AgentxCheckpoint | None:
     """The checkpoint for a round graded against ``reference``; None when it is off or the reference has none."""
     mode = env_str(EARLY_STOP_ENV).lower() or _ENFORCE
     if mode not in _MODES:
@@ -99,7 +98,7 @@ def round_checkpoint(reference: Mapping[str, Any] | None, *, may_stop: bool) -> 
     reference_p50 = optional_positive_float((reference or {}).get(GRADED_INTVTY_P50_CHECKPOINT))
     if mode == _OFF or reference_p50 is None:
         return None
-    return AgentxCheckpoint(reference_p50, enforce=may_stop and mode == _ENFORCE)
+    return AgentxCheckpoint(reference_p50, enforce=mode == _ENFORCE)
 
 
 def checkpoint_summary(ruling: Mapping[str, Any]) -> str:

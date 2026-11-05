@@ -678,7 +678,7 @@ async def test_promoted_baseline_arms_the_agentx_checkpoint(baseline_writer, tmp
 
     anchor, _ = resolve_grading_anchor_perf(writer.shared_state)
     assert outcome.audit_decision == "promoted"
-    assert round_checkpoint(anchor, may_stop=True) == AgentxCheckpoint(55.0, enforce=True)
+    assert round_checkpoint(anchor) == AgentxCheckpoint(55.0, enforce=True)
 
 
 # Comparability inputs ride the same snapshot as the graded axes, so an anchor carries what the gates read.

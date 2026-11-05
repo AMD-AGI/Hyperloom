@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from hyperloom.common.outside_facts import AIPERF_PHASE_KEY
+
 log = logging.getLogger(__name__)
 
 
@@ -144,7 +146,7 @@ def _record_from(payload: dict[str, Any]) -> RequestRecord | None:
         end=end,
         first_token=first_token,
         ok=payload.get("error") in (None, {}),
-        phase=str(metadata.get("benchmark_phase") or ""),
+        phase=str(metadata.get(AIPERF_PHASE_KEY) or ""),
         output_tokens=_metric(metrics, "output_sequence_length"),
         latency=latency_ms / 1000.0 if latency_ms is not None else None,
     )

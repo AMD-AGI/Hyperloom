@@ -108,32 +108,31 @@ def test_reference_snapshots_carry_the_checkpoint_median():
 
 
 @pytest.mark.parametrize(
-    "mode,may_stop,expected",
+    "mode,expected",
     [
-        (None, True, AgentxCheckpoint(25.0, enforce=True)),
-        ("enforce", False, AgentxCheckpoint(25.0, enforce=False)),
-        ("Shadow", True, AgentxCheckpoint(25.0, enforce=False)),
-        ("off", True, None),
+        (None, AgentxCheckpoint(25.0, enforce=True)),
+        ("Shadow", AgentxCheckpoint(25.0, enforce=False)),
+        ("off", None),
     ],
 )
-def test_round_checkpoint_follows_the_mode(monkeypatch, mode, may_stop, expected):
+def test_round_checkpoint_follows_the_mode(monkeypatch, mode, expected):
     if mode is None:
         monkeypatch.delenv(EARLY_STOP_ENV, raising=False)
     else:
         monkeypatch.setenv(EARLY_STOP_ENV, mode)
-    assert round_checkpoint({GRADED_INTVTY_P50_CHECKPOINT: 25.0}, may_stop=may_stop) == expected
+    assert round_checkpoint({GRADED_INTVTY_P50_CHECKPOINT: 25.0}) == expected
 
 
 def test_round_checkpoint_refuses_an_unknown_mode(monkeypatch):
     monkeypatch.setenv(EARLY_STOP_ENV, "shdow")
     with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX_EARLY_STOP='shdow' is not one of enforce, shadow, off"):
-        round_checkpoint({GRADED_INTVTY_P50_CHECKPOINT: 25.0}, may_stop=True)
+        round_checkpoint({GRADED_INTVTY_P50_CHECKPOINT: 25.0})
 
 
 def test_round_checkpoint_needs_a_reference_median(monkeypatch):
     monkeypatch.setenv(EARLY_STOP_ENV, "enforce")
-    assert round_checkpoint({"e2e_norm_intvty_p50": 25.0}, may_stop=True) is None
-    assert round_checkpoint(None, may_stop=True) is None
+    assert round_checkpoint({"e2e_norm_intvty_p50": 25.0}) is None
+    assert round_checkpoint(None) is None
 
 
 def test_judge_rules_once_the_checkpoint_is_due(tmp_path):
