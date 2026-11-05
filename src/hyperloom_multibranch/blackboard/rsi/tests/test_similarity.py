@@ -13,7 +13,6 @@ from hyperloom_multibranch.blackboard.rsi.similarity import (
     AGENTX,
     INFERENCEX,
     TaskConditions,
-    effective_sessions,
     task_conditions,
     task_similarity,
     workload_kind,
@@ -59,9 +58,3 @@ def test_a_trace_replay_and_a_fixed_length_workload_share_nothing_however_alike_
     assert (workload_kind(replay), workload_kind(fixed), workload_kind(TASK)) == (AGENTX, INFERENCEX, INFERENCEX)
     assert task_similarity(fixed, replay) == task_similarity(replay, fixed) == 0.0
     assert task_similarity(replay, replay) == pytest.approx(1.0)
-
-
-def test_effective_sessions_count_equally_similar_sessions() -> None:
-    assert effective_sessions([1.0, 1.0]) == pytest.approx(2.0)
-    assert effective_sessions([1.0, 0.0]) == pytest.approx(1.0)
-    assert effective_sessions([]) == 0.0

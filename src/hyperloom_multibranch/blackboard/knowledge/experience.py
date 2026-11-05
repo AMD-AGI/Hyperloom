@@ -156,7 +156,8 @@ def _decision(record: TestRecord) -> str:
 
 def _accuracy(record: TestRecord, others: Sequence[TestRecord] = ()) -> dict[str, object] | None:
     """The accuracy of the tests ``record``'s judgement rests on, its own reading first, the rest found among
-    ``others``: a confirm's eval stands for an explore that skipped its own."""
+    ``others``: a confirm's eval stands for an explore that skipped its own. A test the gate did not judge, such as a
+    candidate that failed first, did not pass it."""
 
     judged = record.judgement
     behind = set(judged.request_ids) - {record.request_id} if judged is not None else set()
@@ -165,8 +166,10 @@ def _accuracy(record: TestRecord, others: Sequence[TestRecord] = ()) -> dict[str
     asked = any(reading.request.accuracy for reading in readings)
     if not (asked or scores or record.conclusion is Conclusion.ACCURACY_FAILED):
         return None
-    passed = record.conclusion is not Conclusion.ACCURACY_FAILED and (
-        judged is None or judged.accuracy is AccuracyVerdict.PASSED
+    passed = (
+        judged is not None
+        and judged.accuracy is AccuracyVerdict.PASSED
+        and record.conclusion is not Conclusion.ACCURACY_FAILED
     )
     return {"required": True, "passed": passed, "value": next(iter(scores), None)}
 

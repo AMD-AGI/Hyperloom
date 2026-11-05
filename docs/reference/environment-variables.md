@@ -268,7 +268,7 @@ does, so under `HYPERLOOM_RSI_WRITE_ONLY=1` it finds none and `HYPERLOOM_RSI_AS_
 |---|---|---|
 | `HYPERLOOM_RSI_ARCHIVE` | None; required | The archive directory sessions read and write. A session refuses to start when it is unset or not a writable directory. Operator configuration. |
 | `HYPERLOOM_IMAGE_CHECK` | `warn` | How a session checks the rule pack's facts about the image before PRELUDE: `warn` logs a failing fact, `strict` refuses to start, `off` checks nothing; any other value is a usage error. |
-| `HYPERLOOM_RSI_AS_OF` | Unset (everything) | An ISO time; the archive is read as it stood then, so sessions run as repeats or as pairs start from one state. For experiments. |
+| `HYPERLOOM_RSI_AS_OF` | Unset (everything) | An ISO time the archive is read as of, for sessions run as repeats or as pairs: lessons and playbooks by when they were written, a search tree by its session's start plus budget, not by when CLOSE wrote it. A tree that ended by then but is written after it is read by a session that loads the archive after the write and missed by one that loads it before. For experiments. |
 | `HYPERLOOM_RSI_WRITE_ONLY` | Unset (read and write) | `1` reads nothing of the archive, for a run beside the archive runs, while CLOSE still writes the session's outcomes into it. For experiments. |
 
 ---

@@ -50,7 +50,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import (
     LineageKind,
 )
 from hyperloom_multibranch.blackboard.codec import decode, encode
-from hyperloom_multibranch.blackboard.families import family_of
+from hyperloom_multibranch.blackboard.families import Mechanism, family_of
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.local.unfinished import hinted_gain
 from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, task_conditions
@@ -60,14 +60,17 @@ log = logging.getLogger(__name__)
 TREE_FORMAT = "multibranch.search-tree.v1"
 SOURCE_BLACKBOARD = "multibranch-notebook"
 ARCHIVE_ENV = "HYPERLOOM_RSI_ARCHIVE"
-#: The time the archive is read as of, so that sessions run as repeats or as pairs start from one state: what was
-#: written after it, trees, lessons and playbooks alike, is not read.
+#: The time the archive is read as of, for sessions run as repeats or as pairs. Lessons and playbooks are read by
+#: when they were written, a tree by its nominal end, its session's start plus its budget, not by when CLOSE wrote
+#: it: a tree that ended by this time and that CLOSE writes after it is read by a session that loads the archive
+#: after the write and missed by one that loads it before.
 AS_OF_ENV = "HYPERLOOM_RSI_AS_OF"
 #: Set to 1, the session is a no-KB run beside the KB runs on one archive: it reads nothing the archive holds, not its
 #: trees, lessons, menus or playbooks, while CLOSE still writes the session's own outcomes into it.
 WRITE_ONLY_ENV = "HYPERLOOM_RSI_WRITE_ONLY"
 SINGLE_HOST = "local"
 _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")
+_MECHANISMS = frozenset(item.value for item in Mechanism)
 
 
 @dataclass(frozen=True)
@@ -95,7 +98,8 @@ class TreeDirection:
     at over its parent, among those that kept accuracy; ``None`` when none was. ``cross_image`` when it replayed a
     Recipe KB champion built on another image, so later sessions learn how often such a replay pays.
     ``family_target`` and ``family_mechanism`` are its direction family (:mod:`blackboard.families`), read off the change
-    its first test made; empty in a tree archived before they were kept."""
+    its first test made; empty and ``None`` in a tree archived before they were kept, and the mechanism ``None`` where
+    the tree names one this version does not know."""
 
     target: str
     mechanism: str
@@ -105,7 +109,7 @@ class TreeDirection:
     best_gain_pct: float | None = None
     cross_image: bool = False
     family_target: str = ""
-    family_mechanism: str = ""
+    family_mechanism: Mechanism | None = None
 
 
 @dataclass(frozen=True)
@@ -262,12 +266,35 @@ def tree_document(tree: SearchTree) -> dict[str, object]:
     return {"format": TREE_FORMAT, "tree": encode(tree)}
 
 
-def tree_from_document(document: Mapping[str, object]) -> SearchTree:
-    """The tree :func:`tree_document` wrote; raises ``ValueError`` or ``TypeError`` on anything else."""
+def tree_from_document(document: object) -> SearchTree:
+    """The tree :func:`tree_document` wrote, a direction's family mechanism this version does not know read as
+    ``None``; raises ``ValueError`` or ``TypeError`` on anything else, ``TypeError`` for a document that is not an
+    object."""
 
+    if not isinstance(document, Mapping):
+        raise TypeError(f"expected an object, got {document!r}")
     if document.get("format") != TREE_FORMAT:
         raise ValueError(f"unsupported search tree format {document.get('format')!r}")
-    return decode(SearchTree, document.get("tree"))
+    return decode(SearchTree, _known_families(document.get("tree")))
+
+
+def _known_families(tree: object) -> object:
+    """The stored ``tree`` with each direction's family mechanism this version does not know as ``None``."""
+
+    if not isinstance(tree, Mapping) or not isinstance(tree.get("branches"), list):
+        return tree
+    branches: list[object] = []
+    for stored in tree["branches"]:
+        if isinstance(stored, Mapping) and isinstance(stored.get("directions"), list):
+            stored = {**stored, "directions": [_known_family(item) for item in stored["directions"]]}
+        branches.append(stored)
+    return {**tree, "branches": branches}
+
+
+def _known_family(direction: object) -> object:
+    if isinstance(direction, Mapping) and direction.get("family_mechanism") not in _MECHANISMS:
+        return {**direction, "family_mechanism": None}
+    return direction
 
 
 def session_start(snapshot: BlackboardSnapshot) -> float:
@@ -391,7 +418,7 @@ def _directions(
                 best_gain_pct=max(gains) if gains else None,
                 cross_image=intent.target == REPLAY_TARGET and intent.mechanism in cross_image,
                 family_target=family.target,
-                family_mechanism=family.mechanism.value,
+                family_mechanism=family.mechanism,
             )
         )
     return tuple(directions)
@@ -525,9 +552,9 @@ def as_of_from_env(env: Mapping[str, str] | None = None) -> float | None:
 
 
 class TreeArchive:
-    """The shared folder of archived search trees; with ``as_of``, read as it stood then: only the trees of sessions
-    whose budget ran out by then. Every archive beside it, the lesson pool and the playbook pool, is read as of then
-    too."""
+    """The shared folder of archived search trees; with ``as_of``, only the trees of sessions whose budget ran out by
+    then, whenever CLOSE wrote them (:data:`AS_OF_ENV`). Every archive beside it, the lesson pool and the playbook
+    pool, is read as of then too."""
 
     def __init__(self, root: Path, as_of: float | None = None) -> None:
         self.root = root / "trees"

@@ -128,6 +128,7 @@ def test_a_judged_replay_asks_the_judge_every_round_and_refuses_the_stop_of_a_br
 
 def test_a_judges_reply_names_the_branches_to_stop_in_its_json_object() -> None:
     assert stops_in('Stop these: {"stop": [{"branch": "b1", "reason": "stalled"}, "b2"]} done') == ("b1",)
+    assert stops_in('{"stop": [{"branch": "b1", "reason": "stalled"}]}\nThe rest {b2, b3} stand.') == ("b1",)
     assert stops_in("{not json}") == () == stops_in('["b1"]') == stops_in('{"stop": null}')
     assert stops_in('{"stop": true}') == () == stops_in('{"stop": 1}') == stops_in('{"stop": "b1"}')
 

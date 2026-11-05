@@ -24,17 +24,17 @@ curator, the session and the model. The step never stops CLOSE: what it could no
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.blackboard.learning_search import word_overlap, words
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS, LEARNING_MIN_CHARS
 from hyperloom_multibranch.blackboard.rsi.archive import NO_ARCHIVE, SKIPPED, TreeArchive
-from hyperloom_multibranch.blackboard.rsi.authoring import Complete
+from hyperloom_multibranch.blackboard.rsi.ladder import Complete
 from hyperloom_multibranch.blackboard.rsi.learning_eval import REDISCOVERY_OVERLAP
 from hyperloom_multibranch.blackboard.rsi.lessons import (
     Lesson,
@@ -166,12 +166,8 @@ def curation_prompt(snapshot: BlackboardSnapshot, found: _Offer) -> str:
 
 
 def _steps(answer: str) -> list[Any] | None:
-    start, end = answer.find("{"), answer.rfind("}")
-    try:
-        document = json.loads(answer[start : end + 1]) if 0 <= start < end else None
-    except json.JSONDecodeError:
-        return None
-    actions = document.get("actions") if isinstance(document, dict) else None
+    document = extract_last_json_with_key(answer, "actions")
+    actions = document["actions"] if document is not None else None
     return actions if isinstance(actions, list) else None
 
 

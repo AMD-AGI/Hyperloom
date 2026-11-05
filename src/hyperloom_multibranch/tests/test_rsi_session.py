@@ -42,12 +42,14 @@ from hyperloom_multibranch.blackboard.rsi.archive import (
 )
 from hyperloom_multibranch.blackboard.rsi.frontier import (
     CANDIDATE_COMPONENT,
-    EVIDENCE_COMPONENTS,
+    MERGED_COMPONENT,
+    MERGED_GAIN_COMPONENT,
     NEAR_BAR_COMPONENT,
     PROBATION_COMPONENT,
     SETTLED_TESTS,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
+    STRANDED_COMPONENT,
 )
 from hyperloom_multibranch.blackboard.rsi.ladder import trials
 from hyperloom_multibranch.blackboard.rsi.playbook import (
@@ -117,6 +119,18 @@ SESSION_ARGS = [
 ]  # fmt: skip
 STALLED = "stalled past the bar"
 INSISTED = "stop it whatever holds it"
+STALL_EVIDENCE = frozenset(
+    {
+        STALLED_COMPONENT,
+        STALL_BAR_COMPONENT,
+        MERGED_COMPONENT,
+        MERGED_GAIN_COMPONENT,
+        NEAR_BAR_COMPONENT,
+        STRANDED_COMPONENT,
+        CANDIDATE_COMPONENT,
+        PROBATION_COMPONENT,
+    }
+)
 
 
 @pytest.fixture(autouse=True)
@@ -386,7 +400,7 @@ async def test_a_session_that_plays_no_playbook_runs_as_one_without_the_rsi(
         assert "Scheduling playbook" not in prompt and "Open areas" not in prompt
         assert "How similar past sessions went" not in prompt
     rows = [row for rows in _rounds(stage) for row in rows.values()]
-    assert not any(EVIDENCE_COMPONENTS & set(row.get("components", {})) for row in rows)
+    assert not any(STALL_EVIDENCE & set(row.get("components", {})) for row in rows)
     assert not any(row.get("held") in (HoldReason.NEAR_BAR.value, HoldReason.PROBATION.value) for row in rows)
     assert (await _stops(stage))["b02"] == f"judge: {INSISTED}"
     assert not any(node.probations for node in (await stage.handle(Role.OBSERVER).lineage()).branches)

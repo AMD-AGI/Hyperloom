@@ -265,6 +265,9 @@ class CrossSessionBriefing(StartupBriefProvider):
     """
 
     blackboard: Blackboard
+    recalls: RecallCache
+    champions: dict[str, frozenset[str]]
+    refused: dict[str, set[str]]
     warm: tuple[WarmLead, ...] = ()
     references: tuple[ReferenceLead, ...] = ()
     experiences: ExperienceReader | None = None
@@ -273,11 +276,8 @@ class CrossSessionBriefing(StartupBriefProvider):
     branch: str = ""
     identities: IdentityIndex | None = None
     learnings: LearningRecall | None = None
-    recalls: RecallCache | None = None
     repo: RecipeReads | None = None
-    champions: dict[str, frozenset[str]] | None = None
     stack_slot: StackSlot | None = None
-    refused: dict[str, set[str]] | None = None
     menus: DirectionMenus | None = None
     cases: CasePool | None = None
 
@@ -330,7 +330,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     async def _champions_of(self, repo: RecipeReads, commit: str, prepared: Sequence[PreparedReplay]) -> frozenset[str]:
         """The champions of ``prepared`` whose recipe ``commit``'s is; none when it cannot be read, so they stay leads."""
 
-        kept = self.champions.get(commit) if self.champions is not None else None
+        kept = self.champions.get(commit)
         if kept is not None:
             return kept
         try:
@@ -339,8 +339,7 @@ class CrossSessionBriefing(StartupBriefProvider):
         except (KeyError, RuntimeError, ValueError) as exc:
             log.warning("could not read %s to find the warm-start champions it is: %s", commit, exc)
             return frozenset()
-        if self.champions is not None:
-            self.champions[commit] = kept
+        self.champions[commit] = kept
         return kept
 
     async def peer_replay(self, request_id: str) -> PeerReplay:
@@ -376,8 +375,7 @@ class CrossSessionBriefing(StartupBriefProvider):
         return PeerReplay(request_id, request.branch, head, delta, delta_layer(delta), replaces)
 
     def _refuse(self, request_id: str, head: str) -> None:
-        if self.refused is not None:
-            self.refused.setdefault(request_id, set()).add(head)
+        self.refused.setdefault(request_id, set()).add(head)
 
     def _unrefused(
         self, leads: Sequence[UnfinishedLead], snapshot: BlackboardSnapshot, start_commit: str
@@ -423,7 +421,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             return None
         baseline = snapshot.baseline.values.get(self.metric) if snapshot.baseline is not None else None
         key = (self.focus, self.branch, baseline)
-        if self.recalls is not None and (kept := self.recalls.get(key)) is not None:
+        if (kept := self.recalls.get(key)) is not None:
             return kept
         recall = await asyncio.to_thread(
             recall_experiences,
@@ -433,8 +431,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             RecallQuery(self.focus, self.branch),
             identities=self.identities,
         )
-        if self.recalls is not None:
-            self.recalls.keep(key, recall)
+        self.recalls.keep(key, recall)
         return recall
 
     async def _learnt(self, snapshot: BlackboardSnapshot) -> Notes:
@@ -478,13 +475,15 @@ class CrossSessionBriefing(StartupBriefProvider):
         return Notes()
 
     async def _known_defects(self, snapshot: BlackboardSnapshot) -> list[_Item]:
-        """A lesson for each defect the root carries: each pooled case that reproduced on it, by its diagnosis."""
+        """A lesson for each defect the root carries: each pooled case that reproduced on it, by the first line of its
+        diagnosis, clipped."""
 
         if self.cases is None:
             return []
         found = await asyncio.to_thread(known_defects, snapshot, self.cases)
         return [
-            _Item(True, f"{KNOWN_DEFECT} {item.origin}: {item.diagnosis.strip().splitlines()[0]}") for item in found
+            _Item(True, clipped(f"{KNOWN_DEFECT} {item.origin}: {item.diagnosis.strip().splitlines()[0]}"))
+            for item in found
         ]
 
     async def startup_brief(self, start_commit: str) -> StartupBrief:
