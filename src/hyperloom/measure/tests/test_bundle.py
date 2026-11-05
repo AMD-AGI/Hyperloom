@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import replace
+import subprocess
+import sys
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -19,7 +22,8 @@ from hyperloom.measure.tests.bundle_factory import (
 )
 
 from hyperloom.measure import bundle as bundle_mod
-from hyperloom.measure import signing
+from hyperloom.measure import fsafe, signing
+from hyperloom.measure.manifest import encode_manifest
 from hyperloom.measure.bundle import (
     RecordedBundle,
     MaterializeError,
@@ -115,6 +119,34 @@ def test_a_signed_manifest_listing_an_unsafe_path_is_rejected(bundle, path: str)
     assert _reason(bundle.staging, bundle) is RejectReason.MANIFEST_INVALID
 
 
+def _sign_raw(bundle, raw: bytes) -> None:
+    """Write ``raw`` as the manifest with a valid signature over exactly those bytes, whatever they hold."""
+    (bundle.staging / "manifest.json").write_bytes(raw)
+    (bundle.staging / "manifest.sig").write_text(signing.sign(raw, bundle.key), encoding="ascii")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("1" + "0" * 400, id="an-integer-no-float-holds"),
+        pytest.param("7" * 5000, id="an-integer-past-the-digit-limit"),
+        pytest.param("1e999", id="a-number-that-overflows-to-infinity"),
+        pytest.param("[" * 100_000 + "]" * 100_000, id="arrays-nested-past-the-parser-stack"),
+    ],
+)
+def test_a_signed_manifest_with_a_number_or_nesting_no_reader_holds_is_invalid_not_a_crash(bundle, value) -> None:
+    raw = encode_manifest(bundle.document)
+    tampered = raw.replace(b'"finished_unix":4.0', b'"finished_unix":' + value.encode())
+    assert tampered != raw
+    _sign_raw(bundle, tampered)
+    assert _reason(bundle.staging, bundle) is RejectReason.MANIFEST_INVALID
+
+
+def test_an_oversized_signature_is_a_bad_signature_not_an_oversized_manifest(bundle) -> None:
+    (bundle.staging / "manifest.sig").write_bytes(b"A" * (bundle_mod.MAX_SIGNATURE_BYTES + 1))
+    assert _reason(bundle.staging, bundle) is RejectReason.BAD_SIGNATURE
+
+
 def test_a_bundle_for_another_request_spec_or_sandbox_is_rejected(bundle) -> None:
     assert _reason(bundle.staging, bundle, request_id="other") is RejectReason.REQUEST_ID_MISMATCH
     assert _reason(bundle.staging, bundle, spec_fingerprint="0" * 16) is RejectReason.SPEC_FINGERPRINT_MISMATCH
@@ -188,6 +220,68 @@ def test_a_symlinked_staging_directory_is_rejected(bundle, tmp_path: Path) -> No
 
 def test_a_special_file_is_rejected(bundle) -> None:
     os.mkfifo(bundle.staging / "pipe")
+    assert _reason(bundle.staging, bundle) is RejectReason.UNSAFE_PATH
+
+
+def _nested(root: Path, depth: int) -> list[Path]:
+    """Make ``depth`` directories one inside the next below ``root``, one call per level; the deepest is last."""
+    levels = [root / "d"]
+    while len(levels) < depth:
+        levels.append(levels[-1] / "d")
+    for level in levels:
+        os.mkdir(level)
+    return levels
+
+
+def _remove_nested(levels: list[Path]) -> None:
+    """Remove what :func:`_nested` made, deepest first, without recursing (``shutil.rmtree`` recurses per level)."""
+    for path in reversed(levels):
+        for child in path.iterdir():
+            child.unlink()
+        path.rmdir()
+
+
+def test_a_staging_tree_nested_deeper_than_the_walk_goes_is_refused_as_unsafe_not_a_crash(bundle) -> None:
+    levels = _nested(bundle.staging, 1100)
+    try:
+        assert _reason(bundle.staging, bundle) is RejectReason.UNSAFE_PATH
+    finally:
+        _remove_nested(levels)
+
+
+def test_a_listed_file_as_deep_as_the_walk_goes_verifies_and_one_level_deeper_is_unsafe(bundle) -> None:
+    levels = _nested(bundle.staging, fsafe.MAX_DEPTH)
+    try:
+        files = {**DEFAULT_FILES, (levels[-1] / "f.txt").relative_to(bundle.staging).as_posix(): b"deep\n"}
+        deep = make_bundle(bundle.staging, files, key=bundle.key)
+        verify_bundle(deep.staging, verify_args(deep))
+        levels.append(levels[-1] / "d")
+        os.mkdir(levels[-1])
+        files[(levels[-1] / "g.txt").relative_to(bundle.staging).as_posix()] = b"deeper\n"
+        deeper = make_bundle(bundle.staging, files, key=bundle.key)
+        assert _reason(deeper.staging, deeper) is RejectReason.UNSAFE_PATH
+    finally:
+        _remove_nested(levels)
+
+
+def test_an_entry_removed_while_the_staging_directory_is_walked_is_refused_as_unsafe(bundle, monkeypatch) -> None:
+    real_scandir = os.scandir
+
+    class _ListedThenRemoved:
+        """The listing of a directory, after which ``server.log`` is removed: as if it went between scan and open."""
+
+        def __init__(self, fd: int) -> None:
+            with real_scandir(fd) as entries:
+                self._entries = list(entries)
+            (bundle.staging / "server.log").unlink(missing_ok=True)
+
+        def __enter__(self):
+            return iter(self._entries)
+
+        def __exit__(self, *exc_info) -> None:
+            return None
+
+    monkeypatch.setattr(fsafe.os, "scandir", _ListedThenRemoved)
     assert _reason(bundle.staging, bundle) is RejectReason.UNSAFE_PATH
 
 
@@ -345,6 +439,68 @@ def test_without_hard_links_the_files_are_still_placed_exclusively(bundle, tmp_p
     out = tmp_path / "out"
     materialize(verify_bundle(bundle.staging, verify_args(bundle)), out)
     assert (out / "server.log").read_bytes() == DEFAULT_FILES["server.log"]
+
+
+#: Run in a child process, so the file-size limit binds that process alone: verify the bundle, limit the size of any
+#: file the process writes, and materialize. ``copied`` takes the cross-device fallback and sets the limit only once the
+#: checked copies are staged, so it is the placement copy that is cut short. Prints what materialize ended with.
+_MATERIALIZE_UNDER_A_FILE_SIZE_LIMIT = """
+import errno, json, resource, sys
+from pathlib import Path
+
+from hyperloom.measure import bundle
+
+staging, out, limit, placement = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+verified = bundle.verify_bundle(Path(staging), bundle.BundleExpectation(**json.loads(sys.stdin.read())))
+
+
+def limit_file_size():
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
+
+
+def no_link(*args, **kwargs):
+    raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+
+if placement == "copied":
+    place_all = bundle._place_all
+
+    def place_all_limited(*args):
+        limit_file_size()
+        return place_all(*args)
+
+    bundle.os.link = no_link
+    bundle._place_all = place_all_limited
+else:
+    limit_file_size()
+try:
+    bundle.materialize(verified, Path(out))
+except (OSError, bundle.MaterializeError) as exc:
+    print(type(exc).__name__)
+else:
+    print("returned")
+"""
+
+
+@pytest.mark.parametrize("placement", ["linked", "copied"])
+def test_a_copy_cut_short_by_a_file_size_limit_fails_and_lands_nothing(tmp_path: Path, placement: str) -> None:
+    big = bytes(range(256)) * (3 * 4096) + b"x" * 500  # 3 MiB and 500 bytes: four writes of at most 1 MiB
+    staged = make_bundle(tmp_path / "staging", {"big.bin": big, "small.txt": b"small\n"})
+    out = tmp_path / "out"
+    source_root = Path(bundle_mod.__file__).resolve().parents[2]
+    child = subprocess.run(
+        [sys.executable, "-c", _MATERIALIZE_UNDER_A_FILE_SIZE_LIMIT, str(staged.staging), str(out), str(len(big) - 400)]
+        + [placement],
+        input=json.dumps(asdict(verify_args(staged))),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, "PYTHONPATH": str(source_root)},
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() in ("OSError", "MaterializeError"), "materialize returned over a truncated copy"
+    assert list(out.iterdir()) == [], "nothing was placed, not even the scratch directory"
 
 
 def test_read_file_refuses_a_file_changed_after_verification_and_an_unlisted_name(bundle) -> None:
