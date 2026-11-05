@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.fs_utils import (
+    is_private_dir,
     read_bytes_nofollow,
     read_text_nofollow,
     regular_files_nofollow,
@@ -183,3 +184,21 @@ def test_reading_below_a_base_refuses_a_swapped_directory_or_file(tmp_path):
         read_text_below_nofollow(base, ("d", "f"))
     with pytest.raises(OSError):
         read_text_below_nofollow(base, ("g",))
+
+
+def test_a_private_directory_is_this_accounts_own_not_a_link_and_only_it_can_write_it(tmp_path, monkeypatch):
+    mine = tmp_path / "mine"
+    mine.mkdir(mode=0o700)
+    (tmp_path / "link").symlink_to(mine)
+    (tmp_path / "file").write_text("", encoding="utf-8")
+
+    assert is_private_dir(mine)
+    assert not is_private_dir(tmp_path / "link"), "a link to one is not"
+    assert not is_private_dir(tmp_path / "file")
+    assert not is_private_dir(tmp_path / "missing")
+    for mode, private in ((0o755, True), (0o770, False), (0o707, False)):
+        mine.chmod(mode)
+        assert is_private_dir(mine) is private, oct(mode)
+    uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+    assert not is_private_dir(mine), "another account's"

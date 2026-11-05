@@ -35,6 +35,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.gateway import LlmGateway, resolve_openai_gateway
+from kernelforge.agent_backends.structured_output import output_json_schema
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 
 log = logging.getLogger(__name__)
@@ -670,13 +671,16 @@ class CodexBackend:
         spec: AgentRunSpec,
     ) -> dict[str, Any]:
         """Build SDK options for one non-interactive Codex turn."""
-        return {
+        options = {
             "approval_mode": sdk.ApprovalMode.deny_all,
             "cwd": spec.cwd,
             "effort": resolve_codex_reasoning_effort(spec.reasoning_effort),
             "model": resolve_codex_model(spec.model),
             "sandbox": self._sdk_sandbox(sdk, spec),
         }
+        if spec.output_schema is not None:
+            options["output_schema"] = output_json_schema(spec.output_schema)
+        return options
 
     def probe(
         self,
