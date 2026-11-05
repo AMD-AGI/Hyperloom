@@ -29,6 +29,7 @@ __all__ = [
     "measured_verdict",
     "stack_of",
     "stack_of_measured",
+    "unqueued_variants",
     "variants_queued_on_stack",
 ]
 
@@ -180,13 +181,7 @@ def _launch_keys(params: Mapping[str, Any]) -> list[tuple[str, str]]:
 
 
 def variants_queued_on_stack(params: Mapping[str, Any], active: Iterable[Any]) -> set[str]:
-    """Content fingerprints of the variants ``active`` already holds on ``params``'s stack.
-
-    A queued grid only covers a proposed one when the two would launch on the
-    same stack: the same configuration on a moved anchor is a measurement the
-    queued grid never made. The stack comparison is :func:`stack_of`, so both
-    sides normalise alike.
-    """
+    """Content fingerprints of the variants ``active`` already holds on ``params``'s stack, as :func:`stack_of` reads it."""
     stack = stack_of(params)
     return {
         content_fingerprint(variant)
@@ -195,3 +190,22 @@ def variants_queued_on_stack(params: Mapping[str, Any], active: Iterable[Any]) -
         for variant in (task.params or {}).get("grid") or ()
         if isinstance(variant, Mapping)
     }
+
+
+def unqueued_variants(grid: list[Any], params: Mapping[str, Any], active: Iterable[Any]) -> list[dict[str, Any]]:
+    """``grid`` without the variants ``active`` already holds on ``params``'s stack, or that repeat within it.
+
+    A kernel-overlay variant is always kept: its args and envs do not name the kernel it loads.
+    """
+    already = variants_queued_on_stack(params, active)
+    kept: list[dict[str, Any]] = []
+    for variant in grid:
+        if not isinstance(variant, dict):
+            continue
+        if not variant.get("overlay_pythonpath"):
+            fingerprint = content_fingerprint(variant)
+            if fingerprint in already:
+                continue
+            already.add(fingerprint)
+        kept.append(variant)
+    return kept

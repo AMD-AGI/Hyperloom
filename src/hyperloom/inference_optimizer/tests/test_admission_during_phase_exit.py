@@ -26,54 +26,26 @@ def _dispatcher(*, frozen: bool) -> DispatcherCollaborator:
     dispatcher.admission_frozen = frozen
     dispatcher._coord = SimpleNamespace(
         tasks=SimpleNamespace(queued=_no_queued),
-        # Resolved before the specialist gate reads the action name.
         shared_state=SimpleNamespace(find_gap=lambda _cid: None),
         action_registry={},
     )
     dispatcher._phase_denial_for_action = lambda _a: None
     dispatcher._sequence_denial_for_action = lambda _a: None
     dispatcher.time_budget_denial_for_action = lambda _a, **_kw: None
-    dispatcher.expected_cost_minutes_for = lambda _kind, _params=None: 12.0
     return dispatcher
 
 
-def test_a_phase_waiting_to_leave_refuses_the_round_it_would_have_cancelled():
-    """Seventeen minutes of a FRAMEWORK_AGENT phase went this way.
-
-    The transition to KERNEL_AGENT was decided but held on one running
-    explore, so ``_drain_for_transition`` re-cleared the queue every tick
-    while admission kept saying yes. Eleven rounds were proposed, reviewed,
-    admitted and cancelled within half a second each.
-    """
-    denied = asyncio.run(_dispatcher(frozen=True).admission_denial_for_action("explore", params=_ONE_VARIANT))
-
-    assert denied is not None
-    assert denied.rule == "phase_transition_pending"
-    assert "leaving" in str(denied)
-    # The agent is told to wait rather than re-propose; a bare refusal reads as "never".
-    assert "propose again" in str(denied.hint)
-
-
-def test_the_freeze_outranks_the_gates_below_it():
-    """A frozen phase is not a budget question, so it answers before the clock is read."""
+def test_a_phase_waiting_to_leave_refuses_new_rounds_until_the_flag_lifts():
     dispatcher = _dispatcher(frozen=True)
+    # The freeze answers before the clock is read.
     dispatcher.time_budget_denial_for_action = lambda _a, **_kw: PolicyDenied("too slow", rule="phase_time_budget")
 
     denied = asyncio.run(dispatcher.admission_denial_for_action("explore", params=_ONE_VARIANT))
 
     assert denied is not None and denied.rule == "phase_transition_pending"
-
-
-def test_a_phase_that_is_staying_admits_as_before():
-    assert asyncio.run(_dispatcher(frozen=False).admission_denial_for_action("explore", params=_ONE_VARIANT)) is None
-
-
-def test_the_freeze_lifts_with_the_flag():
-    """The phase machine clears the flag the moment the transition commits, and admission follows."""
-    dispatcher = _dispatcher(frozen=True)
-
-    assert asyncio.run(dispatcher.admission_denial_for_action("explore", params=_ONE_VARIANT)) is not None
+    assert "propose again" in str(denied.hint)
 
     dispatcher.admission_frozen = False
+    dispatcher.time_budget_denial_for_action = lambda _a, **_kw: None
 
     assert asyncio.run(dispatcher.admission_denial_for_action("explore", params=_ONE_VARIANT)) is None

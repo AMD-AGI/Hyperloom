@@ -128,23 +128,42 @@ def specialist_admission_minutes(shared_state: SharedState, params: dict[str, An
 
 
 def explore_admission_minutes(per_round_minutes: float, params: dict[str, Any] | None) -> float:
-    """What an explore round costs: one measured round for each variant its grid carries.
-
-    The catalogue prices an action, and an explore is priced as one round --
-    but the task is a whole grid and every variant in it is a server launch and
-    a benchmark on the same serving lane. A measured FRAMEWORK_AGENT explore
-    carrying four variants ran 39.9 minutes against the ~12 it was admitted
-    at, so a queue charged per task reads as a third of what it will take: that
-    phase queued 23 rounds in 52 minutes and still had every one of them
-    waiting 95 minutes later, when the exit cancelled them unmeasured.
-    """
+    """What an explore round costs: one measured round per grid variant, or one short boot per cycle-bench arm."""
     from ..actions.executors.cycle_bench_arm import CYCLE_ARM_MINUTES, CYCLE_ARMS_PARAM
 
     if CYCLE_ARMS_PARAM in (params or {}):
-        # A cycle batch boots once per candidate and once per bracketing base, each far shorter than a replay round.
+        # A cycle batch boots once per candidate and once per bracketing base.
         return CYCLE_ARM_MINUTES * (len(params[CYCLE_ARMS_PARAM] or ()) + 2)
     variants = len(((params or {}).get("grid") or ()))
     return per_round_minutes * variants if variants > 1 else per_round_minutes
+
+
+def expected_round_minutes(
+    action_name: str, params: dict[str, Any] | None, action_registry: Any, shared_state: SharedState
+) -> float:
+    """What one round of a catalogued action is admitted at, on this session's measured baseline round once one exists."""
+    action = str(action_name or "").strip()
+    meta = action_registry.get(action)
+    if meta is None:
+        return 0.0
+    minutes = expected_action_cost_minutes(meta, measured_baseline_sec=measured_baseline_runtime_sec(shared_state))
+    return explore_admission_minutes(minutes, params) if action == "explore" else minutes
+
+
+def queued_lane_minutes(action_name: str, queued: Any, action_registry: Any, shared_state: SharedState) -> float:
+    """Minutes the ``queued`` tasks have committed on the lanes ``action_name`` needs; other lanes run alongside."""
+
+    def lanes(name: str) -> set[str]:
+        meta = action_registry.get(str(name or "").strip())
+        return set(getattr(meta, "requires_lanes", ()) or ()) if meta is not None else set()
+
+    wanted = lanes(action_name)
+    total = 0.0
+    for task in queued:
+        kind = str(getattr(task, "kind", "") or "")
+        if not wanted or wanted & lanes(kind):
+            total += expected_round_minutes(kind, getattr(task, "params", None), action_registry, shared_state)
+    return total
 
 
 def time_budget_denial(
@@ -195,12 +214,7 @@ def time_budget_denial(
 
 
 def _denial_hint(queued_minutes: float, usable_sec: float | None, short_hint: str) -> str:
-    """What to do about a refusal: wait for the queue when it is what fills a budget that can fund it, else ``short_hint``.
-
-    A GLM-5.3 FRAMEWORK_AGENT phase with 410 minutes left had about 390 of them queued. Read as a phase too short to
-    fund an explore, the refusal sent the orchestrator to ``skip_to_kernel``, and the exit cancelled the four queued
-    rounds it had been waiting on, unmeasured, with six hours of the phase unspent.
-    """
+    """What to do about a refusal: wait for the queue when it is what fills a budget that can fund it, else ``short_hint``."""
     if queued_minutes > 0 and action_fits_time_budget(usable_sec=usable_sec, expected_cost_minutes=queued_minutes):
         return (
             "the budget is booked, not spent: the work already queued on this action's lanes fits it and runs first. "

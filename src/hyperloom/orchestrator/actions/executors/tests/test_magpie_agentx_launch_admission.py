@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.orchestrator.loop.intent_router import DelegateRequest, IntentRouter
+from hyperloom.orchestrator.loop._explore_delegate import _keep_launchable_variants
 
 _MODULE = "Magpie.modes.benchmark.agentx_launch"
 _GOLDEN_REFUSAL = "Changing AgentX golden acceptance inputs requires a new resolved recipe"
@@ -96,28 +96,18 @@ def _variant(name: str, args: str) -> dict:
 
 
 def _narrow(workspace, grid):
-    """Run the explore admission narrowing on ``grid``; the outcome, the grid left and the observations."""
+    """Run the launch-contract narrowing on ``grid``; the outcome, the grid left and the observations."""
     observations: list[dict] = []
 
     async def record_observation(sender, kind, payload):
         observations.append(payload)
 
-    async def no_tasks():
-        return []
-
-    async def not_queued(grid, params):
-        return list(grid)
-
-    router = IntentRouter.__new__(IntentRouter)
-    router._coord = SimpleNamespace(
+    router = SimpleNamespace(
         shared_state=SimpleNamespace(baseline_workspace=str(workspace)),
         bus=SimpleNamespace(record_observation=record_observation),
-        tasks=SimpleNamespace(queued=no_tasks, running=no_tasks),
-        dispatcher=SimpleNamespace(variants_not_already_queued=not_queued),
     )
     params = {"grid": list(grid)}
-    request = DelegateRequest("orchestration", SimpleNamespace(payload={}), "explore", params)
-    admitted = asyncio.run(router._narrow_explore_grid(request, "explore-key", None, False))
+    admitted = asyncio.run(_keep_launchable_variants(router, "orchestration", params))
     return admitted, params["grid"], observations
 
 

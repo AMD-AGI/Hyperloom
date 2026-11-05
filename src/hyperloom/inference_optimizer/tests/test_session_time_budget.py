@@ -429,7 +429,7 @@ class TestThePhaseBudgetGate:
         """Read as a phase too short to fund an explore, a booked one was escalated out of, cancelling its queue."""
         _set_budget(coord, minutes=24 * 60)
         _set_phase_budget(coord, monkeypatch, phase="FRAMEWORK_AGENT", minutes_left=410)
-        queued = 410.0 - coord.dispatcher.expected_cost_minutes_for("explore") / 2
+        queued = 410.0 - coord.dispatcher.admission_cost_minutes("explore") / 2
 
         denied = coord.dispatcher.time_budget_denial_for_action("explore", already_committed_minutes=queued)
 

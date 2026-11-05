@@ -577,13 +577,16 @@ class ConversationCollaborator(CoordinatorCollaborator):
         append_conversation(session_dir=self.session_dir, record=record)
 
     def _explore_grid_fingerprints(self) -> set[str]:
-        """Content fingerprints of the variants in every queued or running explore grid.
+        """Content fingerprints of the variants in every queued or running explore grid."""
+        from ..actions.executors._proposal_identity import content_fingerprint
 
-        The dispatcher owns this reading: it is the same set the enqueue gate
-        narrows a proposed grid against, and two copies would drift into the
-        prompt promising one thing while admission did another.
-        """
-        return self._coord.dispatcher.queued_grid_fingerprints()
+        return {
+            content_fingerprint(variant)
+            for task in (*self.tasks.queued_context_sync(), *self.tasks.running_context_sync())
+            if task.kind == _EXPLORE
+            for variant in (task.params or {}).get("grid") or ()
+            if isinstance(variant, dict)
+        }
 
     def trajectory_digest(self) -> str:
         """The deterministic trajectory digest, or "" when building it fails."""

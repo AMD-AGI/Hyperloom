@@ -13,6 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.orchestrator.loop._dead_holder import account_dead_holder_failures
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
@@ -134,7 +135,7 @@ async def test_accounting_is_idempotent_per_task(session_dir):
     try:
         task = await _running_task_with_dead_lease(c, key="k-dead-once")
         await c.dispatcher.pump_dispatcher_once()
-        await c.dispatcher._account_dead_holder_failures([task.task_id], reason="dead_holder_pump")
+        await account_dead_holder_failures(c.dispatcher, [task.task_id], reason="dead_holder_pump")
         assert c.shared_state.baseline_failure_streak == 1
         assert len(c.shared_state.last_action_failures) == 1
     finally:
