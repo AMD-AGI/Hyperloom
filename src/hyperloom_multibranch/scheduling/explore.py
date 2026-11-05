@@ -223,8 +223,17 @@ class Explorer:
         the op shares of the commit they open on rather than the root's, which PRELUDE analysed from another recipe.
         """
 
-        if window.start_commit != window.root_commit:
-            self._events.start_profiling(window.start_commit, window.root_commit)
+        try:
+            if window.start_commit != window.root_commit:
+                self._events.start_profiling(window.start_commit, window.root_commit)
+            return await self._explore(window)
+        finally:
+            try:
+                await self._events.stop_profiling()
+            finally:
+                await self._integrator.abandon()
+
+    async def _explore(self, window: ExploreWindow) -> SessionStopReason:
         await self._open_named(window)
         opening = await self._ask(window, opening=True)
         first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.start_commit, window.explore_end)
@@ -240,12 +249,8 @@ class Explorer:
             return await self._steer(window, merging)
         finally:
             merging.cancel()
-            try:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await merging
-                await self._events.stop_profiling()
-            finally:
-                await self._integrator.abandon()
+            with contextlib.suppress(asyncio.CancelledError):
+                await merging
 
     async def _open_named(self, window: ExploreWindow) -> None:
         if self._clock.now() < window.explore_end:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import signal
@@ -115,6 +116,7 @@ from hyperloom_multibranch.scheduling.budget import (
     explore_gpu_seconds,
 )
 from hyperloom_multibranch.scheduling import branches
+from hyperloom_multibranch.scheduling import events
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILED
 from hyperloom_multibranch.scheduling.explore import (
     EXPLORE_TICK_SECONDS,
@@ -175,6 +177,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     ScriptedCompletion,
     SessionStep,
     StuckToolbox,
+    TAG_FLAG,
     VirtualClock,
     recipe_effect,
     recipe_tags,
@@ -1094,6 +1097,47 @@ async def test_an_agentx_champion_replay_asks_for_no_confirm_ahead_of_its_judgem
     assert not [request for request in requests.values() if request.retest_of == replay]
 
 
+class FasterChampionKB(OneChampionKB):
+    """The one champion, carrying ``c1``, which measures above the root, so its replay is kept as the start commit."""
+
+    def get_view(self, canonical_id: str, scope: Any) -> dict[str, Any] | None:
+        view = super().get_view(canonical_id, scope)
+        assert view is not None
+        view["knowledge"]["value"]["config"]["extra_server_args"] = f"{TAG_FLAG}c1"
+        return view
+
+
+async def test_the_profile_of_a_replayed_start_commit_is_stopped_before_final_when_the_opening_call_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    started, stop, phase = events.IntegrationProfiler.start, events.IntegrationProfiler.stop, lifecycle.Session._phase
+
+    def starting(profiler: events.IntegrationProfiler, head: str, moved_from: str) -> None:
+        order.append("profile")
+        started(profiler, head, moved_from)
+
+    async def stopping(profiler: events.IntegrationProfiler) -> None:
+        order.append("stop")
+        await stop(profiler)
+
+    def recording(session: lifecycle.Session, name: str, **detail: object) -> None:
+        order.append(name)
+        phase(session, name, **detail)
+
+    monkeypatch.setattr(events.IntegrationProfiler, "start", starting)
+    monkeypatch.setattr(events.IntegrationProfiler, "stop", stopping)
+    monkeypatch.setattr(lifecycle.Session, "_phase", recording)
+    stage = _stage(tmp_path)
+    stage.recipe_kb = FasterChampionKB()
+    stage.judge = ScriptedCompletion([_reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
+
+    outcome = await stage.run()
+
+    assert outcome.stop_reason is SessionStopReason.JUDGE_STOPPED
+    assert "profile" in order and "stop" in order[order.index("profile") : order.index("final")]
+
+
 def _fails_strictly() -> ImageCheckReport:
     raise ImageCheckFailed(replace(IMAGE_CHECK, mode=ImageCheckMode.STRICT))
 
@@ -1133,6 +1177,29 @@ async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Pat
     assert roster["closed"] and all(
         entry["stop"]["cause"] == StopCause.SESSION_END.value for entry in roster["entries"]
     )
+
+
+async def test_a_close_whose_first_record_fails_still_kills_releases_and_removes_the_signal_handlers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = _stage(tmp_path)
+    _script(stage)
+    recorded = lifecycle.Session._phase
+
+    def disk_full_at_close(session: lifecycle.Session, name: str, **detail: object) -> None:
+        if name == "close":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        recorded(session, name, **detail)
+
+    monkeypatch.setattr(lifecycle.Session, "_phase", disk_full_at_close)
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+
+    with pytest.raises(OSError, match="No space left"):
+        await stage.run()
+
+    assert stage.toolbox.closed == 1
+    assert stage.pids and not any(running(pid) for pid in stage.pids)
+    assert {sig: signal.getsignal(sig) for sig in handlers} == handlers
 
 
 def _signalling(stage: Stage) -> dict[str, SessionStep]:
@@ -2163,6 +2230,25 @@ async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_k
     assert (outcome.stop_reason, outcome.exit_code) == (SessionStopReason.MAPPED, 1)
     assert outcome.error.startswith(NO_MAP)
     assert "the pack has no dossier skill" in outcome.error
+    assert not stage.layout.agent_map.exists()
+
+
+async def test_a_run_that_stops_after_its_map_fails_when_its_dossier_pass_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def mapping(_start: DossierStart) -> DossierOutcome:
+        raise RuntimeError("the pass lost its sandbox")
+
+    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    stage = _stage(tmp_path)
+    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.dossier_pass = mapping
+
+    with pytest.raises(RuntimeError, match="the pass lost its sandbox"):
+        await stage.run()
+
+    report = json.loads(stage.layout.report.read_text())
+    assert "the pass lost its sandbox" in report["error"]
     assert not stage.layout.agent_map.exists()
 
 

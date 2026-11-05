@@ -41,21 +41,44 @@ def test_the_root_is_the_named_checkout_at_its_head_on_the_image(tmp_path: Path)
     assert framework_pin(framework) == UpstreamPin(REMOTE_URL, head_of(framework))
 
 
+def test_the_root_pins_a_credentialed_remote_without_its_userinfo(tmp_path: Path) -> None:
+    framework = framework_checkout(tmp_path, remote="https://user:ghp_secret@example.invalid/sglang.git")
+
+    recipe = launched_root("sglang", {MB_FRAMEWORK_REPO_ENV: str(framework)}, IMAGE)
+
+    assert framework_pin(framework) == UpstreamPin(REMOTE_URL, head_of(framework))
+    assert recipe == root_recipe("sglang", UpstreamPin(REMOTE_URL, head_of(framework)), IMAGE)
+
+
 def test_a_framework_without_remote_cannot_be_pinned(tmp_path: Path) -> None:
     framework = framework_checkout(tmp_path, remote="")
     with pytest.raises(PreludeReadError, match="no git remote"):
         launched_root("sglang", {MB_FRAMEWORK_REPO_ENV: str(framework)}, IMAGE)
 
 
-@pytest.mark.parametrize("named", [None, "site-packages"], ids=["none-named", "no-git-checkout"])
-def test_a_framework_path_that_is_no_git_checkout_pins_nothing(tmp_path: Path, named: str | None) -> None:
-    env = {}
-    if named is not None:
-        (tmp_path / named).mkdir()
-        env[MB_FRAMEWORK_REPO_ENV] = str(tmp_path / named)
-
-    assert launched_root("sglang", env, IMAGE).components == ()
+def test_a_session_whose_environment_names_no_framework_checkout_pins_nothing() -> None:
+    assert launched_root("sglang", {}, IMAGE).components == ()
     assert framework_pin(None) is None
+
+
+def test_a_named_framework_path_that_is_no_git_checkout_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "site-packages").mkdir()
+    with pytest.raises(PreludeReadError, match="not a git repository"):
+        launched_root("sglang", {MB_FRAMEWORK_REPO_ENV: str(tmp_path / "site-packages")}, IMAGE)
+
+
+def test_a_named_framework_checkout_git_cannot_read_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    framework = framework_checkout(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "no-git"))
+    with pytest.raises(PreludeReadError, match="rev-parse --show-toplevel"):
+        launched_root("sglang", {MB_FRAMEWORK_REPO_ENV: str(framework)}, IMAGE)
+
+
+def test_a_named_framework_directory_inside_another_checkout_is_refused(tmp_path: Path) -> None:
+    vendored = framework_checkout(tmp_path) / "vendor" / "sglang"
+    vendored.mkdir(parents=True)
+    with pytest.raises(PreludeReadError, match="not the top of its git checkout"):
+        launched_root("sglang", {MB_FRAMEWORK_REPO_ENV: str(vendored)}, IMAGE)
 
 
 def test_root_recipe_pins_the_framework_without_a_patch_on_the_main_flows_launch() -> None:
