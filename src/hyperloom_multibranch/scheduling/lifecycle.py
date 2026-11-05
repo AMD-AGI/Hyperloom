@@ -444,8 +444,10 @@ class Session:
             ending = replace(ending, error=f"{type(exc).__name__}: {exc}")
             raise
         finally:
-            ending = await self._close(ending, hard_stop)
-            self._signals.uninstall()
+            try:
+                ending = await self._close(ending, hard_stop)
+            finally:
+                self._signals.uninstall()
         return ending
 
     async def _until_stopped(
@@ -924,11 +926,15 @@ class Session:
         )
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
-        self._phase("close", stop_reason=ending.stop_reason.value, error=ending.error)
         if ending.stop_reason is SessionStopReason.ABORTED:
             hard_stop.bring_forward()
         close_by = hard_stop.at
-        closer = self._closer()
+        try:
+            self._phase("close", stop_reason=ending.stop_reason.value, error=ending.error)
+            closer = self._closer()
+        except BaseException:  # re-raised: nothing is stopped yet, so the sandboxes and processes go first
+            await self._stopper.release(TOOLBOX_CLOSE_SECONDS)
+            raise
         closing = asyncio.ensure_future(closer.close(ending.stop_reason, ending.final, ending.error, close_by))
         cut = asyncio.ensure_future(self._cut(hard_stop, close_by))
         try:

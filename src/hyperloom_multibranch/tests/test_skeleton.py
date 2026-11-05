@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import signal
@@ -1133,6 +1134,29 @@ async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Pat
     assert roster["closed"] and all(
         entry["stop"]["cause"] == StopCause.SESSION_END.value for entry in roster["entries"]
     )
+
+
+async def test_a_close_whose_first_record_fails_still_kills_releases_and_removes_the_signal_handlers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = _stage(tmp_path)
+    _script(stage)
+    recorded = lifecycle.Session._phase
+
+    def disk_full_at_close(session: lifecycle.Session, name: str, **detail: object) -> None:
+        if name == "close":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        recorded(session, name, **detail)
+
+    monkeypatch.setattr(lifecycle.Session, "_phase", disk_full_at_close)
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+
+    with pytest.raises(OSError, match="No space left"):
+        await stage.run()
+
+    assert stage.toolbox.closed == 1
+    assert stage.pids and not any(running(pid) for pid in stage.pids)
+    assert {sig: signal.getsignal(sig) for sig in handlers} == handlers
 
 
 def _signalling(stage: Stage) -> dict[str, SessionStep]:
