@@ -787,7 +787,7 @@ class Session:
 
     async def _dossier_map(self, source: str, start_commit: str, shares: RootShares | None) -> DossierOutcome | None:
         """How the dossier pass of the Arbor ``source`` on ``start_commit``, given ``shares`` as its profile, ended;
-        ``None`` when none ran (no runner, or no minutes for it) or it crashed. Each step is a ``PRELUDE`` decision."""
+        ``None`` when none ran (no runner, or no minutes for it). Each step is a ``PRELUDE`` decision."""
 
         from hyperloom_multibranch.specialist.dossier_pass import DossierStart
 
@@ -800,13 +800,7 @@ class Session:
         start = DossierStart(source, start_commit, self._clock.now() + minutes * MINUTE, *given)
         detail = {"source": source, "start_commit": start_commit, "minutes": minutes, "profile": given[1]}
         self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_STARTED, INTEGRATION_BRANCH, detail))
-        try:
-            outcome = await self._dossier_pass(start)
-        except Exception as exc:  # an optional step: the generic map stands in for it
-            logger.exception("the dossier pass crashed")
-            failed = {"reason": f"it crashed: {exc}", "map": "", "dossier": ""}
-            self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_ENDED, INTEGRATION_BRANCH, failed))
-            return None
+        outcome = await self._dossier_pass(start)
         ended = {"reason": outcome.reason, "map": str(outcome.map or ""), "dossier": str(outcome.dossier or "")}
         self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_ENDED, INTEGRATION_BRANCH, ended))
         return outcome

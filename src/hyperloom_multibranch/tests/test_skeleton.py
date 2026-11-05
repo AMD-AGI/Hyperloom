@@ -2166,6 +2166,25 @@ async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_k
     assert not stage.layout.agent_map.exists()
 
 
+async def test_a_run_that_stops_after_its_map_fails_when_its_dossier_pass_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def mapping(_start: DossierStart) -> DossierOutcome:
+        raise RuntimeError("the pass lost its sandbox")
+
+    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    stage = _stage(tmp_path)
+    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.dossier_pass = mapping
+
+    with pytest.raises(RuntimeError, match="the pass lost its sandbox"):
+        await stage.run()
+
+    report = json.loads(stage.layout.report.read_text())
+    assert "the pass lost its sandbox" in report["error"]
+    assert not stage.layout.agent_map.exists()
+
+
 async def _decide(
     stage: Stage, approve: bool, after: float = 0.0, edit: Callable[[], object] | None = None
 ) -> dict[str, Any]:
