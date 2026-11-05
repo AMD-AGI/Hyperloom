@@ -14,9 +14,13 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
-from kernelforge.workflows.forge_loop.campaign.run_state import RunState
+from kernelforge.workflows.forge_loop.campaign.run_state import BestRecord, LoopStateStore, RoundCost, RunState
 from kernelforge.evaluation.scoring import GateScoring
 from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef, PlanCriticOutcome
+from kernelforge.workflows.forge_loop.search.search_policy import (
+    OBJECTIVE_DISCOVER_NEW_MECHANISM,
+    SEARCH_MODE_DIVERSIFY,
+)
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _make_loop,
     _no_change_agent,
@@ -380,6 +384,54 @@ def test_a_round_the_critic_could_not_review_is_carried_as_unreviewed(
     assert (root / "critic_review.md").read_text().startswith("STATUS: CRITIC_ERROR")
     # No review exists to resume, so a later process inherits no ruling at all.
     assert loop.run_state.last_critic.verdict == ""
+
+
+def test_planning_is_handed_the_search_policy_this_iteration_decided(tmp_path, monkeypatch):
+    """Analysis builds its context before the policy is decided; the planners and the critic rule still see the new mode."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = LoopStateStore(str(workspace))
+    head = loop._git("rev-parse", "HEAD").splitlines()[0]
+    loop.run_state = RunState(head_commit=head, best=BestRecord(iteration=1, plan="lane plan"))
+    loop.run_state.round_costs.recent = [RoundCost(iteration=1, lanes=3, planning_sec=600.0, total_sec=1800.0)]
+    loop.config = SimpleNamespace(
+        experiments_dir=workspace / "forge_experiments",
+        gpu_target="gfx942",
+    )
+    loop._active_analysis_context = loop._build_orchestration_context()
+    loop.run_state.search_mode = SEARCH_MODE_DIVERSIFY
+    loop.run_state.search_reason_codes = ["NO_IMPROVEMENT_STALL"]
+    loop.run_state.search_objective = OBJECTIVE_DISCOVER_NEW_MECHANISM
+    loop.run_state.search_mode_residence_remaining = 2
+    planned = []
+
+    class OrchestrationService:
+        has_plan_critic = True
+
+        async def run(self, context, **_kwargs):
+            planned.append(context)
+            return SimpleNamespace(
+                optimization_plans=("# Optimization plan\nTry a new mechanism.",),
+                optimization_plan_draft="",
+                optimization_plan_executable=True,
+                dispatch_plan=None,
+                specialist_outcomes=(),
+                structured_output_diagnostics={},
+                plan_critic=None,
+                plan_revised=False,
+            )
+
+    asyncio.run(loop._run_orchestration(iteration=2, orchestration_service=OrchestrationService()))
+
+    (context,) = planned
+    assert loop._active_analysis_context.search_mode == "EXPLOIT"
+    assert context.search_mode == SEARCH_MODE_DIVERSIFY
+    assert context.search_reason_codes == ("NO_IMPROVEMENT_STALL",)
+    assert context.search_objective == OBJECTIVE_DISCOVER_NEW_MECHANISM
+    assert context.search_mode_residence_remaining == 2
+    # The previous round kept a candidate, so only the new mode makes this round's plans go to review.
+    assert context.review_plan is True
+    reviews = [event for event in loop.state_store.read_events() if event["type"] == "plan_review"]
+    assert [(event["review"], event["reason"]) for event in reviews] == [(True, "search_mode_diversify")]
 
 
 def test_framework_fallback_plan_does_not_complete_diversify_cycle(
