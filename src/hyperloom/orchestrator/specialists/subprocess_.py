@@ -1047,6 +1047,7 @@ class SpecialistSubprocessDispatcher:
         *,
         deadline: Deadline | None,
         started: float,
+        outcome: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Poll the subprocess until it finishes, stalls, or times out.
 
@@ -1067,19 +1068,18 @@ class SpecialistSubprocessDispatcher:
             deadline (Deadline | None): Absolute instant to kill at; ``None``
                 falls back to :data:`UNBOUNDED_REAP_CAP_SEC` from spawn.
             started (float): ``time.monotonic()`` value at spawn time.
+            outcome (dict[str, Any] | None): Filled in place as the loop
+                decides, and returned; a caller that passes one still reads
+                ``timed_out`` or ``stale_heartbeat`` when the kill that
+                follows raises. A fresh dict when ``None``.
 
         Returns:
             dict[str, Any]: Outcome with ``exit_code``, ``elapsed``,
                 ``timed_out``, ``stale_heartbeat``, and ``error`` keys.
         """
         cfg = self.config
-        outcome: dict[str, Any] = {
-            "exit_code": None,
-            "elapsed": 0.0,
-            "timed_out": False,
-            "stale_heartbeat": False,
-            "error": "",
-        }
+        outcome = {} if outcome is None else outcome
+        outcome.update(exit_code=None, elapsed=0.0, timed_out=False, stale_heartbeat=False, error="")
         # An unbounded caller still gets a finite instant.
         hard_stop = deadline if deadline is not None else Deadline.after(UNBOUNDED_REAP_CAP_SEC, now=started)
         last_heartbeat_seen: float = started

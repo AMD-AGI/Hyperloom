@@ -7,6 +7,7 @@ session ends."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -291,6 +292,35 @@ async def test_a_tree_kill_left_unconfirmed_at_teardown_is_logged_with_its_trace
     unconfirmed = [r for r in caplog.records if "tree cleanup unconfirmed" in r.getMessage()]
     assert "tree cleanup unconfirmed" in status.error
     assert unconfirmed and all(r.exc_info and r.exc_info[0] is ss.ExecutionCleanupUnconfirmed for r in unconfirmed)
+    assert not running(sleep_pid)
+
+
+@pytest.mark.parametrize(
+    ("ending", "state", "ended_by"), [("deadline", "exited", "timeout"), ("silence", "lost", "lost")]
+)
+async def test_a_reap_loop_kill_left_unconfirmed_still_reports_why_it_killed(
+    tmp_path: Path, started: _Started, monkeypatch: pytest.MonkeyPatch, ending: str, state: str, ended_by: str
+) -> None:
+    _kill_left_unconfirmed(monkeypatch)
+    ws = tmp_path / "w"
+    code = _cli(ws, "detached", _STAY)
+    if ending == "deadline":
+        runner = make_runner(tmp_path / "session")
+        spec = make_spec(ws, code=code, deadline_unix=time.time() + 3)
+    else:
+        runner = make_runner(tmp_path / "session", liveness=Liveness(lost_after_seconds=2.0))
+        spec = make_spec(ws, code=code)
+    handle = await runner.launch(spec)
+    try:
+        sleep_pid = await started.read(ws)
+        status = await wait_finished(runner, handle)
+        await runner.collect(handle)
+    finally:
+        await _end(runner, [handle])
+    record = json.loads((tmp_path / "session" / "agents" / "resources.jsonl").read_text().splitlines()[0])
+    assert (status.state, status.timed_out) == (state, ending == "deadline")
+    assert "reap loop failed" in status.error and "tree cleanup unconfirmed" in status.error
+    assert record["ended_by"] == ended_by
     assert not running(sleep_pid)
 
 
