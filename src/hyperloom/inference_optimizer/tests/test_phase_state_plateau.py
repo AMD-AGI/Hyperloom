@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.orchestrator.phases.exit_predicates import framework_plateau
+
 from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB, is_valid_stop_reason
 from hyperloom.orchestrator.kernel import kernel_decisions
 from hyperloom.orchestrator.lever import LEVER_CONFIG
@@ -17,7 +19,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     _config_lever_evidence,
-    _framework_plateau,
     compute_next_phase,
     kernel_work_pending,
     PhaseFlags,
@@ -34,7 +35,7 @@ from hyperloom.orchestrator.state.shared_state import (
 
 def _config_dry(state, overrides):
     evidence = _config_lever_evidence(state, overrides)
-    return _framework_plateau(evidence).config_dry, evidence
+    return framework_plateau(evidence).config_dry, evidence
 
 
 def test_escalate_hint_vocab_closed():
