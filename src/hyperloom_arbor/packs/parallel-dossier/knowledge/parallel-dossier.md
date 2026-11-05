@@ -1,6 +1,6 @@
 # The round's dossier (parallel mode): inputs and deliverables
 
-A parallel run (runner decision 0003, `arbor/parallel/`) maps each round before it fans
+A parallel run (`arbor/parallel/`) maps each round before it fans
 out: this campaign writes the dossier skill's update round uK for the round's base tree,
 in two halves, while a node profiles that tree. Read this before the first iteration.
 

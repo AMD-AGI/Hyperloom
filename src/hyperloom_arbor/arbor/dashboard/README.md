@@ -36,7 +36,7 @@ their output, and serves it.
 | File | What |
 | --- | --- |
 | `server.mjs` | the server, every mode; Node 16 or later, no dependencies |
-| `share_query.py` | what global mode runs on the share host, sent compressed and base64-encoded inside the command (the gateway takes commands, not piped stdin; Git for Windows' ssh cuts a command at about 8 KB); Python 3.8 or later there, nothing installed. It always answers with one JSON object, `{"error": ...}` on failure, because through the gateway every command exits 0 and its stderr arrives on stdout (tested 2026-10-07) |
+| `share_query.py` | what global mode runs on the share host, sent compressed and base64-encoded inside the command (the gateway takes commands, not piped stdin; Git for Windows' ssh cuts a command at about 8 KB); Python 3.8 or later there, nothing installed. It always answers with one JSON object, `{"error": ...}` on failure, because through the gateway every command exits 0 and its stderr arrives on stdout |
 | `public/index.html`, `app.js` | one campaign: `/` in local mode, `/c/<project>/<user>/<campaign>/` in global mode, which adds the knowledge panel |
 | `public/global.html`, `global.js` | the share's index, by project, with filters by project, user and state in the query string |
 | `public/parallel.html`, `parallel.js` | a parallel run: lanes on the round's clock, their clocks and items, the round's map, the integration table |
@@ -56,7 +56,7 @@ their output, and serves it.
 
 ## Ported from an earlier dashboard
 
-The source is an earlier campaign dashboard, which served the v2 and v2.1
+The source is an earlier campaign dashboard, which served earlier
 campaigns. Kept: the page and its panels, the snapshot's keys (`arbor.collect`'s realtime
 collector writes the same ones), the server's caching, and its rules:
 
@@ -79,8 +79,8 @@ Changed:
   collector's `status.json`.
 - **Liveness from the Slurm job** (`--slurm-job`), as the Cluster A page's last
   fix did for chained campaigns: a driver inside a job on a GPU node is
-  invisible to a process check on the login node, and the first port showed
-  two running campaigns as "not running". Only a queued successor is "between
+  invisible to a process check on the login node, which shows a running
+  campaign as "not running". Only a queued successor is "between
   chunks"; a `squeue` that fails is "unknown".
 - **No node panel by default.** The realtime collector never samples GPU nodes:
   a probe during a measured replay perturbs it. The panel shows only when a

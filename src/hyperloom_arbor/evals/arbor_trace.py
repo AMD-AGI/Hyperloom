@@ -526,8 +526,8 @@ def _migrate_fallback_events(trace_dir: Path) -> int:
     Hooks start firing at ``SessionStart``, which is necessarily before the
     agent can run ``mark session-start``. Those early rows land under
     ``~/.arbor/trajectories/<session_id>/`` and used to stay there: on a real
-    run that stranded 29 events, costing 15 orchestrator steps their timing and
-    permission mode. Moving them at open time closes the window.
+    run that stranded the early events, costing those orchestrator steps their
+    timing and permission mode. Moving them at open time closes the window.
     """
     moved = 0
     try:
@@ -610,7 +610,7 @@ def _mark_session_start(args) -> None:
         data.setdefault("claude_sessions", [])
         # Recorded because it is a property of the MODEL, not of the run or the
         # collector: some models return no reasoning text on any capture route
-        # while still billing the tokens. Probed 2026-08-24 against the gateway
+        # while still billing the tokens. Probed against the gateway
         # directly — opus-5 withholds, sonnet-4.6 and haiku-4.5 do not.
         # See docs/archive/evals-README.md, "Reasoning text".
         data["thinking_capture"] = "withheld-by-model"

@@ -55,8 +55,8 @@ DECODE_KERNELS = (
     "fwd_kvcache",
     "decode_attention",
     "topk_transform",
-    # DSv4.1-Flash / DSA on gfx950. Verified against a real decode capture
-    # (sessions/decode_share_reparsed.json): the kernel is spelled
+    # DSv4.1-Flash / DSA on gfx950. Verified against a real decode capture:
+    # the kernel is spelled
     # `_sparse_attn_decode_gfx950_partial_kernel.kd`, which matches none of the
     # patterns above — "attn_decode", not "decode_attention". Without this the
     # model's own decode attention is invisible to the classifier and a clean

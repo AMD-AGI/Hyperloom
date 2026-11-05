@@ -82,8 +82,8 @@ source and label, as everywhere in the dossier.
 - **Graphs and compilation:**
   - It must capture under the served graph mode.
   - Counts that vary per step are runtime arguments, not compile-time
-    constants. A `tl.constexpr` route count compiled 2,218 variants and
-    stalled the engine for 30 s mid-bench (Model M B4, iteration 22).
+    constants. A `tl.constexpr` route count compiled thousands of variants and
+    stalled the engine mid-bench.
   - Target zero JIT compiles during inference.
 - **gfx950:**
   - wave64;
@@ -116,18 +116,17 @@ with its iteration, its numbers and its evidence, lands in the session's
 | S4 In tree | Behind a `VLLM_*` switch that defaults off, declared `SWITCH: NAME=1` beside `DONE:`. The harness checks it at the KEEP, serving the switch on: dispatch logged on every rank, 0 JIT compiles in serving, accuracy gate passed (`arbor/measure/switches.py`) | Dispatch fails at a served shape and the fix breaks S2 or S3 |
 | S5 A/B | The campaign's own gate, at every operating point the target names | The gate: KEEP, REVERT or a Pareto point, as part 4 classes it |
 
-Lessons the stages carry, from Model M campaigns B4 and C4:
-- **Time graph-captured, not eager:** eager timing is host-bound and read
-  one saving at half its size (B4 iteration 47).
-- **Gate correctness before timing,** with a negative control. Two checks
-  that passed vacuously were caught that way (C4 iteration 34).
-- **A fixture can rank right and price wrong.** C4 iteration 31's served
+Lessons the stages carry, from earlier rewrites:
+- **Time graph-captured, not eager:** eager timing is host-bound and misread
+  the size of a saving.
+- **Gate correctness before timing,** with a negative control. Checks that
+  passed vacuously were caught that way.
+- **A fixture can rank right and price wrong.** One served
   saving was well off its projection, so only S5 books a gain.
 - **Prove the arm by an artifact the run owns,** such as a cache file or a
-  marker the kernel writes, not by a log line that may be swallowed (C4
-  iteration 34).
+  marker the kernel writes, not by a log line that may be swallowed.
 - **Probe before building:** pricing the design's parts first changed the
-  design (B4 iteration 26: the split grid lost to the interleaved one).
+  design (a split grid lost to the interleaved one).
 
 ### The `## Items` block
 
@@ -140,7 +139,7 @@ losing design does not hold up the others:
 
 ITEMS: [
  {"id": "s1", "stage": "S1", "title": "Reference: the chain in situ",
-  "gate": {"measure": "region_us", "reference": 1647.8, "tolerance_pct": 10},
+  "gate": {"measure": "region_us", "reference": 1000.0, "tolerance_pct": 10},
   "stop": {"measure": "gap_x_gate", "below": 3, "status": "below_floor"}, "stops_plan": true},
  {"id": "c.s2", "stage": "S2", "after": ["s1"], "gate": {"require": ["correct", "negative_control_fired"], "measure": "snr_db", "min": 30.0}},
  {"id": "c.s3", "stage": "S3", "after": ["c.s2"], "gate": {"measure": "gap_share", "min": 0.5}},
@@ -168,7 +167,7 @@ Check it with `python3 -m arbor.stages check <plan.md>`.
 **In the campaign, the agent declares each stage's result on one line:**
 
 ```
-STAGE: {"item": "m-finalize-chain.c.s2", "result": "pass", "measured": {"snr_db": 32.69, "correct": true, "negative_control_fired": true}, "evidence": {"artifacts": ["iter_20/peer_rs_sc_c5.json"], "ledger": ["c5-sc-snr"]}}
+STAGE: {"item": "m-finalize-chain.c.s2", "result": "pass", "measured": {"snr_db": <dB>, "correct": true, "negative_control_fired": true}, "evidence": {"artifacts": ["iter_<n>/<file>.json"], "ledger": ["<ledger id>"]}}
 ```
 
 `result` is pass, fail or stop. The harness judges the line at the next
@@ -212,8 +211,7 @@ it. Turning the switch on is held to the accuracy gate.
     copy of the plan. The campaign stops when every item has its verdict,
     with `LANE_CLOSED.json` and a STOP that starts `lane-closed:`.
     `python3 -m arbor.stages show --session <dir>` shows where it is.
-  - **As a kernel-plan lane in the parallel mode** (runner decision 0003;
-    coming): the coordinator seeds the same lane on its own node, beside the
+  - **As a kernel-plan lane in the parallel mode** (coming): the coordinator seeds the same lane on its own node, beside the
     round's other lanes.
 
   Either way, while the next item is S1–S3 the LEARN cap does not demote
@@ -244,7 +242,7 @@ Two plans from a Model M dossier, written and run by campaigns' agents. One
 built a slice of its rewrite and kept it; the other stopped at S1, as it
 should have. The numbers in the `## Items` blocks below are illustrative.
 
-### (a) Rewrite R1: the MoE finalize chain
+### (a) Rewrite A: the MoE finalize chain
 
 The plan's region is a reduce-scatter, a finalize, a copy and an all-gather
 per layer and microbatch on the mixed step, which the compute stream waits
@@ -254,20 +252,20 @@ MXFP8 transport, an accuracy trade).
 
 What each design's stages showed, mapped onto §5:
 
-| The plan's stage | §5 stage | Iteration | What it showed | Verdict |
-|---|---|---|---|---|
-| S1 | S1 Reference | 1 | the chain's time per call and the compute stall it causes, several times the gate | done |
-| S-A: S2 | S2 Correct | 2 | SNR against fp32 above RCCL's ring; both negative controls fire | pass |
-| S-A: (an earlier fixture) | S3 Fast | earlier campaign | faster than RCCL's reduce-scatter, closing most of the gap, on a fixture | pass, on a fixture |
-| S-A: S3 Dispatched | S4 In tree | 2 | graph capture survives; every rank installed and dispatching | pass |
-| S-A: S4 A/B | S5 A/B | 2 | REVERT: below the bar | killed |
-| (S-A explained) | — | 3–6 | wrong stream (3), corrected: already on a side stream (4), a DBO pairing loss (5); in situ (6): the kernel beats the ring, but two rendezvous barriers and the staging copy cost more than it saves | — |
-| S-B: S5 | S4, S5 | 6 | not built: without the copy, the chain is still slower than RCCL's | killed unbuilt |
-| S-C: S6 | S2 Correct | 17, 20 | the transport's error sits well below the MXFP4 partial's own; negative controls firing | pass |
-| S-C: S6 | S3 Fast | 18–20 | at the shipped grid MXFP8 is no faster, at a smaller grid it is; the whole link beats RCCL's | pass |
-| S-C: S6 | S4 In tree | 20 | four switches (`VLLM_ROCM_MODEL_M_PEER_RS`, `_STAGED`, `_FMT=mxfp8`, `_LOCAL_BF16`), off by default; vLLM only; declines under capture, so decode is untouched | pass |
-| S-C: S6 | S5 A/B | 20 | KEEP above the bar, interactivity unchanged | done |
-| (after it) | a new direction | 21–23 | the fused form (MoE stage 2 writes MXFP8): priced (22); its first step, stage 2's tile 128 → 256, REVERT (23) | — |
+| The plan's stage | §5 stage | What it showed | Verdict |
+|---|---|---|---|
+| S1 | S1 Reference | the chain's time per call and the compute stall it causes, several times the gate | done |
+| S-A: S2 | S2 Correct | SNR against fp32 above RCCL's ring; both negative controls fire | pass |
+| S-A: (an earlier fixture) | S3 Fast | faster than RCCL's reduce-scatter, closing most of the gap, on a fixture | pass, on a fixture |
+| S-A: S3 Dispatched | S4 In tree | graph capture survives; every rank installed and dispatching | pass |
+| S-A: S4 A/B | S5 A/B | REVERT: below the bar | killed |
+| (S-A explained) | — | read first as the wrong stream, then (corrected: already on a side stream) as a DBO pairing loss; in situ: the kernel beats the ring, but two rendezvous barriers and the staging copy cost more than it saves | — |
+| S-B: S5 | S4, S5 | not built: without the copy, the chain is still slower than RCCL's | killed unbuilt |
+| S-C: S6 | S2 Correct | the transport's error sits well below the MXFP4 partial's own; negative controls firing | pass |
+| S-C: S6 | S3 Fast | at the shipped grid MXFP8 is no faster, at a smaller grid it is; the whole link beats RCCL's | pass |
+| S-C: S6 | S4 In tree | four switches (`VLLM_<REGION>_PEER_RS`, `_STAGED`, `_FMT=mxfp8`, `_LOCAL_BF16`), off by default; vLLM only; declines under capture, so decode is untouched | pass |
+| S-C: S6 | S5 A/B | KEEP above the bar, interactivity unchanged | done |
+| (after it) | a new direction | the fused form (MoE stage 2 writes MXFP8): priced; its first step, stage 2's tile 128 → 256, REVERT | — |
 
 S-A's S4 and S5 ran in one WIN iteration, and so did S-C's. In this format
 they are two: a FIX that lands the code behind its switches, off, and must
@@ -304,32 +302,33 @@ ITEMS: [
 
 What it teaches:
 - **Designs are separate item chains.** The plan ranked S-C last, behind S-A
-  and S-B, so it was not priced until iteration 17, after both had died. As
-  its own chain after `s1`, it could have started at iteration 2.
-- **Explain a losing A/B in situ before killing its sibling.** Iteration 2's
-  REVERT was read three ways in three iterations before iteration 6 traced
-  it in the server: the barriers and the copy, not the kernel. That killed
-  S-B on evidence rather than by association, and it made S-C's case: under
-  MXFP8 the copy becomes the format conversion the transport needs anyway.
+  and S-B, so it was not priced until both had died. As its own chain after
+  `s1`, it could have started right after S1.
+- **Explain a losing A/B in situ before killing its sibling.** S-A's REVERT
+  was read one way after another, an iteration each, before an in-situ trace
+  in the server found the cause: the barriers and the copy, not the kernel.
+  That killed S-B on evidence rather than by association, and it made S-C's
+  case: under MXFP8 the copy becomes the format conversion the transport needs
+  anyway.
 - **The records were scattered.** The campaign wrote many addenda, most on
   this plan, and the plan's own stage table was never updated past S1. Here
   the harness writes the stage records (§5): `stages.json`, each attempt with
   its iteration, numbers and evidence.
-- **A lane ends at its last verdict.** Every item had one at iteration 20.
-  The fused form came after it; it is a proposal for the next round's map,
-  not more of this plan.
+- **A lane ends at its last verdict.** Every item had one once S-C's A/B was
+  booked. The fused form came after it; it is a proposal for the next round's
+  map, not more of this plan.
 
-### (b) Rewrite 3: the decode layer's collective count
+### (b) Rewrite B: the decode layer's collective count
 
 Its prize was measured first: the share of run each decode collective
 removed would save, and the share for all four. It had no mechanism, so S1
 was a dependency census from the source, with a hard stop: no removal priced
 at 3× the gate, no rewrite.
 
-| The plan's stage | §5 stage | Iteration | What it showed | Verdict |
-|---|---|---|---|---|
-| S1 census | S1 Reference | 7 | the four collectives are totally ordered by data dependence, and the model has no shared expert to hide one behind; the diamond fee, re-measured, was well below the figure carried from an earlier campaign; the best single collective nets under 3× the gate | stop: below_floor |
-| S2 overlap, S3 riders | — | — | not run | killed by the stop |
+| The plan's stage | §5 stage | What it showed | Verdict |
+|---|---|---|---|
+| S1 census | S1 Reference | the four collectives are totally ordered by data dependence, and the model has no shared expert to hide one behind; the diamond fee, re-measured, was well below the figure carried from an earlier campaign; the best single collective nets under 3× the gate | stop: below_floor |
+| S2 overlap, S3 riders | — | not run | killed by the stop |
 
 The items, with the stop on `s1`:
 
@@ -350,8 +349,8 @@ ITEMS: [
  {"id": "r.s5", "stage": "S5", "title": "Rider: the A/B", "after": ["r.s2"]}]
 ```
 
-At iteration 7, `STAGE: {"item": "<map ID>.s1", "result": "stop", "measured":
-{"gain_x_gate": 1.5, "census": true}, ...}` closes `s1` as below_floor and
+At its census iteration, `STAGE: {"item": "<map ID>.s1", "result": "stop", "measured":
+{"gain_x_gate": <under 3>, "census": true}, ...}` closes `s1` as below_floor and
 every later item as killed, and the lane closes.
 
 **A plan stopped at S1 is a success.** One iteration, no build, and the

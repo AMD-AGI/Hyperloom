@@ -1,9 +1,7 @@
 # reference/: a curated copy of KernelForge
 
 **Source:** KernelForge (this repository carries it as `src/kernelforge`), MIT licence
-(`LICENSE-KernelForge`, copied unchanged). Copied on 2026-10-20 from the runner's read-only copy at
-`src/kernelforge (this repository)` (the same tree as `src/kernelforge (this repository)` on
-Cluster B).
+(`LICENSE-KernelForge`, copied unchanged).
 - **Commit:** `cd9c585` (2026-08-17), from that copy's `RUNNER_README.txt`. The copy is not a git
   checkout, so `git log` cannot confirm it.
 - KernelForge's AITER pages cite AITER `b467ce342`; its FlyDSL pages, FlyDSL `2812676` (2026-05-18).
@@ -51,7 +49,7 @@ copied (`fmoe.md`, `dispatch_and_rebind.md`, `languages/flydsl/...`) do not reso
   other 34 `knowledge_base/skills/` files, the other examples (`aiter-allreduce-forge-loop`, `hip_gemma_fused_add_rmsnorm`,
   `mori_ep_dispatch_combine`, `triton-softmax-forge-loop`, `triton_mixtral_dynamic_quant`), the
   rest of `local_knowledge/` (the per-language and per-operator folders), `tasks/`, `src/`. They stay
-  in the runner's copy.
+  in KernelForge.
 
 ## Known-wrong numbers
 

@@ -27,7 +27,7 @@ It writes `status.json` and `meta.json` to `<session>/collector/realtime/`, and
 pushes both to the share:
 
 ```text
-/shared/arbor/projects/<project>/<user>/<campaign>/realtime/{status.json,meta.json}
+/path/to/arbor-share/projects/<project>/<user>/<campaign>/realtime/{status.json,meta.json}
 ```
 
 It never samples a GPU node: a probe during a measured replay perturbs it. It
@@ -35,14 +35,14 @@ never raises either: a section that fails is recorded in the snapshot's `errors`
 
 ## Once per person: reach the share
 
-The share is `/shared/arbor` on the share's pod
+The share is `/path/to/arbor-share` on the share's pod
 `<pod name>` (workspace `<workspace>`), reached
 through the platform's ssh gateway. The gateway takes ssh commands, scp and
-sftp, but not rsync and not piped stdin (tested 2026-10-06). That is why an
+sftp, but not rsync and not piped stdin. That is why an
 upload is one sftp batch (make the directories, put each file under a temporary
 name, rename it into place), so a reader never sees half a file. The gateway
-also returns exit status 0 for every command and puts its stderr on stdout
-(tested 2026-10-07): in anything you script against it, print a marker or
+also returns exit status 0 for every command and puts its stderr on stdout:
+in anything you script against it, print a marker or
 JSON and read that, never `$?`.
 
 1. Register your public key on the platform, and add the pod to `~/.ssh/config`
@@ -61,26 +61,20 @@ JSON and read that, never `$?`.
 
    The user is `<user id>.<pod>.<container>.<shell>.<workspace>`. If the pod
    is replaced, its name changes; the platform shows the current one.
-   Cluster B's login nodes reach the gateway (port 2222 open from `<login node>`,
-   2026-10-07).
+   Cluster B's login nodes reach the gateway (port 2222 open from `<login node>`).
 2. Check it from an Arbor checkout: `python3 -m arbor.collect check`. It runs
    three steps (ssh, the share root, an upload of a probe file it then removes)
    and, for the first that fails, says what to do.
 
 The share root and its `projects/` directory are made once, by a person, never
-by a collector. They were made on 2026-10-07 to match `/shared` itself:
-owner root, group <gid> (the share's group), mode 1775, so every member of
-the group can add a project and no one can remove another person's:
+by a collector: owned by root, the share's group (<gid>) with mode 1775, so every member
+of the group can add a project and no one can remove another person's:
 
 ```bash
-ssh arbor-share 'mkdir -p /shared/arbor/projects && chgrp <gid> /shared/arbor /shared/arbor/projects && chmod 1775 /shared/arbor /shared/arbor/projects'
+ssh arbor-share 'mkdir -p /path/to/arbor-share/projects && chgrp <gid> /path/to/arbor-share /path/to/arbor-share/projects && chmod 1775 /path/to/arbor-share /path/to/arbor-share/projects'
 ```
 
-The pod's `/shared` is the same NFS volume Cluster B mounts (both see
-`/shared/runner`; checked 2026-10-07), so on a Cluster B node the
-share can be read at `/shared/arbor` directly. Collectors still write
-through the pod. The volume was 98% full that day (12 TB free); the collectors
-push summaries, never traces.
+Collectors push summaries, never traces.
 
 ## Names: project, user, campaign
 
@@ -148,7 +142,7 @@ the share could not be reached or written (the local copy is still written),
 ## Reading it
 
 - Every campaign, or one live: the `dashboard` skill.
-- By hand: `ssh arbor-share cat /shared/arbor/projects/<project>/<user>/<campaign>/realtime/status.json`,
+- By hand: `ssh arbor-share cat /path/to/arbor-share/projects/<project>/<user>/<campaign>/realtime/status.json`,
   or read the path directly on a Cluster B node.
 
 ## Settings
@@ -156,6 +150,6 @@ the share could not be reached or written (the local copy is still written),
 | Variable | Default | |
 | --- | --- | --- |
 | `ARBOR_SHARE_HOST` | `arbor-share` | ssh destination, an alias from `~/.ssh/config` |
-| `ARBOR_SHARE_ROOT` | `/shared/arbor` | the share root on that host; a scratch root (under `/tmp`) for tests |
+| `ARBOR_SHARE_ROOT` | `/path/to/arbor-share` | the share root on that host; a scratch root (under `/tmp`) for tests |
 | `ARBOR_SHARE_SSH_OPTS` | none | extra options for both ssh and sftp; use `-F` and `-o` forms (`-o Port=2222`), since ssh and sftp spell `-p` differently |
 | `ARBOR_PROJECT`, `ARBOR_USER` | none | the names above |

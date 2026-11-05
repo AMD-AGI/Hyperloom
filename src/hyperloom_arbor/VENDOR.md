@@ -7,9 +7,9 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 | | |
 | --- | --- |
 | Source | `AMD-AGI/Arbor` (internal) |
-| Tag | `v0.9.1` |
-| Commit | `123cd15` |
-| Files | 303 |
+| Tag | `v0.9.2` |
+| Commit | `cfbb7b9` |
+| Files | 330 |
 | Licence | Apache-2.0, [`LICENSE`](LICENSE) (`REUSE.toml` at the repository root says so per file) |
 
 ## What it holds
@@ -19,6 +19,8 @@ The engine and what its agents read:
 - `arbor/`, the harness: the loop, the gates, component mode, the dossier and stage machinery;
 - `.claude/skills/`, the skills its agents use (the dossier, the profiler, kernels, hardware, the serving playbook's
   rules and knob catalog, and the rest). The profiler skill is this copy's own: it profiles with TraceLens (below);
+- `plugins/`, the skill families a pack can place in a session's chapters (`docs/skill-integration.md`): `dossier`
+  (the dossier split into six skills), `benchmark` (the benchmark studied once) and `pack` (drafting a pack);
 - `packs/serving` (the template MB names by default), `packs/agentx`, `packs/_shared`, `packs/parallel-dossier` and
   the `evolve-asm` packs;
 - `docs/`, the operator and host documentation; `evals/`, the session tracer the skills' hooks call; `scripts/pack/`;
@@ -29,13 +31,17 @@ The engine and what its agents read:
 - **Left out:** Arbor's tests (they run upstream at the tag), its campaign results, its workload-specific packs,
   configs and dossiers, and its cluster launchers. Code or documents that name one of them keep the name; the file is
   not here.
+  - **Skills for developing Arbor** (`plugins/arbor-dev`, the `develop` mode) are left out: a campaign never loads
+    them, and this copy is not edited here. The two skill docs say so where they would describe them.
+  - **Records of internal campaigns** are left out: the barren/learn design notes, the config index, and two
+    one-shot campaign scripts under `scripts/pack/`.
   - **The serving playbook keeps its rules and its knob catalog only.**
     - **Left out:** the InferenceX study's evidence corpus, and the five reference pages generated from it (big
       directions, regime tables, AMD knobs, numerics knobs, the image manifest). They carry other vendors' recipes
       and figures, and quantified results.
     - **Its `SKILL.md`** is this copy's own: the playbook's rules, and what the catalog holds.
     - **`knobs.json`,** which the harness reads (`arbor/knobs.py`), stays, without its entries for another vendor's
-      GPUs. Its entries still cite a page section and a study record id (`#655`); neither is carried in this copy.
+      GPUs. Its entries still cite the page section they came from, which is not carried in this copy.
     - **What the agent is told** points to what the copy carries: the dossier's template has no section built from
       the pages, and the dossier skill, the agents' program, the `serving` pack, the always-on MI355X knowledge and
       the hardware skill name `knobs.json` and the playbook's rules instead. Code comments and the kernels skill's
@@ -49,11 +55,22 @@ The engine and what its agents read:
 - **Replaced by placeholders:** the names of internal clusters, hosts, paths, accounts, people, personal GitHub
   accounts and repositories, and of workloads or chips that are not public.
   - **The placeholders:** `Cluster A`, `Cluster B`, `<node>`, `<login node>`, `<partition>`, `<account>`, `/data/...`,
-    `/shared/...`, `<fork>`, `<colleague>`, `Model M`, `Model W` and the like.
+    `/shared/...`, `/path/to/arbor-share` (the collectors' share), `<fork>`, `<colleague>`, `Model M`, `Model W` and
+    the like.
   - **Renamed identifiers:** an identifier that carried such a name was renamed the same way everywhere in this copy
     (for example `CAMPAIGN_CONFIG` for a launcher variable), so the copy is consistent with itself.
   - **GitHub owners:** a GitHub owner is named only when it is an organisation; the vendoring tool refuses a copy that
     names any other.
+- **No internal references:** Arbor's code and docs cite the board topic, comment or ticket where a decision was made.
+  This copy keeps the decision and drops the citation.
+  - **Also dropped:** internal plans, branches, sessions and decision records, roadmap ids, and study record ids.
+  - **The private repository:** this copy carries no access or clone instructions for it. The README, getting started
+    and the skills guide point to this copy instead.
+- **No results of internal campaigns:** the `benchmark` family's `contract.md` is this copy's own. It keeps every rule
+  and what it guards against, without the campaigns' names, costs and figures.
+  - **Elsewhere:** the study skill's findings, and the campaign names and figures in code comments and skills, are
+    generalized.
+- **`CONTRIBUTING.md`** is this copy's own: it says where a change to Arbor is made.
 - **Profiling on TraceLens:** upstream, Arbor's profiler skill traces with a tracer of its own, which is not released
   here. In this copy the skill (`.claude/skills/profiler/SKILL.md`) profiles with TraceLens instead, as this repository
   does:
@@ -66,7 +83,7 @@ The engine and what its agents read:
 - **KernelForge's examples are this repository's:** the four examples under `.claude/skills/kernels/reference/examples/`
   are taken from `src/kernelforge/examples`, which runs `kernelforge forge-loop --kernel-backend ...`. Arbor's own
   copies predate that rename. KernelForge's knowledge pages here use the same names.
-- **One permission:** the round-end A/B's output directory is created for the group only (`0o770`) instead of
+- **One permission:** the round-end A/B's output directory is created for its owner only (`0o700`) instead of
   world-writable (`arbor/rounds.py`). The round-end A/B never runs under a host.
 
 ## What it carries from elsewhere
@@ -90,10 +107,13 @@ install pins.
 
 Never edit it here: a change is made in Arbor and the copy is taken again, whole, from a new tag, by the Arbor
 maintainers' vendoring tool, with the same omissions, placeholders, profiler skill and examples. The tool refuses a
-copy that still names any of the replaced terms.
+copy that still names any of the replaced terms, or cites an internal board or ticket.
 
-This copy also carries a text-only scrub on top of the tag: internal board, job and plan references and measured
-performance figures are removed. The vendoring tool does not apply or check it, so a re-vendor has to redo it.
+This copy also carries a text-only scrub on top of the tag: internal board, job and plan references, operator decision
+logs, measured performance figures and the history of internal runs are removed. The vendoring tool applies it, as a
+patch over its own output, and refuses a tag the patch no longer fits, so a re-vendor keeps it. The tool also refuses a
+copy that still has a job id, a dated operator log, an internal plan or a measured step time, or, in Arbor's own text, a
+date (bar timestamp examples), a run, round, generation or iteration id, or a run's counts, times or figures.
 
 Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,
 `[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). Secret

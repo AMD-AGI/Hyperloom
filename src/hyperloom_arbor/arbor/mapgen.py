@@ -14,9 +14,9 @@ with the v2 pack as a template.
   CUDA-graph trace): the families also match hipBLASLt's Tensile GEMMs (``Cijk_``), vLLM's skinny
   GEMM (``wvSplitK``), its KV-cache write (``reshape_and_cache``) and its prefix-prefill attention
   (``_fwd_kernel``); copies and memcpys stay unmapped.
-- **The template** is the v2 pack's roadmap (``packs/agentx-dsv41-2``, constraints section 3),
+- **The template** is a serving pack's roadmap,
   model-independent: each family is one direction, titled as that roadmap frames the gap. The
-  small kernels (norm, RoPE, activation, elementwise) are one direction, as its X3 fusion pack.
+  small kernels (norm, RoPE, activation, elementwise) are one direction.
 - **Rank** follows the family's share of GPU time, largest first. **Ceiling** is its Amdahl
   ceiling, the most the run could gain if the family's time went to zero (MB's
   ``amdahl_ceiling_pct``). A family under ``min_share`` percent is left out.

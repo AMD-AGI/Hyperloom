@@ -1,6 +1,6 @@
 # Component mode: Arbor inside a host
 
-Status: **slices 1 to 3 built** (CORE-02, 2026-10-28; decisions in §7, as built in §8), and run
+Status: **slices 1 to 3 built** (decisions in §7, as built in §8), and run
 on a GPU node (`scripts/component/`).
 
 Arbor has run one way so far, **standalone**: it owns a node, its container and its clock. Its
@@ -10,8 +10,8 @@ to empty, it rolls from node to node, ends rounds with its own same-node A/B and
 **Component mode** is Arbor run by a host that owns all of that: Hyperloom's multibranch (MB)
 today, which runs Arbor as an "autonomous branch" on a lease of GPUs, under its own deadline, and
 gates and merges what Arbor keeps. MB already runs Arbor this way, with a sandbox built around what standalone Arbor did wrong inside it: stopping MB's
-servers with a pattern `pkill`, running on cards outside its lease, iterating an hour after the
-session died, hanging for 511 minutes, loading kernel tables from paths outside the workspace.
+servers with a pattern `pkill`, running on cards outside its lease, iterating after the session
+died, hanging for hours, loading kernel tables from paths outside the workspace.
 Component mode makes Arbor do the right thing itself.
 
 Which side runs each step of an MB session, and the files between the two:
@@ -27,8 +27,8 @@ recorded in `session.json`, and a resumed session keeps it.
 "mode": "component",
 "component": {
   "host": "hyperloom-mb",
-  "deadline": "2026-10-29T03:20:00Z",
-  "seconds": 25200,
+  "deadline": "2030-01-01T00:00:00Z",
+  "seconds": 3600,
   "notes": "/abs/path/mb-integration.md",
   "bench_command": "python3 benchmark_serving.py ... --base-url http://127.0.0.1:{port} --result-dir {out}",
   "outbox": "keeps"
@@ -124,16 +124,16 @@ manifest without either side writing host-specific code.
    `@host`; the heartbeat; target, round ends and rolling refused or ignored. Tested on `@host`
    fakes; then once on a node with a lease of 4 cards and something else on the other 4.
 2. **The KEEP snapshot,** the notes and the bench command in the prompts, the tables check.
-3. **The short-prompt check** (built 2026-10-28; the README section came with slice 2).
+3. **The short-prompt check** (the README section came with slice 2).
 
 ## 7. Decisions
 
 1. **An exhausted map with no time left for its update round: exit 0, and say why.** Every exit
    in component mode writes `<session>/component_exit.json` first: `{reason, iteration, keeps,
    map, deadline, ts}`, with `reason` one of `deadline`, `map_exhausted` (the map is closed and
-   its update round does not fit), `done` (STOP, max iterations), `sigterm`, and since 2026-10-30
-   `aborted` (the harness stopped measuring: `ABORTED.md`, its message as `detail`), and since
-   2026-10-31 `review_rejected` (a human rejected the campaign at the review gate); the same line
+   its update round does not fit), `done` (STOP, max iterations), `sigterm`,
+   `aborted` (the harness stopped measuring: `ABORTED.md`, its message as `detail`), and
+   `review_rejected` (a human rejected the campaign at the review gate); the same line
    goes to the log and the heartbeat. A host reads why Arbor ended instead of guessing from an exit code.
    **One exception exits non-zero** (for model gateway outages): `unreachable`, a streak that ended while the model could not be reached, exits 3 after
    writing its record. The host resumes it as it does a crash, instead of retiring the branch; the
@@ -145,7 +145,7 @@ manifest without either side writing host-specific code.
    a `docker_container` other than `"@host"` and `ARBOR_ROLL=1`: exit 2, before it touches the
    session, with the reason on stderr.
 
-## 8. As built (slice 1, 2026-10-28)
+## 8. As built (slice 1)
 
 The switch and the safety are in `arbor/component.py` and the sites the table names. Where the
 build settled what the design left open:
@@ -173,7 +173,7 @@ build settled what the design left open:
 - Standalone records `"mode": "standalone"` in session.json; its commands, prompts and stops are
   byte for byte as before.
 
-### Slice 2 (2026-10-28)
+### Slice 2
 
 The KEEP snapshot (§4, in the layout MB agreed), the tables check, the host's notes and bench
 command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), and the README's
@@ -197,7 +197,7 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
 - **`bench_command`:** `{out}` is a directory per replay (`iter_N/host_bench/`, or `run<i>/`
   under it), made empty by the harness; the bench agent reads the metric from it into
   `bench_output.json` with a fixed one-line command, and with `bench_repeats` the fixed mean
-  block aggregates, as with the pack's bench. Since 2026-10-30 the same command also takes the
+  block aggregates, as with the pack's bench. The same command also takes the
   pack's `secondary_metric` when the client gives it; before, the gate saw only the primary
   (`secondary: None` on every KEEP).
 - **`component.root`** (MB's request): MB's worktree is at the branch's start
@@ -207,13 +207,14 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   (`workspace.base_commit`); one the workspace lacks is refused at start (exit 2) and malformed
   is a config error. Without it, the first commit stays the base, for standalone use.
 
-### Slice 3 (2026-10-28): the short-prompt check
+### Slice 3: the short-prompt check
 
 A second launch at each KEEP, component mode only.
 `arbor/measure/short_prompts.py`; the probe after correctness and the check after the critic in
 `arbor/policy/claude_loop.py`. Where the build settled what the design left open:
 - **What it answers:** AITER's vectorized_5d `mha_batch_prefill` gave wrong output on
-  short sequences in about one server process in three, and GSM8K did not see it. The design's
+  short sequences intermittently, in some server processes and not others, and GSM8K did not
+  see it. The design's
   "against the base server" was dropped: MB compared with the parent first and stopped
   (Hyperloom `b315477e5`), because exact greedy matching fires on the largest gains (fp8 KV,
   quantized GEMMs). A defect wrong in every process is one GSM8K already sees, so the check
@@ -232,20 +233,21 @@ A second launch at each KEEP, component mode only.
   session's first KEEP sets the floor (`<session>/short_prompts/floor.json`); a later KEEP whose
   processes differ on more prompts sent one at a time than the floor becomes REVERT, with the
   first differing positions in the reason. The batched half is recorded and refuses nothing:
-  on a GPU run an unchanged tree's two boots differed on none of the prompts sent one at a
-  time, and on most of the batched ones in their first tokens, because which prompts share a prefill batch changes
-  between boots and that flips near-tied greedy picks; pooled, that noise hid a small
-  single-request defect and could refuse a good KEEP. The second launch's server log is kept
+  an unchanged tree's two boots agree on the prompts sent one at a time but can differ on the
+  batched ones in their first tokens, because which prompts share a prefill batch changes
+  between boots and that flips near-tied greedy picks; pooled, that noise can hide a small
+  single-request defect and refuse a good KEEP. The second launch's server log is kept
   as `iter_N/server_2.log`. The record is `iter_N/short_prompts_check.json`; `keep.json` gets its
   brief, and a snapshot carries the record when the check ran.
 - **What refuses nothing:** an iteration probe that did not finish (no boot is spent then), a
   second boot that does not come up, no time left, a second probe that does not finish. The
   KEEP stands and `keep.json` says why, as MB's check does; MB re-gates every KEEP.
-- **Odds and cost:** two processes catch a one-in-three defect 4 times in 9 per KEEP, and every
-  later KEEP that carries it is another chance. The cost is one server boot and two probes per
-  KEEP (about 5 minutes on Model M at TP4), which a host should allow for in its deadline.
+- **Odds and cost:** a defect that shows in a fraction p of processes makes two processes differ
+  with probability 2p(1 - p) per KEEP, and every later KEEP that carries it is another chance.
+  The cost is one server boot and two probes per KEEP (several minutes for a large model), which
+  a host should allow for in its deadline.
 
-### The host's plan (2026-10-29)
+### The host's plan
 
 `component.plan`: a host
 running several Arbors from one set of directions gives each its share. `component.plan_entries`
@@ -262,7 +264,7 @@ one map: its open directions, disjoint, each a valid `component.plan`. Direction
 `depends_on` stay together, since `deps_met` counts a dependency missing from a map as met; the
 groups are dealt in rank order to the share with the fewest directions ([hosts.md](hosts.md)).
 
-### The dossier pass (2026-10-29)
+### The dossier pass
 
 Agreed with MB. Before its branches
 open, the host runs one Arbor as a dossier pass, splits that pass's map, and gives each branch a
@@ -279,7 +281,7 @@ share; directions an Arbor finds outside its share come back as `proposals`.
 - **`component.profile`:** the host's profile file, which MB writes from the root's `OpShares`.
   It goes into the prompt at every iteration through the same capped reader as
   the notes (`_read_head`), and the agent profiles only what it does not cover. When MB has no
-  shares (GLM-5.3 AgentX: its head profile is refused as too large), the key is left out.
+  shares (its head profile can be refused as too large), the key is left out.
 - **The agent is told what the pass is for** (`dossier_pass_block`): LEARN only, every direction
   one Arbor's work, `depends_on` only where needed (joined directions go to one Arbor), every
   direction ranked.

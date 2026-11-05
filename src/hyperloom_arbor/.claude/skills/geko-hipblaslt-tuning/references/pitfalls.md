@@ -3,8 +3,8 @@
 ## PITFALL #0 (most important): the tuned M must match your serving decode M
 
 This is the single easiest way to get **zero benefit from a correct tune** — and it fails *silently*. We hit it:
-a trace of a real serving run showed only **1 of 42** tuned kernels ever firing, not because the library was
-missing, but because we tuned one regime's M and ran the server at another regime's M.
+a trace of a real serving run showed **almost none** of the tuned kernels ever firing, not because the library
+was missing, but because we tuned one regime's M and ran the server at another regime's M.
 
 ### Why it happens
 
@@ -15,18 +15,18 @@ missing, but because we tuned one regime's M and ran the server at another regim
    fixed by the model weights, but `M` (the batched-token dimension) is set by: concurrency → batch size →
    **cudagraph capture bucket** (the batch is padded up to the nearest captured graph size). M belongs to the
    serving regime, not the model.
-3. **The concurrency→M map is non-linear — measure it, never guess.** Measured for DSV4.1-Flash:
-   `conc1 → M=128–1024`, `conc4 → M=32`, `conc16 → M=384`, `conc32 → M=384`. It jumps between buckets.
+3. **The concurrency→M map is non-linear — measure it, never guess.** It jumps between buckets: two
+   concurrencies can share one M while a lower one lands on a much smaller M, and the lightest load can spread
+   over a range of M.
 4. **cudagraph hides M.** In normal serving the decode runs inside HIP graphs, and **graph replay does not
    re-log hipBLASLt calls**, so you cannot read the decode M from a normal server. Use `--enforce-eager` +
    `HIPBLASLT_LOG_MASK=32` to discover it.
 
 ### The concrete failure we saw
 
-Library tuned for **conc4 (M=32)** — shapes like `(M=32, N=768, K=5120)`, `(M=32, N=672, K=5120)` — was loaded
-into a server driven at a **conc16 load**, whose decode padded to **M=384** — shapes like `(M=384, N=16380)`,
-`(M=384, N=96)`, `(M=384, N=54)`. Because `384 ≠ 32`, every M=384 GEMM fell back to stock; only one stray M=32
-GEMM (from a light step) fired a tuned kernel → **1/42**.
+Library tuned for a **low concurrency's M** was loaded into a server driven at a **higher concurrency**, whose
+decode padded to a **larger M**. Because the two Ms differ, every GEMM at the larger M fell back to stock; only a
+stray GEMM at the tuned M (from a light step) fired a tuned kernel → **a hit-rate near zero**.
 
 ### The correct workflow (do this, in order)
 
@@ -39,12 +39,12 @@ GEMM (from a light step) fired a tuned kernel → **1/42**.
    - *In-serving:* capture a torch-profiler trace under that load and confirm the tuned `..._UserArgs_...` kernel
      names appear as dispatched `Cijk_*` events (these kernels exist only in the merged lib — stock never emits
      them, so even their presence proves the lib is live).
-4. **Expected healthy result:** a high tuned-kernel hit-rate in the trace. A hit-rate near zero (e.g. 1/42) is
-   the signature of this pitfall — check that the trace's concurrency matches the tune's M.
+4. **Expected healthy result:** a high tuned-kernel hit-rate in the trace. A hit-rate near zero is the
+   signature of this pitfall — check that the trace's concurrency matches the tune's M.
 
 > One tune does not cover all concurrencies. If you serve at multiple concurrencies, either tune each regime's M,
-> or accept that the tune only helps at the one concurrency whose decode M it was built for. (For DSV4.1-Flash,
-> conc16 and conc32 happen to share M=384, so one tune covers both; conc1 and conc4 each need their own.)
+> or accept that the tune only helps at the one concurrency whose decode M it was built for. (Concurrencies whose
+> decode pads to the same M share one tune; the others each need their own.)
 
 ### The trap is the WHOLE signature, not just M — especially the output dtype (c_type/d_type)
 
@@ -52,9 +52,9 @@ M is the most common mismatch, but geko's Equality match keys on the **entire** 
 transB, a_type, b_type, c_type, d_type, compute_type)`. If **any** field differs from what serving actually
 dispatches, the tuned kernel does not fire — stock fallback, silently.
 
-**Hard-won example (2026-10-02):** a tune produced 25 kept kernels with a real GEMM uplift, yet a trace of
-the tuned serving run showed **0 of 25** firing. Ground truth from the eager `HIPBLASLT_LOG`: every real
-DSV4.1-Flash M=384 decode GEMM is `--a_type bf16_r --b_type bf16_r --c_type f32_r --d_type f32_r` — i.e. **bf16
+**Hard-won example:** a tune produced kept kernels with a real GEMM uplift, yet a trace of
+the tuned serving run showed **none of them** firing. Ground truth from the eager `HIPBLASLT_LOG`: every real
+DSV4.1-Flash decode GEMM is `--a_type bf16_r --b_type bf16_r --c_type f32_r --d_type f32_r` — i.e. **bf16
 in, f32 OUT**. But the tuning workload yaml had `c_type: bf16_r, d_type: bf16_r` (bf16 out). So geko tuned the
 `...BBS...` (bf16-out) kernel family while serving dispatches `...BSS...` (f32-out) — the kernel-name type code
 (`BBS` vs `BSS`) differs, the Equality match never hits, and the tune is a silent no-op. This single wrong field
@@ -68,7 +68,7 @@ had masqueraded as "geko gives no e2e benefit" across *every* earlier run.
   block (e.g. `BBS` vs `BSS`) encodes (inputDtype, outDtype, computeDtype). If the tuned kernels' code differs
   from the ones in the serving trace, you tuned the wrong variant.
 - **Verify the tuned-kernel FULL name appears in the serving trace** (not just "some `_UserArgs_` kernel" — that
-  tag is NOT geko-specific; stock Tensile kernels carry it too, ~20-30 per trace). The right check is: the exact
+  tag is NOT geko-specific; stock Tensile kernels carry it too). The right check is: the exact
   `kernel_tuned` names from `results/final_results.csv` appear as dispatched `Cijk_*` events in the tuned trace
   AND are absent from the baseline trace. 0 overlap = the tune never fired (check M AND dtypes).
 
@@ -88,14 +88,15 @@ checks — use BOTH:
    `experiments/verify_selection.sh` (reads shapes+types from `results/final_results.csv`).
 2. **Serving-trace firing (cross-check).** Capture a vLLM torch-profiler trace of the tuned serving run; confirm
    the exact `kernel_tuned` names appear as dispatched `Cijk_*` events AND are absent from the baseline trace.
-   Expect a *partial* count (an 8 s window only exercises some shapes) — that is fine; (1) is the complete
-   statement. Do NOT use the bare `_UserArgs_` tag as the signal — stock Tensile kernels carry it too (~20-30
-   per trace). See `experiments/verify_kernels_in_trace.py`.
+   Expect a *partial* count (a short window only exercises some shapes) — that is fine; (1) is the complete
+   statement. Do NOT use the bare `_UserArgs_` tag as the signal — stock Tensile kernels carry it too. See
+   `experiments/verify_kernels_in_trace.py`.
 
-Worked result (conc16, f32-corrected workload): selection 27/27, trace firing 9-10/27 → PASS. With the WRONG
-(bf16-out) workload the same checks gave 0/27 — the canonical signature-mismatch failure.
+Worked result (f32-corrected workload): every kept shape tuned-selected (`N of N`), a partial count firing in the
+trace → PASS. With the WRONG (bf16-out) workload the same checks selected none — the canonical signature-mismatch
+failure.
 
-## Running the experiment at scale — hard-won gotchas (2026-10)
+## Running the experiment at scale — hard-won gotchas
 
 The cluster now rejects node-holding sbatch (`while true`); use self-contained per-task sbatch that ends. Beyond
 that, these cost real hours to find:
@@ -119,7 +120,7 @@ that, these cost real hours to find:
   contains the `geko_agentx` path). Only pkill SPECIFIC binary names (`TensileCreateLibrary`, `hipblaslt-bench`).
 - **geko client build needs LLVM:** the ROCm image has no `LLVMConfig.cmake`; `apt-get update && apt-get install
   -y llvm-14-dev libomp5-14` makes `invoke build-client` succeed. Add a fail-fast `which geko` after install so a
-  broken setup aborts in ~2 min instead of after the 1 h baseline.
+  broken setup aborts within minutes instead of after the long baseline.
 
 ## Context: is geko even the right lever? (measure first)
 

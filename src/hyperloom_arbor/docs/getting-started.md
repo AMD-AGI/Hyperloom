@@ -22,12 +22,11 @@ From a laptop dry run to a first campaign on a GPU node.
 - **Credentials for the agents:** Claude, through your gateway. Put the gateway's variables
   (`ANTHROPIC_BASE_URL` and the token it needs) in the environment; the cluster launchers source
   them from `~/.arbor/gateway.env` (mode 600). Never commit them.
-- **Access:** `AMD-AGI/Arbor` is private; ask its maintainers for access.
 
 ## 1. A dry run (no GPU)
 
 ```bash
-git clone git@github.com:AMD-AGI/Arbor.git && cd Arbor
+cd src/hyperloom_arbor   # this repository's copy
 python3 -m arbor run --config configs/agentx-glm52-mi355x.json --dry-run
 ```
 

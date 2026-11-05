@@ -1,0 +1,6 @@
+{
+  "name": "dossier",
+  "version": "1.0.0",
+  "description": "The dossier an optimization campaign starts from, for one model, workload and GPU target: find and read it (read), write its parts (discover, measure, reference, directions) and update it in rounds (update). Its files and parts are those of the flat dossier skill it replaces.",
+  "author": {"name": "Arbor"}
+}

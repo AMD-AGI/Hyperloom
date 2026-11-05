@@ -207,8 +207,8 @@ class Trees:
 
 
 # Bytecode a server compiles beside the sources is never part of a tree. Arbor's landed.patch
-# carries it when the workspace's baseline commit tracked it: 46 of b5m c003's 56 files were
-# __pycache__/*.pyc, binary hunks no source tree can take (2026-10-14).
+# carries it when the workspace's baseline commit tracked it: most of one lane's files were
+# __pycache__/*.pyc, binary hunks no source tree can take.
 _ARTIFACT_DIRS = ("__pycache__/",)
 _ARTIFACT_SUFFIXES = (".pyc", ".pyo")
 
@@ -309,7 +309,7 @@ def workspace_from_session(doc) -> dict | None:
 
     The driver's mirror wraps it, {"workspace_config": {...}, "seed_digest", "job", "at"}
     (arbor/cluster/handoff.py), while the test fakes wrote it bare; freeze read the wrapper
-    as the flags themselves, so a real lane's kept flags came out empty (CORE-01, 2026-10-27).
+    as the flags themselves, so a real lane's kept flags came out empty.
     """
     if not isinstance(doc, dict):
         return None

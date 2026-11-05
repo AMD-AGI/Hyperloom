@@ -2,8 +2,8 @@
 
 The dossier (map step A and B) is a document campaign: no node, no GPU, an
 agent on the LLM gateway editing files. It runs where the controller runs, as
-a user unit, because a login node kills whatever an ssh session leaves behind
-(runner AGENTS.md section 3.1), with `MemoryMax` under the login node's
+a user unit, because a login node kills whatever an ssh session leaves behind,
+with `MemoryMax` under the login node's
 per-user throttle and `OOMPolicy=continue`.
 
 The contract is cluster.py's: `submit` returns the unit's name, Failed or

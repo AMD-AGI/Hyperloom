@@ -7,8 +7,8 @@ merges what Arbor keeps, and polls session.json's KEEP lessons as the keep
 signal (docs/component-mode.md, the design and the operator's decisions).
 
 MB built a sandbox around what standalone Arbor did wrong inside it: Arbor stopped MB's servers with a pattern `pkill`,
-ran on cards outside its lease, iterated an hour after the session died, hung
-for 511 minutes, and loaded kernel tables from paths outside the workspace.
+ran on cards outside its lease, kept iterating after the session had ended, hung
+in an agent turn with no bound, and loaded kernel tables from paths outside the workspace.
 This module is the part of the fix that is not the serving path:
 
 - **the switch**: ``"mode": "standalone" | "component"`` and the ``"component"``
@@ -102,7 +102,7 @@ REASONS = ("deadline", "map_exhausted", "done", "sigterm", "mapped", "aborted", 
 MASK_KEYS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox", "phase_minutes",
-              "root", "plan", "stop_at", "profile", "review")
+              "root", "plan", "stop_at", "profile", "review", "callbacks")
 
 # component.review: who reviews the campaign before it runs. "host": the host does, before it
 # starts this run (MB pauses after its dossier pass, holding no lease), so the review gate
@@ -119,8 +119,8 @@ STOP_AT = ("map",)
 # without the key, the first commit is the base (workspace.base_commit).
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
-# Each phase's cap, in minutes (``component.phase_minutes`` overrides). The
-# 511-minute hang MB saw was one agent turn with no bound at all.
+# Each phase's cap, in minutes (``component.phase_minutes`` overrides). A hang
+# MB saw was one agent turn with no bound at all.
 PHASE_MINUTES = {"agent": 90, "server": 45, "bench": 60, "critic": 15, "correctness": 30,
                  "short_prompts": 10}
 
@@ -208,7 +208,7 @@ def session_root(config) -> Path:
 
 def parse_deadline(value) -> float:
     """An absolute deadline: epoch seconds (a number or a numeric string), or ISO 8601
-    with a timezone ("2026-10-29T03:20:00Z"). ValueError otherwise: a deadline with no
+    with a timezone ("2030-01-01T00:00:00Z"). ValueError otherwise: a deadline with no
     timezone is read differently on every host."""
     if isinstance(value, bool):
         raise ValueError(f"deadline {value!r} is not a time")
@@ -274,6 +274,9 @@ def config_errors(config) -> list[str]:
         errors.append(f"component.root must be a commit sha (7 to 40 hex digits), not {raw['root']!r}")
     if raw.get("plan") is not None:
         errors += plan_entries(config)[1]
+    if raw.get("callbacks") is not None:
+        from arbor import triggers
+        errors += triggers.callback_errors(raw["callbacks"])
     if raw.get("deadline") is not None:
         try:
             parse_deadline(raw["deadline"])
@@ -782,8 +785,8 @@ def gpu_list(value) -> list[int] | None:
 def turn_block(config, session_dir=None, now: float | None = None) -> str:
     """The main agent's time this turn: its phase cap and what is left before the deadline.
 
-    On Cluster C (2026-10-29) an agent started an AITER fused-MoE tuning sweep inside a 30-minute
-    turn, hit the cap before measuring, and lost half of Arbor's 67 minutes: nothing had
+    Under a host an agent once started an AITER fused-MoE tuning sweep inside a capped
+    turn, hit the cap before measuring, and lost much of Arbor's time: nothing had
     told it how long its turn was. Empty in standalone, where turns have no cap.
     """
     if not is_component(config):
@@ -1065,7 +1068,7 @@ def carried_changes(container: str, workspace: str, parent: str, commit: str, it
     ``Revert "iter-N: ..."`` undoes, and that changes what is served: the served pathspec,
     or arbor/config.json (flags and env, which the patches leave out). A NOT_MEASURED
     iteration keeps its tree, so its change rides into the next KEEP, whose gate judges
-    only the two together (Cluster C, 2026-10-30: iteration 5's INT4 QuickReduce env in KEEP 2).
+    only the two together (an INT4 QuickReduce env once rode into a later KEEP that way).
     Each is named with its own verdict from session.json, for the host to see.
     """
     from arbor.execute.workspace import git
@@ -1117,7 +1120,7 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
     - ``carries``: the earlier iterations' changes the tree holds since ``parent`` that
       no gate judged on their own, such as a NOT_MEASURED iteration's (carried_changes).
     - Both patches use the served pathspec (no probes, logs, bytecode or arbor/config.json),
-      byte for byte as git wrote them (``workspace._write_diff``; CORE-01).
+      byte for byte as git wrote them (``workspace._write_diff``).
     - ``left_out``: a file over ``workspace.OVERSIZE_BYTES`` stays out of both patches and
       is named here, with its size (a GPU core dump once rode in one).
     - config.json is the live arbor/config.json, what was measured (the server and

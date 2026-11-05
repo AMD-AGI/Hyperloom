@@ -4,8 +4,8 @@ A host that owns the node, its GPUs and the clock (Hyperloom's multibranch today
 a component: Arbor optimizes the worktree the host gives it, on the host's GPU lease and under the
 host's deadline, and the host gates and merges what Arbor keeps. The design, the decisions and
 what is built: [component-mode.md](component-mode.md). Tested on a GPU node with a stand-in host
-([scripts/component/](../scripts/component/README.md)), and run inside Hyperloom's MB on Cluster A since
-2026-10-30. Which side runs each step of an MB session: [who-runs-what.md](who-runs-what.md).
+([scripts/component/](../scripts/component/README.md)), and run inside Hyperloom's MB.
+Which side runs each step of an MB session: [who-runs-what.md](who-runs-what.md).
 
 ## The config
 
@@ -21,7 +21,7 @@ with:
 "port": 8006,
 "component": {
   "host": "hyperloom-mb",
-  "deadline": 1793244000,
+  "deadline": 1893456000,
   "notes": "/abs/path/to/merged-notes.md",
   "bench_command": "python3 bench.py --base-url http://127.0.0.1:{port} --result-dir {out}",
   "outbox": "keeps",
@@ -38,7 +38,7 @@ with:
 | `gpu_ids` | optional: the leased cards' physical numbers, a string or a list. |
 | `directives` | optional: lines every agent reads in its program, at every iteration. The host's rules go here, each starting `Host rule`: what it holds fixed, what it refuses and how it judges a change. The dossier copies them into part 4's rules table (the dossier skill's `## The benchmark's rules`). |
 | `component.host` | the host's name, for the log and the agents' rules. |
-| `component.deadline` | when the run must be over: unix seconds, or ISO 8601 with a timezone (`"2026-10-29T03:20:00Z"`). |
+| `component.deadline` | when the run must be over: unix seconds, or ISO 8601 with a timezone (`"2030-01-01T00:00:00Z"`). |
 | `component.seconds` | or a duration in seconds from the first launch; a resume does not restart it. With both, the earlier wins; `0` means none, so `deadline` decides. |
 | `component.notes` | a file of what the host has already measured and merged. Read at every iteration; the agent never redoes what it lists (the first 20 KB go into its prompt). |
 | `component.bench_command` | the host's benchmark client, run unchanged for every measurement, with `{port}` (Arbor's server) and `{out}` (an empty directory per replay, for its results) filled in. Without it, the pack's bench. Warm the server first: the first reading after a start reads low. The agent reads the pack's metric from the client's results, and its second metric too when the pack names one (`p90_interactivity` as 1000 / p90 TPOT in ms if the client reports latencies): without it Arbor's gate is one-axis. |
@@ -255,6 +255,21 @@ A resumed session is never gated again.
   ts}`, written before every exit 0 and exit 3.
 - **Why it never started:** `<session>/component_refused.json`, `{reasons, ts}`, written before
   every exit 2 whose config names a session.
+- **The lifecycle:** `<session>/lifecycle.jsonl`, one JSON object a line (`arbor/lifecycle.py`). It
+  is the feed a host follows for where the session is.
+  - **What it records:**
+    - each chapter the session enters: `{at, kind: "chapter", name, iteration, skills}`. The names are
+      `map` (a dossier round), `round_end` (the dossier's update round) and `iterate`;
+    - each event it fires: `{at, kind: "event", name, iteration, ...}`. The events are
+      `session_start`, `iteration_start`, `keep`, `revert`, `probe`, `invalid`, `agent_failed`,
+      `map_set` (with the map's open directions), `round_end` and `end` (with the exit reason);
+    - the `run` skills' turns, and the `trigger` skills and callbacks each event started.
+  - **Callbacks** (optional): a host can be called on an
+    event instead of reading the file.
+    - **Where:** the config's component block, `"callbacks": {"<event>": [<command>, ...]}`.
+    - **A command** is a string or a list of arguments. It is never run by a shell.
+    - **How Arbor runs it:** without waiting, with `ARBOR_EVENT`, `ARBOR_SESSION` and
+      `ARBOR_EVENT_JSON` (the journal entry) in its environment. Each call is journaled.
 
 | Exit code | When | `reason` |
 |---|---|---|
@@ -325,4 +340,4 @@ record.
   does, restarts it, and the run carries on once the gateway answers. Each restart into a
   continuing outage takes as long again, so it never fills a crash window like MB's (3 in 10
   minutes); the deadline still ends the run. Sites that reach the gateway through a tunnel or a
-  proxy should expect drops (Cluster C: 7 in four days, 2026-10).
+  proxy should expect drops.

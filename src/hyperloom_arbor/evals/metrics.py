@@ -52,7 +52,7 @@ _FLAG_RE = re.compile(r"(--[a-z][a-z0-9-]{3,})")
 #: Flags every launch carries regardless of what is being tested. Reporting
 #: ``--model`` or ``--port`` as a "retried change" is noise dressed as a finding,
 #: and the earlier "present in every iteration" filter did not catch them: they
-#: appeared in 4 of 5 iterations (two runs never reached a launch), so they
+#: appeared in most iterations (some runs never reached a launch), so they
 #: survived the intersection and were reported anyway.
 _STRUCTURAL_FLAGS = frozenset({
     "--model", "--port", "--host", "--tensor-parallel-size", "--trust-remote-code",
@@ -158,11 +158,11 @@ def outcome_metrics(steps: list[dict[str, Any]], session_json: dict[str, Any],
         delta = mark.get("delta_pct")
         if (spread is not None and isinstance(delta, (int, float))
                 and abs(delta) < spread):
-            # Carry the individual runs. The spread alone can mislead: in the
-            # observed case it was large only because a hot-cache run the agent
-            # had itself discarded as invalid was among the artifacts, while the
-            # two cold runs spread far less. A reader needs the values to judge
-            # which comparison is the honest one.
+            # Carry the individual runs. The spread alone can mislead: it can be
+            # large only because a hot-cache run the agent had itself discarded
+            # as invalid is among the artifacts, while the cold runs spread far
+            # less. A reader needs the values to judge which comparison is the
+            # honest one.
             below_noise.append({"iteration": it, "delta_pct": delta,
                                 "noise_spread_pct": spread,
                                 "decision": mark.get("decision"),
@@ -192,9 +192,9 @@ def _billed_usages(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     A single assistant message becomes several trajectory steps — a thinking
     block, some text, one per tool_use — and every step carries that message's
     whole ``usage`` dict. Summing per step therefore counts the same tokens
-    once per block: measured at 2.60x for output tokens and 3.02x for thinking
-    on the 3-hour validation run, which made every cost-per-percent number in
-    the report roughly two and a half times too expensive.
+    once per block, several times over for output and thinking tokens, which
+    made every cost-per-percent number in the report several times too
+    expensive.
 
     Steps predating ``message_id`` (or reconstructed from hooks alone, which
     have no usage at all) fall back to identity so nothing is silently dropped.
@@ -237,9 +237,9 @@ def efficiency_metrics(steps: list[dict[str, Any]],
 
     wall = _span_seconds(steps)
     # Split by actor: subagents run concurrently with the orchestrator and
-    # with each other, so summed tool time legitimately exceeds wall clock
-    # (it did: 11,987 s of tool time inside 11,923 s of wall clock). Reporting
-    # one total invites reading that as impossible rather than as parallelism.
+    # with each other, so summed tool time can legitimately exceed wall clock.
+    # Reporting one total invites reading that as impossible rather than as
+    # parallelism.
     tool_ms = sum(s.get("duration_ms") or 0 for s in tool_calls)
     tool_ms_orch = sum(s.get("duration_ms") or 0 for s in tool_calls
                        if s.get("actor") != "subagent")
@@ -463,8 +463,8 @@ def pathology_metrics(steps: list[dict[str, Any]], session_dir: Path,
     # A retried change is only waste if it was already tried and REVERTED.
     #
     # An earlier version counted any env var or flag seen in more than one
-    # server launch, which reported `--model×2` and `--port×2` — the constants
-    # present in every launch — as repeated changes, and `SESSION_DIR×3`, a
+    # server launch, which reported `--model×N` and `--port×N` — the constants
+    # present in every launch — as repeated changes, and `SESSION_DIR×N`, a
     # shell variable that never reaches the server. Noise that looks like a
     # finding is worse than no finding, so this now measures the real thing:
     # settings carried by an iteration that reverted, and tried again later.

@@ -1,6 +1,6 @@
 """Arbor's parallel mode: a run of rounds, each a map, a fan-out of lanes, a drain and an integration.
 
-Runner decision 0003 (2026-10-20). A round maps the tree (a profile on a node
+A round maps the tree (a profile on a node
 and the dossier's update round on the host, in parallel), runs every open
 direction as a lane (an Arbor campaign on its own node, its map the direction's
 plan), as far as `max_lanes` nodes and the dependencies allow, waits until every

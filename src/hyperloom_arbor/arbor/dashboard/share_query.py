@@ -13,7 +13,7 @@ there). Standard library only, Python 3.8 or later.
 
 The answer is always one JSON object on stdout, ``{"error": "..."}`` when the
 query failed: through the gateway, every command exits 0 and its stderr
-arrives on stdout (tested 2026-10-07), so neither can say that it failed.
+arrives on stdout, so neither can say that it failed.
 
 The layout is the collectors' (``arbor/collect/share.py``):
 ``<root>/projects/<project>/<user>/<campaign>/{realtime,knowledge}/``. A

@@ -19,9 +19,9 @@ The order of the checks is the point:
 4. Otherwise Arbor's own `run_gate` decides on the arm means, with the
    candidate's declared intent choosing the bar.
 5. A change that declared a log marker and never printed it did not run
-   (AGENTS.md section 10): a KEEP without it is downgraded to REVERT.
+  : a KEEP without it is downgraded to REVERT.
 
-Ported verbatim from arbor/mesh3/gatecheck.py (<fork>/mesh3-confirm a691edc).
+Ported from an earlier gate check.
 """
 
 from __future__ import annotations

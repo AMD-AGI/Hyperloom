@@ -137,8 +137,8 @@ def main(argv: list[str]) -> int:
             #
             # The metric key comes from the PACK, not a literal. Hardcoding
             # "output_throughput" made this whole dry run vacuous for any pack
-            # gating on something else: agentx-dsv41-6 gates on
-            # mean_interactivity, so all twelve iterations returned
+            # gating on something else: a pack gating on
+            # mean_interactivity had every iteration return
             # "bench output missing metric key" and the run exercised nothing
             # but the not-measured path while still exiting 0.
             noise = rng.gauss(0, 3)

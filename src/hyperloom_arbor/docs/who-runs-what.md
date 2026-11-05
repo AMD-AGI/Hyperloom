@@ -5,9 +5,9 @@ In component mode, Hyperloom's multi-branch mode (MB) runs Arbor as an autonomou
 - **Arbor owns** the optimization loop, inside the cards and the time MB gives it.
 
 This page says which side runs each step of an MB session, and what passes between the two.
-- **As of 2026-11-01:**
+- **When this page was written:**
   - Arbor `main` `85f01cc`;
-  - Hyperloom `<fork>/Hyperloom` `arbor-adapter-v2` `8f59f12db` or later, merging into `multibranch-dev`.
+  - Hyperloom `multibranch-dev` at `8f59f12db` or later.
 - **Hyperloom's copy of this page:** `docs/conceptual/multibranch-arbor.md`.
 - **The contract key by key, from Arbor's side:** [hosts.md](hosts.md).
 - **The design and its decisions:** [component-mode.md](component-mode.md).
@@ -81,7 +81,7 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out.
    - **The start:** `python3 -m arbor run --config hyperloom-mb/config.json`. The process must stay up for 300 s.
    - **Code:** `specialist/autonomous_session.py`, `specialist/agent_onboarding.py`, `specialist/arbor_adapter.py`.
 8. **Arbor runs.**
-   - **Before the first iteration:** the review gate ([how-it-works.md](how-it-works.md#before-the-first-iteration-the-review-gate)), then the init: it pins the validators and seeds the workspace. With its accuracy gate on, it then serves the root once and measures its full GSM8K (`<session>/baseline_accuracy.json`; about 2 min for Qwen3-8B on MI350X).
+   - **Before the first iteration:** the review gate ([how-it-works.md](how-it-works.md#before-the-first-iteration-the-review-gate)), then the init: it pins the validators and seeds the workspace. With its accuracy gate on, it then serves the root once and measures its full GSM8K (`<session>/baseline_accuracy.json`; a few minutes for a small model).
    - **Each iteration:** an agent turn, its server and the bench, the correctness checks, and its own gate.
    - **A KEEP:** written as a snapshot ([hosts.md](hosts.md#what-to-read-back)).
    - **Code:** `arbor/driver.py`, `arbor/component.py` (`snapshot_keep`).
@@ -114,8 +114,8 @@ for a person:
 
 On a shared node, each point gets its own container (`--slot`), cards and Arbor port base (`--agent-port`). Each
 point's Arbor gets its own point's `Host rule` directives. Each point ends with its own recipe; nothing merges across
-the points. Verified with two points (C8 and C64) on one node. How to run it, in Hyperloom's docs on `arbor-adapter-v2`: `docs/how-to/multibranch-points.md`; the
-single-session review: `docs/how-to/multibranch-review-gate.md`.
+the points. The single-session review, in Hyperloom's
+docs: `docs/how-to/multibranch-review-gate.md`.
 
 ## What passes between them
 
@@ -144,7 +144,7 @@ single-session review: `docs/how-to/multibranch-review-gate.md`.
 | 2 (refused) | Never restarts it. The branch ends with the reasons from `component_refused.json`. |
 | 3 (`unreachable`), or any other non-zero | Restarts it with the same command and the same deadline. It gives up after 3 crashes in 10 min, or 2 stalls in a row. |
 
-## Known gaps (2026-11-01)
+## Known gaps
 
 - **The review pauses unattended runs:** it is on by default. A batch run passes `--no-review-gate`, or a person
   approves from a login node.
@@ -153,7 +153,7 @@ single-session review: `docs/how-to/multibranch-review-gate.md`.
 - **No merge across operating points:** each point's session ends with its own recipe. A rule that combines them
   (for example, keep a change only if no point regresses) is not built.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
-  removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `arbor-adapter-v2` `b9d65167d` and
+  removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `b9d65167d` and
   after). Only on AgentX, though: there Magpie applies it; on InferenceX such a removal is refused.
 - **No profile on CUDA-graph runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens
   degraded, the branches get none, though the dossier pass got kernel shares.

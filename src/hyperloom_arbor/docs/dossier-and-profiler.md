@@ -31,6 +31,30 @@ twelve parts: model, system, code reading, target, workload, baseline, profile, 
 platform, earlier optimizations, directions and fast bench. Part 11, the directions, ends with the
 map a campaign works.
 
+### The dossier plugin: the same dossier, written by six skills
+
+The `dossier` plugin (`plugins/dossier/`) splits the flat `dossier` skill into skills a pack places
+in the lifecycle's chapters ([packs.md](packs.md)). The dossier on disk is the same: the same
+directory, index, part numbers and file names, so existing dossiers stay valid.
+
+| Skill | Mode, chapter | Writes |
+|---|---|---|
+| `dossier:read` | `use`, for the iteration agent | nothing: finds the dossier, reads it, cites it |
+| `dossier:discover` | `run`, `map.discover` | the index, parts 1-5 and 10 (no GPU) |
+| `dossier:measure` | `run`, `map.measure`, after discover | parts 6, 7, 8 (and 12), on the node; completes 1 and 3 |
+| `dossier:reference` | `run`, `map.measure`, opt-in | part 9, from the user's reference traces |
+| `dossier:directions` | `run`, `map.directions` | part 11, ending in the map Arbor reads |
+| `dossier:update` | `run`, `round_end` | a round's `NN.uK` parts and the new map |
+
+- **What they share:** the rules, the template and `find-dossier.sh`, in `plugins/dossier/shared/`.
+- **The checker:** `python3 -m arbor.dossier.check`, its part lists in `arbor/dossier/parts.py`.
+- **A pack that uses it:**
+  `plugins: [dossier]`, with the writers as `run` skills in the map's chapters and `dossier:read`
+  as a `use` skill of `iterate`. Arbor then runs each writer in a turn of its own and checks its
+  files.
+- **The flat skill:** `.claude/skills/dossier/` stays, unchanged, for packs that name it
+  (`skills: [dossier]`), for one release. Its `check-dossier.py` runs the module.
+
 ### Where dossiers are, and how one is found
 
 - **In a repository:** `docs/dossier/<model>-<workload>-<gpu>/`. `README.md` is the index, with one
@@ -40,7 +64,7 @@ map a campaign works.
   see, each with its header (project, pins, platform, workload, date):
   - this checkout's `docs/dossier/`, and the enclosing project's when Arbor is a submodule;
   - the dossiers campaigns have shared,
-    `/shared/arbor/projects/<project>/<user>/<campaign>/knowledge/dossier/`. These are read in
+    `/path/to/arbor-share/projects/<project>/<user>/<campaign>/knowledge/dossier/`. These are read in
     place where the share is mounted, and through `ssh arbor-share` elsewhere.
     `ARBOR_DOSSIER_NO_SHARE=1` skips them.
 - **A match** is the same model, workload and GPU type. Different pins or another node class make
@@ -203,7 +227,6 @@ has, each kill and whether it can be reopened, the bar, the lessons.
     told to emit part 11's list, and a second list in the knowledge gives it two to choose from.
   - **Which pack:** a pack made for that model and workload, never `packs/serving`. The serving
     template is used by every host workload that has no pack of its own.
-  - **Size:** keep it short. Knowledge is in the prompt, whole, at every iteration; the C4 hand-off
-    is 32 KB.
+  - **Size:** keep it short. Knowledge is in the prompt, whole, at every iteration.
   - **Edits:** an edit reaches a running campaign at its next iteration. Knowledge is read each
     time the program is rendered; it is not pinned like the validator.

@@ -14,7 +14,7 @@ and the project, user and campaign names, are set up as in the
 ## What it collects
 
 One directory per type, staged in `<session>/collector/knowledge/<type>/` and
-pushed to `/shared/arbor/projects/<project>/<user>/<campaign>/knowledge/<type>/`:
+pushed to `/path/to/arbor-share/projects/<project>/<user>/<campaign>/knowledge/<type>/`:
 
 | Type | Files | From |
 | --- | --- | --- |
@@ -71,7 +71,7 @@ Before a campaign, or when asked what is known about a model:
 
 1. **Find the campaigns**: the dashboard's global mode, filtered by project
    (the `dashboard` skill); or
-   `ssh arbor-share 'ls /shared/arbor/projects/<project>/*/*/knowledge/summary/SUMMARY.md'`;
+   `ssh arbor-share 'ls /path/to/arbor-share/projects/<project>/*/*/knowledge/summary/SUMMARY.md'`;
    on a Cluster B node, the same path directly.
 2. **Read** `SUMMARY.md`, then `OUTCOMES.md` (what was tried and why it was
    kept or reverted) and `FINDINGS.md` (dead ends, with when to revisit each).

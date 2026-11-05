@@ -17,7 +17,7 @@ Usage:
     # Deploy winning tile config to aiter CSV:
     python3 bench_moe_fp8fp4.py --kernel moe1 --M 32 --N 4608 --K 5120 \
         --n-experts 384 --top-k 6 --n-bench 500 \
-        --tile-config t64x128x256_w4_gui --config-name decode_c5 --deploy \
+        --tile-config <tile> --config-name <config> --deploy \
         --deploy-csv /workspace/knowledge_base/aiter/configs/model_configs/dsv41flash_fp8fp4_tuned_fmoe.csv
 """
 import argparse, csv, math, os, sys

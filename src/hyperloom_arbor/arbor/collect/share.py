@@ -1,17 +1,17 @@
 """The share: where collectors put campaign data for everyone to read.
 
-Layout under the share root (default /shared/arbor, on the share's pod)::
+Layout under the share root (default /path/to/arbor-share, on the share's pod)::
 
     projects/<project>/<user>/<campaign>/realtime/          status.json, meta.json
     projects/<project>/<user>/<campaign>/knowledge/<type>/  summary, outcomes, findings,
                                                             profiles, dossier, artifacts
 
 The pod is reached through the platform's ssh gateway, which takes ssh
-commands, scp and sftp but not rsync and not piped stdin (tested 2026-10-06).
+commands, scp and sftp but not rsync and not piped stdin.
 So an upload is one sftp batch: make the directories, put each file under a
 temporary name, rename it into place. sftp's rename replaces the target in one
 step, so a reader never sees half a file. The gateway also returns exit status
-0 for every command and delivers its stderr on stdout (tested 2026-10-07), so
+0 for every command and delivers its stderr on stdout, so
 ``check`` reads markers the command prints, never its exit status; sftp's own
 status is reliable.
 
@@ -20,7 +20,7 @@ collectors only write below projects/.
 
 Settings, each with an environment fallback:
     ARBOR_SHARE_HOST      ssh destination, an alias from ~/.ssh/config (default arbor-share)
-    ARBOR_SHARE_ROOT      the share root on that host (default /shared/arbor)
+    ARBOR_SHARE_ROOT      the share root on that host (default /path/to/arbor-share)
     ARBOR_SHARE_SSH_OPTS  extra options for both ssh and sftp; use -F and -o forms
                           (-o Port=2222), since ssh and sftp spell -p differently
 """
@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_HOST = "arbor-share"
-DEFAULT_ROOT = "/shared/arbor"
+DEFAULT_ROOT = "/path/to/arbor-share"
 BASE_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 
 

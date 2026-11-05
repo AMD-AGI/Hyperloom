@@ -39,7 +39,7 @@ How it works:
 ``apply_output`` after the agent (``arbor.policy.claude_loop.run_iteration``),
 ``render`` inside the program (``arbor.pack.render``).
 
-Version 2 (runner decision 0003, the parallel mode) adds what a coordinator
+Version 2 (the parallel mode) adds what a coordinator
 needs to run each direction as a lane, all optional, so a v1 map and v1 lines
 read as before: ``lane`` (increment, kernel-plan, architectural or upstream;
 by default increment for an increment and kernel-plan for a rewrite),
@@ -419,8 +419,8 @@ def load(root) -> tuple[dict | None, str | None]:
     """(the map, None); (None, None) when there is none; (None, why) when it cannot be read.
 
     Only the harness writes the map (``save``, which keeps its own copy beside it). A file
-    that differs from that copy was edited by hand: Model M day-0 b0's agent wrote its own map
-    into it at iteration 61 (2026-10-22) after its DIRECTIONS list was rejected, then worked
+    that differs from that copy was edited by hand: one campaign's agent wrote its own map
+    into it after its DIRECTIONS list was rejected, then worked
     from it while the harness waited for the list, and the fresh start ran out. The copy is
     put back, and the map says so (``hand_edit``) until the next map is accepted.
     """
@@ -474,10 +474,17 @@ def knob(name: str, campaign=None, state=None) -> int:
 
 
 def enabled(campaign, state=None) -> bool:
-    """Map rounds run for a campaign whose agent has the dossier skill, outside document workloads."""
+    """Map rounds run for a campaign that maps, outside document workloads: its agent has the dossier skill, or its
+    pack's lifecycle names skills in the map's chapters (arbor/lifecycle.py)."""
     try:
+        from arbor import lifecycle
         from arbor.pack.loader import agent_skills
-        if "dossier" not in (agent_skills(campaign.pack) or []):
+        pack = campaign.pack
+        plan = lifecycle.declared(campaign)
+        if plan is not None:
+            if not any(plan.runs(c) or plan.uses(c) for c in lifecycle.MAP_CHAPTERS):
+                return False
+        elif "dossier" not in (agent_skills(pack) or []):
             return False
         if (getattr(campaign.pack, "workload", None) or {}).get("kind") == "document":
             return False
@@ -684,10 +691,10 @@ def advance(campaign, state, root) -> str | None:
 
         if doc["phase"] == "stopped":
             # The driver exits on STOP, so reaching here means the operator removed it.
-            # A map stopped for having nothing open resumes with a fresh start (before
-            # 2026-10-22 that stop came straight after the update round: b0's).
+            # A map stopped for having nothing open resumes with a fresh start (earlier,
+            # that stop came straight after the update round).
             # One stopped for writing no map in time resumes that phase, its count from
-            # zero, whatever the file holds (b0's fresh start, 2026-10-22, after a hand edit).
+            # zero, whatever the file holds (as after a hand edit).
             stop = doc.get("stop") or {}
             reason = str(stop.get("reason") or "")
             empty = stop.get("kind") == "empty" or "no open increment" in reason
@@ -1143,7 +1150,7 @@ def render(doc: dict, state=None, campaign=None) -> str:
     phase = doc.get("phase")
     k = doc.get("map_round", 0)
     # While the map is being written, a rejected list stays shown until a map is accepted:
-    # b0's agent saw its rejection once, then worked from a map the harness never took.
+    # an agent saw its rejection once, then worked from a map the harness never took.
     last = doc.get("last_events")
     writing = phase in ("bootstrap", "unmapped", "updating", "fresh")
     rejected = [e for e in (doc.get("events") or []) if not e.get("ok") and (

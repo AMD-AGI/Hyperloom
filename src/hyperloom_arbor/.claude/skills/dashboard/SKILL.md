@@ -69,7 +69,7 @@ node arbor/dashboard/server.mjs local --host <host with the session> \
 - `--host` is an ssh alias with key authentication. `--host local` runs the
   collector on this machine (it needs `python3` here: WSL, not Windows).
 - **Run it from WSL with a reused connection** when the host is slow to reach
-  (`<login node>`: 7–15 s per ssh connection): `--ssh-opts "-o ControlMaster=auto
+  (`<login node>`: seconds per ssh connection): `--ssh-opts "-o ControlMaster=auto
   -o ControlPath=$HOME/.ssh/cm-%r@%h:%p -o ControlPersist=10m"`. Windows'
   OpenSSH cannot reuse connections. On Windows the server uses
   `C:\Windows\System32\OpenSSH\ssh.exe` when present, because Git for Windows'
@@ -109,6 +109,6 @@ systemd-run --user --collect --unit=arbor-dash-global --setenv=PATH="$PATH" \
 ```
 
 WSL forwards `localhost`, so the Windows browser opens it. Where dashboards
-are collected in a hub (the runner's, at <http://localhost:8790>), link it
+are collected in a hub, link it
 there instead of passing the port around:
 `hub-register --link <id> http://localhost:8767 "Arbor share"`.

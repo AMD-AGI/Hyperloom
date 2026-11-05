@@ -42,7 +42,7 @@ objective:
   unit: "tok/s/GPU"
   measurement:
     # One measurement per iteration. Set the bar from this node's measured floor (two cold
-    # replays) where the launcher measures one; 0.5 % is the v2 line's bar once rebased per node.
+    # replays) where the launcher measures one; the default bar is 0.5 %, rebased per node.
     threshold_rel: 1.005
     noise_band_pct: 1.0
     # Second Pareto axis: p90 interactivity = 1000 / p90 TPOT (ms), tok/s per user. A change

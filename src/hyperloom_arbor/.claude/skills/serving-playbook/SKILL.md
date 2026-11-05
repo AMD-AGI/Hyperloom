@@ -17,8 +17,7 @@ The harness reads it (`arbor/knobs.py`):
   - **`numerics`:** a change to this knob can alter outputs, so it calls for the accuracy gate before a KEEP;
   - **`op_dependent`:** its effect flips with the operating point, so a dead end on it holds at that point only.
 - **`bundles`:** documented sets of settings that pay only together. A declared `BUNDLE:` is gated as one change.
-- **`source`:** the reference page and section the entry was taken from, and record ids (`#655`) of the study behind
-  it. Neither is carried in this copy; they name the origin for whoever has them.
+- **`source`:** the reference page and section the entry was taken from. Neither is carried in this copy; they name the origin for whoever has them.
 
 ## Rules that hold for every serving change
 

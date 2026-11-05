@@ -24,7 +24,7 @@ No copied page says gfx950 has 32 LDS banks. The page that did, `knowledge_base/
 | --- | --- | --- |
 | `knowledge_base/ck/ck_playbook.md:3096`, `:3139` | "96 KB LDS per CU (gfx940)"; "96 KB LDS retained — same as gfx90a". The same file says 64 KB at `:347` | MI300X (gfx942): 64 KiB LDS per CU, 32 banks (`hardware/reference/cdna3_mi300/memory_hierarchy.md:30`) |
 | `knowledge_base/ck/ck_playbook.md:3147` | "gfx950 inherits gfx942's scaled MFMA — same `_f8f6f4` family" | gfx942 has no FP4, FP6 or block-scaled MFMA; the scaled `f8f6f4` MFMA is new in gfx950 (`hardware/reference/cdna3_mi300/matrix_core.md:41`) |
-| `knowledge_base/aiter/backend_dispatch.md:158` | gfx942 row: FP8 "OCP + FNUZ", MXFP4 "Yes" | gfx942's FP8 is FNUZ in hardware, and it has no FP4 matrix instructions; AITER's MXFP4 W4A4 is rejected on gfx942, where `--moe-backend auto` picks W4A16 (`serving-playbook/image-manifest.md` A4, #1011) |
+| `knowledge_base/aiter/backend_dispatch.md:158` | gfx942 row: FP8 "OCP + FNUZ", MXFP4 "Yes" | gfx942's FP8 is FNUZ in hardware, and it has no FP4 matrix instructions; AITER's MXFP4 W4A4 is rejected on gfx942, where `--moe-backend auto` picks W4A16 (`serving-playbook/image-manifest.md` A4) |
 | `knowledge_base/ck/ck_playbook.md:2031` | CK's CMake gate "TF32 = gfx942+" | reads as including gfx950, which has no TF32 (hardware SKILL.md, quick facts); a build-gate statement, so check CK's `CMakeLists.txt` before relying on it |
 
 ## Hits that are correct (checked, no action)

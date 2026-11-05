@@ -34,6 +34,8 @@ or agent. A first campaign on a node: [docs/getting-started.md](docs/getting-sta
 | [docs/how-it-works.md](docs/how-it-works.md) | the loop, the agents, intents and the gate, planning, the records |
 | [docs/packs.md](docs/packs.md) | the pack format, validators, skills, the packs here, writing one |
 | [docs/dossier-and-profiler.md](docs/dossier-and-profiler.md) | using the dossier and profiler skills; whether a dossier's directions can go into a pack |
+| [docs/skill-integration.md](docs/skill-integration.md) | how skills fit into a campaign: the chapters, the dossier split into six skills, where a new skill joins, and the `arbor-dev` skills for developing Arbor |
+| [docs/skills.md](docs/skills.md) | contributing skills: families as plugins, the lifecycle's chapters and events, the run, trigger and use modes, checking a skill, turning it on in a pack |
 | [docs/reference.md](docs/reference.md) | the command line, every config key, environment variables, the session layout |
 | [docs/operations.md](docs/operations.md) | launchers, rolling chunks, parallel mode, dashboards |
 | [docs/hosts.md](docs/hosts.md) | running Arbor inside a host (component mode) |
@@ -62,9 +64,8 @@ Design records: [docs/component-mode.md](docs/component-mode.md),
 
 ## Development
 
-The home is [`AMD-AGI/Arbor`](https://github.com/AMD-AGI/Arbor) (private); `the internal Arbor repository`
-is kept in step until it is retired. Work lands on `main` directly, one change per commit, and
-`main` takes fast-forwards only ([CONTRIBUTING.md](CONTRIBUTING.md)).
+This copy is vendored: a change is made in Arbor's own repository and the copy is taken again from a new tag
+([CONTRIBUTING.md](CONTRIBUTING.md), [VENDOR.md](VENDOR.md)).
 
 ```bash
 python3 -m pytest -q arbor/tests evals/tests

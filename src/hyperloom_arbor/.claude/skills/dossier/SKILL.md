@@ -7,15 +7,16 @@ description: Find, or write if it is missing, the dossier an optimization campai
 
 Audience: an agent (or a person) about to optimize a model on a GPU target,
 or asked what to optimize. The dossier answers, in order and with sources,
-what the campaign would otherwise rediscover. In one DeepSeek V4.1 Flash
-campaign, each of these cost a plan its result or its time:
+what the campaign would otherwise rediscover. In earlier campaigns,
+each of these cost a plan its result or its time:
 
 - a knob aimed at a fused kernel that never ran;
 - a kernel-boundary win that graph capture had already amortized;
-- "C8" turned out to put 1.1 to 1.5 requests in flight, at 6 to 18 rows per
-  step, not 48;
-- every C32 profile across several plans captured the client's warmup;
-- one plan's best possible gain sat an order of magnitude below its noise floor;
+- a nominal concurrency turned out to put far fewer requests in flight, and
+  far fewer rows per step, than its label;
+- profiles across several plans captured the client's warmup instead of the
+  measured load;
+- one plan's best possible gain sat far below its noise floor;
 - AITER's tuned MoE table had no row for the model's shapes, so every token
   tier ran the untuned fallback.
 
@@ -39,7 +40,7 @@ anything else:
    It lists `docs/dossier/*/README.md` in this repository and, when this
    repository is a submodule (Arbor inside a project), in the project around
    it. Then it lists the dossiers earlier campaigns shared,
-   `/shared/arbor/projects/<project>/<user>/<campaign>/knowledge/dossier/`
+   `/path/to/arbor-share/projects/<project>/<user>/<campaign>/knowledge/dossier/`
    (the `knowledge-collector` skill), read in place where the share is
    mounted and through `ssh arbor-share` elsewhere. Each comes with its
    header: project, pins, platform, workload, date.
@@ -63,8 +64,8 @@ anything else:
    takes a node (parts 6 and 7) and the user's answers (the asks below).
    The profile run (part 7) is part of writing it, not a later step: see
    "The profile is taken while the dossier is written", below.
-   Material that is not in dossier form, such as the runner's `research/` and
-   `learn/code/`, is a source to write from, not a dossier.
+   Material that is not in dossier form, such as research notes and
+   code-reading reports, is a source to write from, not a dossier.
 
 ## Ask the user first
 
@@ -97,10 +98,9 @@ dossier's index under "Open asks" and go on.
   and before parts 8 and 11 are written. A part 7 with a plan and no results
   leaves the dossier unwritten: parts 8 and 11 are drafts until it lands, and
   no optimization starts from them. The profiler's checks run with it; a
-  check not run is the next work, not a footnote. Model M campaign B (runner
-  plan M00, 2026-10-07) wrote all twelve parts before any capture and ranked
-  part 11 by evidence instead of ceilings; its first profile, one iteration
-  later, re-ranked it.
+  check not run is the next work, not a footnote. A dossier written whole
+  before any capture ranks part 11 by evidence instead of ceilings, and its
+  first profile re-ranks it.
 - **Re-profile when the tree or the deployment moves.** After a KEEP, and
   after a change of flags or parallelism (expert parallelism, say), part 7 is
   stale; profile again before part 11 is re-ranked from it.
@@ -132,8 +132,8 @@ dossier's index under "Open asks" and go on.
   dtypes per component at the served precision; parameter and KV bytes per
   token; the kernel that serves each component in this build (from part 8).
 - **From:** the model's config and code in the pinned tree, read whole (a
-  truncated print of `quantization_config` once hid most of a 2,361-entry
-  exclude list); the checkpoint's `config.json` as the container sees it, its
+  truncated print of `quantization_config` can hide most of a long exclude
+  list); the checkpoint's `config.json` as the container sees it, its
   README, and the tensor dtypes in the safetensors headers (a router stored in
   fp32 was reported as BF16). Write the routing function out, and the MoE's
   dataflow in order, collectives included.
@@ -174,13 +174,13 @@ dossier's index under "Open asks" and go on.
   tree (AITER, CK) is read where it decides dispatch (part 8). Then:
   - **Line numbers come only from numbered output** (`cat -n`, `grep -n`,
     `nl`). A file too large for one read is read in numbered ranges, never in
-    unnumbered `sed -n` slices: Model M campaign B's reader did that, and 30 of
-    its 33 `amd/model.py` citations were wrong, one past the end of the file.
+    unnumbered `sed -n` slices: a reader that did that cited mostly wrong
+    lines, some past the end of the file.
   - **A reader's report is a lead, not a source.** Before a claim enters the
     dossier, the writer opens the cited range itself and confirms the named
-    class, function or line is there. B's writer copied two reports without
-    opening a source file; one claimed a missing capability the code already
-    had, and it became a ranked direction.
+    class, function or line is there. A writer who copied readers' reports
+    without opening a source file let one claim a missing capability the code
+    already had, and it became a ranked direction.
   - **Write the part after the readers return**, not while one is still out.
   - **A partial part lists every area above it did not read**, not some of
     them.
@@ -230,8 +230,7 @@ dossier's index under "Open asks" and go on.
     long it takes, measured untraced; how much of each step the GPU sits idle
     (TraceLens's GPU timeline: busy time over the window) and whether it waits on the
     host; the client's own pacing (think time in a trace replay).
-- **From:** the client's per-request export and the server's metrics (the
-  runner's `tools/workload/`); TraceLens's kernel summary for steps; untraced timing
+- **From:** the client's per-request export and the server's metrics; TraceLens's kernel summary for steps; untraced timing
   for host work, because a traced host is slower.
 - **Done when:** the distributions of rows per step and context that part 7
   profiles at are written down per operating point, and the GPU's idle share
@@ -323,7 +322,7 @@ The procedure is [kernels.md](kernels.md).
     their pull requests;
   - the recipe's history: `git log -p` on
     `benchmarks/single_node/<suite>/<model>_<gpu>_*.sh`, for image bumps,
-    flags and kernel choices (#3058 chose CK's a8w4 MoE experts for DSV4.1
+    flags and kernel choices (one InferenceX recipe chose CK's a8w4 MoE experts for DSV4.1
     on MI355X);
   - the AMD recipe beside the reference platform's, and beside AMD's recipes
     for the same model on other frameworks (InferenceX has ATOM, SGLang and
@@ -368,8 +367,8 @@ The procedure is [kernels.md](kernels.md).
   - Part 11 lists rewrites in their own table, each with a kernel plan
     ([kernel-plan.md](kernel-plan.md)), even while increments lead.
 - **When rewrites go first: the increments are running out.** Watch for these
-  signs. They're calibrated on two earlier campaigns; revisit the numbers after
-  the first rewrite campaign.
+  signs. They're calibrated on earlier campaigns; revisit the numbers once a
+  rewrite campaign has run.
   - **The KEEPs are small:** the median of the last five KEEPs is under 3×
     the gate.
   - **The probes kill their own leads:** five or more probes in a row each
@@ -464,10 +463,10 @@ served code is laid out differently (a path split, a layer re-partitioned, a
 collective moved) and the step's time goes elsewhere, sometimes drastically.
 Part 7's rule (re-profile after a KEEP) keeps the profile current inside a
 campaign. It does not re-read the code or re-rank the directions, so the
-campaign goes on optimizing from a map of a tree that no longer exists. One
-campaign kept ten changes in forty iterations, a sequence-parallel prefill path
-among them, and its stack was then merged onto another team's, which partitions
-the MoE pooler another way; the dossier it started from describes neither tree.
+campaign goes on optimizing from a map of a tree that no longer exists. A long
+campaign can keep many changes, a new parallel path among them, and its stack
+can then be merged onto another team's that partitions a layer another way; the
+dossier it started from then describes neither tree.
 
 **When.** The operator decides, on signs like these:
 
@@ -569,11 +568,11 @@ measured. Then, on the served tree as it now is, in order:
      (config, tuning, framework, kernel), so a round that keeps working one
      level sees it.
 
-   The hand-off a restarted campaign reads is cut from this part. Model M's round
-   u2 did this step by hand as `11.u2-c2-ledger.md`. Across several Model M
-   campaigns, a fair share of the KEEPs that came from a handed ranking reworked
-   something an earlier map had killed. The core kernels there were killed on floors that a later
-   campaign found the kernel under test had measured itself.
+   The hand-off a restarted campaign reads is cut from this part. It can be
+   written by hand, as a ledger file for the round. Across earlier campaigns, a
+   fair share of the KEEPs that came from a handed ranking reworked something an
+   earlier map had killed: kills that rested on a floor the kernel under test had
+   measured itself.
 5. **11.uK, the directions again**, as part 11, from 03.uK, 06.uK, 07.uK and
    10.uK, and the parts still current. A direction the campaign killed stays
    killed unless the new tree removes the reason it died or 10.uK marks it
@@ -616,7 +615,7 @@ python3 <this skill>/check-dossier.py <reports dir> --round uK --no-index   # a 
 - **What fails a file:** missing, a copied template, a status of "missing", or a round the index doesn't list.
 - **What it doesn't judge:** whether the content is right. That's what each part's "Done when" is for.
 
-Calibrated on the Model M MI350X dossier: every real part has at least 635 words and 131 numbers, while a template skeleton with one line filled in has 17 words. A FAIL names the file and why. Write or finish that file. A part that genuinely can't be filled says so in its own status line ("not available", with the reason); it isn't left out.
+Calibrated on a real dossier: every written part is well above these thresholds, while a template skeleton with one line filled in is far below them. A FAIL names the file and why. Write or finish that file. A part that genuinely can't be filled says so in its own status line ("not available", with the reason); it isn't left out.
 
 ## Done when
 

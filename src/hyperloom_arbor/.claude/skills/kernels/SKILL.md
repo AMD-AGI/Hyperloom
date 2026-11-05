@@ -15,7 +15,7 @@ show at each stage; this skill says how.
 | --- | --- |
 | `probe-image.sh` | prints the container's ROCm, hipcc, torch, Triton, FlyDSL, AITER (with its asm, FlyDSL, Triton and CK kernels and tuned tables) and CK versions, and whether each imports (§3) |
 | `kbench.py` | a reference op against a candidate at given shapes: correctness with negative controls, then graph-captured timing, as JSON (§5) |
-| `reference/` | a curated copy of KernelForge (AMD-AGI, MIT licence: `reference/LICENSE-KernelForge`), taken 2026-10-20 from the runner's copy of commit `cd9c585`; what was copied and skipped is in `reference/README.md`, its known-wrong numbers in `reference/STALE.md` |
+| `reference/` | a curated copy of KernelForge (AMD-AGI, MIT licence: `reference/LICENSE-KernelForge`), taken from KernelForge's commit `cd9c585`; what was copied and skipped is in `reference/README.md`, its known-wrong numbers in `reference/STALE.md` |
 
 Hardware facts (LDS, MFMA, bandwidth) are the `hardware` skill's; this skill points to them. Knobs
 and the images that carry each kernel family are the `serving-playbook` skill's.
@@ -39,8 +39,8 @@ Write a kernel last. Each step before the last is cheaper, reversible and alread
    finds the provider, the dispatcher's other branches and why each is unused.
    - `AITER_LOG_TUNED_CONFIG=1` logs which tuned row each call took (`aiter/backend_dispatch.md`).
    - A kernel name in a trace proves the dispatch; a flag being set does not.
-2. **Select an existing family.** `AITER_FLYDSL_FORCE=1` (#863), `--moe-backend flydsl` (#867),
-   `AITER_USE_FLYDSL_MOE_SORTING=1` (#0, #1255) and the attention and MoE backend flags
+2. **Select an existing family.** `AITER_FLYDSL_FORCE=1`, `--moe-backend flydsl`,
+   `AITER_USE_FLYDSL_MOE_SORTING=1` and the attention and MoE backend flags
    (`serving-playbook/amd-knobs.md` §1, §4) are increments or bundles: one iteration each, with
    proof that the arm ran the family it claims.
 3. **Tune AITER's table for your shapes.** Capture the live shapes, race the library's kernels per
@@ -57,8 +57,8 @@ Write a kernel last. Each step before the last is cheaper, reversible and alread
      Prove engagement first (`grep -c 'is tuned on cu_num' server.log` > 0, `tuning_db.md`). The CSV
      is build-locked: regenerate it on every image change.
    - **Size the sweep to your turn.** A tuner sweep over many shapes can outlast an agent turn; a
-     turn cut off by its cap is not measured, and its uncommitted work is discarded (Cluster C,
-     2026-10-29: a fused-MoE sweep used a whole 30-minute turn, half the run). Tune the shapes the
+     turn cut off by its cap is not measured, and its uncommitted work is discarded (a fused-MoE
+     sweep once used a whole turn). Tune the shapes the
      served load runs, a batch at a time, writing each batch's rows to the CSV in the workspace,
      so the next iteration continues. Inside a host the prompt says how long the turn is.
    - This is a small rewrite in kernel-plan terms: tuner run, correctness, A/B (D19).
@@ -70,7 +70,7 @@ Write a kernel last. Each step before the last is cheaper, reversible and alread
 
 | What you made | Where it goes first | Where it ends | Source |
 | --- | --- | --- | --- |
-| Tuned rows for shapes AITER's tables miss | an overlay CSV named by `AITER_CONFIG_*` in the server's environment, kept with the campaign's tree | AITER's `aiter/configs/` upstream | `tuning_db.md`; amd-knobs §4 (#560, #652) |
+| Tuned rows for shapes AITER's tables miss | an overlay CSV named by `AITER_CONFIG_*` in the server's environment, kept with the campaign's tree | AITER's `aiter/configs/` upstream | `tuning_db.md`; amd-knobs §4 |
 | A new kernel for an op AITER owns (GEMM, MoE stage, attention, norm and quant) | the served tree, behind a `VLLM_*` switch that defaults off, written to AITER's interfaces: its op signature, weight preshuffle, scale layout and, for FlyDSL, its name-encoded configs | AITER (`aiter/ops/flydsl/`, `aiter/ops/triton/`, `csrc/`), where its tuner can race it | kernel-plan §7; `authoring_delegation.md`; `flydsl_path.md` |
 | A fusion across ops the framework owns | the served tree (model or layer code), behind a switch | the framework, by PR | kernel-plan §7 |
 
@@ -78,10 +78,10 @@ Write a kernel last. Each step before the last is cheaper, reversible and alread
 
 | Tool | Reach for it when | Why | What AITER already ships in it | Evidence, limits |
 | --- | --- | --- | --- | --- |
-| **Triton** | Elementwise and reduction kernels (norms, activation with quant, RoPE, softmax, sorting helpers); fusions across ops Inductor cannot see through; S1 references and quick prototypes; MFMA work where its best config is good enough | Fast iteration, Python-level autotuning; a dependency of vLLM and SGLang, so in their images (`probe-image.sh` shows it). `tl.dot` maps to MFMA (`triton/pitfalls.md`). Most decode kernels are HBM-bound, where layout control matters less than bytes moved (the hardware skill's `reference/INDEX.md`, golden rules) | Many ops under `aiter/ops/triton/` (attention, MoE, RoPE, GEMM; `triton/auto_known_issues.md`); some Gluon kernels, Triton's lower-level dialect with explicit layouts (big-directions D18, #1050) | AITER's asm sparse paged attention won on one image and lost to Triton the next (amd-knobs §0 rule 4, #926 → #941). **Limit:** layouts and LDS are implicit. On gfx950 `tl.dot_scaled` emits native `v_mfma_scale_f32_32x32x64_f8f6f4` but runs slower than plain `tl.dot` at the same MFMA count (scale traffic through LDS); no config fixed it (`triton/tl_dot_scaled_gfx950.md`, one MXFP8 grouped GEMM) |
-| **FlyDSL** | MFMA-heavy tiles where layout decides speed: GEMM (split-K, small-M decode), fused MoE stages, block-scaled FP4/FP8 on gfx950, attention where Triton leaves the matrix cores idle; extending a FlyDSL family AITER already ships | Explicit layout algebra (CuTe-style), explicit LDS allocation and swizzles, explicit MFMA atoms including `mfma_scale_f32_16x16x128_f8f6f4`, async global→LDS copies; Python with JIT, no C++ build. "The right tool when you need to hit close to peak MFMA utilization or beat the CUTLASS/CK pattern catalog on a specific shape"; not for fast iteration (`flydsl/overview.md`) | Split-K HGEMM, small-M HGEMM for M = 1–16 (bf16), preshuffle A8 GEMM, two-stage fused MoE (mixed W4A16, A4W4), gated-delta-rule decode, `silu_and_mul_fq` (`kernel_families.md`). FlyDSL's own repo adds blockscale GEMM, paged-attention decode and flash attention (both "WIP perf tuning"), MLA decode, norms, RoPE with cache write (`flydsl/kernels_inventory.md`) | Recipes chose AITER's FlyDSL kernels on MI355X: #560, #867, #863, #1214 (FP8 stage 2, NUM), and #1255, where FlyDSL MoE sorting was one of three changes that together raised P90 interactivity. **No record separates FlyDSL's own gain on gfx950.** The one sized FlyDSL rewrite is vendor-reported on MI300X: Kimi-K2.5's fused MoE, +162% throughput at concurrency 40 (`kernel_families.md`; [AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html)). The `triton2flydsl-*` examples show the porting method, not a result. **Limits:** verbose; a separate package, so if the image lacks it every AITER FlyDSL path is inert (`flydsl_path.md`); the repo's MX-scaled MoE targets gfx1250 (`kernels_inventory.md`) |
-| **CK** (Composable Kernel) | Templated GEMM, attention (FMHA), fused MoE and norms, mostly by instantiating or tuning instances through AITER's codegen (`gen_instances.py`, `--gen-tune`) rather than writing new templates | AITER's default backend for GEMM, prefill attention, normalization and RoPE (`aiter/backend_dispatch.md`); thousands of instances, a mature pipeline catalog (`ck/ck_playbook.md` §12) | `gemm_a8w8_ck`, `ck_moe_stage1/2`, `mha_fwd`, `*_cktile` (`aiter/operator_catalog.md`) | **Limits:** C++ templates, long builds, stale-`.so` and header-tracking traps (`ck/pitfalls.md`). Its LDS swizzles assume 32 banks and no kernel uses gfx950's 160 KB LDS: headroom, but work (`ck_playbook.md` §16.12). Fused-MoE tile gaps on real models (image-manifest A4: N = 384 at TP ≥ 4, #517; "Unsupported kernel config", #999) |
-| **HIP / assembly** | The last mile: register pinning, exact instruction scheduling, instructions the compilers do not emit; kernels outside any DSL (custom collectives) | Full control. AITER's asm kernels (`hsa/<gfx>/<op>/*.co`: paged attention, MLA, fused MoE, FP4 GEMM) are its lowest-latency paths for the shapes they cover (`aiter/backend_dispatch.md`) | The asm families above; HIP ops in `csrc/`; HipKittens as a C++ tile library (`hip/hipkittens_guide.md`) | **Limits:** per-arch hand maintenance; silent traps (an AGPR inline-asm constraint drops register 0: 21 dB SNR; the 256-VGPR occupancy cliff; buffer loads clamp out-of-bounds silently: `hip/pitfalls.md`). Hand asm does not stay ahead by itself: #926 → #941 above |
+| **Triton** | Elementwise and reduction kernels (norms, activation with quant, RoPE, softmax, sorting helpers); fusions across ops Inductor cannot see through; S1 references and quick prototypes; MFMA work where its best config is good enough | Fast iteration, Python-level autotuning; a dependency of vLLM and SGLang, so in their images (`probe-image.sh` shows it). `tl.dot` maps to MFMA (`triton/pitfalls.md`). Most decode kernels are HBM-bound, where layout control matters less than bytes moved (the hardware skill's `reference/INDEX.md`, golden rules) | Many ops under `aiter/ops/triton/` (attention, MoE, RoPE, GEMM; `triton/auto_known_issues.md`); some Gluon kernels, Triton's lower-level dialect with explicit layouts (big-directions D18) | AITER's asm sparse paged attention won on one image and lost to Triton the next (amd-knobs §0 rule 4). **Limit:** layouts and LDS are implicit. On gfx950 `tl.dot_scaled` emits native `v_mfma_scale_f32_32x32x64_f8f6f4` but runs slower than plain `tl.dot` at the same MFMA count (scale traffic through LDS); no config fixed it (`triton/tl_dot_scaled_gfx950.md`, one MXFP8 grouped GEMM) |
+| **FlyDSL** | MFMA-heavy tiles where layout decides speed: GEMM (split-K, small-M decode), fused MoE stages, block-scaled FP4/FP8 on gfx950, attention where Triton leaves the matrix cores idle; extending a FlyDSL family AITER already ships | Explicit layout algebra (CuTe-style), explicit LDS allocation and swizzles, explicit MFMA atoms including `mfma_scale_f32_16x16x128_f8f6f4`, async global→LDS copies; Python with JIT, no C++ build. "The right tool when you need to hit close to peak MFMA utilization or beat the CUTLASS/CK pattern catalog on a specific shape"; not for fast iteration (`flydsl/overview.md`) | Split-K HGEMM, small-M HGEMM for M = 1–16 (bf16), preshuffle A8 GEMM, two-stage fused MoE (mixed W4A16, A4W4), gated-delta-rule decode, `silu_and_mul_fq` (`kernel_families.md`). FlyDSL's own repo adds blockscale GEMM, paged-attention decode and flash attention (both "WIP perf tuning"), MLA decode, norms, RoPE with cache write (`flydsl/kernels_inventory.md`) | Recipes chose AITER's FlyDSL kernels on MI355X (FP8 stage 2, NUM), and one where FlyDSL MoE sorting was one of three changes that together raised P90 interactivity. **No record separates FlyDSL's own gain on gfx950.** The one sized FlyDSL rewrite is vendor-reported on MI300X: Kimi-K2.5's fused MoE, +162% throughput at concurrency 40 (`kernel_families.md`; [AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html)). The `triton2flydsl-*` examples show the porting method, not a result. **Limits:** verbose; a separate package, so if the image lacks it every AITER FlyDSL path is inert (`flydsl_path.md`); the repo's MX-scaled MoE targets gfx1250 (`kernels_inventory.md`) |
+| **CK** (Composable Kernel) | Templated GEMM, attention (FMHA), fused MoE and norms, mostly by instantiating or tuning instances through AITER's codegen (`gen_instances.py`, `--gen-tune`) rather than writing new templates | AITER's default backend for GEMM, prefill attention, normalization and RoPE (`aiter/backend_dispatch.md`); thousands of instances, a mature pipeline catalog (`ck/ck_playbook.md` §12) | `gemm_a8w8_ck`, `ck_moe_stage1/2`, `mha_fwd`, `*_cktile` (`aiter/operator_catalog.md`) | **Limits:** C++ templates, long builds, stale-`.so` and header-tracking traps (`ck/pitfalls.md`). Its LDS swizzles assume 32 banks and no kernel uses gfx950's 160 KB LDS: headroom, but work (`ck_playbook.md` §16.12). Fused-MoE tile gaps on real models (image-manifest A4: N = 384 at TP ≥ 4; "Unsupported kernel config") |
+| **HIP / assembly** | The last mile: register pinning, exact instruction scheduling, instructions the compilers do not emit; kernels outside any DSL (custom collectives) | Full control. AITER's asm kernels (`hsa/<gfx>/<op>/*.co`: paged attention, MLA, fused MoE, FP4 GEMM) are its lowest-latency paths for the shapes they cover (`aiter/backend_dispatch.md`) | The asm families above; HIP ops in `csrc/`; HipKittens as a C++ tile library (`hip/hipkittens_guide.md`) | **Limits:** per-arch hand maintenance; silent traps (an AGPR inline-asm constraint drops register 0: 21 dB SNR; the 256-VGPR occupancy cliff; buffer loads clamp out-of-bounds silently: `hip/pitfalls.md`). Hand asm does not stay ahead by itself (above) |
 
 Gluon and Triton are both Triton; CK and FlyDSL overlap on GEMM and MoE. Where two fit, S1–S3
 decide, at the served shapes.
@@ -167,7 +167,7 @@ of an inline compile (`flydsl/env_vars.md`); AITER's first-call JIT takes 30 s o
 (kernel-plan §4).
 
 **Run kbench only when nothing is being measured on the node.** It shares HBM bandwidth, power and
-the host CPU with whatever else runs (runner `AGENTS.md` §4). Pin it to one GPU with
+the host CPU with whatever else runs. Pin it to one GPU with
 `HIP_VISIBLE_DEVICES`.
 
 ## 5. `kbench.py`
@@ -297,7 +297,7 @@ Each from the KernelForge page named (under `reference/knowledge_base/` unless t
 - wave64: blocks under 64 lanes waste lanes; `BLOCK_M` or `BLOCK_N` of 32 underuses MFMA on gfx950.
 - Autotune at the served shape; a config tuned on another shape does not carry over.
 - The `TRITON_HIP_*` and `AMDGCN_USE_BUFFER_OPS` codegen knobs flip sign by kernel and image
-  (amd-knobs §9, #69, #396).
+  (amd-knobs §9).
 
 **CK** (`ck/pitfalls.md`, `ck_playbook.md` §16)
 - The warp tile is not an independent knob: change it with the block tile and LDS descriptors.

@@ -3,7 +3,7 @@
 `Unknown` is what a timed-out or unreadable `squeue`/`sacct` gives, and it
 never triggers an action. A restart guard that read "could not check" as
 "nothing running" once relaunched a driver into a point that was mid-
-measurement (AGENTS.md section 4); here the controller simply waits for the
+measurement; here the controller simply waits for the
 next tick.
 
 Submission is the same: an `sbatch` that timed out may still have queued the

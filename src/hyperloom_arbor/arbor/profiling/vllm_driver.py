@@ -52,7 +52,7 @@ def parse_args(argv=None):
     p.add_argument("--conc", type=int, default=int(os.environ.get("CONC", "32")),
                    help="batch size; decode rows = conc x (1 + num_spec_tokens)")
     p.add_argument("--isl", type=int, default=int(os.environ.get("ISL", "32768")),
-                   help="live context per request. The campaign's traces reach ~996k; "
+                   help="live context per request. Long-context traces reach about a million tokens; "
                         "a share measured at 8k understates every context-scaling component")
     p.add_argument("--phase", choices=["decode", "prefill"], default="decode")
     p.add_argument("--steps", type=int, default=16,
@@ -260,7 +260,7 @@ def main(argv=None) -> int:
         "max_num_seqs": max(args.conc, 32),
         "gpu_memory_utilization": args.gpu_mem_util,
         "tokenizer_mode": args.tokenizer_mode,
-        # Required for DSv4.1-Flash and missing from the original C8 config:
+        # Required for DSv4.1-Flash, and easy to leave out of a config:
         # the recipe derives it as the first power of two >= max_num_seqs x
         # (1 + num_speculative_tokens). Top-level EngineArgs field that
         # forwards into CompilationConfig.

@@ -94,7 +94,7 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 | `ARBOR_ROLL=1` | turn on rolling chunks; `ARBOR_ROLL_WALL_MIN`, `ARBOR_ROLL_SUCCESSOR_AT_MIN`, `ARBOR_ROLL_EXIT_MARGIN_MIN`, `ARBOR_ROLL_MAX_CHUNKS`, `ARBOR_ROLL_EST_DEFAULT_MIN`, `ARBOR_ROLL_EST_FLOOR_MIN` override `cluster.roll` |
 | `ARBOR_ROUND_AB` | the round-end A/B hook (over the config's `round_ab.command`) |
 | `ARBOR_REVIEW_GATE` | `0` starts new campaigns without the review gate, `1` with it; over the config's `review_gate`, under `run --[no-]review-gate` |
-| `ARBOR_SHARE_HOST`, `ARBOR_SHARE_ROOT`, `ARBOR_PROJECT`, `ARBOR_USER` | where the collectors push (`arbor-share`, `/shared/arbor`) |
+| `ARBOR_SHARE_HOST`, `ARBOR_SHARE_ROOT`, `ARBOR_PROJECT`, `ARBOR_USER` | where the collectors push (`arbor-share`, `/path/to/arbor-share`) |
 | `ARBOR_AGENT_BACKEND` | leave unset. Its non-Claude value imports a module that is not in the tree |
 | `SLURM_JOB_ID`, `SPUR_JOB_ID` | read to label rows and rounds |
 

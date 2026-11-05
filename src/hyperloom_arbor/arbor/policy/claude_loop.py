@@ -29,11 +29,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from arbor import component, frameworks
+from arbor import chapters, component, frameworks, lifecycle
 from arbor.cli.iterate import _find_arbor_root
 from arbor.measure.integrity import snapshot_digests, verify_unchanged
 from arbor.measure.intents import ALL_NAMES, fill as _fill_intents, resolve
-from arbor.pack import agent_skills, load_campaign, render_program
+from arbor.pack import load_campaign, render_program
 from arbor.state import CampaignState
 
 
@@ -216,20 +216,18 @@ def _report_agent_tmp_health() -> None:
     """Log the state of the directory the agent CLI needs, BEFORE it runs.
 
     The CLI creates ``/tmp/claude-<uid>`` at startup and dies instantly if it
-    cannot. Three campaigns have aborted on exactly that, and every time the
-    evidence had to be reconstructed after the fact from a node that had
-    already been released. One cheap line per iteration turns that into a
-    record.
+    cannot. Campaigns have aborted on exactly that, and the evidence then had
+    to be reconstructed after the fact from a node that had already been
+    released. One cheap line per iteration turns that into a record.
 
-    WHAT THE ERRNO MEANS HERE, because it is the diagnosis. On this cluster
-    Slurm runs ``JobContainerType=job_container/tmpfs``, so /tmp is a bind
-    mount from a PER-JOB path (``/slurm/<jobid>/.<jobid>/_tmp``, confirmed by
-    findmnt). If that bind SOURCE is removed while the mount
-    stays, every lookup under /tmp returns ENOENT rather than ENOSPC or
-    EACCES -- which matches the observed failure exactly, and matches the
-    campaign's own report that its baseline artifacts under /tmp had been
-    reaped. So: ENOENT here points at the mount, a full filesystem would say
-    ENOSPC, and permissions would say EACCES. Record which one it actually is.
+    WHAT THE ERRNO MEANS HERE, because it is the diagnosis. Where Slurm runs
+    ``JobContainerType=job_container/tmpfs``, /tmp is a bind mount from a
+    PER-JOB path (``/slurm/<jobid>/.<jobid>/_tmp``; findmnt shows it). If that
+    bind SOURCE is removed while the mount stays, every lookup under /tmp
+    returns ENOENT rather than ENOSPC or EACCES, and whatever was written under
+    /tmp before (baseline artifacts, for example) is gone with it. So: ENOENT
+    here points at the mount, a full filesystem would say ENOSPC, and
+    permissions would say EACCES. Record which one it actually is.
 
     This never raises. A health probe that can break the loop it is protecting
     is worse than no probe.
@@ -265,9 +263,8 @@ class AgentLaunchError(RuntimeError):
         Command failed with exit code 1 (exit code: 1)
         Error output: Check stderr output for details
 
-    -- a message that names a stream nobody was reading. Three campaigns have
-    now died this way (v3 on 2026-09-19, v5, and the cuda-graph campaign),
-    costing ~3 h of exclusive MI355X time on the first occasion alone, and each
+    -- a message that names a stream nobody was reading. Campaigns have
+    died this way, wasting exclusive GPU time, and each
     time the diagnosis had to be reconstructed from a single line that happened
     to leak into the driver's own stdout. The real cause was one `mkdir` errno
     that was being thrown away.
@@ -278,8 +275,9 @@ class AgentLaunchError(RuntimeError):
 
 
 def _skill_options(options_cls, skills: list[str] | None,
-                   allowed_tools: list[str]) -> tuple[dict, list[str]]:
-    """SDK options for a pack's skills (Pack.skills), and the tools to allow.
+                   allowed_tools: list[str],
+                   plugins: list[str] | None = None) -> tuple[dict, list[str]]:
+    """SDK options for a turn's skills (arbor.lifecycle.turn_skills), and the tools to allow.
 
     None leaves the options as they were before packs listed skills. A list
     loads the project's settings, so `.claude/skills/` and with it
@@ -287,6 +285,9 @@ def _skill_options(options_cls, skills: list[str] | None,
     lets the agent invoke only the listed skills. An SDK without the `skills`
     option gets the Skill tool instead, which cannot narrow the list; one
     without `setting_sources` cannot load skills at all. Both are logged.
+    ``plugins`` are the directories of the skill families the pack loads,
+    whose skills are named family:skill; an SDK without `plugins` cannot
+    load them, which is logged.
     """
     if skills is None:
         return {}, allowed_tools
@@ -303,13 +304,18 @@ def _skill_options(options_cls, skills: list[str] | None,
               f"Skill tool, so every project skill is invocable, not only {skills}",
               file=sys.stderr, flush=True)
         allowed_tools = [*allowed_tools, "Skill"]
+    if plugins and "plugins" in params:
+        opts["plugins"] = [{"type": "local", "path": path} for path in plugins]
+    elif plugins:
+        print(f"[arbor] this claude_agent_sdk has no `plugins` option; the skill families "
+              f"{plugins} are unavailable", file=sys.stderr, flush=True)
     return opts, allowed_tools
 
 
 # An agent that cannot reach its model has done nothing, so it is started again before the
-# iteration is booked not measured: under Hyperloom on Cluster C (2026-10-29) a 20-minute gateway
-# outage made three starts in a row fail with ERR_PROXY_TUNNEL, and the not-measured streak
-# ended a 9-hour run. Connection-level and server-side (5xx, overloaded) errors only: a 4xx
+# iteration is booked not measured: under a host, a gateway
+# outage can make every start fail (ERR_PROXY_TUNNEL, for example) until the not-measured streak
+# ends the run. Connection-level and server-side (5xx, overloaded) errors only: a 4xx
 # (a refused key, a model the CLI does not support) does not heal by waiting.
 CONNECT_ERRORS = ("couldn't connect", "could not connect", "err_proxy", "econnrefused",
                   "econnreset", "etimedout", "enotfound", "eai_again", "socket hang up",
@@ -344,7 +350,7 @@ def _connect_wait_budget() -> float:
 
 async def _run_claude(prompt: str, cwd: str, allowed_tools: list[str],
                       label: str = "agent", skills: list[str] | None = None,
-                      **_kw) -> str:
+                      plugins: list[str] | None = None, **_kw) -> str:
     """One agent turn. A start that cannot reach the model is retried with backoff, up to
     ``ARBOR_AGENT_CONNECT_WAIT_S`` (900 s) in all, before the error reaches the caller."""
     global _unreachable
@@ -352,7 +358,7 @@ async def _run_claude(prompt: str, cwd: str, allowed_tools: list[str],
     while True:
         attempt += 1
         try:
-            out = await _run_claude_once(prompt, cwd, allowed_tools, label, skills)
+            out = await _run_claude_once(prompt, cwd, allowed_tools, label, skills, plugins)
             _unreachable = None
             return out
         except Exception as e:
@@ -370,7 +376,8 @@ async def _run_claude(prompt: str, cwd: str, allowed_tools: list[str],
 
 
 async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
-                           label: str, skills: list[str] | None) -> str:
+                           label: str, skills: list[str] | None,
+                           plugins: list[str] | None = None) -> str:
     if os.environ.get("ARBOR_AGENT_BACKEND", "claude").lower() in {
         "openai", "gpt", "openai-compatible",
     }:
@@ -391,7 +398,7 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
         if len(stderr_lines) < 200:
             stderr_lines.append(line)
 
-    skill_opts, allowed_tools = _skill_options(ClaudeAgentOptions, skills, allowed_tools)
+    skill_opts, allowed_tools = _skill_options(ClaudeAgentOptions, skills, allowed_tools, plugins)
     options = ClaudeAgentOptions(
         cwd=cwd,
         allowed_tools=allowed_tools,
@@ -463,7 +470,7 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
     # NEWLINE, not "". Separate text blocks are separate chunks and a block does
     # not reliably end in one. Gluing them ran the last line of one block into
     # the first line of the next, so a `CLASS: PROBE` that started its own block
-    # landed MID-LINE -- invisible to the anchored parsers below. v2 iteration 1
+    # landed MID-LINE -- invisible to the anchored parsers below. One iteration
     # declared CLASS: PROBE, was read as the default B, missed the read-only
     # probe path, and was recorded as "REVERT: no changes".
     return "\n".join(text_parts)
@@ -475,8 +482,8 @@ def _run_phase(coro, phase: str, config: dict):
     Standalone: exactly that, with no timeout. Component mode: bounded by
     component.phase_seconds, the phase's cap or the time left before the deadline,
     whichever is less; past it the turn is cancelled and PhaseTimeout raised, which
-    the caller books as NOT MEASURED. MB saw one unbounded agent turn hang for 511
-    minutes, and a session iterating an hour after its deadline.
+    the caller books as NOT MEASURED. Under a host, an unbounded agent turn can hang
+    for hours, and a session can keep iterating past its deadline.
     """
     timeout = component.phase_seconds(config, phase)
     if timeout is None:
@@ -498,7 +505,7 @@ def _run_phase(coro, phase: str, config: dict):
 def _write_aborted(session_dir_p: Path, msg: str) -> None:
     """ABORTED.md, which ends the run: a broken harness, or, when the last agent start could
     not reach its model, component.UNREACHABLE_HEAD, on which a component run exits 3 so the
-    host resumes it once the model answers again (a gateway outage, Cluster C 2026-10-29)."""
+    host resumes it once the model answers again (a gateway outage)."""
     if _unreachable:
         text = (f"{component.UNREACHABLE_HEAD}\n\nThe model could not be reached: "
                 f"{_unreachable}\n{msg}\n")
@@ -597,8 +604,7 @@ def _extract_change(output: str) -> str | None:
     Agents decorate it the way they decorate INTENT (`**DONE: ...**`,
     `- DONE: ...`, `**DONE:** ...`), and _extract_class already reads through
     that. This did not: a decorated line parsed as nothing, and the iteration
-    was recorded as "iteration N". Two campaigns' first iterations lost their
-    change text that way.
+    was recorded as "iteration N", its change text lost.
     """
     for line in reversed(output.strip().splitlines()):
         line = line.strip().strip(_MARKDOWN_DECORATION)
@@ -724,11 +730,10 @@ def _synthesize_dead_end(campaign, iteration: int, change: str, reason: str,
 
     A REVERT that emits no `LEDGER:` line teaches the campaign nothing: the
     change is undone, the history row scrolls out of the window after ten more
-    iterations, and the next agent is free to try the same thing. The cuda-graph
-    campaign is the argument for this — iterations 38, 41 and 44 were reverted,
-    and the discovery that all three were NULL (the bar was the maximum of its
-    own cohort, unreachable by 6-8 of 10 identical runs) was possible only
-    because that agent happened to write ledger entries voluntarily. Nothing in
+    iterations, and the next agent is free to try the same thing. Reverted
+    iterations can all be NULL because the bar is the maximum of its own cohort,
+    unreachable by most identical runs, and only ledger entries let a later
+    iteration discover that. An agent may write them voluntarily; nothing else in
     the harness required it.
 
     This record is deliberately worse than one the agent writes. It knows the
@@ -809,11 +814,10 @@ def _finalize_iteration(
     """
     # save_patch is used further down to archive a KEEP/PROBE's diff. It was
     # never imported, so the call raised NameError -- and the `except` around it
-    # reinterprets ANY failure as "downgrade to REVERT". Iteration 2 therefore
+    # reinterprets ANY failure as "downgrade to REVERT". An iteration therefore
     # recorded REVERT even though the gate returned PROBE and the critic upheld
-    # it. Same shape as the snapshot_digests NameError that corrupted iteration
-    # 1: an undefined name inside a try whose handler turns a crash into a
-    # verdict.
+    # it. Same shape as an earlier snapshot_digests NameError: an undefined
+    # name inside a try whose handler turns a crash into a verdict.
     from arbor.execute.workspace import git, save_landed_patch, save_patch, save_scratch_patch
     from arbor.measure import armcheck, scope as _scope
     from arbor.measure.gate import run_gate
@@ -1067,7 +1071,7 @@ def _finalize_iteration(
     # ── A REVERT owes a record ──────────────────────────────────────────────
     # Placed after the critic so it captures the FINAL reason, including a
     # critic override. Bookkeeping, so a failure here must never change the
-    # verdict -- that mistake has been made three times in this function.
+    # verdict -- that mistake has been made more than once in this function.
     if decision == "REVERT" and not finding_ids:
         try:
             finding_ids = _synthesize_dead_end(
@@ -1086,12 +1090,12 @@ def _finalize_iteration(
     if decision in ("KEEP", "PROBE"):
         # Archiving the diff is BOOKKEEPING, not judgement. It must never
         # overturn a verdict the gate reached and the critic upheld -- and it has
-        # now done so three times:
-        #   iter 1  NameError: snapshot_digests   -> spurious REVERT
-        #   iter 2  NameError: save_patch          -> spurious REVERT
-        #   iter 3  save_patch: "not a git repository" (the server-start step ran
-        #           `docker rm -f` + `docker run`, recreating the container and
-        #           destroying the repo mid-iteration) -> spurious REVERT
+        # done so, each time as a spurious REVERT:
+        #   NameError: snapshot_digests
+        #   NameError: save_patch
+        #   save_patch: "not a git repository" (the server-start step ran
+        #     `docker rm -f` + `docker run`, recreating the container and
+        #     destroying the repo mid-iteration)
         # Each time the pattern was identical: an infrastructure failure inside a
         # try whose handler rewrites it as a scientific conclusion. Record the
         # failure, keep the verdict.
@@ -1133,7 +1137,7 @@ def _finalize_iteration(
         except Exception as e:
             print(f"[arbor] WARNING: landed packages not captured: {e} — an edit outside "
                   f"the workspace is NOT recoverable if this container dies", file=sys.stderr)
-        # What the served tree links to outside itself (c0's AITER JIT modules) and how it
+        # What the served tree links to outside itself (a KEEP's AITER JIT modules) and how it
         # is rebuilt: recorded, never stored (arbor/execute/outside.py). Bookkeeping too.
         try:
             from arbor.execute import outside as _outside
@@ -1233,7 +1237,7 @@ def _extract_class(output: str) -> str:
     LEARN**`, `- CLASS: A`, or a block boundary that glued it mid-line. Falling
     back because of formatting silently applies the STRICTEST bar to work that
     declared an evidence-gated intent, which is the worst direction for the
-    error to go: it cost v2 iteration 1 its probe path and recorded a
+    error to go: it cost one iteration its probe path and recorded a
     knowledge-producing iteration as a REVERT.
     """
     lines = list(reversed(output.strip().splitlines()))
@@ -1255,7 +1259,7 @@ def _as_claim_class(name: str | None) -> str:
 
     Returning the alias rather than the new name is deliberate and permanent:
     `claim_class` is what lands in session.json, and
-    check_review_consistency.py reads those strings out of four archived
+    check_review_consistency.py reads those strings out of archived
     campaigns. The rename is a change of what the agent WRITES, not of what the
     campaign RECORDS.
     """
@@ -1263,11 +1267,12 @@ def _as_claim_class(name: str | None) -> str:
 
 
 # Paths a read-only PROBE may touch. Anything here is incapable of changing
-# serving behaviour, so the 30-minute server run buys nothing and is skipped.
-# `arbor/config.json` is written by the HARNESS on every iteration, not by the
-# agent. Counting it as a non-inert path forced every probe through a full
-# ~45-minute server+bench cycle, making a read-only probe cost exactly as much
-# as a real change — part of why the dsv41flash campaign stopped probing.
+# serving behaviour, so the server run (tens of minutes) buys nothing and is
+# skipped. `arbor/config.json` is written by the HARNESS on every iteration,
+# not by the agent. Counting it as a non-inert path forced every probe through
+# a full server+bench cycle of tens of minutes, making a read-only probe cost
+# exactly as much as a real change — part of why an earlier campaign stopped
+# probing.
 READONLY_PROBE_PREFIXES = ("eval/", "knowledge/", "ledger.jsonl", "arbor/")
 
 
@@ -1281,10 +1286,10 @@ def _out_of_tree_artifacts(pack_dir, since_ts: float) -> list[tuple[Path, int]]:
     These live on SHARED STORAGE, outside the container's git workspace, so they
     never appear in the diff the critic reviews.
 
-    Job 38943 iteration 2 is why this exists. The agent found a genuine ROCm
-    feature gap, wrote a 22 KB grouped ``tl.dot_scaled`` MXFP8 BMM evaluator,
-    swept it against the BF16 einsum on real weights, and recorded seven ledger
-    findings. The gate returned PROBE. The critic then reverted it with "the
+    One campaign's iteration is why this exists. The agent found a genuine ROCm
+    feature gap, wrote a grouped ``tl.dot_scaled`` MXFP8 BMM evaluator, swept
+    it against the BF16 einsum on real weights, and recorded its findings in
+    the ledger. The gate returned PROBE. The critic then reverted it with "the
     diff does not implement the claim" -- correctly, on the evidence it was
     shown, because the only thing in the workspace diff was arbor/config.json.
     A probe whose entire deliverable is an instrument is structurally invisible
@@ -1377,7 +1382,7 @@ def _server_launch_cmd(config: dict, server_flags: str | None = None,
     """Build the framework-appropriate server launch command.
 
     This used to hardcode `python3 -m sglang.launch_server`, so a campaign with
-    `"framework": "vllm"` — like dsv41flash — failed at server start on every
+    `"framework": "vllm"` failed at server start on every
     iteration. The framework is declared in the config; honour it. The command
     itself is that framework's adapter's (arbor/frameworks/).
 
@@ -1979,15 +1984,31 @@ def run_iteration(
 
     # ── Step 2: Agent decides + edits ───────────────────────────────────────
     _report_agent_tmp_health()
+    # The turn's chapter and its skills (arbor/lifecycle.py); entering a chapter is
+    # journaled, the feed a host follows.
+    chapter, turn_skills = lifecycle.turn_skills(campaign, state)
+    if lifecycle.enter(session_dir_p, chapter, iteration, turn_skills):
+        print(f"[arbor] Chapter {chapter}: the agent's skills {turn_skills or []}",
+              file=sys.stderr, flush=True)
     print(f"[arbor] Running agent...", file=sys.stderr, flush=True)
     prompt = _build_agent_prompt(program, campaign, state, iteration)
-    try:
-        agent_output = _run_phase(
-            _run_claude(prompt, arbor_root,
-                        allowed_tools=["Bash", "Read", "Edit"],
-                        label="agent", skills=agent_skills(campaign.pack)),
+    plugins = lifecycle.plugin_paths(campaign, arbor_root)
+
+    def _agent_turn(text: str, skills: list[str] | None, label: str) -> str:
+        return _run_phase(
+            _run_claude(text, arbor_root, allowed_tools=["Bash", "Read", "Edit"],
+                        label=label, skills=skills, plugins=plugins),
             "agent", config,
         )
+
+    try:
+        # A chapter whose pack lists run skills is theirs, each in a turn of its own
+        # (arbor/chapters.py); any other turn is the main agent's.
+        if chapters.turn_runs(campaign, chapter, arbor_root):
+            agent_output = chapters.run_turns(campaign, chapter, session_dir_p, arbor_root,
+                                              iteration, program, _agent_turn)
+        else:
+            agent_output = _agent_turn(prompt, turn_skills, "agent")
         change = _extract_change(agent_output) or f"iteration {iteration}"
         claim_class = _extract_class(agent_output)
     except component.PhaseTimeout as e:
@@ -2009,12 +2030,12 @@ def run_iteration(
         # iteration restarted the server, ran a full bench against unchanged
         # code, and recorded "REVERT: no changes" — indistinguishable in
         # session.json from "the agent wrote something that regressed". It then
-        # cooled down and did it again. On 2026-09-19 the v3 campaign's node
-        # lost /tmp, the agent died in milliseconds with
+        # cooled down and did it again. When a node
+        # lost /tmp, the agent died at once with
         #     ENOENT: no such file or directory, mkdir '/tmp/claude-<pid>'
-        # and the loop produced 33 consecutive REVERTs — 24 of them inside 13
-        # minutes — burning ~3 h of exclusive MI355X time and manufacturing a
-        # null_streak of 24 that reads exactly like diminishing returns.
+        # and the loop produced a run of REVERTs, burning
+        # exclusive GPU time and manufacturing a null_streak that reads
+        # exactly like diminishing returns.
         #
         # This is the same category as a bench that never ran, which
         # record_invalid() already handles correctly: the tree is preserved,
@@ -2097,8 +2118,9 @@ def run_iteration(
 
     # ── Step 3b: Read-only probe short-circuit ──────────────────────────────
     # A probe confined to eval/ and the ledger cannot change what the server
-    # does, so the 30-minute server run would measure nothing. This is the
-    # pack's own rule made mechanical: search in eval/, confirm on the server.
+    # does, so the server run (tens of minutes) would measure nothing. This is
+    # the pack's own rule made mechanical: search in eval/, confirm on the
+    # server.
     #
     # Read off the registry rather than compared to a literal: WHICH intents may
     # skip the server is a per-intent rule (`server: skip_if_readonly`), so it
@@ -2225,7 +2247,7 @@ def run_iteration(
         server_output = ""
         print(f"[arbor] Server agent error: {e}", file=sys.stderr, flush=True)
 
-    reason = _server_failure(server_output)   # a verdict line, not a mention (#23)
+    reason = _server_failure(server_output)   # a verdict line, not a mention
     if reason is not None:
         print(f"[arbor] Server agent gave up: {reason}", file=sys.stderr, flush=True)
         state.record_revert(
@@ -2269,9 +2291,9 @@ def run_iteration(
     # duration_seconds cannot be checked, which is the campaign's first
     # integrity rule) and no secondary metric (so the two-axis gate is inert).
     #
-    # Run 2 iteration 1 measured a gain on p90_interactivity, the second axis,
-    # larger than its throughput gain -- and the gate never saw it. Run 1 lost iterations 8, 10 and 15 the
-    # same way.
+    # A gain on p90_interactivity, the second axis, even one larger than the
+    # throughput gain, is then invisible to the gate; runs have lost iterations
+    # the same way.
     comp = component.is_component(config)
     session_mount = config.get("session_mount", "/workspace/sessions")
     if comp:
@@ -2307,8 +2329,8 @@ def run_iteration(
     # which silently dropped everything after the 8th entry -- and since
     # server_env is merged in AFTER the 7 base keys, the cut fell immediately
     # after ROCR_VISIBLE_DEVICES. DURATION never reached bench_agentx.sh, which
-    # then fell back to its own default of 3600s: every iteration ran a 60-minute
-    # replay instead of the configured 600s, and was measured under different
+    # then fell back to its own default (3600s): every iteration ran that replay
+    # instead of the configured one, and was measured under different
     # conditions than the baseline. A truncated env is never the right answer --
     # if a command is too long, wrap it, do not silently shorten what it says.
     bench_env_flags = " \\\n     ".join(f'-e {k}="{v}"' for k, v in bench_env.items())
@@ -2321,9 +2343,9 @@ def run_iteration(
 
     # REPEATED MEASUREMENT. `bench_repeats` > 1 runs the replay N times and
     # books the MEAN, because a single replay is not a reliable estimate of this
-    # workload: re-measuring a byte-identical v3 tree on its own node, same code
-    # path, same DURATION, differed by more than the gate, and v3's own
-    # post-iteration-6 measurements spanned about as much. Arbor books best_metric as a
+    # workload: re-measuring a byte-identical tree on its own node, same code
+    # path, same DURATION, differed by more than the gate, and one campaign's
+    # later measurements spanned about as much. Arbor books best_metric as a
     # running MAX, so with noise that large the bar lands on the luckiest draw
     # and nothing afterwards can clear it.
     #
@@ -2457,7 +2479,7 @@ def run_iteration(
             bench_output.setdefault("status", "ok")
         except Exception:
             bench_output = {"status": "failed", "error": "invalid JSON in bench_output.json"}
-    elif _bench_failure(bench_agent_output) is not None:   # a verdict line, after any METRIC (#23)
+    elif _bench_failure(bench_agent_output) is not None:   # a verdict line, after any METRIC
         bench_output = {"status": "failed", "error": _bench_failure(bench_agent_output)}
     elif reported_metric is not None:
         bench_output = {"status": "ok", metric_key: reported_metric, "source": "agent_reported"}

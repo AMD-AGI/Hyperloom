@@ -26,7 +26,7 @@ import yaml
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
-from arbor import component, directions, review, rounds
+from arbor import component, directions, review, rounds, triggers
 from arbor.cli.iterate import _find_arbor_root, cmd_init
 from arbor.execute.workspace import recover_orphaned_commit
 from arbor.pack import load_campaign, validate_campaign
@@ -40,8 +40,8 @@ def _resolve_target(target, metric: str):
     """Resolve a campaign `target` to a number, or None if it carries none.
 
     A config may express `target` either as a bare number or as a dict of
-    documented reference points — e.g. the dsv41flash campaign records
-    ``{"_source": ..., "output_tok_per_chip": 328.59, "gap_pct": 26.8}``.
+    documented reference points, e.g.
+    ``{"_source": ..., "output_tok_per_chip": <number>, "gap_pct": <number>}``.
     Comparing `best_metric >= <dict>` raises TypeError, which killed the loop
     on the first iteration that had a metric to compare (iteration 1 was safe
     only because best_metric was still None).
@@ -75,7 +75,7 @@ def _aborted_detail(session_dir: Path) -> str:
     """ABORTED.md's message (the streak and the last not-measured reason), for the exit record.
 
     A host has to tell a broken harness from a finished run: an abort recorded as `done`
-    read as a normal end under Hyperloom on Cluster C (2026-10-29, a gateway outage).
+    read as a normal end under a host (a gateway outage).
     """
     try:
         text = (session_dir / "ABORTED.md").read_text()
@@ -322,8 +322,8 @@ def _main(argv: list[str] | None, held: dict) -> int:
             return rc
     elif campaign.config.get("docker_container"):
         # Not rolling, the flag KEEPs still go into a fresh container, and each KEEP's are
-        # mirrored below: a campaign's first iteration in a held job once ran
-        # without them, without --enable-expert-parallel.
+        # mirrored below: without them, the first iteration in a fresh container
+        # runs without a kept launch flag.
         from arbor.cluster import handoff
         handoff.restore_workspace_config(campaign.config, session_dir)
 
@@ -433,8 +433,24 @@ def _main(argv: list[str] | None, held: dict) -> int:
     print(f"[arbor] Stop: touch {session_dir}/STOP")
     print()
 
+    # The lifecycle's events (arbor/triggers.py): journaled for a host, the pack's trigger
+    # skills started and the host's callbacks called, none of them holding the loop up.
+    def _fire(event: str, at: int | None = None, **detail) -> None:
+        triggers.fire(campaign, session_dir, arbor_root, config_path, event, at, **detail)
+
+    fired_map = {"round": None}
+
+    def _map_set() -> None:
+        doc, _ = directions.load(session_dir)
+        if doc and doc.get("phase") == "active" and doc.get("map_round") != fired_map["round"]:
+            fired_map["round"] = doc.get("map_round")
+            _fire("map_set", map_round=doc.get("map_round"),
+                  open=[d.get("id") for d in doc.get("directions") or [] if d.get("status") == "open"])
+
+    _fire("session_start", mode=campaign.mode)
     iteration = 0
     while True:
+        _map_set()
         if (session_dir / "STOP").exists():
             print("[arbor] STOP file — exiting.")
             break
@@ -465,11 +481,10 @@ def _main(argv: list[str] | None, held: dict) -> int:
         #
         # That asymmetry mattered. A band narrower than the measurement noise
         # silently rejects real work, and the noise is routinely underestimated:
-        # the spread quoted across three campaigns came from two runs on
-        # one node, while re-measuring a byte-identical tree on its own node
-        # later differed by several times that. v2 widened its secondary band
-        # only at the START of the next campaign, after 47 iterations under a
-        # bar it could not reach.
+        # a spread quoted from a couple of runs on one node can be several
+        # times smaller than what re-measuring a byte-identical tree on
+        # another node shows. A campaign that cannot widen its band mid-run
+        # can spend many iterations under a bar it cannot reach.
         #
         # Only the measurement block is refreshed. Validators, protected paths
         # and tools stay pinned to what the campaign started with, so a
@@ -501,6 +516,8 @@ def _main(argv: list[str] | None, held: dict) -> int:
         # component mode: the host gates and merges, and rounds.hook is None there.
         if not comp and rounds.pending(session_dir):
             outcome = _round_end(campaign, session_dir, state_path, roll)
+            if outcome != "pending":
+                _fire("round_end", iteration, outcome=outcome)
             if outcome == "handoff":
                 return roll.handoff(CampaignState.load(state_path))
             if outcome == "exit":
@@ -553,12 +570,18 @@ def _main(argv: list[str] | None, held: dict) -> int:
         t_iter = time.time()
         if comp:
             comp.begin(iteration, t_iter)
+        _fire("iteration_start", iteration)
         try:
             result = run_iteration(config_path, arbor_root, str(session_dir), iteration)
             if comp:
                 comp.end()
             print(f"[arbor] {result.get('decision')}: {result.get('change')} "
                   f"→ {result.get('metric')}")
+            decided = str(result.get("decision") or "").lower()
+            if decided in triggers.FIRED:
+                _fire(decided, iteration, change=result.get("change"), metric=result.get("metric"))
+            if decided == "invalid" and str(result.get("reason") or "").startswith("agent did not run"):
+                _fire("agent_failed", iteration, reason=result.get("reason"))
             if result.get("decision") in ("STOPPED", "ROUND_END"):
                 # The map stopped the campaign, or ended its round, before the agent
                 # ran (arbor/directions.py): no iteration to time; the loop's STOP
@@ -598,6 +621,8 @@ def _main(argv: list[str] | None, held: dict) -> int:
         print(f"[arbor] Cooling down {args.cooldown}s...")
         time.sleep(args.cooldown)
 
+    _map_set()
+    _fire("end", CampaignState.load(state_path).iteration, reason=exit_reason, detail=exit_detail)
     rc = 0
     if comp:
         # Every component-mode exit says why (decision 1): `done` for STOP, max iterations

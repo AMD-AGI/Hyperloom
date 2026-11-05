@@ -1,4 +1,4 @@
-"""Serving frameworks behind one interface (roadmap CORE-06).
+"""Serving frameworks behind one interface.
 
 ``get(config)`` is the adapter for the framework a campaign config names in
 ``"framework"``; the harness launches, finds, stops and probes its server

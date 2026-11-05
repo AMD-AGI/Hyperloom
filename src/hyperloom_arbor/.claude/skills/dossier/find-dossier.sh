@@ -3,7 +3,7 @@
 # whether it is the one you need (SKILL.md, "First: look it up").
 #   bash find-dossier.sh [<root>...]
 # Default roots: this repository's top level and, when it is a submodule (Arbor
-# inside a project, as in the runner's external/arbor), the project around it.
+# inside a project), the project around it.
 # Then the dossiers campaigns shared (the knowledge collector's
 # <share>/projects/<project>/<user>/<campaign>/knowledge/dossier/): read in
 # place where the share is mounted (a Cluster B node), otherwise through
@@ -48,7 +48,7 @@ done
 [ "$found" -gt 0 ] || echo "no dossier under: ${roots[*]} (looked for docs/dossier/*/README.md)"
 
 [ "${ARBOR_DOSSIER_NO_SHARE:-0}" = 1 ] && exit 0
-share_root=${ARBOR_SHARE_ROOT:-/shared/arbor}
+share_root=${ARBOR_SHARE_ROOT:-/path/to/arbor-share}
 share_glob="$share_root/projects/*/*/*/knowledge/dossier/README.md"
 if [ -d "$share_root/projects" ]; then
     # shellcheck disable=SC2086  # the glob expands here

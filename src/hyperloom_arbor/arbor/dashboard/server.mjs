@@ -4,7 +4,7 @@
 // README.md here says what changed.
 //
 //   node server.mjs local    --host <host with the session> --session <dir> [--slurm-job <name>] ...
-//   node server.mjs global   [--share-host arbor-share] [--share-root /shared/arbor]
+//   node server.mjs global   [--share-host arbor-share] [--share-root /path/to/arbor-share]
 //   node server.mjs parallel --host <host with the run's store> --store <store>/<run_id>
 //
 // local:  each refresh runs the realtime collector (arbor/collect/realtime.py,
@@ -79,7 +79,7 @@ function parseArgs(argv) {
     store: "",
     // global
     shareHost: process.env.ARBOR_SHARE_HOST || "arbor-share",
-    shareRoot: process.env.ARBOR_SHARE_ROOT || "/shared/arbor",
+    shareRoot: process.env.ARBOR_SHARE_ROOT || "/path/to/arbor-share",
     maxOutputBytes: 32 * 1024 * 1024,
   };
   const flags = {
@@ -178,7 +178,7 @@ function run(cmd, args, opts = {}) {
 }
 
 // Git for Windows' ssh, first on PATH in Git Bash, cuts a command at about
-// 8 KB (measured 2026-10-07: 8,000 characters arrive, 8,200 do not); Windows'
+// 8 KB (8,000 characters arrive, 8,200 do not); Windows'
 // own OpenSSH and Linux's pass 24,000. On Windows, use Windows' own.
 const WINDOWS_SSH = "C:\\Windows\\System32\\OpenSSH\\ssh.exe";
 const SSH = process.platform === "win32" && existsSync(WINDOWS_SSH) ? WINDOWS_SSH : "ssh";
@@ -189,8 +189,8 @@ function ssh(host, command) {
 }
 
 // The command's answer is the JSON object on its stdout. Through the
-// the platform gateway every command exits 0 and its stderr arrives on stdout
-// (tested 2026-10-07), so a failure there is either share_query's
+// the platform gateway every command exits 0 and its stderr arrives on stdout,
+// so a failure there is either share_query's
 // {"error": ...} or output that is not JSON, never an exit status.
 function parseJson(result) {
   if (!result.ok) return result;

@@ -1,6 +1,6 @@
 name: parallel-dossier
 description: >
-  The map step of a parallel run's round (runner decision 0003; arbor/parallel/mapstep.py):
+  The map step of a parallel run's round (arbor/parallel/mapstep.py):
   the dossier skill's update round uK for the round's base tree, written as a document
   campaign on the controller's host while the round's profile runs on a node. Part A
   writes 03.uK (the code read again) and 10.uK (what every lane of the last round learned);

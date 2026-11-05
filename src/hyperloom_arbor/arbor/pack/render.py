@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from pathlib import Path
 
 from arbor.measure.intents import from_legacy, is_history_row
-from arbor.pack.loader import agent_skills
+from arbor import lifecycle
 
 # How many recent non-KEEP iterations to show in full. KEEPs are always shown —
 # they describe the tree the agent is actually looking at.
@@ -56,7 +55,7 @@ def _lesson_label(lesson: dict) -> str:
     """`INTENT → VERDICT`, or the annotation's own word.
 
     Used by BOTH the per-iteration line and the header tally, because a
-    document that says "26 PROBE" above rows labelled "LEARN → KEEP" makes the
+    document that says "N PROBE" above rows labelled "LEARN → KEEP" makes the
     reader reconcile two vocabularies — the exact cost the split was meant to
     remove. Annotation rows (BASELINE / ESCALATE / NOTE) are exempt: no gate
     produced them and no intent was declared, so re-deriving a pair would print
@@ -121,8 +120,8 @@ def _render_history(lessons: list[dict]) -> str:
     #
     # Deliberately still a literal, and NOT the rule "verdict != REVERT" that
     # the intent split makes tempting. Those are not the same set: a LEARN that
-    # passed has verdict KEEP, so that rule would pin every probe — 25 of them
-    # in the cuda-graph campaign, almost all of whose artifacts live in `eval/`
+    # passed has verdict KEEP, so that rule would pin every probe — a campaign
+    # can run many, almost all of whose artifacts live in `eval/`
     # rather than in the tree. It would also pin ESCALATE. Which rows are worth
     # permanent prompt budget is a judgement about cost, not something derivable
     # from the verdict, so it stays written down.
@@ -196,8 +195,8 @@ def _render_barren(campaign, state) -> str:
         # not discovered anything.
         # NOT a claim about what the campaign has or has not measured. The
         # design sketched two variants ("nothing has measured it" / "the last
-        # measurement was iteration X"), and rendering the first against the 2b
-        # campaign — which holds ~20 denominator and census ledger entries —
+        # measurement was iteration X"), and rendering the first against a
+        # campaign that held many denominator and census ledger entries
         # produced a flat falsehood. A block the agent can catch lying is a
         # block it discounts. Asking instead is always true, and after N landed
         # changes STALENESS is the live question anyway.
@@ -267,8 +266,8 @@ def _render_barren(campaign, state) -> str:
                 for f in uncited[:_BARREN_LIST_CAP]) + "\n")
 
     # (2) Re-land candidates. This is the highest-yield move in the corpus and
-    # nothing currently asks for it: the 2c campaign re-landed previously
-    # REVERTed work at iterations 15, 17, 19 and 24 — unprompted — and cleared
+    # nothing currently asks for it: one campaign re-landed previously
+    # REVERTed work several times, unprompted, and cleared
     # a bar every time.
     # Only intents that BOOK. A `LEARN -> REVERT` is a probe that closed no
     # finding, not a change sitting on the shelf — listing those as re-land
@@ -294,9 +293,9 @@ def _render_barren(campaign, state) -> str:
         f"thing on the menu.\n")
 
     # THE CLOSING PARAGRAPH IS NOT A HEDGE. A forced-diversity rule is the
-    # obvious move here and it is wrong: the 2d campaign's entire lead came
-    # from going DEEPER on one seam it had already touched (iterations 22, 24,
-    # 28 and 32 are all the same one). Breadth is the right prior when you do
+    # obvious move here and it is wrong: one campaign's entire lead came
+    # from going DEEPER on one seam it had already touched (its leading KEEPs
+    # are all the same one). Breadth is the right prior when you do
     # not know where the cost is; it is the wrong rule once you do.
     parts.append(
         "You are NOT required to change direction. Going deeper on a seam "
@@ -308,12 +307,13 @@ def _render_barren(campaign, state) -> str:
 
 
 def _skill_description(arbor_root: Path, name: str) -> str:
-    try:
-        text = (arbor_root / ".claude" / "skills" / name / "SKILL.md").read_text()
-    except OSError:
-        return ""
-    m = re.search(r"^description:\s*(.+)$", text, re.MULTILINE)
-    return m.group(1).strip() if m else ""
+    """A skill's description, its front matter read as YAML, so a folded one (`>-`) reads as its text; a family's
+    skill (`family:name`) is found in its plugin."""
+    from arbor import skillcheck
+    family, _, skill = name.rpartition(":")
+    if family:
+        return skillcheck.description(arbor_root / skillcheck.PLUGINS_DIR / family / "skills" / skill)
+    return skillcheck.description(arbor_root / skillcheck.SKILLS_DIR / name)
 
 
 def _render_skills(skills: list[str], arbor_root: Path) -> str:
@@ -402,9 +402,9 @@ def render_program(campaign, state, arbor_root: str | Path,
 
     sections.append(f"# {campaign.pack.name} — {campaign.goal}\n")
 
-    # The regime, stated once at the top. 2b's 31-iteration drought was
-    # invisible for as long as it was because every counter anyone looked at
-    # faithfully reported `null_streak=2`.
+    # The regime, stated once at the top. A long drought can stay invisible
+    # when every counter anyone looks at faithfully reports a small
+    # `null_streak`.
     if hasattr(state, "diagnose") and state.lessons:
         sections.append(f"_{state.diagnose()}_")
 
@@ -414,13 +414,12 @@ def render_program(campaign, state, arbor_root: str | Path,
     # because it is the one place the pack states what this campaign IS
     # before it starts stating rules.
     #
-    # It was parsed into Pack.description from the beginning but never
-    # rendered until 2026-09-20. Packs had been written against the
-    # assumption that it reached the agent, so agentx-dsv41-5's header --
-    # "at CONCURRENCY 4", the C4 baseline and target, and the warning that
-    # the inherited roadmap's numbers are C32 LEADS -- was invisible to the
-    # agent it was written for, and the C4/C32 distinction survived only in
-    # the config goal and knowledge/operating-point.md.
+    # It was parsed into Pack.description from the beginning but at first
+    # never rendered. Packs had been written against the assumption that it
+    # reached the agent, so one pack's header -- its operating point, its
+    # baseline and target, and the warning that the inherited roadmap's
+    # numbers came from another operating point -- was invisible to the
+    # agent it was written for.
     if campaign.pack.description:
         sections.append(campaign.pack.description.strip())
 
@@ -510,7 +509,7 @@ def render_program(campaign, state, arbor_root: str | Path,
 
     # Skills — after the knowledge and constraints, because a listed skill
     # can take precedence over a procedure they describe (_SKILL_RULES).
-    skills = agent_skills(campaign.pack)
+    _chapter, skills = lifecycle.turn_skills(campaign, state)
     if skills:
         sections.append(_render_skills(skills, arbor_root))
 

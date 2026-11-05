@@ -108,4 +108,4 @@ low), RCCL's tests for collectives, a graph-captured loop for launch cost.
   - 304 CUs become 256, so redo the grid and wave arithmetic;
   - TF32 is gone.
 - **Every fact here carries its source.** When one turns out wrong, fix it here and in the place
-  that cited it. The MI350X dossier's "304 CUs" carries a correction note dated 2026-10-20.
+  that cited it. The MI350X dossier's "304 CUs" carries a correction note.

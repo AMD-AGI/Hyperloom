@@ -2,8 +2,7 @@
 """Render a pack's roadmap.yaml into the knowledge/*.md the agent actually reads.
 
 WHY THIS EXISTS. arbor/pack/render.py renders `knowledge/*.md` and the flat
-`constraints:` list; it does not know about roadmap.yaml (that is Part 2 of the
-hyperloom plan, unimplemented). So the roadmap has to reach the agent as
+`constraints:` list; it does not know about roadmap.yaml (unimplemented). So the roadmap has to reach the agent as
 markdown. Copying it by hand would create two sources of truth that drift --
 which is precisely the failure the structured roadmap exists to prevent. This
 script makes the markdown DERIVED: regenerate it, never edit it.

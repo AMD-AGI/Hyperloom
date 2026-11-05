@@ -5,10 +5,8 @@ component-mode GPU test. The loop itself: [how-it-works.md](how-it-works.md).
 
 ## Before a launch
 
-- **Arbor on the cluster.** Clusters often cannot read `AMD-AGI/Arbor` directly. Clone
-  from a mirror you can read and point launchers at it with `ARBOR_URL`. **The launchers' defaults
-  still name the retired repository and branches** (`<fork>/Arbor`, `<old branch>`,
-  `<fork>/model-m`): always set `ARBOR_URL` and the branch.
+- **Arbor on the cluster.** Point launchers at a checkout the cluster can read with `ARBOR_URL`, and
+  set the branch: the launchers' defaults are not this copy's.
 - **Credentials.** The launchers source `~/.arbor/gateway.env` (mode 600) for the agents' gateway.
 - **The image and weights.** Launchers load the serving image from an archive and check its ID, and
   check the weights as the container sees them.
@@ -60,11 +58,6 @@ touch <session>/STOP               # stop after the iteration in flight
 
 `scripts/cluster/roll_smoke.sh` rolls four short jobs as a smoke test (set its repository and ref).
 
-## DSV4.1 campaigns (`scripts/dsv41-campaign/`)
-
-The DeepSeek-V4.1-Flash campaign line, one sbatch per pack variant. These scripts write under
-cluster-specific paths; adapt one before reuse.
-
 ## Parallel mode
 
 Rounds of a map step, lanes and integration. Each lane is a campaign on its own node, seeded with
@@ -80,7 +73,7 @@ touch <store>/<run_id>/keeper/STOP
 The run config (`arbor/parallel/config.py`) requires `run_id`, `store`, `arbor_root`,
 `template_config`, `dossier_dir`, `gates` and `lane_sessions`; optional keys include `max_lanes`
 (4), `max_rounds`, `no_keep_rounds` (2), `seed`, `base_vmu`, and `cluster` (partition, account,
-time limit, scripts). State lives under `<store>/<run_id>/`. Built on 2026-10-20 and tested on
+time limit, scripts). State lives under `<store>/<run_id>/`. Tested on
 fakes only; `configs/parallel/*.json` are examples, never launched.
 
 ## Dashboards and collectors
@@ -94,7 +87,7 @@ node arbor/dashboard/server.mjs parallel --host <host> --store <store>/<run_id> 
 The dashboard binds 127.0.0.1 and reads a session over ssh through `arbor/collect/realtime.py`
 ([arbor/dashboard/README.md](../arbor/dashboard/README.md)). The collectors
 (`python3 -m arbor.collect realtime|project|knowledge`) write `<session>/collector/` and push to
-`/shared/arbor`.
+`/path/to/arbor-share`.
 
 ## Component mode's GPU test
 

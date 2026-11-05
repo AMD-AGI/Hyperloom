@@ -1,6 +1,6 @@
 "use strict";
 
-// A parallel run's page (arbor/parallel/, runner decision 0003): its phase and
+// A parallel run's page (arbor/parallel/): its phase and
 // round, every lane's timeline and clocks, the round's map, the integration
 // table. The data is `arbor.parallel status --json` (arbor/parallel/status.py),
 // which the server runs where the run's store is; esc, durText and the map's
