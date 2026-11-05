@@ -16,9 +16,9 @@ Without a map, two or more Arbor agents split the map of the dossier pass
 opens a share branch for each share. The dossier pass is the default, and it runs on a branch, so no other branch waits
 for it. When the pass gives none, they split one Arbor generates from the root's shares, PRELUDE's profile, with no GPU
 time (:func:`~hyperloom_multibranch.specialist.arbor_adapter.generate_directions`): one direction per op family, ranked
-by its share. Those shares are the root's op shares, or its kernel shares when TraceLens gave none
-(:mod:`~hyperloom_multibranch.scheduling.root_shares`), as ``shares_source`` says. A single Arbor gets none and maps its
-own directions, which its dossier measures better.
+by its share. Those shares are the root's op shares (:mod:`~hyperloom_multibranch.scheduling.root_shares`), kernel
+names where the toolbox ranked kernels, and ``shares_source`` says where they came from. A single Arbor gets none and
+maps its own directions, which its dossier measures better.
 
 A map that cannot be split, or generated, leaves every branch without a share, as without a map, and the log says why:
 a source that cannot be fetched, no Arbor among the agents, fewer independent directions than Arbor agents, or a root
