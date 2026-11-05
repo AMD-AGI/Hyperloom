@@ -304,8 +304,10 @@ async def test_each_user_branchs_specialist_runs_on_its_own_direction_in_every_l
     await asyncio.wait_for(_relaunched(bench.sessions, "b01"), 5)
 
     directions = dict(bench.sessions.directions)
-    assert directions.pop("b01") == ["Fuse the MoE gate.", "Fuse the MoE gate."]
-    assert directions.pop("b02") == ["Tune attention."]
+    user_first = directions.pop("b01")
+    user_second = directions.pop("b02")
+    assert user_first == ["Fuse the MoE gate.", "Fuse the MoE gate."]
+    assert user_second == ["Tune attention."]
     [built_in] = directions.pop("b03")
     assert built_in in DIRECTIONS and not directions
 
