@@ -12,9 +12,8 @@ from pathlib import Path
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.scheduling.agent_plans import GENERATED_MAP, agent_plans, arbor_agents
-from hyperloom_multibranch.scheduling.root_shares import KERNEL_SHARES_SOURCE
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, ROOT_PROFILE_SOURCE
-from hyperloom_multibranch.tests.test_specialist_arbor_adapter import CHECKOUT_FILES, MAP, _committed, _write
+from hyperloom_multibranch.tests.agent_rig import CHECKOUT_FILES, MAP, _committed, _write
 
 #: The root's op shares as PRELUDE's profile reports them, in percent.
 ROOT_SHARES = OpShares("c0ffee", "prelude-1", "p1", {"attn_fwd": 41.0, "moe_gemm": 33.0, "rmsnorm": 1.5, "nccl": 9.0})
@@ -73,15 +72,15 @@ async def test_without_a_map_two_arbor_agents_split_one_arbor_generates_from_the
     assert (work / GENERATED_MAP).is_file()
 
 
-async def test_kernel_shares_generate_the_map_too_and_the_profile_says_they_are_kernels(tmp_path: Path) -> None:
+async def test_kernel_names_the_toolbox_took_as_op_shares_generate_the_map_too(tmp_path: Path) -> None:
     arbor, _ = _agents(tmp_path)
     kernels = OpShares("c0ffee", "prelude:p1", "", {"paged_attention_ll4mi_QKV": 32.5, "Cijk_Alik": 27.3})
 
-    plans = await agent_plans((arbor, arbor), "", tmp_path / "work", kernels, KERNEL_SHARES_SOURCE)
+    plans = await agent_plans((arbor, arbor), "", tmp_path / "work", kernels)
 
     assert [_ids(plan) for plan in plans] == [["m-paged_attention_ll4mi_QKV"], ["m-Cijk_Alik"]]
     profile = json.loads((tmp_path / "work" / PROFILE_FILE).read_text(encoding="utf-8"))
-    assert profile["source"] == KERNEL_SHARES_SOURCE
+    assert (profile["shares"], profile["source"]) == (dict(kernels.shares), ROOT_PROFILE_SOURCE)
 
 
 async def test_the_arbor_agents_are_found_by_their_checkouts_each_source_fetched_once(tmp_path: Path) -> None:
