@@ -1055,7 +1055,7 @@ def _deleted_and_created(to: str, **values: str) -> str:
 
 
 async def _moved_onto(tmp_path, head_patch: str, candidate_patch: str):
-    installed = _installed(tmp_path, old="".join(_module()))
+    installed = _installed(tmp_path, old="".join(_module()), scheduler=SCHEDULER)
     repo = _repository(tmp_path, installed)
     root = await repo.init_root(BASE)
     first = await _candidate(repo, "s1", root, head_patch)
@@ -1133,3 +1133,60 @@ async def test_a_rename_that_overlaps_the_head_stays_whole_in_the_split_off_conf
     assert "old.py" in rest and "new.py" in rest and "scheduler.py" not in rest
     built = _files(apply(await repo.read_recipe(head), merge.delta).component("vllm"), installed, tmp_path)
     assert built == {"old.py": "".join(_module(value_5="500", value_15="1501")), "scheduler.py": "policy = 'lpm'\n"}
+
+
+def _created(file: str, text: str) -> str:
+    body = difflib.unified_diff([], [text], "/dev/null", f"b/vllm/{file}")
+    return f"diff --git a/vllm/{file} b/vllm/{file}\nnew file mode 100644\n" + "".join(body)
+
+
+def _deleted_old() -> str:
+    body = difflib.unified_diff(_module(), [], "a/vllm/old.py", "/dev/null")
+    return "diff --git a/vllm/old.py b/vllm/old.py\ndeleted file mode 100644\n" + "".join(body)
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [_module_edit("old.py", value_14="1400"), _moved("new.py", value_14="1400")],
+    ids=["in-place", "renamed"],
+)
+async def test_an_edit_next_to_the_head_s_line_is_a_conflict_that_keeps_the_head_s_edit(tmp_path, candidate):
+    """git merges adjacent changed lines as one hunk, so taking the candidate's side of it would drop the head's."""
+
+    repo, installed, head, merge = await _moved_onto(tmp_path, _module_edit("old.py", value_13="1300"), candidate)
+
+    (conflict,) = merge.patch_conflicts
+    assert "does not apply" in conflict.detail and merge.replaced_patches == ()
+    assert [(change.add_patches, change.remove_patches) for change in merge.delta.components] == [((), ())]
+    files = _files(apply(await repo.read_recipe(head), merge.delta).component("vllm"), installed, tmp_path)
+    assert files == {"old.py": "".join(_module(value_13="1300"))}
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [_module_edit("old.py", value_13="1301"), _moved("new.py", value_13="1301")],
+    ids=["in-place", "renamed"],
+)
+async def test_a_head_edit_the_candidate_rewrote_line_for_line_is_replaced(tmp_path, candidate):
+    repo, installed, head, merge = await _moved_onto(tmp_path, _module_edit("old.py", value_13="1300"), candidate)
+
+    (replaced,) = merge.replaced_patches
+    assert merge.clean and replaced.removed == tuple(_paths(repo, await repo.read_recipe(head)))
+    files = _files(apply(await repo.read_recipe(head), merge.delta).component("vllm"), installed, tmp_path)
+    assert "".join(_module(value_13="1301")) in files.values()
+
+
+@pytest.mark.parametrize(
+    "head_patch",
+    [_deleted_old(), _moved("other.py"), _created("new.py", "made = 1\n")],
+    ids=["rename-delete", "rename-rename", "rename-add"],
+)
+async def test_a_rename_git_reports_as_a_conflict_is_one_that_keeps_the_head_s_files(tmp_path, head_patch):
+    wide = _moved("new.py") + _git_patch("scheduler.py", "policy = 'fcfs'", "policy = 'lpm'")
+    repo, installed, head, merge = await _moved_onto(tmp_path, head_patch, wide)
+
+    assert not merge.clean and merge.replaced_patches == ()
+    assert len(merge.patch_conflicts) == 1
+    files = _files(apply(await repo.read_recipe(head), merge.delta).component("vllm"), installed, tmp_path)
+    before = _files((await repo.read_recipe(head)).component("vllm"), installed, tmp_path)
+    assert files == {**before, "scheduler.py": "policy = 'lpm'\n"}
