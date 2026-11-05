@@ -14,7 +14,7 @@ from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.scheduling.agent_plans import GENERATED_MAP, agent_plans, arbor_agents
 from hyperloom_multibranch.scheduling.root_shares import KERNEL_SHARES_SOURCE
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, ROOT_PROFILE_SOURCE
-from hyperloom_multibranch.tests.test_specialist_arbor_adapter import CHECKOUT_FILES, MAP, _committed, _write
+from hyperloom_multibranch.tests.agent_rig import CHECKOUT_FILES, MAP, _committed, _write
 
 #: The root's op shares as PRELUDE's profile reports them, in percent.
 ROOT_SHARES = OpShares("c0ffee", "prelude-1", "p1", {"attn_fwd": 41.0, "moe_gemm": 33.0, "rmsnorm": 1.5, "nccl": 9.0})

@@ -23,8 +23,16 @@ from hyperloom_multibranch.specialist.dossier_pass import (
     run_dossier_pass,
 )
 from hyperloom_multibranch.tests.branch_rig import branch_rig
-from hyperloom_multibranch.tests.test_specialist_arbor_adapter import CHECKOUT_FILES, _committed, _spec, _write
-from hyperloom_multibranch.tests.test_specialist_autonomous_session import ROOT, LocalProcess, LocalSandbox, Toolbox
+from hyperloom_multibranch.tests.agent_rig import (
+    CHECKOUT_FILES,
+    ROOT,
+    LocalProcess,
+    LocalSandbox,
+    Toolbox,
+    _committed,
+    _spec,
+    _write,
+)
 
 #: Arbor's entry point in a fake checkout, run as a dossier pass: what it does is fake-dossier.json's ``do``. ``mapped``
 #: writes a dossier, the map and exits 0 with ``mapped``; ``nomap`` writes the dossier and ends with ``deadline``;

@@ -2,31 +2,26 @@
 # SPDX-License-Identifier: MIT
 
 import ast
-import asyncio
 import json
 import os
 import shlex
 import subprocess
 from collections.abc import Mapping
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.recipe import ConfigDelta
 from hyperloom.measure.compile import (
     ComponentLayout,
-    LocalBlobStore,
     PackageBase,
     PackageLocator,
     UnsupportedComponentError,
 )
-from hyperloom_multibranch.blackboard.tests.factories import result
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_manifest import REFUSED_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, make_ready, root_profile
-from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import (
     BRANCH_RUN,
     DOSSIER_DIR,
@@ -52,145 +47,30 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     refused_reasons,
     split_directions,
 )
-from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, MANIFEST_FILE, START_TABLES_FILE
-from hyperloom_multibranch.specialist.gate_client import GateClient
-from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCrashed, SessionFinished, SessionRefused
+from hyperloom_multibranch.specialist.runtime import PreflightFailed
 from hyperloom_multibranch.specialist.worktree import SKIPPED
-from hyperloom_multibranch.tests.test_specialist_agent_onboarding import Onboarder, Process, Sandbox, _setup
-from hyperloom_multibranch.tests.test_specialist_autonomous_session import (
-    BRANCH,
-    CHAMPION_ROWS,
-    COMPONENT_AGENT,
+from hyperloom_multibranch.tests.agent_rig import (
+    CHECKOUT_FILES,
+    CLIENT,
+    CONFIG_FILE,
+    GATED_COMPONENT,
+    LAUNCH,
+    MAP,
+    MODEL,
+    PORT,
+    REASONS,
+    SESSION_DIR,
+    START_TABLE_PARTS,
     TABLE_ENV,
-    Component,
-    _aiter,
-    _imported,
-    _replayed,
-    _rig,
-    _until,
+    Onboarder,
+    Process,
+    Sandbox,
+    _arbor_repo,
+    _git,
+    _setup,
+    _spec,
+    _write,
 )
-
-MODEL = "/models/Qwen3-14B-FP8"
-#: The gate's client as MB builds it; it names the model by its hub name, which the server must answer to.
-CLIENT = GateClient("/opt/InferenceX", "Qwen/Qwen3-14B-FP8", 1024, 1024, 8, 0.8, None, False)
-PORT = 31110
-DEADLINE = 1793244000.7
-CONFIG_FILE, SESSION_DIR = BRANCH_RUN.config_file, BRANCH_RUN.session_dir
-LAUNCH = f"python3 -m arbor run --config {CONFIG_FILE}"
-REASONS = ["component.plan[0]: m-attn: no title", "component mode needs a deadline"]
-#: A start table as MB gives its variable: the private copies of the image's default tables, then the start's rows.
-START_TABLE_PARTS = ("/mb/agent/start-tables/AITER_CONFIG_GEMM_A8W8/a8w8_tuned_gemm.csv", "/mb/start-tables/r.csv")
-
-#: Arbor's entry point in a fake checkout. It runs :data:`COMPONENT_AGENT` on the config ``--config`` names, which
-#: reads campaign.json and keeps its session in run/ of its working directory: run/ is linked to the config's session
-#: and the plan comes from fake-plan.json, its environment on top of the config's ``server_env``, as Arbor's snapshot
-#: records the launch it measured. With ``refuse`` in the plan it refuses instead, as Arbor does, after ``tail``
-#: seconds: the reasons on stderr and in the session's refusal file, then exit 2.
-FAKE_MAIN = """
-import json, os, pathlib, runpy, sys, time
-config = json.loads(pathlib.Path(sys.argv[sys.argv.index("--config") + 1]).read_text())
-plan = json.loads(pathlib.Path("fake-plan.json").read_text())
-plan["envs"] = {**config["server_env"], **plan["envs"]}
-session = pathlib.Path(config["session_root"])
-if plan["refuse"]:
-    time.sleep(plan["tail"])
-    (session / "component_refused.json").write_text(json.dumps({"reasons": plan["refuse"], "ts": "2026-10-29T00:00:00Z"}))
-    for reason in plan["refuse"]:
-        print(f"[arbor] refusing to start: {reason}", file=sys.stderr, flush=True)
-    sys.exit(2)
-if not os.path.lexists("run"):
-    os.symlink(session, "run")
-pathlib.Path("campaign.json").write_text(json.dumps({**config, "workspace": config["workspace_root"], "plan": plan}))
-runpy.run_path("component.py", run_name="__main__")
-"""
-#: Arbor's split in a fake checkout: the open directions of the map dealt in turn to the shares, or exit 1 when there
-#: are fewer than shares. Its generate: one direction per op of the profile at 2 % or more, largest first, or exit 1
-#: when there is none.
-FAKE_DIRECTIONS = """
-import json, pathlib, sys
-args = sys.argv[1:]
-if args[0] == "generate":
-    shares = json.loads(pathlib.Path(args[args.index("--profile") + 1]).read_text())["shares"]
-    ops = [op for op, share in sorted(shares.items(), key=lambda item: -item[1]) if share >= 2]
-    if not ops:
-        sys.exit("nothing above --min-share 2")
-    directions = [{"id": f"m-{op}", "kind": "increment", "title": op} for op in ops]
-    pathlib.Path(args[args.index("--out") + 1]).write_text(json.dumps({"directions": directions}))
-    sys.exit(0)
-directions = json.loads(pathlib.Path(args[1]).read_text())["directions"]
-shares, out = int(args[args.index("--shares") + 1]), pathlib.Path(args[args.index("--out") + 1])
-live = [entry for entry in directions if entry.get("status", "open") == "open"]
-if len(live) < shares:
-    sys.exit(f"{len(live)} independent groups for {shares} shares")
-out.mkdir(parents=True, exist_ok=True)
-for number in range(1, shares + 1):
-    (out / f"share-{number}.json").write_text(json.dumps({"directions": live[number - 1 :: shares]}))
-"""
-#: What an Arbor checkout needs for the adapter: its markers and the serving pack's validator.
-CHECKOUT_FILES = {
-    "arbor/__init__.py": "",
-    "arbor/__main__.py": FAKE_MAIN,
-    "arbor/component.py": "# component mode\n",
-    "arbor/directions.py": FAKE_DIRECTIONS,
-    "docs/hosts.md": "# Running Arbor inside a host (component mode)\n",
-    "packs/serving/pack.yaml": "name: serving\n",
-    "packs/serving/validator/bench.sh": "#!/usr/bin/env bash\n",
-    "packs/serving/validator/correctness.sh": "#!/usr/bin/env bash\n",
-}
-
-
-def _git(cwd: Path, *args: str) -> str:
-    argv = ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args]
-    return subprocess.run(argv, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
-
-
-def _write(root: Path, files: Mapping[str, str]) -> Path:
-    for name, text in files.items():
-        (root / name).parent.mkdir(parents=True, exist_ok=True)
-        (root / name).write_text(text, encoding="utf-8")
-    return root
-
-
-def _committed(repo: Path) -> Path:
-    _git(repo, "init", "-q")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-q", "-m", "init")
-    return repo
-
-
-def _arbor_repo(tmp_path: Path, agent: Component = Component(), refuse: tuple[str, ...] = ()) -> Path:
-    """A fake Arbor's repository, run as :data:`FAKE_MAIN` says."""
-
-    plan = json.dumps({**asdict(agent), "refuse": list(refuse)})
-    files = {**CHECKOUT_FILES, "component.py": COMPONENT_AGENT, "fake-plan.json": plan}
-    return _committed(_write(tmp_path / "arbor-repo", files))
-
-
-def _spec(tmp_path: Path, **changes: object) -> AgentSpec:
-    """A branch's spec, its workspace a repository at the root it names and the gate's client aimed at :data:`PORT`."""
-
-    workspace = _committed(_write(tmp_path / "workspace", {"vllm/config.py": "max_num_seqs = 128\n"}))
-    spec = AgentSpec(
-        model=MODEL,
-        framework="vllm",
-        tp=2,
-        precision="fp8",
-        gpu_type="mi355x",
-        workload={"kind": "inferencex", "isl": 1024, "osl": 1024, "conc": 8},
-        metric="output_throughput",
-        server_args="--max-num-seqs 128",
-        envs={"VLLM_ROCM_USE_AITER": "1", TABLE_ENV: os.pathsep.join(START_TABLE_PARTS)},
-        workspace=str(workspace),
-        cards=(4, 5),
-        seconds=3600.0,
-        port=PORT,
-        client=CLIENT.command(PORT, tmp_path / "agent" / "mb-bench"),
-        knowledge=str(tmp_path / "agent" / "mb-integration.md"),
-        deadline=DEADLINE,
-        root=_git(workspace, "rev-parse", "HEAD"),
-    )
-    return replace(spec, **changes)
 
 
 def _filled(command: str, port: int, out: str) -> str:
@@ -693,12 +573,6 @@ def test_what_arbor_refuses_at_its_start_is_refused_before_it_starts(tmp_path: P
     assert len(reasons) == len(expected) and all(said in reason for said, reason in zip(expected, reasons))
 
 
-#: Arbor main 1fa2069's arbor/component.py, as far as the adapter reads it: its component keys, "review" among them.
-GATED_COMPONENT = (
-    'BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox", "phase_minutes",\n'
-    '              "root", "plan", "stop_at", "profile", "review")\n'
-    'REVIEW_BY = ("host",)\n'
-)
 #: Arbor 05d04d5's: no review gate.
 UNGATED_COMPONENT = (
     'BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox", "phase_minutes",\n'
@@ -797,103 +671,6 @@ async def test_arbor_refusing_its_config_as_it_starts_fails_the_preflight_with_i
     assert process.killed and waits == []
 
 
-async def test_an_arbor_run_on_the_adapter_s_config_has_its_keeps_imported_end_to_end(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(arbor_adapter, "INSTALL", ())
-    agent = Component(keeps=(256, 512), gap=0.1, latest_each=False, tail=0.6)
-    rig = await _rig(tmp_path, source=_arbor_repo(tmp_path, agent), start_seconds=0.2)
-
-    await rig.session.preflight()
-    running = asyncio.create_task(rig.session.run())
-    await _until(lambda: rig.toolbox.requests, "the import")
-    await rig.toolbox_blackboard.write_result(result("r1"))
-    with pytest.raises(SessionFinished):
-        await asyncio.wait_for(running, 10)
-
-    assert rig.sandbox.prompts == [] and rig.sandbox.started == [LAUNCH]
-    [request] = rig.toolbox.requests
-    assert "+max_num_seqs = 512" in rig.patch(request)
-    checkout = tmp_path / BRANCH / "session" / AGENT_DIR / "src"
-    assert (checkout / SESSION_DIR / "keeps" / "LATEST").read_text() == "0002"
-    assert (await rig.notices())[-1] == f"{NOTICE} the agent finished its run: done"
-
-
-async def test_arbor_starts_with_the_start_s_kernel_tables_and_a_keep_that_keeps_them_imports_no_table_change(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(arbor_adapter, "INSTALL", ())
-    # The keep runs with the flags MB gave it, the TP MB names on vLLM included.
-    agent = Component(keeps=(256,), gap=0.1, flags="--max-num-seqs 128 --tensor-parallel-size 1", tail=0.6)
-    start = _replayed(LocalBlobStore(tmp_path / "blobs"))
-    source = _arbor_repo(tmp_path, agent)
-    rig = await _rig(tmp_path, start=start, start_seconds=0.2, aiter=_aiter(tmp_path), source=source)
-
-    request = await _imported(rig)
-
-    config = json.loads((tmp_path / BRANCH / "session" / AGENT_DIR / "src" / CONFIG_FILE).read_text())
-    given = json.loads((tmp_path / BRANCH / "session" / START_TABLES_FILE).read_text())[TABLE_ENV]["value"]
-    assert config["server_env"] == {arbor_adapter.ACCURACY_FLOOR_ENV: "0.5", TABLE_ENV: given}
-    assert Path(given.split(os.pathsep)[-1]).read_text() == CHAMPION_ROWS
-    assert (request.delta.add_kernels, request.delta.remove_kernels) == ((), ())
-    assert request.delta.config == ConfigDelta() and "+max_num_seqs = 256" in rig.patch(request)
-
-
-async def test_an_arbor_started_with_too_little_time_ends_its_branch_as_finished_after_one_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(arbor_adapter, "INSTALL", ())
-    agent = Component(keeps=(), tail=0.0, reason="deadline")
-    rig = await _rig(tmp_path, source=_arbor_repo(tmp_path, agent), start_seconds=5.0)
-
-    await asyncio.wait_for(rig.session.preflight(), 20)
-    with pytest.raises(SessionFinished, match="the agent finished its run: deadline"):
-        await asyncio.wait_for(rig.session.run(), 10)
-
-    assert rig.sandbox.started == [LAUNCH]
-    assert (await rig.notices())[-1] == f"{NOTICE} the agent finished its run: deadline"
-
-
-async def test_an_arbor_restarted_after_a_crash_is_resumed_by_its_stored_manifest_without_onboarding_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(arbor_adapter, "INSTALL", ())
-    rig = await _rig(tmp_path, source=_arbor_repo(tmp_path, Component(keeps=(), exit=3, tail=0.6)), start_seconds=0.2)
-    config = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / CONFIG_FILE
-
-    await rig.session.preflight()
-    written = config.read_text()
-    with pytest.raises(SessionCrashed, match="the agent exited 3"):
-        await asyncio.wait_for(rig.session.run(), 10)
-    await rig.session.stop()
-    resumed = rig.restart()
-    with pytest.raises(SessionCrashed, match="the agent exited 3"):
-        await asyncio.wait_for(resumed.run(), 10)
-    await resumed.stop()
-
-    stored = json.loads((tmp_path / BRANCH / "session" / MANIFEST_FILE).read_text())
-    assert (stored["launch"], stored["resume"]) == (LAUNCH, LAUNCH)
-    assert rig.sandbox.started == [LAUNCH, LAUNCH] and rig.sandbox.prompts == []
-    assert config.read_text() == written
-    assert any(note == f"{NOTICE} the agent resumed with `{LAUNCH}`" for note in await rig.notices())
-
-
-async def test_an_arbor_that_refuses_its_config_ends_the_branch_for_good_with_its_reasons(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(arbor_adapter, "INSTALL", ())
-    rig = await _rig(tmp_path, source=_arbor_repo(tmp_path, Component(tail=0.6), REASONS), start_seconds=0.2)
-
-    await rig.session.preflight()
-    with pytest.raises(SessionRefused) as refused:
-        await asyncio.wait_for(rig.session.run(), 10)
-    await rig.session.stop()
-
-    assert str(refused.value) == f"the agent refused its config: {'; '.join(REASONS)}"
-    assert isinstance(refused.value, SessionFinished) and not isinstance(refused.value, SessionCrashed)
-    assert (await rig.notices())[-1] == f"{NOTICE} {refused.value}"
-
-
 def test_a_refusal_file_s_reasons_are_read_in_order_and_none_is_empty(tmp_path: Path) -> None:
     path = tmp_path / REFUSED_FILE
     assert refused_reasons(path) == ""
@@ -911,16 +688,6 @@ def test_a_dossier_pass_ended_mapped_only_when_its_exit_file_says_so(
         (tmp_path / "component_exit.json").write_text(json.dumps({"reason": exit_file, "detail": "m-attn, m-moe"}))
 
     assert mapped(tmp_path) is ended
-
-
-MAP = {
-    "directions": [
-        {"id": "m-attn", "kind": "increment", "title": "attention decode path", "rank": 1},
-        {"id": "m-moe", "kind": "increment", "title": "MoE GEMM tables", "rank": 2},
-        {"id": "m-allreduce", "kind": "increment", "title": "custom all-reduce", "rank": 3},
-        {"id": "m-sampler", "kind": "increment", "title": "sampler", "status": "done", "why": "iteration 4, KEEP 2"},
-    ]
-}
 
 
 async def test_a_map_is_split_into_one_plan_per_share_by_arbor_s_command_line(tmp_path: Path) -> None:
