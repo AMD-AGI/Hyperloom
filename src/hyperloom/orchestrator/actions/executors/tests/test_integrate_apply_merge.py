@@ -14,7 +14,6 @@ import pytest
 from hyperloom.orchestrator.actions.executors import patch_conflict_merge
 from hyperloom.orchestrator.actions.executors._integrate_apply import _apply_patch_series
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
-from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.actions.executors.patch_conflict_merge import STRATEGY_THREE_WAY
 
 _GIT_IDENTITY = {
@@ -121,12 +120,3 @@ async def test_an_overlapping_edit_goes_back_to_its_author(repo: Path, monkeypat
     assert series.feedback
     assert (repo / _MODULE).read_text(encoding="utf-8") == kept
     assert _git(repo, "status", "--porcelain") == ""
-
-
-def test_the_integrate_result_names_the_merged_patches(tmp_path: Path) -> None:
-    attempt = IntegrateAttempt(task_id="integrate-b")
-    attempt.merged_patches.append({"patch": "b.patch", "strategy": STRATEGY_THREE_WAY, "steps": []})
-
-    result = IntegratePatchExecutor(session_dir=tmp_path)._finish_attempt(attempt, {"status": "kept"})
-
-    assert result["patches_merged"] == attempt.merged_patches

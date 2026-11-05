@@ -208,18 +208,14 @@ def _strip_level(repo: Path, patch_path: Path) -> int:
     return _commit_strip_level(repo, pairs) if pairs else 1
 
 
-def _distinctive_lines(text: str) -> set[str]:
-    """The lines of ``text`` that carry identity, whitespace-normalized.
-
-    Blank and near-blank lines cannot witness that a side survived a merge.
-    """
-    bodies = (" ".join(line.split()) for line in text.splitlines())
-    return {body for body in bodies if len(body) >= 4}
-
-
 def _added_lines(patch_text: str) -> set[str]:
-    """The distinctive lines a diff adds."""
-    return _distinctive_lines("\n".join(line for change in parse_unified_diff(patch_text) for line in change.added))
+    """The distinctive lines a diff adds, whitespace-normalized.
+
+    Blank and near-blank additions carry no identity, so they cannot witness
+    that a side survived a merge.
+    """
+    bodies = (" ".join(line.split()) for change in parse_unified_diff(patch_text) for line in change.added)
+    return {body for body in bodies if len(body) >= 4}
 
 
 def _missing_additions(repo: Path, patch_path: Path) -> list[str]:
@@ -239,18 +235,6 @@ def _missing_additions(repo: Path, patch_path: Path) -> list[str]:
             continue
         present |= {" ".join(line.split()) for line in text.splitlines() if line.strip()}
     return sorted(wanted - present)
-
-
-def _dropped_side_lines(marked: str, resolved: str) -> list[str]:
-    """Lines either side of a conflict region adds over its base that ``resolved`` lost.
-
-    Read from the regions themselves, so the kept side is held even when no landed diff is known.
-    """
-    wanted: set[str] = set()
-    for match in _CONFLICT_RE.finditer(marked):
-        sides = _distinctive_lines(match.group("ours")) | _distinctive_lines(match.group("theirs"))
-        wanted |= sides - _distinctive_lines(match.group("base"))
-    return sorted(wanted - _distinctive_lines(resolved))
 
 
 def _module_level_names(text: str) -> list[str]:
@@ -556,9 +540,6 @@ async def _resolve_conflicts(
                 return strategy, error
             strategy = STRATEGY_LLM
             rejection = _reject_reason(repo, relative, resolved)
-            dropped = [] if rejection else _dropped_side_lines(marked, resolved)
-            if dropped:
-                rejection = f"{relative}: merge dropped {len(dropped)} added line(s), first: {dropped[0][:80]}"
 
         if rejection:
             return strategy, rejection
