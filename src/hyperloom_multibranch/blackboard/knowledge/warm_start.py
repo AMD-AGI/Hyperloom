@@ -153,9 +153,13 @@ class RecipeReader(Protocol):
         match: dict[str, str],
         offset: int = 0,
         limit: int = 50,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """The identities of ``scheme`` whose dimensions named in ``match`` equal it, ``limit`` of them from
+        ``offset``."""
 
-    def get_view(self, canonical_id: str, scope: RecipeScope) -> dict[str, Any] | None: ...
+    def get_view(self, canonical_id: str, scope: RecipeScope) -> dict[str, Any] | None:
+        """The validated View of ``canonical_id`` in ``scope``, its files not downloaded; ``None`` when there is
+        none."""
 
 
 class RecipeDownloader(RecipeReader, Protocol):
@@ -164,7 +168,9 @@ class RecipeDownloader(RecipeReader, Protocol):
 
     def read(
         self, canonical_id: str, destination: str | Path, *, scope: RecipeScope, envelope: dict[str, Any] | None = None
-    ) -> dict[str, Any] | None: ...
+    ) -> dict[str, Any] | None:
+        """The View of ``canonical_id`` in ``scope``, ``envelope`` when it was read already, with its verified files
+        under ``destination``; ``None`` when there is none."""
 
 
 @dataclass(frozen=True)

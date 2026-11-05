@@ -32,10 +32,12 @@ EXPORT_FORMAT = "multibranch.notebook.learnings.v1"
 
 
 def measures(record: TestRecord) -> bool:
-    """Whether ``record`` measured what a learning citing it says: a judgement, or a candidate that failed."""
+    """Whether ``record`` measured what a learning citing it says: a judgement, or a candidate that failed; a result
+    the rule gate could not re-verify measured nothing."""
 
-    return record.judgement is not None or (
-        record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED
+    return record.measured and (
+        record.judgement is not None
+        or (record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED)
     )
 
 
