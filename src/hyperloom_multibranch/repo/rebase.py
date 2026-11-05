@@ -28,8 +28,8 @@ _GIT_TIMEOUT_S = 60.0
 _MAX_CONFLICTS = 127
 #: ``git diff`` with no colour or external diff driver, whatever the environment asks for.
 _DIFF = ("diff", "--no-color", "--no-ext-diff")
-# The old side of a hunk header; with no count it is one line, and with a count of 0 the hunk inserts after that line.
-_HUNK_OLD_SIDE = re.compile(rb"^@@ -(\d+)(?:,(\d+))? ", re.MULTILINE)
+# A hunk header, split on to keep the old side's start and line count (1 when it has none) beside the hunk's body.
+_HUNK_OLD_SIDE = re.compile(rb"^@@ -(\d+)(?:,(\d+))? .*\n", re.MULTILINE)
 
 
 class _Overlap(Exception):
@@ -91,7 +91,8 @@ def _hunks(before: bytes, after: bytes) -> list[tuple[int, int]]:
     there.
 
     Repeated lines can be aligned more than one way; git merge-file aligns them as this diff does, with the same
-    algorithm and no indent heuristic, so a line counts as changed exactly where the merge sees it changed.
+    algorithm and no indent heuristic, so a line counts as changed exactly where the merge sees it changed. The diff
+    keeps context: with none, git cuts the files' common tail before aligning them, which git merge-file never does.
     """
     done = _git_on(
         {"before": before, "after": after},
@@ -101,18 +102,36 @@ def _hunks(before: bytes, after: bytes) -> list[tuple[int, int]]:
         "--text",
         "--diff-algorithm=myers",
         "--no-indent-heuristic",
-        "-U0",
+        "-U1",
         "before",
         "after",
     )
     # git diff --no-index exits 1 when the files differ.
     if done.returncode > 1:
         raise subprocess.CalledProcessError(done.returncode, "git diff --no-index", done.stdout, done.stderr)
-    hunks = []
-    for match in _HUNK_OLD_SIDE.finditer(done.stdout):
-        start, count = int(match[1]), 1 if match[2] is None else int(match[2])
-        hunks.append((start, start) if count == 0 else (start - 1, start - 1 + count))
-    return hunks
+    parts = _HUNK_OLD_SIDE.split(done.stdout)
+    return [
+        run
+        for start, count, body in zip(parts[1::3], parts[2::3], parts[3::3], strict=True)
+        # A hunk names its first line of ``before``, or the line it follows when it has none.
+        for run in _changed_runs(int(start) - (count != b"0"), body)
+    ]
+
+
+def _changed_runs(first: int, body: bytes) -> list[tuple[int, int]]:
+    """The runs of changed lines in the ``body`` of a hunk whose first line of ``before`` has index ``first``."""
+    runs: list[tuple[int, int]] = []
+    line, run = first, None
+    for marker in (row[:1] for row in body.split(b"\n")):
+        if marker == b" ":
+            if run is not None:
+                runs.append(run)
+            line, run = line + 1, None
+        elif marker == b"-":
+            run, line = (line if run is None else run[0], line + 1), line + 1
+        elif marker == b"+" and run is None:
+            run = (line, line)
+    return runs if run is None else [*runs, run]
 
 
 def _git_on(files: Mapping[str, bytes], *args: str) -> subprocess.CompletedProcess[bytes]:

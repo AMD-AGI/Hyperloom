@@ -825,6 +825,31 @@ async def test_a_repeated_line_the_candidate_rewrote_where_the_head_did_is_repla
     assert _built(stack, installed, tmp_path)["config.py"] == "".join([*_config(c="31"), *["}\n"] * 3, "}  # done\n"])
 
 
+@pytest.mark.parametrize(
+    ("line", "length", "tail", "rewritten"),
+    [("A = 1\n", 1500, 0, 134), ("\n", 10, 578, 4)],
+    ids=["repeated-line", "blank-line"],
+)
+async def test_a_head_deletion_from_a_run_of_like_lines_is_where_git_merge_file_puts_it(
+    tmp_path, line, length, tail, rewritten
+):
+    """With no context git diff cuts the files' common tail in 1 KiB blocks before aligning them, which would put the
+    head's deletion on the line the candidate rewrites; git merge-file puts it at the end of the run."""
+
+    rest = [f"t{number} = {number}\n" for number in range(tail)]
+    config = ["b = 0\n", "x = 5\n", *[line] * length, *rest]
+    head_lines = ["b = 10\n", "x = 5\n", *[line] * (length - 1), *rest]
+    candidate = ["b = 11\n", "x = 5\n", *[line] * rewritten, "y = 1\n", *[line] * (length - rewritten - 1), *rest]
+    repo, installed, head, merge = await _replaced_onto(
+        tmp_path, [_on(head_lines, config)], _on(candidate, config), config=config
+    )
+
+    (conflict,) = merge.patch_conflicts
+    assert "does not apply" in conflict.detail and merge.replaced_patches == ()
+    stack = apply(await repo.read_recipe(head), merge.delta).component("vllm")
+    assert _built(stack, installed, tmp_path)["config.py"] == "".join(head_lines)
+
+
 def test_a_merge_replaces_no_head_patch_unless_the_tier_settles_one():
     replaced = ReplacedPatch("vllm", ("patch/vllm/old.patch",), _patch("new"))
 
