@@ -35,7 +35,7 @@ knobs; select with a heuristic, never a brute-force sweep.
 ## Why this process exists
 
 The naive alternative has been tried and its output is unusable. A prior
-V5→V6 merge skipped all 9 contended files because "resolving them by hand
+merge of two campaign trees skipped every contended file because "resolving them by hand
 would produce code neither campaign ever measured" — and shipped a tree whose
 own README begins **"NEVER BENCHMARKED"**. Skipping contention does not avoid
 risk; it converts a measurable result into a hypothesis.

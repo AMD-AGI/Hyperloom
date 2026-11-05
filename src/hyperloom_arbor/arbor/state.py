@@ -29,8 +29,8 @@ MAX_CONSECUTIVE_PROBES = 2
 # When the loop has produced this many nulls in a row AND has no tier left to
 # escalate into, it does not know what to do next — which is precisely when it
 # should buy knowledge rather than guess again. At that point a probe is
-# MANDATED, not merely permitted. An earlier campaign sat at null_streak 7
-# on the terminal tier with 30 unresolved ledger findings and never probed,
+# MANDATED, not merely permitted. An earlier campaign sat at a high null_streak
+# on the terminal tier with many unresolved ledger findings and never probed,
 # because every counter it could see treated probing as failure.
 PROBE_MANDATE_NULL_STREAK = 3
 
@@ -467,7 +467,7 @@ class CampaignState:
 
         Called BEFORE the bars are mutated, so it must not be moved below the
         _record_* dispatch. Either axis counts: the two peak at different
-        iterations (v2's throughput peaked at 55, its interactivity at 58), and
+        iterations (in one campaign, several iterations apart), and
         tying them together would lose every second-axis-only advance.
         """
         def better(v, best, direction):
@@ -690,8 +690,8 @@ class CampaignState:
         campaign surveying forever, but combined with the probe cap it made
         every visible counter treat probing as failure: probe_streak is a
         limit, null_streak kept climbing, best_metric could not move. An
-        earlier campaign stopped probing after iteration 2 and accumulated
-        30 unresolved findings while sitting at null_streak 7. A probe that
+        earlier campaign stopped probing early and accumulated
+        many unresolved findings while its null_streak climbed. A probe that
         closes a real uncertainty IS progress; a probe that closes nothing is
         still counted as a null, and MAX_CONSECUTIVE_PROBES still bounds the
         survey.
