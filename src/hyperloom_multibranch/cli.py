@@ -19,13 +19,13 @@ cut short, lost or stopped included, so the stop can come up to one launch late,
 judge, patch resolver and the rule gate's fix critic as it returns. A cap is a usage error when the price sheet has no
 rate for the model the specialists run on or the one the judge, the patch resolver and the fix critic ask, whose calls
 would record tokens only.
-``--playbook`` says which scheduling playbook the session plays once ``HYPERLOOM_RSI_ARCHIVE`` names an archive:
+``--playbook`` says which scheduling playbook the session plays from the RSI archive ``HYPERLOOM_RSI_ARCHIVE`` names:
 ``champion``, ``challenger``, which plays the oldest playbook on trial in the pool beside it and the champion while
 none is, or ``auto`` (the default), a challenger session when the session's id draws it, half of them, so the
 playbooks on trial are played without anyone asking; the manifest fingerprint and the session's manifest record the
 label under ``playbook`` in
-``policy_versions``, and a challenger's fallback to the champion under ``playbook_fallback``. Without an archive, or
-under ``HYPERLOOM_RSI_WRITE_ONLY=1``, the session plays none and is judged as before the RSI: no stall evidence, safety
+``policy_versions``, and a challenger's fallback to the champion under ``playbook_fallback``. Under
+``HYPERLOOM_RSI_WRITE_ONLY=1`` the session plays none and is judged as before the RSI: no stall evidence, safety
 envelope or probation.
 Each ``--autonomous-agent SOURCE`` opens one branch where EXPLORE starts, after the user's directions and within
 ``--max-branches``, whose specialist runs that third-party agent end to end in a sandbox of its own; a source that
@@ -353,7 +353,7 @@ def _add_playbook_option(run: argparse.ArgumentParser) -> None:
         choices=[mode.value for mode in PlaybookMode],
         default=PlaybookMode.AUTO.value,
         help=(
-            "The scheduling playbook the session plays once the RSI archive is configured: the champion, or, in a "
+            "The scheduling playbook the session plays from the RSI archive: the champion, or, in a "
             "challenger session, the oldest playbook on trial; auto (the default) makes half the sessions, drawn by "
             "their id, challenger sessions."
         ),
