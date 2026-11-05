@@ -13,7 +13,8 @@ launch of the branch's start commit, its kernel tables laid out under the agent'
 the manifest in the blackboard for CLOSE's archive, and the lease goes back when the branch stops. A lease asks for the
 time left until the branch's deadline. A run then
 watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent
-goes on to its next candidate in the same workspace. Keeps are submitted as claimless explore tests against the branch
+goes on to its next candidate in the same workspace; the agent's driver gives the reader of both, and reads its exit
+(:mod:`agent_driver`). Keeps are submitted as claimless explore tests against the branch
 head, one at a time: a keep that lands while an import is measured or judged waits, and a later keep replaces it, since
 each is cumulative. An agent that signals no keep has its workspace taken as its keep once, early enough before EXPLORE
 ends for the session's queued tests and then its own to be measured and judged in EXPLORE (:func:`collection_margin`),
@@ -63,21 +64,24 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind, Lease
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.specialist.agent_import import (
-    ComponentStart,
     KeptChange,
     KeptChangeError,
     added_at,
     KeepStores,
     import_delta,
-    latest_snapshot,
-    read_json,
-    read_snapshot,
-    with_tables,
-    read_kept_change,
 )
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
+from hyperloom_multibranch.specialist.agent_driver import (
+    AgentDriver,
+    EndKind,
+    KeepPlace,
+    KeepReader,
+    driver_for,
+    exit_reason,
+    without_file,
+)
 from hyperloom_multibranch.specialist.agent_knowledge import NOTES_FILE, IntegrationNotes
-from hyperloom_multibranch.specialist.agent_manifest import WORKSPACE, AgentManifest, LedgerSource, read_field
+from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, LedgerSource
 from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentProcess,
     AgentSandbox,
@@ -93,7 +97,6 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
-from hyperloom_multibranch.specialist.arbor_adapter import refused_reasons
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import (
@@ -106,7 +109,6 @@ from hyperloom_multibranch.specialist.runtime import (
 from hyperloom_multibranch.specialist.start_tables import (
     StartTable,
     StartTableError,
-    from_start_tables,
     lay_start_tables,
     load_start_tables,
     save_start_tables,
@@ -150,8 +152,6 @@ START_TABLES_FILE = "agent-start-tables.json"
 SETTLE_SECONDS = 120.0
 #: The toolbox's refusal of a delta it cannot compile, among them a launch the measurement's launcher overrides.
 LAUNCH_REFUSED = "delta_not_applicable"
-#: The exit code of an agent run as a component that refused its config, saying why on stderr and in its refusal file.
-REFUSED_CONFIG = 2
 #: The deadline of an agent run as a component when EXPLORE has none, which it refuses to run without; MB stops it
 #: long before.
 NO_DEADLINE_SECONDS = 365 * 24 * 3600.0
@@ -254,7 +254,7 @@ class AutonomousSession:
         self._root = LaunchConfig()
         self._root_commit = ""
         self._start_tables: dict[str, StartTable] = {}
-        self._unread = ""
+        self._keeps: KeepReader | None = None
         self._spend_unread = False
         self._spent_at = -math.inf
         self._polled_at = self._heard_at = 0.0
@@ -292,7 +292,7 @@ class AutonomousSession:
         await self._place.blackboard.record_agent_manifest(self._start.branch, document)
         # Every snapshot of the agent's session is one of this branch's keeps, the first among them possibly written
         # while the preflight waited for the agent to start.
-        mark = None if ready.manifest.snapshots is not None else self._mark(ready.manifest)
+        mark = None if ready.manifest.snapshots is not None else self._reader(ready.manifest).mark()
         KeepWatch(root, mark=mark).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
         for note in ready.notes:
@@ -318,7 +318,8 @@ class AutonomousSession:
 
     async def run(self) -> None:
         manifest, process, sandbox = await self._running()
-        self._unread = ""
+        # A run reads the keeps against the launch and tables it loads next, with nothing unread yet.
+        self._keeps = None
         self._root = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         watch = KeepWatch.load(self._place.workspace / WATCH_FILE)
         self._root_commit = watch.root
@@ -442,7 +443,7 @@ class AutonomousSession:
         if self._process is not None:
             await self._process.kill()
         if running and self._manifest is not None and self._manifest.snapshots is not None:
-            await self._note(f"the agent stopped: {self._exit_reason(self._manifest)}")
+            await self._note(f"the agent stopped: {exit_reason(self._manifest, self._agent_dir / SOURCE_DIR)}")
         watch_file = self._place.workspace / WATCH_FILE
         if self._manifest is not None and watch_file.exists():
             watch = KeepWatch.load(watch_file)
@@ -556,17 +557,17 @@ class AutonomousSession:
         return BranchLease(**{**document, "gpu_ids": tuple(document["gpu_ids"]), "root": Path(document["root"])})
 
     async def _ended(self, manifest: AgentManifest, process: AgentProcess, watch: KeepWatch) -> None:
-        """End the run of an agent that exited: for good when it refused its config, a crash when it failed, else once
-        what it kept last settled."""
+        """End the run of an agent that exited, as its driver reads the exit: for good when it refused its config, a
+        crash when it failed, else once what it kept last settled."""
 
-        if process.returncode == REFUSED_CONFIG and manifest.snapshots is not None:
-            why = refused_reasons(self._agent_dir / SOURCE_DIR / manifest.snapshots_refused)
-            refused = f"the agent refused its config: {why or tail(await process.output())}"
+        ended = self._driver().ended(process.returncode, manifest, self._agent_dir / SOURCE_DIR)
+        if ended.kind is EndKind.REFUSED:
+            refused = f"the agent refused its config: {ended.why or tail(await process.output())}"
             await self._note(refused)
             raise SessionRefused(refused)
-        if process.returncode != 0:
+        if ended.kind is EndKind.CRASHED:
             raise SessionCrashed(f"the agent exited {process.returncode}: {tail(await process.output())}")
-        said = self._exit_reason(manifest) if manifest.snapshots is not None else ""
+        said = ended.why
         if not manifest.signals_keeps:
             await self._take(manifest, watch, watch.seq + 1)
         await self._learn(manifest.ledger, watch)
@@ -577,27 +578,37 @@ class AutonomousSession:
         await self._note(finished)
         raise SessionFinished(finished)
 
-    def _exit_reason(self, manifest: AgentManifest) -> str:
-        """Why the agent run as a component says it ended, as the exit file it writes before an exit 0 has it."""
+    def _driver(self) -> AgentDriver:
+        """The driver of the branch's agent, as its checkout says (:func:`~.agent_driver.driver_for`)."""
 
-        path = self._agent_dir / SOURCE_DIR / manifest.snapshots_exit
-        if not path.exists():
-            return "it wrote no exit reason"
-        try:
-            document = read_json(path)
-        except KeptChangeError as error:
-            return f"its exit reason cannot be read: {error}"
-        reason = document.get("reason") if isinstance(document, dict) else None
-        return reason if isinstance(reason, str) and reason else f"its exit file names no reason: {document!r}"
+        return driver_for(self._agent_dir / SOURCE_DIR)
+
+    def _reader(self, manifest: AgentManifest) -> KeepReader:
+        """The reader of the keeps of the agent ``manifest`` runs, its driver's, made once for a run: it reads them
+        against the start commit's launch and kernel tables the run loaded."""
+
+        if self._keeps is None:
+            place = KeepPlace(
+                self._agent_dir,
+                self._agent_dir / SOURCE_DIR,
+                self._place.worktree,
+                self._setup.component,
+                self._root,
+                self._start_tables,
+                self._applied,
+            )
+            self._keeps = self._driver().keeps(manifest, place)
+        return self._keeps
 
     async def _observe(self, manifest: AgentManifest, watch: KeepWatch) -> None:
         """Read the agent's state the moment its keep file shows a new keep: by the time an import can go, the agent
         may be measuring its next candidate in the same workspace."""
 
-        unread = self._unread
-        mark = self._mark(manifest)
-        if self._unread and self._unread != unread:
-            await self._note(f"{self._unread}; no keep is counted until it does")
+        keeps = self._reader(manifest)
+        unread = keeps.unread
+        mark = keeps.mark()
+        if keeps.unread and keeps.unread != unread:
+            await self._note(f"{keeps.unread}; no keep is counted until it does")
         if mark is None or mark == watch.mark:
             return
         if isinstance(mark, int) and isinstance(watch.mark, int) and mark < watch.mark and manifest.snapshots is None:
@@ -611,7 +622,7 @@ class AutonomousSession:
     async def _take(self, manifest: AgentManifest, watch: KeepWatch, seq: int) -> None:
         watch.seq = seq
         try:
-            watch.pending = await asyncio.to_thread(self._read, manifest, watch.root, seq)
+            watch.pending = await asyncio.to_thread(self._reader(manifest).read, seq, watch.root)
         except (KeptChangeError, WorktreeError) as error:
             await self._note(f"keep {seq} cannot be read and is skipped: {error}")
         else:
@@ -790,72 +801,6 @@ class AutonomousSession:
         request_id = await self._setup.toolbox.submit_test(request)
         await self._note(f"keep {kept.seq} imported as {request_id}: {kept.summary or 'no summary'}")
 
-    def _mark(self, manifest: AgentManifest) -> int | str | None:
-        """What the agent's keep file says of its keeps now; ``None`` when it has none, cannot be read mid-write, or
-        holds no counter the manifest names, which :attr:`_unread` then says."""
-
-        if manifest.snapshots is not None:
-            return self._latest(manifest.snapshots_outbox)
-        if manifest.keep is None:
-            return None
-        path = self._agent_dir / SOURCE_DIR / manifest.keep.path
-        try:
-            mark = manifest.keep.mark(path.read_bytes())
-        except json.JSONDecodeError as error:
-            log.debug("the keep file %s is being written: %s", path, error)
-            return None
-        except OSError as error:
-            self._unread = f"the keep file {manifest.keep.path} cannot be read ({error.strerror})"
-            return None
-        except (ValueError, KeyError, IndexError) as error:
-            self._unread = (
-                f"the keep file {manifest.keep.path} holds no keep count at {manifest.keep.counter!r} ({error!r})"
-            )
-            return None
-        self._unread = ""
-        return mark
-
-    def _latest(self, outbox: str) -> int | None:
-        """The keep the agent's newest snapshot holds; ``None`` before the first, or when ``LATEST`` cannot be read,
-        which :attr:`_unread` then says."""
-
-        try:
-            latest = latest_snapshot(self._agent_dir / SOURCE_DIR / outbox)
-        except OSError as error:
-            self._unread = f"the snapshot outbox {outbox} cannot be read ({error.strerror})"
-            return None
-        except ValueError as error:
-            self._unread = f"the LATEST of {outbox} names no keep ({error})"
-            return None
-        self._unread = ""
-        return latest
-
-    def _read(self, manifest: AgentManifest, root: str, seq: int) -> KeptChange:
-        """The agent's keep ``seq``, from its snapshot, or its state now; an agent that keeps no config of its own runs
-        with the root's."""
-
-        if manifest.snapshots is not None:
-            outbox = self._agent_dir / SOURCE_DIR / manifest.snapshots_outbox
-            outside: list[str] = []
-            copies = [path for table in self._start_tables.values() for path in table.defaults]
-            kept = read_snapshot(
-                outbox,
-                seq,
-                root,
-                partial(self._applied, root, outside),
-                ComponentStart(self._root, manifest.config, copies),
-            )
-            return replace(from_start_tables(kept, self._start_tables), outside=tuple(outside))
-        workspace = self._place.worktree.path
-        patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)
-        source = manifest.config_source
-        started = KeptChange(seq, patch, self._root.server_args, dict(self._root.envs), self._summary(manifest))
-        if source is None:
-            return started
-        where = workspace if source.root == WORKSPACE else self._agent_dir / SOURCE_DIR
-        kept = read_kept_change(started, read_json(where / source.path), source)
-        return with_tables(from_start_tables(kept, self._start_tables), (workspace, self._agent_dir))
-
     def _applied(self, root: str, outside: list[str], patches: Sequence[str]) -> str:
         """What ``patches`` make of ``root``'s component, each less its files outside the component; ``outside`` gets
         those of the last, the keep's own change."""
@@ -870,15 +815,6 @@ class AutonomousSession:
                 f"its source change is {len(source.encode())} bytes, over the {MAX_SOURCE_PATCH_BYTES} bytes a keep may be"
             )
         return source
-
-    def _summary(self, manifest: AgentManifest) -> str:
-        if manifest.keep is None or not manifest.summary_field:
-            return ""
-        try:
-            state = read_json(self._agent_dir / SOURCE_DIR / manifest.keep.path)
-            return str(read_field(state, manifest.summary_field))
-        except (KeptChangeError, KeyError, IndexError, ValueError):
-            return ""
 
     async def _busy(self) -> bool:
         """Whether a test of the branch is in flight, or measured and not judged yet within the settle time."""
@@ -978,17 +914,6 @@ def run_seconds(left: float, records: Iterable[TestRecord], floor: float) -> flo
 def _being_judged(record: TestRecord, settled_before: float) -> bool:
     measured_at = record.measured_at if record.measured_at is not None else record.requested_at
     return record.result is not None and record.judgement is None and measured_at > settled_before
-
-
-def without_file(patch: str, manifest: AgentManifest) -> str:
-    """``patch`` without the sections of the file the agent keeps its config in, which the config delta carries."""
-
-    if manifest.config_source is None or manifest.config_source.root != WORKSPACE:
-        return patch
-    path = manifest.config_source.path
-    sections = patch.split("diff --git ")
-    kept = [section for section in sections[1:] if section.split("\n", 1)[0] != f"a/{path} b/{path}"]
-    return "".join([sections[0], *(f"diff --git {section}" for section in kept)])
 
 
 __all__ = [
