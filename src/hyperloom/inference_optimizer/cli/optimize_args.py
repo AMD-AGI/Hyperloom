@@ -405,16 +405,6 @@ def add_framework_agent_arguments(opt: argparse.ArgumentParser) -> None:
         "DISCOVER_FAILURE_RETRY_LIMIT (3) empty/failed discoveries. Requires "
         "the authoring track (has no effect under diff-only mode).",
     )
-    opt.add_argument(
-        "--no-framework-source",
-        dest="no_framework_source",
-        action="store_true",
-        default=False,
-        help="Disable the FRAMEWORK_AGENT source lever (PR discovery, "
-        "specialist-authored patches, integrate_patch) and keep "
-        "the configuration lever (explore grids over launch args and envs). "
-        "The phase then advances on the configuration plateau alone.",
-    )
 
 
 def add_critic_arguments(opt: argparse.ArgumentParser) -> None:

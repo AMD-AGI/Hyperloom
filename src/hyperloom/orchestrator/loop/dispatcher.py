@@ -34,7 +34,6 @@ from ..actions.executors._subprocess_kill import (
     STOP_GATE_POLL_SECONDS,
 )
 from ..phases import dispatch_order, machine_state as _phase_state
-from ..phases.phase_chain import SOURCE_LEVER_ACTIONS
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from ..policy.denial import PolicyDenied
@@ -1198,12 +1197,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         action = str(action_name or "").strip()
         phase = str(self.shared_state.phase or "").strip().upper()
         proposable = _phase_state.allowed_actions_for(phase)
-        if action in SOURCE_LEVER_ACTIONS and not bool(getattr(self.shared_state, "framework_source_enabled", True)):
-            return PolicyDenied(
-                f"action={action!r} is disabled: the FRAMEWORK source lever is off (--no-framework-source)",
-                rule="framework_source_disabled",
-                hint="tune launch args and envs with `explore`",
-            )
         if not phase or action in proposable:
             return None
         return PolicyDenied(

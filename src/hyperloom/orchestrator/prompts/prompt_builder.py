@@ -1097,7 +1097,6 @@ def default_enabled_actions(
     *,
     no_kernel: bool,
     no_optimize: bool = False,
-    no_source: bool = False,
 ) -> tuple[str, ...]:
     """Return the canonical enabled-action set used by the CLI.
 
@@ -1110,22 +1109,16 @@ def default_enabled_actions(
             intersection with :data:`NO_KERNEL_AGENT_ENABLED_ACTIONS`).
         no_optimize (bool): When ``True``, drop the ``explore`` grid-runner
             action: the phase that dispatches it is skipped.
-        no_source (bool): When ``True``, drop the source-lever actions
-            (:data:`SOURCE_LEVER_ACTIONS`).
 
     Returns:
         tuple[str, ...]: The filtered enabled-action set, preserving
         :data:`FULL_ENABLED_ACTIONS` ordering.
     """
-    from ..phases.phase_chain import SOURCE_LEVER_ACTIONS
-
     actions = list(FULL_ENABLED_ACTIONS)
     if no_kernel:
         actions = [a for a in actions if a in NO_KERNEL_AGENT_ENABLED_ACTIONS]
     if no_optimize:
         actions = [a for a in actions if a != "explore"]
-    if no_source:
-        actions = [a for a in actions if a not in SOURCE_LEVER_ACTIONS]
     return tuple(actions)
 
 

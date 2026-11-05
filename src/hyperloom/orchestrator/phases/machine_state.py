@@ -879,7 +879,7 @@ def _patch_lever_evidence(state: Any, overrides: dict[str, Any]) -> dict[str, An
         overrides.get("framework_no_keep_streak", DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK),
     )
     streak = _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR))
-    exhausted = bool(state.framework_agent_phase_done) or not bool(getattr(state, "framework_source_enabled", True))
+    exhausted = bool(state.framework_agent_phase_done)
     return {
         "source_consecutive_no_keep": streak,
         "source_threshold": streak_floor,

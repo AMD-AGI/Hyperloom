@@ -522,7 +522,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        if bool(state.framework_agent_phase_done) or not bool(state.framework_source_enabled):
+        if bool(state.framework_agent_phase_done):
             return
         in_flight_ids = self._authoring_inflight_candidate_ids(await self.tasks.queued(), await self.tasks.running())
         submitted = False

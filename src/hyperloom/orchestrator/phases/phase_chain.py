@@ -95,10 +95,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 }
 
 
-# FRAMEWORK_AGENT source-lever actions; refused while ``framework_source_enabled`` is False.
-SOURCE_LEVER_ACTIONS = frozenset({"specialist", "integrate_patch"})
-
-
 # Actions a single phase reserves for the Coordinator. COORDINATOR_INTERNAL_ACTIONS
 # cannot say this: other phases let the agent propose them.
 PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
