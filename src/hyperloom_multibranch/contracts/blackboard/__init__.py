@@ -9,6 +9,7 @@
 * :mod:`.interfaces`: one protocol per interface the other modules use, and the errors they raise;
 * :mod:`.peers`: the objects other modules define, re-exported: the toolbox's test requests and results, and the
   intents, judgements and branch-log entries.
+* :mod:`.exhausted`: the branch-log record a specialist writes when its direction is done on a head.
 
 ``hyperloom_multibranch.blackboard.LocalBlackboard`` implements every protocol and is the fake the skeleton runs on.
 """

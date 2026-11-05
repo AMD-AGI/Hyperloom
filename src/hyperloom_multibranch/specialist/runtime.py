@@ -9,7 +9,7 @@ work instead of all sweeping the same settings, and a stopped branch's direction
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
 fewest running branches hold. A direction given to a branch counts when it is one of these. A direction whose
 specialist gave up finding nothing to test is not dealt again on that start commit while another is left there, nor on
-the head its last :mod:`~hyperloom_multibranch.specialist.exhausted` record names, and neither is one any branch's
+the head its last :mod:`~hyperloom_multibranch.contracts.blackboard.exhausted` record names, and neither is one any branch's
 record names done on the commit a branch starts at: a later head may open it again, the same one would not.
 
 A branch's first session is made ready once (``preflight``); one that cannot be gives the specialist up with every
@@ -46,10 +46,10 @@ from typing import Protocol
 
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
+from hyperloom_multibranch.contracts.blackboard.exhausted import exhausted_records, latest_exhausted
 from hyperloom_multibranch.contracts.blackboard.interfaces import ClaimService, BlackboardError
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
-from hyperloom_multibranch.specialist.exhausted import exhausted_records, latest_exhausted, session_direction
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, session_direction
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeBlackboard, Judging
 
 logger = logging.getLogger(__name__)
@@ -413,7 +413,7 @@ class SpecialistRuntime:
         """Deal the given-up branch's direction to no new branch on its start commit or on the head its specialist's
         last exhausted record names; that record as the give-up notice quotes it, ``""`` without one."""
         self._closed.add((state.start_commit, state.task.direction))
-        exhausted = latest_exhausted(await state.blackboard.branch_log(state.name))
+        exhausted = latest_exhausted(record.entry for record in await state.blackboard.branch_log(state.name))
         if exhausted is None:
             return ""
         self._closed.add((exhausted.head, state.task.direction))
@@ -421,7 +421,7 @@ class SpecialistRuntime:
 
     async def _learn_exhausted(self, state: _Branch) -> None:
         """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
-        for exhausted in exhausted_records(await state.blackboard.branch_log(state.name)):
+        for exhausted in exhausted_records(record.entry for record in await state.blackboard.branch_log(state.name)):
             direction = session_direction(exhausted.direction)
             if direction is None:
                 logger.warning(

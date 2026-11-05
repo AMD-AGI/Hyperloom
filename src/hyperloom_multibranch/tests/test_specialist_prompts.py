@@ -17,7 +17,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, 
 from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
 from hyperloom_multibranch.specialist import prompts
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
-from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
+from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.specialist.prompts import (
     ENTRY_CHARS,
