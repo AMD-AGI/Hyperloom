@@ -178,7 +178,7 @@ function run(cmd, args, opts = {}) {
 }
 
 // Git for Windows' ssh, first on PATH in Git Bash, cuts a command at about
-// 8 KB (measured 2026-10-07: 8,000 characters arrive, 8,200 do not); Windows'
+// 8 KB (8,000 characters arrive, 8,200 do not); Windows'
 // own OpenSSH and Linux's pass 24,000. On Windows, use Windows' own.
 const WINDOWS_SSH = "C:\\Windows\\System32\\OpenSSH\\ssh.exe";
 const SSH = process.platform === "win32" && existsSync(WINDOWS_SSH) ? WINDOWS_SSH : "ssh";
@@ -189,8 +189,8 @@ function ssh(host, command) {
 }
 
 // The command's answer is the JSON object on its stdout. Through the
-// the platform gateway every command exits 0 and its stderr arrives on stdout
-// (tested 2026-10-07), so a failure there is either share_query's
+// the platform gateway every command exits 0 and its stderr arrives on stdout,
+// so a failure there is either share_query's
 // {"error": ...} or output that is not JSON, never an exit status.
 function parseJson(result) {
   if (!result.ok) return result;

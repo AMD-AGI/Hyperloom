@@ -180,8 +180,8 @@ def parse_transcripts(paths: list[Path]) -> dict[str, Any]:
             # One assistant message becomes several steps (a thinking block, some
             # text, N tool_use blocks) and every one of them carries this same
             # usage dict. Summing usage per step therefore multiplies the true
-            # cost by the number of blocks — measured at 2.6x for output tokens
-            # and 3.0x for thinking on the 3-hour run. Carry the message identity
+            # cost by the number of blocks, several times over for output and
+            # thinking tokens. Carry the message identity
             # so aggregates can count each message exactly once.
             message_id = msg.get("id") or row.get("uuid")
 

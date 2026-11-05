@@ -4,11 +4,11 @@ Ported from arbor/mesh2/keeper.py (<fork>/mesh3-confirm a691edc), with the
 mesh's storage helpers replaced by store.py's and the supervisor being
 `python3 -m arbor.parallel run`. Its history, as mesh2 wrote it:
 
-The v9 supervisor died on a Cluster B login node at 14:45:22 UTC and nothing
-noticed for six hours. Its log held a startup warning and no traceback, which
-is what an external kill looks like, and there were two suspects -- the Login
-Node Guardian's per-process memory limit and the per-user cgroup, which had
-throttled 528,119 times -- with no record that could tell them apart.
+A supervisor once died on a login node and nothing noticed for hours. Its
+log held a startup warning and no traceback, which is what an external kill
+looks like, and there were two suspects -- the login node's per-process
+memory limit and the per-user cgroup, which had been throttling it -- with no
+record that could tell them apart.
 
 So the keeper does two things. It restarts the supervisor, with backoff,
 whenever it exits. And before restarting it records what distinguishes one

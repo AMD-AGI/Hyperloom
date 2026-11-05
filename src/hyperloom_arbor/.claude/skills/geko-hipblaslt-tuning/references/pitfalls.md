@@ -95,7 +95,7 @@ checks — use BOTH:
 Worked result (conc16, f32-corrected workload): selection 27/27, trace firing 9-10/27 → PASS. With the WRONG
 (bf16-out) workload the same checks gave 0/27 — the canonical signature-mismatch failure.
 
-## Running the experiment at scale — hard-won gotchas (2026-10)
+## Running the experiment at scale — hard-won gotchas
 
 The cluster now rejects node-holding sbatch (`while true`); use self-contained per-task sbatch that ends. Beyond
 that, these cost real hours to find:

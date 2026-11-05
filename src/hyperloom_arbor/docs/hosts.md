@@ -4,8 +4,8 @@ A host that owns the node, its GPUs and the clock (Hyperloom's multibranch today
 a component: Arbor optimizes the worktree the host gives it, on the host's GPU lease and under the
 host's deadline, and the host gates and merges what Arbor keeps. The design, the decisions and
 what is built: [component-mode.md](component-mode.md). Tested on a GPU node with a stand-in host
-([scripts/component/](../scripts/component/README.md)), and run inside Hyperloom's MB on Cluster A since
-2026-10-30. Which side runs each step of an MB session: [who-runs-what.md](who-runs-what.md).
+([scripts/component/](../scripts/component/README.md)), and run inside Hyperloom's MB.
+Which side runs each step of an MB session: [who-runs-what.md](who-runs-what.md).
 
 ## The config
 
@@ -325,4 +325,4 @@ record.
   does, restarts it, and the run carries on once the gateway answers. Each restart into a
   continuing outage takes as long again, so it never fills a crash window like MB's (3 in 10
   minutes); the deadline still ends the run. Sites that reach the gateway through a tunnel or a
-  proxy should expect drops (Cluster C: 7 in four days, 2026-10).
+  proxy should expect drops.

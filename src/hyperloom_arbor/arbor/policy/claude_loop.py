@@ -462,7 +462,7 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
     # NEWLINE, not "". Separate text blocks are separate chunks and a block does
     # not reliably end in one. Gluing them ran the last line of one block into
     # the first line of the next, so a `CLASS: PROBE` that started its own block
-    # landed MID-LINE -- invisible to the anchored parsers below. v2 iteration 1
+    # landed MID-LINE -- invisible to the anchored parsers below. One iteration
     # declared CLASS: PROBE, was read as the default B, missed the read-only
     # probe path, and was recorded as "REVERT: no changes".
     return "\n".join(text_parts)
@@ -1232,7 +1232,7 @@ def _extract_class(output: str) -> str:
     LEARN**`, `- CLASS: A`, or a block boundary that glued it mid-line. Falling
     back because of formatting silently applies the STRICTEST bar to work that
     declared an evidence-gated intent, which is the worst direction for the
-    error to go: it cost v2 iteration 1 its probe path and recorded a
+    error to go: it cost one iteration its probe path and recorded a
     knowledge-producing iteration as a REVERT.
     """
     lines = list(reversed(output.strip().splitlines()))

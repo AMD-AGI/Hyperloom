@@ -38,11 +38,11 @@ never raises either: a section that fails is recorded in the snapshot's `errors`
 The share is `/path/to/arbor-share` on the share's pod
 `<pod name>` (workspace `<workspace>`), reached
 through the platform's ssh gateway. The gateway takes ssh commands, scp and
-sftp, but not rsync and not piped stdin (tested 2026-10-06). That is why an
+sftp, but not rsync and not piped stdin. That is why an
 upload is one sftp batch (make the directories, put each file under a temporary
 name, rename it into place), so a reader never sees half a file. The gateway
-also returns exit status 0 for every command and puts its stderr on stdout
-(tested 2026-10-07): in anything you script against it, print a marker or
+also returns exit status 0 for every command and puts its stderr on stdout:
+in anything you script against it, print a marker or
 JSON and read that, never `$?`.
 
 1. Register your public key on the platform, and add the pod to `~/.ssh/config`
@@ -61,8 +61,7 @@ JSON and read that, never `$?`.
 
    The user is `<user id>.<pod>.<container>.<shell>.<workspace>`. If the pod
    is replaced, its name changes; the platform shows the current one.
-   Cluster B's login nodes reach the gateway (port 2222 open from `<login node>`,
-   2026-10-07).
+   Cluster B's login nodes reach the gateway (port 2222 open from `<login node>`).
 2. Check it from an Arbor checkout: `python3 -m arbor.collect check`. It runs
    three steps (ssh, the share root, an upload of a probe file it then removes)
    and, for the first that fails, says what to do.

@@ -5,7 +5,7 @@ In component mode, Hyperloom's multi-branch mode (MB) runs Arbor as an autonomou
 - **Arbor owns** the optimization loop, inside the cards and the time MB gives it.
 
 This page says which side runs each step of an MB session, and what passes between the two.
-- **As of 2026-11-01:**
+- **When this page was written:**
   - Arbor `main` `85f01cc`;
   - Hyperloom `multibranch-dev` at `8f59f12db` or later.
 - **Hyperloom's copy of this page:** `docs/conceptual/multibranch-arbor.md`.
@@ -144,7 +144,7 @@ docs: `docs/how-to/multibranch-review-gate.md`.
 | 2 (refused) | Never restarts it. The branch ends with the reasons from `component_refused.json`. |
 | 3 (`unreachable`), or any other non-zero | Restarts it with the same command and the same deadline. It gives up after 3 crashes in 10 min, or 2 stalls in a row. |
 
-## Known gaps (2026-11-01)
+## Known gaps
 
 - **The review pauses unattended runs:** it is on by default. A batch run passes `--no-review-gate`, or a person
   approves from a login node.

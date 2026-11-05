@@ -45,7 +45,7 @@ class Pack:
     knowledge_dir: Path
     pack_dir: Path
     # Optional pace-threshold overrides (arbor.state.Policy field names).
-    # Absent from every pack written before 2026-09-25, which is why it
+    # Absent from every pack written before it existed, which is why it
     # defaults rather than being required.
     policy: dict | None = None
     # Skills the campaign agent may use, by name: <arbor_root>/.claude/skills/<name>/.
@@ -53,7 +53,7 @@ class Pack:
     # (agent_skills). Listing "profiler" makes every profile go through that
     # skill (render.py states the precedence); a pack without it profiles its
     # own way. With nothing declared and no default-on skills, the agent runs
-    # as before 2026-10-06.
+    # as before skills existed.
     skills: list[str] | None = None
     opt_out_skills: list[str] | None = None
 

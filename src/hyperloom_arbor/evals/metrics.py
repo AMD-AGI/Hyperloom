@@ -192,9 +192,9 @@ def _billed_usages(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     A single assistant message becomes several trajectory steps — a thinking
     block, some text, one per tool_use — and every step carries that message's
     whole ``usage`` dict. Summing per step therefore counts the same tokens
-    once per block: measured at 2.60x for output tokens and 3.02x for thinking
-    on the 3-hour validation run, which made every cost-per-percent number in
-    the report roughly two and a half times too expensive.
+    once per block, several times over for output and thinking tokens, which
+    made every cost-per-percent number in the report several times too
+    expensive.
 
     Steps predating ``message_id`` (or reconstructed from hooks alone, which
     have no usage at all) fall back to identity so nothing is silently dropped.
