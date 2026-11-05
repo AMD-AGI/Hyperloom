@@ -58,7 +58,11 @@ from hyperloom.common.gain_math import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
 )
 from hyperloom.inference_optimizer.framework_registry import EXPERT_PARALLEL_FLAGS
-from hyperloom.inference_optimizer.grid_server_args import merge_server_args, tokenize_server_args_preserving_json
+from hyperloom.inference_optimizer.grid_server_args import (
+    merge_server_args,
+    remove_server_args,
+    tokenize_server_args_preserving_json,
+)
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     UnsupportedComponentError,
@@ -467,11 +471,12 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
 
 
 def server_flags(spec: AgentSpec, resolved: str = "") -> str:
-    """The recipe's server arguments as Arbor launches them, after the ``resolved`` launch's when there is one, with
-    the workload's TP size unless the arguments set it (SGLang and vLLM); on SGLang also its expert-parallel size,
-    unless the arguments set it, and only when it divides the TP, as MB's own launch has it."""
+    """The recipe's server arguments as Arbor launches them, after the ``resolved`` launch's, less the flags the recipe
+    removes from it, when there is one, with the workload's TP size unless the arguments set it (SGLang and vLLM); on
+    SGLang also its expert-parallel size, unless the arguments set it, and only when it divides the TP, as MB's own
+    launch has it."""
 
-    args = merge_server_args(resolved, spec.server_args)
+    args = merge_server_args(remove_server_args(resolved, spec.remove_args), spec.server_args)
     tp_flags = {SGLANG: SGLANG_TP_FLAGS, VLLM: VLLM_TP_FLAGS}.get(spec.framework)
     if tp_flags is None:
         return args

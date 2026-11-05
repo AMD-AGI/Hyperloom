@@ -963,6 +963,26 @@ async def test_the_agent_runs_until_its_imports_can_still_be_judged_against_the_
     await rig.session.stop()
 
 
+async def test_the_agent_is_asked_for_the_start_s_launch_with_the_resolved_flags_it_removes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    specs: list[AgentSpec] = []
+    make_ready = autonomous_session.make_ready
+
+    async def recorded(agent: str, spec: AgentSpec, *args):
+        specs.append(spec)
+        return await make_ready(agent, spec, *args)
+
+    monkeypatch.setattr(autonomous_session, "make_ready", recorded)
+    start = replace(ROOT, launch=LaunchConfig("--max-num-seqs 128", remove_args=("--enforce-eager",)))
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0), start=start)
+
+    await rig.session.preflight()
+
+    assert (specs[0].server_args, specs[0].remove_args) == ("--max-num-seqs 128", ("--enforce-eager",))
+    await rig.session.stop()
+
+
 async def test_the_agent_stops_by_the_session_s_own_tests_once_one_was_measured(tmp_path: Path) -> None:
     now = time.time()
     rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0), clock=lambda: now, deadline=now + 3600.0)

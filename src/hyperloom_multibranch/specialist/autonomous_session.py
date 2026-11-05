@@ -274,6 +274,7 @@ class AutonomousSession:
         spec = replace(
             self._setup.spec,
             server_args=recipe.launch.server_args,
+            remove_args=recipe.launch.remove_args,
             envs={**recipe.launch.envs, **{name: table.value for name, table in tables.items()}},
             workspace=str(self._place.worktree.path),
             seconds=seconds,
