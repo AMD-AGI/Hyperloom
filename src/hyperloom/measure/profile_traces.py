@@ -69,7 +69,8 @@ def collect_traces(workspace: Path, destination: Path) -> int:
     A directory that holds no trace file is left where it is. A stale directory of the same name in ``destination``
     (an earlier attempt of the same test) is replaced, never merged. The round's two ``capture_traces`` directories, in
     the workspace and beside it, both land in ``destination/capture_traces``: the second's files join the first's, each
-    under its own name unless the first holds that name, when it takes a numbered one; no trace is overwritten.
+    under its own name unless the first holds that name, when it takes a numbered one (a directory both hold is merged
+    the same way); no trace is overwritten.
     """
     destination = Path(destination)
     moved = 0
@@ -91,12 +92,25 @@ def collect_traces(workspace: Path, destination: Path) -> int:
 
 
 def _merge(source: Path, target: Path) -> None:
-    """Move every file below ``source`` to the same place below ``target``, under a free name, then remove ``source``."""
-    for path in sorted(p for p in source.rglob("*") if not p.is_dir() or p.is_symlink()):
-        landing = _free(target / path.relative_to(source))
-        landing.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(path), str(landing))
+    """Move what ``source`` holds to the same place below ``target``, then remove ``source``.
+
+    A directory both hold is merged the same way; any other entry whose name ``target`` already holds (a file, or a file
+    on one side and a directory on the other) is moved whole under a free name, so both are kept.
+    """
+    pending = [(source, target)]
+    while pending:
+        here, there = pending.pop()
+        for entry in sorted(here.iterdir()):
+            landing = there / entry.name
+            if _real_dir(entry) and _real_dir(landing):
+                pending.append((entry, landing))
+            else:
+                shutil.move(str(entry), str(_free(landing)))
     shutil.rmtree(source)
+
+
+def _real_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
 
 
 def _free(path: Path) -> Path:

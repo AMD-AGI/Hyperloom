@@ -66,6 +66,9 @@ class ResultRejected(Exception):
     """The bundle is not an authentic result of the requested measurement."""
 
     def __init__(self, reason: RejectReason, detail: str = "") -> None:
+        # A detail can name what the sandbox wrote, such as a file name that is not UTF-8 (read as lone surrogates):
+        # escape what UTF-8 cannot encode, so the refusal can always be printed and logged.
+        detail = detail.encode("utf-8", "backslashreplace").decode("utf-8")
         super().__init__(f"result rejected ({reason.value}){': ' + detail if detail else ''}")
         self.reason = reason
         self.detail = detail
