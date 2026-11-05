@@ -162,11 +162,7 @@ def test_ordinary_sessions_carry_no_ceiling() -> None:
     assert spec.resolved(runtime).reasoning_effort == "high"
 
 
-#: The two places a call site is allowed to cap its own effort, and why.
-#:
-#: ``plan_critic`` -- the width repair is a parse, not reasoning work, and it is
-#: the round's only conditional call; the ceiling is what keeps it a small
-#: fraction of the review it follows.
+#: The places a call site is allowed to cap its own effort, and why.
 #:
 #: ``orchestration`` -- the round partition divides ground the analyses already
 #: name, which is a reading task rather than the deepest reasoning the round
@@ -174,10 +170,10 @@ def test_ordinary_sessions_carry_no_ceiling() -> None:
 #: rather than one call because the cap travels in the partition's ``_Turn``
 #: to the spec ``_run_spec`` builds from it; the cap is still written in
 #: exactly one place, ``ROUND_PARTITION_EFFORT_CEILING``.
-_CAPPED_CALL_SITES = {"workflows/forge_loop/roles/plan_critic.py", "workflows/forge_loop/roles/orchestration.py"}
+_CAPPED_CALL_SITES = {"workflows/forge_loop/roles/orchestration.py"}
 
 
-def test_effort_ceilings_are_confined_to_the_two_argued_call_sites() -> None:
+def test_effort_ceilings_are_confined_to_the_argued_call_sites() -> None:
     """A ceiling is an exception; new ones have to be argued for here."""
     offenders: set[str] = set()
     for path in _python_sources():

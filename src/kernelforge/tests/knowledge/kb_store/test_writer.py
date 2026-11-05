@@ -7,6 +7,7 @@ from __future__ import annotations
 
 
 from kernelforge.config import Config
+from kernelforge.knowledge.kb_store import run_summary
 from kernelforge.knowledge.kb_store import writer as sink
 from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
@@ -121,7 +122,7 @@ def test_a_failed_llm_summary_files_nothing(config, workspace, monkeypatch):
     async def boom(*_a, **_k):
         raise RuntimeError("no sdk")
 
-    monkeypatch.setattr(sink, "_query_llm", boom)
+    monkeypatch.setattr(run_summary, "_query_llm", boom)
 
     assert _write(config, workspace, summary_override=None) == {"written": False, "reason": "RuntimeError: no sdk"}
     assert _candidates(_records(config, workspace)) == []
