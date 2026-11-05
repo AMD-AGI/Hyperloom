@@ -15,9 +15,12 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import AccuracyValue
+from hyperloom.measure import signing
+from hyperloom.measure.bundle import RejectReason, ResultRejected
 from hyperloom.measure.failures import SANDBOX_ACQUIRE_TIMEOUT
-from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedStartError
+from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedMeasurementBackend, HostedStartError
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
+from hyperloom.measure.manifest import encode_manifest
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
     HOSTED_RESULT_REJECTED_RC,
@@ -25,6 +28,7 @@ from hyperloom.measure.returncodes import (
     HOSTED_SPEC_REJECTED_RC,
 )
 from hyperloom.measure.spec import MeasurementSpec
+from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_document, spec_document
 from hyperloom.measure.tests.hosted_fixtures import (
     HOSTNAME,
     Rig,
@@ -289,6 +293,19 @@ def test_a_file_the_manifest_does_not_list_is_never_fetched_or_landed(rig, tmp_p
     assert outcome.returncode == 0
     assert not (call.output_dir / "extra.txt").exists()
     assert not list(Path(r.record_archive("req-1")).rglob("extra.txt"))
+
+
+def test_listed_sizes_adding_up_to_more_digits_than_str_converts_are_too_large_not_a_crash() -> None:
+    key = signing.generate_private_key()
+    public = signing.public_key_pem(key)
+    document = manifest_document(DEFAULT_FILES, public)
+    for entry in document["files"]:
+        entry["size"] = int("9" * 4300)  # each as long as an integer the reader converts may be; their sum is longer
+    raw = encode_manifest(document)
+    spec = MeasurementSpec.from_document(spec_document())
+    with pytest.raises(ResultRejected) as raised:
+        HostedMeasurementBackend._signed_file_list(raw, signing.sign(raw, key).encode("ascii"), public, spec)
+    assert raised.value.reason is RejectReason.TOO_LARGE
 
 
 def test_a_signed_manifest_for_other_sheet_bytes_is_rejected(rig, tmp_path, monkeypatch) -> None:
