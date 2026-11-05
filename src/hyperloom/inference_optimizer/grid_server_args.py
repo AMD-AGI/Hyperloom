@@ -181,6 +181,24 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     return " ".join(out)
 
 
+def removals_absent_from_args(server_args: str | None, remove_args: Any) -> list[str]:
+    """The removal specs that delete nothing from ``server_args``, one spec per entry, in the order they are written.
+
+    A removal that still matches a composed snapshot is not a delta against it: a consumer that applies it to that
+    snapshot deletes an option the snapshot asserts. What is left here removes nothing from ``server_args`` and so
+    keeps suppressing, in whatever base a consumer applies it to, only the options that base carries.
+    """
+    args = normalize_server_args(server_args)
+    kept: list[str] = []
+    # Per parsed spec rather than per written entry: one entry may name several options ("--a --b"), and an entry is
+    # dropped only for the options that collide.
+    for flag, value in _parse_removal_specs(remove_args):
+        spec = flag if value is None else f"{flag} {value}"
+        if spec not in kept and remove_server_args(args, [spec]) == args:
+            kept.append(spec)
+    return kept
+
+
 # Serving-ineligible harness flags: legal to benchmark with, wrong to hand back as a serving recipe. Stripped where a
 # recipe is persisted, never on the launch path: the baseline keeps the operator's flags, so a variant must too.
 _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching",)

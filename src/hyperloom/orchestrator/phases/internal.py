@@ -212,11 +212,12 @@ class InternalTasksPhase(CoordinatorCollaborator):
         from ..knowledge import static_recon_checklist as _src_recon
 
         _entries = _src_recon.entries_for(
+            framework=state.framework,
             gpu_type=str(state.gpu_type or ""),
             precision=_src_recon.workload_precision(state),
         )
         _entries = _src_recon.filter_entries_for_model(_entries, dict(state.model_info or {}))
-        _rendered = _src_recon.render_checklist_for_prompt(_entries)
+        _rendered = _src_recon.render_checklist_for_prompt(_entries, framework=state.framework)
         if _rendered:
             params["static_recon_checklist"] = _rendered
         await self._coord.specialist_dispatch.warm_specialist_params(params)

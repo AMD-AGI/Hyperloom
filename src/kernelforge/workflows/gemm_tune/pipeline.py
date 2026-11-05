@@ -642,6 +642,7 @@ class TuneRequest:
     ) -> TuneContext:
         """The context every tuner starts from: this request on the resolved target and the usable shape inputs."""
         from .tuners.base import TuneContext
+        from .utils import visible_gpu_count
 
         return TuneContext(
             profile=profile,
@@ -650,7 +651,7 @@ class TuneRequest:
             conc=self.workload.conc,
             m_grid=MGrid(self.workload.m_grid),
             tokens=tokens,
-            mp=self.mp,
+            mp=self.mp if self.mp > 0 else visible_gpu_count(self.gpus.gpu_ids),
             output_dir=Path(self.output_dir),
             **dataclasses.asdict(self.bench),
             timeout_s=self.timeouts.timeout,

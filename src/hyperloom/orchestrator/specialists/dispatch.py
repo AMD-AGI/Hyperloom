@@ -317,6 +317,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             from ..knowledge import static_recon_checklist as _src_recon
 
             _dirs = _src_recon.source_hint_directories_for(
+                framework=state.framework,
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
                 precision=_src_recon.workload_precision(state),
             )

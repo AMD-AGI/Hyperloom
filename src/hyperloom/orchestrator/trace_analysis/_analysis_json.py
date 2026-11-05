@@ -28,6 +28,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.tracelens_report import member_kernel_names, member_name, task_operation
 from hyperloom_common.coerce import first_str, to_float
 
 from TraceLens.TraceUtils.kernel_source import ResolveResult, resolve_kernel_source
@@ -79,17 +80,14 @@ def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[s
     ``gpu_pct := pct_e2e``: the per-kernel %E2E is TraceLens' number, read
     everywhere but never recomputed here.
     """
-    kernel_names = [str(n) for n in (member.get("kernel_name") or []) if str(n).strip()]
-    operation = first_str(task.get("operation")).strip()
-    # A graph-collapsed member can carry no Operation; its device symbol is the
-    # identity, matching TraceLens' own deterministic-fallback grouping.
-    name = operation or (kernel_names[0] if kernel_names else "")
+    kernel_names = member_kernel_names(member)
+    operation = task_operation(task)
 
     pct_e2e = to_float(member.get("pct_e2e"))
     time_ms = to_float(member.get("time_ms"))
 
     candidate: dict[str, Any] = {
-        "name": name,
+        "name": member_name(task, member),
         "duration_us": (time_ms or 0.0) * 1000.0,
         "call_count": int(to_float(member.get("count"), 0.0)),
         "gpu_pct": pct_e2e,

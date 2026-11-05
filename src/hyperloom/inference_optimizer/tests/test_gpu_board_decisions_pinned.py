@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inference_optimizer import gpu_types
-from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, resolve_compute_peak_provenance
+from hyperloom.inference_optimizer.roofline_ceiling import resolve_compute_peak_provenance
 from hyperloom.orchestrator.actions.executors._server_lifecycle import MAGPIE_BUILTIN_SCRIPTS
 
 _BOARDS = [
@@ -16,6 +16,7 @@ _BOARDS = [
     ("mi300x", "mi300x", True, "achievable"),
     ("mi308x", "mi300x", True, "vendor"),
     ("mi325x", "mi300x", True, "achievable"),
+    ("mi350x", "mi355x", True, "vendor"),
     ("mi355x", "mi355x", True, "vendor"),
     ("r9700", "gfx12", False, "vendor"),
 ]
@@ -28,11 +29,10 @@ def test_board_decisions(product, runner, build_validated, convention):
     assert resolve_compute_peak_provenance(product, "bf16")["compute_peak_convention"] == convention
 
 
-def test_radeon8060s_has_its_own_runner_and_no_published_specs():
+def test_radeon8060s_has_its_own_runner_and_no_framework_restriction():
     assert gpu_types.gpu_runner_type("radeon8060s") == "radeon8060s"
     assert gpu_types.targeted_build_validated("radeon8060s") is True
     assert gpu_types._runner_framework_error("radeon8060s", "sglang") is None
-    assert "radeon8060s" not in HW_SPECS
 
 
 def test_server_reuse_scripts():
@@ -47,7 +47,7 @@ def test_server_reuse_scripts():
     }
 
 
-@pytest.mark.parametrize("product", ["mi300x", "mi308x", "mi325x", "mi355x"])
+@pytest.mark.parametrize("product", ["mi300x", "mi308x", "mi325x", "mi350x", "mi355x"])
 @pytest.mark.parametrize("framework", ["vllm", "sglang", "atom", "xdit"])
 def test_instinct_boards_leave_the_framework_unconstrained(product, framework):
     assert gpu_types._runner_framework_error(product, framework) is None
@@ -64,7 +64,7 @@ def test_the_gfx12_runner_is_validated_for_vllm_only(framework):
 
 def test_only_r9700_pins_its_geak_identity():
     assert gpu_types.geak_identity_pin("r9700") == {"expected_target": "r9700", "expected_gfx": "gfx1201"}
-    for product in ("mi300x", "mi308x", "mi325x", "mi355x", "radeon8060s", "unknown_gpu", ""):
+    for product in ("mi300x", "mi308x", "mi325x", "mi350x", "mi355x", "radeon8060s", "unknown_gpu", ""):
         assert gpu_types.geak_identity_pin(product) == {}, product
 
 
@@ -75,6 +75,7 @@ def test_only_r9700_pins_its_geak_identity():
         ("Card Series: AMD Instinct MI300X VF", "mi300x"),
         ("Card Series: AMD Instinct MI308X OAM", "mi308x"),
         ("Card Series: AMD Instinct MI325X OAM", "mi325x"),
+        ("Card Series: AMD Instinct MI350X OAM", "mi350x"),
         ("Card Series: AMD Instinct MI355X OAM", "mi355x"),
         ("AMD_INSTINCT_MI300X", "mi300x"),
         ("Card Series: AMD Radeon AI PRO R9700", "r9700"),

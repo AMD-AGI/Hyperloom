@@ -290,7 +290,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         """Record an authored patch's settled outcome, then re-arm or drain the authored lane."""
         if (task.params or {}).get("framework_agent_authoring"):
             self._record_framework_agent_authored_outcome(task=task, result=result, adopted=verdict is Verdict.ADOPTED)
-        await self._maybe_rearm_authored_lane(result.result)
+        await self._maybe_rearm_authored_lane(result.result, to_mapping(task.params))
         await self._drain_apply_fail_retry_pending()
 
     def record_unpromoted_candidate(self, task: "Task", result_payload: dict[str, Any]) -> None:
@@ -748,8 +748,8 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         log.info("FRAMEWORK: dispatched authoring specialist candidate=%s batch=%s gap=%s", cand_id, batch_id, gap_cid)
         return spec_tid
 
-    async def _maybe_rearm_authored_lane(self, res: dict[str, Any] | None) -> None:
-        """Route an authored lane's result to the handler that rearms it: enablement settles, a perf apply-failure retries under cap."""
+    async def _maybe_rearm_authored_lane(self, res: dict[str, Any] | None, params: Mapping[str, Any]) -> None:
+        """Route an authored lane's result to the handler that rearms it: enablement settles, a perf apply-failure re-authors the candidate ``params`` name, under cap."""
         if not isinstance(res, dict):
             return
         lane = first_str(res.get("lane"))
@@ -760,7 +760,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         if first_str(res.get("status")) != "apply_failed" or lane not in ("perf_framework", "perf_explore"):
             return
 
-        candidate = to_mapping(res.get("candidate"))
+        candidate = self._candidate_row(self._authored_candidate_id(params))
         cand_id = self._framework_candidate_key(candidate) or first_str(res.get("specialist_task_id")).strip()
         if not cand_id:
             return

@@ -1409,6 +1409,12 @@
             "number",
             "null"
           ]
+        },
+        "eval_runtime_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
@@ -1554,6 +1560,15 @@
           "minimum": 0
         },
         "controller_reason": {
+          "type": "string"
+        },
+        "geak_status": {
+          "type": "string"
+        },
+        "geak_error_class": {
+          "type": "string"
+        },
+        "geak_error": {
           "type": "string"
         }
       },

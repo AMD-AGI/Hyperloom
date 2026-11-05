@@ -578,7 +578,7 @@ class WorkspaceGuard:
         if self._read_only_state() != self.read_only_state:
             violations.append("tracked, staged, or untracked files changed")
 
-        protected_ignored = self._protected_ignored_changes()
+        protected_ignored = self._protected_path_rules().discard_rebuildable_bytecode(self._protected_ignored_changes())
         if protected_ignored:
             violations.append("protected ignored files changed: " + ", ".join(protected_ignored))
         return violations
@@ -757,7 +757,7 @@ class WorkspaceGuard:
             path for path in tracked_changes if not self.spec.allow_tracked_changes or self._is_protected(path)
         ]
         protected_untracked = [path for path in untracked if self._is_protected(path)]
-        protected_ignored = self._protected_ignored_changes()
+        protected_ignored = self._protected_path_rules().discard_rebuildable_bytecode(self._protected_ignored_changes())
 
         violations: list[str] = []
         if index_changed:
