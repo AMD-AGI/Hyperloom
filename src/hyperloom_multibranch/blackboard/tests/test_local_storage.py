@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import multiprocessing
+import os
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
@@ -81,6 +83,47 @@ def test_a_line_still_being_written_is_skipped_until_it_is_whole(tmp_path: Path)
     assert [entry.seq for entry in reader.entries()] == [1, 2]
 
 
+@pytest.mark.parametrize("cut_back", [True, False], ids=["cut_back", "cut_back_fails"])
+def test_an_append_that_fails_partway_leaves_no_torn_line_for_the_next_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cut_back: bool
+) -> None:
+    writer = SegmentWriter(tmp_path, "a.h.1.0000")
+    writer.append(_entry(writer.writer, START + 1))
+    write = os.write
+
+    def fails_partway(fd: int, data: bytes) -> int:
+        if data.startswith(b"{"):
+            write(fd, data[:20])
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return write(fd, data)
+
+    def cannot_truncate(fd: int, length: int) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "write", fails_partway)
+    if not cut_back:
+        monkeypatch.setattr(os, "ftruncate", cannot_truncate)
+    with pytest.raises(OSError, match="No space"):
+        writer.append(_entry(writer.writer, START + 2))
+    monkeypatch.undo()
+
+    assert writer.append(_entry(writer.writer, START + 3)).seq == 2
+    assert [entry.at for entry in SegmentReader(tmp_path).entries()] == [START + 1, START + 3]
+
+
+def test_a_torn_last_line_is_cut_before_a_reopened_writer_appends(tmp_path: Path) -> None:
+    SegmentWriter(tmp_path, "a.h.1.0000").append(_entry("a.h.1.0000", START + 1))
+    torn = json.dumps(_entry("a.h.1.0000", START + 2)(2).to_dict(), sort_keys=True)[:40]
+    path = tmp_path / "a.h.1.0000.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(torn)
+
+    SegmentWriter(tmp_path, "a.h.1.0000").append(_entry("a.h.1.0000", START + 3))
+
+    assert [entry.at for entry in SegmentReader(tmp_path).entries()] == [START + 1, START + 3]
+    assert path.read_text(encoding="utf-8").count("\n") == 2
+
+
 def test_a_reopened_writer_continues_its_sequence_and_refuses_another_writers_entry(tmp_path: Path) -> None:
     SegmentWriter(tmp_path, "a.h.1.0000").append(_entry("a.h.1.0000", START + 1))
     reopened = SegmentWriter(tmp_path, "a.h.1.0000")
@@ -152,6 +195,28 @@ def test_a_live_claim_blocks_the_next_generation_until_it_expires(tmp_path: Path
     assert blocked.value.claim.holder == "s1"
     assert (held.generation, taken.generation) == (1, 2)
     assert [claim.holder for claim in store.all_current()] == ["s2"]
+
+
+def test_a_claim_generation_reaches_the_disk_before_it_is_linked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    fsync, link = os.fsync, os.link
+
+    def synced(fd: int) -> None:
+        calls.append("fsync")
+        fsync(fd)
+
+    def linked(source: str, target: Path) -> None:
+        calls.append("link")
+        link(source, target)
+
+    monkeypatch.setattr(os, "fsync", synced)
+    monkeypatch.setattr(os, "link", linked)
+
+    LeaseStore(tmp_path).acquire(_claim("s1"), START)
+
+    assert calls == ["fsync", "link"]
 
 
 def test_the_claims_in_force_come_from_one_listing_of_the_folder(
