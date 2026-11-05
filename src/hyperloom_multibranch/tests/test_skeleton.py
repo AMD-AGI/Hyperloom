@@ -116,6 +116,7 @@ from hyperloom_multibranch.scheduling.budget import (
     explore_gpu_seconds,
 )
 from hyperloom_multibranch.scheduling import branches
+from hyperloom_multibranch.scheduling import events
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILED
 from hyperloom_multibranch.scheduling.explore import (
     EXPLORE_TICK_SECONDS,
@@ -176,6 +177,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     ScriptedCompletion,
     SessionStep,
     StuckToolbox,
+    TAG_FLAG,
     VirtualClock,
     recipe_effect,
     recipe_tags,
@@ -1093,6 +1095,47 @@ async def test_an_agentx_champion_replay_asks_for_no_confirm_ahead_of_its_judgem
     requests = stage.toolbox.requests
     [replay] = [request_id for request_id, request in requests.items() if request.purpose is Purpose.INTEGRATION]
     assert not [request for request in requests.values() if request.retest_of == replay]
+
+
+class FasterChampionKB(OneChampionKB):
+    """The one champion, carrying ``c1``, which measures above the root, so its replay is kept as the start commit."""
+
+    def get_view(self, canonical_id: str, scope: Any) -> dict[str, Any] | None:
+        view = super().get_view(canonical_id, scope)
+        assert view is not None
+        view["knowledge"]["value"]["config"]["extra_server_args"] = f"{TAG_FLAG}c1"
+        return view
+
+
+async def test_the_profile_of_a_replayed_start_commit_is_stopped_before_final_when_the_opening_call_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    started, stop, phase = events.IntegrationProfiler.start, events.IntegrationProfiler.stop, lifecycle.Session._phase
+
+    def starting(profiler: events.IntegrationProfiler, head: str, moved_from: str) -> None:
+        order.append("profile")
+        started(profiler, head, moved_from)
+
+    async def stopping(profiler: events.IntegrationProfiler) -> None:
+        order.append("stop")
+        await stop(profiler)
+
+    def recording(session: lifecycle.Session, name: str, **detail: object) -> None:
+        order.append(name)
+        phase(session, name, **detail)
+
+    monkeypatch.setattr(events.IntegrationProfiler, "start", starting)
+    monkeypatch.setattr(events.IntegrationProfiler, "stop", stopping)
+    monkeypatch.setattr(lifecycle.Session, "_phase", recording)
+    stage = _stage(tmp_path)
+    stage.recipe_kb = FasterChampionKB()
+    stage.judge = ScriptedCompletion([_reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
+
+    outcome = await stage.run()
+
+    assert outcome.stop_reason is SessionStopReason.JUDGE_STOPPED
+    assert "profile" in order and "stop" in order[order.index("profile") : order.index("final")]
 
 
 def _fails_strictly() -> ImageCheckReport:
