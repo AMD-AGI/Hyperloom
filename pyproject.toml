@@ -73,6 +73,8 @@ forge = [
     "click>=8.0",
     "PyYAML>=6.0",
     "anthropic>=0.40",
+    # The answer shapes agent sessions are held to are pydantic v2 models.
+    "pydantic>=2.0",
     "hyperloom-inference_optimizer[llm]",
 ]
 # ROCm Compute Profiler (rocprof-compute) Python requirements. Nothing in this
@@ -150,6 +152,15 @@ ast = [
 claude = [
     "claude-agent-sdk>=0.2.110",
 ]
+# InferaSim (Infera) serving projection for EXPLORE's projection router
+# (HYPERLOOM_EXPLORE_PROJECTION=1), lazy-imported by
+# ``orchestrator.actions.executors.explore_prefilter.inferasim_bridge``. Pinned: the
+# bridge imports Infera's internal module paths. A projection also needs Origami,
+# which is not on PyPI (see docs/reference/environment-variables.md).
+# HYPERLOOM_INFERASIM_ROOT, pointing at an Infera checkout, takes precedence.
+inferasim = [
+    "amd-infera[projection]==0.3.3",
+]
 # Local dev tooling: pre-commit hooks, formatters, type checker.
 dev = [
     "pre-commit>=4.0",
@@ -215,6 +226,11 @@ exclude = [
     # (``actions/executors/launch_backend.py``) ships as normal.
     "hyperloom.orchestrator.rehearsal",
     "hyperloom.orchestrator.rehearsal.*",
+    # Arbor, vendored as a source tree (src/hyperloom_arbor/VENDOR.md): it runs from
+    # the checkout as `python -m arbor` in its own root, so its `arbor` package is
+    # never imported as `hyperloom_arbor.arbor` and does not ship in the wheel.
+    "hyperloom_arbor",
+    "hyperloom_arbor.*",
 ]
 
 [tool.setuptools.data-files]
@@ -268,6 +284,8 @@ hyperloom = [
     "assets/configs/*.yaml",
     "assets/agentx/*.sh",
     "assets/agentx/*.py",
+    # Workload template for the InferaSim projection EXPLORE pre-filters with.
+    "assets/inferasim/*.yaml",
     # Host-side evidence probe, injected into the benchmark process via a
     # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
     # installs can arm it.
@@ -331,6 +349,9 @@ hyperloom_kb = [
     "declarations/*.yaml",
     "mappings/*.yaml",
 ]
+hyperloom_multibranch = [
+    "contracts/llm_prices.json",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -360,6 +381,7 @@ source = [
     "src/hyperloom",
     "src/kernelforge",
     "src/hyperloom_kb",
+    "src/hyperloom_multibranch",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
@@ -527,6 +549,9 @@ exclude = [
     "src/kernelforge/examples",
     "src/kernelforge/knowledge/local_wiki/resources",
     "src/kernelforge/knowledge/kb_store/remote_client.py",
+    # Arbor, vendored at a release tag (src/hyperloom_arbor/VENDOR.md): its style is
+    # Arbor's own, and a change to it is made upstream and vendored again.
+    "src/hyperloom_arbor",
 ]
 # SonarSource CPD defaults: a clone is at least 100 tokens and 10 lines (jscpd).
 duplication-min-tokens = 100
@@ -605,6 +630,8 @@ exclude_dirs = [
     ".venv",
     "src/kernelforge/examples",
     "src/kernelforge/knowledge/local_wiki/resources",
+    # Arbor, vendored at a release tag (src/hyperloom_arbor/VENDOR.md); scanned upstream.
+    "src/hyperloom_arbor",
 ]
 
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only``.
@@ -627,6 +654,8 @@ extend-exclude = [
     "src/kernelforge/examples",
     "src/kernelforge/knowledge/local_wiki/resources",
     "src/kernelforge/knowledge/kb_store/remote_client.py",
+    # Arbor, vendored at a release tag; linted upstream.
+    "src/hyperloom_arbor",
 ]
 
 [tool.ruff.lint]

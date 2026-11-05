@@ -45,6 +45,7 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
+from kernelforge.agent_backends.structured_output import schema_instruction
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 
 log = logging.getLogger(__name__)
@@ -113,6 +114,13 @@ def _harness_instructions(spec: AgentRunSpec) -> str:
         "that task is complete; do not continue open-ended exploration.\n"
     )
     return f"{runtime}\n## System instructions\n{spec.system_prompt}"
+
+
+def _with_answer_format(prompt: str, spec: AgentRunSpec) -> str:
+    """``prompt``, followed by the answer schema the harness cannot hold the session to itself."""
+    if spec.output_schema is None:
+        return prompt
+    return f"{prompt}\n\n{schema_instruction(spec.output_schema)}"
 
 
 def _normalize_run_result(result: Any, session_id: str) -> AgentRunResult:
@@ -410,7 +418,7 @@ class DeepSeekHarnessBackend:
             spec.progress_log.append("progress: not supported by deepseek backend")
         return await self._execute(
             spec=spec,
-            prompt=_harness_instructions(spec) + "\n\n## Task\n" + spec.user_prompt,
+            prompt=_with_answer_format(_harness_instructions(spec) + "\n\n## Task\n" + spec.user_prompt, spec),
             session_id=f"forge-{uuid.uuid4()}",
             usage=usage,
         )
@@ -427,7 +435,7 @@ class DeepSeekHarnessBackend:
             raise DeepSeekHarnessExecutionError("DeepSeek Harness resume requires a session ID")
         return await self._execute(
             spec=spec.resolved(self.runtime),
-            prompt=feedback,
+            prompt=_with_answer_format(feedback, spec),
             session_id=session_id,
             usage=usage,
         )

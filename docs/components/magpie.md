@@ -31,12 +31,17 @@ variant:
 
 ```python
 cmd = [
-    magpie_python, "-m", "Magpie", "-v", "benchmark",
+    magpie_python, ".../executors/magpie_confined.py", "-v", "benchmark",
     "--benchmark-config", str(config_path),
     "--output-dir", str(output_dir),
     "--run-mode", "local",
 ]
 ```
+
+`magpie_confined.py` runs `python -m Magpie` with one change: inside a local
+sandbox, Magpie's leftover-server sweep, which otherwise SIGKILLs every server
+process on the host, signals only processes of the same sandbox. Parallel tests
+on one host would otherwise kill each other's servers.
 
 `HYPERLOOM_AGENTX=1 hyperloom optimize --model ... --tp ... --conc ...` converts
 Hyperloom workload flags into native AgentX YAML. `--benchmark-config` accepts an
