@@ -54,7 +54,7 @@ def test_external_deadline_holds_the_existing_finalization_reserve(campaign):
 
 
 def test_round_admission_cannot_spend_the_floored_hour_past_external_deadline(campaign):
-    assert campaign._admit_next_round(1) is None
+    assert campaign._admit_next_round(1, requested_lanes=campaign.ic.lanes) is None
     assert campaign.termination_reason == "round_budget_exhausted"
 
 
