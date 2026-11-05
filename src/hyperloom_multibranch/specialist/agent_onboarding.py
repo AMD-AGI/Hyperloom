@@ -17,10 +17,12 @@ with every line, and at once after a model call refused for a reason the next at
 An agent that writes a snapshot of each keep runs as a component of MB, in the mode Arbor's README describes: MB sets
 that mode, its host, the absolute deadline and the commit its keeps are read against in its config itself
 (:func:`component_config`), whatever the manifest says of them, and, when the session's root was profiled, the file in
-its session that holds the root's op shares (:data:`PROFILE_FILE`). Arbor itself is not onboarded by the model: its
-checkout says what it is, and :mod:`arbor_adapter` writes its manifest and config from the spec, which MB then sets
-as it sets any agent's in that mode. A config refused then, by the adapter's check or by Arbor as it starts, is the
-last attempt (:class:`ConfigRefused`): another would write the same config.
+its session that holds the root's op shares (:data:`PROFILE_FILE`). The checkout picks the agent's driver
+(:func:`~hyperloom_multibranch.specialist.agent_driver.driver_for`), which says how its manifest is made and how its
+exit reads. Arbor itself is not onboarded by the model: its checkout says what it is, and :mod:`arbor_adapter` writes
+its manifest and config from the spec, which MB then sets as it sets any agent's in that mode. A config refused then,
+by the adapter's check or by Arbor as it starts, is the last attempt (:class:`ConfigRefused`): another would write the
+same config.
 
 The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DOCKER_SHIM`) runs ``docker exec`` and
 ``docker cp`` in place, for an agent written to drive a container, and refuses everything else.
@@ -36,24 +38,15 @@ import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
+from hyperloom_multibranch.specialist.agent_driver import AgentCheckout, AgentDriver, ConfigRefusal, EndKind, driver_for
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
 from hyperloom_multibranch.specialist.agent_spec import ROOT_PROFILE_SOURCE, AgentSpec
-from hyperloom_multibranch.specialist.arbor_adapter import (
-    BRANCH_RUN,
-    EXIT_REFUSED,
-    ArborCheckout,
-    ArborRefused,
-    ArborRun,
-    arbor_manifest,
-    dossier_notes,
-    fit_keys,
-    is_arbor,
-    refused_reasons,
-)
+from hyperloom_multibranch.specialist.arbor_adapter import BRANCH_RUN, ArborRun
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 
 ATTEMPTS = 3
@@ -173,8 +166,9 @@ class OnboardingSetup:
 @dataclass(frozen=True)
 class ReadyAgent:
     """An agent preflight made ready: its manifest, its checkout and the process it runs in, and what its branch should
-    note of how it was started (an input its Arbor lacks, :func:`fit_keys`, or a dossier that is gone,
-    :func:`dossier_notes`)."""
+    note of how it was started (its driver's :meth:`~hyperloom_multibranch.specialist.agent_driver.AgentDriver.fit`:
+    an input its Arbor lacks, :func:`~.arbor_adapter.fit_keys`, or a dossier that is gone,
+    :func:`~.arbor_adapter.dossier_notes`)."""
 
     manifest: AgentManifest
     source_dir: Path
@@ -239,26 +233,17 @@ async def _attempt(
     source: str, spec: AgentSpec, agent_dir: Path, setup: OnboardingSetup, failures: tuple[str, ...]
 ) -> ReadyAgent:
     checkout = agent_dir / SOURCE_DIR
-    commit = await fetch_source(source, checkout)
-    adapted = is_arbor(checkout)
-    if adapted:
-        try:
-            manifest = await asyncio.to_thread(arbor_manifest, spec, ArborCheckout(source, commit, checkout), setup.run)
-        except ArborRefused as error:
-            raise ConfigRefused(f"Arbor would refuse the config written for it: {error}") from error
-    else:
-        answer = await setup.onboard(checkout, onboarding_prompt(spec, source, checkout, commit, failures))
-        try:
-            manifest = AgentManifest.read(_json_object(answer))
-        except (ManifestError, ValueError) as error:
-            raise AttemptFailed(f"the manifest: {error}") from error
+    fetched = AgentCheckout(source, await fetch_source(source, checkout), checkout)
+    driver = driver_for(checkout)
+    driver.prepare(spec, Path(spec.workspace))
+    try:
+        manifest = await driver.manifest(spec, fetched, setup.run, partial(_onboarded, spec, fetched, setup, failures))
+    except ConfigRefusal as error:
+        raise ConfigRefused(str(error)) from error
     if manifest.snapshots is not None:
         profile = root_profile(spec.root_shares, checkout / manifest.snapshots.session, spec.root_shares_source)
         manifest = replace(manifest, config=component_config(manifest.config, spec, profile))
-    notes: tuple[str, ...] = ()
-    if adapted:
-        config, notes = fit_keys(manifest.config, checkout)
-        manifest, notes = replace(manifest, config=config), (*notes, *dossier_notes(checkout, spec.dossier))
+    manifest, notes = driver.fit(manifest, spec, checkout)
     (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
     (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
     env = agent_env(agent_dir)
@@ -266,12 +251,26 @@ async def _attempt(
     process = await setup.sandbox.start(manifest.launch, checkout, env)
     started = False
     try:
-        await _started(process, manifest, checkout, setup, final=adapted)
+        await _started(process, manifest, checkout, setup, driver)
         started = True
     finally:
         if not started:
             await process.kill()
     return ReadyAgent(manifest, checkout, process, notes)
+
+
+async def _onboarded(
+    spec: AgentSpec, checkout: AgentCheckout, setup: OnboardingSetup, failures: tuple[str, ...]
+) -> AgentManifest:
+    """The manifest the onboarding model writes for the agent in ``checkout``, told of the earlier attempts'
+    ``failures``; raise :class:`AttemptFailed` when its answer is none."""
+
+    prompt = onboarding_prompt(spec, checkout.source, checkout.path, checkout.commit, failures)
+    answer = await setup.onboard(checkout.path, prompt)
+    try:
+        return AgentManifest.read(_json_object(answer))
+    except (ManifestError, ValueError) as error:
+        raise AttemptFailed(f"the manifest: {error}") from error
 
 
 async def install(manifest: AgentManifest, setup: OnboardingSetup, checkout: Path, env: Mapping[str, str]) -> None:
@@ -319,13 +318,13 @@ def root_profile(shares: OpShares | None, session: Path, source: str = ROOT_PROF
 
 
 async def _started(
-    process: AgentProcess, manifest: AgentManifest, checkout: Path, setup: OnboardingSetup, *, final: bool = False
+    process: AgentProcess, manifest: AgentManifest, checkout: Path, setup: OnboardingSetup, driver: AgentDriver
 ) -> None:
     """Return once the agent wrote its keep file or stayed up :attr:`OnboardingSetup.start_seconds`, or, run as a
     component, ended of itself with its exit file written, as one started with too little time left does: its run
     finishes with the exit file's reason. Raise :class:`AttemptFailed` when it exited otherwise first, saying why from
-    its refusal file when it ran as a component and refused its config, and :class:`ConfigRefused` then when the
-    config is ``final``."""
+    its refusal file when its ``driver`` reads its exit as a refusal of its config, and :class:`ConfigRefused` then
+    when the driver wrote that config from the spec alone."""
 
     until = setup.clock() + setup.start_seconds
     keep = None if manifest.keep is None else checkout / manifest.keep.path
@@ -338,9 +337,10 @@ async def _started(
             return
         if process.returncode is not None:
             said = tail(await process.output())
-            if process.returncode == EXIT_REFUSED and manifest.snapshots is not None:
-                why = refused_reasons(checkout / manifest.snapshots_refused) or said
-                raise (ConfigRefused if final else AttemptFailed)(f"`{manifest.launch}` refused its config: {why}")
+            ended = driver.ended(process.returncode, manifest, checkout)
+            if ended.kind is EndKind.REFUSED:
+                refused = ConfigRefused if driver.config_from_spec else AttemptFailed
+                raise refused(f"`{manifest.launch}` refused its config: {ended.why or said}")
             raise AttemptFailed(f"`{manifest.launch}` exited {process.returncode}: {said}")
         await setup.sleep(setup.poll_seconds)
 
