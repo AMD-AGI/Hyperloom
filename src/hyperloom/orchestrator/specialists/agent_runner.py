@@ -74,7 +74,6 @@ log = logging.getLogger(__name__)
 __all__ = [
     "CONTAINER_RECORD_KIND",
     "DEFAULT_MCP_TOKEN_ENV",
-    "LONG_RUNNING_SESSION_SEC",
     "LOST_AFTER_SEC",
     "SPECIALIST_RECORD_KIND",
     "AgentConfigError",
@@ -96,9 +95,6 @@ __all__ = [
 #: How long a CLI may stay silent. Past it with no tool call in flight, the reap loop ends the CLI and ``poll`` reports
 #: it lost; ``poll`` also counts a beat and the session's start as life within it.
 LOST_AFTER_SEC: float = 300.0
-
-#: Minimum session length for a long-lived (one per branch) specialist.
-LONG_RUNNING_SESSION_SEC: float = 6 * 60 * 60.0
 
 #: The ``kind`` of each line the runner appends to :data:`RESOURCES_RELATIVE_PATH`: one specialist's run, and one
 #: reading of the container.
@@ -164,7 +160,7 @@ class AgentLaunchSpec:
     cwd: Path
     gpus: int
     deadline_unix: float
-    """Absolute wall-clock end of the session; a long-lived specialist asks for at least 6 hours."""
+    """Absolute wall-clock end of the session."""
     done_paths: tuple[Path, ...]
     heartbeat_path: Path
     mcp_servers: tuple[McpEndpoint, ...] = ()
@@ -623,10 +619,6 @@ class LocalAgentRunner:
         self._log.append(self._specialist_record(session))
         self._log.append(self._container_record())
         session.collected = True
-
-    async def finish_campaign(self) -> None:
-        """Write the closing container record, with the highest specialist concurrency seen."""
-        self._log.append(self._container_record())
 
     # Internals
     def _prepare(
