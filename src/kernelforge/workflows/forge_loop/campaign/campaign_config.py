@@ -362,6 +362,7 @@ _BACKEND_TEXT_MARKERS = (
     ("gluon", ("triton.experimental.gluon", "@gluon.jit", "gluon.language")),
     ("triton", ("@triton.jit", "triton.language")),
     ("ck", ("composable_kernel", "ck::")),
+    ("ave", ("import avelang", "from avelang")),
 )
 
 
