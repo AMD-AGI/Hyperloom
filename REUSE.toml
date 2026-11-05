@@ -71,3 +71,14 @@ path = "src/hyperloom_arbor/.claude/skills/kernels/reference/examples/triton2fly
 precedence = "override"
 SPDX-FileCopyrightText = "SGLang Team and contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Arbor's own pages among them, not KernelForge's: the index of what was copied, and Arbor's errata for the copied
+# files. Arbor's Apache-2.0, as the tree.
+[[annotations]]
+path = [
+    "src/hyperloom_arbor/.claude/skills/kernels/reference/README.md",
+    "src/hyperloom_arbor/.claude/skills/kernels/reference/STALE.md",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "Apache-2.0"
