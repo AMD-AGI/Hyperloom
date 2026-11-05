@@ -47,8 +47,8 @@ AgentX), whose integrator is a :class:`BundlingIntegrator`, the commits a look f
 were offered and take one slot: one merge test of the bundle, judged, checked and recorded as any merge is, so a
 bundle that may be merged lands as one integration commit whose source commits are every member's. A member that does
 not combine with the head and the members before it is left out, and a bundle that does not merge sends its members
-back: each of them then takes the single path on that head, tested on its own as on any other workload, so a bundle
-never merges what single tests would not. A foundation fix is never bundled, since it merges without the gain a bundle
+back: each of them is then owed a merge test of its own, on whatever head is current once a slot is free, so a bundle
+never merges what single tests would not and never stands in for a member's own answer. A foundation fix is never bundled, since it merges without the gain a bundle
 is judged on.
 
 Before EXPLORE opens, :meth:`Integrator.replay_champion` carries the Recipe KB champion PRELUDE prepared onto the
@@ -446,31 +446,27 @@ async def _carried(merge: RepoMerge) -> RepoMerge:
 
 
 class _SinglePath:
-    """The commits a bundle sent the single path on one integration head, in the order they were offered: left out of
-    it, or the members of a bundle that was not merged. Each is started on its own on that head once, and none of them
-    joins another bundle there; a head the integration branch moved on from holds none."""
+    """The commits owed a merge test of their own, in the order they were offered: left out of a bundle, or the members
+    of a bundle that was not merged. A bundle's verdict answers nothing about any one member, and the blackboard
+    records it as each member's last merge, so the integrator keeps what it owes: each is started on its own on
+    whatever head is current once a slot is free, however often the head moved meanwhile, unless a merge carried it
+    first, and it joins no other bundle until then."""
 
     def __init__(self) -> None:
-        self._head = ""
         self._waiting: list[str] = []
-        self._sent: set[str] = set()
 
-    def send(self, head: str, commits: Sequence[str]) -> None:
-        if head != self._head:
-            self._head, self._waiting, self._sent = head, [], set()
-        self._waiting.extend(commit for commit in commits if commit not in self._sent)
-        self._sent.update(commits)
+    def send(self, commits: Sequence[str]) -> None:
+        self._waiting.extend(commit for commit in commits if commit not in self._waiting)
 
-    def take(self, head: str, free: int) -> tuple[str, ...]:
-        """Up to ``free`` of the commits waiting on ``head``, removed from the wait."""
+    def take(self, free: int, merged: Set[str]) -> tuple[str, ...]:
+        """Up to ``free`` of the waiting commits, removed from the wait; those in ``merged`` leave it untested."""
 
-        if head != self._head:
-            return ()
+        self._waiting = [commit for commit in self._waiting if commit not in merged]
         taken, self._waiting = self._waiting[:free], self._waiting[free:]
         return tuple(taken)
 
-    def holds(self, head: str, commit: str) -> bool:
-        return head == self._head and commit in self._sent
+    def holds(self, commit: str) -> bool:
+        return commit in self._waiting
 
 
 @dataclass(frozen=True)
@@ -578,7 +574,7 @@ class Integrator:
             timer.cancel()
 
     async def _to_start(self, head: str, free: int, started: Set[str]) -> tuple[_Start, ...]:
-        """The merge tests to start now on ``head``, ``free`` at most: first the commits the single path holds there,
+        """The merge tests to start now on ``head``, ``free`` at most: first the commits owed a test of their own,
         then those it offers, less the ones this round has already started. On a workload that bundles its merges,
         the offered commits but foundation fixes go into one bundle, when there are enough of them and a slot is left.
 
@@ -589,14 +585,12 @@ class Integrator:
 
         if free <= 0:
             return ()
-        starts = [
-            self._single(MergeReport(commit, head, MergeOutcome.PENDING, ""))
-            for commit in self._single_path.take(head, free)
-        ]
+        owed = self._single_path.take(free, await self._merged_commits())
+        starts = [self._single(MergeReport(commit, head, MergeOutcome.PENDING, "")) for commit in owed]
         offered = [
             commit
             for commit in await self._candidates.offered_on(head)
-            if commit.commit_id not in started and not self._single_path.holds(head, commit.commit_id)
+            if commit.commit_id not in {*started, *owed} and not self._single_path.holds(commit.commit_id)
         ]
         bundled = self._bundleable(offered)
         if len(bundled) < BUNDLE_MIN_MEMBERS:
@@ -618,9 +612,9 @@ class Integrator:
         offered = [commit.commit_id for commit in commits]
         bundle = await self._repo.merge_many(offered, head, await self._foundation_fixes())
         if len(bundle.members) < BUNDLE_MIN_MEMBERS:
-            self._single_path.send(head, offered)
+            self._single_path.send(offered)
             return ()
-        self._single_path.send(head, bundle.left_out)
+        self._single_path.send(bundle.left_out)
         pending = MergeReport(bundle.members[0], head, MergeOutcome.PENDING, "", members=bundle.members)
         return (_Start(pending, partial(_carried, bundle.merge)),)
 
@@ -636,13 +630,16 @@ class Integrator:
         return await self._resolved(carried, candidate)
 
     async def _concluded(self, item: _Tested, merged: bool) -> MergeReport:
-        """What came of a merge test that ended, logged; the members of a bundle that was not merged take the single
-        path on its head."""
+        """What came of a merge test that ended, logged."""
 
-        report = self._logged(item) if isinstance(item, MergeReport) else await self._conclude(item, merged)
-        if report.members and report.outcome is not MergeOutcome.MERGED:
-            self._single_path.send(report.onto, report.members)
-        return report
+        return self._logged_failure(item) if isinstance(item, MergeReport) else await self._conclude(item, merged)
+
+    def _logged_failure(self, report: MergeReport) -> MergeReport:
+        """``report`` of a merge that failed, logged; a bundle's members are each owed a test of their own. A superseded
+        bundle failed nothing, and its members are offered together again on the new head."""
+
+        self._single_path.send(report.members)
+        return self._logged(report)
 
     async def _test(self, start: _Start) -> _Tested:
         """Test the merge ``start`` carries onto its integration head, or skip it; a lead adoption's merge test
@@ -667,6 +664,11 @@ class Integrator:
         except _Skipped as exc:
             skipped = await self._skip(pending, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
             return replace(skipped, lost_to=exc.lost_to)
+
+    async def _merged_commits(self) -> frozenset[str]:
+        """The committed commits a merge onto the integration branch carried."""
+
+        return frozenset(commit.commit_id for commit in await self._blackboard.committed() if commit.merged_into)
 
     async def _foundation_fixes(self) -> frozenset[str]:
         """The foundation fixes merged onto the integration branch, as the blackboard records them: no later merge may
@@ -738,12 +740,12 @@ class Integrator:
         reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
         if reason:
             await self._blackboard.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
-            return self._logged(replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason))
+            return self._logged_failure(replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason))
         if superseded:
             return self._logged(replace(report, reason=SUPERSEDED))
         failed = await self._regression_failure(report, tested.delta)
         if failed:
-            return self._logged(replace(report, reason=failed))
+            return self._logged_failure(replace(report, reason=failed))
         self._recording = asyncio.ensure_future(self._record_merge(report, tested.delta, judgement))
         return await asyncio.shield(self._recording)
 

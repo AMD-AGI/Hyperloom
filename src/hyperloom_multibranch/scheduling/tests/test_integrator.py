@@ -1653,3 +1653,45 @@ async def test_a_bundle_cancelled_while_committing_is_still_recorded_with_every_
     assert [await _merged_into(bench, commit) for commit in (bench.commits["c1"], d1)] == [head, head]
     [logged] = bench.logged()
     assert (logged["detail"]["members"], logged["detail"]["merged_commit"]) == ([bench.commits["c1"], d1], head)
+
+
+async def test_the_members_of_a_bundle_that_failed_are_each_tested_alone_after_the_head_moved(tmp_path: Path) -> None:
+    """The foundation fix ``c1`` merges in the round the bundle of ``d1`` and ``e1`` regresses in, so the head moves
+    before either member had a test of its own; ``d1``, which gains on its own, is still tested alone and merged."""
+
+    curves = {
+        **BUNDLED,
+        frozenset({"d1", "e1"}): {MAIN_POINT: 950.0},
+        frozenset({"c1", "d1"}): {MAIN_POINT: 1060.0},
+    }
+    bench = await _bench(tmp_path, curves, tags=("c1",), foundation="c1", bundles=True)
+    d1 = await _committed_off_root(bench, "s2", "d1", 2.0)
+    e1 = await _committed_off_root(bench, "s3", "e1", 1.0)
+
+    first = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
+    later = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
+
+    assert [(report.members, report.outcome) for report in first] == [
+        ((), MergeOutcome.MERGED),
+        ((d1, e1), MergeOutcome.NOT_STACKABLE),
+    ]
+    moved = first[0].merged_commit
+    assert [(report.candidate, report.members, report.onto) for report in later] == [(d1, (), moved), (e1, (), moved)]
+    assert later[0].outcome is MergeOutcome.MERGED
+    assert await _merged_into(bench, d1) == later[0].merged_commit
+
+
+async def test_a_superseded_bundle_is_offered_together_again_on_the_new_head(tmp_path: Path) -> None:
+    curves = {**BUNDLED, frozenset({"c1", "d1", "e1"}): {MAIN_POINT: 1080.0}}
+    bench = await _bench(tmp_path, curves, tags=("c1",), foundation="c1", bundles=True)
+    d1 = await _committed_off_root(bench, "s2", "d1", 2.0)
+    e1 = await _committed_off_root(bench, "s3", "e1", 1.0)
+
+    first = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
+    [again] = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
+
+    assert [(report.members, report.reason) for report in first][1] == (
+        (d1, e1),
+        f"{BUNDLING.format(f'{d1}, {e1}')}: {SUPERSEDED}",
+    )
+    assert (again.members, again.onto, again.outcome) == ((d1, e1), first[0].merged_commit, MergeOutcome.MERGED)
