@@ -431,6 +431,7 @@ class BranchControl:
             direction=launch.direction,
             agent=launch.agent,
             deadline=deadline,
+            focus=launch.focus.text if launch.focus is not None else "",
             plan=launch.plan,
             map_for=launch.map_for,
         )

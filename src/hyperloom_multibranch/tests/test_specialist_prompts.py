@@ -147,7 +147,7 @@ def test_the_role_goes_back_to_choosing_after_a_result_and_never_stops_its_branc
 def test_the_role_works_its_direction_first_and_then_moves_to_one_no_branch_covers():
     prompt = role_prompt(WORKLOAD)
 
-    assert "Your launch prompt names your branch's direction: work on it first." in prompt
+    assert "Your launch prompt names your branch's direction, if it has one: work on it first." in prompt
     assert "dig deeper in it rather than switching to settings" in prompt
     assert "take another of the session's directions, preferring one no running branch covers" in prompt
     assert "Server arguments and environment variables; MoE chain; Small-M GEMM kernels; ROCm code gaps" in prompt
@@ -397,7 +397,9 @@ def test_the_role_says_a_branch_opened_on_a_focus_starts_from_that_operator():
     prompt = role_prompt(WORKLOAD)
 
     label = FOCUS_LINE.split(",")[0]
-    assert f'When the brief names a "{label}", start from that operator within your direction' in prompt
+    assert (
+        f'When the brief names a "{label}", start from that operator, within your direction if you have one' in prompt
+    )
 
 
 def test_the_role_says_how_to_record_a_direction_done_on_a_head_with_every_reason():
