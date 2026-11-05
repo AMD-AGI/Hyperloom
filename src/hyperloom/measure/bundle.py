@@ -148,7 +148,8 @@ def verify_bundle(
         manifest, document = _parse_manifest(manifest_raw)
         _check_identity(manifest, fingerprint, expected)
         if max_total_bytes is not None and manifest.total_size() > max_total_bytes:
-            raise ResultRejected(RejectReason.TOO_LARGE, f"{manifest.total_size()} > {max_total_bytes}")
+            # The sum is not shown: sizes thousands of digits long can add up to more digits than str() converts.
+            raise ResultRejected(RejectReason.TOO_LARGE, f"the listed files hold more than {max_total_bytes} bytes")
         _check_files(root_fd, manifest)
     finally:
         os.close(root_fd)
