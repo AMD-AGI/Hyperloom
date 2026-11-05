@@ -97,6 +97,9 @@ class LocalSandbox:
         self._startup_exit: int | None = None
         self._timer: threading.Timer | None = None
         self._bg_count = 0
+        # Set when a command timeout's reap could not confirm its tree gone: a descendant that outlived it may have left
+        # the tree, so ``kill()`` cannot confirm the sandbox empty and keeps its cards leased.
+        self._unconfirmed_reap = False
         self.set_timeout(plan.timeout_sec)
 
     def _build_base_env(self, create_envs: Mapping[str, str], platform_envs: Mapping[str, str]) -> dict[str, str]:
@@ -167,7 +170,7 @@ class LocalSandbox:
                 self._timer.cancel()
             if self._startup is not None:
                 self._startup[1].close()
-            reaped = reap_sandbox_processes(self._procs, self.sandbox_id)
+            reaped = reap_sandbox_processes(self._procs, self.sandbox_id) and not self._unconfirmed_reap
             shutil.rmtree(self.directory, ignore_errors=True)
             self._on_end(self, reaped)
         if not reaped:
@@ -392,11 +395,13 @@ class LocalSandbox:
             code = status.wait_exit(proc, timeout_sec)
         except TimeoutError:
             status.close()
-            # Under the lock kill() reaps with, so one of the two reaps this launcher; once waited its pid is free, and
-            # it leaves the list a later kill() signals.
+            # Under the lock kill() reaps with, so one of the two reaps this launcher. Only a waited launcher leaves the
+            # list a later kill() signals (its pid is free then); one still running stays for kill() to reap.
             with self._lock:
-                kill_launchers([proc], grace_sec=1.0)
-                self._procs.remove(proc)
+                if not kill_launchers([proc], grace_sec=1.0):
+                    self._unconfirmed_reap = True
+                if proc.returncode is not None:
+                    self._procs.remove(proc)
             raise SandboxUnavailable(f"command timed out after {timeout_sec}s") from None
         finally:
             join_by = time.monotonic() + _READER_JOIN_SEC
