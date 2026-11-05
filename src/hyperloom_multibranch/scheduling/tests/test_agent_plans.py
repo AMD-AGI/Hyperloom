@@ -5,7 +5,7 @@
 with a fake Arbor whose split deals the open directions round-robin, and whose generate makes one direction per op of
 the profile at 2 % or more; and the map kept to deal a reporting worker's slot its next order
 (:class:`~hyperloom_multibranch.scheduling.agent_plans.MapDealer`), by a fake Arbor master that deals by rank the open
-directions no report settled and no held order holds."""
+directions no report settled, two reports did not give back open and no held order holds."""
 
 from __future__ import annotations
 
@@ -150,17 +150,21 @@ async def test_a_reporting_worker_s_slot_is_dealt_open_directions_no_report_sett
     dealer = map_dealer(_map(tmp_path, DEAL_MAP), (first, "", second), tmp_path / "work")
     assert dealer is not None
 
-    done = _report(tmp_path, "r1", {"id": "m-attn", "status": "done"})
-    order = await dealer.deal(Path(arbor), first, done)
+    order = await dealer.deal(Path(arbor), first, _report(tmp_path, "r1", {"id": "m-attn", "status": "done"}))
 
     # m-moe is held by the running worker, m-rope was closed in the map; at most two by rank.
     assert order is not None and _ids(str(order)) == ["m-allreduce", "m-sampler"]
 
-    spent = _report(tmp_path, "r2", {"id": "m-allreduce", "status": "open", "spent": True}, {"id": "m-sampler"})
-    again = await dealer.deal(Path(arbor), str(order), spent)
+    back = _report(tmp_path, "r2", {"id": "m-allreduce", "status": "open"}, {"id": "m-sampler", "status": "done"})
+    again = await dealer.deal(Path(arbor), str(order), back)
 
-    # The spent direction is not dealt again; the worker's other open one is, and the closed m-attn stays closed.
-    assert again is not None and _ids(str(again)) == ["m-sampler"]
+    # Given back open once, m-allreduce is dealt again; the closed m-attn and m-sampler stay closed.
+    assert again is not None and _ids(str(again)) == ["m-allreduce"]
+
+    spent = _report(tmp_path, "r3", {"id": "m-allreduce", "status": "open"})
+
+    # Given back open by a second worker, m-allreduce is exhausted: every report is passed, so it is not reopened.
+    assert await dealer.deal(Path(arbor), str(again), spent) is None
 
 
 async def test_with_every_open_direction_settled_or_held_the_deal_leaves_the_slot_without_an_order(
@@ -176,7 +180,7 @@ async def test_with_every_open_direction_settled_or_held_the_deal_leaves_the_slo
         "r1",
         {"id": "m-attn", "status": "done"},
         {"id": "m-allreduce", "status": "dropped"},
-        {"id": "m-sampler", "status": "open", "spent": True},
+        {"id": "m-sampler", "status": "done"},
     )
 
     assert await dealer.deal(Path(arbor), first, report) is None
