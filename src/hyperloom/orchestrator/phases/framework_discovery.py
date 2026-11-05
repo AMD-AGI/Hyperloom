@@ -50,11 +50,7 @@ _LEDGER_OUTCOME_MEASURED: str = "integrated"
 def _measured_short_of_keep(rec: dict[str, Any], keep_threshold_pct: float) -> bool:
     """Whether a ledger record is a completed measurement that did not clear the KEEP bar.
 
-    Separating this from "the round never measured" is what keeps a direction
-    alive: a GLM-5.3 session spent three rounds on enabling the prefix cache and
-    all three died before the server was serving, which says nothing about the
-    idea --- and the idea was worth 94% of the run's prefill. Recorded as a
-    result, it would have retired a correct direction permanently.
+    A round that never measured says nothing about its idea, so it does not retire the direction.
     """
     if str(rec.get("outcome") or "") != _LEDGER_OUTCOME_MEASURED:
         return False
@@ -64,12 +60,8 @@ def _measured_short_of_keep(rec: dict[str, Any], keep_threshold_pct: float) -> b
 def _measured_on_this_stack(rec: dict[str, Any], state: Any) -> bool:
     """Whether a ledger record's throughput was measured on the model, GPU and precision running now.
 
-    The ledger is one file under the workspace root, shared by every session
-    that root has ever served, and a config's throughput is a property of the
-    stack as much as of the config: a lever worth +0.4% on Qwen3-8B/MI300X says
-    nothing about GLM-5.3 on MI355X. The accuracy gate above this one matches
-    on the fingerprint alone because an accuracy regression travels with the
-    config; a throughput number does not.
+    The ledger is shared by every session under the workspace root, and a throughput number belongs to the stack
+    as much as to the config; an accuracy regression travels with the config, so that gate matches the fingerprint.
     """
     return all(
         str(rec.get(field) or "").strip() == str(getattr(state, field, "") or "").strip()

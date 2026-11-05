@@ -19,9 +19,8 @@ GEMM_DEFAULT_TARGET_SEC = 20 * 60
 #: fusion: the most recipes one lane may attempt. Travels to forge-fuse as ``--max-recipes``.
 FUSION_MAX_TARGETS = 3
 
-#: fusion: what one recipe is priced at, so a share too small to pay for even one leaves the lane unfundable
-#: instead of taking whatever seconds remain. Held at the sibling lane's per-target price rather than invented:
-#: both buy one forge target out of the same phase share, and nothing here has measured them apart.
+#: fusion: what one recipe is priced at, so a share too small to pay for one leaves the lane unfundable; held at the
+#: sibling lane's per-target price, since both buy one forge target out of the same phase share.
 FUSION_DEFAULT_TARGET_SEC = GEMM_DEFAULT_TARGET_SEC
 
 #: Held back from the phase share so the lanes cannot consume the time the phase

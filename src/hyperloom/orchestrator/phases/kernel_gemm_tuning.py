@@ -158,8 +158,7 @@ def _tuned_rows_reach_a_logged_lookup(tuner_name: str, envs: Mapping[str, str], 
     """Whether a candidate's tuned rows serve any lookup the serving log shows missing; ``True`` when it cannot tell.
 
     The workload is fixed, so a measured round repeats the lookups the baseline logged. Hit lines need
-    AITER_LOG_TUNED_CONFIG and are absent there, but the tuners build their tables from the misses. On GLM-5.3 an a8w8
-    and a bf16 table, written at an M aiter never looks up, each spent an AgentX round to read ``zero_hit`` afterwards.
+    AITER_LOG_TUNED_CONFIG and are absent there, but the tuners build their tables from the misses.
     """
     from ..kernel.gemm_shape_coverage import (
         fmoe_dispatch_lookup_key,

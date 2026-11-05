@@ -4,13 +4,7 @@
 """Which steps replay a captured graph and which still launch every kernel one at a time.
 
 A kernel replayed from a graph carries no launch call of its own; an eagerly dispatched one does, and the trace
-records it. Counting which side of that line each step class falls on says where the per-launch cost is still
-being paid -- and the answer is rarely uniform: a GLM-5.3 AgentX capture runs target decode 99.8% from a graph
-while prefill and draft extend launch 100% of their kernels individually, 4958 of them in one prefill step.
-
-That split is worth naming because closing it was one of the larger steps in the hand-tuned stack: putting prefill
-behind a breakable graph was +8.75% on its own, and the draft extend was still eager after it because NextN has no
-``layers`` for the capture to walk.
+records it. Counting each step class's eager share says where the per-launch cost is still paid.
 """
 
 from __future__ import annotations
@@ -26,8 +20,7 @@ from kernelforge.evaluation.profiling.trace_events import load_trace_events
 #: that call; a kernel with no match came out of a graph replay.
 _LAUNCH_MARKER: str = "LaunchKernel"
 
-#: Share of a class's kernel time that must be eager before the class is called ungraphed. Well below the 100% a
-#: GLM-5.3 prefill step shows, and far above the 0.2% its graphed decode leaves behind.
+#: Share of a class's kernel time that must be eager before the class is called ungraphed.
 UNGRAPHED_SHARE: float = 0.5
 
 

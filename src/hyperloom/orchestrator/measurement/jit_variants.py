@@ -3,16 +3,9 @@
 
 """Which kernels a session recompiled over and over, read off the JIT cache it filled.
 
-A triton kernel is compiled once per distinct set of specialising constants, and every first compile stalls the
-whole engine for a few hundred milliseconds. A constant that tracks a runtime quantity rather than a tuning choice
-turns that into one compile per value: a GLM-5.3 AgentX run compiled 238 variants of one aiter bmm/rope kernel
-because its grid constant moved with the prefill token count, and 59 of 227 variants in that run compiled after the
-server reported ready, 23 of them inside the scored window. TTFT p90 measured 0.97 s cold against 0.55 s warm, and
-two real optimizations were rejected twice on cold numbers before the cause was found.
-
-Many variants is not itself the finding -- a tile-tuned GEMM legitimately carries dozens. What separates the two is
-where the variants differ: a tuning table spreads across several constants, while a runtime quantity leaks into one
-and takes a new value per call shape.
+A triton kernel compiles once per distinct set of specialising constants, and every first compile stalls the
+engine. A constant that tracks a runtime quantity turns that into one compile per call shape. A tuning table
+spreads its variants across several constants; a leaked runtime quantity varies in one.
 """
 
 from __future__ import annotations
@@ -76,11 +69,8 @@ def _varying_positions(suffixes: list[str]) -> list[dict[str, Any]]:
 def variant_counts(cache_root: str | Path | None) -> list[dict[str, Any]]:
     """Per base kernel, how many variants a session compiled and where they differ, worst first.
 
-    A cache this process cannot stat counts as a cache with nothing to report.
-    The callers render a hand-off document and a gap set from several censuses
-    at once, and a session whose cache a privileged earlier run left unreadable
-    would otherwise lose the launch, graph and front-end findings along with
-    this one.
+    A cache this process cannot stat counts as a cache with nothing to report, so the other censuses rendered
+    beside this one survive it.
     """
     root = Path(str(cache_root or "")).expanduser()
     if not str(cache_root or "").strip():

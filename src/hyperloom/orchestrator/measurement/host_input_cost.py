@@ -3,17 +3,9 @@
 
 """What a request pays per input token before the GPU sees it, read off the requests a run already recorded.
 
-On a cached prefix the GPU does almost no prefill work, so time-to-first-token should barely move with how long
-the prompt is. When it moves anyway, the cost is in front of the engine -- rendering the template, tokenising the
-whole prompt again, pickling it to the scheduler -- and it is paid per input token whether or not the KV for those
-tokens is already resident.
-
-Measured on a GLM-5.3 AgentX run with a 97.9% prefix-cache hit: TTFT runs 225 ms at 25k of input and 1414 ms at
-625k, about 198 ms per 100k. The hand-tuned stack took the same workload's front end down to roughly 7 ms per
-100k by encoding the prompt in parallel and caching tokenised segments, which was its single largest step.
-
-The GPU trace cannot show this. In that same run the device was 99.4% busy inside every step and the steps covered
-98.8% of the capture: there is no idle to find, because the cost is paid before a step exists.
+On a cached prefix the GPU does almost no prefill work, so time-to-first-token growing with prompt length is a
+cost in front of the engine (template rendering, re-tokenising, pickling to the scheduler). The GPU trace cannot
+show it: the cost is paid before a step exists.
 """
 
 from __future__ import annotations
@@ -28,9 +20,8 @@ MIN_REQUESTS: int = 60
 #: Input span, in tokens, a run must cover before a slope over it means anything.
 MIN_ISL_SPAN: float = 50_000.0
 
-#: Slope, in ms per 100k input tokens, above which the front end is worth a reader's attention. The hand-tuned
-#: GLM-5.3 stack reached about 7 ms per 100k after its host-side work, so a run well above that is paying for
-#: something that has been removed before.
+#: Slope, in ms per 100k input tokens, above which the front end is worth a reader's attention; a tuned host-side
+#: path reaches single digits.
 FLAG_MS_PER_100K: float = 20.0
 
 _TTFT = "time_to_first_token"

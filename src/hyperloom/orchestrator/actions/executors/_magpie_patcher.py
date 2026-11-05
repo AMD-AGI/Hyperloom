@@ -116,12 +116,8 @@ _LM_EVAL_REF_RE = re.compile(r'local lm_eval_ref="([^"]+)"')
 LM_EVAL_READY_FN = "_hyperloom_lm_eval_ready"
 _LM_EVAL_SPARE_MARKER_FN = "_hyperloom_lm_eval_spare_marker"
 
-# The generic SGLang scripts inject ``--disable-radix-cache``, which is right for a fixed-sequence throughput sweep
-# and wrong for an agentic replay, where each turn resends the previous turn's prompt as its own prefix: a GLM-5.3
-# AgentX hour prefilled 44.7M input tokens of which 94.4% were a prefix the same run had already computed. The flag
-# cannot be lifted from the request side -- the loop below re-adds any default the request does not itself name, and
-# naming this one passes it. InferenceX's own multi-node server script drops it under ``IS_AGENTIC``; these generic
-# scripts are the gap, and this patch retires once they close it.
+# The generic SGLang scripts inject ``--disable-radix-cache``, wrong for an agentic replay whose turns resend their
+# prefix; the request side cannot lift it, so the scripts drop it under ``IS_AGENTIC`` as the multi-node one does.
 _AGENTIC_RADIX_SENTINEL = "HYPERLOOM_AGENTIC_RADIX"
 #: The generic scripts carrying the block; upstream ships one per GPU.
 _AGENTIC_RADIX_SCRIPTS: tuple[str, ...] = ("sglang_mi300x.sh", "sglang_mi355x.sh")

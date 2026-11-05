@@ -47,10 +47,8 @@ from ._patch_sources import _done_field
 
 log = logging.getLogger(__name__)
 
-#: Why an agentic replay keeps a switched patch without a switches-off bench. That leg is a whole replay hour, the
-#: replay's own run-to-run drift (6-8.5% on GLM-5.3) is wider than the band it would be judged in, so it would cost
-#: every switched patch a round and then revert most of them on noise; an off path that cannot even import already
-#: fails the switches-on bench before any of this runs.
+#: Why an agentic replay keeps a switched patch without a switches-off bench: the replay's run-to-run drift is
+#: wider than the parity band, and an off path that cannot import already fails the switches-on bench.
 _AGENTIC_PARITY_NOT_BENCHED = (
     "switch-off parity not benched under an agentic replay: one leg is a full replay hour and the replay's run-to-run "
     "drift is wider than the parity band, so the leg could only revert on noise"
@@ -397,21 +395,10 @@ class PerfGateMixin:
         switch_manifest: list[dict[str, Any]],
         base_tput: float,
     ) -> dict[str, Any]:
-        """Verify the patch is genuinely inert with every rewrite switch unset.
+        """Verify the patch is inert with every rewrite switch unset.
 
-        The whole lever mechanism rests on one invariant: with no switch set, the
-        patched tree behaves exactly like the original. That invariant is what
-        makes it safe to keep unprofitable rewrite code on disk, what makes a
-        per-lever measurement mean anything, and what keeps the baseline
-        comparable across a session that has accumulated several rewrite patches.
-        It is also the invariant an LLM is most likely to break by accident — by
-        reading the switch once at import, inverting a default, or restructuring
-        code outside the guard — and nothing else in the pipeline would notice: a
-        switches-on bench that improves throughput looks like a success whether or
-        not the switches-off path still works.
-
-        So it is measured, not assumed. One extra leg with the switches removed
-        must land inside a noise band around the pre-patch base.
+        The lever mechanism rests on the switched-off tree behaving like the original, so it is measured, not
+        assumed: one extra leg with the switches removed must land inside a noise band around the pre-patch base.
 
         Args:
             bench: The task params, workspace, originating specialist and the

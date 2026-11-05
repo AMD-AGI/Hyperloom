@@ -3,14 +3,9 @@
 
 """Gaps shaped like a cause, derived from what a run was measured doing.
 
-The rest of the gap vocabulary is shaped like an outcome -- short of target, crashed, no promotion for N rounds --
-which tells a session it is stuck without telling it what it is stuck on. The censuses beside this module measure
-causes: a kernel recompiled once per call shape, a launch that could fold into its neighbour, a step class that
-never reached a graph, a prompt tokenised again on every turn. On GLM-5.3 those four carried the hand-tuned
-stack's largest single steps, and not one of them has an outcome a session would have noticed.
-
-Each gap names what was measured and what it costs, so a specialist is pointed at a thing to change rather than at
-a number to improve.
+The censuses beside this module measure causes (a kernel recompiled per call shape, a launch that could fold
+into its neighbour, a step class that never reached a graph, a prompt tokenised again every turn). Each gap names
+what was measured and what it costs, so a specialist is pointed at a thing to change.
 """
 
 from __future__ import annotations
@@ -92,12 +87,8 @@ def _recompile_gaps(session_dir: Any) -> list[dict[str, Any]]:
 def _foldable_gaps(trace_path: Any) -> list[dict[str, Any]]:
     """Launches that cost more than the work they do, with the neighbour each could fold into.
 
-    Ranked across step classes by what each costs over the whole capture. Taken a class at a time, the cap went to
-    whichever class the trace opened with: the GLM-5.3 session raised four EXTEND folds and none from VERIFY, whose
-    1.15 ms-per-step quant launch in front of every blockscale GEMM was the costliest fold in its trace.
-
-    One launch is one fold at every batch width of its step kind. A steady-state capture spans several widths, and
-    counted per width that same quant launch took two of the three slots.
+    Ranked across step classes by what each costs over the whole capture; one launch is one fold at every batch
+    width of its step kind.
     """
     widths: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = defaultdict(list)
     for window_class, rows in foldable_launches(trace_path).items():

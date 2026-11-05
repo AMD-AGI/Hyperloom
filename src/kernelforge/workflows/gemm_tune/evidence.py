@@ -613,8 +613,7 @@ def padded_m(m: int, n: int = 0) -> int:
     Up to 256 the gl=0 multiple of 16 is the bucket, so the CUDA-graph batch
     sizes keep rows of their own; above it the power of two collapses the many
     distinct prefill M. M=1 is its own row: its gl=0 bucket is 16. The power of
-    two is held at 8192 only for a wide N: GLM-5.3's prefill at N=2624 pads to
-    32768, and demand bucketed at 8192 there tuned a row no lookup reached.
+    two is held at 8192 only for a wide N, where aiter pads past it.
     """
     if m <= 1:
         return 1

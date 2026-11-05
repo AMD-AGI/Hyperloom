@@ -279,8 +279,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     async def assign_module_group(self, params: dict[str, Any]) -> None:
         """Name the module group of the capture's decode kernels a FRAMEWORK_AGENT dispatch's target text names.
 
-        A dispatch that names a group keeps it. Kernels of several groups resolve to the one with the most decode time per step. A ``task_kind`` dispatch is
-        Coordinator work with its own target, and a wave's tasks are assigned one by one.
+        A dispatch that names a group keeps it. Kernels of several groups resolve to the one with the most decode
+        time per step. A ``task_kind`` dispatch is Coordinator work with its own target, and a wave's tasks are
+        assigned one by one.
         """
         if any(params.get(key) for key in ("module_group", "task_kind", "tasks")) or is_custom_specialist_dispatch(
             params

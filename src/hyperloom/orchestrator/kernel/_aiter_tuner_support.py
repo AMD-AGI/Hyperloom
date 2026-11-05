@@ -164,18 +164,11 @@ def _write_fmoe_untuned_csv_from_log(
     """Turn the MoE problems observed in ``server_log`` into a tuning input CSV.
 
     Returns ``(csv_path, report)``; ``csv_path`` is "" when nothing tunable was
-    observed. Writing the observed tuple verbatim is the whole point: the
-    quantisation pair, the per-partition ``inter_dim`` and the EP-inflated
-    expert/topk counts are all properties of what the serving framework chose,
-    and every attempt to re-derive them from the model config is a guess that has
-    already produced tables no runtime lookup could reach.
-
-    The token column is held to the same rule: each problem is tuned at the token
-    counts its lookups missed, as aiter logged them. aiter pads a batch's token
-    count before the lookup, so a row keyed on a workload's raw M is never read.
-    Rows taken from the dense GEMMs' M values were: on GLM-5.3, sixteen prefill
-    counts between 16639 and 32768 that all pad to one key, while every decode
-    lookup ran the untuned default.
+    observed. The observed tuple is written verbatim: the quantisation pair, the
+    per-partition ``inter_dim`` and the EP-inflated expert/topk counts are what
+    the serving framework chose, not what the model config implies. Each problem
+    is tuned at the token counts its lookups missed, as aiter logged them, since
+    aiter pads a batch's token count before the lookup.
 
     Problems whose dtype pair aiter's codegen rejects are dropped rather than
     passed through, because one unsupported row aborts the whole tuner run.

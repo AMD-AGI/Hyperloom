@@ -29,9 +29,8 @@ _session_environment: ContextVar[Mapping[str, str]] = ContextVar(
     default={},
 )
 
-#: Under every session's overlay. An import the agent runs rewrites the byte-code caches beside the modules it loads,
-#: including those under a protected ``benchmark/`` or ``test/`` directory, and the workspace guard -- rightly, since a
-#: planted ``.pyc`` replaces the source it shadows -- rejects the session for them.
+#: Under every session's overlay: an agent's imports rewrite byte-code caches beside protected ``benchmark/`` or
+#: ``test/`` modules, which the workspace guard rejects as planted ``.pyc`` files.
 _SESSION_BASE_ENVIRONMENT: Mapping[str, str] = {"PYTHONDONTWRITEBYTECODE": "1"}
 
 

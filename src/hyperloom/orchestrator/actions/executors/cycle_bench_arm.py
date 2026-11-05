@@ -39,7 +39,7 @@ CYCLE_ARMS_PARAM = "cycle_arms"
 #: Batch sizes the bench drives; the baseline replay's running counts are weighted onto them.
 BATCH_GRID: tuple[int, ...] = (1, 2, 4)
 
-#: About 2x / 3x the two-boot stdev of fixed-mode boots on GLM-5.3 (ROCm 10): 0.5% weighted, up to 1.3% at one size.
+#: About 2x / 3x the measured two-boot stdev of fixed-mode boots: 0.5% weighted, up to 1.3% at one size.
 CYCLE_BANDS = cb.Bands(batch_pct=1.0, per_bs_pct=3.0, regress_pct=1.5)
 
 #: Admission price of one arm: a warm boot without the host KV cache plus one log window per batch size.

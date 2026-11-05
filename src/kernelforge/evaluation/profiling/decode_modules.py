@@ -3,11 +3,8 @@
 
 """Where a decode step's device time goes, by model module, read straight off the raw capture.
 
-A GLM-5.3 VERIFY step is one CUDA-graph replay that TraceLens cannot decompose, yet the raw ROCm trace records
-each of its ~2,000 kernels with a duration inside the step's annotation. Summing them per module (MoE, dense GEMM,
-attention, the DSA indexer, collectives, quantisation) gives the table a specialist needs to pick a target, without
-TraceLens. Profiling stretches each kernel by under a microsecond, so absolute milliseconds read high by about a
-tenth while the ranking holds.
+The raw trace records every kernel of a graph-replayed step that TraceLens cannot decompose; summing them per
+module gives the ranking. Profiling inflates absolute milliseconds by about a tenth; the shares hold.
 """
 
 from __future__ import annotations
@@ -22,7 +19,7 @@ from kernelforge.evaluation.profiling.serving_windows import StepWindow, _kernel
 from kernelforge.evaluation.profiling.trace_events import load_trace_events, resolve_capture
 
 #: First match wins, so a name that mentions two modules lands in the earlier one (an allreduce fused with an
-#: RMSNorm is a collective; a MoE quant is MoE). Checked on GLM-5.3 VERIFY: 99.96% of kernel time is classified.
+#: RMSNorm is a collective; a MoE quant is MoE).
 MODULE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (module, re.compile(pattern))
     for module, pattern in (

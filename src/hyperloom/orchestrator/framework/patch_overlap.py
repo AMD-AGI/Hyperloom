@@ -36,9 +36,8 @@ def _line_key(body: str) -> str:
 def changed_line_keys(diff_texts: Iterable[str]) -> list[str]:
     """Keys for the code lines a unified diff adds or removes, whitespace-normalised and de-duplicated.
 
-    Two specialists porting one upstream change produce diffs that differ in context, ordering, file paths and the
-    comments each writes, but repeat the same code lines, which is what makes those a better identity than the patch
-    name: one GLM-5.3 session measured the same upstream PR seven times under five different names.
+    Two ports of one upstream change differ in context, ordering, paths and comments but repeat the same code
+    lines, which makes those a better identity than the patch name.
     """
     keys: dict[str, None] = {}
     for text in diff_texts:

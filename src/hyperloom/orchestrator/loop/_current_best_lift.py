@@ -255,10 +255,7 @@ class CurrentBestLiftMixin:
     def _hold_current_best(self, task_kind: str, reason: str, detail: str) -> bool:
         """Log a measured winner refused promotion; returns ``True``, the refusal outcome.
 
-        Warning, not info: a refusal here is the whole measured round being
-        discarded, and the lane that measured it has already filed its KEEP
-        elsewhere, so a quiet log leaves the session reporting 0% for work it
-        did do.
+        Warning, not info: the whole measured round is discarded while its lane already filed the KEEP.
         """
         log.warning("current_best held: %s winner %s (%s)", task_kind, reason, detail)
         return True

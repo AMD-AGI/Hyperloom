@@ -15,9 +15,8 @@ if TYPE_CHECKING:
 
 __all__ = ["LEVER_BUNDLE_REASON", "PHASE_DISPATCH_FIRST", "in_dispatch_order", "is_operator_work"]
 
-#: The ``reason`` of the explore that benches every dormant rewrite lever together. It goes ahead of queued integrates:
-#: its patches are already written and in the tree, each missed the KEEP threshold alone, and benched together is the
-#: only way they clear it. Behind the integrates it never ran -- they filled the phase first.
+#: The ``reason`` of the explore that benches every dormant rewrite lever together. It goes ahead of queued
+#: integrates: its patches are already in the tree, and benched together is the only way they clear the KEEP bar.
 LEVER_BUNDLE_REASON: str = "dormant_lever_bundle"
 _EXPLORE = "explore"
 

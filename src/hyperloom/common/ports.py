@@ -2,13 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Listening ports for servers that bind long after the port is chosen.
 
-A port read back from ``bind(("", 0))`` comes out of the kernel's ephemeral
-range, the same pool every outbound ``connect`` draws its local port from. A
-server that binds it minutes later -- a TP8 model server spends that long
-loading weights and capturing graphs while its ranks, RCCL and the agents open
-connections -- can find it taken and die with EADDRINUSE after a full boot.
-Ports below the ephemeral range are never handed to an outbound connection, so
-a port chosen there stays free unless something binds it explicitly.
+A port from ``bind(("", 0))`` is in the ephemeral range every outbound ``connect`` draws from, so a server that
+binds it minutes later can find it taken. Ports below that range stay free unless something binds them explicitly.
 """
 
 from __future__ import annotations

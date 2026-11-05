@@ -3,15 +3,9 @@
 
 """Which part of a serving trace a kernel ranking is about.
 
-An agentic serving trace has no single steady state. One GLM-5.3 AgentX capture holds prefill steps of 660 ms
-beside decode steps of 14 ms -- a factor of 46 -- so one ranking over the whole trace is a ranking of prefill, and
-says nothing about the decode it is 46 times larger than. Which is why the same operator needs two patches: the
-hand-tuned GLM-5.3 stack carries ``aiter_fmoe_cfg_ep4`` for decode MoE and ``aiter_fmoe_prefill_ep4`` for prefill
-MoE, one tuned table each.
-
-sglang annotates every step with its kind and batch size (``step[VERIFY bs=3]``), and the device timeline carries
-the same annotations as the kernels, so the windows are already in the trace: group by what the step is, rank
-inside each group, and a reader can tell a decode hotspot from a prefill one.
+Prefill steps run far longer than decode steps, so one ranking over a whole agentic trace ranks prefill. sglang
+annotates every step with its kind and batch size (``step[VERIFY bs=3]``) on the device timeline, so kernels are
+grouped by the step they start in and ranked within each group.
 """
 
 from __future__ import annotations
@@ -74,9 +68,8 @@ def step_kind(window_class: str) -> str:
 def step_windows(events: list[dict[str, Any]]) -> list[StepWindow]:
     """Annotated steps on the device timeline, in time order.
 
-    Device-side only: the host records the same annotations, but their duration is how long submission took, not
-    how long the step ran -- on the GLM-5.3 capture a decode step reads 0.5 ms on the host and 14.3 ms on the
-    device -- and only the device timeline shares a clock with the kernels.
+    Device-side only: a host annotation's duration is submission time, and only the device timeline shares a clock
+    with the kernels.
     """
     out: list[StepWindow] = []
     for event in events:

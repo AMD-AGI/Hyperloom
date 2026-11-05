@@ -186,14 +186,9 @@ class ResumeConsistencyMixin:
     async def _resume_reenter_kernel_if_needed(self) -> None:
         """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
 
-        Phase-entry side effects (the ``kernel_agent`` task that carries the
-        phase's work) are bound to a phase *transition* via
-        ``_on_phase_entered``; a resume only restores ``phase`` from state.json
-        and never re-enters the current phase. The resume reaps the task the
-        dead leg held, so the next tick sees no agent in flight and leaves
-        KERNEL as settled -- the whole round is silently lost.
-
-        The decision is driven purely by whether THIS phase's round finished:
+        Phase-entry side effects (the ``kernel_agent`` task) are bound to a
+        phase *transition*; a resume restores ``phase`` without re-entering it
+        and reaps the dead leg's task. Whether THIS phase's round finished decides:
 
           * finished -> the phase machine exits KERNEL on the next tick with no
             re-run (GEAK: a ``geak`` completion record on the current phase row;

@@ -3,16 +3,9 @@
 
 """Kernels that cost a launch rather than the work they do, and the neighbour each could fold into.
 
-A step that runs a split-K GEMM, then a few microseconds of reduction, then the one consumer of that reduction
-pays three launches for one result. Folding the middle one into either side removes a launch without changing what
-is computed, which is where a large share of the hand-tuned GLM-5.3 wins came from -- the o_proj reduce folded
-into the pull all-reduce, the q_b reduce into the fused BMM/RoPE, the indexer reduces into the qk kernel.
-
-The signal is measured, not named. A GLM-5.3 decode step runs ``_sparse_mla_reduce_kernel`` 78 times at 4.2 us a
-call, always after ``_sparse_mla_split_k_kernel`` and always before one batched GEMM -- but the repository's
-kernel categoriser reads that name as attention, not as a reduction, so a category filter would drop the clearest
-candidate in the trace. What finds it is the shape of its launches: many per step, microseconds each, and the same
-neighbours every time.
+Folding a microsecond-scale kernel into the neighbour it always runs beside removes a launch without changing what
+is computed. Candidates are found by the shape of their launches (many per step, microseconds each, the same
+neighbours every time), not by name: the kernel categoriser misreads some reductions as attention.
 """
 
 from __future__ import annotations
@@ -26,16 +19,14 @@ from kernelforge.evaluation.profiling.trace_events import load_trace_events
 
 from .diagnose import categorize_kernel_name
 
-#: Above this a kernel is doing work worth its own launch. Anchored on the empty-kernel floor measured on this
-#: hardware, about 1.5 us: a call within a few multiples of it is mostly launch. At 10 us the census also caught
-#: a blockscale GEMM at 9.6 us and a reduce-scatter at 9.9 us, which are the work, not the glue around it.
+#: Above this a kernel is doing work worth its own launch: a few multiples of the ~1.5 us empty-kernel floor.
 MAX_GLUE_US: float = 6.0
 
 #: Below this the launches are not what the step is spending itself on, whatever each one costs.
 MIN_LAUNCHES_PER_STEP: float = 8.0
 
 #: Share of a kernel's launches that must sit beside the same neighbour before that neighbour is named as the one
-#: to fold into. Real pairs in a GLM-5.3 step reach 99-100%; anything looser is not one relationship.
+#: to fold into.
 MIN_NEIGHBOUR_SHARE: float = 0.9
 
 #: Candidates named per window class.

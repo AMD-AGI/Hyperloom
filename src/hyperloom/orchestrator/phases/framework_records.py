@@ -122,11 +122,7 @@ def _framework_config_levers_from_done(
 def _lever_controls(entry: Mapping[str, Any]) -> dict[str, Any]:
     """The ablation half of a config lever: what it drops, not only what it appends.
 
-    A proposal that only removes a flag -- the way a baked-in
-    ``--disable-radix-cache`` is turned off -- carries no ``extra_args`` at all,
-    so a reader that looks only at what is appended sees an empty lever and
-    walks past it to the next proposal. That is how the agentic GLM-5.3 session
-    launched one proposal's name against another proposal's arguments.
+    A proposal that only removes a flag carries no ``extra_args`` at all, and is still a lever.
     """
     remove_args = [text for text in (str(a).strip() for a in (entry.get("remove_args") or [])) if text]
     unset_envs = [text for text in (str(e).strip() for e in (entry.get("unset_envs") or [])) if text]
@@ -141,11 +137,7 @@ def _lever_controls(entry: Mapping[str, Any]) -> dict[str, Any]:
 def _framework_config_deliverable(config_levers: dict[str, Any]) -> dict[str, Any]:
     """The ``integrate_patch`` params a config-lever round is proposed with.
 
-    The name has to come from the proposal the levers came from. Reading
-    ``proposal_set[0]`` instead launched one proposal's name against another's
-    arguments whenever the first proposal was ablation-only. A lever that only
-    drops a flag needs its ablation carried too, or it reaches the launcher as a
-    no-op.
+    The name comes from the proposal the levers came from, and an ablation-only lever carries its ablation.
     """
     return {
         "patch_name": str(config_levers.get("name") or ""),

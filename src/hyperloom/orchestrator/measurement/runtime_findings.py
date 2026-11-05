@@ -334,10 +334,8 @@ def render_runtime_findings(measurement: Mapping[str, Any]) -> str:
 def _device_fault_reading(findings: list[dict[str, Any]]) -> list[str]:
     """Say which kind of device fault this was, because the log's loudest line is not the one that caused it.
 
-    A trapped kernel kills its rank's queue, so the next collective never completes and a watchdog reports a
-    timeout minutes later. That timeout is the last and loudest error in the log and it points at the collectives,
-    which is the wrong place: on the GLM-5.3 run where this was traced by hand, the queue exceptions landed at
-    19:31 and the NCCL watchdog fired at 19:41 on an all-reduce that was only waiting for a dead queue.
+    A trapped kernel kills its rank's queue, so the next collective never completes and a watchdog timeout
+    minutes later is the last and loudest error, pointing at the collectives instead of the kernel.
     """
     detected = {f["rule_id"] for f in findings if f["status"] == DETECTED}
     if "device.queue_exception" not in detected:

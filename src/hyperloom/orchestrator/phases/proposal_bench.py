@@ -127,8 +127,7 @@ class ProposalBench(CoordinatorCollaborator):
         """Enqueue one round benching every dormant rewrite lever together; whether a new round was enqueued.
 
         Keyed on the set of switches, so a set is benched once and a grown set again. Dispatched ahead of queued
-        integrates (see :mod:`.dispatch_order`): left to the orchestration it waited behind them, and no explore fit
-        the phase they had already filled. Nothing is enqueued into a phase on its way out, which would cancel it.
+        integrates (see :mod:`.dispatch_order`); nothing is enqueued into a phase on its way out.
         """
         from ..actions.executors._framework_switch_manifest import dormant_lever_bundle
 
