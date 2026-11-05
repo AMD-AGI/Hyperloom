@@ -87,3 +87,21 @@ def test_a_stale_directory_of_an_earlier_attempt_is_replaced_not_merged(tmp_path
     collect_traces(workspace, destination)
 
     assert sorted(p.name for p in (destination / "torch_trace").iterdir()) == ["new.pt.trace.json.gz"]
+
+
+def test_capture_traces_in_and_beside_the_workspace_are_both_kept_and_both_counted(tmp_path: Path) -> None:
+    workspace = tmp_path / "round" / "ws"
+    _file(workspace / "capture_traces" / "bs_1_rank0.json", b"inside 1")
+    _file(workspace / "capture_traces" / "bs_2_rank0.json", b"inside 2")
+    _file(workspace.parent / "capture_traces" / "bs_1_rank0.json", b"beside 1")
+    _file(workspace.parent / "capture_traces" / "bs_4_rank0.json", b"beside 4")
+    destination = tmp_path / "out" / "profile"
+
+    assert collect_traces(workspace, destination) == 2
+
+    kept = {p.relative_to(destination).as_posix(): p.read_bytes() for p in destination.rglob("*") if p.is_file()}
+    assert sorted(kept.values()) == [b"beside 1", b"beside 4", b"inside 1", b"inside 2"], "no trace was overwritten"
+    assert kept["capture_traces/bs_1_rank0.json"] == b"inside 1", "the round's own file keeps its name"
+    assert all(path.startswith("capture_traces/bs_") for path in kept), "each still reads as a capture sidecar"
+    assert has_traces(destination) and not has_step_traces(destination)
+    assert not (workspace / "capture_traces").exists() and not (workspace.parent / "capture_traces").exists()
