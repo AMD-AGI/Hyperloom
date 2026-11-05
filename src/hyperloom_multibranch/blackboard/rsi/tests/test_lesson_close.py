@@ -129,6 +129,33 @@ def test_a_revision_of_a_lesson_no_longer_live_begins_a_lesson_of_its_own(
         publish_lessons(dataclasses.replace(snapshot, profile=None), pool)
 
 
+def test_a_revision_of_a_lesson_another_learning_retires_in_the_same_close_begins_a_lesson_of_its_own(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    pool = LessonPool(tmp_path)
+    wrong = pooled(pool, "z", "chunked prefill always kills the server during warmup on this image")
+    session = dataclasses.replace(
+        snapshot,
+        learnings=(
+            learnt("s1:1", LearningKind.OTHER, "it only fails with the old warmup script", retires=wrong),
+            learnt(
+                "s2:1",
+                LearningKind.PITFALL,
+                "the old warmup script sends prompts past the prefill chunk",
+                supersedes=wrong,
+            ),
+        ),
+    )
+
+    published = publish_lessons(session, pool)
+
+    assert published.counts == {RETIRED: 1, NEW: 1}
+    assert pool.lessons()[wrong].retired is not None
+    assert heads(pool, wrong) == ["chunked prefill always kills the server during warmup on this image"]
+    own = pool.lessons()[lesson_id_for("sess-1", "s2:1")]
+    assert (own.retired, own.heads[0].supersedes) == (None, ())
+
+
 def test_the_standing_of_a_shown_lesson_is_what_the_branchs_tests_of_its_family_did_next(
     snapshot: BlackboardSnapshot, tmp_path: Path
 ) -> None:
@@ -179,3 +206,21 @@ def test_a_session_starts_at_most_so_many_lessons_and_skips_what_one_already_say
     published = publish_lessons(dataclasses.replace(snapshot, learnings=(near, *many)), pool)
 
     assert published.counts == {DUPLICATE: 1, NEW: MAX_NEW_LESSONS, CAPPED: 2}
+
+
+def test_a_close_run_again_counts_the_lessons_the_session_started_toward_the_cap(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    pool = LessonPool(tmp_path)
+    many = tuple(
+        learnt(f"s1:{n}", LearningKind.INSIGHT, f"knob{n}a sets alpha{n}b beta{n}c gamma{n}d for decode")
+        for n in range(1, MAX_NEW_LESSONS + 3)
+    )
+    session = dataclasses.replace(snapshot, learnings=many)
+
+    first = publish_lessons(session, pool)
+    again = publish_lessons(session, pool)
+
+    assert first.counts == {NEW: MAX_NEW_LESSONS, CAPPED: 2}
+    assert again.counts == {DUPLICATE: MAX_NEW_LESSONS, CAPPED: 2} and again.written == 0
+    assert len(pool.lessons()) == MAX_NEW_LESSONS

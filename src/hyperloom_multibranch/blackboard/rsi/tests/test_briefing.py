@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from hyperloom_kb import RemoteReadResult
 
+from hyperloom.contracts.measurement import REPRODUCED, AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ComponentPatches,
@@ -57,13 +58,22 @@ from hyperloom_multibranch.blackboard.knowledge.warm_start import (
     ReplayRefusal,
     WarmLead,
 )
+from hyperloom_multibranch.blackboard.knowledge.lessons import clipped
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi import briefing as briefing_module
-from hyperloom_multibranch.blackboard.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs
+from hyperloom_multibranch.blackboard.rsi.briefing import (
+    KNOWN_DEFECT,
+    ON_HEAD,
+    CrossSessionBriefing,
+    RecallCache,
+    SessionBriefs,
+)
+from hyperloom_multibranch.blackboard.rsi.cases import CasePool, PoolEntry
 from hyperloom_multibranch.blackboard.rsi.tests.repos import FakeRepo
-from hyperloom_multibranch.blackboard.tests.factories import FakeClock, judgement, profile, request, result
+from hyperloom_multibranch.blackboard.tests.factories import START, FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, SPLIT_KV, scripted_session
 from hyperloom_multibranch.blackboard.tools import FOCUS_LINE
+from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
 
 
 SAME = {
@@ -124,7 +134,15 @@ async def test_the_brief_holds_this_sessions_lessons_and_both_kinds_of_recall(tm
         _recalled("exp-elsewhere", "keep", 1200.0, gpu="mi300x"),
     )
     briefing = CrossSessionBriefing(
-        _WithExtraFailure(blackboard), warm=(LEAD,), experiences=reader, metric=METRIC, focus="attention", branch="s3"
+        _WithExtraFailure(blackboard),
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(LEAD,),
+        experiences=reader,
+        metric=METRIC,
+        focus="attention",
+        branch="s3",
     )
 
     brief = await briefing.startup_brief("c1")
@@ -172,7 +190,9 @@ async def test_a_reference_launch_is_a_lead_after_the_recipe_kbs_champions_and_b
 async def test_the_cap_keeps_the_most_specific_items(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
     monkeypatch.setattr(briefing_module, "MAX_BRIEF_CHARS", 150)
-    briefing = CrossSessionBriefing(_WithExtraFailure(blackboard), warm=(LEAD,))
+    briefing = CrossSessionBriefing(
+        _WithExtraFailure(blackboard), recalls=RecallCache(), champions={}, refused={}, warm=(LEAD,)
+    )
 
     brief = await briefing.startup_brief("c1")
 
@@ -180,10 +200,57 @@ async def test_the_cap_keeps_the_most_specific_items(tmp_path: Path, monkeypatch
     assert brief.leads == ("recipe: inference:older: +10.00% `--enable-expert-parallel` [older]",)
 
 
+async def _reproduced_on_the_root(root: Path, pool: CasePool, diagnosis: str) -> None:
+    """A past session's case of ``diagnosis`` in ``pool``, and the repro test of the session at ``root`` that ran it on
+    the root ``c0``, where it reproduced."""
+
+    found = profile()
+    entry = PoolEntry(
+        "#!/bin/sh\nexit 1\n",
+        diagnosis,
+        "past-1",
+        "c1",
+        "sha256:" + "a" * 64,
+        found.model,
+        found.framework,
+        found.framework_version,
+        found.hardware,
+        START,
+    )
+    pool.write(entry)
+    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    case = (AttachmentRef(FIX_CASE_ID, "dir", entry.case_id),)
+    repro = TestRequest(
+        TestKind.REPRO, Purpose.REPRO, INTEGRATION_BRANCH, "c0", RecipeDelta(), attachments=case, request_id="p9"
+    )
+    await toolbox.write_request(repro)
+    await toolbox.write_result(dataclasses.replace(result("p9"), repro_verdict=REPRODUCED))
+
+
+async def test_a_known_defect_is_clipped_as_every_lesson_is_so_a_long_diagnosis_leaves_the_rest_of_the_brief(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    pool = CasePool(tmp_path / "cases")
+    diagnosis = "rope_theta is read as a quarter of its value, so greedy answers drift; " * 60
+    await _reproduced_on_the_root(tmp_path / "blackboard", pool, diagnosis)
+
+    brief = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, warm=(LEAD,), cases=pool
+    ).startup_brief("c1")
+    without = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, warm=(LEAD,)
+    ).startup_brief("c1")
+
+    assert len(diagnosis) > briefing_module.MAX_BRIEF_CHARS
+    assert brief.lessons == (clipped(f"{KNOWN_DEFECT} past-1 c1: {diagnosis.strip()}"), *without.lessons)
+    assert brief.leads == without.leads != ()
+
+
 async def test_a_champion_that_removes_an_option_of_the_resolved_launch_says_so_in_its_lead(tmp_path: Path) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
     removing = dataclasses.replace(LEAD, remove_args=("--enable-linear-replayssm-spec",))
-    briefing = CrossSessionBriefing(blackboard, warm=(removing,))
+    briefing = CrossSessionBriefing(blackboard, recalls=RecallCache(), champions={}, refused={}, warm=(removing,))
 
     brief = await briefing.startup_brief("c1")
 
@@ -202,7 +269,12 @@ async def test_the_first_batch_brief_is_cross_session_only(tmp_path: Path) -> No
     await as_role(Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
     await as_role(Role.GATE).write_baseline(BaselineRecord("c0", {METRIC: 1000.0}, {METRIC: 0.8}, {METRIC: 1.6}, ()))
     briefing = CrossSessionBriefing(
-        as_role(Role.OBSERVER), warm=(LEAD,), experiences=_reader(_recalled("exp-faster", "keep", 1100.0))
+        as_role(Role.OBSERVER),
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(LEAD,),
+        experiences=_reader(_recalled("exp-faster", "keep", 1100.0)),
     )
 
     brief = await briefing.startup_brief("c0")
@@ -222,8 +294,12 @@ async def test_a_recalled_summary_without_conditions_is_sorted_by_the_index_the_
     bare = {key: value for key, value in _recalled("exp-faster", "keep", 1100.0).items() if key != "identity"}
     index = IdentityIndex(FakeExport([{"id": "exp-faster", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE}]))
 
-    with_index = CrossSessionBriefing(blackboard, experiences=_reader(bare), identities=index)
-    without = CrossSessionBriefing(blackboard, experiences=_reader(bare))
+    with_index = CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, experiences=_reader(bare), identities=index
+    )
+    without = CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, experiences=_reader(bare)
+    )
 
     assert (await with_index.startup_brief("c0")).leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
     assert without.identities is None
@@ -239,7 +315,12 @@ async def test_an_experience_of_the_other_kind_of_session_is_only_a_lesson_to_re
     reader = _reader(_recalled("exp-agentx", "keep", 1120.0), _recalled("exp-faster", "keep", 1100.0))
 
     briefing = CrossSessionBriefing(
-        blackboard, experiences=reader, identities=IdentityIndex(FakeExport([agentx, faster]))
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        experiences=reader,
+        identities=IdentityIndex(FakeExport([agentx, faster])),
     )
     brief = await briefing.startup_brief("c0")
 
@@ -258,7 +339,9 @@ async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_repla
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
     repo = FakeRepo({"s3": "c3"}, {"c3": head})
     warm = (dataclasses.replace(LEAD, replay=prepared),)
-    briefing = CrossSessionBriefing(blackboard, warm=warm, branch="s3", repo=repo)
+    briefing = CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, warm=warm, branch="s3", repo=repo
+    )
 
     brief = await briefing.startup_brief("c1")
     replayed = await briefing.warm_replay(LEAD.canonical_id)
@@ -275,7 +358,8 @@ async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_repla
         unpacked,
     )
     assert await briefing.warm_replay("inference:none") is None
-    assert await CrossSessionBriefing(blackboard, warm=warm, branch="s3").warm_replay(LEAD.canonical_id) is None
+    no_repo = CrossSessionBriefing(blackboard, recalls=RecallCache(), champions={}, refused={}, warm=warm, branch="s3")
+    assert await no_repo.warm_replay(LEAD.canonical_id) is None
 
 
 async def test_the_briefing_reads_a_patch_a_launch_only_replay_leaves_out_whatever_the_head(tmp_path: Path) -> None:
@@ -283,7 +367,14 @@ async def test_the_briefing_reads_a_patch_a_launch_only_replay_leaves_out_whatev
     image, upstream = "sha256:" + "b" * 64, "e" * 40
     patch = ReplayReference(PATCH_REFERENCE, "sglang/gate.patch", "d" * 64, image, "sglang", upstream, "+gate\n")
     prepared = PreparedReplay(LEAD.canonical_id, None, LaunchConfig("--enable-expert-parallel"), "refused", (patch,))
-    briefing = CrossSessionBriefing(blackboard, warm=(dataclasses.replace(LEAD, replay=prepared),), branch="s3")
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(dataclasses.replace(LEAD, replay=prepared),),
+        branch="s3",
+    )
 
     assert await briefing.warm_reference(LEAD.canonical_id, "sglang/gate.patch") == "+gate\n"
     assert await briefing.warm_reference(LEAD.canonical_id, "other.patch") is None
@@ -309,7 +400,9 @@ async def test_a_champion_the_start_commit_builds_on_is_named_on_the_head_and_no
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
     unpacked = "the record holds no patch or kernel files"
     warm, repo = _champion_merged(unpacked)
-    briefing = CrossSessionBriefing(blackboard, warm=warm, branch="s3", repo=repo)
+    briefing = CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, warm=warm, branch="s3", repo=repo
+    )
 
     on_head, on_root = await briefing.startup_brief("i1"), await briefing.startup_brief("c0")
 
@@ -332,7 +425,13 @@ async def test_a_replay_preludes_check_refused_is_named_in_the_brief_and_blackbo
         "online_tuning_unsupported", "PYTORCH_TUNABLEOP_ENABLED=1 without PYTORCH_TUNABLEOP_TUNING=0"
     )
     briefing = CrossSessionBriefing(
-        blackboard, warm=(dataclasses.replace(warm[0], refusal=refusal),), branch="s3", repo=repo
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(dataclasses.replace(warm[0], refusal=refusal),),
+        branch="s3",
+        repo=repo,
     )
 
     brief = await briefing.startup_brief("c0")
@@ -360,7 +459,14 @@ async def test_the_session_reads_each_commits_recipe_once_to_find_the_champions_
 async def test_another_branchs_tested_change_is_replayed_on_the_branch_head_as_it_was_tested(tmp_path: Path) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
-    briefing = CrossSessionBriefing(blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": head}))
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": head}),
+    )
 
     replayed = await briefing.peer_replay("r1")
 
@@ -378,7 +484,14 @@ async def test_a_peer_replay_names_the_heads_kernel_its_change_takes_the_place_o
     )
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(theirs,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(own, other))
-    briefing = CrossSessionBriefing(blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": head}))
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": head}),
+    )
 
     replayed = await briefing.peer_replay("r7")
 
@@ -397,7 +510,14 @@ async def test_a_peer_replay_gives_a_component_new_to_the_head_the_upstream_its_
     await toolbox.write_request(request("r7", SPLIT_KV, tested))
     plain = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
     patched = dataclasses.replace(plain, components=(ComponentPatches("sglang", sglang, "f" * 40),))
-    briefing = CrossSessionBriefing(blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": plain, "c0": patched}))
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": plain, "c0": patched}),
+    )
 
     replayed = await briefing.peer_replay("r7")
 
@@ -417,7 +537,9 @@ async def test_a_peer_replay_says_why_when_there_is_nothing_to_replay_on_the_bra
 
     def replaying(branch: str, recipe: Recipe | None = plain) -> CrossSessionBriefing:
         repo = FakeRepo({branch: "c3"}, {"c3": recipe}) if recipe is not None else None
-        return CrossSessionBriefing(blackboard, branch=branch, repo=repo)
+        return CrossSessionBriefing(
+            blackboard, recalls=RecallCache(), champions={}, refused={}, branch=branch, repo=repo
+        )
 
     for briefing, request_id, why in (
         (replaying("s3"), "r8", "no longer applies to your head c3: the recipe loads no kernel artifacts"),
@@ -426,7 +548,14 @@ async def test_a_peer_replay_says_why_when_there_is_nothing_to_replay_on_the_bra
         (replaying("s3", tuned), "r1", "your head c3 already has the change r1 tested"),
         (replaying("s3", None), "r1", "reads no experiment repository"),
         (
-            CrossSessionBriefing(blackboard, branch="s3", repo=FakeRepo({"s3": "c0"}, {"c0": plain})),
+            CrossSessionBriefing(
+                blackboard,
+                recalls=RecallCache(),
+                champions={},
+                refused={},
+                branch="s3",
+                repo=FakeRepo({"s3": "c0"}, {"c0": plain}),
+            ),
             "r1",
             "on your head c0",
         ),
@@ -451,7 +580,9 @@ async def test_recalled_leads_take_turns_by_the_layer_they_change(tmp_path: Path
         kept("exp-s1", 1050.0, "source_patch"),
     )
 
-    brief = await CrossSessionBriefing(blackboard, experiences=reader).startup_brief("c0")
+    brief = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, experiences=reader
+    ).startup_brief("c0")
 
     assert brief.leads == (
         "prior (config): change exp-c1: keep +10.00% [exp-c1]",
@@ -480,9 +611,19 @@ async def test_the_lessons_hold_what_this_session_and_past_sessions_learnt_about
     log = tmp_path / LEARNINGS_LOG
     recall = LearningRecall(FakeExperienceReader(completed_read(past)), log=RetrievalLog(log))
 
-    briefing = CrossSessionBriefing(blackboard, focus="attention split kv", branch="s3", learnings=recall)
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        focus="attention split kv",
+        branch="s3",
+        learnings=recall,
+    )
     brief = await briefing.startup_brief("c0")
-    alone = await CrossSessionBriefing(blackboard, focus="attention split kv").startup_brief("c0")
+    alone = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, focus="attention split kv"
+    ).startup_brief("c0")
     (logged,) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
     assert (logged["branch"], logged["source"], logged["query"]) == ("s3", "brief", "attention split kv")
@@ -507,7 +648,16 @@ async def test_the_brief_logs_the_leads_it_kept_under_its_cap_with_the_change_ea
     log = tmp_path / LEARNINGS_LOG
     recall = LearningRecall(FakeExperienceReader(completed_read()), log=RetrievalLog(log))
     reader = _reader(_recalled("exp-faster", "keep", 1100.0))
-    full = CrossSessionBriefing(blackboard, warm=(LEAD,), experiences=reader, branch="s3", learnings=recall)
+    full = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(LEAD,),
+        experiences=reader,
+        branch="s3",
+        learnings=recall,
+    )
 
     await full.startup_brief("c0")
     monkeypatch.setattr(briefing_module, "MAX_BRIEF_CHARS", 100)
@@ -527,9 +677,13 @@ async def test_without_a_kb_or_a_profile_or_a_completed_read_nothing_is_recalled
         async def snapshot(self) -> BlackboardSnapshot:
             return dataclasses.replace(await self.blackboard.snapshot(), profile=None)
 
-    unavailable = await CrossSessionBriefing(blackboard, experiences=failed).startup_brief("c1")
-    no_profile = await CrossSessionBriefing(_NoProfile(blackboard), experiences=_reader()).startup_brief("c1")
-    no_kb = await CrossSessionBriefing(blackboard).startup_brief("c1")
+    unavailable = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, experiences=failed
+    ).startup_brief("c1")
+    no_profile = await CrossSessionBriefing(
+        _NoProfile(blackboard), recalls=RecallCache(), champions={}, refused={}, experiences=_reader()
+    ).startup_brief("c1")
+    no_kb = await CrossSessionBriefing(blackboard, recalls=RecallCache(), champions={}, refused={}).startup_brief("c1")
 
     assert unavailable.lessons == unavailable.leads == no_profile.leads == no_kb.leads == ()
 
