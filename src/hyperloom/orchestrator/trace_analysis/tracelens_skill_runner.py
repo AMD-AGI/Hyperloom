@@ -35,8 +35,7 @@ from hyperloom.common.codex_session import (
 )
 from hyperloom_common.llm import llm_config
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest
-from hyperloom_common.llm.llm_config import claude_sdk_env_options
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, claude_sdk_env_options
 from ._capture_shapes import is_capture_dir_name
 from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from ._literal_utils import safe_literal_eval as _safe_literal_eval
@@ -51,8 +50,6 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 _MAX_AGENT_TURNS = 300
-# How much of the agent's last reply a missing-report error quotes.
-_REPLY_EXCERPT_CHARS = 1000
 
 # The run config the TraceLens skill reads.
 RUN_CONFIG_NAME = "run.yaml"
@@ -714,10 +711,8 @@ def _skill_result(run: _SkillRun, *, runner: str, label: str, raw_text: str, err
     if not report_path.exists():
         if error:
             raise RuntimeError(f"TraceLens {label} runner failed before writing {report_path}: {error}")
-        reply = raw_text.strip()[:_REPLY_EXCERPT_CHARS]
-        raise RuntimeError(
-            f"TraceLens {label} runner did not write {report_path}" + (f"; the agent replied: {reply}" if reply else "")
-        )
+        suffix = f"; the agent replied: {reply}" if (reply := raw_text.strip()[:1000]) else ""
+        raise RuntimeError(f"TraceLens {label} runner did not write {report_path}{suffix}")
     artifact_paths = {"tracelens_agent_report": str(report_path), "tracelens_cmd_prefix": str(run.prefix_path)}
     if error:
         artifact_paths["tracelens_agent_sdk_error"] = error

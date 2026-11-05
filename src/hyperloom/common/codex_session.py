@@ -40,9 +40,10 @@ _PRIVATE_HEADER_ENV_PREFIX = "HYPERLOOM_CODEX_HTTP_HEADER_"
 
 # Sandbox preset selector.
 CODEX_SANDBOX_MODE_ENV = "HYPERLOOM_CODEX_SANDBOX_MODE"
-DEFAULT_CODEX_SANDBOX_MODE = "workspace-write"
+_WORKSPACE_WRITE_MODE = "workspace-write"
+DEFAULT_CODEX_SANDBOX_MODE = _WORKSPACE_WRITE_MODE
 # Ordered so the error raised for an unknown mode lists them predictably.
-CODEX_SANDBOX_MODES: tuple[str, ...] = ("bypass", "workspace-write", "read-only")
+CODEX_SANDBOX_MODES: tuple[str, ...] = ("bypass", _WORKSPACE_WRITE_MODE, "read-only")
 
 # Private per-run Codex state is created below this directory when configured.
 HYPERLOOM_RUNTIME_DIR_ENV = "HYPERLOOM_RUNTIME_DIR"
@@ -518,6 +519,24 @@ class CodexTurnRequest:
     output_schema: dict[str, Any] | None = None
 
 
+def _require_writable_working_roots(config: CodexSessionConfig, sandbox_mode: str, source: Mapping[str, str]) -> None:
+    """Refuse a workspace-write sandbox that cannot write the directories it creates its protected paths in.
+
+    Raises:
+        CodexSessionUnavailableError: If the capability probe fails on those directories.
+    """
+    if sandbox_mode != _WORKSPACE_WRITE_MODE or not config.writable_roots:
+        return
+    working_roots = (config.cwd, *config.writable_roots)
+    if not _probe_codex_sandbox_capability(source=source, roots=working_roots):
+        raise CodexSessionUnavailableError(
+            f"Codex sandbox mode {_WORKSPACE_WRITE_MODE!r} cannot write to its working directories "
+            f"({', '.join(str(root) for root in working_roots)}), where it must create its protected paths; "
+            "a common cause is an owner that is not mapped inside the bubblewrap user namespace. "
+            f"Fix the ownership or choose the sandbox mode explicitly with {CODEX_SANDBOX_MODE_ENV}"
+        )
+
+
 class CodexSession:
     """One Codex Agent SDK runtime held open across many turns.
 
@@ -569,15 +588,7 @@ class CodexSession:
                 f"Codex sandbox mode {resolved_sandbox_mode!r} requires a working bubblewrap sandbox, "
                 "but the capability probe failed; refusing to fall back to bypass"
             )
-        if resolved_sandbox_mode == "workspace-write" and self.config.writable_roots:
-            working_roots = (self.config.cwd, *self.config.writable_roots)
-            if not _probe_codex_sandbox_capability(source=effective_env, roots=working_roots):
-                raise CodexSessionUnavailableError(
-                    "Codex sandbox mode 'workspace-write' cannot write to its working directories "
-                    f"({', '.join(str(root) for root in working_roots)}), where it must create its protected paths; "
-                    "a common cause is an owner that is not mapped inside the bubblewrap user namespace. "
-                    f"Fix the ownership or choose the sandbox mode explicitly with {CODEX_SANDBOX_MODE_ENV}"
-                )
+        _require_writable_working_roots(self.config, resolved_sandbox_mode, effective_env)
 
         provider_config = _resolve_codex_provider_config(effective_env)
         sdk = load_codex_sdk()
