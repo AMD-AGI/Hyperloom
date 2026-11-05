@@ -625,7 +625,7 @@ async def test_an_agentx_merge_leaves_the_head_unprofiled_until_branches_open_on
     [shifted] = events.hand_over()
     assert (shifted.kind, shifted.detail["previous_commit"]) == (EventKind.BOTTLENECK_MOVED, "c-root")
     assert [request.parent_commit for request in toolbox.requests.values()] == ["c-merged"]
-    assert await events.focus_on("c-merged", (), 2) == ("gemm", "attn")
+    assert [aim.op for aim in await events.focus_on("c-merged", (), 2)] == ["gemm", "attn"]
 
 
 async def _branch_profiled(toolbox: _AnalysingToolbox, commit: str) -> str:
@@ -653,7 +653,7 @@ async def test_an_agentx_head_whose_recipe_a_branch_profiled_reads_that_profiles
     [shifted] = events.hand_over()
     assert (shifted.kind, shifted.detail["commit"]) == (EventKind.BOTTLENECK_MOVED, "c-b01")
     assert list(toolbox.requests) == [branch_profile] and toolbox.analyses == []
-    assert await events.focus_on("c-merged", ("moe",), 2) == ("moe", "gemm")
+    assert [aim.op for aim in await events.focus_on("c-merged", ("moe",), 2)] == ["moe", "gemm"]
     [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
     assert (profile["reason"], profile["detail"]["request_id"]) == (PROFILE_EXISTS, branch_profile)
 
@@ -671,7 +671,7 @@ async def test_a_head_reads_the_shares_of_its_recipes_profile_once_the_branch_th
     await _until(lambda: not events.profiling)
     await events.detect()
 
-    assert await events.focus_on("c-merged", (), 1) == ("",)
+    assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == [""]
     shares.shares["c-b01"] = OpShares("c-b01", "job-b01", branch_profile, {"gemm": 55.0})
-    assert await events.focus_on("c-merged", (), 1) == ("gemm",)
+    assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == ["gemm"]
     assert list(toolbox.requests) == [branch_profile]
