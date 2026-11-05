@@ -167,7 +167,7 @@ Check it with `python3 -m arbor.stages check <plan.md>`.
 **In the campaign, the agent declares each stage's result on one line:**
 
 ```
-STAGE: {"item": "m-finalize-chain.c.s2", "result": "pass", "measured": {"snr_db": 32.69, "correct": true, "negative_control_fired": true}, "evidence": {"artifacts": ["iter_20/peer_rs_sc_c5.json"], "ledger": ["c5-sc-snr"]}}
+STAGE: {"item": "m-finalize-chain.c.s2", "result": "pass", "measured": {"snr_db": <dB>, "correct": true, "negative_control_fired": true}, "evidence": {"artifacts": ["iter_<n>/<file>.json"], "ledger": ["<ledger id>"]}}
 ```
 
 `result` is pass, fail or stop. The harness judges the line at the next
@@ -348,8 +348,8 @@ ITEMS: [
  {"id": "r.s5", "stage": "S5", "title": "Rider: the A/B", "after": ["r.s2"]}]
 ```
 
-At iteration 7, `STAGE: {"item": "<map ID>.s1", "result": "stop", "measured":
-{"gain_x_gate": 1.5, "census": true}, ...}` closes `s1` as below_floor and
+At its census iteration, `STAGE: {"item": "<map ID>.s1", "result": "stop", "measured":
+{"gain_x_gate": <under 3>, "census": true}, ...}` closes `s1` as below_floor and
 every later item as killed, and the lane closes.
 
 **A plan stopped at S1 is a success.** One iteration, no build, and the

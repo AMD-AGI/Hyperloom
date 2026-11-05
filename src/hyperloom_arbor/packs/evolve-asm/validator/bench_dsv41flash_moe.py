@@ -6,7 +6,7 @@ Supports --kernel moe1 or moe2.
 import argparse, os, sys, torch, random, math
 sys.path.insert(0, '/usr/local/lib/python3.12/dist-packages')
 
-# Island 1 optimized kernel registration
+# The optimized kernel registration
 import aiter.ops.flydsl.moe_kernels as _mk
 # Use the actual compiled heuristic fallback kernel for DSv4.1-Flash decode.
 DEFAULT_MOE2_KERNEL = 'flydsl_moe2_afp8_wfp4_bf16_t32x128x128_atomic_bnt2'
@@ -41,7 +41,7 @@ def bench_moe1(args):
     # serve both: pinning the prefill tile (below) made every decode-regime shape
     # run the wrong kernel, measurably slower.
     #
-    # Island 1 gen-3 (official validator, weakest-of-3, gfx950/MI355X) found
+    # A search under the official validator (weakest-of-3, gfx950/MI355X) found
     # t16x128x256 ahead of t64x128x256 at decode shapes and behind it at prefill
     # shapes. Crossover is between M=256 and M=512 -- the same place the campaign
     # splits decode/verify (M<=256) from prefill (M>=512).
@@ -49,10 +49,10 @@ def bench_moe1(args):
     # t16x128x256/kw1/async is the unique optimum of a full tile_m x tile_n x
     # k_wave grid at M=192; it is bit-exact against the reference config under
     # real e8m0 scales.
-    # The prefill branch is island 1 gen-1's 305-trial result, unchanged.
+    # The prefill branch is an earlier search's result, unchanged.
     # Env vars (FLYDSL_*) still override everything.
     #
-    # Island 0 gen-6 split the decode branch at M=64. At very small M the launch
+    # A later search split the decode branch at M=64. At very small M the launch
     # is parallelism-starved, not bandwidth-bound: with tile_n=128 there are only
     # 36 N-tiles x ceil(M/16) blocks (72 at M=32) for 256 CUs. tile_n=32 + k_wave=4
     # quadruples the block count (288) and drops barriers 23->10, mfma 80->20.
@@ -60,9 +60,9 @@ def bench_moe1(args):
     # fills the machine, the smaller tile is pure MFMA-efficiency loss. Measured
     # interleaved with the official validator, t16x32x256/kw4 wins for M<=48,
     # ties at M=64 and loses from M=96 up (worst at the DSpark verify shape),
-    # so the small-M tile is gated to M<=64 and M=96..256 keeps island 1 gen-3's
+    # so the small-M tile is gated to M<=64 and M=96..256 keeps
     # t16x128x256. Bit-exact vs the validator's reference config under real e8m0
-    # scales (mse=0, coverage 1152/1152, absmax 2592).
+    # scales.
     if M <= 64:
         _tm, _tn, _kw, _wpe, _bnt = 16, 32, 4, 3, 0    # small-batch decode
     elif M <= 256:

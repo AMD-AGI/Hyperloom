@@ -2346,9 +2346,9 @@ def run_iteration(
 
     # REPEATED MEASUREMENT. `bench_repeats` > 1 runs the replay N times and
     # books the MEAN, because a single replay is not a reliable estimate of this
-    # workload: re-measuring a byte-identical v3 tree on its own node, same code
-    # path, same DURATION, differed by more than the gate, and v3's own
-    # post-iteration-6 measurements spanned about as much. Arbor books best_metric as a
+    # workload: re-measuring a byte-identical tree on its own node, same code
+    # path, same DURATION, differed by more than the gate, and one campaign's
+    # later measurements spanned about as much. Arbor books best_metric as a
     # running MAX, so with noise that large the bar lands on the luckiest draw
     # and nothing afterwards can clear it.
     #
