@@ -73,6 +73,8 @@ forge = [
     "click>=8.0",
     "PyYAML>=6.0",
     "anthropic>=0.40",
+    # The answer shapes agent sessions are held to are pydantic v2 models.
+    "pydantic>=2.0",
     "hyperloom-inference_optimizer[llm]",
 ]
 # ROCm Compute Profiler (rocprof-compute) Python requirements. Nothing in this
@@ -335,6 +337,9 @@ hyperloom_kb = [
     "declarations/*.yaml",
     "mappings/*.yaml",
 ]
+hyperloom_multibranch = [
+    "contracts/llm_prices.json",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -363,6 +368,7 @@ source = [
     "src/hyperloom",
     "src/kernelforge",
     "src/hyperloom_kb",
+    "src/hyperloom_multibranch",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
