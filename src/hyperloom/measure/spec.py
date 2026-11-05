@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,6 +51,12 @@ _REMOVED_DECODE_PASS = "decode_pass"
 KINDS = ("test", "profile", _ACCURACY, "repro")
 PURPOSES = tuple(purpose.value for purpose in Purpose)
 DEFAULT_MAX_TOTAL_BYTES = 4 * 1024**3
+#: The most levels a config YAML may nest, aliases expanded: far more than a config needs, and far fewer than the levels
+#: at which what reads the loaded value next runs out of recursion.
+_MAX_YAML_DEPTH = 128
+#: What a loaded YAML value nests in: mappings, sequences, and the pairs of ``!!omap`` and ``!!pairs``.
+_NESTED = (Mapping, list, tuple)
+_TOO_DEEP = f"spec.config.yaml: nests more than {_MAX_YAML_DEPTH} levels deep"
 #: The platform variables a sheet may carry reference values for: RCCL and HSA variables SaFE adds to a Pod.
 #: ``NCCL_MIN_NCHANNELS`` changes how every RCCL collective is split, so a sandbox without the Pod's value measures
 #: under other conditions than the local run. The interface-selection variables (``NCCL_SOCKET_IFNAME``,
@@ -660,11 +666,52 @@ def _load_yaml(text: str) -> Any:
         raise DocumentError(f"spec.config.yaml: not valid YAML ({type(exc).__name__})") from None
     except (ValueError, RecursionError) as exc:  # more digits than int() converts, a day no month has, deep nesting
         raise DocumentError(f"spec.config.yaml: cannot be loaded ({type(exc).__name__})") from None
+    _refuse_deep(value)
     try:
         canonical_json(value).encode()
     except (TypeError, ValueError) as exc:  # a date, a set, binary, a non-finite float or a lone surrogate
         raise DocumentError(f"spec.config.yaml: holds a value UTF-8 JSON cannot hold ({exc})") from None
     return value
+
+
+def _refuse_deep(value: Any) -> None:
+    """Refuse a loaded YAML value that nests more than :data:`_MAX_YAML_DEPTH` levels deep.
+
+    The loader reads an alias as the very value its anchor names, so a chain of anchors (``a1: &a1 [*a0]``) nests one
+    level deeper per line of text, and an anchor used inside its own value nests without end. What reads the value next
+    (its canonical JSON, the comparison of a sweep's points) recurses once per level. This walk keeps its own stack and
+    measures a value an alias repeats once, so it costs no more than the value has distinct levels.
+    """
+    heights: dict[int, int] = {}  # id of a level already measured -> the levels it holds, itself included
+    frames: list[tuple[Any, Iterator[Any]]] = []
+    tallest: list[int] = []  # per frame, the most levels any of its members measured so far holds
+
+    def enter(container: Any) -> None:
+        if len(frames) == _MAX_YAML_DEPTH:
+            raise DocumentError(_TOO_DEEP)
+        members = container.values() if isinstance(container, Mapping) else container
+        frames.append((container, iter(members)))
+        tallest.append(0)
+
+    if isinstance(value, _NESTED):
+        enter(value)
+    while frames:
+        container, members = frames[-1]
+        for member in members:
+            if not isinstance(member, _NESTED):
+                continue
+            height = heights.get(id(member))
+            if height is None:
+                enter(member)
+                break
+            if len(frames) + height > _MAX_YAML_DEPTH:
+                raise DocumentError(_TOO_DEEP)
+            tallest[-1] = max(tallest[-1], height)
+        else:
+            frames.pop()
+            heights[id(container)] = tallest.pop() + 1
+            if tallest:
+                tallest[-1] = max(tallest[-1], heights[id(container)])
 
 
 def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None = None) -> dict[str, Any]:
