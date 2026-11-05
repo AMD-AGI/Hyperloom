@@ -11,9 +11,11 @@ from pathlib import Path
 from hyperloom_multibranch.scheduling.review import (
     APPROVED,
     PENDING,
+    POLL_SECONDS,
     REJECTED,
     REVIEW_FILE,
     REVIEW_PAGE,
+    _time_left,
     decide,
     load,
     Reviewed,
@@ -111,7 +113,7 @@ def test_a_review_with_no_map_says_each_arbor_maps_its_own(tmp_path: Path) -> No
     page = (tmp_path / "MB-review" / REVIEW_PAGE).read_text()
     assert "none could be made: each Arbor maps its own" in page and "**Dossier:** none" in page
     assert "The pause does not count against --max-hours" in page and "## The clock" not in page
-    assert "left to decide" not in str(show(tmp_path / "MB-review", NOW + 60))
+    assert str(show(tmp_path / "MB-review")).endswith("Status: pending\n")
 
 
 def test_a_review_in_explore_shows_its_clock_and_show_says_how_long_is_left_until_it_is_decided(tmp_path: Path) -> None:
@@ -128,13 +130,16 @@ def test_a_review_in_explore_shows_its_clock_and_show_says_how_long_is_left_unti
     assert "- **Decide by about:** 2026-11-01T03:46:40Z, 80 min after it was asked." in page
     assert "- **EXPLORE ends:** 2026-11-01T05:26:40Z, whenever you decide." in page
     assert "--max-hours" not in page and f"review --session {tmp_path} approve" in page
-    assert str(show(directory, NOW + 20 * 60)).endswith(
+    pending = load(directory) or {}
+    assert _time_left(pending, NOW + 20 * 60) == (
         "Now 2026-11-01T02:46:40Z: 60 min left to decide, until 2026-11-01T03:46:40Z\n"
     )
-    late = str(show(directory, NOW + 90 * 60))
-    assert "past 2026-11-01T03:46:40Z; no share branch opens, whatever is decided" in late
+    late = _time_left(pending, NOW + 90 * 60)
+    assert late.startswith("Now 2026-11-01T03:56:40Z: past 2026-11-01T03:46:40Z;")
+    assert "no share branch opens, whatever is decided" in late
+    assert "\nStatus: pending\nNow " in str(show(directory))  # one of the two, whenever this runs
     decide(directory, True, "alice", "", NOW + 90 * 60)
-    assert "Now " not in str(show(directory, NOW + 95 * 60))
+    assert _time_left(load(directory) or {}, NOW + 95 * 60) == "" and "Now " not in str(show(directory))
 
 
 def test_a_review_in_explore_whose_shares_open_whatever_the_time_has_no_time_to_decide_by(tmp_path: Path) -> None:
@@ -145,7 +150,7 @@ def test_a_review_in_explore_whose_shares_open_whatever_the_time_has_no_time_to_
 
     page = (tmp_path / "MB-review" / REVIEW_PAGE).read_text()
     assert "## The clock" in page and "Decide by" not in page and state["open_by_iso"] is None
-    assert "left to decide" not in str(show(tmp_path / "MB-review", NOW))
+    assert _time_left(state, NOW) == "" and str(show(tmp_path / "MB-review")).endswith("Status: pending\n")
 
 
 async def test_the_wait_ends_once_a_person_decides(tmp_path: Path) -> None:
@@ -159,7 +164,7 @@ async def test_the_wait_ends_once_a_person_decides(tmp_path: Path) -> None:
         if len(slept) == 3:
             decide(directory, False, "alice", "wrong directions", NOW)
 
-    decided = await wait(directory, sleep, poll_seconds=15.0)
+    decided = await wait(directory, sleep)
 
-    assert decided["status"] == REJECTED and slept == [15.0, 15.0, 15.0] and decided["changed"] == []
+    assert decided["status"] == REJECTED and slept == [POLL_SECONDS] * 3 and decided["changed"] == []
     assert json.loads((directory / REVIEW_FILE).read_text())["note"] == "wrong directions"

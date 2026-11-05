@@ -5,7 +5,7 @@ from pathlib import Path
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.root_shares import ShareSources, root_shares
+from hyperloom_multibranch.scheduling.root_shares import WAIT_SECONDS, ShareSources, root_shares
 from hyperloom_multibranch.specialist.agent_onboarding import ROOT_PROFILE_SOURCE
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 
@@ -72,10 +72,10 @@ async def test_shares_that_reach_the_blackboard_after_their_job_ended_are_waited
 async def test_a_job_that_succeeded_without_shares_is_waited_on_until_the_deadline_and_a_failed_one_is_not(
     tmp_path: Path,
 ) -> None:
-    clock, succeeded = _clock(), Toolbox(JobStatus.SUCCEEDED)
-    empty = await root_shares(_sources(Records(None), succeeded, clock, tmp_path), ROOT, JOB, wait_seconds=30)
+    clock = _clock()
+    empty = await root_shares(_sources(Records(None), Toolbox(JobStatus.SUCCEEDED), clock, tmp_path), ROOT, JOB)
     assert (empty.shares, empty.detail["job"], empty.detail["taken"]) == (None, "succeeded", "none: no op shares")
-    assert clock.now() == 1000.0 + 30
+    assert clock.now() == 1000.0 + WAIT_SECONDS
 
     clock, records = _clock(), Records(None)
     failed = await root_shares(_sources(records, Toolbox(JobStatus.FAILED), clock, tmp_path), ROOT, JOB)
@@ -89,7 +89,7 @@ async def test_without_a_job_or_past_the_wait_there_is_nothing_to_map_from(tmp_p
     unknown = await root_shares(_sources(Records(None), Toolbox(), _clock(), tmp_path), ROOT, JOB)
     assert unknown.detail["job"] == "the toolbox knows no such job"
 
-    running = Toolbox(JobStatus.RUNNING)
-    late = await root_shares(_sources(Records(None), running, _clock(), tmp_path), ROOT, JOB, wait_seconds=30)
-    assert (late.shares, late.detail["job"]) == (None, "still running after 30 s")
-    assert late.detail["taken"] == "none: no op shares"
+    clock, records = _clock(), Records(None)
+    late = await root_shares(_sources(records, Toolbox(JobStatus.RUNNING), clock, tmp_path), ROOT, JOB)
+    assert (late.shares, late.detail["job"]) == (None, "still running after 600 s")
+    assert (late.detail["taken"], records.reads, clock.now()) == ("none: no op shares", 1, 1000.0 + WAIT_SECONDS)

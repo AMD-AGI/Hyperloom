@@ -174,11 +174,9 @@ def load(directory: Path) -> dict[str, Any] | None:
     return state if isinstance(state, dict) else None
 
 
-async def wait(
-    directory: Path, sleep: Callable[[float], Awaitable[None]], poll_seconds: float = POLL_SECONDS
-) -> dict[str, Any]:
-    """Wait, reading ``directory``'s state every ``poll_seconds``, until a person decided; the decided state, with the
-    files the review changed (``changed``), as the session reads them at the paths it asked about, written back."""
+async def wait(directory: Path, sleep: Callable[[float], Awaitable[None]]) -> dict[str, Any]:
+    """Wait, reading ``directory``'s state every :data:`POLL_SECONDS`, until a person decided; the decided state, with
+    the files the review changed (``changed``), as the session reads them at the paths it asked about, written back."""
 
     while True:
         state = load(directory)
@@ -186,7 +184,7 @@ async def wait(
             state["changed"] = _changed(state)
             atomic_write_json(directory / REVIEW_FILE, state)
             return state
-        await sleep(poll_seconds)
+        await sleep(POLL_SECONDS)
 
 
 def _changed(state: Mapping[str, Any]) -> list[str]:
@@ -213,9 +211,9 @@ def decide(directory: Path, approve: bool, by: str | None, note: str, now: float
     return []
 
 
-def show(directory: Path, now: float | None = None) -> str | None:
-    """``REVIEW.md`` and the review's state, as the ``show`` command prints them at ``now`` (the time when ``None``),
-    with the time left to decide while a review in EXPLORE is pending; ``None`` when there is no review."""
+def show(directory: Path) -> str | None:
+    """``REVIEW.md`` and the review's state, as the ``show`` command prints them now, with the time left to decide
+    while a review in EXPLORE is pending; ``None`` when there is no review."""
 
     state = load(directory)
     if state is None:
@@ -225,7 +223,7 @@ def show(directory: Path, now: float | None = None) -> str | None:
     except OSError:
         page = ""
     decided = f" by {state.get('by')} at {state.get('decided_at_iso')}" if state.get("by") else ""
-    return f"{page}\nStatus: {state.get('status')}{decided}\n{_time_left(state, time.time() if now is None else now)}"
+    return f"{page}\nStatus: {state.get('status')}{decided}\n{_time_left(state, time.time())}"
 
 
 def _time_left(state: Mapping[str, Any], now: float) -> str:

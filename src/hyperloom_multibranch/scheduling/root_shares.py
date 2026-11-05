@@ -59,14 +59,12 @@ class ShareSources:
     toolbox_dir: Path
 
 
-async def root_shares(
-    sources: ShareSources, root_commit: str, job: str, wait_seconds: float = WAIT_SECONDS
-) -> SharesRead:
+async def root_shares(sources: ShareSources, root_commit: str, job: str) -> SharesRead:
     """The op shares of ``root_commit`` once its profile's ``job`` ended and, when it succeeded, they reached the
-    blackboard, waited for at most ``wait_seconds`` in all."""
+    blackboard, waited for at most :data:`WAIT_SECONDS` in all on the session's clock."""
 
     clock = sources.clock
-    waited, landing = await _wait(sources.toolbox, clock, job, wait_seconds)
+    waited, landing = await _wait(sources.toolbox, clock, job)
     own = await _landed(sources.blackboard, clock, root_commit, landing)
     detail: dict[str, object] = {"job_id": job, "job": waited}
     if own is None:
@@ -74,16 +72,16 @@ async def root_shares(
     return SharesRead(RootShares(own, ROOT_PROFILE_SOURCE), {**detail, "taken": "op shares", "ops": len(own.shares)})
 
 
-async def _wait(toolbox: RealToolbox, clock: Clock, job: str, seconds: float) -> tuple[str, float]:
-    """Wait while ``job`` runs, at most ``seconds``: how it ended, as the decision says it, and until when its op
-    shares may still reach the blackboard: the end of those ``seconds`` once it succeeded, its result carrying them,
+async def _wait(toolbox: RealToolbox, clock: Clock, job: str) -> tuple[str, float]:
+    """Wait while ``job`` runs, at most :data:`WAIT_SECONDS`: how it ended, as the decision says it, and until when its
+    op shares may still reach the blackboard: the end of those seconds once it succeeded, its result carrying them,
     else now."""
 
     if not job:
         return "no root profile was started", clock.now()
     from hyperloom_multibranch.toolbox.tools.base import JobStatus  # the toolbox's tools load only when one runs
 
-    until = clock.now() + seconds
+    until = clock.now() + WAIT_SECONDS
     while True:
         try:
             status = toolbox.tool_status(job)
@@ -92,7 +90,7 @@ async def _wait(toolbox: RealToolbox, clock: Clock, job: str, seconds: float) ->
         if status is not JobStatus.RUNNING:
             return status.value, until if status is JobStatus.SUCCEEDED else clock.now()
         if clock.now() >= until:
-            return f"still running after {seconds:.0f} s", until
+            return f"still running after {WAIT_SECONDS:.0f} s", until
         await clock.sleep(POLL_SECONDS)
 
 
