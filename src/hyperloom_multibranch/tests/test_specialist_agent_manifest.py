@@ -86,6 +86,7 @@ def test_a_null_optional_field_is_empty_not_the_text_none() -> None:
         ({"config_source": {"path": "c.json", "server_args": "a", "envs": "e", "adds": "yes"}}, "config_source.adds"),
         ({"surprise": 1}, "surprise"),
         ({"keep": {"path": "s.json", "fields": "lessons"}}, "fields"),
+        ({"keep": {"path": "s.json", "where": {"decision": "KEEP"}}}, "keep.where"),
         ({"result_dir": "results"}, "result_dir"),
     ],
 )
@@ -109,6 +110,8 @@ def test_a_keep_counter_counts_the_matching_items_of_its_field() -> None:
 
     assert keep.count(state) == 2
     assert KeepSignal("s.json", "keeps").count({"keeps": 5}) == 5
+    with pytest.raises(ValueError, match="where"):
+        KeepSignal("s.json", "keeps", {"decision": "KEEP"}).count({"keeps": 5})
 
 
 SNAPSHOTS = {"session": "sessions/b01"}
@@ -136,6 +139,13 @@ def test_an_agent_that_writes_a_snapshot_per_keep_names_its_session_and_its_outb
         ({"config_source": None, "snapshots": SNAPSHOTS}, "keep"),
         ({"keep": None, "snapshots": SNAPSHOTS}, "config_source"),
         ({"keep": None, "config_source": None, "snapshots": {"session": "s", "outbox": "keeps"}}, "outbox"),
+        *(
+            (
+                {"keep": None, "config_source": None, "snapshots": SNAPSHOTS, "config": {"component": {"outbox": bad}}},
+                "config.component.outbox",
+            )
+            for bad in (False, "", 0, [], {}, ".", "../keeps")
+        ),
     ],
 )
 def test_a_snapshot_source_that_breaks_the_schema_is_refused_naming_the_field(
