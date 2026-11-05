@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 from hyperloom_common.coerce import optional_positive_float, to_float
 from hyperloom_common.env import is_truthy
-from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT, constraint_fields, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
@@ -40,7 +40,14 @@ def _baseline_perf_axes(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
         "total_throughput": snapshot["total_throughput"],
         "e2e_norm_intvty_p90": snapshot["e2e_norm_intvty_p90"],
     }
-    for name in ("input_throughput", "tpot_p90_ms", "e2e_norm_intvty_p50", "duration_seconds", "request_error_rate"):
+    for name in (
+        "input_throughput",
+        "tpot_p90_ms",
+        "e2e_norm_intvty_p50",
+        GRADED_INTVTY_P50_CHECKPOINT,
+        "duration_seconds",
+        "request_error_rate",
+    ):
         if snapshot.get(name) is not None:
             axes[name] = snapshot[name]
     return axes

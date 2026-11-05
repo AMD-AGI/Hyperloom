@@ -1493,6 +1493,7 @@ async def test_explore_reverts_a_variant_its_checkpoint_stopped(sub_agent_runner
         "duration_seconds": 25.0,
         "request_error_rate": 0.0,
     }
+    state.current_best = {"action": "baseline", "tput": 200.0, **state.baseline_perf}
     sub.shared_state = state
     base = tmp_path / "base.yaml"
     write_benchmark_yaml(base)
