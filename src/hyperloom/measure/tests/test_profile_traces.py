@@ -105,3 +105,22 @@ def test_capture_traces_in_and_beside_the_workspace_are_both_kept_and_both_count
     assert all(path.startswith("capture_traces/bs_") for path in kept), "each still reads as a capture sidecar"
     assert has_traces(destination) and not has_step_traces(destination)
     assert not (workspace / "capture_traces").exists() and not (workspace.parent / "capture_traces").exists()
+
+
+@pytest.mark.parametrize("file_first", [True, False], ids=["the-file-in-the-workspace", "the-file-beside-it"])
+def test_a_file_in_one_capture_traces_and_a_directory_of_its_name_in_the_other_are_both_kept(
+    tmp_path: Path, file_first: bool
+) -> None:
+    workspace = tmp_path / "round" / "ws"
+    inside, beside = workspace / "capture_traces", workspace.parent / "capture_traces"
+    with_file, with_directory = (inside, beside) if file_first else (beside, inside)
+    _file(with_file / "bs_1_rank0.json", b"file")
+    _file(with_file / "bs_2_rank0.json", b"file 2")
+    _file(with_directory / "bs_1_rank0.json" / "bs_4_rank0.json", b"nested")
+    destination = tmp_path / "out" / "profile"
+
+    assert collect_traces(workspace, destination) == 2
+
+    kept = sorted(p.read_bytes() for p in destination.rglob("*") if p.is_file())
+    assert kept == [b"file", b"file 2", b"nested"], "no trace was lost or overwritten"
+    assert not inside.exists() and not beside.exists()
