@@ -1580,7 +1580,11 @@ def materialize_benchmark_config(
         replacing,
     )
     apply_launch_changes(config["benchmark"], changes, recipe=recipe, accepted=True)
-    return materialize_agentx(config, output_dir / options.out_name, model_path=target.model_path, recipe=recipe)
+    return materialize_agentx(
+        config,
+        output_dir / options.out_name,
+        model_path=target.model_path,
+    )
 
 
 def materialize_config_with_envs(
