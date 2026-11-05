@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import replace
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, TypeVar
 
 from hyperloom.contracts.recipe import ComponentChange, RecipeDelta
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
@@ -27,6 +27,8 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST
 from hyperloom_multibranch.specialist.precheck import CheckFailed, check_change
 from hyperloom_multibranch.specialist.worktree import BranchWorktree, installed_upstream
+
+_T = TypeVar("_T")
 
 #: The worktree of a branch; the runtime adds it before the branch's specialist first runs.
 WorktreeFor = Callable[[str], BranchWorktree]
@@ -57,7 +59,22 @@ async def sync_to_commit(repo: ExperimentRepo, commit: str, worktree: BranchWork
         if worktree.holds(component.component)
         for patch in component.patches
     ]
-    return await asyncio.to_thread(worktree.sync, commit, patches)
+    return await asyncio.to_thread(_holding, worktree, lambda: worktree.sync(commit, patches))
+
+
+def _holding(worktree: BranchWorktree, work: Callable[[], _T]) -> _T:
+    """``work`` run with ``worktree``'s lock held; taken in the worker thread, so a cancelled call cannot release it
+    while its git is still running."""
+    with worktree.lock:
+        return work()
+
+
+@dataclass(frozen=True)
+class _Change:
+    """A worktree's change to a component and the head it is against, read under one hold of its lock."""
+
+    head: str | None
+    patch: str
 
 
 def register_worktree_tools(
@@ -114,8 +131,9 @@ def _check(worktrees: WorktreeFor) -> Callable[[dict[str, Any], CallContext], An
         if layout is None or not worktree.holds(component):
             raise InvalidParamsError(f"your worktree holds no source of {component}")
         try:
+            package = locate_installed_package(layout)
             compiled = await asyncio.to_thread(
-                check_change, worktree, component, layout, locate_installed_package(layout)
+                _holding, worktree, lambda: check_change(worktree, component, layout, package)
             )
         except (CheckFailed, UnsupportedComponentError) as error:
             raise ToolError(str(error)) from error
@@ -130,13 +148,15 @@ def _patch(repo: ExperimentRepo, worktrees: WorktreeFor) -> Callable[[dict[str, 
         worktree = worktrees(branch)
         if not worktree.holds(component):
             raise InvalidParamsError(f"your worktree holds no source of {component}")
-        head, synced = await repo.head(branch), await asyncio.to_thread(worktree.head)
-        if synced != head:
-            raise ToolError(f"your branch is at {head} and your worktree at {synced}; call worktree_sync and redo it")
-        text = await asyncio.to_thread(worktree.diff, component)
-        if not text:
+        head = await repo.head(branch)
+        read = await asyncio.to_thread(_holding, worktree, lambda: _Change(worktree.head(), worktree.diff(component)))
+        if read.head != head:
+            raise ToolError(
+                f"your branch is at {head} and your worktree at {read.head}; call worktree_sync and redo it"
+            )
+        if not read.patch:
             raise ToolError(f"your worktree has no change to {component}")
-        ref = await repo.store_patch(component, text)
+        ref = await repo.store_patch(component, read.patch)
         change = ComponentChange(component, add_patches=(ref,))
         taken: dict[str, Any] = {"parent_commit": head, "patch": ref.to_document()}
         if all(present.component != component for present in (await repo.read_recipe(head)).components):
