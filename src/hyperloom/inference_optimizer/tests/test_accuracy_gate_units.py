@@ -10,6 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.gain_math import (
+    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+    accuracy_meets_floor,
+    accuracy_passed,
+)
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
@@ -88,18 +94,18 @@ class TestParseEvalResults:
 
 class TestAccuracyPassed:
     def test_baseline_zero_skips_gate(self):
-        assert ag.accuracy_passed(0.0, 0.42) is True
-        assert ag.accuracy_passed(-0.1, 0.0) is True
+        assert accuracy_passed(0.0, 0.42) is True
+        assert accuracy_passed(-0.1, 0.0) is True
 
     def test_within_default_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.76) is True
+        assert accuracy_passed(0.80, 0.76) is True
 
     def test_outside_default_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.70) is False
+        assert accuracy_passed(0.80, 0.70) is False
 
     def test_custom_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.70, threshold=0.11) is True
-        assert ag.accuracy_passed(0.80, 0.68, threshold=0.10) is False
+        assert accuracy_passed(0.80, 0.70, threshold=0.11) is True
+        assert accuracy_passed(0.80, 0.68, threshold=0.10) is False
 
 
 class TestRequireKernelAccuracyDefault:
@@ -180,8 +186,8 @@ class TestGradeIntegrateAccuracy:
 class TestEnablementReaders:
     def test_floor_default_rejects_a_collapsed_model(self):
         """The default must be strong enough to be the only correctness authority."""
-        assert ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
-        assert not ag.accuracy_meets_floor(0.00076, ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
+        assert DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
+        assert not accuracy_meets_floor(0.00076, DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
 
     def test_missing_mode_is_fail_closed(self):
         """A caller that cannot supply the field has not opted in."""
@@ -226,7 +232,7 @@ class TestAccuracyValidator:
         ],
     )
     def test_meets_floor(self, score, floor, expected):
-        assert ag.accuracy_meets_floor(score, floor) is expected
+        assert accuracy_meets_floor(score, floor) is expected
 
     def test_classify(self):
         assert ag.classify_accuracy_failure(0.5, 0.2) is None
@@ -333,7 +339,7 @@ class TestTheAgentXValidityGate:
 
     def test_the_threshold_is_inclusive(self, tmp_path):
         """Upstream rejects above the threshold, so exactly at it still passes."""
-        ws = self._result(tmp_path, request_error_rate=ag.AGENTX_ERROR_RATE_THRESHOLD_PCT)
+        ws = self._result(tmp_path, request_error_rate=AGENTX_ERROR_RATE_THRESHOLD_PCT)
         assert ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")["accuracy"] == 1.0
 
     def test_a_rate_past_the_threshold_fails(self, tmp_path):
