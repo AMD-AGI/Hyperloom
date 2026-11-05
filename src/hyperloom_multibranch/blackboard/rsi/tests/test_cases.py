@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -15,22 +16,24 @@ import pytest
 from hyperloom.contracts.measurement import REPRODUCED, AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.pins import IMAGE_DIGEST_VAR, IMAGE_REF_VAR
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, RegressionCase, TestRecord
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, TreeArchive
-from hyperloom_multibranch.blackboard.rsi.briefing import KNOWN_DEFECT, CrossSessionBriefing
+from hyperloom_multibranch.blackboard.rsi.briefing import KNOWN_DEFECT, CrossSessionBriefing, RecallCache
 from hyperloom_multibranch.blackboard.rsi.cases import (
-    IMAGE_DIGEST_ENV,
+    CASE_FORMAT,
+    CASES_DIR,
     NO_IMAGE_DIGEST,
     CasePool,
     SessionCases,
+    image_digest_from_env,
     pool_cases,
     session_cases,
 )
-from hyperloom_multibranch.blackboard.rsi.session import NO_CASE, WRITTEN, CloseTargets, close_knowledge
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock, result
-from hyperloom_multibranch.blackboard.tests.sessions import METRIC, scripted_session
+from hyperloom_multibranch.blackboard.tests.sessions import scripted_session
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, pack_case
 
 REPRO_SH = "#!/bin/sh\n[ \"$(./ask 'What is 6 x 7?')\" = 42 ]\n"
@@ -115,25 +118,25 @@ def test_close_pools_nothing_without_an_image_digest_and_leaves_out_a_case_it_ca
     assert partly.reasons[0].startswith("r1-case: ")
 
 
-def test_close_writes_the_registered_cases_beside_the_archive(
+def test_close_writes_each_case_beside_the_archive_in_a_file_named_for_its_case_image_and_model(
     snapshot: BlackboardSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(IMAGE_DIGEST_ENV, IMAGE)
-    blobs, archive = LocalBlobStore(tmp_path / "blobs"), TreeArchive(tmp_path / "archive")
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
-    targets = CloseTargets(blobs=blobs.root)
+    monkeypatch.setenv(IMAGE_REF_VAR, "rocm/vllm:v0.11")
+    monkeypatch.setenv(IMAGE_DIGEST_VAR, IMAGE)
+    blobs, pool = LocalBlobStore(tmp_path / "blobs"), CasePool.from_env()
+    assert pool is not None
 
-    done = close_knowledge(_registered(snapshot, blobs, "p1"), METRIC, targets=targets)
-    without = close_knowledge(snapshot, METRIC, targets=targets)
+    pooled = pool_cases(_registered(snapshot, blobs, "p1"), blobs, pool, image_digest_from_env())
 
-    assert (done.regression_cases.status, done.regression_cases.counts) == (WRITTEN, {"written": 1, "skipped": 0})
-    assert len(CasePool.beside(archive).entries()) == 1
-    assert done.document()["regression_cases"] == {
-        "status": WRITTEN,
-        "reason": "",
-        "counts": {"written": 1, "skipped": 0},
-    }
-    assert without.regression_cases.reason == NO_CASE
+    (entry,) = pool.entries()
+    name = hashlib.sha256(f"{entry.case_id}:{IMAGE}:{entry.model}".encode()).hexdigest()
+    document = json.loads((tmp_path / "archive" / CASES_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    assert (pooled.written, entry.image_digest, document["format"]) == (1, IMAGE, CASE_FORMAT)
+    then, before = (TreeArchive(tmp_path / "archive", at) for at in (entry.written_at, entry.written_at - 1.0))
+    assert (CasePool.beside(then).entries(), CasePool.beside(before).entries()) == ((entry,), ())
+    monkeypatch.setenv(IMAGE_DIGEST_VAR, "sha256:abc")
+    assert image_digest_from_env() == ""
 
 
 async def test_a_session_is_handed_other_sessions_cases_of_its_image_and_model_as_they_were_packed(
@@ -174,8 +177,12 @@ async def test_a_brief_names_a_pooled_case_that_reproduced_on_the_root_as_a_defe
     await toolbox.write_request(repro)
     await toolbox.write_result(dataclasses.replace(result("p9"), repro_verdict=REPRODUCED))
 
-    brief = await CrossSessionBriefing(blackboard, cases=pool).startup_brief("c1")
-    without = await CrossSessionBriefing(blackboard).startup_brief("c1")
+    brief = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, cases=pool
+    ).startup_brief("c1")
+    without = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, cases=None
+    ).startup_brief("c1")
 
     assert brief.lessons[0] == f"{KNOWN_DEFECT} past-1 c1: {DIAGNOSIS}"
     assert not any(line.startswith(KNOWN_DEFECT) for line in without.lessons)

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, NotRe
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import REPLAY_TARGET, BlackboardSnapshot, Probation, TestRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver, CommitOrigin, LineageKind
+from hyperloom_multibranch.blackboard.families import Mechanism, family_of
 from hyperloom_multibranch.blackboard.rsi.archive import (
     ARCHIVE_ENV,
     ARCHIVED,
@@ -32,6 +34,7 @@ from hyperloom_multibranch.blackboard.rsi.archive import (
     tree_from_document,
     tree_from_snapshot,
 )
+from hyperloom_multibranch.blackboard.rsi.family_stats import direction_family
 from hyperloom_multibranch.blackboard.rsi.tests.trees import HOUR, LATE_BLOOMER, branch, tree
 from hyperloom_multibranch.blackboard.tests.factories import profile
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC
@@ -147,7 +150,7 @@ def test_each_branch_keeps_why_it_stopped_and_the_directions_it_tried(snapshot: 
     s1, s2 = branches["s1"], branches["s2"]
 
     def words(direction: TreeDirection) -> TreeDirection:
-        return dataclasses.replace(direction, family_target="", family_mechanism="")
+        return dataclasses.replace(direction, family_target="", family_mechanism=None)
 
     assert (s1.stop_reason, s2.stop_reason) == ("", "no progress")
     assert tuple(map(words, s1.directions)) == (
@@ -293,6 +296,41 @@ def test_the_archive_keeps_each_tree_once_and_skips_what_it_cannot_read(
         assert archive.load() == [searched]
     assert "broken.json" in caplog.text
     assert tree_from_document(tree_document(searched)) == searched
+
+
+def test_a_file_of_the_archive_that_holds_no_object_is_skipped_with_a_warning(
+    snapshot: BlackboardSnapshot, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    searched = tree_from_snapshot(snapshot, METRIC)
+    archive = TreeArchive(tmp_path / "archive")
+    archive.put(searched)
+    (archive.root / "list.json").write_text("[]", encoding="utf-8")
+    (archive.root / "null.json").write_text("null", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.blackboard.rsi.archive"):
+        assert archive.load() == [searched]
+    assert "list.json" in caplog.text and "null.json" in caplog.text
+    with pytest.raises(TypeError, match="expected an object"):
+        tree_from_document(None)
+
+
+def test_a_family_mechanism_this_version_does_not_know_reads_as_none_and_its_direction_by_its_words(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    searched = tree_from_snapshot(snapshot, METRIC)
+    document = tree_document(searched)
+    for stored in document["tree"]["branches"]:  # type: ignore[index]
+        if stored["name"] == "s2":
+            stored["directions"][0]["family_mechanism"] = "a mechanism a newer version added"
+    archive = TreeArchive(tmp_path / "archive")
+    archive.root.mkdir(parents=True)
+    (archive.root / "sess-1.json").write_text(json.dumps(document), encoding="utf-8")
+
+    (read,) = archive.load()
+
+    s2 = next(branch for branch in read.branches if branch.name == "s2")
+    assert [item.family_mechanism for item in s2.directions] == [None, Mechanism.OTHER, Mechanism.PRECISION]
+    assert direction_family(s2.directions[0]) == family_of("attention", "split kv", IntentLayer.CONFIG)
 
 
 def test_close_archives_the_session_once_with_its_budget(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
