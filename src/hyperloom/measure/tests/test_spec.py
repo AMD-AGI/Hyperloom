@@ -14,6 +14,7 @@ import pytest
 from hyperloom.measure.tests.bundle_factory import REQUEST_ID, point_document, point_yaml, spec_document, spec_json
 from jsonschema import Draft202012Validator
 
+from hyperloom.measure import spec as spec_module
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
@@ -309,6 +310,74 @@ def test_a_sweep_point_the_loader_cannot_load_or_utf8_cannot_encode_is_refused_b
     point = point_yaml(conc=8) + f"extra: {_UNLOADABLE[name]}\n"
     with pytest.raises(DocumentError, match="spec.config.yaml"):
         MeasurementSpec.from_document(_sweep(point_yaml(conc=4), point))
+
+
+def _anchor_chain(levels: int) -> str:
+    """One line per level, each anchor a list of the one before: the last nests ``levels`` lists in a short text."""
+    return "a0: &a0 [x]\n" + "".join(f"a{i}: &a{i} [*a{i - 1}]\n" for i in range(1, levels))
+
+
+@pytest.mark.parametrize("levels", [600, 1000])
+def test_a_yaml_nested_deep_by_a_chain_of_anchors_is_refused_when_fingerprinting(levels: int) -> None:
+    with pytest.raises(DocumentError, match="levels deep"):
+        _fp(_edit(lambda d: _yaml(d, _anchor_chain(levels))))
+
+
+@pytest.mark.parametrize("levels", [600, 1000])
+def test_a_sweep_point_nested_deep_by_a_chain_of_anchors_is_refused_by_the_reader(levels: int) -> None:
+    chain = _anchor_chain(levels)  # in both points, so comparing them goes all the way down
+    with pytest.raises(DocumentError, match="levels deep"):
+        MeasurementSpec.from_document(_sweep(point_yaml(conc=4) + chain, point_yaml(conc=8) + chain))
+
+
+_BOUND = spec_module._MAX_YAML_DEPTH
+
+
+def _pair_chain(tag: str, first: str = "[x]") -> str:
+    """A chain of ``!!omap`` or ``!!pairs`` links after ``first``, each a list of pairs: two levels per link. With the
+    mapping at the top and ``first`` one list, it nests exactly as deep as the bound."""
+    links = (_BOUND - 2) // 2
+    return f"a0: &a0 {first}\n" + "".join(f"a{i}: &a{i} {tag} [{{k: *a{i - 1}}}]\n" for i in range(1, links + 1))
+
+
+def _lists(levels: int) -> str:
+    """Lists nested ``levels`` deep, written out, with no anchor."""
+    return "k: " + "[" * levels + "x" + "]" * levels + "\n"
+
+
+# The mapping at the top is a level too.
+@pytest.mark.parametrize(
+    "text",
+    [_anchor_chain(_BOUND - 1), _pair_chain("!!omap"), _pair_chain("!!pairs"), _lists(_BOUND - 1)],
+    ids=["a-chain-of-anchors", "a-chain-of-omap", "a-chain-of-pairs", "lists-written-out"],
+)
+def test_a_yaml_as_deep_as_the_bound_is_fingerprinted(text: str) -> None:
+    assert _BOUND % 2 == 0, "the chains of pairs reach the bound exactly"
+    _fp(_edit(lambda d: _yaml(d, text)))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _anchor_chain(_BOUND),
+        _anchor_chain(_BOUND - 1) + f"again: [*a{_BOUND - 2}]\n",
+        "a: &a [x, *a]\n",
+        _pair_chain("!!omap", first="[[x]]"),
+        _pair_chain("!!pairs", first="[[x]]"),
+        _lists(_BOUND),
+    ],
+    ids=[
+        "a-longer-chain",
+        "an-alias-a-level-deeper-than-where-its-anchor-was-measured",
+        "an-anchor-in-its-own-value",
+        "a-chain-of-omap-on-a-deeper-first-link",
+        "a-chain-of-pairs-on-a-deeper-first-link",
+        "lists-written-out",
+    ],
+)
+def test_a_yaml_a_level_deeper_than_the_bound_is_refused(text: str) -> None:
+    with pytest.raises(DocumentError, match="levels deep"):
+        _fp(_edit(lambda d: _yaml(d, text)))
 
 
 @pytest.mark.parametrize(
