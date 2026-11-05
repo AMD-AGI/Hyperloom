@@ -40,7 +40,7 @@ def changed_line_keys(diff_texts: Iterable[str]) -> list[str]:
     keys: dict[str, None] = {}
     for text in diff_texts:
         comments = _C_COMMENT_OPENINGS
-        for raw in str(text or "").splitlines():
+        for raw in text.splitlines():
             if raw.startswith("+++ "):
                 comments = _PY_COMMENT_OPENINGS if raw.rstrip().endswith(".py") else _C_COMMENT_OPENINGS
             if raw.startswith(("+++", "---", "@@", "diff ", "index ")):
@@ -61,7 +61,7 @@ def touched_files(diff_texts: Iterable[str]) -> list[str]:
     """Paths a unified diff writes to, in first-seen order."""
     files: dict[str, None] = {}
     for text in diff_texts:
-        for raw in str(text or "").splitlines():
+        for raw in text.splitlines():
             if not raw.startswith("+++ "):
                 continue
             path = raw[4:].strip()
@@ -73,14 +73,13 @@ def touched_files(diff_texts: Iterable[str]) -> list[str]:
 def overlap_ratio(candidate: Iterable[str], measured: Iterable[str]) -> float:
     """Jaccard overlap of two changed-line key sets; 0.0 when either is empty."""
     left, right = set(candidate), set(measured)
-    if not left or not right:
-        return 0.0
-    return len(left & right) / len(left | right)
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
 
 
 def overlapping_measured(
     line_keys: Iterable[str],
-    measured: Iterable[dict[str, Any]] | None,
+    measured: Iterable[dict[str, Any]],
     *,
     min_ratio: float,
 ) -> list[dict[str, Any]]:
@@ -90,11 +89,9 @@ def overlapping_measured(
     refuses only a repeat of a patch still queued or kept in the tree; the review weighs every other overlap.
     """
     keys = list(line_keys)
-    if not keys:
-        return []
     hits: list[dict[str, Any]] = []
-    for entry in measured or []:
-        ratio = overlap_ratio(keys, entry.get("line_keys") or [])
+    for entry in measured:
+        ratio = overlap_ratio(keys, entry["line_keys"])
         if ratio >= min_ratio:
             hits.append({**{k: v for k, v in entry.items() if k != "line_keys"}, "overlap_ratio": round(ratio, 3)})
     hits.sort(key=lambda hit: hit["overlap_ratio"], reverse=True)
@@ -104,10 +101,9 @@ def overlapping_measured(
 def identity_entry(task_id: str, params: dict[str, Any]) -> dict[str, Any] | None:
     """The overlap entry for a queued integrate round, read off the ``patch_identity`` its params carry."""
     identity = params.get("patch_identity")
-    line_keys = identity.get("line_keys") if isinstance(identity, dict) else None
-    if not line_keys:
+    if not identity:
         return None
-    return {"task_id": task_id, "patch_name": str(params.get("patch_name") or ""), "line_keys": list(line_keys)}
+    return {"task_id": task_id, "patch_name": params.get("patch_name", ""), "line_keys": identity["line_keys"]}
 
 
 def queued_identities(proposals: Iterable[Any], tasks: Iterable[Any]) -> list[dict[str, Any]]:
@@ -120,19 +116,14 @@ def queued_identities(proposals: Iterable[Any], tasks: Iterable[Any]) -> list[di
     return [entry for entry in entries if entry is not None]
 
 
-def patch_set_identity(patch_paths: Sequence[Any] | None) -> tuple[list[str], list[str]]:
+def patch_set_identity(patch_paths: Sequence[str]) -> tuple[list[str], list[str]]:
     """Read a patch set off disk and return ``(touched files, changed-line keys)``; unreadable paths are skipped."""
     texts: list[str] = []
-    for raw in patch_paths or []:
-        path = str(raw or "").strip()
-        if not path:
-            continue
+    for path in patch_paths:
         try:
             texts.append(Path(path).read_text(encoding="utf-8", errors="replace"))
         except OSError as exc:
             log.debug("patch_overlap: %s unreadable, not fingerprinted: %s", path, exc)
-    if not texts:
-        return [], []
     return touched_files(texts), changed_line_keys(texts)
 
 

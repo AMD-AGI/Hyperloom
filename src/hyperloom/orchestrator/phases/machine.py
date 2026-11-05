@@ -122,7 +122,7 @@ class MachinePhase(CoordinatorCollaborator):
         phases that has ended. Kept as the reopened pass's own, they end its KERNEL on the first tick.
         """
         state = self.shared_state
-        prior_cycle = int(state.macro_cycle or 0)
+        prior_cycle = state.macro_cycle
         state.open_macro_cycle(no_gain_cycle_streak=int(state.no_gain_cycle_streak or 0))
         self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
@@ -202,7 +202,7 @@ class MachinePhase(CoordinatorCollaborator):
 
         Priced through the dispatcher's own time gate, as the orchestration prompt's affordability line is.
         """
-        if str(self.shared_state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+        if self.shared_state.phase.upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return True
         if await self.tasks.queued() or await self.tasks.running():
             return True

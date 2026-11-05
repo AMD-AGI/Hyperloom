@@ -47,7 +47,7 @@ def defer_env_win(
             "envs": dict(envs),
             "server_args": server_args,
             "gain_pct": float(verdict["gain_pct"]),
-            "macro_cycle": int(state.macro_cycle or 0),
+            "macro_cycle": state.macro_cycle,
         }
     )
 
@@ -67,7 +67,7 @@ def defer_patch_win(
         "kernel_path": publication.kernel_path,
         "operator_name": publication.operator_name,
         "gain_pct": float(validation["gain_pct"]),
-        "macro_cycle": int(state.macro_cycle or 0),
+        "macro_cycle": state.macro_cycle,
     }
     # Versions of one kernel edit the same files, so the bundle can apply only one; it keeps the best measured.
     twin = next((entry for entry in state.kernel_bundle_pending if _same_kernel(entry, member)), None)
@@ -112,7 +112,7 @@ def _bundle_payload(state: Any, kernel_id: str, bundle: list[dict[str, Any]]) ->
         "kernel_id": kernel_id,
         "source": _BUNDLE_SOURCE,
         "base_tput": float(state.current_best.get("tput") or 0.0),
-        "model_path": resolve_session_model_path(state_model_path=str(state.model_path or "")),
+        "model_path": resolve_session_model_path(state_model_path=state.model_path),
         "extra_server_args": dedupe_extra_server_args(server_args),
         "extra_envs": _bundle_envs(bundle),
         "keep_threshold_pct": 1.0,
@@ -135,7 +135,7 @@ async def _keep_bundle(session: KeepSession, kernel_id: str, bundle: list[dict[s
         keep_commit = _head_commit(repo)
         if not committed or not keep_commit or keep_commit == head_before:
             return note or "git commit did not advance HEAD"
-        framework = str(session.shared_state.framework or "")
+        framework = session.shared_state.framework
         layer = {
             **_committed_source_layer(repo, keep_commit, kernel_id, session.session_dir, framework),
             "scope": "source_patch",
@@ -163,7 +163,7 @@ _MIN_MEMBERS = 2
 
 
 def _cycle_members(state: Any) -> list[dict[str, Any]]:
-    cycle = int(state.macro_cycle or 0)
+    cycle = state.macro_cycle
     return [entry for entry in state.kernel_bundle_pending if entry["macro_cycle"] == cycle]
 
 
@@ -223,7 +223,7 @@ async def validate_subthreshold_bundle(
     from ..actions.executors._aiter_jit import prepare_serving_so_for_csvs
 
     state = session.shared_state
-    kernel_id = f"kernel_bundle_c{int(state.macro_cycle or 0)}"
+    kernel_id = f"kernel_bundle_c{state.macro_cycle}"
     members = _take_cycle_members(session)
     stop = round_stop() if len(members) >= _MIN_MEMBERS else None
     if len(members) < _MIN_MEMBERS or stop is not None:

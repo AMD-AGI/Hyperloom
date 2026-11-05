@@ -25,7 +25,7 @@ class _ControllerIntegrationMixin:
             baselines = seal_campaign_baseline(
                 self.shared_state,
                 session_id=str(self.shared_state.session_id or self.session_dir.name),
-                macro_cycle=int(self.shared_state.macro_cycle or 0),
+                macro_cycle=self.shared_state.macro_cycle,
             )
         except (OSError, ValueError, subprocess.SubprocessError):
             log.exception("KERNEL entry: sealing the campaign baseline failed")
@@ -42,11 +42,11 @@ class _ControllerIntegrationMixin:
         from hyperloom.inference_optimizer.session.session_paths import unintegrated_forge_attempt_dirs
 
         kept = False
-        for attempt_dir in unintegrated_forge_attempt_dirs(self.session_dir, int(self.shared_state.macro_cycle or 0)):
+        for attempt_dir in unintegrated_forge_attempt_dirs(self.session_dir, self.shared_state.macro_cycle):
             patches_root = attempt_dir / "result" / "patches"
             log.info("KERNEL entry: integrating the patches %s published before it was killed", attempt_dir.name)
             result: dict[str, Any] = {
-                "run_id": f"forge-cycle-{self.shared_state.macro_cycle or 0}-{attempt_dir.name}",
+                "run_id": f"forge-cycle-{self.shared_state.macro_cycle}-{attempt_dir.name}",
                 "patch_count": sum(not patch.name.startswith(".") for patch in patches_root.iterdir()),
                 "patches_root": str(patches_root),
             }
@@ -57,7 +57,7 @@ class _ControllerIntegrationMixin:
                 admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run + 1),
             )
             self._file_controller_integration_failure(result)
-            kept = kept or int(result["integration"].get("kept_count") or 0) > 0
+            kept = kept or result["integration"]["kept_count"] > 0
         return kept
 
     async def _integrate_controller_output(
@@ -105,7 +105,7 @@ class _ControllerIntegrationMixin:
         status = str(integration.get("status") or "")
         if status not in {"failed", "no_patch_admitted"} and not skipped:
             return
-        cycle = int(self.shared_state.macro_cycle or 0)
+        cycle = self.shared_state.macro_cycle
         self.shared_state.record_action_failure(
             action="kernel_rewrite_controller",
             task_id=str(result.get("run_id") or f"forge-cycle-{cycle}"),

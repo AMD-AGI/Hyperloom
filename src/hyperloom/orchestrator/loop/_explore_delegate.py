@@ -24,7 +24,7 @@ def delegate_idempotency_key(request: Any, shared_state: Any, nested_key: str | 
     raw_key = ""
     # A grid the executor grows with its pending rewrite levers is not all the round measures, so it is not keyed.
     if request.action_name == _EXPLORE and not framework_lever_grid(shared_state):
-        raw_key = explore_grid_key(request.params, macro_cycle=int(shared_state.macro_cycle or 0))
+        raw_key = explore_grid_key(request.params, macro_cycle=shared_state.macro_cycle)
     raw_key = raw_key or request.intent.payload.get("idempotency_key") or nested_key
     if not raw_key:
         content_fp = hashlib.sha1(

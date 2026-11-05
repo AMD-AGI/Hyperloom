@@ -190,7 +190,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             if self._coord.phase_kernel.last_trace_profiles_the_live_stack():
                 log.info(
                     "cycle %d start: the last trace profiles the live stack; no reprofile",
-                    int(self.shared_state.macro_cycle or 0),
+                    self.shared_state.macro_cycle,
                 )
                 return
             task = await self._coord.phase_prelude.enqueue_internal_analysis_task(

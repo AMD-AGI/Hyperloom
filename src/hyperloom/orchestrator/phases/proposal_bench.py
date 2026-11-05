@@ -143,7 +143,7 @@ class ProposalBench(CoordinatorCollaborator):
         if variant is None or self._coord.dispatcher.admission_frozen:
             return False
         switches = sha1(",".join(variant["framework_lever_bundle"]).encode(), usedforsecurity=False).hexdigest()[:12]
-        key = f"lever-bundle-c{int(self.shared_state.macro_cycle or 0)}-{switches}"
+        key = f"lever-bundle-c{self.shared_state.macro_cycle}-{switches}"
         if not await self._bundle_screened(key, variant):
             return False
         round_key = await self._fresh_batch_key(key)
@@ -191,7 +191,7 @@ class ProposalBench(CoordinatorCollaborator):
 
         Called after an adopted settlement and ahead of each tick's dispatcher pass; idempotent.
         """
-        if str(self.shared_state.phase or "").upper() == PHASE_FRAMEWORK_AGENT:
+        if self.shared_state.phase.upper() == PHASE_FRAMEWORK_AGENT:
             await self.enqueue_cycle_batch()
 
     async def enqueue_cycle_batch(self) -> bool:
@@ -216,7 +216,7 @@ class ProposalBench(CoordinatorCollaborator):
         if len(arms) < 2 and any(lane in serving for t in live for lane in t.requires_lanes):
             return False
         names = sha1(",".join(arm["name"] for arm in arms).encode(), usedforsecurity=False).hexdigest()[:12]
-        key = await self._fresh_batch_key(f"cycle-batch-c{int(self.shared_state.macro_cycle or 0)}-{names}")
+        key = await self._fresh_batch_key(f"cycle-batch-c{self.shared_state.macro_cycle}-{names}")
         if key is None:
             cba.release_unscreened_levers(self.shared_state, {cba.CYCLE_ARMS_PARAM: arms})
             return False
@@ -242,7 +242,7 @@ class ProposalBench(CoordinatorCollaborator):
             return False
         if _holds_cycle_batch([*await self.tasks.queued(), *await self.tasks.running()]):
             return False
-        key = await self._fresh_batch_key(f"cycle-reference-c{int(state.macro_cycle or 0)}-s{stack_len}")
+        key = await self._fresh_batch_key(f"cycle-reference-c{state.macro_cycle}-s{stack_len}")
         if key is None:
             return False
         params = {"source": _COORDINATOR_SOURCE, "reason": cba.CYCLE_BATCH_REASON, cba.CYCLE_ARMS_PARAM: []}
