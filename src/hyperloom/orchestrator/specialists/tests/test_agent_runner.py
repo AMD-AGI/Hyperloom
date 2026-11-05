@@ -300,9 +300,8 @@ async def test_resource_records_are_complete_and_appended(tmp_path: Path) -> Non
     handle = await runner.launch(make_spec(ws, code=code, gpus=0))
     await wait_finished(runner, handle)
     await runner.collect(handle)
-    await runner.finish_campaign()
     lines = [json.loads(x) for x in (tmp_path / "session" / "agents" / "resources.jsonl").read_text().splitlines()]
-    specialist, container_at_end, container_final = lines
+    specialist, container = lines
     assert specialist["kind"] == "specialist_resources"
     assert specialist["task_id"] == "task-1" and specialist["backend"] == "claude" and specialist["location"] == "local"
     assert specialist["peak_rss_bytes"] >= 20_000_000
@@ -312,10 +311,10 @@ async def test_resource_records_are_complete_and_appended(tmp_path: Path) -> Non
     assert specialist["ended_by"] == "normal"
     assert specialist["wall_seconds"] > 0
     assert specialist["cpu_seconds"] >= 0
-    assert container_at_end["kind"] == container_final["kind"] == "container_resources"
-    assert container_final["memory_max_bytes"] == 4294967296
-    assert container_final["cpu_quota_us"] == 400000
-    assert container_final["max_concurrent_specialists"] == 1
+    assert container["kind"] == "container_resources"
+    assert container["memory_max_bytes"] == 4294967296
+    assert container["cpu_quota_us"] == 400000
+    assert container["max_concurrent_specialists"] == 1
     assert oct((tmp_path / "session" / "agents" / "resources.jsonl").stat().st_mode & 0o777) == "0o600"
 
 
@@ -341,16 +340,18 @@ async def test_a_link_planted_where_the_records_go_is_refused_and_its_target_is_
         else:
             os.link(target, agents / "resources.jsonl")
     runner = make_runner(session)
+    handle = await runner.launch(make_spec(tmp_path / "w", code="pass"))
+    await wait_finished(runner, handle)
     with pytest.raises(OSError) as refused:
-        await runner.finish_campaign()
+        await runner.collect(handle)
     assert refused.value.errno == refusal
     assert target.read_text() == "kept\n"
     assert sorted(p.name for p in outside.iterdir()) == ["resources.jsonl"]
 
     (agents if planted == "symlinked agents dir" else agents / "resources.jsonl").unlink()
-    await runner.finish_campaign()
+    await runner.collect(handle)
     records = [json.loads(x) for x in (agents / "resources.jsonl").read_text().splitlines()]
-    assert [r["kind"] for r in records] == ["container_resources"]
+    assert [r["kind"] for r in records] == ["specialist_resources", "container_resources"]
     assert target.read_text() == "kept\n"
 
 
