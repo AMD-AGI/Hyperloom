@@ -86,12 +86,7 @@ def patch_between(before: Files, after: Files) -> str:
         return ""
     with tempfile.TemporaryDirectory(prefix="hl-rebase-") as scratch:
         root = Path(scratch)
-        _git(root, *INIT, "--bare", "--quiet")
-        blobs = _hash_objects(
-            root, {content for files in (before, after) for content in files.values() if content is not None}
-        )
-        trees = [_write_tree(root, name, files, blobs) for name, files in (("before", before), ("after", after))]
-        return _git(root, "diff", "--no-color", "--no-ext-diff", "--no-renames", *trees)
+        return _git(root, "diff", "--no-color", "--no-ext-diff", "--no-renames", *_trees(root, before, after))
 
 
 def _hash_objects(root: Path, contents: set[bytes]) -> dict[bytes, str]:
@@ -103,6 +98,28 @@ def _hash_objects(root: Path, contents: set[bytes]) -> dict[bytes, str]:
     listing = "".join(f"{source}\n" for source in sources).encode()
     ids = _git(root, "hash-object", "-w", "--no-filters", "--stdin-paths", stdin=listing).split()
     return dict(zip(ordered, ids, strict=True))
+
+
+def renames(before: Files, after: Files) -> dict[str, str]:
+    """The files ``after`` moves, as ``git diff -M`` finds them: each new path with the path it was moved from.
+
+    ``after`` holds every path of ``before``.
+    """
+    with tempfile.TemporaryDirectory(prefix="hl-rebase-") as scratch:
+        root = Path(scratch)
+        fields = _git(root, "diff", "--name-status", "-z", "-M", "--diff-filter=R", *_trees(root, before, after))
+    # Each rename is three fields: its status (R and a similarity), the old path and the new one.
+    parts = fields.split("\0")
+    return {new: old for old, new in zip(parts[1::3], parts[2::3], strict=True)}
+
+
+def _trees(root: Path, before: Files, after: Files) -> list[str]:
+    """``before`` and ``after`` written as trees of a scratch repository in ``root``."""
+    _git(root, *INIT, "--bare", "--quiet")
+    blobs = _hash_objects(
+        root, {content for files in (before, after) for content in files.values() if content is not None}
+    )
+    return [_write_tree(root, name, files, blobs) for name, files in (("before", before), ("after", after))]
 
 
 def _write_tree(root: Path, name: str, files: Files, blobs: Mapping[bytes, str]) -> str:
@@ -129,4 +146,4 @@ def _git(root: Path, *args: str, stdin: bytes = b"", **pinned: str) -> str:
     return done.stdout.decode()
 
 
-__all__ = ["Files", "merge_files", "patch_between"]
+__all__ = ["Files", "merge_files", "patch_between", "renames"]
