@@ -9,6 +9,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from hyperloom.common import amd_smi
 from kernelforge.gemm_tune import aiter_script_map, utils
 from kernelforge.gemm_tune.utils import (
     check_gpu_status,
@@ -92,48 +93,68 @@ class _Proc:
     def __init__(self, stdout="", rc=0):
         self.stdout = stdout
         self.returncode = rc
+        self.stderr = ""
 
 
 def test_check_gpu_status_skip():
     assert check_gpu_status(skip=True) == []
 
 
+def _stub_amd_smi(monkeypatch, proc):
+    monkeypatch.setattr(amd_smi.shutil, "which", lambda _n: "/opt/rocm/bin/amd-smi")
+    monkeypatch.setattr(amd_smi.subprocess, "run", lambda *a, **k: proc)
+
+
 def test_check_gpu_status_parses(monkeypatch):
     data = {
-        "card0": {
-            "GPU use (%)": "80",
-            "Temperature (Sensor edge) (C)": "45",
-            "Average Graphics Package Power (W)": "300",
-            "VRAM Total Used Memory (B)": "1000",
-            "VRAM Total Memory (B)": "2000",
-        },
-        "card1": {"GPU Utilization (%)": "10"},
-        "system": {"ignored": "x"},
+        "gpu_data": [
+            {
+                "gpu": 0,
+                "usage": {"gfx_activity": {"value": 80, "unit": "%"}},
+                "power": {"socket_power": {"value": 300, "unit": "W"}},
+                "temperature": {"edge": {"value": 45, "unit": "C"}},
+                "mem_usage": {
+                    "used_vram": {"value": 1000, "unit": "MB"},
+                    "total_vram": {"value": 2000, "unit": "MB"},
+                },
+            },
+            {"gpu": 1, "usage": {"gfx_activity": {"value": 10, "unit": "%"}}},
+        ]
     }
-    monkeypatch.setattr(utils.subprocess, "run", lambda *a, **k: _Proc(stdout=json.dumps(data)))
+    _stub_amd_smi(monkeypatch, _Proc(stdout=json.dumps(data)))
     gpus = check_gpu_status()
     assert len(gpus) == 2
     g0 = next(g for g in gpus if g.gpu_id == 0)
     assert g0.busy is True and g0.temperature == "45"
+    # amd-smi reports memory in MiB, where rocm-smi reported bytes.
+    assert (g0.memory_used, g0.memory_total) == ("1000", "2000")
     g1 = next(g for g in gpus if g.gpu_id == 1)
     assert g1.busy is False
 
 
+def test_check_gpu_status_unsupported_readings_are_blank(monkeypatch):
+    """A part that answers "N/A" reports an empty string, not a zero that would read as a real measurement."""
+    data = {"gpu_data": [{"gpu": 0, "usage": "N/A", "power": {"socket_power": "N/A"}, "temperature": "N/A"}]}
+    _stub_amd_smi(monkeypatch, _Proc(stdout=json.dumps(data)))
+    (g0,) = check_gpu_status()
+    assert (g0.utilization, g0.power, g0.temperature, g0.busy) == ("", "", "", False)
+
+
 def test_check_gpu_status_nonzero_rc(monkeypatch):
-    monkeypatch.setattr(utils.subprocess, "run", lambda *a, **k: _Proc(rc=1))
+    _stub_amd_smi(monkeypatch, _Proc(rc=1))
     assert check_gpu_status() == []
 
 
 def test_check_gpu_status_not_found(monkeypatch):
     def boom(*a, **k):
-        raise FileNotFoundError("rocm-smi")
+        raise FileNotFoundError("amd-smi")
 
-    monkeypatch.setattr(utils.subprocess, "run", boom)
+    monkeypatch.setattr(amd_smi.subprocess, "run", boom)
     assert check_gpu_status() == []
 
 
 def test_check_gpu_status_bad_json(monkeypatch):
-    monkeypatch.setattr(utils.subprocess, "run", lambda *a, **k: _Proc(stdout="not json"))
+    _stub_amd_smi(monkeypatch, _Proc(stdout="not json"))
     assert check_gpu_status() == []
 
 

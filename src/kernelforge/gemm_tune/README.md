@@ -155,7 +155,7 @@ Example: 30min budget, 2 tuners at 15+20 min = 35 min → second tuner may be sk
 | Parameter | Description |
 |---|---|
 | `--gpu-ids` | Comma-separated GPU IDs (overrides ROCR_VISIBLE_DEVICES) |
-| `--skip-gpu-check` | Skip rocm-smi preflight (use when Ray manages GPUs) |
+| `--skip-gpu-check` | Skip amd-smi preflight (use when Ray manages GPUs) |
 | `-v, --verbose` | Enable debug-level logging |
 
 ### `kernelforge gemm-tune plan`

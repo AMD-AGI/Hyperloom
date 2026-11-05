@@ -3,7 +3,7 @@
 
 """Per-round GPU telemetry, normalised out of the round's own benchmark report.
 
-The numbers are already collected -- Magpie's ``GPUMonitor`` on a single node, the pod-side ``rocm-smi`` sampler on
+The numbers are already collected -- Magpie's ``GPUMonitor`` on a single node, the pod-side ``amd-smi`` sampler on
 several -- and land in ``benchmark_report.json`` under ``gpu_monitor``. What was missing is a reading of them that a
 consumer can trust, per round, without knowing which producer wrote the block.
 

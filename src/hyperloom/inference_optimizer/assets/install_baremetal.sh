@@ -484,11 +484,36 @@ check_rocm_toolchain_alignment() {
   return 0
 }
 
-# Human GPU label from arch, refined by rocm-smi product name when available.
+# Human GPU label from arch, refined by amd-smi's resolved board/market name
+# when available. rocm-smi --showproductname does not resolve the board on
+# gfx1151 ("Card Series: N/A" on ROCm 7.2.3, the generic "AMD Radeon Graphics"
+# on 7.15) and ROCm 10 pip-wheel stacks ship no
+# rocm-smi at all; `amd-smi static --asic` resolves the real board name there
+# (e.g. "AMD Radeon 8060S Graphics") and is never worse than rocm-smi where it
+# can't. Unlike the old MI###-only regex (which only ever matched Instinct
+# text and yielded nothing for a Radeon part), take market_name verbatim and
+# only discard it when amd-smi itself couldn't resolve one -- "N/A" or the
+# bare unresolved device id ("0x1586").
 detect_gpu_label() {
   local gfx="$1" product=""
-  if command -v rocm-smi >/dev/null 2>&1; then
-    product="$(rocm-smi --showproductname 2>/dev/null | grep -oiE 'MI[0-9]{3}[A-Z]?' | head -1)"
+  # python3 may not be resolved yet (resolve_python, incl. its apt-bootstrap
+  # fallback, runs later in Phase 1) -- skip the amd-smi lookup rather than
+  # hand-rolling a second text scraper, and fall back to the gfx guess below.
+  if command -v amd-smi >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    product="$(amd-smi static --asic --json 2>/dev/null | python3 -c '
+import json, sys
+
+try:
+    data = json.load(sys.stdin)
+    name = data["gpu_data"][0]["asic"]["market_name"]
+except Exception:
+    name = ""
+
+name = (name or "").strip()
+if not name or name == "N/A" or name.lower().startswith("0x"):
+    name = ""
+print(name)
+' 2>/dev/null)"
   fi
   if [ -n "$product" ]; then echo "$product"; return 0; fi
   case "$gfx" in
@@ -509,12 +534,12 @@ base_preflight() {
   [ -r /etc/os-release ] && os_name="$(. /etc/os-release 2>/dev/null; echo "${NAME:-} ${VERSION_ID:-}")"
   log "OS: ${os_name:-unknown}"
 
-  if command -v rocm-smi >/dev/null 2>&1; then
+  if command -v amd-smi >/dev/null 2>&1; then
     local rocm_ver=""
     [ -r /opt/rocm/.info/version ] && rocm_ver="$(cat /opt/rocm/.info/version 2>/dev/null)"
     log "ROCm: present${rocm_ver:+ (version ${rocm_ver})}"
   else
-    warn "ROCm: rocm-smi not found. ${IMAGE_HINT}"; rc=1
+    warn "ROCm: amd-smi not found. ${IMAGE_HINT}"; rc=1
   fi
 
   local gfx=""

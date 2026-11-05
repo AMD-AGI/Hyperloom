@@ -5,14 +5,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from .amd_smi import AmdSmiError, amd_smi_json
 from .gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 
 log = logging.getLogger(__name__)
@@ -85,26 +84,16 @@ def parse_mode(raw: str | None) -> str:
 
 
 def _amd_smi_json(args: Sequence[str], timeout_s: float = _READ_TIMEOUT_S) -> object:
-    """Run a read-only ``amd-smi`` subcommand with ``--json`` and parse it."""
-    cmd = ["amd-smi", *args, "--json"]
+    """Run a read-only ``amd-smi`` subcommand with ``--json`` and parse it.
+
+    A thin adapter over the shared :func:`hyperloom.common.amd_smi.amd_smi_json`, kept so every caller in this
+    module (and every existing test, which stubs this name directly) can go on catching :class:`PartitionError`
+    without knowing about :class:`~hyperloom.common.amd_smi.AmdSmiError`.
+    """
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise PartitionError("amd-smi not found; reading compute partitioning needs it on PATH") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise PartitionError(f"amd-smi {' '.join(args)} timed out after {timeout_s}s") from exc
-    if proc.returncode != 0:
-        raise PartitionError(f"amd-smi {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
-    try:
-        return json.loads(proc.stdout)
-    except ValueError as exc:
-        raise PartitionError(f"amd-smi {' '.join(args)} returned unparseable JSON") from exc
+        return amd_smi_json(args, timeout_s=timeout_s)
+    except AmdSmiError as exc:
+        raise PartitionError(str(exc)) from exc
 
 
 def read_partition_modes() -> dict[int, str]:
@@ -134,6 +123,43 @@ def read_partition_mode(gpu_id: int = 0) -> str:
     modes = read_partition_modes()
     if gpu_id not in modes:
         raise PartitionError(f"amd-smi partition reported no state for GPU {gpu_id}")
+    return modes[gpu_id]
+
+
+def read_memory_partition_modes() -> dict[int, str]:
+    """Read the live memory-partition mode (NPS1/NPS2/NPS4/NPS8) of every GPU.
+
+    A sibling of :func:`read_partition_modes`: the same ``amd-smi partition`` call carries the memory-partition
+    layout in a second top-level array, keyed the same way but under ``current_memory_partition`` rather than
+    ``accelerator_type``. Neither array is filtered for the literal string ``"N/A"`` amd-smi reports on hardware that
+    does not partition at all (e.g. an APU) -- a caller that cares distinguishes that from a real mode itself, the
+    way :func:`~kernelforge.roofline_ceiling.device_profile.describe_device` does.
+    """
+    payload = _amd_smi_json(["partition"])
+    rows: list[dict] = []
+    if isinstance(payload, dict):
+        raw_rows = payload.get("memory_partition")
+        if isinstance(raw_rows, list):
+            rows = [r for r in raw_rows if isinstance(r, dict)]
+    modes: dict[int, str] = {}
+    for row in rows:
+        try:
+            gpu_id = int(row.get("gpu_id"))
+        except (TypeError, ValueError):
+            continue
+        mode = str(row.get("current_memory_partition") or "").strip().upper()
+        if mode:
+            modes[gpu_id] = mode
+    if not modes:
+        raise PartitionError("amd-smi partition reported no memory-partition state")
+    return modes
+
+
+def read_memory_partition_mode(gpu_id: int = 0) -> str:
+    """Read one GPU's memory-partition mode."""
+    modes = read_memory_partition_modes()
+    if gpu_id not in modes:
+        raise PartitionError(f"amd-smi partition reported no memory-partition state for GPU {gpu_id}")
     return modes[gpu_id]
 
 

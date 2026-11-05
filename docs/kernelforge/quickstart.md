@@ -9,7 +9,7 @@ This guide walks through a complete kernel development workflow — from install
 | Python | ≥ 3.10 | `python3 --version` |
 | ROCm | ≥ 6.0 | `rocminfo \| head -5` |
 | rocprofv3 | (included with ROCm) | `rocprofv3 --version` |
-| GPU | MI300X / MI355X | `rocm-smi --showproductname` |
+| GPU | MI300X / MI355X | `amd-smi static --asic` |
 | Claude auth | API key, subscription token, **or** Claude Code Max | `echo $ANTHROPIC_API_KEY` / `echo $CLAUDE_CODE_OAUTH_TOKEN` **or** `claude --version` |
 | Codex auth (instead of Claude) | OpenAI-side key and endpoint | `echo $OPENAI_API_KEY` / `echo $OPENAI_BASE_URL` |
 
