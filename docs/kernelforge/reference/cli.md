@@ -357,7 +357,7 @@ best commit forge-loop recorded.
 | `--workspace <dir>` | required | Workspace of the campaign to deliver. |
 | `--author <'Name <email>'>` | the workspace's git identity | Author and committer of the delivered commit. |
 | `--lint <command>` | none | A check the sources must pass, run with their paths appended. Repeatable. |
-| `--review-guide <file>` | none | A file of the kernel repository's own rules for its language (for SIKL's FlyDSL kernels, its `flydsl-kernel-code-cleanup` skill), read by the review first. Repeatable. |
+| `--review-guide <file>` | none | A file of the kernel repository's own rules for its language (for AKLR's FlyDSL kernels, FlyDSL's own kernel-code-cleanup skill and `aklr-kb/flydsl/guides.md`), read by the review first. Repeatable. |
 | `--review-rounds <n>` | `2` | Review sessions at most. |
 | `--pairs <n>` | `3` | Pairs timing the reviewed kernel beside the best. |
 | `--gpu <card>` | inherited | Card the review's checks and timing run on. |

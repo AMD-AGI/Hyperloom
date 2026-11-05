@@ -22,9 +22,9 @@ points to, when the campaign passes one):
 | You want | Go to |
 |---|---|
 | To look up an op, a layout-algebra rule, or an env var | `flydsl-kernel-authoring` (the reference) |
-| To fix a kernel that runs and is wrong | `skill: bottleneck/debug-flydsl-kernel.md` |
-| To use a kernel FlyDSL already ships | `skill: optimize/flydsl_levers/flydsl_kernel_library.md` |
-| To make a working kernel faster | `skill: optimize/flydsl_levers/flydsl_authoring_method.md` |
+| To fix a kernel that runs and is wrong | `skill: flydsl/debug-flydsl-kernel.md` |
+| To use a kernel FlyDSL already ships | `skill: flydsl/kernels/flydsl_kernel_library.md` |
+| To make a working kernel faster | `skill: flydsl/kernels/flydsl_authoring_method.md` |
 
 **Prerequisites:** FlyDSL installed editable (`pip install -e .`), and a GPU — every step below ends
 in a real launch, because tile-programming bugs do not show up statically.
@@ -323,7 +323,7 @@ if bid == 0:                        # runtime; rewritten to scf.IfOp
 The distinction that costs the most time: a `range()` induction variable **cannot index a Python
 list**, because it is an SSA value rather than an int. If you are indexing a Python-side structure,
 you need `range_constexpr`. What each loop form carries, and which bound types it accepts, is in
-`skill: bottleneck/debug-flydsl-kernel.md` § The three loop forms.
+`skill: flydsl/debug-flydsl-kernel.md` § The three loop forms.
 
 ## Step 5 — Synchronization
 ```python
@@ -376,7 +376,7 @@ has no `allocate_array`; use `fx.SharedAllocator`.
 
 Before adding LDS at all: it only pays when there is **cross-thread reuse**. Staging data that each
 thread reads once adds a round trip and a barrier for nothing. See
-`skill: optimize/flydsl_levers/flydsl_authoring_method.md`.
+`skill: flydsl/kernels/flydsl_authoring_method.md`.
 
 ## Step 7 — Run it
 ```bash
@@ -401,7 +401,7 @@ assert torch.allclose(Out, reference, atol=1e-5)
 | For GEMM: check with non-symmetric A and B | a symmetric input hides operand-order bugs |
 
 If it is wrong, the classification table in
-`skill: bottleneck/debug-flydsl-kernel.md` maps the symptom to the cause. If it does not compile,
+`skill: flydsl/debug-flydsl-kernel.md` maps the symptom to the cause. If it does not compile,
 the error → cause → fix table is in **flydsl-kernel-authoring** §10.
 
 ## Checklist

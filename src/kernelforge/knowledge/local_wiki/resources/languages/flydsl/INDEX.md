@@ -27,18 +27,19 @@ documented in `framework/aiter/` (the `aiter_flydsl_libtype` lever). Backend-neu
 
 **Where the techniques live.** This folder carries the FlyDSL *language* (`API_docs/`). The techniques for
 making a FlyDSL kernel fast or correct live in the **FlyDSL optimization skill**, an external skill the knowledge
-block points at when the campaign passes one with `forge-loop --skill-dir` (for SIKL kernels:
-`<SIKL>/.claude/skills/flydsl-kernel-optimization`). It covers a dense-GEMM package, aiter's shipped FlyDSL kernels
-and their knobs, the structure-first authoring method, LDS and prefetch, trace capture and analysis, debugging,
-perf bisection and FlyDSL's own test suites. Below, a path starting `skill:` is relative to that skill's folder.
+block points at when the campaign passes one with `forge-loop --skill-dir` (for AKLR kernels:
+`<AKLR>/harness/skills/aklr-kb`, with its `flydsl/` folder as a second `--skill-dir`). It covers a dense-GEMM
+package, aiter's shipped FlyDSL kernels and their knobs, the structure-first authoring method, LDS and prefetch,
+trace capture and analysis, debugging, perf bisection and FlyDSL's own test suites. Below, a path starting `skill:`
+is relative to that skill's folder (`aklr-kb/`).
 If the knowledge block lists no such skill, those techniques are not available in this run; work from
 `API_docs/` and `common_methodology/`.
 
 **Two ways you engage FlyDSL — pick your path first, it changes which files you read:**
 - **Path A — *use* the aiter-shipped FlyDSL kernel library.** Pick a kernel family, its knobs and its dispatch.
-  Entry: `skill: optimize/flydsl_levers/flydsl_kernel_library.md` → `skill: optimize/flydsl_levers/flydsl_knob_space.md`.
+  Entry: `skill: flydsl/kernels/flydsl_kernel_library.md` → `skill: flydsl/kernels/flydsl_knob_space.md`.
 - **Path B — *author* a new `@flyc.kernel`.** Entry: `API_docs/` (language) + `API_docs/conventions.md` (style)
-  → `skill: optimize/flydsl_levers/flydsl_authoring_method.md`; for a dense GEMM, `skill: gemm/INDEX.md`.
+  → `skill: flydsl/kernels/flydsl_authoring_method.md`; for a dense GEMM, `skill: gemm/INDEX.md`.
 
 ## Reading order
 1. **`API_docs/`** — the language itself: `kernel_authoring_guide.md` (`@flyc.kernel`/`@flyc.jit`, launch,
@@ -69,10 +70,10 @@ Paths are relative to this folder, except `skill:` paths (see above).
 
 | Task / symptom | Read in this order |
 |---|---|
-| "What is FlyDSL / where does it fit?" | `API_docs/architecture_guide.md` → `skill: optimize/flydsl_levers/flydsl_kernel_library.md` |
+| "What is FlyDSL / where does it fit?" | `API_docs/architecture_guide.md` → `skill: flydsl/kernels/flydsl_kernel_library.md` |
 | "Write my first FlyDSL kernel" | `API_docs/kernel_authoring_guide.md` → `API_docs/conventions.md` → `API_docs/examples/` (01→04) |
 | "Understand the layout algebra (Shape/Stride/tiled copy/MMA)" | `API_docs/layout_system_guide.md` → `API_docs/cute_layout_algebra_guide.md` → `API_docs/flydsl-tile-programming.md` |
-| "Which pre-built kernels exist + their dtype/config?" | `API_docs/prebuilt_kernels_guide.md` → `skill: optimize/flydsl_levers/flydsl_kernel_library.md` |
+| "Which pre-built kernels exist + their dtype/config?" | `API_docs/prebuilt_kernels_guide.md` → `skill: flydsl/kernels/flydsl_kernel_library.md` |
 | Optimize, profile, debug, or write a GEMM | `skill: SKILL.md` (it routes by task and symptom) |
 | "Tune / numerics / fusion for operator X" | not covered in this repo — read the source (`framework/aiter/overall/operator_catalog.md` gives the entry point) |
 
@@ -121,9 +122,9 @@ to an entry point that no longer exists, confidently. Where to get those facts i
   cross-GPU protocol, not a per-release config.
 
 
-For Path A (using the shipped library), `skill: optimize/flydsl_levers/flydsl_kernel_library.md` +
+For Path A (using the shipped library), `skill: flydsl/kernels/flydsl_kernel_library.md` +
 `flydsl_knob_space.md` and `API_docs/prebuilt_kernels_guide.md` carry the entry points and knob tables the
-per-operator `flydsl.md` cards duplicated. For Path B (authoring), `skill: optimize/flydsl_levers/flydsl_authoring_method.md`
+per-operator `flydsl.md` cards duplicated. For Path B (authoring), `skill: flydsl/kernels/flydsl_authoring_method.md`
 and, for a dense GEMM, `skill: gemm/INDEX.md` are the structure-first path.
 
 **Coverage note:** none of the operators this folder used to cover (`gemm_epilogue_fused`,
