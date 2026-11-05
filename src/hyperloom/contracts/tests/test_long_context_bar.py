@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The long-context bar the board decided (#142 c3219, bar (b)): the root's reading with its 95% interval, and a candidate
+"""The long-context bar the gate applies: the root's reading with its 95% interval, and a candidate
 refused when its drop from the lower end of that interval exceeds the check's own sampling noise, 3 of 64 items.
 
 The interval bounds below were computed by hand from the Wilson formula, not by the code under test.
