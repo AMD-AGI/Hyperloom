@@ -11,8 +11,6 @@ from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.timeutil import now_iso
-
 log = logging.getLogger(__name__)
 
 #: Lines kept per patch. A port of one upstream change is a few dozen; the cap bounds what a runaway diff can
@@ -148,25 +146,3 @@ __all__ = [
     "queued_identities",
     "touched_files",
 ]
-
-
-def record_measured_patch_set(
-    state: Any, *, task_id: str, patch_name: str, identity: dict[str, list[str]], outcome: str, landed: bool = False
-) -> None:
-    """Record on ``state`` that a round measured the patch *identity* (``files``, ``line_keys``) describes."""
-    line_keys = list(identity.get("line_keys") or [])
-    if not line_keys:
-        return
-    state.measured_patch_sets.append(
-        {
-            "task_id": task_id,
-            "patch_name": patch_name,
-            "files": list(identity.get("files") or []),
-            "line_keys": line_keys,
-            "outcome": outcome,
-            "landed": landed,
-            "ts": now_iso(),
-        }
-    )
-    if len(state.measured_patch_sets) > MAX_MEASURED:
-        state.measured_patch_sets = state.measured_patch_sets[-MAX_MEASURED:]

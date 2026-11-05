@@ -30,7 +30,7 @@ from .proposal_schemas import (
     UPSTREAM_CANDIDATE_CONTRACT,
     UPSTREAM_CANDIDATE_EXAMPLE,
 )
-from .specialist_focus import _DOMAIN_FOCUS_TEMPLATES, _is_agentx, decode_table_rows, owned_module_rows, switch_contract
+from .specialist_focus import _DOMAIN_FOCUS_TEMPLATES, _is_agentx, owned_module_rows, split_evidence, switch_contract
 from .specialist_prompt_text import (
     IDENTITY_MANDATE_LINES,
     ORCHESTRATOR_CHANNEL_LINES,
@@ -830,7 +830,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         The rendered roofline-evidence section lines.
     """
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
-    ev = {key: value for key, value in inp.roofline_evidence.items() if key != "owned_module"}
+    ev, module_rows = split_evidence(inp)
     if not ev:
         rows.append(
             "(none — no fresh roofline snapshot has been recorded yet. "
@@ -840,7 +840,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         )
         return rows
 
-    rows.extend(decode_table_rows(ev.get("decode_modules")))
+    rows.extend(module_rows)
     snap_id = ev.get("roofline_snapshot_id")
     if snap_id is not None:
         rows.extend([f"**TraceLens snapshot #{snap_id}**", ""])

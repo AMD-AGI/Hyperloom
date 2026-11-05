@@ -844,7 +844,14 @@ def owned_module_rows(inp: SpecialistPromptInputs) -> list[str]:
     return [f"{line}; its decode time per step:", "", *map(str, owned["rows"])]
 
 
-def decode_table_rows(table: Any) -> list[str]:
+def split_evidence(inp: SpecialistPromptInputs) -> tuple[dict[str, Any], list[str]]:
+    """The roofline evidence less its owned module group, which renders with the mandate, and its decode table rows."""
+    evidence = dict(inp.roofline_evidence)
+    evidence.pop("owned_module", None)
+    return evidence, _decode_table_rows(evidence.get("decode_modules"))
+
+
+def _decode_table_rows(table: Any) -> list[str]:
     """The decode steps' time by module, ahead of the TraceLens kernels, or nothing without a table."""
     if not table:
         return []

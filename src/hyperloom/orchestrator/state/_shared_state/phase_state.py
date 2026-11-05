@@ -417,6 +417,35 @@ class _PhaseStateMixin:
         ]
         self.explore_search = search
 
+    def record_measured_patch_set(
+        self,
+        *,
+        task_id: str,
+        patch_name: str,
+        identity: dict[str, list[str]],
+        outcome: str,
+        landed: bool = False,
+    ) -> None:
+        """Record that a round measured the patch *identity* (``files``, ``line_keys``) describes, and if it stayed."""
+        from ...framework.patch_overlap import MAX_MEASURED
+
+        line_keys = list(identity.get("line_keys") or [])
+        if not line_keys:
+            return
+        self.measured_patch_sets.append(
+            {
+                "task_id": task_id,
+                "patch_name": patch_name,
+                "files": list(identity.get("files") or []),
+                "line_keys": line_keys,
+                "outcome": outcome,
+                "landed": landed,
+                "ts": now_iso(),
+            }
+        )
+        if len(self.measured_patch_sets) > MAX_MEASURED:
+            self.measured_patch_sets = self.measured_patch_sets[-MAX_MEASURED:]
+
     def record_authored_framework_levers(
         self,
         switches: list[dict[str, Any]],

@@ -14,6 +14,8 @@ from hyperloom.inference_optimizer.canonical_fingerprint import canonical_finger
 
 __all__ = ["admit_explore_grid", "delegate_idempotency_key", "explore_grid_key"]
 
+_EXPLORE = "explore"
+
 
 def delegate_idempotency_key(request: Any, shared_state: Any, nested_key: str | None) -> str:
     """Grid content for explore -> top-level -> nested compat alias -> content-fingerprint auto-key."""
@@ -21,7 +23,7 @@ def delegate_idempotency_key(request: Any, shared_state: Any, nested_key: str | 
 
     raw_key = ""
     # A grid the executor grows with its pending rewrite levers is not all the round measures, so it is not keyed.
-    if request.action_name == "explore" and not framework_lever_grid(shared_state):
+    if request.action_name == _EXPLORE and not framework_lever_grid(shared_state):
         raw_key = explore_grid_key(request.params, macro_cycle=int(shared_state.macro_cycle or 0))
     raw_key = raw_key or request.intent.payload.get("idempotency_key") or nested_key
     if not raw_key:
@@ -78,7 +80,7 @@ async def admit_explore_grid(router: Any, request: Any, idempotency_key: str, ne
         return True
     keys = {str(k) for k in (idempotency_key, nested_key) if k}
     active = [*await router.tasks.queued(), *await router.tasks.running()]
-    if not any(task.kind == "explore" and task.idempotency_key in keys for task in active):
+    if not any(task.kind == _EXPLORE and task.idempotency_key in keys for task in active):
         if not await _keep_unqueued_variants(router, request.source, request.params, active):
             return False
         if not await _keep_launchable_variants(router, request.source, request.params):
@@ -152,5 +154,5 @@ async def _explore_grid_covered(router: Any, request: Any, idempotency_key: str)
     covered = explore_grid_already_covered(request.params, active, router.shared_state.explore_search)
     if covered is None:
         return False
-    await router.record_policy_denied(request.source, request.intent, covered, action_name="explore")
+    await router.record_policy_denied(request.source, request.intent, covered, action_name=_EXPLORE)
     return True

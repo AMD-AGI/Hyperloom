@@ -30,6 +30,8 @@ from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
 
 log = logging.getLogger(__name__)
 
+_ENCODING = "utf-8"
+
 
 # < N .so files under aiter jit/ ⇒ COLD start (first-time JIT compile pending).
 COLD_START_KERNEL_THRESHOLD = 20
@@ -532,7 +534,7 @@ def csv_jit_kernel_rows(csv_path: Path, target: tuple[str, int] | None) -> list[
     """
     rows: list[tuple[str, str]] = []
     try:
-        with csv_path.open(newline="", encoding="utf-8") as handle:
+        with csv_path.open(newline="", encoding=_ENCODING) as handle:
             reader = csv.DictReader(handle)
             keyed = target is not None and {"gfx", "cu_num"} <= set(reader.fieldnames or ())
             for row in reader:
@@ -580,7 +582,7 @@ def serving_modules_cover_rows(jit_dir: Path, modules: tuple[str, ...], rows: li
     for name, libtype in rows:
         resolved = serving_module_for_kernel(name, libtype, modules)
         search = (resolved,) if resolved else modules
-        encoded = name.encode("utf-8")
+        encoded = name.encode(_ENCODING)
         saw_so = False
         found = False
         for module in dict.fromkeys(search):
@@ -825,7 +827,7 @@ def result_is_aiter_jit_registry_mismatch(result: dict[str, Any] | None) -> bool
 
 def benchmark_framework(config_path: Path) -> str:
     """Read the framework a rendered Magpie config benchmarks, or "" when it names none."""
-    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    cfg = yaml.safe_load(Path(config_path).read_text(encoding=_ENCODING)) or {}
     return str((cfg.get("benchmark") or {}).get("framework") or "")
 
 
