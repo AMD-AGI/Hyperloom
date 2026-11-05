@@ -11,7 +11,7 @@ change rewrites every line of the other's is what lets a merge pick one of them 
 
 from __future__ import annotations
 
-import difflib
+import re
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -21,11 +21,15 @@ from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 
 #: A file's content by its path in the component's upstream repository, ``None`` where there is no file.
 Files = Mapping[str, bytes | None]
-# Both commands work on the few files one patch touches; this only bounds a wedged filesystem.
+# Each git command works on the few files one patch touches; this only bounds a wedged filesystem.
 _SCRATCH_PREFIX = "hl-rebase-"
 _GIT_TIMEOUT_S = 60.0
 # git merge-file exits with the number of conflicts, capped at 127; above that it failed.
 _MAX_CONFLICTS = 127
+#: ``git diff`` with no colour or external diff driver, whatever the environment asks for.
+_DIFF = ("diff", "--no-color", "--no-ext-diff")
+# The old side of a hunk header; with no count it is one line, and with a count of 0 the hunk inserts after that line.
+_HUNK_OLD_SIDE = re.compile(rb"^@@ -(\d+)(?:,(\d+))? ", re.MULTILINE)
 
 
 class _Overlap(Exception):
@@ -53,18 +57,9 @@ def _merge_file(base: bytes | None, ours: bytes | None, theirs: bytes | None) ->
         return theirs
     if base is None or ours is None or theirs is None:
         raise _Overlap
-    with tempfile.TemporaryDirectory(prefix=_SCRATCH_PREFIX) as scratch:
-        sides = [Path(scratch) / name for name in ("ours", "base", "theirs")]
-        for side, data in zip(sides, (ours, base, theirs)):
-            side.write_bytes(data)
-        done = subprocess.run(
-            git_argv("merge-file", "-p", "--quiet", *map(str, sides)),
-            cwd=scratch,
-            env=git_env(GIT_CEILING_DIRECTORIES=str(Path(scratch).parent)),
-            capture_output=True,
-            timeout=_GIT_TIMEOUT_S,
-            check=False,
-        )
+    done = _git_on(
+        {"ours": ours, "base": base, "theirs": theirs}, "merge-file", "-p", "--quiet", "ours", "base", "theirs"
+    )
     if done.returncode > _MAX_CONFLICTS:
         raise subprocess.CalledProcessError(done.returncode, "git merge-file", done.stdout, done.stderr)
     if done.returncode:
@@ -84,22 +79,55 @@ def rewrites(base: bytes | None, ours: bytes | None, theirs: bytes | None) -> bo
         return True
     if base is None or ours is None or theirs is None:
         return base is not None and ours is None and theirs is None
-    lines = base.splitlines(keepends=True)
-    rewritten = _changed_lines(lines, theirs)
+    rewritten = {line for start, end in _hunks(base, theirs) for line in range(start, end)}
     return all(
         set(range(start, end)) <= rewritten if start < end else {start - 1, start} <= rewritten
-        for start, end in _hunks(lines, ours)
+        for start, end in _hunks(base, ours)
     )
 
 
-def _hunks(lines: list[bytes], after: bytes) -> list[tuple[int, int]]:
-    """The runs of ``lines`` that ``after`` changes, as half-open line ranges; an empty one is an insertion there."""
-    matcher = difflib.SequenceMatcher(None, lines, after.splitlines(keepends=True), autojunk=False)
-    return [(start, end) for tag, start, end, _, _ in matcher.get_opcodes() if tag != "equal"]
+def _hunks(before: bytes, after: bytes) -> list[tuple[int, int]]:
+    """The runs of lines of ``before`` that ``after`` changes, as half-open line ranges; an empty one is an insertion
+    there.
+
+    Repeated lines can be aligned more than one way; git merge-file aligns them as this diff does, with the same
+    algorithm and no indent heuristic, so a line counts as changed exactly where the merge sees it changed.
+    """
+    done = _git_on(
+        {"before": before, "after": after},
+        *_DIFF,
+        "--no-index",
+        "--no-textconv",
+        "--text",
+        "--diff-algorithm=myers",
+        "--no-indent-heuristic",
+        "-U0",
+        "before",
+        "after",
+    )
+    # git diff --no-index exits 1 when the files differ.
+    if done.returncode > 1:
+        raise subprocess.CalledProcessError(done.returncode, "git diff --no-index", done.stdout, done.stderr)
+    hunks = []
+    for match in _HUNK_OLD_SIDE.finditer(done.stdout):
+        start, count = int(match[1]), 1 if match[2] is None else int(match[2])
+        hunks.append((start, start) if count == 0 else (start - 1, start - 1 + count))
+    return hunks
 
 
-def _changed_lines(lines: list[bytes], after: bytes) -> set[int]:
-    return {line for start, end in _hunks(lines, after) for line in range(start, end)}
+def _git_on(files: Mapping[str, bytes], *args: str) -> subprocess.CompletedProcess[bytes]:
+    """``git <args>`` run on ``files`` written by name into a scratch directory outside any repository."""
+    with tempfile.TemporaryDirectory(prefix=_SCRATCH_PREFIX) as scratch:
+        for name, data in files.items():
+            (Path(scratch) / name).write_bytes(data)
+        return subprocess.run(
+            git_argv(*args),
+            cwd=scratch,
+            env=git_env(GIT_CEILING_DIRECTORIES=str(Path(scratch).parent)),
+            capture_output=True,
+            timeout=_GIT_TIMEOUT_S,
+            check=False,
+        )
 
 
 def patch_between(before: Files, after: Files) -> str:
@@ -112,7 +140,7 @@ def patch_between(before: Files, after: Files) -> str:
         return ""
     with tempfile.TemporaryDirectory(prefix=_SCRATCH_PREFIX) as scratch:
         root = Path(scratch)
-        return _git(root, "diff", "--no-color", "--no-ext-diff", "--no-renames", *_trees(root, before, after))
+        return _git(root, *_DIFF, "--no-renames", *_trees(root, before, after))
 
 
 def _hash_objects(root: Path, contents: set[bytes]) -> dict[bytes, str]:
