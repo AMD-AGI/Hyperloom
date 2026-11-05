@@ -1230,6 +1230,19 @@ _resolve_geak_codex_bin() {
   "${PYTHON:-python3}" -c 'import os; from hyperloom.common.agent_cli import resolve_codex_executable; print(resolve_codex_executable(os.environ.get("GEAK_CODEX_BIN", "")))' 2>/dev/null || true
 }
 
+# Whether GEAK will take its Node runtime: a backend or profile is named, or the keys are OpenAI-only (as in
+# cli/geak_binaries.py). With none, GEAK keeps its native path, which runs no Node.
+_geak_agent_selected() {
+  [ -n "${GEAK_AGENT_BACKEND:-}${GEAK_AGENT_PROFILE:-}" ] && return 0
+  case "$(printf '%s' "${GEAK_AGENT_AUTO:-1}" | tr '[:upper:]' '[:lower:]')" in 0|false|no) return 1 ;; esac
+  "${PYTHON:-python3}" -c 'import sys; from hyperloom_common.llm.llm_config import is_openai_only; sys.exit(not is_openai_only())' 2>/dev/null
+}
+
+_geak_node_unavailable() {
+  if _geak_agent_selected; then die "$1"; fi
+  warn "$1; GEAK's workflow runtime cannot start until Node ${_GEAK_NODE_MIN_MAJOR}+ is on PATH or GEAK_NODE_BIN is set"
+}
+
 # Pin the Node binary GEAK's workflow runtime runs (GEAK_NODE_BIN). An operator's
 # value is kept, a Node on PATH that is new enough is reused, and otherwise the
 # official build is fetched once into the dependency cache, checked against the
@@ -1276,7 +1289,7 @@ ensure_geak_node() {
     log "would fetch ${_name} into ${_open_source_root} for GEAK"
     return 0
   fi
-  command -v curl >/dev/null 2>&1 || die "curl missing; Node for GEAK cannot be fetched"
+  command -v curl >/dev/null 2>&1 || { _geak_node_unavailable "curl missing; Node for GEAK cannot be fetched"; return 0; }
   local _base="https://nodejs.org/dist/v${HYPERLOOM_GEAK_NODE_VERSION}" _tmp
   mkdir -p "${_open_source_root}"
   _tmp="$(mktemp -d "${_open_source_root}/.${_name}.XXXXXX")"
@@ -1284,7 +1297,8 @@ ensure_geak_node() {
   if ! curl -fsSL --connect-timeout 20 -o "${_tmp}/${_name}.tar.xz" "${_base}/${_name}.tar.xz" \
      || ! curl -fsSL --connect-timeout 20 -o "${_tmp}/SHASUMS256.txt" "${_base}/SHASUMS256.txt"; then
     rm -rf -- "$_tmp"
-    die "downloading ${_name} from ${_base} failed"
+    _geak_node_unavailable "downloading ${_name} from ${_base} failed"
+    return 0
   fi
   if ! (cd "$_tmp" && grep " ${_name}.tar.xz\$" SHASUMS256.txt | sha256sum -c - >/dev/null); then
     rm -rf -- "$_tmp"

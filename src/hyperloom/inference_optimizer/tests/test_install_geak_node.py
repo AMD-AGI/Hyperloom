@@ -11,11 +11,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from hyperloom_common.llm.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER
+
 from ._kernel_tools_harness import sourceable_kernel_tools
 
 _SRC = Path(__file__).resolve().parents[3]
 _ARCH = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine()]
 _NODE_DIR = f"node-v22.23.3-linux-{_ARCH}"
+_NO_PROVIDER_KEYS = dict.fromkeys(
+    ("ANTHROPIC_BASE_URL", *ANTHROPIC_CREDENTIAL_ENV_ORDER, "OPENAI_BASE_URL", "OPENAI_API_KEY"), ""
+)
 
 
 def _fake_node(path: Path, version: str) -> Path:
@@ -25,7 +32,9 @@ def _fake_node(path: Path, version: str) -> Path:
     return path
 
 
-def _install(tmp_path: Path, body: str, *, node_on_path: str, **env: str) -> subprocess.CompletedProcess[str]:
+def _install(
+    tmp_path: Path, body: str, *, node_on_path: str, ok: bool = True, **env: str
+) -> subprocess.CompletedProcess[str]:
     """Source the kernel-agent steps with a fake ``node`` of ``node_on_path`` first on PATH, then run ``body``."""
     fake_bin = tmp_path / "bin"
     _fake_node(fake_bin / "node", node_on_path)
@@ -45,7 +54,7 @@ def _install(tmp_path: Path, body: str, *, node_on_path: str, **env: str) -> sub
         **env,
     )
     proc = subprocess.run(["bash", "-c", script], env=controlled, text=True, capture_output=True, timeout=120)
-    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert (proc.returncode == 0) == ok, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     return proc
 
 
@@ -96,3 +105,31 @@ def test_the_env_file_and_dotenv_pin_node_and_codex_for_geak(tmp_path):
     dotenv = (tmp_path / "repo" / ".env").read_text(encoding="utf-8").splitlines()
     assert f"GEAK_NODE_BIN={node}" in dotenv
     assert "GEAK_CODEX_BIN=/opt/codex/bin/codex" in dotenv
+
+
+@pytest.mark.parametrize(
+    ("env", "refused"),
+    [
+        ({}, False),
+        ({"GEAK_AGENT_PROFILE": "codex-gpt56"}, True),
+        ({"GEAK_AGENT_BACKEND": "claude"}, True),
+        ({"OPENAI_API_KEY": "sk-test"}, True),
+        ({"OPENAI_API_KEY": "sk-test", "GEAK_AGENT_AUTO": "0"}, False),
+    ],
+)
+def test_an_unfetchable_node_stops_the_install_only_when_geak_agent_is_selected(tmp_path, env, refused):
+    curl = tmp_path / "bin" / "curl"
+    curl.parent.mkdir(parents=True)
+    curl.write_text("#!/bin/sh\nexit 22\n", encoding="utf-8")
+    curl.chmod(0o755)
+
+    proc = _install(
+        tmp_path,
+        'ensure_geak_node\necho "NODE=${_geak_node_bin}"',
+        node_on_path="18.19.0",
+        ok=not refused,
+        **{**_NO_PROVIDER_KEYS, **env},
+    )
+
+    assert "downloading" in proc.stderr
+    assert refused or _node_bin(proc) == ""
