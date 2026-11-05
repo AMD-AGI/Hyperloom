@@ -25,7 +25,7 @@ from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
-from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX
+from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 import hyperloom_multibranch.specialist.runtime as runtime_module
 from hyperloom_multibranch.specialist.runtime import (
