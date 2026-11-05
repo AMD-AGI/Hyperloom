@@ -447,10 +447,12 @@ kept on correctness even when it is slower than eager — recorded as
 here; later candidates are then graded against that export rather than against
 eager.
 
-**Do not let the module fall back to eager.** The gate's evidence is a static check
-for `aoti_compile_and_package` / `aoti_load_package` in the applied module, which
-cannot tell an export that ran from one a `try/except` swallowed. A fallback
-therefore records a KEEP, and a latency, for a path the deployment will not take.
+**Don't let the module quietly fall back.** If compiling fails, let it fail. A
+module that catches the error and runs the original model instead still looks like
+a success -- the benchmark passes and a time is recorded -- but that time describes
+the original model, not the compiled one. Hyperloom counts whether the compiled
+model actually ran, so a fallback leaves the run blocked instead of finishing with
+a result you can't ship.
 
 **Budget for at least two patch specialists.** Under the gate the run depends
 entirely on them, and they have a 60-minute floor. The default
