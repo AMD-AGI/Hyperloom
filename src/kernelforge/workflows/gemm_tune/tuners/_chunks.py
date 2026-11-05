@@ -16,6 +16,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..tune_robustness import MergedRows
+
 log = logging.getLogger(__name__)
 
 #: Waves in one chunk at most, unless one unit alone holds more: a chunk killed at the deadline loses all of its shapes,
@@ -191,19 +193,15 @@ def csv_lines(path: Path) -> list[str]:
         return []
 
 
-class MergedCsv:
-    """Rows of the chunks' CSVs under the first header seen, rewritten to ``path`` after every chunk so a kill of the
-    whole run keeps what the finished chunks tuned."""
+class MergedCsv(MergedRows):
+    """The chunks' rows (see :class:`MergedRows`), rewritten to ``path`` after every chunk so a kill of the whole run
+    keeps what the finished chunks tuned."""
 
     def __init__(self, path: Path) -> None:
+        super().__init__()
         self.path = path
-        self.header: str | None = None
-        self.rows: list[str] = []
 
     def absorb(self, lines: Sequence[str]) -> None:
-        if not lines:
-            return
-        if self.header is None:
-            self.header = lines[0]
-        self.rows.extend(lines[1:])
-        write_rows(self.path, self.header, self.rows)
+        super().absorb(lines)
+        if lines and self.header is not None:
+            write_rows(self.path, self.header, self.rows)

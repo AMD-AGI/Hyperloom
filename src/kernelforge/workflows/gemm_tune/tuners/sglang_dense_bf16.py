@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ._chunks import CHUNK_DIR, ChunkBudget, MergedCsv, csv_lines, run_in_chunks, write_rows
+from ._select import LATENCY, POWER, SelectPlan, kept, select_plan, selected
 from ._timings import unmeasured_timings
 from .base import BaseTuner, TuneResult, micro_metrics
 from ..dense_shapes import DenseGeometry, compute_dense_nk_shapes, compute_dense_m_values
@@ -149,7 +150,7 @@ def _shape_key(row: dict[str, str]) -> tuple[int, int, int] | None:
 
 
 # Shared with the fp8 dense path: the tuned CSV is deployed verbatim there too.
-from ._row_accuracy import drop_inaccurate_rows, dropped_row_record  # noqa: E402
+from ._row_accuracy import AccuracyFilter, drop_inaccurate_rows, dropped_row_record  # noqa: E402
 
 
 def _parse_profile_defaults(profile_csv: Path) -> dict[tuple[int, int, int], float]:
@@ -285,6 +286,9 @@ class SglangDenseBf16Tuner(BaseTuner):
 
     name = "sglang_dense_bf16"
     env_var = TUNER_ENV_VARS["sglang_dense_bf16"]
+    # Set by run() from the script's --help; the default asks for nothing.
+    _plan = SelectPlan(())
+    _selected = (LATENCY, "")
 
     def validate(self) -> str | None:
         aiter_root = resolve_aiter_root()
@@ -418,6 +422,7 @@ class SglangDenseBf16Tuner(BaseTuner):
         self._warn_about_unread_inputs()
         header, *rows = csv_lines(self._untuned_csv())
         n_expected = len(rows)
+        self._plan = select_plan(tuner_script, self.ctx.select)
 
         chunks = _Chunks(self, tuner_script, probe_script(tuner_script), header)
         tuned_csv, profile_csv = chunks.tuned.path, chunks.profiles.path
@@ -487,7 +492,14 @@ class SglangDenseBf16Tuner(BaseTuner):
         tail = ["-i", str(untuned_csv), "-o", str(tuned_csv), "-o2", str(profile_csv), "--indtype", "bf16"]
         tail += ["--outdtype", "bf16", "--mp", str(self.ctx.mp), "--iters", str(iters), "--warmup", str(warmup)]
         tail += ["--timeout", str(aiter_timeout), "--shape_grouped", "-v", "--libtype", libtypes, "--with-hipblaslt"]
-        return tail
+        return [*tail, *self._plan.args]
+
+    def _drop_inaccurate(self, tuned_csv: Path) -> AccuracyFilter:
+        """Drop the rows aiter measured as wrong, remembering what aiter selected before the filter ran."""
+        self._selected = selected(self._plan, tuned_csv)
+        accuracy = drop_inaccurate_rows(tuned_csv)
+        self._dropped_inaccurate = accuracy.dropped
+        return accuracy
 
     def _judge_batch(
         self, batch: _BatchRun, profile_csv: Path, tuner_script: Path, stdout: str, stderr: str
@@ -497,8 +509,7 @@ class SglangDenseBf16Tuner(BaseTuner):
         if batch.rc == 124:
             # Killed by the outer timeout -- but the tuner writes rows as it goes, so some shapes may already be on
             # disk.
-            accuracy = drop_inaccurate_rows(tuned_csv)
-            self._dropped_inaccurate = accuracy.dropped
+            accuracy = self._drop_inaccurate(tuned_csv)
             salvaged = _parse_tuner_results(tuned_csv, _parse_profile_defaults(profile_csv))
             if salvaged and not accuracy.completed:
                 return self._failure(
@@ -533,8 +544,7 @@ class SglangDenseBf16Tuner(BaseTuner):
         defaults = _parse_profile_defaults(profile_csv)
         # Before anything reads the artifact: this file IS what gets deployed, so a row aiter measured as wrong must
         # not survive to serving.
-        accuracy = drop_inaccurate_rows(tuned_csv)
-        self._dropped_inaccurate = accuracy.dropped
+        accuracy = self._drop_inaccurate(tuned_csv)
         shape_results = _parse_tuner_results(tuned_csv, defaults)
         not_finished = _NOT_FINISHED_MARKER in (stdout or "") or _NOT_FINISHED_MARKER in (stderr or "")
 
@@ -542,6 +552,7 @@ class SglangDenseBf16Tuner(BaseTuner):
             detail = f"rc={batch.rc}"
             if not_finished:
                 detail += f", aiter reported {_NOT_FINISHED_MARKER}"
+            select, select_note = kept(*self._selected, tuned_csv)
             return TuneResult(
                 tuner_name=self.name,
                 status="empty_output",
@@ -550,6 +561,8 @@ class SglangDenseBf16Tuner(BaseTuner):
                 expected_shapes=n_expected,
                 error=f"Tuner wrote 0 of {n_expected} shapes to {tuned_csv.name} ({detail}): {stderr[-300:]}",
                 error_class="empty_output",
+                select=select,
+                select_note=select_note,
             )
 
         if not accuracy.completed:
@@ -612,6 +625,7 @@ class SglangDenseBf16Tuner(BaseTuner):
                     total,
                 )
             status = "ok" if (improved or unverified) else "no_improvement"
+        select, select_note = kept(*self._selected, tuned_csv)
 
         return TuneResult(
             tuner_name=self.name,
@@ -619,8 +633,11 @@ class SglangDenseBf16Tuner(BaseTuner):
             artifact_path=str(tuned_csv),
             env_var=self.env_var,
             env_value=str(tuned_csv),
-            # A shape without a torch baseline can never show a micro speedup, so the micro gate would drop it.
-            candidate=bool(unverified),
+            # A shape without a torch baseline can never show a micro speedup, so the micro gate would drop it. A power
+            # table is slower by design, so the same holds for it.
+            candidate=bool(unverified) or select == POWER,
+            select=select,
+            select_note=select_note,
             total_shapes=total,
             expected_shapes=n_expected,
             improved_shapes=metrics.improved,

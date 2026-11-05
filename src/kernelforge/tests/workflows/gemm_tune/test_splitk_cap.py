@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
-from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import _cap_splitk_to_serve_safe, _SplitKLimit
+from kernelforge.workflows.gemm_tune.tuners._serve_safe import _cap_splitk_to_serve_safe, _SplitKLimit
 
 from kernelforge.tests.workflows.gemm_tune._fake_aiter import fake_aiter
 

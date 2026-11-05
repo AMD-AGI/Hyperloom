@@ -132,3 +132,140 @@ def _fastest_serve_safe(candidates: Sequence[_Candidate], max_splitk: int, limit
     """The fastest accurate candidate whose splitK the deployment can serve, or None when there is none."""
     servable = sorted((c for c in candidates if c.splitk <= max_splitk), key=lambda c: c.us)
     return next((c for c in servable if limit.accurate(c)), None)
+
+
+@dataclass(frozen=True)
+class _DeployedColumns:
+    """Where the deployed CSV keeps the columns the splitK cap reads."""
+
+    m: int
+    n: int
+    k: int
+    splitk: int
+    libtype: int | None
+
+    def shape_key(self, row: list[str]) -> tuple[str, str, str]:
+        """The ``(M, N, K)`` this row describes, as the profile index is keyed."""
+        return row[self.m], row[self.n], row[self.k]
+
+
+def _deployed_columns(header: list[str]) -> _DeployedColumns | None:
+    """Locate the columns the cap reads, or None when the header lacks one.
+
+    Case-insensitive: were the deployed header's case ever to stop matching
+    exactly, the cap would return early and pass unsafe splitK rows through
+    unchanged -> serve crash.
+    """
+    index = {str(name).strip().lower(): position for position, name in enumerate(header)}
+    try:
+        return _DeployedColumns(index["m"], index["n"], index["k"], index["splitk"], index.get("libtype"))
+    except KeyError:
+        return None
+
+
+def _forwards_splitk(row: list[str], libtype: int | None, forwarding_libtypes: frozenset[str]) -> bool:
+    """Whether this row's libtype has a production wrapper that forwards splitK."""
+    if libtype is None or libtype >= len(row):
+        # No libtype column to check against a contract that is keyed on it;
+        # treat as non-forwarding, matching the fail-closed default.
+        return False
+    return str(row[libtype]).strip().lower() in forwarding_libtypes
+
+
+def _cap_splitk_to_serve_safe(
+    artifact_csv: Path,
+    profile_csv: Path | None,
+    limit: _SplitKLimit,
+    *,
+    forwarding_libtypes: frozenset[str],
+) -> tuple[int, bool]:
+    """Rewrite deployed rows whose splitK production cannot dispatch or forward.
+
+    Two hazards, same remedy: a splitK the production kernel cannot dispatch
+    (crashes engine init), and a splitK on a libtype whose wrapper takes no such
+    argument (no crash, just a kernel slower than the one that won the
+    benchmark, with every engagement gate still green). Either way the row is
+    replaced by the fastest serve-safe candidate from the profile that would
+    pass the accuracy gate, and a shape with no such candidate is dropped.
+
+    ``forwarding_libtypes`` is the set of libtypes whose wrapper forwards splitK
+    for this op (see ``_SPLITK_FORWARDING_LIBTYPES``); a row on any other
+    libtype is capped at 0 regardless of dispatch support.
+    """
+    try:
+        with artifact_csv.open() as handle:
+            rows = list(csv.reader(handle))
+    except OSError:
+        return 0, False
+    if len(rows) < 2:
+        return 0, False
+    hdr = rows[0]
+    columns = _deployed_columns(hdr)
+    if columns is None:
+        return 0, False
+    by_shape = _serve_safe_candidates(profile_csv, hdr) if profile_csv else {}
+
+    out, changed, has_splitk = [hdr], 0, False
+    dropped_unforwarded = 0
+    for row in rows[1:]:
+        try:
+            sk = int(row[columns.splitk])
+        except (ValueError, IndexError):
+            out.append(row)
+            continue
+        if sk == 0:
+            # splitK=0 is the default dispatch: always serve-safe, and its keep decision never depends on the
+            # per-shape max, so skip the (GPU-dispatching) trial entirely for these rows.
+            out.append(row)
+            continue
+        if not _forwards_splitk(row, columns.libtype, forwarding_libtypes):
+            # The wrapper for this libtype takes no splitK, so the only
+            # honourable value is 0 -- fall through to candidate replacement
+            # with maxsk=0 rather than shipping a measurement production cannot
+            # reproduce.
+            dropped_unforwarded += 1
+            try:
+                key = columns.shape_key(row)
+            except IndexError:
+                out.append(row)
+                continue
+            safe = _fastest_serve_safe(by_shape.get(key, ()), 0, limit)
+            if safe is not None:
+                out.append(safe.row)
+            changed += 1
+            continue
+        try:
+            key = columns.shape_key(row)
+            shape = (int(row[columns.m]), int(row[columns.n]), int(row[columns.k]))
+        except (ValueError, IndexError):
+            out.append(row)
+            continue
+        maxsk = limit.ceiling(shape)
+        if sk <= maxsk:
+            out.append(row)
+            has_splitk = has_splitk or sk > 0
+            continue
+        safe = _fastest_serve_safe(by_shape.get(key, ()), maxsk, limit)
+        if safe is not None:
+            out.append(safe.row)
+            has_splitk = has_splitk or safe.splitk > 0
+        # else: drop the row -> serve falls back to the aiter default
+        changed += 1
+    if changed:
+        with artifact_csv.open("w", newline="") as f:
+            csv.writer(f).writerows(out)
+    _warn_unforwarded_splitk(dropped_unforwarded, forwarding_libtypes)
+    return changed, has_splitk
+
+
+def _warn_unforwarded_splitk(dropped_unforwarded: int, forwarding_libtypes: frozenset[str]) -> None:
+    """Say how many rows lost a splitK their libtype's production wrapper cannot forward."""
+    if dropped_unforwarded:
+        log.warning(
+            "splitK forwarding: %d row(s) carried splitK>0 on a libtype whose "
+            "production wrapper takes no splitK (forwarding set: %s); replaced "
+            "with a splitK=0 candidate or dropped, because serving them would "
+            "have run a config slower than the one benchmarked",
+            dropped_unforwarded,
+            sorted(forwarding_libtypes),
+        )

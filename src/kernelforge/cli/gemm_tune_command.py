@@ -85,6 +85,14 @@ def gemm_tune():
         click.option("--iters", default=80, type=int, help="Benchmark iterations per config"),
         click.option("--warmup", default=20, type=int, help="Warmup iterations"),
         click.option("--min-improvement-pct", default=3.0, type=float, help="Min improvement threshold (%%)"),
+        click.option(
+            "--select",
+            default="latency",
+            type=click.Choice(["latency", "power"]),
+            help="Which kernel aiter's tuners keep per shape: the fastest (latency), or the lowest package energy "
+            "among accurate kernels (power, experimental). Power needs an aiter whose tuner accepts --select; a tuner "
+            "that does not runs a latency tune. A power table is kept only on E2E evidence.",
+        ),
     ),
     option_group(
         "timeouts",

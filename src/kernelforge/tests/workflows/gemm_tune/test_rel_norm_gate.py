@@ -14,6 +14,7 @@ import kernelforge.workflows.gemm_tune.aiter_graph_retime as retime
 import kernelforge.workflows.gemm_tune.aiter_splitk_validate as validate
 import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
 import kernelforge.workflows.gemm_tune.tuners._row_accuracy as accuracy
+import kernelforge.workflows.gemm_tune.tuners._serve_safe as serve_safe
 from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 
 _HDR = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us", "kernelName", "tflops", "bw", "errRatio"]
@@ -130,9 +131,9 @@ class TestServeSafeReplacement:
             ],
         )
 
-        limit = ac._SplitKLimit(2, lambda m, n, k: 6, _Measured(0.0047))
+        limit = serve_safe._SplitKLimit(2, lambda m, n, k: 6, _Measured(0.0047))
 
-        ac._cap_splitk_to_serve_safe(art, prof, limit, forwarding_libtypes=frozenset({"asm"}))
+        serve_safe._cap_splitk_to_serve_safe(art, prof, limit, forwarding_libtypes=frozenset({"asm"}))
 
         assert [r["kernelName"] for r in _read(art)] == ["asm_sk6"]
 
@@ -147,9 +148,9 @@ class TestServeSafeReplacement:
                 _row("asm", 4, "0.0", us=12.0, name="asm_sk4"),
             ],
         )
-        limit = ac._SplitKLimit(2, lambda m, n, k: 6, measured)
+        limit = serve_safe._SplitKLimit(2, lambda m, n, k: 6, measured)
 
-        ac._cap_splitk_to_serve_safe(art, prof, limit, forwarding_libtypes=frozenset({"asm"}))
+        serve_safe._cap_splitk_to_serve_safe(art, prof, limit, forwarding_libtypes=frozenset({"asm"}))
 
         assert [r["kernelName"] for r in _read(art)] == ["asm_sk4"]
 

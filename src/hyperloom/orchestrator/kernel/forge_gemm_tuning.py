@@ -9,6 +9,10 @@ import os
 import sys
 from typing import Any
 
+from hyperloom_common.env import EnvValueError, env_str
+
+_POWER = "power"
+
 
 def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, required: bool = False) -> None:
     val = args.get(key)
@@ -49,6 +53,11 @@ def build_command(args: dict[str, Any]) -> list[str]:
     cmd.append("--skip-gpu-check")
     if bool(args.get("thorough", False)):
         cmd.append("--thorough")
+    select = env_str("HYPERLOOM_GEMM_TUNE_SELECT", "latency").lower()
+    if select not in ("latency", _POWER):
+        raise EnvValueError(f"HYPERLOOM_GEMM_TUNE_SELECT={select!r}: expected latency or {_POWER}")
+    if select == _POWER:
+        cmd.extend(["--select", _POWER])
     tokens = str(args.get("tokens") or "").strip()
     if tokens:
         cmd.extend(["--tokens", tokens])

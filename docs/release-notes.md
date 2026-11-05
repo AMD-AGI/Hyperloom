@@ -20,6 +20,23 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **`HYPERLOOM_GEMM_TUNE_SELECT=power` asks aiter's tuners for the
+  lowest-energy kernel (experimental).** Under `KERNEL_OPT_BACKEND_ORDER=forge`,
+  the GEMM/MoE tuning round passes `--select power` (new on `kernelforge
+  gemm-tune`) to the aiter tuners that accept it, which keep the accurate kernel
+  with the lowest `us` times package watts for each shape. The table goes to E2E
+  validation and is kept only on the usual gain threshold and power-budget veto.
+  It needs an aiter with power selection (ROCm/aiter#6970); with an older one
+  the round tunes for latency and says so. Default: `latency`. Compare-parser
+  fixes it needs also apply to latency tunes: a dense row whose post-run failed
+  (`post-mismatch` / `post-error`, including with `N/A` timings) is now dropped
+  rather than kept (for the tuners whose compare rows are `(M, N, K)`; a8w8 and
+  a8w8 bpreshuffle rows carry `q_dtype_w` and are not read), a failed post-run no longer counts toward the micro
+  speedups, both parsers read only aiter's Compare Report (its performance table
+  repeats each shape, which counted each new dense shape twice), and fMoE
+  results count shapes that got slower, so an
+  all-slower fMoE run reports `no_improvement` rather than `empty_output`.
+
 - **Bump validated SGLang stack to 0.5.23 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, the

@@ -139,6 +139,7 @@ Example: 30min budget, 2 tuners at 15+20 min = 35 min → second tuner may be sk
 | `--iters` | 80 | Benchmark iterations per config |
 | `--warmup` | 20 | Warmup iterations |
 | `--min-improvement-pct` | 3.0 | Min % improvement threshold to mark a shape as improved |
+| `--select` | `latency` | `power` (experimental) has aiter's tuners keep the lowest-energy accurate kernel per shape; a table with power rows always goes to E2E. A tuner whose `--help` lacks `--select` tunes for latency |
 | `--timeout` | 3600 | Per-tuner timeout in seconds |
 | `--global-timeout` | 0 | Global session timeout in seconds (0 = unlimited) |
 

@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import dataclasses
 import hashlib
+import io
 import json
 import logging
 import os
 import re
 import tempfile
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -120,7 +123,11 @@ class FaultBlocklist:
 
     def __init__(self, path: str | Path | None, key: dict[str, Any]):
         self.path = Path(path) if path else Path(_DEFAULT_BLOCKLIST)
-        self.key = ":".join(str(key.get(k, "")) for k in ("gpu_type", "quant_type", "tp", "tuner"))
+        base = ":".join(str(key.get(k, "")) for k in ("gpu_type", "quant_type", "tp", "tuner"))
+        # Only a run that sets it records under its own key, so the records every earlier run wrote keep theirs; it
+        # still skips the shapes those runs recorded.
+        self.key = f"{base}:{key['select']}" if key.get("select") else base
+        self._read_keys = tuple(dict.fromkeys((self.key, base)))
         self._data: dict[str, dict[str, Any]] = {}
         self._load()
 
@@ -136,7 +143,7 @@ class FaultBlocklist:
         return self._data.setdefault(self.key, {})
 
     def is_blocked(self, sig: str) -> bool:
-        return sig in self._bucket()
+        return any(sig in self._data.get(key, {}) for key in self._read_keys)
 
     def record(self, sig: str, reason: str, row: str = "") -> None:
         self._bucket()[sig] = {"reason": reason, "row": row, "ts": int(time.time())}
@@ -180,20 +187,74 @@ def _read_csv_lines(path: Path) -> list[str]:
         return []
 
 
-class _MergedCsv:
-    """Rows gathered from many per-shape CSVs, under the first header seen."""
+_SECTION_RE = re.compile(r"={5,}\s*(.*?)\s*={5,}")
+
+
+def compare_report_lines(text: str) -> list[str]:
+    """The lines of aiter's "Compare Report" blocks in ``text``, or every line when it prints none.
+
+    aiter prints a "Tune Performance Comparison" table before each report, with rows of the same shape but its own
+    status words (MISMATCH, ERROR, MISS), so a row parser reading both would see each shape twice. An aiter older
+    than the report prints neither heading.
+    """
+    lines = text.splitlines()
+    picked: list[str] = []
+    inside = False
+    for line in lines:
+        heading = _SECTION_RE.search(line)
+        if heading:
+            inside = heading.group(1) == "Compare Report"
+        elif inside:
+            picked.append(line)
+    return picked if any(_SECTION_RE.search(line) and "Compare Report" in line for line in lines) else lines
+
+
+def _cells(line: str) -> list[str]:
+    return next(csv.reader([line]), [])
+
+
+def _line(cells: Sequence[str]) -> str:
+    out = io.StringIO()
+    csv.writer(out, lineterminator="").writerow(cells)
+    return out.getvalue()
+
+
+def _by_name(header: Sequence[str], row: str, columns: Sequence[str]) -> str:
+    values = dict(zip(header, _cells(row)))
+    return _line([values.get(column, "") for column in columns])
+
+
+class MergedRows:
+    """Rows gathered from many CSVs of one tuner run, under the columns they were written with.
+
+    aiter writes its columns per run: a power tune adds ``select`` and the power columns only when some row's watts
+    were measured, so a run whose shapes were all unmeasured writes a header-only file in the latency columns. A file
+    without rows therefore never decides the header once one with rows arrives, and files with different columns are
+    merged by column name.
+    """
 
     def __init__(self) -> None:
         self.header: str | None = None
         self.rows: list[str] = []
 
-    def absorb(self, lines: list[str]) -> None:
-        """Take one shape's lines; a file with none contributes neither header nor rows."""
+    def absorb(self, lines: Sequence[str]) -> None:
+        """Take one CSV's lines, header first; a file with none contributes neither header nor rows."""
         if not lines:
             return
-        if self.header is None:
-            self.header = lines[0]
-        self.rows.extend(lines[1:])
+        new_header, new_rows = lines[0], list(lines[1:])
+        if self.header is None or not self.rows:
+            if new_rows or self.header is None:
+                self.header = new_header
+            self.rows.extend(new_rows)
+        elif not new_rows or new_header == self.header:
+            self.rows.extend(new_rows)
+        else:
+            old_columns, new_columns = _cells(self.header), _cells(new_header)
+            columns = list(dict.fromkeys([*old_columns, *new_columns]))
+            self.rows = [_by_name(old_columns, row, columns) for row in self.rows] + [
+                _by_name(new_columns, row, columns) for row in new_rows
+            ]
+            self.header = _line(columns)
 
     def write(self, path: Path) -> Path | None:
         """Write the merged CSV, header first, to ``path``; nothing is written when no file contributed."""
@@ -201,6 +262,25 @@ class _MergedCsv:
             return None
         path.write_text(f"{self.header}\n" + "\n".join(self.rows) + "\n", encoding="utf-8")
         return path
+
+
+def fault_blocklist_for(ctx: Any, tuner: str, *, power: bool) -> FaultBlocklist:
+    """The record of shapes that faulted for ``tuner`` on this GPU, quantization and TP width.
+
+    ``power`` is whether the run asked aiter for power selection, not whether the session wanted it: a tune that fell
+    back to latency records as one. A power tune records under its own key: grouped, it loses a whole shape to one faulting candidate, which must not
+    drop that shape from latency tunes. It still skips the shapes latency tunes recorded.
+    """
+    return FaultBlocklist(
+        getattr(ctx, "faulted_blocklist_path", None),
+        {
+            "gpu_type": getattr(ctx, "gpu_type", ""),
+            "quant_type": getattr(ctx, "quant_type", ""),
+            "tp": getattr(ctx, "tp", 1),
+            "tuner": tuner,
+            "select": "power" if power else "",
+        },
+    )
 
 
 def _rows_to_tune(
@@ -261,14 +341,14 @@ def run_isolated(invocation: TunerInvocation, guard: IsolationGuard) -> tuple[in
 
     merged_out: list[str] = []
     merged_err: list[str] = []
-    candidates = _MergedCsv()
+    candidates = MergedRows()
     n_ok = 0
     env_override = compare_temp_env()
     compare_dir = Path(env_override["TMPDIR"]) / "aiter_compare"
 
     # ``base_args`` carries a single shared ``-o2`` profile path.
     profile_idx = base_args.index("-o2") if "-o2" in base_args[:-1] else -1
-    profiles = _MergedCsv()
+    profiles = MergedRows()
 
     for idx, row in enumerate(rows):
         shape_csv = work_dir / f"_iso_{tuned_stem}_{idx}.csv"

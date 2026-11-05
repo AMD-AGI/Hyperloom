@@ -18,6 +18,10 @@ from ..model_analyzer import ModelProfile
 
 log = logging.getLogger(__name__)
 
+# What aiter's tuners keep per shape (``--select``): the fastest kernel, or the accurate one with the lowest energy.
+LATENCY = "latency"
+POWER = "power"
+
 
 def published_metric(value: float | None) -> float | None:
     """A micro metric as it is published: four decimals, or null when unmeasured."""
@@ -88,6 +92,9 @@ class TuneResult:
     skip_reason: str = ""
     # Where the tuned shapes/keys came from; "runtime_observed" means a live dispatch log or a caller-supplied CSV.
     key_source: str = ""
+    # POWER when the artifact holds aiter's lowest-energy picks; select_note says why a requested power tune is not.
+    select: str = LATENCY
+    select_note: str = ""
 
     @property
     def has_improvement(self) -> bool:
@@ -135,6 +142,10 @@ class TuneResult:
             d["skip_reason"] = self.skip_reason
         if self.key_source:
             d["key_source"] = self.key_source
+        if self.select != LATENCY or self.select_note:
+            d["select"] = self.select
+        if self.select_note:
+            d["select_note"] = self.select_note
         return d
 
 
@@ -156,6 +167,7 @@ class TuneContext:
     warmup: int
     min_improvement_pct: float
     timeout_s: int
+    select: str = LATENCY
     thorough: bool = False  # Full search: all libtypes, more shapes, no per-shape timeout
     m_grid: MGrid = MGrid.BUCKET
     # Optional input files

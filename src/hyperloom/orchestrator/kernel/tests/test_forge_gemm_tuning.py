@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
 
 from hyperloom.orchestrator.kernel import forge_gemm_tuning
 
@@ -92,8 +95,33 @@ def test_build_cmd_asserts_every_option_it_can_emit():
         "--thorough",
         "--tokens",
         "--kb-current-lib",
+        "--select",
     }
     assert emitted <= declared, f"option(s) not declared here: {sorted(emitted - declared)}"
+
+
+@pytest.mark.parametrize(("value", "asked"), [(None, False), ("latency", False), ("power", True), (" Power ", True)])
+def test_build_cmd_asks_for_power_selection_only_when_the_environment_does(monkeypatch, value, asked):
+    if value is None:
+        monkeypatch.delenv("HYPERLOOM_GEMM_TUNE_SELECT", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_GEMM_TUNE_SELECT", value)
+
+    cmd = forge_gemm_tuning.build_command(_payload())
+
+    assert (cmd[cmd.index("--select") + 1] == "power") if asked else "--select" not in cmd
+
+
+def test_an_unknown_selection_fails_the_round_instead_of_tuning_for_latency(monkeypatch):
+    from hyperloom.orchestrator.kernel._forge_gemm_tuning import _invoke_forge_gemm_tune
+
+    monkeypatch.setenv("HYPERLOOM_GEMM_TUNE_SELECT", "energy")
+
+    result = asyncio.run(_invoke_forge_gemm_tune(_payload(), 60))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "EnvValueError"
+    assert "HYPERLOOM_GEMM_TUNE_SELECT='energy'" in result["error"]
 
 
 def test_build_cmd_forwards_provenance_but_no_knowledge_base_options(monkeypatch):

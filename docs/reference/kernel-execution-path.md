@@ -185,6 +185,17 @@ calls it. Under `geak` the KERNEL-entry GEMM tuning never fires, because
 reaching it. An orchestration-issued `run_gemm_tuning` REQUEST is rejected, as
 described above.
 
+`HYPERLOOM_GEMM_TUNE_SELECT=power` (experimental) asks aiter's tuners for the
+kernel with the lowest package energy, `us` times PPT watts, among the accurate
+ones for each shape, instead of the fastest. The round passes `--select power`
+to `kernelforge gemm-tune`. A tuner whose aiter predates power selection tunes
+for latency, and the round's result says so. A power table is usually slower,
+so it always goes to E2E validation and is kept only on the same gain threshold
+and power-budget veto as any other table. It can win where the GPU is held to a
+power cap and a lower-energy kernel throttles less. Shapes aiter could not
+measure keep their runtime rows when the candidate is merged for validation.
+Set it with `--extra-env`, which a resume re-applies.
+
 FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.
 
 ### Communication operators

@@ -517,6 +517,7 @@ def _tuner_context_for(ctx: Any, spec: Any, effective_timeout: int) -> Any:
 def _execute_tuners(tuner_specs: list, ctx: Any, global_deadline: float) -> tuple[list, list[tuple[str, str]]]:
     """Run each tuner that still earns its place, and say why the others did not."""
     from .candidates import is_candidate
+    from .tuners.base import POWER
 
     results: list = []
     skipped: list[tuple[str, str]] = []
@@ -543,6 +544,10 @@ def _execute_tuners(tuner_specs: list, ctx: Any, global_deadline: float) -> tupl
             log.error("Unknown tuner: %s", spec.name)
             continue
         result = tuner_instance.execute()
+        if ctx.select == POWER and result.select != POWER and not result.select_note and result.status != "failed":
+            # aiter's tuners explain a latency fallback themselves; the others have no power selection.
+            result.select_note = f"{spec.name} has no power selection; tuned for latency"
+            log.warning("power selection not applied: %s", result.select_note)
         results.append(result)
         log.info(
             "Tuner %s finished: status=%s, improved=%s/%d, best_speedup=%s, elapsed=%.1fs",
@@ -586,6 +591,7 @@ class BenchSettings:
     iters: int
     warmup: int
     min_improvement_pct: float
+    select: str = "latency"
 
 
 @dataclass(frozen=True)

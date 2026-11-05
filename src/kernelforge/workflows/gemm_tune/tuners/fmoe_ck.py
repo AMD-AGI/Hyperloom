@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+import csv
+import dataclasses
 import logging
 import re
 from pathlib import Path
 from typing import Any
 
+from ._select import POWER, SelectPlan, select_plan, selected, wrote_power_rows
 from .base import BaseTuner, TuneResult, micro_metrics
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess, TUNER_ENV_VARS
 from .. import tune_robustness as _tr
@@ -22,6 +25,7 @@ _NO_RUNTIME_KEY = (
 )
 
 # CSV header for untuned fmoe config
+_ENCODING = "utf-8"
 _FMOE_CSV_HEADER = (
     "token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
 )
@@ -31,7 +35,7 @@ _FMOE_CSV_COLUMNS = tuple(_FMOE_CSV_HEADER.split(","))
 def _validate_fmoe_csv(path: Path, *, tuned: bool = False) -> str | None:
     """Return why ``path`` is unusable as an fmoe CSV, or None if it is."""
     try:
-        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        lines = [line.strip() for line in path.read_text(encoding=_ENCODING).splitlines() if line.strip()]
     except (OSError, UnicodeError) as exc:
         return f"unreadable ({exc})"
     if not lines:
@@ -48,6 +52,21 @@ def _validate_fmoe_csv(path: Path, *, tuned: bool = False) -> str | None:
         if len(row.split(",")) != width:
             return f"row {index} has {len(row.split(','))} fields, expected {width}"
     return None
+
+
+def _every_row_verified(table: Path, shape_results: list[dict[str, Any]]) -> bool:
+    """Whether aiter's Compare Report shows every row of ``table`` passing its post-run.
+
+    aiter writes a batch's rows before it runs the production op on them, so a batch that errored or crashed there
+    leaves rows nothing verified. A table holds one row per MoE key and token, and the report one line per row; the
+    report's shape string is not matched against the table's columns, so any failed line, or fewer passing lines than
+    rows, fails the table.
+    """
+    if any(r["post_failed"] for r in shape_results):
+        return False
+    with table.open(newline="", encoding=_ENCODING, errors="replace") as handle:
+        rows = sum(1 for _ in csv.DictReader(handle))
+    return len(shape_results) >= rows
 
 
 class FmoeCKTuner(BaseTuner):
@@ -149,7 +168,7 @@ class FmoeCKTuner(BaseTuner):
             )
             tokens = kept
         csv_path = self.work_dir / "untuned_fmoe.csv"
-        csv_path.write_text(moe_untuned_csv_text(key, tokens=tokens), encoding="utf-8")
+        csv_path.write_text(moe_untuned_csv_text(key, tokens=tokens), encoding=_ENCODING)
         log.info(
             "Untuned CSV from runtime-observed MoE key at %s: %d token(s), "
             "model_dim=%s inter_dim=%s expert=%s topk=%s %s/%s",
@@ -188,30 +207,34 @@ class FmoeCKTuner(BaseTuner):
         """Parse the compare report from tuner stdout."""
         results = []
         # Match table rows: (token, ...) | Pre(us) | Post(us) | Improve% | Action
+        # aiter prints "N/A" for a timing it could not take and a negative Improve% for a slower kernel.
         pattern = re.compile(
             r"\((\d+),.*?\)\s*\|"
-            r"\s*([\d.]+)\s*\|"
-            r"\s*([\d.]+)\s*\|"
-            r"\s*([\d.]+)%\s*\|"
+            r"\s*(N/A|[\d.]+)\s*\|"
+            r"\s*(N/A|[\d.]+)\s*\|"
+            r"\s*(N/A|-?[\d.]+)%?\s*\|"
             r"\s*(.*)"
         )
-        for line in stdout.splitlines():
+        for line in _tr.compare_report_lines(stdout):
             m = pattern.search(line)
             if m:
                 token = int(m.group(1))
-                pre_us = float(m.group(2))
-                post_us = float(m.group(3))
-                improve_pct = float(m.group(4))
+                pre_us, post_us, improve_pct = (None if v == "N/A" else float(v) for v in m.group(2, 3, 4))
                 action = m.group(5).strip()
-                speedup = pre_us / post_us if post_us > 0 else 1.0
+                # The production op computed a wrong result with the tuned kernel, or could not run it.
+                post_failed = action.lower().startswith("post-")
+                if not post_failed and (pre_us is None or post_us is None):
+                    # A new shape or a missing post-run: nothing was compared.
+                    continue
                 results.append(
                     {
                         "token": token,
                         "default_us": pre_us,
                         "tuned_us": post_us,
                         "improve_pct": improve_pct,
-                        "speedup": round(speedup, 4),
+                        "speedup": round(pre_us / post_us, 4) if pre_us and post_us and not post_failed else None,
                         "improved": "UPDATE" in action.upper(),
+                        "post_failed": post_failed,
                     }
                 )
 
@@ -237,7 +260,8 @@ class FmoeCKTuner(BaseTuner):
         tuned_csv = self.work_dir / "tuned_fmoe.csv"
         profile_csv = self.work_dir / "profile_fmoe.csv"
 
-        base_args = self._base_args(profile_csv)
+        plan = select_plan(script, self.ctx.select)
+        base_args = [*self._base_args(profile_csv), *plan.args]
 
         aiter_root = resolve_aiter_root()
         cwd = aiter_root if aiter_root else None
@@ -253,7 +277,7 @@ class FmoeCKTuner(BaseTuner):
                 _tr.IsolationGuard(
                     outer_timeout_s=self.ctx.timeout_s,
                     gpu_ids=getattr(self.ctx, "gpu_ids", "") or "",
-                    blocklist=self._fault_blocklist(),
+                    blocklist=self._fault_blocklist(power=plan.power),
                 ),
             )
         else:
@@ -273,7 +297,12 @@ class FmoeCKTuner(BaseTuner):
                 error_class="timeout",
             )
 
-        if rc != 0:
+        # Find candidate CSV.
+        candidate_csv = (
+            iso_candidate if isolated else _tr._latest_candidate(compare_dir, tuned_csv.stem, run_start_time)
+        )
+        # aiter exits 1 when a shape stays untuned, and a power tune leaves every shape it measured no power for untuned.
+        if rc != 0 and not wrote_power_rows(plan, candidate_csv or ""):
             return TuneResult(
                 tuner_name=self.name,
                 status="failed",
@@ -286,12 +315,11 @@ class FmoeCKTuner(BaseTuner):
         if not shape_results:
             # Try parsing from stderr (some versions print there)
             shape_results = self._parse_compare_output(stderr)
-
-        # Find candidate CSV.
-        candidate_csv = (
-            iso_candidate if isolated else _tr._latest_candidate(compare_dir, tuned_csv.stem, run_start_time)
-        )
-        return self._tune_result(shape_results, candidate_csv, key_source)
+        result = self._tune_result(shape_results, candidate_csv, key_source, plan)
+        if rc == 0 or result.status == "failed":
+            return result
+        shortfall = f"aiter exited {rc} before every shape was tuned"
+        return dataclasses.replace(result, status="partial_output", error=shortfall, error_class="partial_output")
 
     def _base_args(self, profile_csv: Path) -> list[str]:
         """The gemm_moe_tune.py command-line flags this run's context selects."""
@@ -313,20 +341,18 @@ class FmoeCKTuner(BaseTuner):
             "-v",
         ]
 
-    def _fault_blocklist(self) -> _tr.FaultBlocklist:
+    def _fault_blocklist(self, *, power: bool) -> _tr.FaultBlocklist:
         """The persisted record of candidates that faulted on this GPU, quantization and TP width."""
-        return _tr.FaultBlocklist(
-            getattr(self.ctx, "faulted_blocklist_path", None),
-            {
-                "gpu_type": getattr(self.ctx, "gpu_type", ""),
-                "quant_type": getattr(self.ctx, "quant_type", ""),
-                "tp": getattr(self.ctx, "tp", 1),
-                "tuner": self.name,
-            },
-        )
+        return _tr.fault_blocklist_for(self.ctx, self.name, power=power)
 
-    def _tune_result(self, shape_results: list[dict[str, Any]], candidate_csv, key_source: str) -> TuneResult:
-        """Keep a valid candidate CSV as the artifact and report the compare results against it."""
+    def _tune_result(
+        self, shape_results: list[dict[str, Any]], candidate_csv, key_source: str, plan: SelectPlan = SelectPlan(())
+    ) -> TuneResult:
+        """Keep a valid candidate CSV as the artifact and report the compare results against it.
+
+        The compare figures are latency, so a power table that improved no shape still goes to E2E, unless the
+        production op ran a shape wrongly or could not run it: nothing here removes that shape's row.
+        """
         artifact = ""
         artifact_problem = (
             _validate_fmoe_csv(candidate_csv, tuned=True) if candidate_csv else "no candidate CSV produced"
@@ -353,11 +379,16 @@ class FmoeCKTuner(BaseTuner):
             status = "failed"
         else:
             status = "ok"
+        select, select_note = selected(plan, artifact)
+        power_candidate = select == POWER and _every_row_verified(Path(artifact), shape_results)
 
         return TuneResult(
             tuner_name=self.name,
             status=status,
             artifact_path=artifact,
+            candidate=power_candidate,
+            select=select,
+            select_note=select_note,
             env_var=self.env_var if artifact else "",
             env_value=artifact,
             error=f"Unusable MoE compare artifact: {artifact_problem}" if status == "failed" else "",

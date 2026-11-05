@@ -10,8 +10,8 @@ from .base import TuneContext
 
 def dense_tuner_args(script: Path, ctx: TuneContext, profile_csv: Path, extra_args: tuple[str, ...]) -> ArgFilter:
     """Flags shared by every shape (everything except -i/-o), filtered by the script's argparse surface before
-    minutes are spent on it. aiter's --timeout is added per run, to turn on mp_tuner's per-candidate GPU-fault
-    isolation."""
+    minutes are spent on it. aiter's --timeout is added per run, to turn on mp_tuner's GPU-fault isolation: per
+    candidate, or per shape when the run is shape-grouped (a power tune)."""
     args = [
         "-o2",
         str(profile_csv),
