@@ -63,7 +63,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         return run_evidence_gaps(
             session_dir=self.session_dir,
             trace_path=state.last_profile_trace,
-            workspace=(state.current_best or {}).get("workspace") or state.baseline_workspace,
+            workspace=state.current_best.get("workspace") or state.baseline_workspace,
         )
 
     def _extract_gaps_from_baseline(self, workload_id: str) -> list[dict[str, Any]]:

@@ -266,7 +266,7 @@ class _GemmTuningMixin:
             # aiter serves the MoE and never reads VLLM_TUNED_CONFIG_FOLDER.
             return "aiter_moe_runtime_triton_config_inert"
         if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
-            self.shared_state.model_path, int(self.shared_state.tp or 0)
+            self.shared_state.model_path, self.shared_state.tp
         ):
             # aiter's CK fused-MoE rejects a non-128-aligned intermediate_size_per_partition.
             return "aiter_ck_moe_shape_unsupported"

@@ -133,7 +133,7 @@ def explore_admission_minutes(per_round_minutes: float, params: dict[str, Any] |
 
     if CYCLE_ARMS_PARAM in (params or {}):
         # A cycle batch boots once per candidate and once per bracketing base.
-        return CYCLE_ARM_MINUTES * (len(params[CYCLE_ARMS_PARAM] or ()) + 2)
+        return CYCLE_ARM_MINUTES * (len(params[CYCLE_ARMS_PARAM]) + 2)
     variants = len(((params or {}).get("grid") or ()))
     return per_round_minutes * variants if variants > 1 else per_round_minutes
 
@@ -142,27 +142,25 @@ def expected_round_minutes(
     action_name: str, params: dict[str, Any] | None, action_registry: Any, shared_state: SharedState
 ) -> float:
     """What one round of a catalogued action is admitted at, on this session's measured baseline round once one exists."""
-    action = str(action_name or "").strip()
-    meta = action_registry.get(action)
+    meta = action_registry.get(action_name)
     if meta is None:
         return 0.0
     minutes = expected_action_cost_minutes(meta, measured_baseline_sec=measured_baseline_runtime_sec(shared_state))
-    return explore_admission_minutes(minutes, params) if action == "explore" else minutes
+    return explore_admission_minutes(minutes, params) if action_name == "explore" else minutes
 
 
 def queued_lane_minutes(action_name: str, queued: Any, action_registry: Any, shared_state: SharedState) -> float:
     """Minutes the ``queued`` tasks have committed on the lanes ``action_name`` needs; other lanes run alongside."""
 
     def lanes(name: str) -> set[str]:
-        meta = action_registry.get(str(name or "").strip())
-        return set(getattr(meta, "requires_lanes", ()) or ()) if meta is not None else set()
+        meta = action_registry.get(name)
+        return set(meta.requires_lanes) if meta is not None else set()
 
     wanted = lanes(action_name)
     total = 0.0
     for task in queued:
-        kind = str(getattr(task, "kind", "") or "")
-        if not wanted or wanted & lanes(kind):
-            total += expected_round_minutes(kind, getattr(task, "params", None), action_registry, shared_state)
+        if not wanted or wanted & lanes(task.kind):
+            total += expected_round_minutes(task.kind, task.params, action_registry, shared_state)
     return total
 
 

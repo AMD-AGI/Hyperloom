@@ -203,7 +203,7 @@ class KernelPhase(
         Compares the projection with the anchor the watermark keeps in it, never with a snapshot's measured tok/s:
         under AgentX the validated gain is the latency objective's, and the two never meet.
         """
-        before = float(self.shared_state.last_roofline_tput or 0.0)
+        before = self.shared_state.last_roofline_tput
         cur = self.current_tput_from_validated_gain()
         return (
             before > 0

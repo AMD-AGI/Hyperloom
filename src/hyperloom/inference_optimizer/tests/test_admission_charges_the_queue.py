@@ -29,7 +29,7 @@ def _dispatcher(*, queued_kinds: tuple[str, ...], phase_minutes_left: float, lan
         return None
 
     async def queued():
-        return [SimpleNamespace(kind=k) for k in queued_kinds]
+        return [SimpleNamespace(kind=k, params={}) for k in queued_kinds]
 
     dispatcher = DispatcherCollaborator.__new__(DispatcherCollaborator)
     dispatcher.admission_frozen = False

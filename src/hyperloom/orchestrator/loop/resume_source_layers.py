@@ -101,7 +101,7 @@ def install_kept_source_layers(state: Any, session_dir: Path, report: dict[str, 
     sources, so they get the kept kernel files from this tree once it holds them.
     """
     # Snapshots hold whole files, so a later patch's snapshot of a shared file must be written last.
-    layers = sorted([*(state.optimization_stack or []), *state.dormant_source_layers()], key=lambda e: str(e.get("ts")))
+    layers = sorted([*state.optimization_stack, *state.dormant_source_layers()], key=lambda e: str(e.get("ts")))
     result = install_source_layers(layers, superseded=_committed_past)
     report["warnings"].extend(
         {"kind": "source_layer_not_reproducible", "variant": variant} for variant in result.unreproducible
