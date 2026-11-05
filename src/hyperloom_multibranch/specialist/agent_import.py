@@ -112,6 +112,23 @@ class KeptChangeError(ValueError):
 
 
 @dataclass(frozen=True)
+class Retraction:
+    """What a component agent's keep says it undoes (``retracts`` of its ``keep.json``): the change of its own
+    ``iteration``, kept as its keep ``keep``, which its finding ``finding`` found invalid; ``made_on``, the keep it was
+    made on (0 for none); ``beyond``, what it changes from that keep besides undoing keep ``keep``, empty when it
+    changes nothing else."""
+
+    iteration: int
+    keep: int
+    finding: str
+    made_on: int = 0
+    beyond: str = ""
+
+    def __str__(self) -> str:
+        return f"the agent's iteration {self.iteration} (its keep {self.keep}), found invalid by {self.finding}"
+
+
+@dataclass(frozen=True)
 class KeptChange:
     """The agent's state at its ``seq``-th keep: ``source_patch`` against the root and the whole ``server_args`` and
     ``envs`` it runs with; ``summary`` is the agent's own words for it; ``tables``, the text at the keep of the kernel
@@ -121,7 +138,8 @@ class KeptChange:
     ``envs``; ``disabled``, each server flag removed from ``server_args`` because a variable of ``envs`` needs it off
     (:data:`FLAG_CONFLICTS`), with that variable's setting; ``removed``, each flag of the launch the framework resolves
     that the agent runs without, or that ``disabled`` names, which ``server_args`` cannot drop; ``outside``, the files
-    of its own change left out as outside the component (its scratch)."""
+    of its own change left out as outside the component (its scratch); ``retracts``, the earlier keep of the agent's
+    this one undoes."""
 
     seq: int
     source_patch: str
@@ -134,6 +152,7 @@ class KeptChange:
     disabled: Mapping[str, str] = field(default_factory=dict)
     removed: tuple[str, ...] = ()
     outside: tuple[str, ...] = ()
+    retracts: Retraction | None = None
 
 
 def without_conflicts(kept: KeptChange, inherited: Collection[str] = ()) -> KeptChange:
@@ -267,6 +286,7 @@ class _Snapshot:
     summary: str
     tables: Mapping[str, object]
     rebased: bool
+    retracts: object
 
 
 @dataclass(frozen=True)
@@ -290,7 +310,7 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied, start:
     """
 
     chain = _chain(outbox, number, root)
-    patches = [_patch(outbox / _directory(link.number), SERVED_FILE if link.rebased else CHANGE_FILE) for link in chain]
+    patches = [_patch(outbox / _directory(link.number), _patch_file(link)) for link in chain]
     directory = outbox / _directory(number)
     launch = _component_launch(read_json(directory / LAUNCH_FILE))
     if launch is None:
@@ -302,7 +322,11 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied, start:
     # The flags the launch the framework resolves gives the agent, which the start commit's own arguments lack.
     resolved, runs = _flags(since[0]) - _flags(base.server_args), _flags(launch[0])
     tables, uncopied = _snapshot_tables(directory / TABLES_DIR, chain[-1].tables, named, start.copies)
-    kept = KeptChange(number, applied(patches), args, named, chain[-1].summary, tables, uncopied, dropped)
+    newest = chain[-1]
+    retraction = _retraction(newest, outbox, root, applied, start)
+    kept = KeptChange(
+        number, applied(patches), args, named, newest.summary, tables, uncopied, dropped, retracts=retraction
+    )
     return without_conflicts(replace(kept, removed=tuple(sorted(resolved - runs))), resolved & runs)
 
 
@@ -351,10 +375,100 @@ def _snapshot(outbox: Path, number: int, root: str) -> _Snapshot:
     # Arbor makes a keep on the root when the commit of the one before is gone from its workspace, and says why.
     notes = keep.get("notes")
     rebased = previous is not None and parent == root and isinstance(notes, str) and bool(notes.strip())
-    snapshot = _Snapshot(number, previous, parent, commit, _said(keep), tables, rebased)
+    snapshot = _Snapshot(number, previous, parent, commit, _said(keep), tables, rebased, keep.get("retracts"))
     if keep.get("root") != root:
         raise KeptChangeError(f"{_refused(snapshot)} it was made against the root {keep.get('root')}, not {root}")
     return snapshot
+
+
+def _retraction(
+    newest: _Snapshot, outbox: Path, root: str, applied: Applied, start: ComponentStart
+) -> Retraction | None:
+    """What ``newest`` says it retracts; raise :class:`KeptChangeError` when it names no iteration, keep and finding."""
+
+    retracts = newest.retracts
+    if retracts is None:
+        return None
+    fields = retracts if isinstance(retracts, Mapping) else {}
+    iteration, kept, finding = _number(fields.get("iteration")), _number(fields.get("keep")), fields.get("finding")
+    if iteration is None or kept is None or not (isinstance(finding, str) and finding):
+        directory = _directory(newest.number)
+        raise KeptChangeError(f"{directory}/{KEEP_FILE} retracts {retracts!r}, not an iteration, keep and finding")
+    try:
+        beyond = _beyond(newest, kept, _Reader(outbox, root, applied, start))
+    except KeptChangeError as error:
+        beyond = f"the keeps it is checked against cannot be read: {error}"
+    return Retraction(iteration, kept, finding, newest.previous or 0, beyond)
+
+
+@dataclass(frozen=True)
+class _Reader:
+    """How a snapshot's whole state is read: its outbox, the root its chain reaches, how patches apply to the root and
+    what the agent was started with, which is the state before its first keep."""
+
+    outbox: Path
+    root: str
+    applied: Applied
+    start: ComponentStart
+
+    def state(self, number: int | None) -> _State:
+        if number is None:
+            args, envs = _component_launch(self.start.config) or (self.start.launch.server_args, self.start.launch.envs)
+            return _State({}, _by_flag(args), dict(envs), {})
+        chain = _chain(self.outbox, number, self.root)
+        patches = [_patch(self.outbox / _directory(link.number), _patch_file(link)) for link in chain]
+        launch = _component_launch(read_json(self.outbox / _directory(number) / LAUNCH_FILE))
+        if launch is None:
+            raise KeptChangeError(
+                f"{_directory(number)}/{LAUNCH_FILE} holds no server_flags string or server_env object"
+            )
+        source = _file_sections(self.applied(patches))
+        return _State(source, _by_flag(launch[0]), dict(launch[1]), dict(chain[-1].tables))
+
+
+@dataclass(frozen=True)
+class _State:
+    """A snapshot's whole state, entry by entry: its source file by file (each file's diff from the root), its server
+    flags flag by flag, its launch variables and the kernel tables it lists."""
+
+    files: Mapping[str, object]
+    flags: Mapping[str, object]
+    envs: Mapping[str, object]
+    tables: Mapping[str, object]
+
+
+def _beyond(newest: _Snapshot, named: int, reader: _Reader) -> str:
+    """Every entry (file, server flag, launch variable, kernel table) in which ``newest`` differs from the keep it was
+    made on with keep ``named``'s changes undone: each entry keep ``named`` changed as it was before that keep, every
+    other entry as the keep it was made on has it. Empty when ``newest`` undoes keep ``named`` and does nothing else."""
+
+    if newest.previous is None or newest.rebased or not 0 < named <= newest.previous:
+        return f"it was not made on a keep after keep {named}"
+    before = reader.state(_snapshot(reader.outbox, named, reader.root).previous)
+    retracted, made_on, after = reader.state(named), reader.state(newest.previous), reader.state(newest.number)
+    differs: list[str] = []
+    for kind in ("files", "flags", "envs", "tables"):
+        old, new = getattr(before, kind), getattr(retracted, kind)
+        changed = {name for name in {*old, *new} if old.get(name) != new.get(name)}
+        undone = {name: value for name, value in getattr(made_on, kind).items() if name not in changed}
+        undone.update({name: old[name] for name in changed if name in old})
+        got = getattr(after, kind)
+        differs += sorted(name for name in {*got, *undone} if got.get(name) != undone.get(name))
+    return ", ".join(differs)
+
+
+def _patch_file(snapshot: _Snapshot) -> str:
+    return SERVED_FILE if snapshot.rebased else CHANGE_FILE
+
+
+def _file_sections(patch: str) -> dict[str, str]:
+    """``patch`` file by file, by the path it gives the file."""
+    sections = patch.split("diff --git a/")[1:]
+    return {section.split("\n", 1)[0].split(" b/", 1)[-1]: section for section in sections}
+
+
+def _number(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _said(keep: Mapping[str, object]) -> str:
@@ -634,6 +748,7 @@ __all__ = [
     "KeptChange",
     "KeptChangeError",
     "PatchStore",
+    "Retraction",
     "SourceIncrement",
     "TableStore",
     "added_at",
