@@ -564,7 +564,7 @@ def _entry_parsed(switch: str) -> dict[str, Any]:
 
 def test_dormant_levers_seed_additive_variants():
     """Code kept inert is turned on one dependency-closed bundle at a time."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
@@ -576,7 +576,7 @@ def test_dormant_levers_seed_additive_variants():
 
 def test_a_dormant_patch_is_not_benched_whole_again():
     """Its integrate round benched every switch on together; only one switch of several is new."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False, specialist_task_id="t-chain")
@@ -591,7 +591,7 @@ def test_a_dormant_patch_is_not_benched_whole_again():
 
 def test_dormant_levers_of_several_patches_are_bundled_together():
     """Each missed the bar alone; together is the only way they clear it."""
-    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import dormant_lever_bundle
 
     state = _state()
     state.record_authored_framework_levers([_entry_parsed("HL_ONE")], default_on=False, specialist_task_id="t-1")
@@ -608,7 +608,7 @@ def test_dormant_levers_of_several_patches_are_bundled_together():
 
 def test_active_levers_seed_leave_one_out_variants():
     """A stack that already won is attributed by removing one lever at a time."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=True)
@@ -620,7 +620,7 @@ def test_active_levers_seed_leave_one_out_variants():
 
 def test_already_attributed_levers_are_not_re_benched():
     """A lever with a number spends no further legs."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
@@ -631,7 +631,7 @@ def test_already_attributed_levers_are_not_re_benched():
 
 def test_no_levers_means_no_seeding():
     """The seeder is inert for every framework that has no authored rewrites."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_grid
 
     assert framework_lever_grid(None) == []
     assert framework_lever_grid(_state()) == []
@@ -640,7 +640,7 @@ def test_no_levers_means_no_seeding():
 def test_lever_variants_survive_the_payload_parser():
     """The parsed variant keeps the name attribution joins on and the unset the leg needs, or attribution is lost."""
     from hyperloom.orchestrator.actions.executors.explore import (
-        _framework_lever_attributions,
+        framework_lever_attributions,
         _grid_variants_from_payload,
         framework_lever_grid,
     )
@@ -653,7 +653,7 @@ def test_lever_variants_survive_the_payload_parser():
     assert all(v.unset_envs for v in variants)
 
     outcomes = [{"variant_name": v.name, "outcome": "REVERT", "metrics": {"gain_pct": -2.0}} for v in variants]
-    attributed = _framework_lever_attributions(outcomes, payload)
+    attributed = framework_lever_attributions(outcomes, payload)
     assert {row["switch"] for row in attributed} == {str(v.get("framework_lever")) for v in payload}
     # leave_one_out: dropping a lever that cost 2% credits it with +2%.
     assert all(row["gain_pct"] == pytest.approx(2.0) for row in attributed)
@@ -664,11 +664,11 @@ def test_lever_variants_survive_the_payload_parser():
 
 def test_additive_attribution_takes_the_measured_gain_directly():
     """Switching a lever on measures its contribution as-is."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "fwlever_hl_a", "outcome": "KEEP", "metrics": {"gain_pct": 6.2}}]
-    assert _framework_lever_attributions(outcomes, seeds) == [
+    assert framework_lever_attributions(outcomes, seeds) == [
         {
             "switch": "HL_A",
             "gain_pct": 6.2,
@@ -681,7 +681,7 @@ def test_additive_attribution_takes_the_measured_gain_directly():
 
 def test_leave_one_out_attribution_negates_the_measured_gain():
     """Removing a lever measures the negative of its contribution."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_attributions
 
     seeds = [
         {
@@ -691,34 +691,34 @@ def test_leave_one_out_attribution_negates_the_measured_gain():
         }
     ]
     outcomes = [{"variant_name": "fwlever_drop_hl_a", "outcome": "REVERT", "metrics": {"gain_pct": -8.0}}]
-    assert _framework_lever_attributions(outcomes, seeds)[0]["gain_pct"] == pytest.approx(8.0)
+    assert framework_lever_attributions(outcomes, seeds)[0]["gain_pct"] == pytest.approx(8.0)
 
 
 def test_a_combination_variant_attributes_to_nothing():
     """The full-stack leg is a combination test, not one rewrite's number."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_attributions
 
     seeds = [{"name": "fwlever_all", "framework_lever": "", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "fwlever_all", "outcome": "KEEP", "metrics": {"gain_pct": 12.0}}]
-    assert _framework_lever_attributions(outcomes, seeds) == []
+    assert framework_lever_attributions(outcomes, seeds) == []
 
 
 def test_an_unmeasured_variant_attributes_to_nothing():
     """A failed or killed leg produces no number, so it records none."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "fwlever_hl_a", "outcome": "FAILED", "metrics": {}}]
-    assert _framework_lever_attributions(outcomes, seeds) == []
+    assert framework_lever_attributions(outcomes, seeds) == []
 
 
 def test_non_lever_variants_are_ignored():
     """An ordinary config variant in the same round is not a lever attribution."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "myfw_hw_queues_2", "outcome": "KEEP", "metrics": {"gain_pct": 3.0}}]
-    assert _framework_lever_attributions(outcomes, seeds) == []
+    assert framework_lever_attributions(outcomes, seeds) == []
 
 
 # two-tier verdict in integrate_patch
@@ -1408,7 +1408,10 @@ async def test_an_unswitched_patch_marked_for_the_cycle_screen_is_still_benched(
 def test_levers_awaiting_the_cycle_screen_are_neither_bundled_nor_attributed_by_replay():
     """An admitted lever has no measurement yet; the cycle bench decides whether it enters a bundle."""
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
-    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle, framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import (
+        dormant_lever_bundle,
+        framework_lever_grid,
+    )
 
     state = _state()
     for i, name in enumerate(("HL_ONE", "HL_TWO", "HL_THREE")):
@@ -1430,7 +1433,7 @@ def test_a_bundle_takes_the_levers_the_cycle_bench_passed_and_those_it_never_scr
         ATTRIBUTION_CYCLE_BROKEN,
         ATTRIBUTION_CYCLE_INCONCLUSIVE,
     )
-    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle
+    from hyperloom.orchestrator.actions.executors._framework_switch_manifest import dormant_lever_bundle
 
     state = _state()
     screened = [

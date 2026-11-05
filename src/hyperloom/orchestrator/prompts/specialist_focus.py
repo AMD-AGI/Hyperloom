@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from hyperloom.common.perf_metric import is_agentx_mode
 from .speculative_decoding_focus import speculative_decoding_focus
+from ..specialists.domains import CUSTOM_SPECIALIST_KEY
+from ..specialists.profile import MODE_PATCH
 from ..specialists.prompt_inputs import SpecialistPromptInputs
 
 
@@ -815,3 +817,42 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "enablement_specialist": _focus_enablement_specialist,
     "custom_specialist": _focus_custom_specialist,
 }
+
+
+#: Patch authors that carry their own switch contract: enablement is never benched for a gain, the framework-rewrite
+#: focus states it itself, and the operator writes the custom specialist's mandate.
+_OWN_SWITCH_CONTRACT_DOMAINS = frozenset(
+    {"enablement_specialist", "framework_rewrite_specialist", CUSTOM_SPECIALIST_KEY}
+)
+
+
+def switch_contract(inp: SpecialistPromptInputs) -> list[str]:
+    """The switch contract for every patch author whose patch is benched for a gain, freeform dispatches included."""
+    if inp.mode != MODE_PATCH or inp.domain.key in _OWN_SWITCH_CONTRACT_DOMAINS:
+        return []
+    return ["", "### Deliver every rewrite behind a switch", "", *_SWITCH_CONTRACT_LINES]
+
+
+def owned_module_rows(inp: SpecialistPromptInputs) -> list[str]:
+    """§0's module group the dispatch owns, with its row of the module table when one was read."""
+    owned = inp.roofline_evidence.get("owned_module") or {}
+    if not owned.get("group"):
+        return []
+    line = f"- module group: `{owned['group']}` (no other specialist works it while you run)"
+    if not owned.get("rows"):
+        return [line]
+    return [f"{line}; its decode time per step:", "", *map(str, owned["rows"])]
+
+
+def decode_table_rows(table: Any) -> list[str]:
+    """The decode steps' time by module, ahead of the TraceLens kernels, or nothing without a table."""
+    if not table:
+        return []
+    return [
+        "**Decode step time by module** (summed per step off the raw profile capture's step windows, so it covers "
+        "the graph-replayed VERIFY step TraceLens cannot split; profiling inflates every figure by about a tenth, "
+        "the shares hold):",
+        "",
+        *(str(line) for line in table),
+        "",
+    ]

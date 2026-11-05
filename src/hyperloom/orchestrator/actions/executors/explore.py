@@ -6,13 +6,10 @@
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 from hyperloom.common.benchmark_config import is_magpie_agentx
-import asyncio
-import contextlib
 import functools
 import logging
 import os
 import tempfile
-import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -61,11 +58,9 @@ from ..stop_attribution import (
     variant_budget_stop,
 )
 from ._accuracy_gate import parse_eval_results
-from . import _framework_switch_manifest as _switch_manifest
+from ._framework_switch_manifest import LEAVE_ONE_OUT, framework_lever_attributions, framework_lever_grid
 from .bypass_scriptable import declared_lever_payload
 from . import cycle_bench_arm as _cycle_bench
-from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
-from ._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN, ATTRIBUTION_CYCLE_PENDING
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
@@ -135,7 +130,6 @@ SWITCH_UNREAD: str = "switch_unread"
 
 #: The provenance of a grid row that names none: the model proposed it directly.
 _DIRECT_PROVENANCE = "llm_direct"
-_LEAVE_ONE_OUT = "leave_one_out"
 
 
 def is_stack_revalidation(params: dict | None) -> bool:
@@ -249,102 +243,6 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             dict(item) for item in (raw.get("experience_citations") or []) if isinstance(item, dict)
         ]
         out.append(gv)
-    return out
-
-
-def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
-    """Build explore variants that attribute each registered rewrite lever.
-
-    A dormant lever's patch was benched with all its switches on when it was integrated, below the KEEP threshold, so
-    that set benched again repeats the round: a switch on its own is new only out of a patch that carried several.
-    The dormant levers of several patches together are new as well, and get their own round
-    (:func:`dormant_lever_bundle`) rather than a seat in every grid.
-    """
-    rows = _lever_rows(shared_state)
-    pending = [row for row in rows if row.get("attributed_gain_pct") is None]
-    dormant = [row for row in pending if not row.get("default_on")]
-    active = [row for row in pending if row.get("default_on")]
-    payload: list[dict[str, Any]] = []
-    decomposable = [row for patch in _by_patch(dormant) if len(patch) > 1 for row in patch]
-    for variant in _switch_manifest.additive_variants(decomposable):
-        if variant["framework_lever"]:
-            payload.append({**variant, "framework_lever_source": "additive"})
-    if active:
-        for variant in _switch_manifest.leave_one_out_variants(active):
-            payload.append({**variant, "framework_lever_source": _LEAVE_ONE_OUT})
-    return payload
-
-
-def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:
-    """The variant that switches every dormant lever on together, once they come from more than one patch.
-
-    Each was kept dormant for missing the KEEP threshold alone; together is the only way several of them clear it,
-    which is how the hand-tuned GLM-5.3 stack landed most of its 44 patches.
-    """
-    dormant = [row for row in _lever_rows(shared_state) if not row.get("default_on") and not _screened_out(row)]
-    if len(_by_patch(dormant)) < 2:
-        return None
-    return _switch_manifest.bundle_variant(dormant, name="fwlever_bundle")
-
-
-def _screened_out(row: dict[str, Any]) -> bool:
-    """Whether the cycle bench screened the lever and found no gain, or no server, in it."""
-    source = row.get("attribution_source")
-    if source == ATTRIBUTION_CYCLE_BROKEN:
-        return True
-    gain = row.get("attributed_gain_pct")
-    return source == ATTRIBUTION_CYCLE_BENCH and not (isinstance(gain, (int, float)) and gain > 0)
-
-
-def _lever_rows(shared_state: Any) -> list[dict[str, Any]]:
-    """The session's registered rewrite levers, less those the cycle bench has yet to screen."""
-    rows = getattr(shared_state, "authored_framework_levers", None) or []
-    return [r for r in rows if isinstance(r, dict) and r.get("attribution_source") != ATTRIBUTION_CYCLE_PENDING]
-
-
-def _by_patch(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Lever rows grouped by the registration that recorded them together: one integrated patch's switches."""
-    patches: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in rows:
-        patches.setdefault((str(row.get("specialist_task_id") or ""), str(row.get("ts") or "")), []).append(row)
-    return list(patches.values())
-
-
-def _framework_lever_attributions(
-    per_variant_outcomes: list[dict[str, Any]],
-    lever_payload: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Derive each rewrite lever's own contribution from this round's outcomes."""
-    if not lever_payload:
-        return []
-    by_name = {
-        str(v.get("name") or ""): v
-        for v in lever_payload
-        if isinstance(v, dict) and str(v.get("framework_lever") or "")
-    }
-    if not by_name:
-        return []
-    out: list[dict[str, Any]] = []
-    for row in per_variant_outcomes:
-        seed = by_name.get(str(row.get("variant_name") or ""))
-        if seed is None:
-            continue
-        # A REVERT keeps its measured movement in ``graded_gain_pct``; a regressed leave-one-out arm is that case.
-        metrics = row.get("metrics") or {}
-        measured = metrics.get("gain_pct", metrics.get("graded_gain_pct"))
-        if not isinstance(measured, (int, float)):
-            continue
-        source = str(seed.get("framework_lever_source") or "")
-        gain = -float(measured) if source == _LEAVE_ONE_OUT else float(measured)
-        out.append(
-            {
-                "switch": str(seed["framework_lever"]),
-                "gain_pct": round(gain, 4),
-                "source": source,
-                "variant_name": str(row.get("variant_name") or ""),
-                "outcome": str(row.get("outcome") or ""),
-            }
-        )
     return out
 
 
@@ -603,7 +501,7 @@ def _lever_seeded_payload(payload: list[Any], levers: list[dict[str, Any]]) -> l
         return payload
     log.info("explore: seeding %d framework-rewrite lever variant(s) for attribution", len(fresh))
     # A leave-one-out arm only attributes a switch already on, so the arms that could KEEP run before it.
-    attribution = [v for v in fresh if v.get("framework_lever_source") == _LEAVE_ONE_OUT]
+    attribution = [v for v in fresh if v.get("framework_lever_source") == LEAVE_ONE_OUT]
     return [v for v in fresh if v not in attribution] + list(payload) + attribution
 
 
@@ -1536,7 +1434,7 @@ class _ExploreRound:
             return
         self.ss.record_explore_verdicts({"tested": {row["fingerprint"]: row}, "rejected": [rejected]})
         outcome = _outcome_row(row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id))
-        for lever in _framework_lever_attributions([outcome], self.lever_payload):
+        for lever in framework_lever_attributions([outcome], self.lever_payload):
             self.ss.record_framework_lever_attribution(lever["switch"], gain_pct=lever["gain_pct"])
         self.ss.save(self.session_dir)
 
@@ -1645,7 +1543,7 @@ class _ExploreRound:
     def _result(self) -> dict[str, Any]:
         rejected = {row["fingerprint"]: row for row in self.rejected if row["fingerprint"]}
         outcomes = self._per_variant_outcomes({fp: str(row.get("reason") or "") for fp, row in rejected.items()})
-        levers = _framework_lever_attributions(outcomes, self.lever_payload)
+        levers = framework_lever_attributions(outcomes, self.lever_payload)
         if levers:
             log.info(
                 "explore: attributed %d framework rewrite lever(s): %s",
@@ -1742,42 +1640,11 @@ class ExploreExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
         if _cycle_bench.CYCLE_ARMS_PARAM in params:
-            return await _run_cycle_batch(params, extra.get("shared_state"), output_root)
+            return await _cycle_bench.run_cycle_batch(params, extra.get("shared_state"), output_root)
         try:
             return await _ExploreRound(ctx, params, output_root, self.session_dir).run()
         except _RoundRefused as refusal:
             return refusal.result
-
-
-async def _run_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -> dict[str, Any]:
-    """Run the batch off the event loop; cancelled, it stops booting and returns once the arm on the GPUs is down.
-
-    The task's lanes are released when it ends, so a server the thread still holds would share the GPUs.
-    """
-    stop = threading.Event()
-    work = asyncio.ensure_future(asyncio.to_thread(_screen_cycle_batch, params, state, output_root, stop))
-    try:
-        return await asyncio.shield(work)
-    except asyncio.CancelledError:
-        stop.set()
-        with contextlib.suppress(Exception):
-            await work
-        raise
-
-
-def _screen_cycle_batch(
-    params: dict[str, Any], state: Any, output_root: Path, stop: threading.Event | None = None
-) -> dict[str, Any]:
-    """Run one cycle-bench batch of the task's arms on the session baseline's launch; no replay, no grading round."""
-    from hyperloom.common.ports import pick_server_port
-
-    arms = list(params[_cycle_bench.CYCLE_ARMS_PARAM])
-    candidates = [(str(arm["name"]), {str(k): str(v) for k, v in (arm.get("envs") or {}).items()}) for arm in arms]
-    try:
-        spec = _cycle_bench.session_batch(state, candidates, out_dir=output_root, port=pick_server_port())
-    except (OSError, KeyError, ValueError) as exc:
-        return {"status": "failed", "error_class": "cycle_bench_unavailable", "error": str(exc)}
-    return {"status": STATUS_SCREENED, _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec, stop=stop)}
 
 
 explore_executor = ExploreExecutor()

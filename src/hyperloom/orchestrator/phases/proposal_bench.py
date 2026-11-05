@@ -130,7 +130,7 @@ class ProposalBench(CoordinatorCollaborator):
         integrates (see :mod:`.dispatch_order`): left to the orchestration it waited behind them, and no explore fit
         the phase they had already filled. Nothing is enqueued into a phase on its way out, which would cancel it.
         """
-        from ..actions.executors.explore import dormant_lever_bundle
+        from ..actions.executors._framework_switch_manifest import dormant_lever_bundle
 
         variant = dormant_lever_bundle(self.shared_state)
         if variant is None or self._coord.dispatcher.admission_frozen:

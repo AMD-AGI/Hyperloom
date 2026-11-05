@@ -17,6 +17,7 @@ from hyperloom.common.env_safety import (
 )
 
 from ._framework_rewrite_evidence import _CATEGORY_TAXONOMY
+from ._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN, ATTRIBUTION_CYCLE_PENDING
 
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,9 @@ KNOWN_CATEGORIES: frozenset[str] = frozenset(_CATEGORY_TAXONOMY) | {"swap_vendor
 
 # Cap on manifest entries.
 MAX_SWITCHES = 24
+
+# ``framework_lever_source`` of an arm that switches one active lever off.
+LEAVE_ONE_OUT = "leave_one_out"
 
 
 def _clean_list(raw: Any) -> list[str]:
@@ -481,3 +485,93 @@ __all__ = [
     "transitive_closure",
     "unarmed_env_reads",
 ]
+
+
+def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
+    """Build explore variants that attribute each registered rewrite lever.
+
+    A dormant lever is split out only of a patch that carried several, since its patch was benched with all of them
+    on; dormant levers across patches get their own round (:func:`dormant_lever_bundle`).
+    """
+    rows = _lever_rows(shared_state)
+    pending = [row for row in rows if row.get("attributed_gain_pct") is None]
+    dormant = [row for row in pending if not row.get("default_on")]
+    active = [row for row in pending if row.get("default_on")]
+    payload: list[dict[str, Any]] = []
+    decomposable = [row for patch in _by_patch(dormant) if len(patch) > 1 for row in patch]
+    for variant in additive_variants(decomposable):
+        if variant["framework_lever"]:
+            payload.append({**variant, "framework_lever_source": "additive"})
+    if active:
+        for variant in leave_one_out_variants(active):
+            payload.append({**variant, "framework_lever_source": LEAVE_ONE_OUT})
+    return payload
+
+
+def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:
+    """The variant that switches every dormant lever on together, once they come from more than one patch."""
+    dormant = [row for row in _lever_rows(shared_state) if not row.get("default_on") and not _screened_out(row)]
+    if len(_by_patch(dormant)) < 2:
+        return None
+    return bundle_variant(dormant, name="fwlever_bundle")
+
+
+def _screened_out(row: dict[str, Any]) -> bool:
+    """Whether the cycle bench screened the lever and found no gain, or no server, in it."""
+    source = row.get("attribution_source")
+    if source == ATTRIBUTION_CYCLE_BROKEN:
+        return True
+    gain = row.get("attributed_gain_pct")
+    return source == ATTRIBUTION_CYCLE_BENCH and not (isinstance(gain, (int, float)) and gain > 0)
+
+
+def _lever_rows(shared_state: Any) -> list[dict[str, Any]]:
+    """The session's registered rewrite levers, less those the cycle bench has yet to screen."""
+    rows = getattr(shared_state, "authored_framework_levers", None) or []
+    return [r for r in rows if isinstance(r, dict) and r.get("attribution_source") != ATTRIBUTION_CYCLE_PENDING]
+
+
+def _by_patch(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Lever rows grouped by the registration that recorded them together: one integrated patch's switches."""
+    patches: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        patches.setdefault((str(row.get("specialist_task_id") or ""), str(row.get("ts") or "")), []).append(row)
+    return list(patches.values())
+
+
+def framework_lever_attributions(
+    per_variant_outcomes: list[dict[str, Any]],
+    lever_payload: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Derive each rewrite lever's own contribution from this round's outcomes."""
+    if not lever_payload:
+        return []
+    by_name = {
+        str(v.get("name") or ""): v
+        for v in lever_payload
+        if isinstance(v, dict) and str(v.get("framework_lever") or "")
+    }
+    if not by_name:
+        return []
+    out: list[dict[str, Any]] = []
+    for row in per_variant_outcomes:
+        seed = by_name.get(str(row.get("variant_name") or ""))
+        if seed is None:
+            continue
+        # A REVERT keeps its measured movement in ``graded_gain_pct``; a regressed leave-one-out arm is that case.
+        metrics = row.get("metrics") or {}
+        measured = metrics.get("gain_pct", metrics.get("graded_gain_pct"))
+        if not isinstance(measured, (int, float)):
+            continue
+        source = str(seed.get("framework_lever_source") or "")
+        gain = -float(measured) if source == LEAVE_ONE_OUT else float(measured)
+        out.append(
+            {
+                "switch": str(seed["framework_lever"]),
+                "gain_pct": round(gain, 4),
+                "source": source,
+                "variant_name": str(row.get("variant_name") or ""),
+                "outcome": str(row.get("outcome") or ""),
+            }
+        )
+    return out

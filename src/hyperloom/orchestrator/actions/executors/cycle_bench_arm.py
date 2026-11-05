@@ -9,6 +9,7 @@ The arithmetic -- the bench-shaped argv and env, reading cycles off the log, wei
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -457,3 +458,31 @@ __all__ = [
     "session_batch",
     "summarize_batch",
 ]
+
+
+async def run_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -> dict[str, Any]:
+    """Run the batch off the event loop; cancelled, it stops booting and returns once the arm on the GPUs is down."""
+    stop = threading.Event()
+    work = asyncio.ensure_future(asyncio.to_thread(_screen_cycle_batch, params, state, output_root, stop))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        stop.set()
+        with contextlib.suppress(Exception):
+            await work
+        raise
+
+
+def _screen_cycle_batch(
+    params: dict[str, Any], state: Any, output_root: Path, stop: threading.Event | None = None
+) -> dict[str, Any]:
+    """Run one cycle-bench batch of the task's arms on the session baseline's launch; no replay, no grading round."""
+    from hyperloom.common.ports import pick_server_port
+
+    arms = list(params[CYCLE_ARMS_PARAM])
+    candidates = [(str(arm["name"]), {str(k): str(v) for k, v in (arm.get("envs") or {}).items()}) for arm in arms]
+    try:
+        spec = session_batch(state, candidates, out_dir=output_root, port=pick_server_port())
+    except (OSError, KeyError, ValueError) as exc:
+        return {"status": "failed", "error_class": "cycle_bench_unavailable", "error": str(exc)}
+    return {"status": cb.STATUS_SCREENED, CYCLE_ARMS_PARAM: arms, **run_batch(spec, stop=stop)}
