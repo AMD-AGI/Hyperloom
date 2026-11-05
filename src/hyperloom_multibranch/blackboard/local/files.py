@@ -4,8 +4,8 @@
 """Whole-file writes for files every participant of a session reads.
 
 The files are owner-only, as ``tempfile.mkstemp`` creates them and as ``hyperloom_common.io`` writes its own: every
-participant of a session runs as the session's user. Segments (:mod:`.segments`) are written by their owner and
-readable as the umask allows, and the directories follow the umask.
+participant of a session runs as the session's user. Segments (:mod:`.segments`) are created owner-only too, and the
+directories follow the umask.
 A reader never sees a partial file, and a host crash leaves no empty one: a file's bytes reach the disk before its name
 appears.
 """
