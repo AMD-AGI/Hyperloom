@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 from hyperloom_common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from kernelforge.evaluation import decode_module_lines, decode_module_ranking, named_modules
 
 from ..collaborator import CoordinatorCollaborator
+from ..measurement.cycle_bench import cycle_bench_enabled
 from ..measurement.runtime_findings import render_runtime_findings
 from ..state.shared_state import KbInjection
 from ..state.task_registry import TaskSpec
@@ -25,6 +27,8 @@ from ..policy.gate import (
     validate_freeform_wave_task,
 )
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_TASK_RETRY, record_event, trajectory_scope
+from .domains import is_custom_specialist_dispatch
+from .in_flight import MODULE_GROUPS, held_module_group
 from .runner import SpecialistFailureType, specialist_patch_preflight_error
 
 if TYPE_CHECKING:
@@ -161,6 +165,15 @@ def _round_entry_extras(
     return extras
 
 
+def _module_table_source(state: Any) -> str:
+    """The current stack's cycle-bench capture when it parses into a table, else the opening profile's capture."""
+    held = getattr(state, "last_attribution_trace", None) or {}
+    current = held.get("stack_len") == len(getattr(state, "optimization_stack", None) or [])
+    if held.get("trace") and current and decode_module_lines(held["trace"]):
+        return str(held["trace"])
+    return str(getattr(state, "last_profile_trace", "") or "")
+
+
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
@@ -223,14 +236,23 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         self._warm_gap_anchors(params)
         self._warm_progress(params)
 
-        # Pack bottleneck signals into roofline_evidence for the specialist.
-        # Hot kernels alone are enough: a trace whose quality gate withheld
-        # analysis.md still names where device time goes.
-        last_ta = getattr(state, "last_trace_analyze", None) or {}
-        has_evidence = isinstance(last_ta, dict) and bool(
-            last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
-        )
-        if has_evidence and "roofline_evidence" not in params:
+        if "roofline_evidence" not in params:
+            await self._warm_roofline_evidence(params)
+
+        measurement = getattr(state, "current_best_measurement", None)
+        if measurement and "runtime_findings" not in params:
+            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
+
+        await self._warm_experience_kb(params)
+
+    async def _warm_roofline_evidence(self, params: dict[str, Any]) -> None:
+        """Pack the TraceLens snapshot and the decode steps' time by module into ``roofline_evidence``.
+
+        Hot kernels alone are enough: a trace whose quality gate withheld analysis.md still names where device time
+        goes, and the raw capture's module table stands even without a TraceLens snapshot.
+        """
+        last_ta = getattr(self.shared_state, "last_trace_analyze", None) or {}
+        if isinstance(last_ta, dict) and (last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")):
             from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
 
             analysis_path = str(last_ta.get("analysis_md_path") or "")
@@ -239,25 +261,49 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 try:
                     executive_summary = extract_workload_summary(analysis_path)
                 except (ValueError, csv.Error) as exc:
-                    log.warning(
-                        "specialist warmup: extract_workload_summary(%s) failed: %r",
-                        analysis_path,
-                        exc,
-                    )
-                    executive_summary = {}
-            hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
+                    log.warning("specialist warmup: extract_workload_summary(%s) failed: %r", analysis_path, exc)
             params["roofline_evidence"] = {
                 "analysis_md_path": analysis_path,
                 "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
                 "executive_summary": executive_summary,
-                "hot_kernels_top15": hot_kernels,
+                "hot_kernels_top15": list(last_ta.get("hot_kernels_top15") or [])[:8],
             }
+        source = await asyncio.to_thread(_module_table_source, self.shared_state)
+        lines = await asyncio.to_thread(decode_module_lines, source)
+        if lines:
+            params.setdefault("roofline_evidence", {})["decode_modules"] = lines
+        if group := held_module_group(params):
+            rows = await asyncio.to_thread(decode_module_lines, source, module=group)
+            params.setdefault("roofline_evidence", {})["owned_module"] = {"group": group, "rows": rows}
 
-        measurement = getattr(state, "current_best_measurement", None)
-        if measurement and "runtime_findings" not in params:
-            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
+    async def assign_module_group(self, params: dict[str, Any]) -> None:
+        """Name the module group of the capture's decode kernels a FRAMEWORK_AGENT dispatch's target text names.
 
-        await self._warm_experience_kb(params)
+        A dispatch that names a group keeps it. Kernels of several groups resolve to the one with the most decode time per step. A ``task_kind`` dispatch is
+        Coordinator work with its own target, and a wave's tasks are assigned one by one.
+        """
+        if any(params.get(key) for key in ("module_group", "task_kind", "tasks")) or is_custom_specialist_dispatch(
+            params
+        ):
+            return
+        state = self.shared_state
+        if not cycle_bench_enabled() or state.phase != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        gap = state.find_gap(str(params.get("gap_canonical_id") or params.get("gap") or "").strip()) or {}
+        target = (
+            params.get("gap_symptom") or gap.get("symptom"),
+            params.get("task_summary"),
+            params.get("task_description"),
+        )
+        source = await asyncio.to_thread(_module_table_source, state)
+        text = " ".join(str(item or "") for item in target)
+        groups = (await asyncio.to_thread(named_modules, source, text)).intersection(MODULE_GROUPS)
+        if len(groups) == 1:
+            params["module_group"] = groups.pop()
+        elif groups:
+            ranked = await asyncio.to_thread(decode_module_ranking, source)
+            if group := next((m for m in ranked if m in groups), ""):
+                params["module_group"] = group
 
     def _warm_framework_context(self, params: dict[str, Any]) -> None:
         """Warm the runtime framework version and the local framework source roots."""
@@ -624,6 +670,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "priority",
                 "timeout_minutes",
                 "max_turns",
+                "module_group",
             ):
                 if isinstance(task, dict) and carry in task:
                     sub_params[carry] = task[carry]

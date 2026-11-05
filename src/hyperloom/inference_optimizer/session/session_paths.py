@@ -111,10 +111,13 @@ def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     raise RuntimeError(f"unique_runs_dir: {base} still taken after {_MAX_RUNS_DIR_ATTEMPTS} suffixes")
 
 
+_PATCHES: str = "patches"
+
+
 def patches_dir(session_dir: Path, kernel_id: str) -> Path:
     """``<sd>/patches/<kernel_id>/`` — KEEP-promoted on-disk changes: the original source backup + applied patch (REVERT restores from backup)."""
     kid = _validate_id_component(kernel_id, field="patches_dir.kernel_id")
-    return Path(session_dir) / "patches" / kid
+    return Path(session_dir) / _PATCHES / kid
 
 
 _KERNEL_PATCH_BACKUPS: str = "backup"
@@ -127,13 +130,18 @@ def kernel_patch_backup_root(session_dir: Path, kernel_id: str) -> Path:
 
 def kernel_patch_backup_roots(session_dir: Path) -> list[Path]:
     """Every :func:`kernel_patch_backup_root` in the session."""
-    return sorted((Path(session_dir) / "patches").glob(f"*/{_KERNEL_PATCH_BACKUPS}"))
+    return sorted((Path(session_dir) / _PATCHES).glob(f"*/{_KERNEL_PATCH_BACKUPS}"))
 
 
 # Session-breakdown record fragments (recorder write-side spool).
 def breakdown_parts_dir(session_dir: Path) -> Path:
     """``<sd>/runtime/breakdown/parts/`` — per-producer breakdown record fragments."""
     return Path(session_dir) / "runtime" / "breakdown" / "parts"
+
+
+def jit_cache_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/jit-cache/`` — session-scoped JIT / code-object caches shared by every run."""
+    return Path(session_dir) / "runtime" / "jit-cache"
 
 
 # Reports / logs
@@ -264,6 +272,25 @@ def next_forge_attempt_dir(session_dir: Path, macro_cycle: int) -> Path:
             except ValueError:
                 continue
     return forge_attempt_dir(session_dir, macro_cycle, highest + 1)
+
+
+def unintegrated_forge_attempt_dirs(session_dir: Path, macro_cycle: int) -> tuple[Path, ...]:
+    """Return this cycle's attempts with a published patch that integration never wrote a result for, oldest first."""
+    cycle_root = forge_cycle_dir(session_dir, macro_cycle)
+    if not cycle_root.is_dir():
+        return ()
+    found: list[tuple[int, Path]] = []
+    for entry in cycle_root.iterdir():
+        number = entry.name[len("attempt-") :]
+        if not entry.is_dir() or not entry.name.startswith("attempt-") or not number.isdigit():
+            continue
+        patches = entry / "result" / _PATCHES
+        results = entry / "integration" / "results"
+        published = sum(not patch.name.startswith(".") for patch in patches.iterdir()) if patches.is_dir() else 0
+        written = len(list(results.glob("*.json"))) if results.is_dir() else 0
+        if written < published:
+            found.append((int(number), entry))
+    return tuple(entry for _number, entry in sorted(found))
 
 
 def competitor_target_json(session_dir: Path) -> Path:

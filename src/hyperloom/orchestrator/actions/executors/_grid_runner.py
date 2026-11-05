@@ -65,6 +65,7 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import apply_benchmark_round_seed, composed_benchmark_timeout_sec, prepare_benchmark_runtime
+from ._jit_cache_env import apply_session_jit_cache, benchmark_framework
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
@@ -434,9 +435,14 @@ class MagpieRound:
     warmup: bool = False
 
 
-def _magpie_process_env(unset_envs: list[str] | None) -> dict[str, str]:
+def _magpie_process_env(config_path: Path, unset_envs: list[str] | None) -> dict[str, str]:
     """The scrubbed process environment a Magpie round starts from, before per-round pins."""
     env = scrub_benchmark_process_env(os.environ.copy())
+    apply_session_jit_cache(
+        env,
+        framework=benchmark_framework(config_path),
+        session_dir=_resolve_session_dir(),
+    )
     env["PYTHONUNBUFFERED"] = "1"
     from ._workload_envs import resolve_reference_launch
 
@@ -468,7 +474,7 @@ def _run_magpie(
     output_dir = bench_round.output_dir
     sync_benchmark_timeout(config_path, bench_round.timeout_sec)
     server_log_path = _benchmark_server_log(config_path, output_dir)
-    env = _magpie_process_env(unset_envs)
+    env = _magpie_process_env(config_path, unset_envs)
 
     preparation_failure = prepare_benchmark_runtime(config_path, env)
     if preparation_failure is not None:

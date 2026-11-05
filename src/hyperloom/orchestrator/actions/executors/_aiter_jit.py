@@ -21,6 +21,8 @@ from hyperloom_common.aiter_jit_cache import (
     resolve_package_root,
     resolve_serving_context,
 )
+from hyperloom_common.gpu_identity import row_dispatches_on
+from hyperloom.inference_optimizer.gpu_types import amd_gpu_board
 
 log = logging.getLogger(__name__)
 
@@ -514,8 +516,13 @@ def serving_module_for_kernel(kernel_name: str, libtype: str, table_modules: tup
     return None
 
 
-def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
-    """Each ``(kernelName, libtype)`` pair linked into a serving ``module_*.so``, once, in first-seen order.
+def csv_jit_kernel_rows(csv_path: Path, target: tuple[str, int] | None) -> list[tuple[str, str]]:
+    """Each ``(kernelName, libtype)`` pair linked into a serving ``module_*.so`` on ``target``, once, in first-seen order.
+
+    aiter's codegen compiles only the rows whose ``(gfx, cu_num)`` is the GPU it builds
+    for, so a row tuned for another GPU is never in the .so; counting it would call every
+    shared table uncovered and re-JIT its modules before each boot. A table without
+    those columns, or an unknown ``target``, keeps every row.
 
     The tables this reads ship with aiter, so their encoding and field sizes are not
     ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
@@ -524,7 +531,11 @@ def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     try:
         with csv_path.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
+            reader = csv.DictReader(handle)
+            keyed = target is not None and {"gfx", "cu_num"} <= set(reader.fieldnames or ())
+            for row in reader:
+                if keyed and not row_dispatches_on(row, target):
+                    continue
                 name = str(row.get("kernelName") or "").strip()
                 if not name:
                     continue
@@ -717,6 +728,8 @@ def prepare_serving_so_for_csvs(
     package_root, jit_build = context
     jit_dir = jit_build.parent
     configs_dir = package_root / "configs"
+    board = amd_gpu_board()
+    target = (board.gfx, board.compute_units) if board else None
     tables: list[tuple[tuple[str, ...], list[tuple[str, str]]]] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
         tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")
@@ -724,7 +737,7 @@ def prepare_serving_so_for_csvs(
             continue
         for csv_path in csvs_aiter_will_load(configs_dir, tuned_file_name, str(envs.get(env_var) or "")):
             if csv_path.is_file():
-                tables.append((modules, csv_jit_kernel_rows(csv_path)))
+                tables.append((modules, csv_jit_kernel_rows(csv_path, target)))
     log.info(
         "aiter_jit: checking %d tuned table(s), %d kernel(s), against the serving .so in %s",
         len(tables),

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _apply_feedback as af
+from hyperloom.orchestrator.actions.executors import _integrate_apply as integrate_apply
 from hyperloom.orchestrator.actions.executors import _nogit_patch as ng
 from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
 from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
@@ -30,7 +31,7 @@ def test_reexport_from_integrate_patch():
     assert patch_git._P_LEVELS is ng._P_LEVELS
     assert patch_artifacts._is_within is ng._is_within
     assert integrate_enablement_gate._is_git_tree is ng._is_git_tree
-    assert patch_git._apply_patch_no_git is ng._apply_patch_no_git
+    assert integrate_apply._apply_patch_no_git is ng._apply_patch_no_git
 
 
 def test_reexport_from_patch_snapshot():

@@ -261,7 +261,7 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path, 
         )
     )
 
-    assert captured["options"].kwargs["env"] == _stability_env()
+    assert captured["options"].kwargs["env"] == {"PYTHONDONTWRITEBYTECODE": "1", **_stability_env()}
 
 
 async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeypatch):
@@ -291,7 +291,11 @@ async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeyp
         )
     )
 
-    assert captured["options"].kwargs["env"] == {**_stability_env(), "AITER_JIT_DIR": "/lane/1/jit"}
+    assert captured["options"].kwargs["env"] == {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        **_stability_env(),
+        "AITER_JIT_DIR": "/lane/1/jit",
+    }
 
 
 def test_codex_hands_the_session_environment_to_its_app_server(tmp_path):

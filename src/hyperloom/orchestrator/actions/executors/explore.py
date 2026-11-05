@@ -6,10 +6,13 @@
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 from hyperloom.common.benchmark_config import is_magpie_agentx
+import asyncio
+import contextlib
 import functools
 import logging
 import os
 import tempfile
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -60,6 +63,9 @@ from ..stop_attribution import (
 from ._accuracy_gate import parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
 from .bypass_scriptable import declared_lever_payload
+from . import cycle_bench_arm as _cycle_bench
+from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+from ._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN, ATTRIBUTION_CYCLE_PENDING
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
@@ -92,8 +98,10 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
 )
+from ._patch_sources import _resolve_framework_root
 from ._ray_serving import maybe_serving_lease
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
+from hyperloom.orchestrator.enablement.recipe.keep_records import framework_envs_without_readers
 
 from ._launch_restatement import Launch, config_envs, launch_change, observed_launch_after, read_launch
 from ._server_argv import ConfigUnreadable, config_server_argv
@@ -122,9 +130,12 @@ ALREADY_MEASURED: str = "already_measured"
 # ... for one that starts the stack's own server, or a server this round already launched.
 BASELINE_NOOP: str = "baseline_noop"
 ROUND_DUP: str = "round_dup"
+# ... for one that sets a framework switch no file of the framework tree reads.
+SWITCH_UNREAD: str = "switch_unread"
 
 #: The provenance of a grid row that names none: the model proposed it directly.
 _DIRECT_PROVENANCE = "llm_direct"
+_LEAVE_ONE_OUT = "leave_one_out"
 
 
 def is_stack_revalidation(params: dict | None) -> bool:
@@ -242,25 +253,61 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
 
 
 def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
-    """Build explore variants that attribute each registered rewrite lever."""
-    if shared_state is None:
-        return []
-    rows = list(getattr(shared_state, "authored_framework_levers", None) or [])
-    if not rows:
-        return []
-    pending = [row for row in rows if isinstance(row, dict) and row.get("attributed_gain_pct") is None]
-    if not pending:
-        return []
+    """Build explore variants that attribute each registered rewrite lever.
+
+    A dormant lever's patch was benched with all its switches on when it was integrated, below the KEEP threshold, so
+    that set benched again repeats the round: a switch on its own is new only out of a patch that carried several.
+    The dormant levers of several patches together are new as well, and get their own round
+    (:func:`dormant_lever_bundle`) rather than a seat in every grid.
+    """
+    rows = _lever_rows(shared_state)
+    pending = [row for row in rows if row.get("attributed_gain_pct") is None]
     dormant = [row for row in pending if not row.get("default_on")]
     active = [row for row in pending if row.get("default_on")]
     payload: list[dict[str, Any]] = []
-    if dormant:
-        for variant in _switch_manifest.additive_variants(dormant):
+    decomposable = [row for patch in _by_patch(dormant) if len(patch) > 1 for row in patch]
+    for variant in _switch_manifest.additive_variants(decomposable):
+        if variant["framework_lever"]:
             payload.append({**variant, "framework_lever_source": "additive"})
     if active:
         for variant in _switch_manifest.leave_one_out_variants(active):
-            payload.append({**variant, "framework_lever_source": "leave_one_out"})
+            payload.append({**variant, "framework_lever_source": _LEAVE_ONE_OUT})
     return payload
+
+
+def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:
+    """The variant that switches every dormant lever on together, once they come from more than one patch.
+
+    Each was kept dormant for missing the KEEP threshold alone; together is the only way several of them clear it,
+    which is how the hand-tuned GLM-5.3 stack landed most of its 44 patches.
+    """
+    dormant = [row for row in _lever_rows(shared_state) if not row.get("default_on") and not _screened_out(row)]
+    if len(_by_patch(dormant)) < 2:
+        return None
+    return _switch_manifest.bundle_variant(dormant, name="fwlever_bundle")
+
+
+def _screened_out(row: dict[str, Any]) -> bool:
+    """Whether the cycle bench screened the lever and found no gain, or no server, in it."""
+    source = row.get("attribution_source")
+    if source == ATTRIBUTION_CYCLE_BROKEN:
+        return True
+    gain = row.get("attributed_gain_pct")
+    return source == ATTRIBUTION_CYCLE_BENCH and not (isinstance(gain, (int, float)) and gain > 0)
+
+
+def _lever_rows(shared_state: Any) -> list[dict[str, Any]]:
+    """The session's registered rewrite levers, less those the cycle bench has yet to screen."""
+    rows = getattr(shared_state, "authored_framework_levers", None) or []
+    return [r for r in rows if isinstance(r, dict) and r.get("attribution_source") != ATTRIBUTION_CYCLE_PENDING]
+
+
+def _by_patch(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Lever rows grouped by the registration that recorded them together: one integrated patch's switches."""
+    patches: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        patches.setdefault((str(row.get("specialist_task_id") or ""), str(row.get("ts") or "")), []).append(row)
+    return list(patches.values())
 
 
 def _framework_lever_attributions(
@@ -282,11 +329,13 @@ def _framework_lever_attributions(
         seed = by_name.get(str(row.get("variant_name") or ""))
         if seed is None:
             continue
-        measured = (row.get("metrics") or {}).get("gain_pct")
+        # A REVERT keeps its measured movement in ``graded_gain_pct``; a regressed leave-one-out arm is that case.
+        metrics = row.get("metrics") or {}
+        measured = metrics.get("gain_pct", metrics.get("graded_gain_pct"))
         if not isinstance(measured, (int, float)):
             continue
         source = str(seed.get("framework_lever_source") or "")
-        gain = -float(measured) if source == "leave_one_out" else float(measured)
+        gain = -float(measured) if source == _LEAVE_ONE_OUT else float(measured)
         out.append(
             {
                 "switch": str(seed["framework_lever"]),
@@ -553,7 +602,9 @@ def _lever_seeded_payload(payload: list[Any], levers: list[dict[str, Any]]) -> l
     if not fresh:
         return payload
     log.info("explore: seeding %d framework-rewrite lever variant(s) for attribution", len(fresh))
-    return fresh + list(payload)
+    # A leave-one-out arm only attributes a switch already on, so the arms that could KEEP run before it.
+    attribution = [v for v in fresh if v.get("framework_lever_source") == _LEAVE_ONE_OUT]
+    return [v for v in fresh if v not in attribution] + list(payload) + attribution
 
 
 def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[str, Any]) -> list[Any]:
@@ -627,7 +678,7 @@ def runnable_grid_variants(params: Mapping[str, Any] | None, shared_state: Any) 
 # The numbers a measured variant produced. ``base_tput`` is carried verbatim rather than left to be back-solved
 # from the gain: each KEEP advances the round anchor, so a consumer dividing the gain out of the final throughput
 # reconstructs whichever anchor happens to be current, and a FAILED variant has no gain to divide.
-_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "base_tput")
+_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "graded_gain_pct", "base_tput")
 
 # The ledgers' views of the row the round records for a variant.
 _VARIANT_FIELDS: tuple[str, ...] = (
@@ -714,11 +765,11 @@ def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None
 class _ExploreRound:
     """One explore round: the stack it accumulates, the variants it measures, and the ledgers it writes."""
 
-    def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path) -> None:
+    def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path, session_dir: Path) -> None:
         extra = getattr(ctx, "extra", None) or {}
         self.ctx = ctx
         self.params = params
-        self.output_root = output_root
+        self.output_root, self.session_dir = output_root, session_dir
         self.ss = extra.get("shared_state")
         self.phase_deadline = extra.get("phase_deadline")
         script, self.result_dir = _sanitized_overrides(params)
@@ -1030,7 +1081,22 @@ class _ExploreRound:
         if self._already_measured(gv):
             self.judged_without_measuring += 1
             return True
+        if unread := self._unread_switches(gv):
+            self._decided_without_measuring(gv, SWITCH_UNREAD, detail=unread)
+            self.judged_without_measuring += 1
+            return True
         return self._out_of_budget(idx) or self._refuses_context_copy(gv)
+
+    def _unread_switches(self, gv: GridVariant) -> str:
+        """Why ``gv`` sets only switches the framework tree never reads, or ``""``.
+
+        A variant carrying its own source, overlay or runtime may bring the reader with it, so it is never judged.
+        """
+        if gv.source_patches or gv.overlay_pythonpath or gv.runtime_override:
+            return ""
+        root = _resolve_framework_root(None)
+        unread = framework_envs_without_readers(gv.extra_envs or {}, root, framework=self.framework)
+        return f"nothing in {root} reads {', '.join(unread)}" if unread else ""
 
     def _decided_without_measuring(
         self, gv: GridVariant, reason: str, *, detail: str = "", duplicate_of: str = ""
@@ -1442,8 +1508,10 @@ class _ExploreRound:
     def _record(self, gv: GridVariant, row: dict[str, Any]) -> None:
         self.tested[row["fingerprint"]] = row
         if row["outcome"] != "KEEP":
-            self.rejected.append({**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)})
+            rejected = {**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)}
+            self.rejected.append(rejected)
             self.losers.append(_ledger_view(row, _LOSER_FIELDS))
+            self._land_verdict(row, rejected)
             return
         self.winners_history.append(
             {
@@ -1459,6 +1527,18 @@ class _ExploreRound:
                 "ts": row["ts"],
             }
         )
+
+    def _land_verdict(self, row: dict[str, Any], rejected: dict[str, Any]) -> None:
+        """Persist a non-KEEP verdict and its lever attribution before the round ends, which a preemption can prevent.
+
+        A KEEP waits for settlement: on the ledger it reads as measured, so a retry would skip it unadopted."""
+        if self.ss is None:
+            return
+        self.ss.record_explore_verdicts({"tested": {row["fingerprint"]: row}, "rejected": [rejected]})
+        outcome = _outcome_row(row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id))
+        for lever in _framework_lever_attributions([outcome], self.lever_payload):
+            self.ss.record_framework_lever_attribution(lever["switch"], gain_pct=lever["gain_pct"])
+        self.ss.save(self.session_dir)
 
     def _next_effective_args(self, gv: GridVariant, run_remove_args: list[str]) -> str:
         """The full server argv string ``gv`` ran with on top of the inherited and accumulated args."""
@@ -1661,10 +1741,43 @@ class ExploreExecutor:
             or runs_dir(self.session_dir, "explore", ctx.task.task_id)
         )
         output_root.mkdir(parents=True, exist_ok=True)
+        if _cycle_bench.CYCLE_ARMS_PARAM in params:
+            return await _run_cycle_batch(params, extra.get("shared_state"), output_root)
         try:
-            return await _ExploreRound(ctx, params, output_root).run()
+            return await _ExploreRound(ctx, params, output_root, self.session_dir).run()
         except _RoundRefused as refusal:
             return refusal.result
+
+
+async def _run_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -> dict[str, Any]:
+    """Run the batch off the event loop; cancelled, it stops booting and returns once the arm on the GPUs is down.
+
+    The task's lanes are released when it ends, so a server the thread still holds would share the GPUs.
+    """
+    stop = threading.Event()
+    work = asyncio.ensure_future(asyncio.to_thread(_screen_cycle_batch, params, state, output_root, stop))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        stop.set()
+        with contextlib.suppress(Exception):
+            await work
+        raise
+
+
+def _screen_cycle_batch(
+    params: dict[str, Any], state: Any, output_root: Path, stop: threading.Event | None = None
+) -> dict[str, Any]:
+    """Run one cycle-bench batch of the task's arms on the session baseline's launch; no replay, no grading round."""
+    from hyperloom.common.ports import pick_server_port
+
+    arms = list(params[_cycle_bench.CYCLE_ARMS_PARAM])
+    candidates = [(str(arm["name"]), {str(k): str(v) for k, v in (arm.get("envs") or {}).items()}) for arm in arms]
+    try:
+        spec = _cycle_bench.session_batch(state, candidates, out_dir=output_root, port=pick_server_port())
+    except (OSError, KeyError, ValueError) as exc:
+        return {"status": "failed", "error_class": "cycle_bench_unavailable", "error": str(exc)}
+    return {"status": STATUS_SCREENED, _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec, stop=stop)}
 
 
 explore_executor = ExploreExecutor()

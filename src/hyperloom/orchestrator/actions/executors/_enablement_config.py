@@ -19,7 +19,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 
 from . import _framework_switch_manifest as _switch_manifest
-from ._patch_sources import _acquiring_round, _done_field
+from ._patch_sources import _acquiring_round, _done_field, _read_patch_texts
 
 log = logging.getLogger(__name__)
 
@@ -172,7 +172,9 @@ def _parse_framework_switches(
     for source in (params.get("base_extra_envs"), params.get("extra_envs")):
         if isinstance(source, dict):
             reserved.update(str(k).strip().upper() for k in source)
-    manifest, problems = _switch_manifest.parse_manifest(raw, reserved_env=reserved)
+    manifest, problems = _switch_manifest.parse_manifest(
+        raw, reserved_env=reserved, patch_text="\n".join(_read_patch_texts(patch_paths))
+    )
     if manifest and not patch_paths:
         # A manifest without a patch describes switches that gate code which was
         # never delivered. Setting them would be a no-op, and registering them as

@@ -286,6 +286,14 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
     )
 
 
+def _twin_skip_reason(action_name: str, twin_state: str) -> str:
+    """Why an existing task of the same content answers a proposal, or ``""`` when a fresh key may retry it."""
+    if twin_state not in TERMINAL_STATES:
+        return "duplicate_proposal_content"
+    # A measured baseline answers every later proposal of the same content; only a failed one is retried.
+    return "baseline_already_succeeded" if action_name == "baseline" and twin_state == "succeeded" else ""
+
+
 class ProposalsCollaborator(CoordinatorCollaborator):
     """Turns approved proposals into queued tasks."""
 
@@ -387,10 +395,8 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             )
             if not was_existing:
                 break
-            if task.state not in TERMINAL_STATES:
-                await self._record_materialize_skipped(
-                    pending, "duplicate_proposal_content", task_id=task.task_id, task_state=task.state
-                )
+            if reason := _twin_skip_reason(pending.action_name, task.state):
+                await self._record_materialize_skipped(pending, reason, task_id=task.task_id, task_state=task.state)
                 return
         else:
             await self._record_materialize_skipped(

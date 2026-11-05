@@ -16,6 +16,7 @@ import yaml
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from ...stop_attribution import StoppedByTheRun
 from .._grid_runner import stopped_by_the_run
+from .._jit_cache_env import apply_session_jit_cache, benchmark_framework
 from .._subprocess_kill import post_ready_runtime_sec
 
 if TYPE_CHECKING:
@@ -183,12 +184,13 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
 
 
 def _benchmark_process_env(
-    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str
+    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str, session_dir: Path
 ) -> dict[str, str]:
     """Build the client environment without overriding Magpie's native checkout selection."""
     from ..magpie_agentx import native_config
 
     env = scrub_benchmark_process_env(os.environ.copy())
+    apply_session_jit_cache(env, framework=benchmark_framework(config_path), session_dir=session_dir)
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     if inferencex_path and not native_config(config_path):
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path

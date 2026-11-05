@@ -16,6 +16,7 @@ from typing import Iterator
 from hyperloom_common import io as _common_io
 
 from ._file_lock import best_effort_file_lock
+from ._patch_sentinel import file_contains_sentinel
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +115,32 @@ _LM_EVAL_REF_RE = re.compile(r'local lm_eval_ref="([^"]+)"')
 #: Succeeds when ``python3`` has the pinned lm-eval and the round's ``_install_lm_eval_deps`` would install nothing.
 LM_EVAL_READY_FN = "_hyperloom_lm_eval_ready"
 _LM_EVAL_SPARE_MARKER_FN = "_hyperloom_lm_eval_spare_marker"
+
+# The generic SGLang scripts inject ``--disable-radix-cache``, which is right for a fixed-sequence throughput sweep
+# and wrong for an agentic replay, where each turn resends the previous turn's prompt as its own prefix: a GLM-5.3
+# AgentX hour prefilled 44.7M input tokens of which 94.4% were a prefix the same run had already computed. The flag
+# cannot be lifted from the request side -- the loop below re-adds any default the request does not itself name, and
+# naming this one passes it. InferenceX's own multi-node server script drops it under ``IS_AGENTIC``; these generic
+# scripts are the gap, and this patch retires once they close it.
+_AGENTIC_RADIX_SENTINEL = "HYPERLOOM_AGENTIC_RADIX"
+#: The generic scripts carrying the block; upstream ships one per GPU.
+_AGENTIC_RADIX_SCRIPTS: tuple[str, ...] = ("sglang_mi300x.sh", "sglang_mi355x.sh")
+_AGENTIC_RADIX_LEGACY_BLOCK = """DEFAULT_ARGS=""
+for flag_val in "--mem-fraction-static=0.8" "--disable-radix-cache"; do
+  flag="${flag_val%%=*}"
+  if [[ -z "$EXTRA_SGLANG_ARGS" ]] || ! echo "$EXTRA_SGLANG_ARGS" | grep -q -- "$flag"; then
+    DEFAULT_ARGS="$DEFAULT_ARGS $flag_val"
+  fi
+done
+"""
+_AGENTIC_RADIX_PATCHED_BLOCK = (
+    _AGENTIC_RADIX_LEGACY_BLOCK + f"# {_AGENTIC_RADIX_SENTINEL}: an agentic replay lives on the prefix cache,\n"
+    "# as InferenceX multi_node/amd_utils/server_sglang.sh already recognises.\n"
+    'if [[ "${IS_AGENTIC:-0}" == "1" || "${IS_AGENTIC:-}" == "true" ]]; then\n'
+    '  DEFAULT_ARGS="${DEFAULT_ARGS//--disable-radix-cache/}"\n'
+    "fi\n"
+)
+
 
 # System-wide lock.
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
@@ -526,6 +553,34 @@ def atomic_write_text(src: Path, content: str, *, log_prefix: str) -> bool:
     return True
 
 
+def _is_agentic_radix_patched(src: Path) -> bool:
+    """Return whether an SGLang script already keeps the prefix cache for an agentic replay."""
+    return file_contains_sentinel(src, _AGENTIC_RADIX_SENTINEL, log, "_magpie_patcher")
+
+
+def _apply_agentic_radix_patch_atomic(src: Path) -> bool:
+    """Stop an SGLang script injecting ``--disable-radix-cache`` into an agentic run."""
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
+        return False
+
+    if _AGENTIC_RADIX_LEGACY_BLOCK not in original:
+        log.warning(
+            "_magpie_patcher: default-server-args block not found in %s; an AgentX round will serve its replay "
+            "with the prefix cache off and re-prefill every turn",
+            src,
+        )
+        return False
+
+    patched = original.replace(_AGENTIC_RADIX_LEGACY_BLOCK, _AGENTIC_RADIX_PATCHED_BLOCK, 1)
+    if not atomic_write_text(src, patched, log_prefix="_magpie_patcher"):
+        return False
+    log.info("_magpie_patcher: kept the prefix cache for agentic runs in %s", src)
+    return True
+
+
 def _is_sglang_client_trust_patched(src: Path) -> bool:
     """Return whether an SGLang script's client paths already carry trust gating."""
     try:
@@ -611,6 +666,36 @@ def ensure_client_trust_compat(magpie_dir: Path | str | None = None) -> bool:
         # Materialized, not short-circuited: every script must be attempted so one drifted file cannot leave a healthy
         # sibling unpatched.
         results = [_is_sglang_client_trust_patched(s) or _apply_sglang_client_trust_patch_atomic(s) for s in scripts]
+    return all(results)
+
+
+def ensure_agentic_prefix_cache(
+    magpie_dir: Path | str | None = None,
+    inferencex_dir: Path | str | None = None,
+) -> bool:
+    """Leave an agentic replay its prefix cache, in whichever copy of the generic SGLang scripts will run.
+
+    Resolved through :func:`_script_dirs` rather than Magpie's own tree: the
+    copy a session executes is the one under ``$INFERENCEX_PATH/benchmarks``,
+    rewritten at session start, and on a deployment with no Magpie checkout at
+    all it is the only copy there is.
+    """
+    scripts = [
+        script
+        for scripts_dir in _script_dirs(magpie_dir, inferencex_dir)
+        for name in _AGENTIC_RADIX_SCRIPTS
+        if (script := scripts_dir / name).is_file()
+    ]
+    if not scripts:
+        log.info(
+            "_magpie_patcher: no generic SGLang script resolved — skipping the agentic prefix-cache patch "
+            "(not applicable)",
+        )
+        return True
+    with best_effort_file_lock(_LOCK_PATH, label="_magpie_patcher"):
+        # Materialized, not short-circuited: every copy must be attempted so one drifted file cannot leave a healthy
+        # sibling unpatched.
+        results = [_is_agentic_radix_patched(s) or _apply_agentic_radix_patch_atomic(s) for s in scripts]
     return all(results)
 
 

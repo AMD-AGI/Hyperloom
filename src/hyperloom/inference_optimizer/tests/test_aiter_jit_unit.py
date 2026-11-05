@@ -540,7 +540,7 @@ def test_csv_jit_kernel_rows_skips_blank_kernel_names(tmp_path):
         "M,N,K,kernelName,libtype\n16,512,7168,kernel_a,ck\n32,512,7168,,ck\n64,512,7168,kernel_b,ck\n",
         encoding="utf-8",
     )
-    names = {name for name, _ in aj.csv_jit_kernel_rows(csv_path)}
+    names = {name for name, _ in aj.csv_jit_kernel_rows(csv_path, None)}
     assert names == {"kernel_a", "kernel_b"}
 
 
@@ -551,7 +551,7 @@ def test_csv_jit_kernel_rows_returns_each_pair_once_in_first_seen_order(tmp_path
         "64,512,7168,kernel_b,ck\n128,512,7168,kernel_a,cktile\n",
         encoding="utf-8",
     )
-    assert aj.csv_jit_kernel_rows(csv_path) == [("kernel_b", "ck"), ("kernel_a", "ck"), ("kernel_a", "cktile")]
+    assert aj.csv_jit_kernel_rows(csv_path, None) == [("kernel_b", "ck"), ("kernel_a", "ck"), ("kernel_a", "cktile")]
 
 
 def test_serving_modules_cover_rows_when_names_are_in_so(tmp_path):
@@ -564,7 +564,7 @@ def test_serving_modules_cover_rows_when_names_are_in_so(tmp_path):
     assert aj.serving_modules_cover_rows(
         jit_dir,
         ("module_gemm_a8w8_blockscale_bpreshuffle",),
-        aj.csv_jit_kernel_rows(csv_path),
+        aj.csv_jit_kernel_rows(csv_path, None),
     )
 
 
@@ -578,7 +578,7 @@ def test_serving_modules_cover_rows_false_when_name_missing(tmp_path):
     assert not aj.serving_modules_cover_rows(
         jit_dir,
         ("module_gemm_a8w8_blockscale_bpreshuffle",),
-        aj.csv_jit_kernel_rows(csv_path),
+        aj.csv_jit_kernel_rows(csv_path, None),
     )
 
 
@@ -595,7 +595,7 @@ def test_serving_modules_cover_rows_ignores_asm_kernel_names(tmp_path):
     assert aj.serving_modules_cover_rows(
         jit_dir,
         ("module_gemm_a8w8_blockscale_bpreshuffle",),
-        aj.csv_jit_kernel_rows(csv_path),
+        aj.csv_jit_kernel_rows(csv_path, None),
     )
 
 
@@ -616,7 +616,7 @@ def test_serving_modules_cover_rows_finds_cktile_in_bpreshuffle_cktile_so(tmp_pa
     assert aj.serving_modules_cover_rows(
         jit_dir,
         aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"],
-        aj.csv_jit_kernel_rows(csv_path),
+        aj.csv_jit_kernel_rows(csv_path, None),
     )
 
 
@@ -638,7 +638,7 @@ def test_serving_modules_cover_rows_false_when_cktile_only_in_tune_so(tmp_path):
     assert not aj.serving_modules_cover_rows(
         jit_dir,
         aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"],
-        aj.csv_jit_kernel_rows(csv_path),
+        aj.csv_jit_kernel_rows(csv_path, None),
     )
 
 
@@ -650,8 +650,53 @@ def test_serving_modules_cover_rows_when_so_absent(tmp_path):
     assert aj.serving_modules_cover_rows(
         jit_dir,
         ("module_gemm_a8w8_blockscale_bpreshuffle",),
-        aj.csv_jit_kernel_rows(csv_path),
+        aj.csv_jit_kernel_rows(csv_path, None),
     )
+
+
+# A shared tuned table, as aiter ships it: one MI355X row and one MI308X row.
+_TWO_GPU_TABLE = (
+    "gfx,cu_num,M,N,K,libtype,kernelName\n"
+    "gfx950,256,16,512,7168,ck,kernel_mi355x\n"
+    "gfx942,80,16,512,7168,ck,kernel_mi308x\n"
+)
+
+
+def test_csv_jit_kernel_rows_keeps_only_the_target_gpus_rows(tmp_path):
+    csv_path = tmp_path / "tuned.csv"
+    csv_path.write_text(_TWO_GPU_TABLE, encoding="utf-8")
+    assert aj.csv_jit_kernel_rows(csv_path, ("gfx950", 256)) == [("kernel_mi355x", "ck")]
+    assert {name for name, _ in aj.csv_jit_kernel_rows(csv_path, None)} == {"kernel_mi355x", "kernel_mi308x"}
+
+
+def _prepare_on_mi355x(tmp_path, monkeypatch, so_bytes: bytes) -> tuple[dict, Path]:
+    monkeypatch.chdir(tmp_path)
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    so_path.write_bytes(so_bytes)
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text(_TWO_GPU_TABLE, encoding="utf-8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
+    monkeypatch.setenv("TARGET_GPU_TYPE", "mi355x")
+    result = aj.prepare_serving_so_for_csvs(
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": csv_path.name},
+        backup_dir=tmp_path / "backup",
+    )
+    return result, so_path
+
+
+def test_prepare_serving_so_keeps_a_module_missing_only_another_gpus_kernels(tmp_path, monkeypatch):
+    # aiter never compiles the MI308X row on MI355X; counting it re-JITs the module before every boot.
+    result, so_path = _prepare_on_mi355x(tmp_path, monkeypatch, b"kernel_mi355x")
+    assert result["action"] == "skip"
+    assert so_path.is_file()
+
+
+def test_prepare_serving_so_rebuilds_a_module_missing_its_own_gpus_kernel(tmp_path, monkeypatch):
+    result, so_path = _prepare_on_mi355x(tmp_path, monkeypatch, b"kernel_mi308x")
+    assert result["action"] == "invalidate"
+    assert not so_path.exists()
 
 
 def test_prepare_serving_so_skips_when_only_asm_names_are_outside_so(tmp_path, monkeypatch):
@@ -1119,7 +1164,7 @@ _DSV3_CKTILE_KERNEL = b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intra
 def test_a_bpreshuffle_table_s_cktile_row_maps_to_the_bpreshuffle_cktile_module(tmp_path):
     csv_path = tmp_path / "a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv"
     csv_path.write_text(_DSV3_BPRESHUFFLE_CKTILE_ROW, encoding="utf-8")
-    [(name, libtype)] = aj.csv_jit_kernel_rows(csv_path)
+    [(name, libtype)] = aj.csv_jit_kernel_rows(csv_path, None)
     assert aj.serving_module_for_kernel(name, libtype, _BP_MODULES) == _BP_CKTILE
     plain = aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"]
     assert aj.serving_module_for_kernel(name, libtype, plain) == "module_gemm_a8w8_blockscale_cktile"

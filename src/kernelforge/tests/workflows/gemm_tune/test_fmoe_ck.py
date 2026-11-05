@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,7 +45,7 @@ def _moe_ctx(tmp_path, **overrides) -> TuneContext:
         iters=5,
         warmup=2,
         min_improvement_pct=1.0,
-        timeout_s=60,
+        timeout_s=3600,
     )
     base.update(overrides)
     return TuneContext(**base)
@@ -126,6 +127,82 @@ def test_caller_supplied_csv_is_tuned_verbatim(tmp_path):
     assert _column(resolved, "q_dtype_a") == ["torch.float8_e4m3fn"] * 2
     assert _column(resolved, "q_dtype_w") == ["torch.float4_e2m1fn_x2"] * 2
     assert set(_column(resolved, "inter_dim")) == {"512"}
+
+
+_GLM_KEY_TAIL = (
+    "6144,2048,{expert},{topk},ActivationType.Silu,torch.bfloat16,"
+    "torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0"
+)
+
+
+def _glm_rows(pairs) -> list[str]:
+    return [f"{token}," + _GLM_KEY_TAIL.format(expert=expert, topk=topk) for expert, topk, token in pairs]
+
+
+def test_rows_are_tuned_one_run_each_until_the_timeout_is_spent(tmp_path, monkeypatch):
+    """aiter writes nothing until a run's every row finishes, so a row list past the timeout must not be one run."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    rows = _glm_rows([(64, 7, 256), (64, 7, 1), (65, 8, 8192), (64, 7, 32)])
+    external = tmp_path / "untuned_fmoe_from_runtime.csv"
+    external.write_text("\n".join([fm._FMOE_CSV_HEADER, *rows]) + "\n", encoding="utf-8")
+    tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path, moe_untuned_csv=external, timeout_s=250))
+    monkeypatch.setattr(fm, "find_tuner_script", lambda _: Path("/fake/tune.py"))
+    monkeypatch.setattr(fm, "resolve_aiter_root", lambda: None)
+    monkeypatch.setattr(fm._tr, "is_isolation_enabled", lambda: False)
+    clock = [0.0]
+    monkeypatch.setattr(fm, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    runs = []
+
+    def run(cmd, **kwargs):
+        header, row = Path(cmd[cmd.index("-i") + 1]).read_text(encoding="utf-8").splitlines()
+        runs.append((row, kwargs["timeout_s"]))
+        if kwargs["timeout_s"] < 100:
+            clock[0] += kwargs["timeout_s"]
+            return 124, "", "TimeoutExpired"
+        clock[0] += 100
+        compare_dir = tmp_path / "aiter_compare"
+        compare_dir.mkdir(exist_ok=True)
+        candidate = compare_dir / f"{Path(cmd[cmd.index('-o') + 1]).stem}.1.candidate.csv"
+        candidate.write_text(f"{header},kernelName1,kernelName2\n{row},stage1,stage2\n", encoding="utf-8")
+        os.utime(candidate, (time.time() + 1, time.time() + 1))
+        return 0, f"({row.split(',')[0]}, shape) | 10 | 8 | 20% | UPDATE", ""
+
+    monkeypatch.setattr(fm, "run_subprocess", run)
+    result = tuner.run()
+
+    assert runs == [(rows[0], 250), (rows[1], 150), (rows[2], 50)]
+    assert Path(result.artifact_path).read_text(encoding="utf-8") == (
+        f"{fm._FMOE_CSV_HEADER},kernelName1,kernelName2\n{rows[0]},stage1,stage2\n{rows[1]},stage1,stage2\n"
+    )
+    assert (result.status, result.total_shapes, result.improved_shapes) == ("ok", 2, 2)
+
+
+def _glm_key(expert: int, topk: int, counts: dict[str, int]) -> dict:
+    fields = dict(zip(fm._FMOE_CSV_COLUMNS[1:], _GLM_KEY_TAIL.format(expert=expert, topk=topk).split(","), strict=True))
+    tokens = sorted(int(t) for t in counts)
+    return {**fields, "tokens": tokens, "untuned_tokens": tokens, "untuned_token_counts": counts}
+
+
+def test_demand_rows_are_written_most_looked_up_first(tmp_path):
+    """Rows are tuned in file order until the timeout, so the file leads with the lookups the server made most."""
+    demand = tmp_path / "demand.json"
+    key = _glm_key(64, 7, {"1": 3, "8": 40, "32": 3, "256": 7})
+    demand.write_text(json.dumps({"demands": [], "dispatch": {"moe": {"keys": [key]}}}), encoding="utf-8")
+
+    resolved, _ = fm.FmoeCKTuner(_moe_ctx(tmp_path, demand_json=demand, tokens=[]))._resolve_untuned_csv()
+
+    expected = _glm_rows([(64, 7, 8), (64, 7, 256), (64, 7, 1), (64, 7, 32)])
+    assert resolved.read_text(encoding="utf-8") == "\n".join([fm._FMOE_CSV_HEADER, *expected]) + "\n"
+
+
+def test_rows_of_several_keys_are_ordered_by_their_own_lookup_counts():
+    from kernelforge.workflows.gemm_tune.evidence import moe_untuned_csv_text
+
+    text = moe_untuned_csv_text(_glm_key(64, 7, {"1": 2, "8": 9}), _glm_key(65, 8, {"1": 5, "8": 2}))
+
+    expected = _glm_rows([(64, 7, 8), (65, 8, 1), (64, 7, 1), (65, 8, 8)])
+    assert text == "\n".join([fm._FMOE_CSV_HEADER, *expected]) + "\n"
 
 
 def test_no_runtime_key_is_refused_rather_than_derived_from_the_config(tmp_path):

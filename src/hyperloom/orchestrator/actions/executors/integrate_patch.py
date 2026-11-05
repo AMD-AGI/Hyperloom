@@ -18,7 +18,8 @@ from ._integrate_bench import BenchStageMixin
 from ._integrate_enablement_gate import EnablementGateMixin
 from ._integrate_perf_gate import PerfGateMixin
 from ._integrate_resolve import ResolveStageMixin
-from ._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED
+from ._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, SCREEN_CYCLE, SCREEN_PARAM
+from .cycle_bench_arm import screen_open
 from ._patch_git import restore_pending_integrate
 
 
@@ -84,6 +85,13 @@ class IntegratePatchExecutor(
         # when a stage cannot return because it was cancelled.
         try:
             result = await self._stage_apply(attempt, params, extra)
+            if (
+                result is None
+                and params.get(SCREEN_PARAM) == SCREEN_CYCLE
+                and attempt.switch_manifest
+                and screen_open(attempt.shared_state)
+            ):
+                result = await self._admit_dormant(attempt, params)
             if result is None:
                 result = {**await self._stage_gate(attempt, params), RESULT_BENCHED: True}
         except BaseException:
@@ -108,6 +116,8 @@ class IntegratePatchExecutor(
             recovery["phase"] = "applied"
             if recovery.get("stash_oid"):
                 recovery["phase"] = "applied_with_restored_stash"
+        if attempt.merged_patches:
+            result["patches_merged"] = attempt.merged_patches
         state = attempt.shared_state
         if state is not None:
             state.save(self.session_dir)

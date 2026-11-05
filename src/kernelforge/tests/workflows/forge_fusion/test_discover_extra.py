@@ -120,3 +120,24 @@ def test_discovery_module_has_no_direct_sdk_fallback() -> None:
     assert "default_llm_fn" not in source
     assert "from openai import" not in source
     assert "from anthropic import" not in source
+
+
+def test_hot_kernels_are_taken_from_the_decode_steps_and_leave_out_collectives(tmp_path):
+    """S1: forge-fuse chased a bf16 add from outside the step windows for 93 minutes, 0.05% of decode time."""
+    events = [
+        {"cat": "gpu_user_annotation", "name": "step[VERIFY bs=2]", "ts": 0, "dur": 100},
+        {"cat": "kernel", "name": "_fused_rms_fp8_group_quant_kernel", "ts": 10, "dur": 30},
+        {
+            "cat": "kernel",
+            "name": "void aiter::reduce_scatter_cross_device_store<__hip_bfloat16, 4>",
+            "ts": 50,
+            "dur": 40,
+        },
+        {"cat": "kernel", "name": "vectorized_elementwise CUDAFunctor_add<bf16>", "ts": 300, "dur": 500},
+    ]
+    path = tmp_path / "d.trace.json"
+    path.write_text(json.dumps({"traceEvents": events}))
+
+    assert [(row["name"], row["share"]) for row in hot_kernels_from_trace(path)] == [
+        ("_fused_rms_fp8_group_quant_kernel", 30 / 70)
+    ]

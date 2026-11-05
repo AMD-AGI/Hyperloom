@@ -26,6 +26,11 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _patch_touched_paths,
 )
 from hyperloom.orchestrator.actions.executors._patch_git import _git_apply_reverse, _git_restore_to_head
+from hyperloom.orchestrator.actions.executors.patch_conflict_merge import (
+    LandingContext,
+    PatchMergeOutcome,
+    apply_patch_resolving_conflicts,
+)
 from hyperloom.orchestrator.actions.stop_attribution import StoppedByTheRun
 from hyperloom.orchestrator.enablement.runtime.adapters import get_adapter
 from hyperloom.orchestrator.source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
@@ -35,7 +40,6 @@ from .controller_publication import (
     ControllerPublicationError,
     load_controller_publication,
 )
-from .patch_conflict_merge import LandingContext, PatchMergeOutcome, apply_patch_resolving_conflicts
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +92,9 @@ KeepRecorder = Callable[[dict[str, Any]], Awaitable[None]]
 #: Given how many E2E rounds already ran, says why the next one cannot start, or ``None`` to start it.
 RoundAdmission = Callable[[int], StoppedByTheRun | None]
 
+#: Told of each measured publication the E2E did not KEEP, before its patch is reverted.
+UnkeptRecorder = Callable[[ControllerPatchPublication, dict[str, Any]], None]
+
 
 @dataclass(frozen=True)
 class KeepSession:
@@ -105,14 +112,24 @@ class KeepSession:
     record_keep: KeepRecorder
 
 
-def _priority_ordered_patch_dirs(layout: ControllerLayout) -> tuple[Path, ...]:
-    """Order publications by their original Controller task priority."""
+def _measurement_ordered_patch_dirs(layout: ControllerLayout) -> tuple[Path, ...]:
+    """Order publications by the kernel time each measured saving, the Controller's task priority breaking ties.
 
-    def key(patch_dir: Path) -> tuple[int, str]:
+    The phase reserves one E2E round past the Controller and admits later ones only into what is left of it, so the
+    first publication is the one surely measured. The task priority was set before any search ran.
+    """
+
+    def key(patch_dir: Path) -> tuple[float, int, str]:
+        try:
+            speedup = float(load_controller_publication(patch_dir).manifest.get("total_speedup") or 0.0)
+        except (ControllerPublicationError, TypeError, ValueError):
+            speedup = 0.0
+        # No recorded speedup ranks with a 1.0x one: neither saved any kernel time.
+        speedup = speedup if speedup > 0.0 else 1.0
         parsed = load_task(layout.tasks_root / patch_dir.name, record_state=False)
         if parsed.task is None:
-            return (2**31 - 1, patch_dir.name)
-        return (parsed.task.priority, parsed.task.operator_id)
+            return -speedup, 2**31 - 1, patch_dir.name
+        return -speedup, parsed.task.priority, parsed.task.operator_id
 
     return tuple(sorted(published_operator_dirs(layout), key=key))
 
@@ -128,15 +145,48 @@ def _git_output(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _head_against_base(repo: Path, base_commit: str) -> tuple[str, str]:
-    """Return the integration HEAD and why patches built on ``base_commit`` cannot land on it (empty when they can)."""
+def _preimage_matches(repo: Path, patch_path: Path, commit: str) -> bool:
+    """Whether every file the patch edits holds, at ``commit``, the blob the patch's ``index`` line names."""
+    preimages: dict[str, str] = {}
+    current = ""
+    for line in Path(patch_path).read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("diff --git a/"):
+            current = line[len("diff --git a/") :].split(" b/", 1)[0]
+        elif line.startswith("index ") and current:
+            preimages[current] = line[len("index ") :].split("..", 1)[0]
+            current = ""
+    if not preimages:
+        return False
+    for relative, blob in preimages.items():
+        if set(blob) == {"0"}:
+            if _tracked_at_head(repo, relative):
+                return False
+            continue
+        try:
+            if not _git_output(repo, "rev-parse", f"{commit}:{relative}").startswith(blob):
+                return False
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return True
+
+
+def _head_against_base(repo: Path, base_commit: str, patch_path: Path) -> tuple[str, str]:
+    """Return the integration HEAD and why patches built on ``base_commit`` cannot land on it (empty when they can).
+
+    A base this clone never held (a preempted pod's seal) still lands when the files the patch edits are unchanged.
+    """
     try:
         head = _git_output(repo, "rev-parse", "HEAD").lower()
     except (OSError, subprocess.SubprocessError) as error:
         return "", f"could not read integration Git HEAD: {error}"
-    if head != base_commit:
-        return head, f"integration HEAD {head} does not match controller base {base_commit}"
-    return head, ""
+    if head == base_commit:
+        return head, ""
+    try:
+        _git_output(repo, "cat-file", "-e", f"{base_commit}^{{commit}}")
+    except (OSError, subprocess.SubprocessError):
+        if _preimage_matches(repo, patch_path, head):
+            return head, ""
+    return head, f"integration HEAD {head} does not match controller base {base_commit}"
 
 
 def _head_commit(repo: Path) -> str:
@@ -328,10 +378,12 @@ class _ControllerIntegration:
         validate: PatchValidator,
         persist_keep: Callable[[ControllerPatchPublication, dict[str, Any], str], Awaitable[str]],
         admit_round: RoundAdmission,
+        on_unkept: UnkeptRecorder,
     ) -> None:
         self._validate = validate
         self._persist_keep = persist_keep
         self._admit_round = admit_round
+        self._on_unkept = on_unkept
         # One base commit, the head it was pinned against and the pin's error per
         # repository, rather than one repository per run.
         self._pins: dict[Path, tuple[str, str, str]] = {}
@@ -344,7 +396,10 @@ class _ControllerIntegration:
         """Pin the repository, refuse a stale base or a dirty worktree, then land the patch."""
         repo = publication.repo_root
         if repo not in self._pins:
-            self._pins[repo] = (publication.base_commit, *_head_against_base(repo, publication.base_commit))
+            self._pins[repo] = (
+                publication.base_commit,
+                *_head_against_base(repo, publication.base_commit, publication.patch_path),
+            )
         base, pinned_head, pin_error = self._pins[repo]
         if pin_error:
             return _refusal(publication, "skipped_baseline_mismatch", pin_error, pinned_head)
@@ -417,6 +472,7 @@ class _ControllerIntegration:
             str(validation.get("status") or "ok").lower() == "ok" and str(validation.get("decision")).upper() == "KEEP"
         )
         if not kept:
+            self._on_unkept(publication, validation)
             reason = str(validation.get("error") or validation.get("decision_reason") or "E2E did not KEEP")
             return _refusal(
                 publication,
@@ -463,6 +519,7 @@ async def integrate_controller_patches(
     session: KeepSession,
     validator: PatchValidator | None = None,
     admit_round: RoundAdmission = lambda _rounds_run: None,
+    on_unkept: UnkeptRecorder = lambda _publication, _validation: None,
 ) -> ControllerIntegrationSummary:
     """Apply and E2E-validate complete Controller patches in task-priority order.
 
@@ -473,6 +530,7 @@ async def integrate_controller_patches(
             optimizer's own integrate handler.
         admit_round: Asked before each patch is applied; a stop leaves the patch
             unapplied and unmeasured, recorded under the stop's class.
+        on_unkept: Given every measured verdict that did not KEEP, while its patch is still applied.
     """
     layout = ControllerLayout(Path(patches_root).resolve().parent.parent)
     integration_root = layout.output_dir / "integration"
@@ -503,9 +561,10 @@ async def integrate_controller_patches(
         validator or (lambda publication: _default_validator(publication, session_dir=Path(session.session_dir))),
         persist_keep,
         admit_round,
+        on_unkept,
     )
     results: list[PatchIntegrationResult] = []
-    for index, patch_dir in enumerate(_priority_ordered_patch_dirs(layout)):
+    for index, patch_dir in enumerate(_measurement_ordered_patch_dirs(layout)):
         try:
             publication = load_controller_publication(patch_dir)
         except ControllerPublicationError as error:

@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""What a request pays per input token before the GPU sees it, read off the requests a run already recorded.
+
+On a cached prefix the GPU does almost no prefill work, so time-to-first-token should barely move with how long
+the prompt is. When it moves anyway, the cost is in front of the engine -- rendering the template, tokenising the
+whole prompt again, pickling it to the scheduler -- and it is paid per input token whether or not the KV for those
+tokens is already resident.
+
+Measured on a GLM-5.3 AgentX run with a 97.9% prefix-cache hit: TTFT runs 225 ms at 25k of input and 1414 ms at
+625k, about 198 ms per 100k. The hand-tuned stack took the same workload's front end down to roughly 7 ms per
+100k by encoding the prompt in parallel and caching tokenised segments, which was its single largest step.
+
+The GPU trace cannot show this. In that same run the device was 99.4% busy inside every step and the steps covered
+98.8% of the capture: there is no idle to find, because the cost is paid before a step exists.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+#: Requests below this cannot carry a slope worth reading.
+MIN_REQUESTS: int = 60
+
+#: Input span, in tokens, a run must cover before a slope over it means anything.
+MIN_ISL_SPAN: float = 50_000.0
+
+#: Slope, in ms per 100k input tokens, above which the front end is worth a reader's attention. The hand-tuned
+#: GLM-5.3 stack reached about 7 ms per 100k after its host-side work, so a run well above that is paying for
+#: something that has been removed before.
+FLAG_MS_PER_100K: float = 20.0
+
+_TTFT = "time_to_first_token"
+_ISL = "input_sequence_length"
+
+#: aiperf writes warmup records to the same export; only the scored phase counts.
+_SCORED_PHASE = "profiling"
+
+
+def profiling_records(workspace: str | Path | None) -> list[dict[str, Any]]:
+    """Per-request metric blocks for the scored phase of the run under *workspace*, newest export wins."""
+    if not workspace:
+        return []
+    exports = sorted(Path(workspace).glob("**/aiperf_artifacts/profile_export.jsonl"), key=lambda p: p.stat().st_mtime)
+    if not exports:
+        return []
+    try:
+        records = [json.loads(line) for line in exports[-1].read_text(errors="replace").splitlines() if line.strip()]
+    except json.JSONDecodeError:
+        return []
+    return [r["metrics"] for r in records if r["metadata"]["benchmark_phase"] == _SCORED_PHASE]
+
+
+def _paired(records: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    """``(input tokens, ttft ms)`` for requests that reported both; a failed request reports neither."""
+    return [(m[_ISL]["value"], m[_TTFT]["value"]) for m in records if _ISL in m and _TTFT in m]
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
+
+
+def input_cost(workspace: str | Path | None) -> dict[str, Any] | None:
+    """How much time-to-first-token grows per 100k input tokens, or ``None`` when the run cannot say.
+
+    Read off two halves rather than a least-squares fit: TTFT carries a long tail of queued requests, and a median
+    on each side of the input range is not moved by it. The halves are split at the median input length, so both
+    hold the same number of requests whatever the workload's shape.
+    """
+    pairs = _paired(profiling_records(workspace))
+    if len(pairs) < MIN_REQUESTS:
+        return None
+    pairs.sort()
+    midpoint = len(pairs) // 2
+    low, high = pairs[:midpoint], pairs[midpoint:]
+    low_isl, high_isl = _median([p[0] for p in low]), _median([p[0] for p in high])
+    span = high_isl - low_isl
+    if span < MIN_ISL_SPAN:
+        return None
+    low_ttft, high_ttft = _median([p[1] for p in low]), _median([p[1] for p in high])
+    slope = (high_ttft - low_ttft) / span * 100_000.0
+    return {
+        "ms_per_100k_tokens": round(slope, 1),
+        "requests": len(pairs),
+        "low_isl": int(low_isl),
+        "low_ttft_ms": round(low_ttft, 1),
+        "high_isl": int(high_isl),
+        "high_ttft_ms": round(high_ttft, 1),
+        "flagged": bool(slope >= FLAG_MS_PER_100K),
+    }

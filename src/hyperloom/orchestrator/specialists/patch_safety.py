@@ -297,7 +297,11 @@ def _resolved_dir(path: Path) -> Path | None:
 
 
 def _git_apply_check(root: Path, patch_text: str) -> bool | None:
-    """Whether ``patch_text`` applies cleanly in ``root``; ``None`` when git cannot run."""
+    """Whether ``patch_text`` applies cleanly in ``root``; ``None`` when git reaches no verdict about the patch.
+
+    Git either never ran or failed on the repository itself (``_GIT_FATAL_RC``) before reading the patch -- a
+    worktree whose parent checkout is gone, a tree another uid owns. Both are evidence about the machine, not the patch.
+    """
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "apply", "--check", "-"],
@@ -308,6 +312,8 @@ def _git_apply_check(root: Path, patch_text: str) -> bool | None:
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == _GIT_FATAL_RC:
         return None
     return proc.returncode == 0
 
@@ -624,6 +630,8 @@ GROUND_PATH_ESCAPE = "path_escape"  # patch path escapes the tree
 GROUND_MISSING_TARGET = "missing_target"  # modify/delete target absent from base
 GROUND_AMBIGUOUS_ROOT = "ambiguous_root"  # patch targets match more than one disjoint tree
 GROUND_UNCHECKED = "unchecked"  # no base available / git unavailable
+#: git's exit code for a fatal error about the repository rather than the input.
+_GIT_FATAL_RC = 128
 
 # Verdict for each ``git apply --check`` outcome; ``None`` is git failing to run.
 _APPLY_CHECK_VERDICTS: dict[bool | None, str] = {True: GROUND_APPLIES, False: GROUND_STALE, None: GROUND_UNCHECKED}

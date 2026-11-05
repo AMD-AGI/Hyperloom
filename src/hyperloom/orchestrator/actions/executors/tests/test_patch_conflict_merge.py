@@ -12,7 +12,7 @@ import pytest
 
 from hyperloom_common.llm import llm_config
 from hyperloom_common.llm.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER, _ANTHROPIC_MANAGED_GATEWAY_ENVS
-from hyperloom.orchestrator.kernel.patch_conflict_merge import (
+from hyperloom.orchestrator.actions.executors.patch_conflict_merge import (
     STRATEGY_LLM,
     STRATEGY_STRICT,
     STRATEGY_THREE_WAY,
@@ -496,6 +496,20 @@ async def test_resolver_dropping_a_landed_keep_is_rejected(repo: Path, patches: 
     assert not outcome.applied
     assert "dropped 1 added line(s)" in outcome.note()
     assert not _dirty(repo)
+
+
+async def test_resolver_dropping_the_kept_side_is_rejected_without_its_patch(repo: Path, patches: Path) -> None:
+    """The kept side is read from the conflict region, so a caller holding no landed diff is still covered."""
+    landed = _capture_patch(repo, patches, "landed", _BASE.replace("return x * 2", "return x * 4"))
+    incoming = _capture_patch(repo, patches, "incoming", _BASE.replace("return x * 2", "return x * 8"))
+    _land(repo, landed)
+
+    outcome = await apply_patch_resolving_conflicts(repo, incoming, resolver=_resolver_returning("    return x * 8\n"))
+
+    assert not outcome.applied
+    assert "dropped 1 added line(s)" in outcome.note()
+    assert not _dirty(repo)
+    assert "return x * 4" in (repo / _MODULE).read_text(encoding="utf-8")
 
 
 async def test_resolver_leaving_markers_is_rejected(repo: Path, patches: Path) -> None:

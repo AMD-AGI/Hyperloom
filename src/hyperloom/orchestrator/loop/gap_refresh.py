@@ -48,10 +48,22 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             state.upsert_gap(entry)
         for entry in self._extract_gaps_from_attempts(workload_id):
             state.upsert_gap(entry)
+        for entry in self._extract_gaps_from_run_evidence():
+            state.upsert_gap(entry)
         log.debug(
             "gaps refresh (reason=%s): %d gaps after merge",
             reason,
             len(state.gaps),
+        )
+
+    def _extract_gaps_from_run_evidence(self) -> list[dict[str, Any]]:
+        from ..state.run_evidence_gaps import run_evidence_gaps
+
+        state = self.shared_state
+        return run_evidence_gaps(
+            session_dir=self.session_dir,
+            trace_path=state.last_profile_trace,
+            workspace=(state.current_best or {}).get("workspace") or state.baseline_workspace,
         )
 
     def _extract_gaps_from_baseline(self, workload_id: str) -> list[dict[str, Any]]:

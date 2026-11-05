@@ -589,6 +589,9 @@ class Coordinator:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
         finally:
             await self.dispatcher.close_db_after_executions()
+            # Held until the round's servers are torn down: a SIGTERM before that must not kill the process outright.
+            if self._signals is not None:
+                self._signals.close()
 
     def _bind_session_deadline(
         self,
@@ -680,6 +683,7 @@ class Coordinator:
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
         if not self.stop_requested():
+            await self.phase_framework.on_stack_adopted()
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
             phase = (self.shared_state.phase or "").strip().upper()
@@ -934,10 +938,7 @@ class Coordinator:
 
     async def _close_run(self, stop_reason: str, *, ticks: int, tick_failed: bool, max_minutes: float) -> str:
         """Classify the stop, persist it, and release everything the run still holds."""
-        final_signals: AbstractSet[int] = frozenset()
-        if self._signals is not None:
-            final_signals = self._signals.close()
-            self._signals = None
+        final_signals = frozenset() if self._signals is None else frozenset(self._signals.received)
         stop_reason = self._classify_stop(final_signals, pending=stop_reason)
         self._stop_classification = stop_reason
         self.shared_state.closing_phase = False

@@ -165,11 +165,8 @@ def _silent_backends() -> dict[str, object]:
     }
 
 
-def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "cycle" / "result" / "patches"
-    alphabetical = tuple(root / name for name in ("first", "second", "third"))
-    priorities = {"first": 2, "second": 0, "third": 1}
-
+def _ordered(root: Path, monkeypatch, *, priorities: dict[str, int], speedups: dict[str, float]) -> list[str]:
+    alphabetical = tuple(root / name for name in sorted(priorities))
     monkeypatch.setattr(integration, "published_operator_dirs", lambda _layout: alphabetical)
     monkeypatch.setattr(
         integration,
@@ -178,9 +175,44 @@ def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monke
             task=SimpleNamespace(priority=priorities[path.name], operator_id=path.name)
         ),
     )
+    monkeypatch.setattr(
+        integration,
+        "load_controller_publication",
+        lambda path: SimpleNamespace(manifest={"total_speedup": speedups[Path(path).name]}),
+    )
+    layout = ControllerLayout(root.parent.parent)
+    return [path.name for path in integration._measurement_ordered_patch_dirs(layout)]
 
-    ordered = integration._priority_ordered_patch_dirs(ControllerLayout(tmp_path / "cycle"))
-    assert [path.name for path in ordered] == ["second", "third", "first"]
+
+def test_patch_directories_follow_controller_task_priority_among_equal_savings(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "cycle" / "result" / "patches"
+
+    ordered = _ordered(
+        root,
+        monkeypatch,
+        priorities={"first": 2, "second": 0, "third": 1},
+        speedups={"first": 1.5, "second": 1.5, "third": 1.5},
+    )
+
+    assert ordered == ["second", "third", "first"]
+
+
+def test_the_largest_measured_saving_takes_the_round_the_phase_reserves(tmp_path: Path, monkeypatch) -> None:
+    """Only the first publication is sure of an E2E round; the analyst's priority predates every search.
+
+    A GLM-5.3 KERNEL measured a 1.04x priority-0 rewrite in that round, and the 2.47x priority-1 one behind it found
+    too little of the phase left to be measured at all.
+    """
+    root = tmp_path / "cycle" / "result" / "patches"
+
+    ordered = _ordered(
+        root,
+        monkeypatch,
+        priorities={"gluon_fp8_mqa_logits": 0, "sparse_mla_fused": 1},
+        speedups={"gluon_fp8_mqa_logits": 1.0439, "sparse_mla_fused": 2.4694},
+    )
+
+    assert ordered == ["sparse_mla_fused", "gluon_fp8_mqa_logits"]
 
 
 def _coordinator(session_dir: Path, repo: Path) -> Coordinator:
@@ -547,12 +579,14 @@ async def test_a_revert_unstages_a_patch_whose_commit_never_landed(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_controller_base_mismatch_is_rejected_before_apply(tmp_path: Path) -> None:
-    repo, _base = _repo(tmp_path)
+    repo, base = _repo(tmp_path)
+    (repo / "second.py").write_text("VALUE = 5\n", encoding="utf-8")
+    _git(repo, "commit", "-am", "move HEAD past the controller base")
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
         patches,
         repo,
-        "a" * 40,
+        base,
         kernel_name="mismatch",
         kernel_path="first.py",
         patch=_patch(repo, "first.py", "VALUE = 2\n"),
@@ -572,7 +606,62 @@ async def test_controller_base_mismatch_is_rejected_before_apply(tmp_path: Path)
 
     assert summary.results[0].status == "skipped_baseline_mismatch"
     assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
-    assert int(_git(repo, "rev-list", "--count", "HEAD")) == 1
+    assert int(_git(repo, "rev-list", "--count", "HEAD")) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_base_from_another_clone_lands_when_the_files_it_edits_are_unchanged(tmp_path: Path) -> None:
+    """A preempted pod's seal commit never reaches the fresh clone, which still holds the same bytes."""
+    repo, _base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        "a" * 40,
+        kernel_name="carried",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    async def _validate(_publication):
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert [result.status for result in summary.results] == ["kept"]
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_a_base_from_another_clone_is_refused_when_a_file_it_edits_differs(tmp_path: Path) -> None:
+    repo, _base = _repo(tmp_path)
+    patch = _patch(repo, "first.py", "VALUE = 2\n")
+    (repo / "first.py").write_text("VALUE = 1\nOTHER = 0\n", encoding="utf-8")
+    _git(repo, "commit", "-am", "the clone's first.py differs")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(patches, repo, "a" * 40, kernel_name="carried", kernel_path="first.py", patch=patch)
+
+    async def _must_not_validate(_publication):
+        raise AssertionError("a differing pre-image must not reach E2E")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_must_not_validate,
+    )
+
+    assert [result.status for result in summary.results] == ["skipped_baseline_mismatch"]
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\nOTHER = 0\n"
 
 
 @pytest.mark.asyncio
@@ -1258,6 +1347,37 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     assert len(callbacks) == 1
     assert callbacks[0].__func__ is WritebackCollaborator.record_integrate_keep
     assert callbacks[0].__self__.shared_state is coordinator.shared_state
+
+
+@pytest.mark.asyncio
+async def test_a_controller_the_orchestrator_cancelled_is_left_for_the_resumed_entry(tmp_path, monkeypatch):
+    """A stop mid-Controller is not this cycle's Controller result; the resume re-enters KERNEL and measures it."""
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
+    from hyperloom.orchestrator.kernel import controller_submit
+    from hyperloom.orchestrator.phases.machine_state import kernel_controller_settled
+
+    repo, _ = _repo(tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    coordinator.shared_state.kernel_optimizer = "forge"
+    phase = coordinator.phase_kernel
+    monkeypatch.setattr(phase, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
+    monkeypatch.setattr(
+        controller_submit,
+        "run_controller_subprocess",
+        lambda **kwargs: {"status": "partial", "patch_count": 1, "returncode": ORCHESTRATOR_CANCELLED_RETURNCODE},
+    )
+    monkeypatch.setattr(controller_submit, "record_controller_llm_usage", lambda **kwargs: None)
+
+    async def _must_not_integrate(**_kwargs):
+        raise AssertionError("a cancelled Controller's patches belong to the resumed entry")
+
+    monkeypatch.setattr(integration, "integrate_controller_patches", _must_not_integrate)
+    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output", {})
+
+    assert coordinator.shared_state.kernel_rewrite_controller_result == {}
+    assert kernel_controller_settled(coordinator.shared_state) is False
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -1613,6 +1614,53 @@ async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordina
 
 
 @pytest.mark.asyncio
+async def test_resume_requeues_an_integrate_the_lost_environment_stopped(coord: Coordinator, monkeypatch) -> None:
+    params = {"patch_name": "spec-patch", "source_specialist_task_id": "spec-1"}
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params=params,
+            idempotency_key="approved:integrate_patch:abc",
+            requires_lanes=["benchmark_lane", "server_lifecycle"],
+            lease_ttl_sec=900,
+            dispatch_class="llm",
+        )
+    )
+    await coord.tasks.transition(task.task_id, "running")
+    await coord.tasks.transition(
+        task.task_id,
+        "cancelled",
+        {
+            "reason": "operator_confirmed_stopped",
+            "confirmed_scope_gone": "lost-scope",
+            "cleanup_confirmed": True,
+            "outcome": {"task_id": task.task_id, "state": "cancelled", "result": {}},
+        },
+    )
+    coord.shared_state.pending_integrate = {"task_id": task.task_id, "patches": ["/tmp/p.diff"]}
+    monkeypatch.setattr(
+        coord.writeback,
+        "_resume_rollback_pending_integrate",
+        lambda pending, _gone_scope=None: {"reversed": list(pending["patches"]), "failed": []},
+    )
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    queued = await coord.tasks.queued()
+    assert [(t.kind, t.idempotency_key, t.params, t.requires_lanes, t.lease_ttl_sec) for t in queued] == [
+        ("integrate_patch", "approved:integrate_patch:abc-retry1", params, ["benchmark_lane", "server_lifecycle"], 900)
+    ]
+    assert [f["kind"] for f in report["fixes"]] == ["rolled_back_pending_integrate", "requeued_pending_integrate"]
+    assert report["fixes"][1] == {
+        "kind": "requeued_pending_integrate",
+        "task_id": task.task_id,
+        "requeued_task_id": queued[0].task_id,
+    }
+    assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "phase", "replayed"),
     [("kept", "accepted", True), ("reverted", "restored", False)],
@@ -2836,7 +2884,7 @@ async def test_direct_integrate_proposal_inherits_specialist_owner(
     monkeypatch.setattr(
         coord.dispatcher,
         "admission_denial_for_action",
-        lambda _action, **_kw: None,
+        AsyncMock(return_value=None),
     )
     await coord.router._handle_propose_action(
         "orchestration",
@@ -2996,6 +3044,21 @@ async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coor
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
     assert len(queued) == 1
     assert queued[0].task_id != first.task_id
+
+
+@pytest.mark.asyncio
+async def test_materialize_skips_baseline_after_succeeded_twin(coord: Coordinator) -> None:
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-s0"))
+    first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
+    await coord.tasks.transition(first.task_id, "running")
+    await coord.tasks.transition(first.task_id, "succeeded")
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-s1"))
+    assert [t.task_id for t in (*await coord.tasks.queued(), *await coord.tasks.running())] == []
+    tail = await coord.bus.tail(topic="observation", n=20)
+    skipped = [m.payload for m in tail if m.payload.get("kind") == "proposal_materialize_skipped"]
+    assert [(p["reason"], p["proposal_msg_id"], p["task_id"]) for p in skipped] == [
+        ("baseline_already_succeeded", "prop-s1", first.task_id)
+    ]
 
 
 # -- handle_delegate branches ----------------------------------------------

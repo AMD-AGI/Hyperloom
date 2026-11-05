@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 # Kernel-tool steps of install.sh: Ray + the Ray head, TraceLens, GEAK, the
-# Claude CLI and the kernel-agent env file. install.sh sources this file in a
+# Claude gateway env (credentials and model -- the CLI binary itself comes from
+# the container image) and the kernel-agent env file. install.sh sources this file in a
 # subshell after its own setup (paths, .env, credentials, install lock) and
 # calls install_kernel_tools; the file has no entry point of its own.
 

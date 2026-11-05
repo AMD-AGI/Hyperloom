@@ -116,12 +116,21 @@ class MachinePhase(CoordinatorCollaborator):
             log.exception("Coordinator: save after phase init failed")
 
     def _reopen_a_session_that_was_left_closed(self) -> None:
-        """Put a session persisted in CLOSE back at the phase machine's entrance."""
+        """Put a session persisted in CLOSE back at the phase machine's entrance, as the next macro-cycle.
+
+        The closed cycle's records -- the Forge controller's terminal result above all -- describe a pass through the
+        phases that has ended. Kept as the reopened pass's own, they end its KERNEL on the first tick.
+        """
         state = self.shared_state
+        prior_cycle = int(state.macro_cycle or 0)
+        state.open_macro_cycle(no_gain_cycle_streak=int(state.no_gain_cycle_streak or 0))
+        self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
             "Coordinator: session resumed in CLOSE, a phase with no way out; "
-            "reopening at PRELUDE so the new budget can be spent on the work "
-            "the earlier leg stopped short of."
+            "reopening at PRELUDE as macro-cycle %d -> %d so the new budget can be spent on the work "
+            "the earlier leg stopped short of.",
+            prior_cycle,
+            state.macro_cycle,
         )
         _phase_state.record_phase_transition(
             state,
@@ -188,12 +197,32 @@ class MachinePhase(CoordinatorCollaborator):
         if not state.stop_reason:
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
-    async def _next_phase(self, *, in_flight: _phase_state.WorkInFlight) -> tuple[str, str, dict[str, Any]] | None:
+    async def _framework_round_fits(self) -> bool:
+        """Whether FRAMEWORK_AGENT has a round left: work queued or running, or one it admits fits the time left.
+
+        A remainder shorter than every round the phase admits never admits another; a resumed GLM-5.3 session sat
+        out the last 44 minutes of its FRAMEWORK_AGENT budget that way with every GPU idle. Priced through the
+        dispatcher's own gate, as the orchestration prompt's affordability line is.
+        """
+        if str(self.shared_state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return True
+        if await self.tasks.queued() or await self.tasks.running():
+            return True
+        dispatcher = self._coord.dispatcher
+        return any(
+            dispatcher.time_budget_denial_for_action(action) is None
+            for action in _phase_state.allowed_actions_for(_phase_state.PHASE_FRAMEWORK_AGENT)
+        )
+
+    async def _next_phase(
+        self, *, in_flight: _phase_state.WorkInFlight, framework_round_fits: bool
+    ) -> tuple[str, str, dict[str, Any]] | None:
         """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
         state = self.shared_state
         next_phase = _phase_state.compute_next_phase(
             state,
             in_flight=in_flight,
+            framework_round_fits=framework_round_fits,
             flags=self.phase_flags(),
         )
         if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -365,6 +394,7 @@ class MachinePhase(CoordinatorCollaborator):
                 kernel=kernel_facts.agent_in_flight,
                 prelude=in_prelude and await self._prelude_work_in_flight(),
             ),
+            framework_round_fits=await self._framework_round_fits(),
         )
         await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
         dispatcher = self._coord.dispatcher
@@ -406,8 +436,15 @@ class MachinePhase(CoordinatorCollaborator):
         """
         phase = str(self.shared_state.phase or "").upper()
         if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
-            # Both phases hold their exit for this marker.
-            await self._coord.phase_kernel.release_finished_roofline_gate()
+            # Both phases hold their exit for this marker. A cancelled initial analysis never ran, so PRELUDE asks again.
+            state = self.shared_state
+            gone = state.auto_roofline_pending_task_id
+            ended = await self._coord.phase_kernel.release_finished_roofline_gate()
+            if ended == "cancelled" and phase == _phase_state.PHASE_PRELUDE and not state.roofline_attempts:
+                # A fresh key: the cancelled task still holds the initial one, and reusing it hands that task back.
+                await self._coord.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline(
+                    idem_scope=f"-after-{gone[:8]}"
+                )
         # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
         await self._coord.phase_sweep.resume_unsettled_sweep()
 

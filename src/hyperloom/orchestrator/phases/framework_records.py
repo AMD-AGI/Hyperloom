@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom_common.coerce import dict_rows, first_str, first_text, to_list, to_mapping
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+from hyperloom.inference_optimizer.grid_server_args import (
+    ARGS_MODE_APPEND,
+    ARGS_MODE_REPLACE,
+    tokenize_server_args_preserving_json,
+)
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind
 from ..actions.executors import _integrate_vocabulary
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
@@ -26,10 +30,15 @@ if TYPE_CHECKING:
 log = _logging.getLogger(__name__)
 
 
-def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
-    """The server args and env overrides one lever proposal carries, dropping args Magpie cannot transport."""
-    extra_envs = {str(k).strip(): str(v) for k, v in to_mapping(entry.get("extra_envs")).items() if str(k).strip()}
-    args = entry.get("extra_args")
+class _IntegrateReview(NamedTuple):
+    """What accompanies a specialist deliverable to its synthetic ``integrate_patch`` review."""
+
+    observation: dict[str, Any]
+    overlaps_measured: list[dict[str, Any]] | None = None
+
+
+def _lever_server_args(args: Any) -> tuple[Any, str]:
+    """``(parsed server args or None, fault)`` for a lever's ``extra_args``; *fault* is empty when they transport."""
     tokens = [str(a) for a in args if str(a).strip()] if isinstance(args, (list, tuple)) else []
     if any(ch.isspace() for token in tokens for ch in token):
         text, fault = "", "has a whitespace-bearing argv token"
@@ -42,6 +51,13 @@ def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
             if isinstance(args, str)
             else "has unparsable server args"
         )
+    return parsed_args, fault
+
+
+def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """The server args and env overrides one lever proposal carries, dropping args Magpie cannot transport."""
+    extra_envs = {str(k).strip(): str(v) for k, v in to_mapping(entry.get("extra_envs")).items() if str(k).strip()}
+    parsed_args, fault = _lever_server_args(entry.get("extra_args"))
     if fault:
         log.warning(
             "FRAMEWORK config lever %r %s; dropping the args%s",
@@ -52,9 +68,15 @@ def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
         if not extra_envs:
             return {}
     extra_server_args = "" if parsed_args is None else parsed_args[0]
-    if not extra_server_args and not extra_envs:
+    controls = _lever_controls(entry)
+    if not (extra_server_args or extra_envs or controls["remove_args"] or controls["unset_envs"]):
         return {}
-    return {"extra_server_args": extra_server_args, "extra_envs": extra_envs}
+    return {
+        "name": str(entry.get("name") or ""),
+        "extra_server_args": extra_server_args,
+        "extra_envs": extra_envs,
+        **controls,
+    }
 
 
 def _framework_config_levers_from_done(
@@ -95,9 +117,55 @@ def _framework_config_levers_from_done(
     return {}
 
 
-def _patches_on_disk(patch: Path, resolve_bases: list[Path]) -> bool:
-    """True when a specialist's claimed patch path resolves to a real file under one of its worktree roots."""
-    return (patch.is_absolute() and patch.is_file()) or any((base / patch).is_file() for base in resolve_bases)
+def _lever_controls(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """The ablation half of a config lever: what it drops, not only what it appends.
+
+    A proposal that only removes a flag -- the way a baked-in
+    ``--disable-radix-cache`` is turned off -- carries no ``extra_args`` at all,
+    so a reader that looks only at what is appended sees an empty lever and
+    walks past it to the next proposal. That is how the agentic GLM-5.3 session
+    launched one proposal's name against another proposal's arguments.
+    """
+    remove_args = [text for text in (str(a).strip() for a in (entry.get("remove_args") or [])) if text]
+    unset_envs = [text for text in (str(e).strip() for e in (entry.get("unset_envs") or [])) if text]
+    mode = str(entry.get("args_mode") or ARGS_MODE_APPEND).strip().lower()
+    return {
+        "remove_args": remove_args,
+        "unset_envs": unset_envs,
+        "args_mode": mode if mode in {ARGS_MODE_APPEND, ARGS_MODE_REPLACE} else ARGS_MODE_APPEND,
+    }
+
+
+def _framework_config_deliverable(config_levers: dict[str, Any]) -> dict[str, Any]:
+    """The ``integrate_patch`` params a config-lever round is proposed with.
+
+    The name has to come from the proposal the levers came from. Reading
+    ``proposal_set[0]`` instead launched one proposal's name against another's
+    arguments whenever the first proposal was ablation-only. A lever that only
+    drops a flag needs its ablation carried too, or it reaches the launcher as a
+    no-op.
+    """
+    return {
+        "patch_name": str(config_levers.get("name") or ""),
+        "extra_server_args": str(config_levers.get("extra_server_args") or ""),
+        "extra_envs": dict(config_levers.get("extra_envs") or {}),
+        "remove_args": list(config_levers.get("remove_args") or []),
+        "unset_envs": list(config_levers.get("unset_envs") or []),
+        "args_mode": str(config_levers.get("args_mode") or ARGS_MODE_APPEND),
+        "framework_agent_authoring": True,
+    }
+
+
+def _resolved_patch_paths(patches: list[Any], resolve_bases: list[Path]) -> list[str]:
+    """The claimed patch paths that resolve to a real file, absolute or under one of the specialist's worktree roots."""
+    resolved: list[str] = []
+    for raw in patches:
+        patch = Path(str(raw))
+        candidates = [patch] if patch.is_absolute() else [base / patch for base in resolve_bases]
+        hit = next((c for c in candidates if c.is_file()), None)
+        if hit is not None:
+            resolved.append(str(hit))
+    return resolved
 
 
 def _resolvable_artifacts_from_done(

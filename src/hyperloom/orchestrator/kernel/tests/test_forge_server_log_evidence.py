@@ -198,19 +198,18 @@ class _StopHere(Exception):
     """Raised from the MoE CSV writer to end the run at the point under test."""
 
 
-class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
-    """Both lanes must see the observed M sweep, not just the dense one."""
+class TestTheDenseLaneTokens:
+    """Forge's ``--tokens`` is the M sweep the serving log observed."""
 
     @pytest.mark.asyncio
-    async def test_the_moe_writer_receives_the_serving_log_sweep(self, tmp_path, monkeypatch):
+    async def test_the_observed_sweep_is_forges_tokens(self, tmp_path, monkeypatch):
         model_dir = tmp_path / "model"
         model_dir.mkdir()
         log_path = _log(tmp_path / "server.log", "".join(HIT.format(m=m) * 4 for m in (1, 64, 2048, 16384)))
-
         seen: dict[str, str] = {}
 
-        def _writer(_log_path, tokens, _workspace):
-            seen["tokens"] = tokens
+        def _build(args):
+            seen.update(args)
             raise _StopHere
 
         from hyperloom.common import model_paths, visible_devices
@@ -222,13 +221,14 @@ class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
         monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
         monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_shapes", lambda *_a, **_k: "")
         monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
-        monkeypatch.setattr(forge_gemm_tuning, "_write_fmoe_untuned_csv_from_log", _writer)
+        monkeypatch.setattr(forge_gemm_tuning.forge_gemm_tuning, "build_command", _build)
         monkeypatch.setattr(forge_gemm_tuning, "resolve_forge_server_log", lambda *_a: str(log_path))
         SharedState(model_path=str(model_dir), framework="sglang").save(tmp_path)
 
         with pytest.raises(_StopHere):
             await forge_gemm_tuning._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
-        assert seen["tokens"] == serving_log_evidence._tokens_from_serving_log(log_path)
-        # Not the ``[1]`` fallback, and not a single value of any kind.
-        assert len(seen["tokens"].split(",")) > 1
+        tokens = str(seen["tokens"])
+        assert tokens == serving_log_evidence._tokens_from_serving_log(log_path)
+        # Not forge's ``conc``-derived guess, and not a single value of any kind.
+        assert len(tokens.split(",")) > 1

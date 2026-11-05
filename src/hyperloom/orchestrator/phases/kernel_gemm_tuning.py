@@ -154,6 +154,33 @@ _AITER_ENV_TO_TABLE: dict[str, str] = {
 }
 
 
+def _tuned_rows_reach_a_logged_lookup(tuner_name: str, envs: Mapping[str, str], log_text: str) -> bool:
+    """Whether a candidate's tuned rows serve any lookup the serving log shows missing; ``True`` when it cannot tell.
+
+    The workload is fixed, so a measured round repeats the lookups the baseline logged. Hit lines need
+    AITER_LOG_TUNED_CONFIG and are absent there, but the tuners build their tables from the misses. On GLM-5.3 an a8w8
+    and a bf16 table, written at an M aiter never looks up, each spent an AgentX round to read ``zero_hit`` afterwards.
+    """
+    from ..kernel.gemm_shape_coverage import (
+        fmoe_dispatch_lookup_key,
+        parse_aiter_fused_moe_dispatches,
+        parse_aiter_shape_lookups_for_tables,
+        tuned_config_coverage,
+        tuned_csv_shapes,
+        tuned_fmoe_csv_rows,
+    )
+
+    csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
+    if tuner_name == "fmoe_ck":
+        rows = {fmoe_dispatch_lookup_key(row) for path in csv_paths for row in tuned_fmoe_csv_rows(path)}
+        logged = {fmoe_dispatch_lookup_key(record) for record in parse_aiter_fused_moe_dispatches(log_text)}
+        return not rows or not logged or bool(rows & logged)
+    tables = [_AITER_ENV_TO_TABLE[key] for key in envs if key in _AITER_ENV_TO_TABLE]
+    missed, _hit = parse_aiter_shape_lookups_for_tables(log_text, tables)
+    tuned = {shape for path in csv_paths for shape in tuned_csv_shapes(path)}
+    return not tuned or not missed or bool(tuned_config_coverage(tuned, missed)["covered"])
+
+
 def _integrate_run_name(tuner_name: str) -> str:
     """Name of the integrate run that serves a tuner's candidate."""
     return f"integrate-gemm_tune_{tuner_name}"
@@ -217,18 +244,36 @@ def _no_fmoe_dispatch_verdict(log_text: str, *, hit_logging: bool) -> dict[str, 
 
 
 class _GemmTuningMixin:
-    def _runtime_uses_aiter_fused_moe(self) -> bool:
-        """Return whether the served model dispatches MoE through aiter."""
+    def _serving_log_text(self) -> str:
+        """The serving log Forge derived its tuning demand from, or ``""`` when there is none."""
         from ..kernel.serving_log_evidence import resolve_forge_server_log
 
         log_path = resolve_forge_server_log(self.shared_state, self.session_dir)
         if not log_path:
-            return False
+            return ""
         try:
-            text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+            return Path(log_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return False
-        return "[aiter] [fused_moe]" in text or "Mxfp4 MoE backend" in text
+            return ""
+
+    def _reason_not_to_measure(self, cand: Mapping[str, Any], serving_log: str) -> str:
+        """Why a tuning candidate cannot take effect, read before its round is spent; ``""`` when it may."""
+        from hyperloom.inference_optimizer.model_config_utils import model_supports_aiter_ck_fused_moe
+
+        from ..kernel.gemm_shape_coverage import log_has_fused_moe_activity
+
+        tuner_name = cand["tuner"]
+        if tuner_name == "vllm_moe_triton" and log_has_fused_moe_activity(serving_log):
+            # aiter serves the MoE and never reads VLLM_TUNED_CONFIG_FOLDER.
+            return "aiter_moe_runtime_triton_config_inert"
+        if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
+            str(self.shared_state.model_path or ""), int(self.shared_state.tp or 0)
+        ):
+            # aiter's CK fused-MoE rejects a non-128-aligned intermediate_size_per_partition.
+            return "aiter_ck_moe_shape_unsupported"
+        if not _tuned_rows_reach_a_logged_lookup(tuner_name, cand["envs"], serving_log):
+            return "tuned_rows_unreachable"
+        return ""
 
     def _gemm_tuned_config_coverage(
         self,
@@ -254,6 +299,7 @@ class _GemmTuningMixin:
             parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
             parse_aiter_shape_lookups_for_tables,
+            server_hit_logging,
             tuned_config_coverage,
             tuned_csv_shapes,
         )
@@ -292,13 +338,12 @@ class _GemmTuningMixin:
             # against this candidate's table.
             missed, hit = all_missed, set()
             requested = all_requested
-        tuned: set[tuple[int, int, int]] = set()
-        for path in csv_paths:
-            tuned |= tuned_csv_shapes(path)
+        tuned = {shape for path in csv_paths for shape in tuned_csv_shapes(path)}
         if not tuned:
             _unreadable("dense")
             return None
         report = tuned_config_coverage(tuned, requested, known_covered=hit)
+        report["conclusive"] = server_hit_logging(logs[-1]) or bool(report.get("covered"))
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)
         report["runtime_lookup_hit"] = len(hit)
@@ -439,7 +484,7 @@ class _GemmTuningMixin:
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths or tuner_name == "fmoe_ck":
             return None
-        from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
+        from ..kernel.gemm_shape_coverage import server_hit_logging
         from ..measurement.apply_verification import verify_applied
 
         logs = _integrate_server_logs(self.session_dir, tuner_name)
@@ -456,14 +501,10 @@ class _GemmTuningMixin:
         # arrival check compares merged_tuned_dense_bf16.csv against bf16_tuned_gemm.csv and concludes the artifact
         # never landed.
         table_names = [name for key in envs if (name := _AITER_ENV_TO_TABLE.get(key))]
-        # aiter prints a hit line only under this flag; every serving run now sets it by default, but an operator
-        # value in the candidate env wins, and then a zero-hit result means nothing.
-        hit_logging = aiter_log_tuned_config_enabled(envs)
-
         return verify_applied(
             logs[-1],
             csv_paths,
-            hit_logging=hit_logging,
+            hit_logging=server_hit_logging(logs[-1]),
             runtime_table_names=table_names,
         ).to_dict()
 
@@ -765,31 +806,6 @@ class _GemmTuningMixin:
         # produced, and the eligibility checks downstream already read them as "must be empty".
         self._replace_latest_gemm_tuning_attempt(result)
 
-    def _gemm_candidate_skip_reason(self, tuner_name: str, *, triton_moe_inert: bool) -> str:
-        from hyperloom.inference_optimizer.model_config_utils import model_supports_aiter_ck_fused_moe
-
-        if tuner_name == "vllm_moe_triton" and triton_moe_inert:
-            log.warning(
-                "gemm E2E: skipping %s -- the server dispatches MoE through "
-                "aiter, which never reads VLLM_TUNED_CONFIG_FOLDER, so the tuned "
-                "Triton config cannot take effect",
-                tuner_name,
-            )
-            return "aiter_moe_runtime_triton_config_inert"
-        # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's CK fused-MoE rejects a
-        # non-128-aligned intermediate_size_per_partition.
-        if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
-            str(self.shared_state.model_path or ""), int(self.shared_state.tp or 0)
-        ):
-            log.info(
-                "gemm E2E: skipping %s -- aiter CK fused-MoE cannot serve "
-                "this model at tp=%s (intermediate size is not 128-aligned)",
-                tuner_name,
-                self.shared_state.tp or 0,
-            )
-            return "aiter_ck_moe_shape_unsupported"
-        return ""
-
     def _merged_candidate_envs(self, cand: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any] | None]:
         # Each aiter table merged into the runtime one, plus the refusal row if one of them is unusable.
         env = dict(cand["envs"])
@@ -1055,16 +1071,17 @@ class _GemmTuningMixin:
             result["micro_decision"] = "candidate_no_e2e_gain"
         self._replace_latest_gemm_tuning_attempt(result)
 
-    def _screened_candidate_envs(
+    async def _screened_candidate_envs(
         self,
         cand: dict[str, Any],
         *,
-        triton_moe_inert: bool,
+        serving_log: str,
     ) -> tuple[dict[str, str], dict[str, Any] | None]:
-        """A candidate's merged envs, or the refusal row when it is skipped or one of its tables is unusable."""
-        skip_reason = self._gemm_candidate_skip_reason(cand["tuner"], triton_moe_inert=triton_moe_inert)
-        if skip_reason:
-            return {}, {**cand, "reason": skip_reason}
+        """A candidate's merged envs, or the refusal row when it cannot take effect or one of its tables is unusable."""
+        not_measured = await asyncio.to_thread(self._reason_not_to_measure, cand, serving_log)
+        if not_measured:
+            log.warning("gemm E2E: skipping %s before measuring it: %s", cand["tuner"], not_measured)
+            return {}, {**cand, "reason": not_measured}
         # Merge candidate CSV with the runtime config so that shapes NOT in the candidate keep their existing
         # tuned entries.
         return self._merged_candidate_envs(cand)
@@ -1072,6 +1089,7 @@ class _GemmTuningMixin:
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each tuning candidate's env independently."""
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs
+        from ..kernel.subthreshold_bundle import defer_env_win
 
         candidates = self._gemm_canonical_candidates(result)
         if not candidates:
@@ -1087,14 +1105,12 @@ class _GemmTuningMixin:
         reverted: list[dict[str, Any]] = []
         faults: list[dict[str, Any]] = []
         accepted_measurement: dict[str, Any] = {}
-        # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now byte-scans the whole runs/ tree for
-        # aiter evidence -- and then reads it whole, ~17MB on the fleet.
-        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
-            self._runtime_uses_aiter_fused_moe
-        )
+        # Resolving the serving log byte-scans the whole runs/ tree for aiter evidence, then reads it whole, ~17MB on
+        # the fleet.
+        serving_log = await asyncio.to_thread(self._serving_log_text)
         for cand in candidates:
             tuner_name = cand["tuner"]
-            env, refusal = self._screened_candidate_envs(cand, triton_moe_inert=triton_moe_inert)
+            env, refusal = await self._screened_candidate_envs(cand, serving_log=serving_log)
             if refusal is not None:
                 reverted.append(refusal)
                 continue
@@ -1122,6 +1138,9 @@ class _GemmTuningMixin:
                     accepted_measurement = measurement
                     kept.append(keep_row)
                     continue
+            if not blockers:
+                server_args = self._gemm_candidate_server_args(tuner_name)
+                defer_env_win(self.shared_state, verdict, tuner=tuner_name, envs=env, server_args=server_args)
             reverted.append({**cand, "reason": _gemm_revert_reason(decision, gain_pct, blockers)})
             await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
 

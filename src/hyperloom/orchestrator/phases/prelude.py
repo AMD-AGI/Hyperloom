@@ -1638,6 +1638,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         self,
         *,
         baseline_tput: float | None = None,
+        idem_scope: str = "",
     ) -> None:
         """Enqueue the PRELUDE-bootstrap roofline/profile task after baseline; skipped while warm-replay is in_flight (GPU/port contention)."""
         state = self.shared_state
@@ -1673,9 +1674,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             self._record_prelude_arm_dropped("initial_analysis", evidence)
             return
         try:
-            rl_task = await self.enqueue_internal_analysis_task(
-                reason="prelude_initial",
-            )
+            rl_task = await self.enqueue_internal_analysis_task(reason="prelude_initial", idem_scope=idem_scope)
             if rl_task is None:
                 return
             state.auto_roofline_pending_task_id = rl_task.task_id

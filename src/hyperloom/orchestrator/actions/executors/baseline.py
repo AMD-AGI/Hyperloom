@@ -491,7 +491,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
 
         await asyncio.to_thread(bind_source_evidence, config_path, attempt.params.get("patches") or [])
         result_dir = _resolve_result_dir(output_dir, attempt.override_result_dir)
-        env = _benchmark_process_env(config_path, output_dir, result_dir, attempt.inferencex_path)
+        env = _benchmark_process_env(config_path, output_dir, result_dir, attempt.inferencex_path, self.session_dir)
         # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client + BENCHMARK_BASE_URL so Magpie skips its server
         # launch and targets the RayJob head.
         env.update(magpie_remote_env())

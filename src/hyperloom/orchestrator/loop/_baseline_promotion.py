@@ -379,6 +379,8 @@ class BaselinePromotionMixin:
         state = self.shared_state
         state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
         state.baseline_perf = perf_snapshot_from_mapping(result) or {}
+        # Kept beside the snapshot so a later comparison can reach the requests this anchor was a percentile of.
+        state.baseline_workspace = str(result.get("workspace") or "").strip()
         accuracy = result.get("accuracy")
         if isinstance(accuracy, (int, float)):
             state.baseline_accuracy = float(accuracy)
@@ -437,6 +439,11 @@ class BaselinePromotionMixin:
             "workspace": result.get("workspace"),
             **_baseline_perf_axes(self.shared_state.baseline_perf),
         }
+        # The measured corpus shape replaces the canonical seed; only an aiperf export carries the distributions.
+        if result.get("isl_distribution"):
+            from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+            self.shared_state.agentx_corpus_shape = map_corpus_shape(result)
         self.shared_state.current_best = current_best
         # Reads the current_best just assigned, so it has to follow it.
         self._stamp_current_best_measurement(result)
