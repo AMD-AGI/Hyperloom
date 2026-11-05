@@ -9,11 +9,13 @@ reworded) makes the rule that reads it stop firing, and nothing else says so. Ev
 (see ``image_check_spec``); this module evaluates them against the environment it runs in and reports, per fact, one of
 *pass*, *fail* or *unverifiable*. A fact with no check is unverifiable, and says so.
 
-A session runs it once before PRELUDE measures anything (``run_image_check``); ``python -m
-hyperloom.common.outside_facts.image_check`` runs it on its own, and exits 1 when a fact fails. The check looks at the
-environment of the process that runs it, which need not be the environment the measurements run in: a hosted sandbox
-has its own image. A failure is therefore a warning by default and not a refusal to start. ``HYPERLOOM_IMAGE_CHECK``
-chooses: ``warn`` (the default), ``strict`` (a failing fact stops the session before it spends anything) or ``off``.
+A session runs it once before PRELUDE measures anything (``run_image_check``). The check looks at the environment of
+the process that runs it, which need not be the environment the measurements run in: a hosted sandbox has its own
+image. A failure is therefore a warning by default and not a refusal to start. ``HYPERLOOM_IMAGE_CHECK`` chooses:
+``warn`` (the default), ``strict`` (a failing fact stops the session before it spends anything) or ``off``.
+
+``python -m hyperloom.common.outside_facts.image_check`` runs it on its own and always checks: it does not read
+``HYPERLOOM_IMAGE_CHECK``, and a failing fact makes it exit 1, as ``strict`` does, so its report says ``strict``.
 """
 
 from __future__ import annotations
@@ -258,12 +260,10 @@ def _warning(report: ImageCheckReport) -> str:
     return "\n".join(lines)
 
 
-def run_image_check(
-    *, mode: ImageCheckMode | None = None, pack: RulePack | None = None, image: Image | None = None
-) -> ImageCheckReport:
+def run_image_check(*, pack: RulePack | None = None, image: Image | None = None) -> ImageCheckReport:
     """Check the pack against the environment, once, before a session measures anything.
 
-    ``mode`` defaults to what ``HYPERLOOM_IMAGE_CHECK`` names. ``off`` evaluates nothing and reports that it did not.
+    The mode is the one ``HYPERLOOM_IMAGE_CHECK`` names. ``off`` evaluates nothing and reports that it did not.
     Under ``warn`` a failing fact is logged as one warning naming each fact and why; under ``strict`` it also raises.
     Blocking: it starts the interpreter and prints the help of the servers it checks, so a session runs it in a thread.
 
@@ -271,19 +271,25 @@ def run_image_check(
         ImageCheckFailed: A fact fails and the mode is ``strict``.
         ValueError: ``HYPERLOOM_IMAGE_CHECK`` names no mode.
     """
-    chosen = mode_from_environment() if mode is None else mode
-    report = build_report(pack, image, chosen)
+    mode = mode_from_environment()
+    report = build_report(pack, image, mode)
     if report.failed():
         logger.warning("%s", _warning(report))
-        if chosen is ImageCheckMode.STRICT:
+        if mode is ImageCheckMode.STRICT:
             raise ImageCheckFailed(report)
     return report
 
 
 def main(argv: Sequence[str] | None = None, *, pack: RulePack | None = None, image: Image | None = None) -> int:
-    """``python -m hyperloom.common.outside_facts.image_check``: print the report; exit 1 when a fact fails."""
+    """``python -m hyperloom.common.outside_facts.image_check``: print the report; exit 1 when a fact fails.
+
+    It always checks, whatever ``HYPERLOOM_IMAGE_CHECK`` says, and its report records ``strict``.
+    """
     parser = argparse.ArgumentParser(
-        prog="python -m hyperloom.common.outside_facts.image_check", description=(__doc__ or "").split("\n\n")[0]
+        prog="python -m hyperloom.common.outside_facts.image_check",
+        description=(__doc__ or "").split("\n\n")[0],
+        epilog=f"The command line always checks: it does not read {MODE_ENV}, which chooses what a session does, and "
+        "a failing fact exits 1, as strict does.",
     )
     parser.add_argument("--python", help="the interpreter whose packages count (default: the one running this)")
     parser.add_argument("--json", action="store_true", help="print the whole report as JSON instead of the summary")
@@ -291,7 +297,7 @@ def main(argv: Sequence[str] | None = None, *, pack: RulePack | None = None, ima
     args = parser.parse_args(argv)
     if image is None and args.python:
         image = HostImage(python=args.python)
-    report = build_report(pack, image)
+    report = build_report(pack, image, ImageCheckMode.STRICT)
     if args.output is not None:
         report.write(args.output)
     if args.json:
