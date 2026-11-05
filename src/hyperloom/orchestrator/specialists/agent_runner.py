@@ -43,10 +43,16 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env_safety import RunAs, RunAsError, redact_file_in_place
+from hyperloom.common.env_safety import RunAs, RunAsError, redact_secret_values
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.session.session_paths import RESOURCES_RELATIVE_PATH
-from hyperloom_common.fs_utils import create_nofollow, read_bytes_nofollow, read_text_nofollow, write_text_nofollow
+from hyperloom_common.fs_utils import (
+    create_nofollow,
+    read_bytes_nofollow,
+    read_text_nofollow,
+    rewrite_lines_nofollow,
+    write_text_nofollow,
+)
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 
 from .agent_cli_config import _build_specialist_env as build_specialist_env
@@ -244,8 +250,11 @@ def _validate_spec(spec: AgentLaunchSpec, now_unix: float) -> None:
             )
         if not _ENV_NAME_RE.fullmatch(endpoint.token_env):
             raise AgentConfigError(f"token_env {endpoint.token_env!r} is not an environment variable name")
-        if not spec.env.get(endpoint.token_env):
+        token = spec.env.get(endpoint.token_env)
+        if not token:
             raise AgentConfigError(f"token environment variable {endpoint.token_env!r} is not set in spec.env")
+        if "\n" in token or "\r" in token:  # no header carries one, and the log is scrubbed line by line
+            raise AgentConfigError(f"token environment variable {endpoint.token_env!r} holds a line break")
     names = [endpoint.name for endpoint in spec.mcp_servers]
     if len(set(names)) != len(names):
         raise AgentConfigError("duplicate MCP server names")
@@ -785,26 +794,25 @@ class LocalAgentRunner:
 
     @staticmethod
     def _scrub_log(process_log: Path, secrets: tuple[str, ...]) -> None:
-        """Take the session's tokens out of the log, then run the existing pattern redaction.
-
-        The literal tokens go first, through a private temporary file: the existing redaction writes its own
-        temporary file with default permissions before it restricts them, and a token that no pattern recognises
-        must not be in it.
+        """Take the session's tokens, and every value :func:`redact_secret_values` recognises, out of the log in one
+        rewrite, as :func:`~hyperloom.common.env_safety.redact_file_in_place` does with the patterns alone: the copy
+        is staged in a file created fresh at ``PRIVATE_FILE_MODE``, and a link at the log is refused. A token holds no
+        line break (the launch refuses one), so a line-by-line replacement misses none. A log that cannot be
+        rewritten is left as it is, and said so.
         """
-        if not process_log.exists():
-            return
         values = [value for value in secrets if value]
-        if values:
-            text = process_log.read_text(encoding=UTF8, errors="replace")
-            scrubbed = text
+
+        def scrub(line: str) -> str:
             for value in values:
-                scrubbed = scrubbed.replace(value, "[REDACTED]")
-            if scrubbed != text:
-                temporary = process_log.with_name(process_log.name + ".scrub")
-                with create_nofollow(temporary.parent, (temporary.name,), mode=PRIVATE_FILE_MODE) as handle:
-                    handle.write(scrubbed)
-                os.replace(temporary, process_log)
-        redact_file_in_place(process_log, mode=PRIVATE_FILE_MODE)
+                line = line.replace(value, "[REDACTED]")
+            return redact_secret_values(line)
+
+        try:
+            rewrite_lines_nofollow(process_log, scrub, mode=PRIVATE_FILE_MODE)
+        except FileNotFoundError:
+            return
+        except OSError:
+            log.warning("agent: %s was not scrubbed", process_log, exc_info=True)
 
     def _write_runtime(self, session: _Session, *, plugins: dict[str, Any] | None) -> None:
         spec = session.spec
