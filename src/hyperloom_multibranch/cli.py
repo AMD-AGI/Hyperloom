@@ -995,10 +995,10 @@ def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -
 
 @dataclass(frozen=True)
 class HostedStart:
-    """What ``hosted run`` runs, and the seconds after which the grant's end stops it, ``None`` when it has none."""
+    """What ``hosted run`` runs, and the deadline of the grant it runs in."""
 
     run: Callable[[], int]
-    stop_after_sec: float | None
+    deadline: GrantDeadline
 
 
 def hosted_run() -> int:
@@ -1016,8 +1016,7 @@ def hosted_run() -> int:
     except ImportError as exc:
         log.exception("hosted run: a module the session needs is not installed")
         return _not_run(host.state_dir, EXIT_FAILED, exc)
-    if start.stop_after_sec is not None:
-        arm_grant_stop(max(0.0, start.stop_after_sec))
+    _stop_before_grant_ends(start.deadline)
     try:
         returncode = start.run()
     except (ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
@@ -1043,7 +1042,15 @@ def _hosted_start(host: HostInfo) -> HostedStart:
         run = partial(final_only, persisted, ready.peer_factory, ready.services)
     else:
         run = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
-    return HostedStart(run, deadline.stop_after_sec)
+    return HostedStart(run, deadline)
+
+
+def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
+    """Arm the stop of this process one CLOSE grace before ``deadline``'s grant ends, at once when that has passed;
+    nothing when the grant states no runtime."""
+
+    if deadline.stop_after_sec is not None:
+        arm_grant_stop(max(0.0, deadline.stop_after_sec))
 
 
 def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
@@ -1112,8 +1119,7 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
         ready = ready_session(settings.workload, load_peers)
     else:
         ready = hosted_ready_session(grant.host, settings.workload)
-        if grant.deadline.stop_after_sec is not None:
-            arm_grant_stop(max(0.0, grant.deadline.stop_after_sec))
+        _stop_before_grant_ends(grant.deadline)
     return run_session(settings, ready.peer_factory, ready.services)
 
 
