@@ -143,6 +143,7 @@ The schema stays `v6.1` but drops the keys only the diffusion latency roofline
 or the `bypass` route produced; read `ceiling_available` instead of
 `close.roofline_progress.ceiling_kind`. Each key and its disposition is under
 Versioning in [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
+The trace certificate's `production_*` keys go with them; read `selected_role`.
 
 ### Required: quantization failure exits 4
 

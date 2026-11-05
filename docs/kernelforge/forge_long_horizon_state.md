@@ -135,10 +135,10 @@ Each iteration runs:
    because a round of several plans is several times the reading. Sized for one
    plan it was not enough: a measured two-lane review ran about eleven minutes,
    timed out, and lost a verdict that had found a lane not worth its session.
-   Critic failure uses the draft and records the verdict `NOT_REVIEWED`;
+   Critic failure -- an outage, or an answer that is not in the shape the
+   review is held to -- uses the draft and records the verdict `NOT_REVIEWED`;
    revision failure publishes a non-executable framework fallback. Diagnostics
-   retain phase duration and whether the Critic verdict was explicit or
-   inferred. Shorter sessions skip this step.
+   retain phase duration. Shorter sessions skip this step.
 5. Publication of the final `optimization_plan.md`.
 6. Implementer execution of that plan.
 7. Canonical validation, benchmark, and KEEP/REVERT.
@@ -224,34 +224,27 @@ synthesis session. A lane whose revision fails keeps its draft and is named in
 `plan_revision.unrevised_lanes`; a single-lane round that cannot be revised
 still publishes the non-executable fallback, because nothing else is left in it.
 
-How wide the round runs is answered per lane rather than by the verdict, and it
-is the one part of the review a machine reads. The review stays prose — a person
-reads it and the revision is fed it — and ends with one JSON object carrying the
-width decision:
+How wide the round runs is answered per lane rather than by the verdict. The
+review is one structured answer: `verdict`, the prose `review` a person reads and
+the revision is fed, and `lane_narrowing`, the lanes the review judges not worth
+an Implementer session of its own, each with its reason:
 
 ```json
-{"lane_narrowing": [{"lane_id": 2, "reason": "it is lane 1's change in different words"}]}
+{"verdict": "REVISE", "review": "...", "lane_narrowing": [{"lane_id": 2, "reason": "it is lane 1's change in different words"}]}
 ```
 
+A provider that can hold a session to a JSON Schema is given this answer's; one
+that cannot is shown the schema in its prompt. An answer that is not in that
+shape -- a review in prose only, a verdict outside the three, a drop with no
+reason -- is no review: the round fails open to its drafts as for an outage.
+
 A named lane is not published, so the round spends fewer Implementer sessions
-than it planned. A round the review wants whole ends with the same block and an
-empty list, because an empty list and a missing block are different answers and
-only the first means "run every lane". The finding is older than the outlet:
-across sixty-eight measured rounds, six reviews said a specific lane was not
-worth its session and every one of those rounds ran it, because a round-wide
+than it planned; an empty list runs every lane. The finding is older than the
+outlet: across sixty-eight measured rounds, six reviews said a specific lane was
+not worth its session and every one of those rounds ran it, because a round-wide
 verdict cannot single a lane out. Narrowing is applied before the revision, so no
 revision turn is spent on a lane that will not run, and `lanes.published` records
 what the round actually handed to Implementer sessions beside what it planned.
-
-The block is read with the same extractor the round partition uses, searched
-from the end of the review and anchored on its own key, because the prose before
-it is free to quote an autotune config and the first JSON object in a review is
-not necessarily its ruling. A review that ends with no readable block is asked
-once more — no tools, two turns, two minutes — to restate the decision it
-already made in its own words. That is the round's only conditional call, and it
-is spent only when the alternative is running a lane the review said was not
-worth its session. A block that *was* read and named a lane the round does not
-have is never repaired: correcting it would mean inventing the decision.
 
 Three decisions can move a round's width, and they are ordered so they cannot
 contradict each other. The partition decides how wide the round is planned and
@@ -265,24 +258,14 @@ to a survivor the review never ranked. A lane the partition widened to joint
 ground is no exception: the review is given that lane's `joint` flag and its
 fallback and rules on the lane with them in view, so a drop naming it is
 carried out like any other, and the round records under `dropped_joint` that
-it spent wider ground than a region and measured none of it. Every drop, every
-refusal, and everything the round could not read is recorded under `lane_narrowing` in
-`structured_output.json` with the reason: `status` says what happened to the
-ruling and `block` (`answered`, `repaired`, `absent`, `malformed`, `not_asked`)
-says where it came from. So a round that published fewer lanes than it planned
-can be audited afterwards, and "the review wanted every lane" never arrives
-looking the same as "nobody could read what it wanted".
-
-The record is split so it cannot disagree with itself. A note under `notes`
-says what was seen while the block was being read — the review ended with no
-block, an entry named no lane — and never what became of it, because it is
-written before the repair pass and the round have answered; `status` and
-`dropped` are what say how the round ended. The one note added afterwards is
-the joint-lane cost, which is not how the ruling ended but what carrying it out
-spent, and has nowhere else to be read. The logs follow the same line: the
-round warns that a narrowing was not applied where that is the outcome, and a
-review whose block one repair pass recovered and the round then acted on is
-reported as the narrowing it was.
+it spent wider ground than a region and measured none of it. Every drop and
+every refusal is recorded under `lane_narrowing` in `structured_output.json`
+with the reason, and `status` says what happened to the ruling, so a round that
+published fewer lanes than it planned can be audited afterwards. A note under
+`notes` says why a drop was not carried out -- a lane the round does not have --
+or what carrying it out spent, as the joint-lane cost; `status` and `dropped`
+are what say how the round ended, and the round warns that a narrowing was not
+applied only where that is the outcome.
 
 `structured_output.json` also records `phase_durations_sec`: what dispatch, the
 specialists, the partition, the synthesis, the Critic review and the revision
