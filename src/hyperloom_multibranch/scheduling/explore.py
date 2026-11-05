@@ -55,7 +55,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookPlay
 from hyperloom_multibranch.blackboard.rsi.session import judge_history, judge_open_areas
 from hyperloom_multibranch.blackboard.rsi.stranded import stranded_leads
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
-from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl
+from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl, BranchFocus
 from hyperloom_multibranch.scheduling.build_waits import waiting_builds
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -531,11 +531,11 @@ class Explorer:
             await self._blackboard.write_manifest_fingerprint(replace(latest, policy_versions=versions))
         await asyncio.to_thread(_record_versions, self._manifest, played)
 
-    async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[str, ...]:
+    async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[BranchFocus, ...]:
         return await self._events.focus_on(start.start_commit, decision.focus, decision.open_count)
 
     async def _open_batch(
-        self, count: int, k: int, start: BatchStart, focus: tuple[str, ...] = ()
+        self, count: int, k: int, start: BatchStart, focus: tuple[BranchFocus, ...] = ()
     ) -> tuple[BranchEntry, ...]:
         """Open up to ``count`` branches at K ``k`` as ``start`` says, briefed on ``focus``; none once its deadline has
         passed. The only place a batch is cut to the free slots: a fork or repair admitted while the batch starts can
