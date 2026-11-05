@@ -45,11 +45,19 @@ from ._spec_decode_pin import (
     SpeculativeDecodingPinnedError,
     refuse_unpinned_speculative_change,
 )
+from ._patch_laying import PatchedServer, is_patched_copy
+from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
+from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
 
 __all__ = [
+    "SGLANG_PATCH_SERVER_FLAG",
     "VLLM_PATCH_PROFILER_FIELDS",
+    "PatchedServer",
+    "ensure_patched_copy",
     "ensure_vllm_patched_for_tracelens",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
+    "is_patched_copy",
+    "lay_tracelens_patch",
     "CONTEXT_COPY_REFUSAL",
     "BenchmarkTarget",
     "COOPERATIVE_REAP_BUDGET_SEC",
