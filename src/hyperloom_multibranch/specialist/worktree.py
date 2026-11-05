@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -144,6 +145,7 @@ class SourceBase:
     ) -> None:
         self.path = path
         self._native = dict(native or {})
+        self._worktrees: dict[Path, BranchWorktree] = {}
 
     def build(self, components: Sequence[str]) -> None:
         """Copy each component's installed package and meta trees to their upstream paths and commit them; a session
@@ -189,14 +191,15 @@ class SourceBase:
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
-        """The worktree of ``branch`` at ``path``, added at the installed packages the first time."""
+        """The worktree of ``branch`` at ``path``, added at the installed packages the first time; every call for
+        ``path`` returns the same one, so all its callers share its :attr:`~BranchWorktree.lock`."""
         if not path.exists():
             _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
         for prefix, target in linked_paths(path):
             if not (path / prefix).exists():
                 (path / prefix).parent.mkdir(parents=True, exist_ok=True)
                 (path / prefix).symlink_to(target)
-        return BranchWorktree(path, self._native)
+        return self._worktrees.setdefault(path, BranchWorktree(path, self._native))
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
         """Copy ``native`` to its upstream path, but for what ``laid`` already put there: the package a test loads is
@@ -295,7 +298,11 @@ class Changes:
 
 class BranchWorktree:
     """One branch's checkout of the source base; the experiment commit it was last synced to is named in the subject of
-    the commit that sync made."""
+    the commit that sync made.
+
+    Whoever runs git in it or reads its files as a change holds :attr:`lock` for the whole of that work: a sync's
+    reset, apply and commit, and a diff's stage, all go through the worktree's one tree and index.
+    """
 
     def __init__(
         self,
@@ -304,6 +311,7 @@ class BranchWorktree:
     ) -> None:
         self.path = path
         self._native = dict(native or {})
+        self.lock = threading.Lock()
 
     def holds(self, component: str) -> bool:
         """Whether the source base laid out ``component``; a recipe's patches to any other component are not here."""

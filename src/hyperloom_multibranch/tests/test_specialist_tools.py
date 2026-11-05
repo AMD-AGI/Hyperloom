@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +14,7 @@ from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.specialist import tools as tools_module
-from hyperloom_multibranch.specialist.tools import register_worktree_tools
+from hyperloom_multibranch.specialist.tools import register_worktree_tools, sync_to_commit
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
 
@@ -59,7 +61,12 @@ async def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_module, "locate_installed_package", lambda _layout: installed)
     register_worktree_tools(server, repo=repo, worktrees=worktrees)
     return SimpleNamespace(
-        server=server, repo=repo, blobs=blobs, root=root, config=worktrees(BRANCH).path / "vllm/config.py"
+        server=server,
+        repo=repo,
+        blobs=blobs,
+        root=root,
+        worktrees=worktrees,
+        config=worktrees(BRANCH).path / "vllm/config.py",
     )
 
 
@@ -243,3 +250,56 @@ async def test_a_sync_names_the_commits_of_the_specialist_s_it_drops(rig):
     assert synced["dropped_commits"] == [commit.strip()]
     assert rig.config.read_bytes() == b"max_num_seqs = 128\n"
     assert (await rig.server.call("worktree_sync"))["dropped_commits"] == []
+
+
+async def _two_heads(rig):
+    """The branch's root and a head on it whose patch sets max_num_seqs to 256, with the worktree synced to the root."""
+    await rig.server.call("worktree_sync")
+    rig.config.write_bytes(b"max_num_seqs = 256\n")
+    taken = await rig.server.call("worktree_patch", component="vllm")
+    landed = await rig.repo.commit(BRANCH, rig.root, apply(ROOT, RecipeDelta.from_document(taken["delta"])), "256")
+    return {rig.root: b"max_num_seqs = 128\n", landed: b"max_num_seqs = 256\n"}
+
+
+async def test_concurrent_syncs_of_one_worktree_leave_it_at_one_head_with_its_patches(rig):
+    files = await _two_heads(rig)
+    worktree = rig.worktrees(BRANCH)
+
+    outcomes = await asyncio.gather(
+        *(sync_to_commit(rig.repo, head, worktree) for head in [*files] * 4), return_exceptions=True
+    )
+
+    assert [outcome for outcome in outcomes if isinstance(outcome, BaseException)] == []
+    assert rig.config.read_bytes() == files[worktree.head()]
+    assert worktree.diff("vllm") == ""
+
+
+async def test_a_patch_taken_beside_a_sync_is_the_change_against_the_head_it_names(rig, monkeypatch):
+    files = await _two_heads(rig)
+    worktree = rig.worktrees(BRANCH)
+    git = worktree_module._git
+
+    def slow_git(cwd, *args, **kwargs):
+        if args[0] == "add":
+            time.sleep(0.2)
+        return git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(worktree_module, "_git", slow_git)
+    taken = []
+    for _round in range(3):
+        await rig.server.call("worktree_sync")
+        rig.config.write_bytes(b"max_num_seqs = 512\n")
+        _, outcome = await asyncio.gather(
+            sync_to_commit(rig.repo, rig.root, worktree),
+            rig.server.call("worktree_patch", component="vllm"),
+            return_exceptions=True,
+        )
+        if not isinstance(outcome, ToolError):
+            taken.append(outcome)
+
+    for patch in taken:
+        (stored,) = RecipeDelta.from_document(patch["delta"]).components[0].add_patches
+        text = rig.blobs.get(stored.sha256).decode()
+        assert (f"-{files[patch['parent_commit']].decode()}", "+max_num_seqs = 512") == tuple(
+            line + "\n" if line.startswith("-") else line for line in text.splitlines()[-2:]
+        )
