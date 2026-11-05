@@ -421,7 +421,7 @@ class Integrator:
         self._regression = checks.regression
         self._resolver = resolver
         self._decisions = records.merges
-        self._recording: asyncio.Future[str] | None = None
+        self._recording: asyncio.Future[MergeReport] | None = None
         self._adopted: set[tuple[str, str]] = set()
 
     async def integrate_next(self, width: int, tick: float, leads: Sequence[StrandedLead]) -> tuple[MergeReport, ...]:
@@ -452,10 +452,8 @@ class Integrator:
                     running.append(asyncio.create_task(self._test(_pending(commit, head))))
                 while running and running[0].done():
                     item = running.pop(0).result()
-                    report = item if isinstance(item, MergeReport) else await self._conclude(item, merged)
-                    report = _naming_replaced(_naming_adoption(report))
+                    report = self._logged(item) if isinstance(item, MergeReport) else await self._conclude(item, merged)
                     merged = merged or report.outcome is MergeOutcome.MERGED
-                    self._decisions.record(_decision(report))
                     reports.append(report)
                 if not running:
                     return tuple(reports)
@@ -583,41 +581,38 @@ class Integrator:
         await self._blackboard.record_merge_attempt(attempt)
         return report if merge is None else _found(report, merge)
 
+    def _logged(self, report: MergeReport) -> MergeReport:
+        """``report`` as the merge log names it, recorded there."""
+
+        named = _naming_replaced(_naming_adoption(report))
+        self._decisions.record(_decision(named))
+        return named
+
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
         """A superseded candidate gets no integration judgement and runs no regression set: it stays pending and is
         tried on the new head, as does one whose regression set did not run clean. Any other candidate that may be
-        merged is merged once the regression set passes on the merge."""
+        merged is merged once the regression set passes on the merge. The report is logged."""
 
         report, judgement = tested.report, tested.judgement
         reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
         if reason:
             await self._blackboard.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
-            return replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason)
+            return self._logged(replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason))
         if superseded:
-            return replace(report, reason=SUPERSEDED)
+            return self._logged(replace(report, reason=SUPERSEDED))
         failed = await self._regression_failure(report, tested.delta)
         if failed:
-            return replace(report, reason=failed)
+            return self._logged(replace(report, reason=failed))
         self._recording = asyncio.ensure_future(self._record_merge(report, tested.delta, judgement))
-        merged = await asyncio.shield(self._recording)
-        reason = _verdict_on_head(judgement)
-        if report.foundation_fix:
-            reason = f"a foundation fix, {reason}"
-        return replace(
-            report,
-            outcome=MergeOutcome.MERGED,
-            reason=reason,
-            merged_commit=merged,
-            gain_pct=judgement.gain_pct,
-            threshold_pct=judgement.threshold_pct,
-        )
+        return await asyncio.shield(self._recording)
 
     async def _regression_failure(self, report: MergeReport, delta: RecipeDelta) -> str:
         outcome = await self._regression.check(report.onto, delta, sources=(report.candidate,))
         return "" if outcome.passed else f"the regression set failed: {outcome.reason}"
 
-    async def _record_merge(self, tested: MergeReport, delta: RecipeDelta, judgement: Judgement) -> str:
-        """Commit the merge and record it; runs shielded, so a cancelled merge never moves only one of the two.
+    async def _record_merge(self, tested: MergeReport, delta: RecipeDelta, judgement: Judgement) -> MergeReport:
+        """Commit the merge, record it on the blackboard and in the merge log; runs shielded, so a cancelled merge
+        never moves only one of the repository and the records.
 
         A commit whose judgement could not be written is rewound: the blackboard would not know the commit the
         integration head is at.
@@ -632,7 +627,19 @@ class Integrator:
         finally:
             if not written:
                 await self._repo.rewind(INTEGRATION_BRANCH, merged, tested.onto)
-        return merged
+        reason = _verdict_on_head(judgement)
+        if tested.foundation_fix:
+            reason = f"a foundation fix, {reason}"
+        return self._logged(
+            replace(
+                tested,
+                outcome=MergeOutcome.MERGED,
+                reason=reason,
+                merged_commit=merged,
+                gain_pct=judgement.gain_pct,
+                threshold_pct=judgement.threshold_pct,
+            )
+        )
 
     async def replay_champion(
         self, champion: PreparedReplay, root: str, anchored: Awaitable[object]

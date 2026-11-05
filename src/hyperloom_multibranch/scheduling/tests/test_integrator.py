@@ -1482,7 +1482,7 @@ async def test_a_merge_cancelled_while_it_is_retested_is_abandoned_and_its_retes
     assert held.withdrawn.keys() == {retest}
 
 
-async def test_a_merge_cancelled_while_committing_is_still_recorded(tmp_path: Path) -> None:
+async def test_a_merge_cancelled_while_committing_is_still_recorded_and_logged(tmp_path: Path) -> None:
     bench = await _bench(tmp_path, repo_type=HeldRepo)
     repo = bench.repo
     assert isinstance(repo, HeldRepo)
@@ -1499,3 +1499,5 @@ async def test_a_merge_cancelled_while_committing_is_still_recorded(tmp_path: Pa
     record = await bench.handle(Role.OBSERVER).record(request_id)
     assert (record.conclusion, record.commit_id) == (Conclusion.MERGED, await repo.head(INTEGRATION_BRANCH))
     assert bench.toolbox.withdrawn == {}
+    [logged] = bench.logged()
+    assert (logged["detail"]["outcome"], logged["detail"]["merged_commit"]) == ("merged", record.commit_id)
