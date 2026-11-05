@@ -75,7 +75,7 @@ def _aborted_detail(session_dir: Path) -> str:
     """ABORTED.md's message (the streak and the last not-measured reason), for the exit record.
 
     A host has to tell a broken harness from a finished run: an abort recorded as `done`
-    read as a normal end under Hyperloom on Cluster C (2026-10-29, a gateway outage).
+    read as a normal end under a host (a gateway outage).
     """
     try:
         text = (session_dir / "ABORTED.md").read_text()
@@ -483,8 +483,8 @@ def _main(argv: list[str] | None, held: dict) -> int:
         # silently rejects real work, and the noise is routinely underestimated:
         # the spread quoted across three campaigns came from two runs on
         # one node, while re-measuring a byte-identical tree on its own node
-        # later differed by several times that. v2 widened its secondary band
-        # only at the START of the next campaign, after 47 iterations under a
+        # later differed by several times that. one campaign widened its secondary band
+        # only at the START of the next, after dozens of iterations under a
         # bar it could not reach.
         #
         # Only the measurement block is refreshed. Validators, protected paths

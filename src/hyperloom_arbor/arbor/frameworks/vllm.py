@@ -13,8 +13,8 @@ class VLLM(FrameworkAdapter):
     native_module = "vllm._C"
     # `vllm serve` is the API server, which takes its engine down on SIGTERM; an
     # EngineCore or worker it leaves behind renames itself `VLLM::...`, so those
-    # get SIGTERM too once the grace period has passed. Model M B on Cluster B
-    # (2026-10-07) kept a server and its EngineCore holding ~265 GB per GPU
+    # get SIGTERM too once the grace period has passed. One campaign
+    # kept a server and its EngineCore holding most of each GPU's memory
     # through every "stop" when only SGLang was signalled.
     stop_patterns = ("vllm serve",)
     post_grace_patterns = ("VLLM::",)

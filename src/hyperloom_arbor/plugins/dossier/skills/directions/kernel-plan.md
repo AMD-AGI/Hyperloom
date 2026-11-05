@@ -82,8 +82,8 @@ source and label, as everywhere in the dossier.
 - **Graphs and compilation:**
   - It must capture under the served graph mode.
   - Counts that vary per step are runtime arguments, not compile-time
-    constants. A `tl.constexpr` route count compiled 2,218 variants and
-    stalled the engine for 30 s mid-bench (Model M B4, iteration 22).
+    constants. A `tl.constexpr` route count compiled thousands of variants and
+    stalled the engine mid-bench.
   - Target zero JIT compiles during inference.
 - **gfx950:**
   - wave64;
@@ -116,18 +116,17 @@ with its iteration, its numbers and its evidence, lands in the session's
 | S4 In tree | Behind a `VLLM_*` switch that defaults off, declared `SWITCH: NAME=1` beside `DONE:`. The harness checks it at the KEEP, serving the switch on: dispatch logged on every rank, 0 JIT compiles in serving, accuracy gate passed (`arbor/measure/switches.py`) | Dispatch fails at a served shape and the fix breaks S2 or S3 |
 | S5 A/B | The campaign's own gate, at every operating point the target names | The gate: KEEP, REVERT or a Pareto point, as part 4 classes it |
 
-Lessons the stages carry, from Model M campaigns B4 and C4:
+Lessons the stages carry, from earlier rewrites:
 - **Time graph-captured, not eager:** eager timing is host-bound and read
-  one saving at half its size (B4 iteration 47).
+  one saving at half its size.
 - **Gate correctness before timing,** with a negative control. Two checks
-  that passed vacuously were caught that way (C4 iteration 34).
-- **A fixture can rank right and price wrong.** C4 iteration 31's served
+  that passed vacuously were caught that way.
+- **A fixture can rank right and price wrong.** One served
   saving was well off its projection, so only S5 books a gain.
 - **Prove the arm by an artifact the run owns,** such as a cache file or a
-  marker the kernel writes, not by a log line that may be swallowed (C4
-  iteration 34).
+  marker the kernel writes, not by a log line that may be swallowed.
 - **Probe before building:** pricing the design's parts first changed the
-  design (B4 iteration 26: the split grid lost to the interleaved one).
+  design (a split grid lost to the interleaved one).
 
 ### The `## Items` block
 

@@ -55,7 +55,7 @@ dossier's index under "Open asks" and go on.
   and before parts 8 and 11 are written. A part 7 with a plan and no results
   leaves the dossier unwritten: parts 8 and 11 are drafts until it lands, and
   no optimization starts from them. The profiler's checks run with it; a
-  check not run is the next work, not a footnote. Model M campaign B wrote all twelve parts before any capture and ranked
+  check not run is the next work, not a footnote. One campaign wrote all twelve parts before any capture and ranked
   part 11 by evidence instead of ceilings; its first profile, one iteration
   later, re-ranked it.
 - **Re-profile when the tree or the deployment moves.** After a KEEP, and

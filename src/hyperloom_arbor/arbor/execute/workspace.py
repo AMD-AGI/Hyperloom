@@ -262,11 +262,11 @@ def save_patch(container: str, workspace: str, out_path: str | Path) -> None:
     Path(out_path).write_text(patch)
 
 
-# What landed.patch carries is what the server runs, and nothing else. Model M day-0's records
-# (2026-10-24) were mostly something else: 35 of b0's 86 file diffs were the agent's probe
-# scripts under arbor/eval/ and 29 were bytecode, so the CI/CD baseline had to be split by
-# hand. Everything else under arbor/ IS served and must stay: B3's TunableOp tables
-# (arbor/tunableop/*.csv), c0's tuned fused-MoE table and its AITER JIT links and sources.
+# What landed.patch carries is what the server runs, and nothing else. One campaign's records
+# were mostly something else: most of its file diffs were the agent's probe
+# scripts under arbor/eval/ and bytecode, so the CI/CD baseline had to be split by
+# hand. Everything else under arbor/ IS served and must stay: TunableOp tables
+# (arbor/tunableop/*.csv), a tuned fused-MoE table and AITER JIT links and sources.
 HARNESS_FILES = ("arbor/config.json",)
 # The agent's own instruments: evaluators and probes the server never imports. They still
 # carry across containers, in scratch.patch, because the agent works with them; they never
@@ -378,7 +378,7 @@ def _write_diff(container: str, workspace: str, out_path: str | Path, *args: str
     terminating newline: with it stripped, every landed.patch was rejected as
     "corrupt patch at line <last>", and the restore block fell back to replaying
     per-iteration patches, the path that cross-applied the OTHER campaign's work
-    into this container (2026-09-17 11:21). Adding back one newline was not
+    into this container. Adding back one newline was not
     enough either: a binary hunk ends with a blank line, so when a binary file
     came last the patch still lost it, and `git apply` reported "corrupt binary
     patch" yet exited 0 having skipped the file. Bytes,
@@ -417,8 +417,8 @@ def save_landed_patch(container: str, workspace: str, out_path: str | Path,
     so including it makes the patch fail to apply against a new repo, and `git
     apply` is atomic: that one file takes the real source changes down with it.
     Excluding all of arbor/ would be wrong the other way: it dropped
-    a KEEP's own files there (campaign B3 iteration 22's TunableOp tables, which
-    its kept PYTORCH_TUNABLEOP_FILENAME points at), so the next container ran
+    a KEEP's own files there (TunableOp tables, which
+    a kept PYTORCH_TUNABLEOP_FILENAME points at), so the next container ran
     without them. The agent's scratch goes to scratch.patch instead
     (``save_scratch_patch``), and bytecode goes nowhere.
     `--binary` so a patch is never silently lossy when a binary appears.

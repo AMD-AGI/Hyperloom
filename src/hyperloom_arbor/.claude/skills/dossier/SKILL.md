@@ -97,7 +97,7 @@ dossier's index under "Open asks" and go on.
   and before parts 8 and 11 are written. A part 7 with a plan and no results
   leaves the dossier unwritten: parts 8 and 11 are drafts until it lands, and
   no optimization starts from them. The profiler's checks run with it; a
-  check not run is the next work, not a footnote. Model M campaign B wrote all twelve parts before any capture and ranked
+  check not run is the next work, not a footnote. One campaign wrote all twelve parts before any capture and ranked
   part 11 by evidence instead of ceilings; its first profile, one iteration
   later, re-ranked it.
 - **Re-profile when the tree or the deployment moves.** After a KEEP, and
@@ -173,8 +173,8 @@ dossier's index under "Open asks" and go on.
   tree (AITER, CK) is read where it decides dispatch (part 8). Then:
   - **Line numbers come only from numbered output** (`cat -n`, `grep -n`,
     `nl`). A file too large for one read is read in numbered ranges, never in
-    unnumbered `sed -n` slices: Model M campaign B's reader did that, and 30 of
-    its 33 `amd/model.py` citations were wrong, one past the end of the file.
+    unnumbered `sed -n` slices: one campaign's reader did that, and most
+    of its `amd/model.py` citations were wrong, one past the end of the file.
   - **A reader's report is a lead, not a source.** Before a claim enters the
     dossier, the writer opens the cited range itself and confirms the named
     class, function or line is there. B's writer copied two reports without

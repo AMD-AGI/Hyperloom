@@ -120,8 +120,8 @@ def _render_history(lessons: list[dict]) -> str:
     #
     # Deliberately still a literal, and NOT the rule "verdict != REVERT" that
     # the intent split makes tempting. Those are not the same set: a LEARN that
-    # passed has verdict KEEP, so that rule would pin every probe — 25 of them
-    # in the cuda-graph campaign, almost all of whose artifacts live in `eval/`
+    # passed has verdict KEEP, so that rule would pin every probe — dozens
+    # in one campaign, almost all of whose artifacts live in `eval/`
     # rather than in the tree. It would also pin ESCALATE. Which rows are worth
     # permanent prompt budget is a judgement about cost, not something derivable
     # from the verdict, so it stays written down.
@@ -195,8 +195,8 @@ def _render_barren(campaign, state) -> str:
         # not discovered anything.
         # NOT a claim about what the campaign has or has not measured. The
         # design sketched two variants ("nothing has measured it" / "the last
-        # measurement was iteration X"), and rendering the first against the 2b
-        # campaign — which holds ~20 denominator and census ledger entries —
+        # measurement was iteration X"), and rendering the first against a
+        # campaign that held many denominator and census ledger entries
         # produced a flat falsehood. A block the agent can catch lying is a
         # block it discounts. Asking instead is always true, and after N landed
         # changes STALENESS is the live question anyway.
@@ -266,8 +266,8 @@ def _render_barren(campaign, state) -> str:
                 for f in uncited[:_BARREN_LIST_CAP]) + "\n")
 
     # (2) Re-land candidates. This is the highest-yield move in the corpus and
-    # nothing currently asks for it: the 2c campaign re-landed previously
-    # REVERTed work at iterations 15, 17, 19 and 24 — unprompted — and cleared
+    # nothing currently asks for it: one campaign re-landed previously
+    # REVERTed work several times, unprompted, and cleared
     # a bar every time.
     # Only intents that BOOK. A `LEARN -> REVERT` is a probe that closed no
     # finding, not a change sitting on the shelf — listing those as re-land
@@ -293,9 +293,9 @@ def _render_barren(campaign, state) -> str:
         f"thing on the menu.\n")
 
     # THE CLOSING PARAGRAPH IS NOT A HEDGE. A forced-diversity rule is the
-    # obvious move here and it is wrong: the 2d campaign's entire lead came
-    # from going DEEPER on one seam it had already touched (iterations 22, 24,
-    # 28 and 32 are all the same one). Breadth is the right prior when you do
+    # obvious move here and it is wrong: one campaign's entire lead came
+    # from going DEEPER on one seam it had already touched (its leading KEEPs
+    # are all the same one). Breadth is the right prior when you do
     # not know where the cost is; it is the wrong rule once you do.
     parts.append(
         "You are NOT required to change direction. Going deeper on a seam "
@@ -402,7 +402,7 @@ def render_program(campaign, state, arbor_root: str | Path,
 
     sections.append(f"# {campaign.pack.name} — {campaign.goal}\n")
 
-    # The regime, stated once at the top. 2b's 31-iteration drought was
+    # The regime, stated once at the top. A long drought was
     # invisible for as long as it was because every counter anyone looked at
     # faithfully reported `null_streak=2`.
     if hasattr(state, "diagnose") and state.lessons:

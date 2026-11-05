@@ -170,7 +170,7 @@ REGISTRY: tuple[Intent, ...] = (
         requires_bar=False,
         books=False,
         server="skip_if_readonly",
-        # NAME THE PATHS. This said "inert paths" until 2026-09-24, which is
+        # NAME THE PATHS. This once said "inert paths", which is
         # abstract where it needs to be operational: the saving is only worth
         # reaching for if the agent knows IN ADVANCE that its probe qualifies,
         # and "inert" leaves it guessing. `READONLY_PROBE_PREFIXES`
@@ -178,7 +178,7 @@ REGISTRY: tuple[Intent, ...] = (
         # knowledge/, ledger.jsonl, arbor/ -- and those are harness-level
         # conventions (cf. ALLOWED_PACK_DIRS), not one pack's layout, so naming
         # them here is general as well as true. The pre-split prompt named them
-        # and the v2 campaign probed 49% of iterations; do not re-abstract this
+        # and campaigns probed often; do not re-abstract this
         # without measuring what it costs.
         deliverable=(
             "buying knowledge rather than throughput. The deliverable is a "

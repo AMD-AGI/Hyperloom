@@ -112,7 +112,8 @@ copy that still names any of the replaced terms, or cites an internal board or t
 This copy also carries a text-only scrub on top of the tag: internal board, job and plan references, operator decision
 logs and measured performance figures are removed. The vendoring tool applies it, as a patch over its own output, and
 refuses a tag the patch no longer fits, so a re-vendor keeps it. The tool also refuses a copy that still has a job id,
-a dated operator log, an internal plan or a measured step time.
+a dated operator log, an internal plan or a measured step time, or, in Arbor's own text, an internal campaign or run
+named beside a date or a measured count.
 
 Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,
 `[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). Secret

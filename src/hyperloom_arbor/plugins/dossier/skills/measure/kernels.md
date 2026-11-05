@@ -73,9 +73,7 @@ writing or tuning anything:
   (task templates), and ISA notes (operand layouts).
 
 Its pages cite AITER `b467ce342`: verify every claim against the installed
-source. The runner keeps a read-only copy at
-`src/kernelforge (this repository)`, and `docs/kernelforge.md` maps
-it to DSV4.1's shapes.
+source. This repository carries KernelForge in `src/kernelforge`.
 
 ## 6. What the reference platform runs
 

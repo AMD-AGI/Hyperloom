@@ -785,8 +785,8 @@ def gpu_list(value) -> list[int] | None:
 def turn_block(config, session_dir=None, now: float | None = None) -> str:
     """The main agent's time this turn: its phase cap and what is left before the deadline.
 
-    On Cluster C (2026-10-29) an agent started an AITER fused-MoE tuning sweep inside a 30-minute
-    turn, hit the cap before measuring, and lost half of Arbor's 67 minutes: nothing had
+    Under a host an agent once started an AITER fused-MoE tuning sweep inside a capped
+    turn, hit the cap before measuring, and lost half of Arbor's time: nothing had
     told it how long its turn was. Empty in standalone, where turns have no cap.
     """
     if not is_component(config):
@@ -1068,7 +1068,7 @@ def carried_changes(container: str, workspace: str, parent: str, commit: str, it
     ``Revert "iter-N: ..."`` undoes, and that changes what is served: the served pathspec,
     or arbor/config.json (flags and env, which the patches leave out). A NOT_MEASURED
     iteration keeps its tree, so its change rides into the next KEEP, whose gate judges
-    only the two together (Cluster C, 2026-10-30: iteration 5's INT4 QuickReduce env in KEEP 2).
+    only the two together (an INT4 QuickReduce env once rode into a later KEEP that way).
     Each is named with its own verdict from session.json, for the host to see.
     """
     from arbor.execute.workspace import git

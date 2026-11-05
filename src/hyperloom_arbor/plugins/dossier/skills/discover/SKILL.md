@@ -86,8 +86,8 @@ first. It names the dossier's directory, the files to write, and the campaign's 
   tree (AITER, CK) is read where it decides dispatch (part 8). Then:
   - **Line numbers come only from numbered output** (`cat -n`, `grep -n`,
     `nl`). A file too large for one read is read in numbered ranges, never in
-    unnumbered `sed -n` slices: Model M campaign B's reader did that, and 30 of
-    its 33 `amd/model.py` citations were wrong, one past the end of the file.
+    unnumbered `sed -n` slices: one campaign's reader did that, and most
+    of its `amd/model.py` citations were wrong, one past the end of the file.
   - **A reader's report is a lead, not a source.** Before a claim enters the
     dossier, the writer opens the cited range itself and confirms the named
     class, function or line is there. B's writer copied two reports without
