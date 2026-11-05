@@ -10,7 +10,7 @@ An Arbor campaign's source tree lives **inside a Docker container** on a compute
 bind-mounted. It dies with the container. This skill covers getting the reproducible part into git, and
 rebuilding the tree byte-for-byte from what git holds.
 
-Verified 2026-09-17: rebuild from the archive reproduces the live container tree, **15/15 files identical by
+Verified: rebuild from the archive reproduces the live container tree, **every file identical by
 sha256**.
 
 ## Layout
@@ -19,8 +19,8 @@ sha256**.
 |---|---|
 | `<sessions root>/<campaign>/` | live session: `session.json`, `ledger.jsonl`, `landed.patch`, `stock_base/`, `iter_N/` |
 | `scripts/dsv41-campaign/` | `sync_campaign_to_git.sh`, `check_review_consistency.py`, the sbatch files |
-| `results/dsv41flash-agentx-c32/runs/<campaign>/` | the archived ~2 MB slice |
-| `results/dsv41flash-agentx-c32/CAMPAIGN_REVIEW.md` | hand-written analysis |
+| `results/<workload>/runs/<campaign>/` | the archived ~2 MB slice |
+| `results/<workload>/CAMPAIGN_REVIEW.md` | hand-written analysis |
 
 Session folders are ~2.7 GB, but **99.96% is replayable aiperf telemetry**. Everything with intellectual
 content — patches, ledgers, verdicts, stock base — is ~2 MB. Archive that; leave `agentic_run/` behind.
@@ -32,7 +32,7 @@ bash scripts/dsv41-campaign/sync_campaign_to_git.sh
 ```
 
 Copies `session.json`, `ledger.jsonl`, `landed.patch`, `stock_base/` and every `iter_N/patch.diff` into
-`results/dsv41flash-agentx-c32/runs/`, runs the review consistency check, commits and pushes to
+`results/<workload>/runs/`, runs the review consistency check, commits and pushes to
 the campaign's archive branch. Safe against running campaigns: read-only except for appending a missing trailing
 newline to `landed.patch`. Idempotent — prints `nothing changed` when there is nothing new.
 
@@ -41,7 +41,7 @@ Runs every 20 minutes on a cron while campaigns are live.
 ## Recover a campaign's exact tree
 
 ```bash
-R=results/dsv41flash-agentx-c32/runs/<campaign>     # dsv41flash-c32 | dsv41flash-c32-v2
+R=results/<workload>/runs/<campaign>
 
 cp -r "$R/stock_base" rebuild && cd rebuild
 git init -q . && git add -A && git -c user.name=r -c user.email=r@r commit -qm stock
@@ -93,8 +93,8 @@ is correct.
 (`arbor/execute/workspace.py`). Without it `git apply` reports `corrupt patch at line <last>` and rejects the
 **whole file** even when the hunk arithmetic is complete — and `git apply` is atomic, so nothing lands. This
 was not cosmetic: a rejected `landed.patch` made the sbatch restore block fall back to replaying
-per-iteration patches, and that fallback globbed `$SESSIONS/*/session.json` — every campaign — so V2's
-container restored ORIGINAL's iterations 1, 12, 13, 15 and 18. One missing byte cross-contaminated a
+per-iteration patches, and that fallback globbed `$SESSIONS/*/session.json` — every campaign — so one
+campaign's container restored another campaign's iterations. One missing byte cross-contaminated a
 campaign. If a patch will not apply, check the last byte before anything else:
 
 ```bash

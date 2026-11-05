@@ -17,8 +17,8 @@ it) minus ``policy.accuracy_tolerance``. Without a golden score it compares
 with the pack's ``GSM8K_MIN`` and says so.
 
 Under a host there is no baseline record, and the host's own eval of the root
-reads on another scale (MB: 0.939 against this pack's 0.870 on Qwen3-8B, Cluster A,
-2026-11-01), so it cannot stand in. So in component mode, before iteration 1,
+reads on another scale (MB's own eval and this pack's GSM8K read the same root differently),
+so it cannot stand in. So in component mode, before iteration 1,
 the driver serves the root as initialized and runs the full set once
 (``measure_root``), into ``<session>/baseline_accuracy.json``; the gate then
 holds a numerics change to that score less the tolerance, on the same eval.

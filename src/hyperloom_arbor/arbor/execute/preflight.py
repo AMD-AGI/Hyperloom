@@ -58,8 +58,8 @@ def stop_server(container: str, gpu_ids: list[int] | None = None,
     launch doesn't fail with 'memory capacity unbalanced'.
 
     vLLM too: this signalled only `sglang.launch_server`, so on a vLLM
-    campaign nothing stopped. Model M B on Cluster B (2026-10-07) kept a server and
-    its EngineCore holding ~265 GB per GPU through every "stop"; the next
+    campaign nothing stopped. One campaign kept a server and
+    its EngineCore holding most of each GPU's memory through every "stop"; the next
     launch failed or the harness reused the stale server. `vllm serve` is the
     API server, which takes its engine down on SIGTERM; an EngineCore or
     worker it leaves behind renames itself `VLLM::...`, so those get SIGTERM

@@ -64,8 +64,8 @@ def _live_flags(config: dict) -> str:
     server_flags changed nothing — silently, with the file on disk showing the
     edit it believed had landed.
 
-    Found by the cuda-graph campaign, which booked a class-A KEEP for landing
-    ``--profiler-config`` and only discovered eight iterations later that
+    Found by a campaign that booked a class-A KEEP for landing
+    ``--profiler-config`` and only discovered iterations later that
     /proc/<pid>/cmdline contained no such flag and POST /start_profile returned
     404, while the workspace config held the correct string and shell-quoting
     had been ruled out by expanding it inside the container.

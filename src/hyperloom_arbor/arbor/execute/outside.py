@@ -1,6 +1,6 @@
 """What a KEEP's served tree needs from outside it, and how that is rebuilt.
 
-Model M day-0 c0's landed.patch (2026-10-24) is 208 symlinks out of 220 entries: its agent pointed
+One campaign's landed.patch was almost all symlinks: its agent pointed
 AITER_JIT_DIR at arbor/aiter_jit/ and linked every AITER JIT module there into AITER's install
 directory, so the modules were saved nowhere and a fresh container need not have them. The
 operator's choice: rebuild them, do not store them.

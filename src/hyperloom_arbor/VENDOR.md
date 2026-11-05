@@ -64,6 +64,7 @@ The engine and what its agents read:
     and the skills guide point to this copy instead.
 - **No results of internal campaigns:** campaign names, dates and measured figures in code comments, skills and docs
   are generalized, or their section is left out.
+- **`CONTRIBUTING.md`** is this copy's own: it says where a change to Arbor is made.
 - **Profiling on TraceLens:** upstream, Arbor's profiler skill traces with a tracer of its own, which is not released
   here. In this copy the skill (`.claude/skills/profiler/SKILL.md`) profiles with TraceLens instead, as this repository
   does:
@@ -103,7 +104,7 @@ maintainers' vendoring tool, with the same omissions, placeholders, profiler ski
 copy that still names any of the replaced terms.
 
 This copy also carries a text-only scrub on top of the tag: internal board, job and plan references, operator decision
-logs, internal campaigns' figures and the private repository's access are removed. The vendoring tool carries the same
+logs, internal campaigns' runs, dates and figures and the private repository's access are removed. The vendoring tool carries the same
 scrub for later tags, as a patch over its output, and refuses a copy that still has such a reference.
 
 Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,

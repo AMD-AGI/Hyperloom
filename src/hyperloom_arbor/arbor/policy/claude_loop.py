@@ -265,9 +265,8 @@ class AgentLaunchError(RuntimeError):
         Command failed with exit code 1 (exit code: 1)
         Error output: Check stderr output for details
 
-    -- a message that names a stream nobody was reading. Three campaigns have
-    now died this way (v3 on 2026-09-19, v5, and the cuda-graph campaign),
-    costing ~3 h of exclusive MI355X time on the first occasion alone, and each
+    -- a message that names a stream nobody was reading. Campaigns have
+    died this way, at a cost of hours of exclusive GPU time, and each
     time the diagnosis had to be reconstructed from a single line that happened
     to leak into the driver's own stdout. The real cause was one `mkdir` errno
     that was being thrown away.
@@ -307,9 +306,9 @@ def _skill_options(options_cls, skills: list[str] | None,
 
 
 # An agent that cannot reach its model has done nothing, so it is started again before the
-# iteration is booked not measured: under Hyperloom on Cluster C (2026-10-29) a 20-minute gateway
-# outage made three starts in a row fail with ERR_PROXY_TUNNEL, and the not-measured streak
-# ended a 9-hour run. Connection-level and server-side (5xx, overloaded) errors only: a 4xx
+# iteration is booked not measured: under a host, a gateway
+# outage once made three starts in a row fail with ERR_PROXY_TUNNEL, and the not-measured streak
+# ended the run. Connection-level and server-side (5xx, overloaded) errors only: a 4xx
 # (a refused key, a model the CLI does not support) does not heal by waiting.
 CONNECT_ERRORS = ("couldn't connect", "could not connect", "err_proxy", "econnrefused",
                   "econnreset", "etimedout", "enotfound", "eai_again", "socket hang up",
@@ -498,7 +497,7 @@ def _run_phase(coro, phase: str, config: dict):
 def _write_aborted(session_dir_p: Path, msg: str) -> None:
     """ABORTED.md, which ends the run: a broken harness, or, when the last agent start could
     not reach its model, component.UNREACHABLE_HEAD, on which a component run exits 3 so the
-    host resumes it once the model answers again (a gateway outage, Cluster C 2026-10-29)."""
+    host resumes it once the model answers again (a gateway outage)."""
     if _unreachable:
         text = (f"{component.UNREACHABLE_HEAD}\n\nThe model could not be reached: "
                 f"{_unreachable}\n{msg}\n")
@@ -724,10 +723,10 @@ def _synthesize_dead_end(campaign, iteration: int, change: str, reason: str,
 
     A REVERT that emits no `LEDGER:` line teaches the campaign nothing: the
     change is undone, the history row scrolls out of the window after ten more
-    iterations, and the next agent is free to try the same thing. The cuda-graph
-    campaign is the argument for this — iterations 38, 41 and 44 were reverted,
+    iterations, and the next agent is free to try the same thing. One campaign
+    is the argument for this — three of its iterations were reverted,
     and the discovery that all three were NULL (the bar was the maximum of its
-    own cohort, unreachable by 6-8 of 10 identical runs) was possible only
+    own cohort, unreachable by most identical runs) was possible only
     because that agent happened to write ledger entries voluntarily. Nothing in
     the harness required it.
 
@@ -1133,7 +1132,7 @@ def _finalize_iteration(
         except Exception as e:
             print(f"[arbor] WARNING: landed packages not captured: {e} — an edit outside "
                   f"the workspace is NOT recoverable if this container dies", file=sys.stderr)
-        # What the served tree links to outside itself (c0's AITER JIT modules) and how it
+        # What the served tree links to outside itself (a KEEP's AITER JIT modules) and how it
         # is rebuilt: recorded, never stored (arbor/execute/outside.py). Bookkeeping too.
         try:
             from arbor.execute import outside as _outside
@@ -1377,7 +1376,7 @@ def _server_launch_cmd(config: dict, server_flags: str | None = None,
     """Build the framework-appropriate server launch command.
 
     This used to hardcode `python3 -m sglang.launch_server`, so a campaign with
-    `"framework": "vllm"` — like dsv41flash — failed at server start on every
+    `"framework": "vllm"` failed at server start on every
     iteration. The framework is declared in the config; honour it. The command
     itself is that framework's adapter's (arbor/frameworks/).
 
@@ -2009,12 +2008,12 @@ def run_iteration(
         # iteration restarted the server, ran a full bench against unchanged
         # code, and recorded "REVERT: no changes" — indistinguishable in
         # session.json from "the agent wrote something that regressed". It then
-        # cooled down and did it again. On 2026-09-19 the v3 campaign's node
+        # cooled down and did it again. When a node
         # lost /tmp, the agent died in milliseconds with
         #     ENOENT: no such file or directory, mkdir '/tmp/claude-<pid>'
-        # and the loop produced 33 consecutive REVERTs — 24 of them inside 13
-        # minutes — burning ~3 h of exclusive MI355X time and manufacturing a
-        # null_streak of 24 that reads exactly like diminishing returns.
+        # and the loop produced a run of REVERTs within minutes, burning
+        # exclusive GPU time and manufacturing a null_streak that reads
+        # exactly like diminishing returns.
         #
         # This is the same category as a bench that never ran, which
         # record_invalid() already handles correctly: the tree is preserved,
@@ -2269,9 +2268,9 @@ def run_iteration(
     # duration_seconds cannot be checked, which is the campaign's first
     # integrity rule) and no secondary metric (so the two-axis gate is inert).
     #
-    # Run 2 iteration 1 measured a gain on p90_interactivity, the second axis,
-    # larger than its throughput gain -- and the gate never saw it. Run 1 lost iterations 8, 10 and 15 the
-    # same way.
+    # One run's first iteration measured a gain on p90_interactivity, the second
+    # axis, larger than its throughput gain -- and the gate never saw it. An
+    # earlier run lost iterations the same way.
     comp = component.is_component(config)
     session_mount = config.get("session_mount", "/workspace/sessions")
     if comp:

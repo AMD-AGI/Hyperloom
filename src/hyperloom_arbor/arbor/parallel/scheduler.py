@@ -1,6 +1,6 @@
 """Which lanes start now, pure: at most ``max_nodes`` nodes, in (level, rank, id) order.
 
-The cap counts nodes, not lanes or GPUs (decision 0003): a lane measures on a
+The cap counts nodes, not lanes or GPUs: a lane measures on a
 whole node, and nothing runs on its other GPUs. Every lane that has a job,
 queued or running, holds its nodes against the cap, so the lanes a tick
 submits never add up to more than the cap once they all start.

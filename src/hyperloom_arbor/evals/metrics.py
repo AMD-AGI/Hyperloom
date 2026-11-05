@@ -52,7 +52,7 @@ _FLAG_RE = re.compile(r"(--[a-z][a-z0-9-]{3,})")
 #: Flags every launch carries regardless of what is being tested. Reporting
 #: ``--model`` or ``--port`` as a "retried change" is noise dressed as a finding,
 #: and the earlier "present in every iteration" filter did not catch them: they
-#: appeared in 4 of 5 iterations (two runs never reached a launch), so they
+#: appeared in most iterations (some runs never reached a launch), so they
 #: survived the intersection and were reported anyway.
 _STRUCTURAL_FLAGS = frozenset({
     "--model", "--port", "--host", "--tensor-parallel-size", "--trust-remote-code",

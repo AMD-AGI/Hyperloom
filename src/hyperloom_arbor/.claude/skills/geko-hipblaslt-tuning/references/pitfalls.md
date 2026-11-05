@@ -52,8 +52,8 @@ M is the most common mismatch, but geko's Equality match keys on the **entire** 
 transB, a_type, b_type, c_type, d_type, compute_type)`. If **any** field differs from what serving actually
 dispatches, the tuned kernel does not fire — stock fallback, silently.
 
-**Hard-won example (2026-10-02):** a tune produced 25 kept kernels with a real GEMM uplift, yet a trace of
-the tuned serving run showed **0 of 25** firing. Ground truth from the eager `HIPBLASLT_LOG`: every real
+**Hard-won example:** a tune produced kept kernels with a real GEMM uplift, yet a trace of
+the tuned serving run showed **none of them** firing. Ground truth from the eager `HIPBLASLT_LOG`: every real
 DSV4.1-Flash M=384 decode GEMM is `--a_type bf16_r --b_type bf16_r --c_type f32_r --d_type f32_r` — i.e. **bf16
 in, f32 OUT**. But the tuning workload yaml had `c_type: bf16_r, d_type: bf16_r` (bf16 out). So geko tuned the
 `...BBS...` (bf16-out) kernel family while serving dispatches `...BSS...` (f32-out) — the kernel-name type code
