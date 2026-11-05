@@ -621,6 +621,19 @@ def _print_session_skeleton(session_dir: Path) -> None:
     print("  [ok] manifest.json (written first)")
 
 
+def _print_export_gate_line(state: SharedState) -> None:
+    """Print the export-gate summary line, next to the gain figure.
+
+    The wording lives with the rest of the run summary in ``executors.report``.
+    Silent unless ``aoti.enabled``.
+    """
+    from hyperloom.orchestrator.actions.executors.report import export_gate_summary_line
+
+    line = export_gate_summary_line(state)
+    if line:
+        print(line)
+
+
 def _print_final_summary(
     state: SharedState,
     stop_reason: str,
@@ -656,6 +669,7 @@ def _print_final_summary(
         )
     else:
         print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` KEEP has landed yet")
+    _print_export_gate_line(state)
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")

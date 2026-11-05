@@ -70,6 +70,7 @@ from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.orchestrator.measurement.runtime_findings import (
     CORRECTNESS_FIX_MAX_DROP_PCT,
     KEEP_REASON_CORRECTNESS_FIX,
+    KEEP_REASON_EXPORT_LANDED,
     correctness_fix_refusal,
     load_runtime_findings,
 )
@@ -1861,6 +1862,158 @@ def _inert_keep_reason(
     return "; ".join(bits)
 
 
+def _export_landing_keep(
+    *,
+    shared_state: Any,
+    graded: Any,
+    delta_pct: float | None,
+    accuracy_pass: bool | None,
+    acc_block: bool,
+) -> bool:
+    """Whether a correct-but-slower first export should KEEP anyway.
+
+    An eager configuration is not a deliverable once ``aoti.enabled`` is declared, so
+    the first export is accepted on correctness and becomes the grading anchor:
+    ``resolve_grading_anchor_tput`` prefers ``current_best`` over the baseline, so
+    phase two measures export against export with no further special casing.
+
+    Throughput is the *only* thing waived. The refusals below mirror
+    ``_correctness_fix_refusals``, the sibling carve-out: an operator's latency or
+    power budget is a declared constraint, not a preference, and an unverified or
+    incomparable measurement is not evidence that the export is correct.
+    """
+    # Imported here, not at module scope: the deployment and framework packages
+    # reach back into this one.
+    from ...deployment.single_file import module_uses_aoti
+    from ...framework.optimization_scope import aoti_config, optimization_file
+
+    if not isinstance(delta_pct, (int, float)):
+        return False
+    if not getattr(graded, "comparable", False) or getattr(graded, "veto_reason", ""):
+        return False
+    # None means no verdict was recorded, which is not the same as passing.
+    if acc_block or accuracy_pass is not True:
+        return False
+    if shared_state is None or bool(getattr(shared_state, "export_landed", False)):
+        return False
+    try:
+        config = aoti_config()
+    except ValueError:
+        return False
+    if config is None or not config.enabled:
+        return False
+    hook = optimization_file()
+    return hook is not None and module_uses_aoti(hook)
+
+
+@dataclass(frozen=True)
+class _KeepDecision:
+    """Whether a candidate may KEEP, and under which rule.
+
+    ``rule`` is the ``keep_reason`` that travels to the verdict: empty when the
+    candidate cleared the throughput gate on its own, otherwise the carve-out that
+    admitted it below the threshold.
+    """
+
+    gate_pass: bool
+    delta_pct: float | None
+    rule: str = ""
+    fix_refusals: tuple[str, ...] = ()
+    resolves_finding: str = ""
+
+    @property
+    def correctness_fix(self) -> bool:
+        return self.rule == KEEP_REASON_CORRECTNESS_FIX
+
+    @property
+    def export_landing(self) -> bool:
+        return self.rule == KEEP_REASON_EXPORT_LANDED
+
+    def reason(self, *, graded: Any, keep_threshold_pct: float) -> str:
+        """The human-readable verdict line for a KEEP."""
+        delta_pct = self.delta_pct or 0.0
+        if self.correctness_fix:
+            return f"correctness fix {self.resolves_finding} verified at {_fix_axis(graded)} delta {delta_pct:+.2f}%"
+        if self.export_landing:
+            return (
+                f"first ahead-of-time export landed at {delta_pct:+.2f}% vs the eager baseline, "
+                "which this workload cannot ship; later candidates are graded against this export"
+            )
+        return f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"
+
+
+def _decide_keep(
+    *,
+    graded: Any,
+    delta_pct: float | None,
+    keep_threshold_pct: float,
+    acc_block: bool,
+    accuracy_pass: bool | None,
+    shared_state: Any,
+    bench_result: dict[str, Any],
+    done_payload: dict[str, Any] | None,
+) -> _KeepDecision:
+    """Apply the throughput gate, then the carve-outs that can admit a candidate below it.
+
+    The correctness fix is tried before the export so that a candidate which both
+    exports and resolves a finding is recorded as the fix, leaving the finding closed
+    rather than re-chased.
+    """
+    if (
+        graded.comparable
+        and delta_pct is not None
+        and delta_pct >= keep_threshold_pct
+        and not graded.veto_reason
+        and not acc_block
+    ):
+        return _KeepDecision(gate_pass=True, delta_pct=delta_pct)
+
+    resolves_finding = str(_done_field(done_payload, "resolves_finding") or "").strip()
+    fix_refusals: tuple[str, ...] = ()
+    if resolves_finding:
+        fix_delta_pct = gain_pct(graded.candidate, graded.reference) if graded.graded_on_intvty else delta_pct
+        fix_refusals = tuple(
+            _correctness_fix_refusals(
+                resolves_finding,
+                shared_state=shared_state,
+                bench_result=bench_result,
+                graded=graded,
+                delta_pct=fix_delta_pct,
+                accuracy_pass=accuracy_pass,
+            )
+        )
+        if not fix_refusals:
+            return _KeepDecision(
+                gate_pass=True,
+                delta_pct=fix_delta_pct,
+                rule=KEEP_REASON_CORRECTNESS_FIX,
+                resolves_finding=resolves_finding,
+            )
+
+    # Reached with the refusals above still set: they are about the finding, and say
+    # nothing about whether this is the first export.
+    if _export_landing_keep(
+        shared_state=shared_state,
+        graded=graded,
+        delta_pct=delta_pct,
+        accuracy_pass=accuracy_pass,
+        acc_block=acc_block,
+    ):
+        return _KeepDecision(
+            gate_pass=True,
+            delta_pct=delta_pct,
+            rule=KEEP_REASON_EXPORT_LANDED,
+            resolves_finding=resolves_finding,
+        )
+
+    return _KeepDecision(
+        gate_pass=False,
+        delta_pct=delta_pct,
+        fix_refusals=fix_refusals,
+        resolves_finding=resolves_finding,
+    )
+
+
 class IntegratePatchExecutor:
     """ActionRunner for the ``integrate_patch`` action (PR-A4)."""
 
@@ -3643,29 +3796,24 @@ class IntegratePatchExecutor:
                 "KEEP allowed on throughput only (task=%s)",
                 specialist_task_id,
             )
-        gate_pass = (
-            graded.comparable
-            and delta_pct is not None
-            and delta_pct >= keep_threshold_pct
-            and not graded.veto_reason
-            and not acc_block
+        decision = _decide_keep(
+            graded=graded,
+            delta_pct=delta_pct,
+            keep_threshold_pct=keep_threshold_pct,
+            acc_block=acc_block,
+            accuracy_pass=accuracy_pass,
+            shared_state=shared_state,
+            bench_result=bench_result,
+            done_payload=done_payload,
         )
-        resolves_finding = str(_done_field(done_payload, "resolves_finding") or "").strip()
-        fix_refusals: list[str] = []
-        correctness_fix = False
-        if not gate_pass and resolves_finding:
-            fix_delta_pct = gain_pct(graded.candidate, graded.reference) if graded.graded_on_intvty else delta_pct
-            fix_refusals = _correctness_fix_refusals(
-                resolves_finding,
-                shared_state=shared_state,
-                bench_result=bench_result,
-                graded=graded,
-                delta_pct=fix_delta_pct,
-                accuracy_pass=accuracy_pass,
+        delta_pct = decision.delta_pct
+        if decision.export_landing:
+            log.warning(
+                "integrate_patch: accepting first ahead-of-time export at %+.2f%% (threshold %.2f%%); "
+                "later candidates grade against it",
+                delta_pct,
+                keep_threshold_pct,
             )
-            if not fix_refusals:
-                gate_pass = correctness_fix = True
-                delta_pct = fix_delta_pct
         _ss_kb = extra.get("shared_state") or extra.get("state")
         acc_delta_pct = _accuracy_delta_pct(
             gate_evidence.get("accuracy"),
@@ -3756,7 +3904,7 @@ class IntegratePatchExecutor:
                     "workspace": str(output_root),
                 }
 
-        if not gate_pass:
+        if not decision.gate_pass:
             # Two-tier verdict for a framework-rewrite patch. Every rewrite in it
             # is behind a switch that defaults OFF, so keeping the code with the
             # switches unset changes nothing at runtime — which makes reverting
@@ -3805,15 +3953,18 @@ class IntegratePatchExecutor:
                 reasons.append(graded.veto_reason)
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
-            if fix_refusals:
-                reasons.append(f"correctness fix {resolves_finding} refused: {'; '.join(fix_refusals)}")
+            if decision.fix_refusals:
+                reasons.append(
+                    f"correctness fix {decision.resolves_finding} refused: {'; '.join(decision.fix_refusals)}"
+                )
             _probe_reason = eval_probe_summary(gate_evidence.get("eval_probe"))
             if _probe_reason:
                 reasons.append(_probe_reason)
             _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
             revert_status = (
                 "accuracy_unavailable_reject"
-                if (acc_block and accuracy_pass is None and _tput_ok) or fix_refusals == [_FIX_ACCURACY_UNAVAILABLE]
+                if (acc_block and accuracy_pass is None and _tput_ok)
+                or decision.fix_refusals == (_FIX_ACCURACY_UNAVAILABLE,)
                 else "reverted"
             )
             await self._maybe_write_framework_kb_record(
@@ -3971,13 +4122,9 @@ class IntegratePatchExecutor:
             "base_tput": base_tput,
             "measured_against": measured_against,
             "keep_threshold_pct": keep_threshold_pct,
-            "reason": (
-                f"correctness fix {resolves_finding} verified at {_fix_axis(graded)} delta {delta_pct:+.2f}%"
-                if correctness_fix
-                else f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"
-            ),
-            "keep_reason": KEEP_REASON_CORRECTNESS_FIX if correctness_fix else "",
-            "resolves_finding": resolves_finding if correctness_fix else "",
+            "reason": decision.reason(graded=graded, keep_threshold_pct=keep_threshold_pct),
+            "keep_reason": decision.rule,
+            "resolves_finding": decision.resolves_finding if decision.correctness_fix else "",
             "bench_result": bench_result,
             "workspace": str(output_root),
             "source_snapshot": source_snapshot_dir,

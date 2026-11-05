@@ -57,6 +57,7 @@ from ..bringup import ARGV_INVALID
 from ..framework.artifacts import candidate_key
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import SharedState, resolve_graded_comparison, stack_base_params
+from ..framework.optimization_scope import aoti_config
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.grid_server_args import (
     dedupe_extra_server_args,
@@ -93,7 +94,7 @@ from ..actions.executors._accuracy_gate import (
 from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
-from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
+from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX, KEEP_REASON_EXPORT_LANDED
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
@@ -1452,9 +1453,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "current_best held: %s winner refused by %s (%s)", task_kind, graded.vetoed_by, graded.veto_reason
                 )
                 return False
-            # A verified correctness fix was already bounded by the integrate gate.
-            correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
-            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
+            # A verified correctness fix, and the first export (an eager reference is not a deliverable), were already
+            # bounded by the integrate gate: neither has to beat the anchor to be recorded.
+            admitted_below_anchor = bv.get("keep_reason") in (KEEP_REASON_CORRECTNESS_FIX, KEEP_REASON_EXPORT_LANDED)
+            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not admitted_below_anchor:
                 log.info(
                     "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
                     task_kind,
@@ -1465,7 +1467,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     graded.tput_candidate,
                 )
                 return False
-            if graded.reference > 0 and graded.candidate <= graded.reference and not correctness_fix:
+            if graded.reference > 0 and graded.candidate <= graded.reference and not admitted_below_anchor:
                 log.info(
                     "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
                     graded.reference,
@@ -2978,6 +2980,66 @@ class WritebackCollaborator(CoordinatorCollaborator):
             f"stash_restore_error={result.get('stash_restore_error')!r}"
         )
 
+    def _record_export_gate(self, *, kept_flag: bool, workspace: str = "") -> bool:
+        """Open the export gate once a KEEP lands whose benchmark really exported.
+
+        Inert unless ``aoti.enabled``. The evidence is the run's own call counters,
+        not its source: a module that mentions the AOTI entry points in a helper
+        nobody calls, in a dead branch, or in the ``except`` arm of a fallback to
+        eager parses the same as one that exports, and benchmarks just as happily.
+        Counting the calls separates them -- see ``measurement.aoti_evidence``.
+
+        There is no source-reading fallback. A promotion judges a benchmark that just
+        ran under this build, so its counters are always present -- including on a
+        resumed session, whose next KEEP is a fresh run. Keeping one would preserve
+        the weak check for a case that cannot arise.
+
+        Returns whether it mutated state, so the caller persists it. A failed attempt
+        is the one this counter exists to record, and that path has no other reason
+        to save.
+
+        ``export_attempts`` counts KEEPs whose module did not export. A REVERT is not
+        an export attempt -- it is a candidate that never reached the tree -- and
+        counting one would make the figure read as progress toward an export.
+        """
+        try:
+            config = aoti_config()
+        except ValueError:
+            return False
+        if config is None or not config.enabled or self.shared_state.export_landed:
+            return False
+        if not kept_flag:
+            return False
+        if self._keep_really_exported(workspace):
+            self.shared_state.export_landed = True
+            return True
+        self.shared_state.export_attempts += 1
+        return True
+
+    def _keep_really_exported(self, workspace: str) -> bool:
+        """Whether this KEEP's benchmark ran an exported module."""
+        from ..measurement.aoti_evidence import read_evidence
+
+        evidence = read_evidence(workspace) if workspace else None
+        if evidence is None or not evidence.observed:
+            # The counters are armed for every run of an aoti workload, so their
+            # absence is a broken harness, not a verdict -- most likely the start-up
+            # shim never loaded. Hold the gate and say which it is.
+            log.warning(
+                "export gate: no run counters under %r; the start-up shim did not run, "
+                "so this KEEP cannot be judged and the gate stays shut",
+                workspace or "<no workspace>",
+            )
+            return False
+        if not evidence.exported:
+            log.info(
+                "export gate: KEEP did not export (compiled=%d loaded=%d invoked=0 across %d process(es))",
+                evidence.compiled,
+                evidence.loaded,
+                evidence.processes,
+            )
+        return evidence.exported
+
     async def _promote_integrate_patch(
         self,
         result: dict,
@@ -2991,6 +3053,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         measurement = result.get("bench_result") or result
         new_tput = measurement.get("output_throughput", result.get("output_throughput"))
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+        export_gate_changed = self._record_export_gate(
+            kept_flag=kept_flag, workspace=str(result.get("workspace") or "")
+        )
         completed_pending = self._confirmed_integrate_completion(result, task, kept_flag=kept_flag)
         # Register framework-rewrite switches as search levers. Done for both KEEP
         # verdicts: a bundle that cleared the gate is on and gets leave-one-out
@@ -3066,6 +3131,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 lift["keep_reason"] = KEEP_REASON_CORRECTNESS_FIX
                 lift["resolves_finding"] = str(result.get("resolves_finding") or "")
                 lift["attribution_eligible"] = False
+            elif result.get("keep_reason") == KEEP_REASON_EXPORT_LANDED:
+                lift["keep_reason"] = KEEP_REASON_EXPORT_LANDED
             if enablement_landing:
                 lift["recipe_publishable"] = False
             if prebaseline_enablement:
@@ -3129,7 +3196,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     task=task,
                     include_patches=True,
                 )
-        outcome.changed = changed
+        outcome.changed = changed or export_gate_changed
 
     async def _promote_conc_sweep(
         self,

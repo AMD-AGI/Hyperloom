@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
 )
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
+from ...framework.optimization_scope import aoti_config
 from ...state.shared_state import SharedState
 
 
@@ -229,6 +230,14 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Terminal reasons the coordinator loop sets directly.
     "target_reached": "Target reached: a requested --target-gain / --target-tput / --target-roofline was met.",
     "time_exhausted": "Wall-clock budget (--max-hours) was exhausted; the best validated result was kept.",
+    "export_never_landed": (
+        "This workload declared aoti.enabled, but the run closed without a KEEP whose module "
+        "compiles an AOTInductor package, so the ahead-of-time export never landed. See "
+        "ungated_close_reason for what actually ended the run and export_attempts for how many "
+        "integrate rounds went by without one. Common causes: the framework-agent phase budget "
+        "fits too few patch specialists (raise --phase-budget-framework-pct), or the model has a "
+        "tracing blocker torch.export cannot get past."
+    ),
     "max_ticks": "The coordinator hit its max-ticks safety cap; the best validated result was kept.",
     "signal": "Stopped on an OS stop signal (e.g. SIGINT / SIGTERM).",
     "emergency": (
@@ -335,6 +344,54 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "Resume once the cause is fixed."
     ),
 }
+
+
+def _export_gate_stop_reason(state) -> str:
+    """Name an unlanded ahead-of-time export, whatever else ended the run.
+
+    Overrides every other terminal, so short runs, budget exhaustion and wall-clock
+    expiry all report it rather than reading as an ordinary closeout. Mirrors the
+    ``baseline_failed`` rewrite in ``machine_state._skip_to_close_reason``.
+    """
+    try:
+        config = aoti_config()
+    except ValueError:
+        return ""
+    if config is None or not config.enabled:
+        return ""
+    if bool(getattr(state, "export_landed", False)):
+        return ""
+    return "export_never_landed"
+
+
+def export_gate_summary_line(state) -> str:
+    """One summary line saying whether the declared ahead-of-time export landed.
+
+    A landed export can still show a negative headline gain, measured against an eager
+    path this workload cannot ship, so the gain figure alone misreads. Empty unless
+    ``aoti.enabled``, and empty on an unreadable declaration -- the gate itself already
+    fails closed on that, and a summary line is not where to surface it.
+    """
+    try:
+        config = aoti_config()
+    except ValueError:
+        return ""
+    if config is None or not config.enabled:
+        return ""
+    if not getattr(state, "export_landed", False):
+        attempts = int(getattr(state, "export_attempts", 0) or 0)
+        return (
+            f"  aoti_export          : ⚠ NEVER LANDED after {attempts} integrate round(s) — "
+            f"no shippable artifact was produced, whatever else this run kept"
+        )
+    gain = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+    tail = (
+        "the artifact is faster than the eager path it replaces"
+        if gain > 0
+        else "it is still behind the eager path, which this workload does not ship; "
+        "optimizing the export is what further budget buys"
+    )
+    return f"  aoti_export          : landed — {tail}"
 
 
 def _explain_stop_reason(stop_reason, state=None):
@@ -488,6 +545,7 @@ def _build_summary_dict(
     # The wind-down report is rendered inside closing_phase, before the loop assigns the terminal stop_reason;
     # closing_phase is only entered on the wall-clock deadline, so fall back to time_exhausted rather than blank.
     stop_reason = str(getattr(state, "stop_reason", "") or "").strip()
+    export_gate_reason = _export_gate_stop_reason(state)
     if not stop_reason and getattr(state, "closing_phase", False):
         stop_reason = "time_exhausted"
     summary: dict[str, Any] = {
@@ -496,8 +554,12 @@ def _build_summary_dict(
         "model_path": state.model_path,
         "model_class": state.model_class,
         "framework": getattr(state, "framework", "") or "",
-        "stop_reason": stop_reason,
-        "stop_reason_explanation": _explain_stop_reason(stop_reason, state),
+        "stop_reason": export_gate_reason or stop_reason,
+        "stop_reason_explanation": _explain_stop_reason(export_gate_reason or stop_reason, state),
+        # Preserved when the export gate renames the reason, so the original terminal
+        # (time_exhausted, global_converged, ...) is still readable.
+        **({"ungated_close_reason": stop_reason} if export_gate_reason else {}),
+        "export_attempts": int(getattr(state, "export_attempts", 0) or 0),
         "baseline_tput": state.baseline_tput,
         "baseline_perf": dict(getattr(state, "baseline_perf", None) or {}),
         # Read back by the graded-axes section: the persisted AgentX marker outlives the shell, so a report rendered

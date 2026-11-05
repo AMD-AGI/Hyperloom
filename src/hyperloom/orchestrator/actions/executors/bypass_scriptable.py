@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from contextlib import ExitStack, nullcontext
@@ -13,6 +14,8 @@ from typing import Any
 
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.inference_optimizer.session.paths import asset_root
+
+log = logging.getLogger(__name__)
 
 
 def _scriptable_script_name(framework: str, runner_type: str) -> str:
@@ -73,13 +76,20 @@ def enforce_custom_scope(framework: str) -> None:
     The operator-declared single-file scope is verified at launch, where the
     framework repo path is already exported, so an out-of-boundary campaign
     fails before spending any work rather than at the first patch apply.
+
+    The ``aoti`` block is parsed here for the same reason, and because nothing
+    else ever reports it: every other caller of ``aoti_config`` swallows the
+    error. A malformed block otherwise costs the whole run -- the agent is never
+    told to export, since ``scope_instructions`` omits the declaration it could
+    not read, while the dispatcher holds the gate shut on the same error.
     """
-    from ...framework.optimization_scope import check_patch_scope, optimization_file
+    from ...framework.optimization_scope import aoti_config, check_patch_scope, optimization_file
 
     if str(framework or "").strip().lower() != "custom":
         return
     if optimization_file() is not None:
         check_patch_scope(Path(os.environ.get("FRAMEWORK_REPO_PATH", "")), [])
+        aoti_config()
 
 
 def build_scriptable_env(
@@ -108,7 +118,71 @@ def build_scriptable_env(
             run_scoped["VLLM_TORCH_PROFILER_DIR"] = profile_dir
             run_scoped["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
             run_scoped["HYPERLOOM_PROFILE_TRACE_DIR"] = profile_dir
-    return build_benchmark_env(defaults, bench.get("envs"), run_scoped)
+        _enable_aoti_kernel_profile(run_scoped)
+    env = build_benchmark_env(defaults, bench.get("envs"), run_scoped)
+    # After the layers are merged, not before: PYTHONPATH has to keep whatever the
+    # operator and the image put there, and a run_scoped entry would replace it.
+    _arm_aoti_evidence(env, workspace)
+    return env
+
+
+def _arm_aoti_evidence(env: dict[str, str], workspace: Path) -> None:
+    """Deliver the export counters to the benchmark child and point them at its workspace.
+
+    Both halves are required and only one is obvious. Setting the directory arms
+    ``hl_aoti_evidence``, but the shim only runs if Python imports the bundled
+    ``sitecustomize``, which needs its directory on ``PYTHONPATH``. Armed without
+    delivered, the counters are never written and the export gate -- which has no
+    source fallback -- stays shut for the whole campaign, including on ``profile``,
+    the one action that delivers the shim by another route.
+
+    Fails open, like the kernel-profile flag: an unreadable scope costs the gate its
+    evidence, and the gate already refuses to open without it.
+    """
+    from hyperloom.orchestrator.framework.optimization_scope import aoti_config
+    from hyperloom.orchestrator.measurement.aoti_evidence import EVIDENCE_DIR_ENV, evidence_dir
+
+    from ._framework_rewrite_evidence import probe_asset_dir
+    from ._workload_envs import prepend_launch_path
+
+    try:
+        config = aoti_config()
+    except ValueError:
+        return
+    if config is None or not config.enabled:
+        return
+    asset_dir = probe_asset_dir()
+    if not asset_dir.is_dir():
+        log.warning("bypass_scriptable: start-up shim assets missing at %s; the export gate cannot open", asset_dir)
+        return
+    env[EVIDENCE_DIR_ENV] = str(evidence_dir(workspace))
+    prepend_launch_path(env, "PYTHONPATH", str(asset_dir))
+
+
+def _enable_aoti_kernel_profile(run_scoped: dict[str, str]) -> None:
+    """Ask Inductor for per-launch profiling scopes, on AOTI profiling runs only.
+
+    An AOTI module compiles its launches into a ``.so``, and without this the
+    trace loses roughly half its kernels -- measured 767 vs 1466 events and 7.2
+    vs 13.1 ms of captured GPU time on SmolVLA/gfx1151, at identical end-to-end
+    latency. The missing ones are the Inductor-generated kernels, so the blind
+    spot is exactly the exported region. Overhead is below noise (under ~1.5%,
+    n=3 per arm), so this is not a speed/visibility trade.
+
+    Profiling runs only: a benchmark run must compile the same way the
+    deliverable will, so the accepted number describes what ships.
+
+    Fails *open*, unlike the export gate -- an unreadable scope costs trace
+    richness, which is not worth failing a run over.
+    """
+    from hyperloom.orchestrator.framework.optimization_scope import aoti_config
+
+    try:
+        config = aoti_config()
+    except ValueError:
+        return
+    if config is not None and config.enabled:
+        run_scoped["TORCHINDUCTOR_CPP_ENABLE_KERNEL_PROFILE"] = "1"
 
 
 def run_scriptable(
