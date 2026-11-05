@@ -634,8 +634,8 @@ def _compiled_for(row: dict[str, Any], targets: BuildTargets | None) -> bool:
 
 
 def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> list[tuple[str, str]]:
-    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so``, those aiter compiles for
-    ``targets`` when they are given.
+    """Each ``(kernelName, libtype)`` pair linked into a serving ``module_*.so``, once, in first-seen order; only the
+    rows aiter compiles for ``targets`` when they are given.
 
     The tables this reads ship with aiter, so their encoding and field sizes are not
     ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
@@ -658,21 +658,19 @@ def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> 
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         log.warning("aiter_jit: cannot read tuned CSV %s (%s); treating it as covered", csv_path, exc)
         return []
-    return rows
+    return list(dict.fromkeys(rows))
 
 
-def serving_modules_cover_csv(
-    jit_dir: Path, modules: tuple[str, ...], csv_path: Path, targets: BuildTargets | None = None
-) -> bool:
-    """True when every JIT ``kernelName`` in the CSV that aiter compiles for ``targets`` appears in its serving .so.
+def serving_modules_cover_rows(jit_dir: Path, modules: tuple[str, ...], rows: list[tuple[str, str]]) -> bool:
+    """True when every JIT ``kernelName`` in ``rows`` appears in its serving .so.
 
     ``libtype=asm`` (and other non-JIT backends) names are not linked into
-    ``module_*.so``, and a row tuned for another GPU than ``targets`` is in no module built for these
-    (:func:`aiter_build_targets`; every row counts when they are ``None``). A name is looked up in the module of
-    ``modules`` its ``libtype`` names, then in the one its prefix implies, falling back to ``modules``. Missing .so
-    files mean the next start will compile from the current CSV, so that case is treated as covered.
+    ``module_*.so``, and a row tuned for another GPU than the targets ``rows`` were read for is in no module built for
+    these (:func:`csv_jit_kernel_rows` with :func:`aiter_build_targets`; every row counts when they are ``None``). A
+    name is looked up in the module of ``modules`` its ``libtype`` names, then in the one its prefix implies, falling
+    back to ``modules``. Missing .so files mean the next start will compile from the current CSV, so that case is
+    treated as covered.
     """
-    rows = csv_jit_kernel_rows(csv_path, targets)
     if not rows:
         return True
     blobs: dict[str, bytes | None] = {}
@@ -907,23 +905,31 @@ def prepare_serving_so_for_csvs(
     configs_dir = package_root / "configs"
     targets = aiter_build_targets(package_root, os.environ if environ is None else environ)
     config = _module_config(package_root)
-    modules_needed: list[str] = []
-    variables: list[str] = []
+    tables: list[tuple[str, tuple[str, ...], list[tuple[str, str]]]] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
         tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")
         if not tuned_file_name:
             continue
         for csv_path in csvs_aiter_will_load(configs_dir, tuned_file_name, str(envs.get(env_var) or "")):
-            if not csv_path.is_file():
-                continue
-            if serving_modules_cover_csv(jit_dir, modules, csv_path, targets):
-                continue
-            variables.append(env_var)
-            modules_needed.extend(_generated_from(config, env_var, modules))
-            for name, libtype in csv_jit_kernel_rows(csv_path, targets):
-                resolved = serving_module_for_kernel(name, libtype, modules)
-                if resolved:
-                    modules_needed.append(resolved)
+            if csv_path.is_file():
+                tables.append((env_var, modules, csv_jit_kernel_rows(csv_path, targets)))
+    log.info(
+        "aiter_jit: checking %d tuned table(s), %d kernel(s), against the serving .so in %s",
+        len(tables),
+        sum(len(rows) for _, _, rows in tables),
+        jit_dir,
+    )
+    modules_needed: list[str] = []
+    variables: list[str] = []
+    for env_var, modules, rows in tables:
+        if serving_modules_cover_rows(jit_dir, modules, rows):
+            continue
+        variables.append(env_var)
+        modules_needed.extend(_generated_from(config, env_var, modules))
+        for name, libtype in rows:
+            resolved = serving_module_for_kernel(name, libtype, modules)
+            if resolved:
+                modules_needed.append(resolved)
     own = image_own_modules(jit_dir, configs_dir, envs, targets) if modules_needed else frozenset()
     modules_needed_t = tuple(m for m in dict.fromkeys(modules_needed) if m not in own)
     read_for = {"jit_dir": str(jit_dir), "targets": target_names(targets)}
@@ -1025,7 +1031,7 @@ __all__ = [
     "registry_mismatch_modules",
     "result_is_aiter_jit_registry_mismatch",
     "serving_module_for_kernel",
-    "serving_modules_cover_csv",
+    "serving_modules_cover_rows",
     "sweep_stale_aiter_locks_if_dead",
     "target_names",
     "tuned_tables_sha256",

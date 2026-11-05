@@ -18,7 +18,6 @@ import yaml
 
 from hyperloom.common.gain_math import (
     ACCURACY_METRICS,
-    ACCURACY_THRESHOLD,
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_meets_floor,
@@ -661,7 +660,6 @@ def enablement_correctness(
 
 
 __all__ = [
-    "ACCURACY_THRESHOLD",
     "BASELINE_ACCURACY_STOP_REASON",
     "BASELINE_EVAL_ACCURACY_FLOOR_KEY",
     "BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY",
@@ -669,7 +667,6 @@ __all__ = [
     "BASELINE_EVAL_FAILED_KEY",
     "BASELINE_EVAL_FAILURE_KIND_KEY",
     "BASELINE_EVAL_OBSERVED_ACCURACY_KEY",
-    "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
     "ENABLEMENT_MODES",
     "ENABLEMENT_MODE_ALL",
     "ENABLEMENT_REVALIDATION_REASON",
@@ -684,8 +681,6 @@ __all__ = [
     "EVAL_PROBE_FILENAME",
     "_extract_eval_contract_fields",
     "accuracy_keep_block",
-    "accuracy_meets_floor",
-    "accuracy_passed",
     "classify_accuracy_failure",
     "enablement_correctness",
     "eval_contract_fingerprint",
