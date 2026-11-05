@@ -256,6 +256,8 @@ def test_orchestration_persists_optimization_plan_without_decision_json(
     )
 
     class OrchestrationService:
+        has_plan_critic = False
+
         async def run(self, _context, **_kwargs):
             return result
 
@@ -302,6 +304,8 @@ def test_orchestration_persists_critic_draft_review_and_final_paths(
     )
 
     class OrchestrationService:
+        has_plan_critic = False
+
         async def run(self, _context, **_kwargs):
             return result
 
@@ -342,7 +346,6 @@ def test_a_round_the_critic_could_not_review_is_carried_as_unreviewed(
     critic = PlanCriticOutcome(
         verdict="NOT_REVIEWED",
         error="TimeoutError: plan critic exceeded 600s",
-        verdict_source="error",
     )
     result = SimpleNamespace(
         optimization_plans=("# Draft plan\nVectorize global loads.",),
@@ -356,6 +359,8 @@ def test_a_round_the_critic_could_not_review_is_carried_as_unreviewed(
     )
 
     class OrchestrationService:
+        has_plan_critic = False
+
         async def run(self, _context, **_kwargs):
             return result
 
@@ -403,6 +408,8 @@ def test_framework_fallback_plan_does_not_complete_diversify_cycle(
     )
 
     class OrchestrationService:
+        has_plan_critic = False
+
         async def run(self, _context, **_kwargs):
             return result
 
@@ -438,6 +445,8 @@ def test_orchestration_plan_persistence_error_propagates(
     )
 
     class OrchestrationService:
+        has_plan_critic = False
+
         async def run(self, _context, **_kwargs):
             return SimpleNamespace(
                 optimization_plans=("# Optimization plan\nVectorize loads.",),

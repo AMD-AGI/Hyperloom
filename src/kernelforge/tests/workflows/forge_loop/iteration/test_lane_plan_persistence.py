@@ -496,6 +496,8 @@ async def test_a_planned_round_records_the_commit_recovery_compares_against(tmp_
     plans = ("widen the loads", "stage through LDS")
 
     class OrchestrationService:
+        has_plan_critic = False
+
         async def run(self, context, **_kwargs):
             return SimpleNamespace(
                 dispatch_plan=None,
@@ -726,7 +728,6 @@ def test_a_fail_open_review_records_no_ruling(tmp_path, monkeypatch):
         PlanCriticOutcome(
             verdict="NOT_REVIEWED",
             error="backend timed out",
-            verdict_source="error",
         ),
     )
 

@@ -13,7 +13,11 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
+from hyperloom.inference_optimizer.grid_server_args import (
+    compose_server_args,
+    remove_server_args,
+    removals_absent_from_args,
+)
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
@@ -543,3 +547,17 @@ def test_remove_server_args_unbalanced_brace_drops_only_its_own_flag() -> None:
     """A stray ``}`` is not a JSON blob and must not take the tail with it."""
     out = remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
     assert out == "--tp 8 --max-num-seqs 64"
+
+
+def test_removals_absent_from_args_drops_only_what_the_args_assert() -> None:
+    kept = removals_absent_from_args(
+        "--tp 8 --speculative-num-steps 3",
+        ["--speculative-num-steps --enable-hierarchical-cache", "--hicache-ratio"],
+    )
+    assert kept == ["--enable-hierarchical-cache", "--hicache-ratio"]
+
+
+def test_removals_absent_from_args_keeps_a_removal_scoped_to_another_value() -> None:
+    """``--tp 4`` deletes nothing from args that run ``--tp 8``, so it stays a delta for the recipe."""
+    assert removals_absent_from_args("--tp 8", ["--tp 4"]) == ["--tp 4"]
+    assert removals_absent_from_args("--tp 8", ["--tp=8"]) == []

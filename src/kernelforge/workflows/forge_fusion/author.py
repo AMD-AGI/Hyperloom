@@ -220,7 +220,7 @@ Run this A/B (boots the model twice; eager vs `{env_flag}=1`), decode-step media
 - Also confirm correctness: greedy output with the flag on stays coherent vs off.
 - Iterate: edit -> run A/B -> read speedup -> fix -> repeat until the target is met.
 
-When done, print: `AUTHORING_RESULT: env_flag={env_flag} speedup=<X>x files=<edited files>` and stop.
+When done, stop.
 Do not edit the A/B harness or hard-code any numbers.
 """
 
@@ -285,7 +285,7 @@ kernel fusions on {_arch_phrase(gpu_arch)}, bf16 serving. Work autonomously; no 
 - SUCCESS = combined fused clearly faster than eager (target speedup >= {target_speedup:.2f}x).
 - Confirm greedy output stays coherent with all flags on. Iterate until the target is met.
 
-When done print: `AUTHORING_RESULT: env_flags={" ".join(all_flags)} speedup=<X>x files=<edited>` and stop.
+When done, stop.
 Do not edit the A/B harness or hard-code numbers.
 """
 

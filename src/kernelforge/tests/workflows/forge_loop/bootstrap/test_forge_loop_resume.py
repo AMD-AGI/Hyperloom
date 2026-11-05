@@ -884,7 +884,10 @@ def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is True
     assert captured["agent_fn_setup"].task.profiling_enabled is True
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
-    assert "Plan Critic: enabled (long-horizon, same backend/model)" in result.output
+    assert (
+        "Plan Critic: enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
+        in result.output
+    )
 
 
 def test_forge_loop_can_disable_all_experience_kb_io(tmp_path, monkeypatch):

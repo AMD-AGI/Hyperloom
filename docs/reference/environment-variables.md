@@ -182,7 +182,7 @@ throughput-only measurement.
 | `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
 
 The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
-`src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py` is a fixed
+`src/hyperloom/common/gain_math.py` is a fixed
 `0.05`, that is, a candidate must stay within 5 percentage points of the recorded
 baseline accuracy.
 
@@ -378,6 +378,7 @@ consumers and triage read a contract rather than candidate internals.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `INFERENCE_OPTIMIZER_RAY_EXEC` | Unset (`on` for single-node) | Controls whether single-node serving benchmarks and `needs_gpu` specialists run through Ray actors. When unset, single-node runs are routed through Ray-managed leases while multi-node stays on the multi-node backend. Set to `0` / `false` / `no` / `off` to force the local subprocess path, or `1` / `true` / `yes` / `on` to force Ray. |
+| `HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC` | `60` | Bound, in seconds, on the driver connect (`ray.init`) a process tries in a child process before it connects to a running Ray head in-process: first when work is routed to Ray, and again before every in-process reconnect (after a Ray actor dies, after the process starts or restarts a local head, and before the retry after a version mismatch). In-process, Ray 2.44 waits for the raylet's registration reply with the GIL held and no timeout, so a head that never answers would freeze the whole process. When the probe times out (its process group is killed) or exits non-zero, the process does not connect, takes the local subprocess path from then on, as with `INFERENCE_OPTIMIZER_RAY_EXEC=0`, and logs one WARNING. The installer bounds its own `serving_slot` check of a running head by the same value and replaces a head that does not answer in time. A non-positive or unparsable value keeps the default. |
 
 ---
 
@@ -615,7 +616,7 @@ to `all`:
   run with `stop_reason='baseline_failed'` instead of opening an authoring loop.
 
 The eval trigger and the enablement KEEP gate both judge a score against the
-fixed constant `_accuracy_gate.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.5`):
+fixed constant `hyperloom.common.gain_math.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.5`):
 `score >= floor` passes, and a score that is not finite or not above zero fails.
 The lanes differ only when a candidate's eval produced no score: an `eval`-lane
 candidate then fails, while a `launch`-lane candidate that serves is kept as

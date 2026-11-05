@@ -73,6 +73,8 @@ forge = [
     "click>=8.0",
     "PyYAML>=6.0",
     "anthropic>=0.40",
+    # The answer shapes agent sessions are held to are pydantic v2 models.
+    "pydantic>=2.0",
     "hyperloom-inference_optimizer[llm]",
 ]
 # ROCm Compute Profiler (rocprof-compute) Python requirements. Nothing in this
@@ -101,8 +103,15 @@ forge-profiling = [
     "textual-fspicker>=0.4.3",
     "tqdm",
 ]
+# Hosted measurement: the E2B sandbox SDK, imported only by ``hyperloom.sandbox.e2b``. ``e2b`` 2.53 is the
+# first SDK whose ``connect`` sends the ``E2b-Sandbox-Id`` header the data-plane router needs and whose errors carry a
+# ``status_code``.
+hosted = [
+    "e2b>=2.53.1,<3",
+]
 test = [
     "hyperloom-inference_optimizer[runtime]",
+    "hyperloom-inference_optimizer[hosted]",
     "hyperloom-inference_optimizer[ci]",
     # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
     "hyperloom-inference_optimizer[kb-service]",
@@ -323,6 +332,9 @@ hyperloom_kb = [
     "declarations/*.yaml",
     "mappings/*.yaml",
 ]
+hyperloom_multibranch = [
+    "contracts/llm_prices.json",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -351,6 +363,7 @@ source = [
     "src/hyperloom",
     "src/kernelforge",
     "src/hyperloom_kb",
+    "src/hyperloom_multibranch",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and

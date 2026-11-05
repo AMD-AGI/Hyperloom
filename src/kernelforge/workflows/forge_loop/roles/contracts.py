@@ -249,6 +249,9 @@ class OrchestrationContext:
     last_critic_review: str = ""
     # Present only when the campaign has a roofline ceiling; each case's own figure rides on ``CaseEvidence.roofline``.
     roofline: CampaignRoofline | None = None
+    # Whether this round's plans go to the campaign's plan critic, when it has one. The loop decides it per round; it
+    # is not part of any prompt.
+    review_plan: bool = True
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
@@ -416,15 +419,6 @@ class SpecialistDefinition:
 
 
 @dataclass(frozen=True)
-class DispatchIntent:
-    """Minimal probabilistic role/case intent returned by orchestration."""
-
-    role_id: str
-    target_case_ids: tuple[str, ...]
-    reason: str = ""
-
-
-@dataclass(frozen=True)
 class SpecialistAssignment:
     """Assign one specialist to an evidence-scoped analysis task."""
 
@@ -567,13 +561,7 @@ class PlanCriticOutcome:
     review: str = ""
     error: str = ""
     duration_sec: float = 0.0
-    verdict_source: str = "explicit"
     lane_drops: tuple[LaneDrop, ...] = ()
-    # What reading the review's width block found: a block that was not there, an entry that named no lane.
-    narrowing_notes: tuple[str, ...] = ()
-    # How the width ruling above was arrived at, which no count of drops can say: an empty ``lane_drops`` is the
-    # answer to "run every lane", to "the review never answered", and to "the block was there and unusable" alike.
-    narrowing_status: str = "not_asked"
 
     def __post_init__(self) -> None:
         if self.verdict not in {"ACCEPT", "REVISE", "REPLACE", "NOT_REVIEWED"}:
@@ -586,21 +574,9 @@ class PlanCriticOutcome:
         _text(self.error, "plan critic error", allow_empty=True)
         if self.duration_sec < 0:
             raise ValueError("plan critic duration_sec must be non-negative")
-        if self.verdict_source not in {"explicit", "inferred", "error"}:
-            raise ValueError("plan critic verdict_source is unsupported")
         lane_ids = [drop.lane_id for drop in self.lane_drops]
         if len(set(lane_ids)) != len(lane_ids):
             raise ValueError("plan critic lane_drops must name each lane once")
-        for note in self.narrowing_notes:
-            _text(note, "plan critic narrowing note")
-        if self.narrowing_status not in {
-            "not_asked",
-            "answered",
-            "repaired",
-            "absent",
-            "malformed",
-        }:
-            raise ValueError("plan critic narrowing_status is unsupported")
 
     @property
     def fail_open(self) -> bool:
@@ -621,10 +597,7 @@ class PlanCriticOutcome:
             "error": self.error,
             "fail_open": self.fail_open,
             "duration_sec": self.duration_sec,
-            "verdict_source": self.verdict_source,
             "lane_drops": [drop.to_dict() for drop in self.lane_drops],
-            "narrowing_notes": list(self.narrowing_notes),
-            "narrowing_status": self.narrowing_status,
         }
 
     def render_artifact(self) -> str:
@@ -633,7 +606,7 @@ class PlanCriticOutcome:
                 f"STATUS: CRITIC_ERROR\n\nVERDICT: {self.verdict}\n\nERROR: {self.error}\n\n"
                 "The draft plan was used without critic enforcement."
             )
-        return self.review.strip()
+        return f"VERDICT: {self.verdict}\n\n{self.review.strip()}"
 
 
 @dataclass(frozen=True)
@@ -669,10 +642,12 @@ class LaneGround:
 
 @dataclass(frozen=True)
 class SynthesizedPlan:
-    """One generated plan, the ground it was planned on, and its session."""
+    """One generated plan, the ground it was planned on, and its session with the system prompt it ran under."""
 
     text: str
     session_id: str = ""
+    # Resuming the session under any other system prompt rewrites the whole cached conversation instead of reading it.
+    system_prompt: str = ""
     ground: str = ""
     joint: bool = False
     fallback: str = ""
@@ -684,6 +659,9 @@ class SynthesizedPlan:
             "synthesized plan session_id",
             allow_empty=True,
         )
+        _text(self.system_prompt, "synthesized plan system_prompt", allow_empty=True)
+        if self.session_id and not self.system_prompt:
+            raise ValueError("a synthesized plan that keeps its session must name the system prompt it ran under")
         _text(self.ground, "synthesized plan ground", allow_empty=True)
         if not isinstance(self.joint, bool):
             raise ValueError("synthesized plan joint must be a boolean")

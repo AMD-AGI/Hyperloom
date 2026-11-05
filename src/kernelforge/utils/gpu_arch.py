@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 import subprocess
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS, board_named_in
 
 
 def _spelling(value: str) -> str:
@@ -34,8 +34,10 @@ _GFX_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)
 def canon_arch(value: str) -> str:
     """The canonical lowercase gfx target ``value`` names, product name or gfx alike; ``""`` when it names none.
 
-    Lenient: any spelling that contains a gfx target or a known product name folds onto it (``mi300x_vf`` is
-    ``gfx942``). Use it to pick a target, not to key stored records; :func:`canonical_gpu_type` does that.
+    Lenient: a spelling that contains a gfx target, or names a board as a whole word the way
+    :func:`hyperloom_common.gpu_identity.board_named_in` reads probe output, folds onto it (``mi300x_vf`` is
+    ``gfx942``; ``R9700S`` and ``MI300XL`` are other products and name none). Use it to pick a target, not to key
+    stored records; :func:`canonical_gpu_type` does that.
     """
     raw = str(value or "").strip().lower()
     if not raw:
@@ -43,11 +45,8 @@ def canon_arch(value: str) -> str:
     match = _GFX_RE.search(raw)
     if match:
         return match.group(0).lower()
-    spelled = _spelling(raw)
-    for gpu_type, arch in _ARCH_BY_GPU_TYPE.items():
-        if gpu_type in spelled:
-            return arch
-    return ""
+    board = board_named_in(re.sub(r"[_-]+", " ", raw))
+    return board.gfx if board else ""
 
 
 def canonical_gpu_type(value: str) -> str:

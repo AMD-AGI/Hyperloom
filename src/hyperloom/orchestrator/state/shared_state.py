@@ -47,6 +47,7 @@ from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harne
 
 from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from .failure_evidence import tail_excerpt
+from .retest_view import write_retest_view
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.budget import _BudgetStateMixin
 from ._shared_state.enablement_round import EnablementRound
@@ -451,14 +452,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap anchor from which ExploreExecutor derives
     # the overtime-kill deadline.
     baseline_runtime_sec: float = 0.0
-    # Baseline WARM measure-round wall-clock (client-only, no boot); anchors the explore overtime kill
-    # apples-to-apples.
+    # Baseline WARM measure-round wall-clock (client-only, no boot); anchors the explore overtime kill apples-to-apples.
     baseline_warm_runtime_sec: float = 0.0
     # Whether the baseline's hot pass was dropped because the budget could not cover it plus one variant to read
     # against it, leaving the cold pass's depressed figure as the anchor.
     baseline_measure_round_dropped: bool = False
-    # The benchmark's own share of the COLD round above, from the server-ready marker onward.
+    # The COLD round above from the server-ready marker onward (benchmark and accuracy eval), and that eval's own time.
     baseline_post_ready_runtime_sec: float = 0.0
+    baseline_eval_runtime_sec: float = 0.0
     # Wall-clock of the slowest roofline (profile + TraceLens) this session finished; CLOSE sizes its own from it.
     roofline_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
@@ -1089,22 +1090,21 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     def save(self, session_dir: Path) -> None:
         """Atomically write ``state.json`` (tmp file + ``os.replace``).
 
-        Serializes via :meth:`to_dict` and writes to a temp file in the
-        same directory before an atomic rename, so concurrent readers never
-        observe a partial blob. The temp file is cleaned up on failure.
+        Serializes via :meth:`to_dict` and writes to a temp file in the same directory before an atomic rename, so
+        concurrent readers never observe a partial blob; also writes the group-readable ``retest_view.json``.
 
         Charges the elapsed budget first, so every save is a durable record of
         spend and a leg that dies abruptly loses only the time since the last.
 
         Args:
-            session_dir (Path): The session root directory; created if it
-                does not already exist.
+            session_dir (Path): The session root directory; created if it does not already exist.
         """
         self.charge_elapsed()
         # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput`` so current_best has the latency metric.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
         atomic_write_json(path, self.to_dict())
+        write_retest_view(session_dir, self)
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
