@@ -37,7 +37,7 @@ def _session(name: str, *directions: TreeDirection, task=None):
 
 
 def test_an_archived_direction_keeps_the_family_close_read_off_its_change() -> None:
-    kept = dataclasses.replace(KV, family_target="attention", family_mechanism="backend or implementation")
+    kept = dataclasses.replace(KV, family_target="attention", family_mechanism=Mechanism.BACKEND)
 
     assert direction_family(KV) == FP8_KV
     assert direction_family(kept) == Family("attention", Mechanism.BACKEND, CONFIG)

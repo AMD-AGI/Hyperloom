@@ -15,6 +15,7 @@ import pytest
 
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.rsi import ladder
+from hyperloom_multibranch.blackboard.rsi.archive import SearchTree
 from hyperloom_multibranch.blackboard.rsi.ladder import (
     BETTER,
     GAIN_PER_GPU_HOUR,
@@ -37,6 +38,7 @@ from hyperloom_multibranch.blackboard.rsi.ladder import (
     pairs,
     r0,
     r1,
+    r1_reading,
     r2,
     r2_sessions,
     r3,
@@ -110,6 +112,55 @@ def test_r1_replays_a_number_change_both_ways_and_leaves_the_rest_to_the_rungs_t
     assert replayed.rung == "R1" and "optimistic" in replayed.reason and "pessimistic" in replayed.reason
     assert skipped.skipped and skipped.passed and skipped.reason.startswith("a rule change")
     assert unplayed.skipped and unplayed.passed and unplayed.reason == "failed_op_limit: the replay does not play it"
+
+
+#: A stop bar of four judged tests once a grace of three has run, with no probation, and a challenger that waits one
+#: test more.
+STRICT = Playbook("strict", replaced(H0, stall_tests=4, grace_tests=3, probation_share=0.0).numbers)
+WAITING = Playbook("waiting", replaced(STRICT, stall_tests=5).numbers, parent=STRICT.label)
+
+
+def _close_call(session_id: str) -> SearchTree:
+    """A session whose b2 makes its one commit, 0.01 points past b1's, at its fifth judged test: the replay under
+    WAITING reaches it in every run, the one under STRICT, which stops b2 after its fourth, in none."""
+
+    stopped = branch(
+        "b1",
+        [(20 * MINUTE, 3.0)],
+        judged_times=_judged(10, 20, 30),
+        closed_s=35 * MINUTE,
+        stop_reason="judge: lowest expected gain",
+    )
+    return tree(session_id, stopped, branch("b2", [(50 * MINUTE, 3.01)], judged_times=_judged(10, 20, 30, 40, 50, 60)))
+
+
+@pytest.mark.parametrize("sessions", [1, 2], ids=["one session", "two sessions"])
+def test_too_few_archived_sessions_neither_pass_r1_nor_read_better_however_alike_their_replays(
+    monkeypatch: pytest.MonkeyPatch, sessions: int
+) -> None:
+    monkeypatch.setattr(ladder, "CLOSE_REPLAY_RUNS", 3)
+    trees = [_close_call(f"s{n}") for n in range(sessions)]
+
+    replayed, reading = r1(WAITING, STRICT, trees, runs=3), r1_reading(WAITING, STRICT, trees)
+
+    # Every run of every session gains 0.01 points, and an interval bootstrapped over so few sessions is no wider.
+    assert reading is not None and (reading.optimistic.low, reading.pessimistic.low) == (pytest.approx(0.01),) * 2
+    assert not replayed.passed and replayed.reason.endswith(
+        f"; {sessions} of the 3 archived sessions its interval needs"
+    )
+    assert reading.reading == UNCLEAR
+
+
+def test_enough_archived_sessions_whose_replays_agree_pass_r1_and_read_better(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ladder, "CLOSE_REPLAY_RUNS", 3)
+    trees = [_close_call(f"s{n}") for n in range(3)]
+
+    replayed, reading = r1(WAITING, STRICT, trees, runs=3), r1_reading(WAITING, STRICT, trees)
+
+    assert replayed.passed and replayed.reason == (
+        "best gain against strict: optimistic +0.01 points (low +0.01); pessimistic +0.01 points (low +0.01)"
+    )
+    assert reading is not None and reading.reading == BETTER
 
 
 def _call(minutes: float, *stopped: str) -> dict[str, object]:
@@ -241,6 +292,29 @@ def test_a_challenger_session_pairs_once_with_the_nearest_champion_session_of_it
     assert [pair.difference("early_stops") for pair in found] == [2.0, 3.0]
     assert (
         r3(PATIENT, H0, kept).reason == "2 of its 3 paired sessions so far; 1 of its sessions fell back to the champion"
+    )
+
+
+def test_a_session_that_fell_back_is_no_session_of_the_playbook_it_fell_back_from() -> None:
+    later = Playbook(
+        "later-grace", replaced(PATIENT, grace_tests=7).numbers, parent=PATIENT.label, measure="early_stops"
+    )
+    steady = [_trial(f"c{n}", PATIENT.label, 3.0, 1.0, at=n * HOUR) for n in range(2)]
+    fell = _trial("f0", PATIENT.label, 9.0, 1.0, at=3 * HOUR, fell_back=True)
+    challenger = _trial("l0", later.label, 1.0, 1.0, at=3 * HOUR + 60, champion=PATIENT.label)
+    repeats = [_trial(f"r{n}", PATIENT.label, early, rate, at=n * HOUR) for n, (early, rate) in enumerate(REPEATS)]
+    paired = [_trial(f"l{n}", later.label, 1.0, 1.2, at=n * HOUR + 60, champion=PATIENT.label) for n in range(3)]
+    wild = _trial("f1", PATIENT.label, 20.0, 1.2, at=20 * HOUR, fell_back=True)
+
+    nearest = pairs(later.label, PATIENT.label, [*steady, fell, challenger])
+    found = r3(later, PATIENT, [*repeats, *paired, wild])
+
+    # Once patient is champion, f0 and f1, which played h0 after their breach, are none of its sessions: f0 is not the
+    # one l0 pairs with though it started nearest, nor a spread of its early stops, and f1 widens no noise band.
+    assert [pair.champion.session_id for pair in nearest] == ["c1"]
+    assert measured([*steady, fell], PATIENT.label, TASK_KEY) == frozenset()
+    assert found.passed and found.reason == (
+        "early_stops better by 3 over 3 paired sessions, band 1; gain per GPU hour +0, band 0.2"
     )
 
 
