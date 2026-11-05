@@ -79,6 +79,17 @@ async def test_a_head_on_the_integration_head_lacks_nothing_of_it(tmp_path):
     assert "Commits of your head" not in text
 
 
+async def test_the_holdings_name_the_integration_head_the_blackboard_recorded_not_one_still_unjudged(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
+    await rig.repo.commit_integration(session.onto, OWN, (session.own,))
+
+    text = await integration_holdings(rig.repo, await rig.blackboard.snapshot(), session.own)
+
+    assert f"The integration head is {session.onto}: " in text
+    assert f"- {session.merged[:12]} of s0 (+3.00%)" in text
+
+
 async def test_following_moves_the_branch_and_carries_its_own_change_onto_the_integration_head(tmp_path):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)

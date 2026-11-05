@@ -52,10 +52,11 @@ def reroot_requested(content: str) -> bool:
 
 
 async def integration_holdings(repo: ExperimentRepo, snapshot: BlackboardSnapshot, head: str) -> str:
-    """What the integration head holds, and what of it the branch head ``head`` lacks; the branch's own commits that
-    are not on it, with their merges."""
+    """What the integration head ``snapshot`` records holds, and what of it the branch head ``head`` lacks; the branch's
+    own commits that are not on it, with their merges. The head is the blackboard's, as :func:`follow` moves onto it:
+    the repository's may be a merge whose judgement is not written yet, of which ``snapshot`` knows no commit."""
 
-    onto = await repo.head(INTEGRATION_BRANCH)
+    onto = {node.branch: node for node in snapshot.lineage.branches}[INTEGRATION_BRANCH].head_commit
     integration, own = await repo.read_recipe(onto), await repo.read_recipe(head)
     on_head = set(snapshot.lineage.ancestry(head))
     on_integration = set(snapshot.lineage.ancestry(onto))
