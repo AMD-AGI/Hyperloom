@@ -790,8 +790,7 @@ def _phase_toggle_fields(args: argparse.Namespace) -> dict[str, Any]:
         "framework_source_enabled": not bool(getattr(args, "no_framework_source", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         "enablement_mode": str(getattr(args, "enablement", "all")),
-        "research_scout_enabled": bool(getattr(args, "research_scout", True))
-        and not bool(getattr(args, "no_framework_source", False)),
+        "research_scout_enabled": bool(getattr(args, "research_scout", True)),
         "research_scout_interval": max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
         "static_recon_enabled": bool(getattr(args, "static_recon", True)),
         "target_advisory_enabled": bool(getattr(args, "target_advisory", True)),

@@ -411,7 +411,7 @@ def add_framework_agent_arguments(opt: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help="Disable the FRAMEWORK_AGENT source lever (PR discovery, "
-        "specialist-authored patches, integrate_patch, research scout) and keep "
+        "specialist-authored patches, integrate_patch) and keep "
         "the configuration lever (explore grids over launch args and envs). "
         "The phase then advances on the configuration plateau alone.",
     )

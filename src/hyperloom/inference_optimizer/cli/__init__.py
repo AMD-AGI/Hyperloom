@@ -996,7 +996,6 @@ def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -
         print("  framework source      : DISABLED (persisted from original run)")
     elif bool(getattr(args, "no_framework_source", False)):
         state.framework_source_enabled = False
-        state.research_scout_enabled = False
         state.save(session_dir)
         print("  framework source      : DISABLING for resume (--no-framework-source)")
 

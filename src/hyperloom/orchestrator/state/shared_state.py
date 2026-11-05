@@ -612,7 +612,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # candidate-free authoring specialist that authors a throughput patch from the live source + profile evidence
     # instead of skipping the phase.
     framework_local_explore_enabled: bool = True
-    # False when only the configuration lever runs: no discovery, authoring, integrate_patch or scout.
+    # False when only the configuration lever runs: no discovery, authoring or integrate_patch.
     framework_source_enabled: bool = True
     # Maps an authoring specialist task_id -> originating FRAMEWORK candidate id (PR URL), so the authored-outcome
     # bridge can key the progress row on the PR-URL that ``_select_next_framework_agent_candidate`` checks.
