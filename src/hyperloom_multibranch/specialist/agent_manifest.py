@@ -100,9 +100,10 @@ class KeepSignal:
         where = fields.get("where", {})
         if not isinstance(where, Mapping):
             raise ManifestError(f"keep.where must be an object, got {where!r}")
-        return cls(
-            _relative(fields.get("path"), "keep.path"), _optional(fields.get("field"), "keep.field"), dict(where)
-        )
+        counter = _optional(fields.get("field"), "keep.field")
+        if where and not counter:
+            raise ManifestError("keep.where filters the items of keep.field, which is not set")
+        return cls(_relative(fields.get("path"), "keep.path"), counter, dict(where))
 
     def mark(self, raw: bytes) -> int | str:
         """What the keep file's bytes ``raw`` say of the keeps: the count of :meth:`count`, or, with no ``counter``,
@@ -124,6 +125,8 @@ class KeepSignal:
                 if isinstance(item, Mapping) and all(item.get(key) == value for key, value in self.where.items())
             )
         if isinstance(found, int) and not isinstance(found, bool):
+            if self.where:
+                raise ValueError(f"keep.where filters list items, but keep.field {self.counter} is a count: {found!r}")
             return found
         raise ValueError(f"keep.field {self.counter} is neither a list nor a count: {found!r}")
 
@@ -238,8 +241,12 @@ class SnapshotSource:
 
 def _outbox_name(config: Mapping[str, Any]) -> str:
     component = config.get("component")
-    named = component.get("outbox") if isinstance(component, Mapping) else None
-    return _relative(named or DEFAULT_OUTBOX, "config.component.outbox")
+    if not isinstance(component, Mapping) or "outbox" not in component:
+        return DEFAULT_OUTBOX
+    outbox = _relative(component["outbox"], "config.component.outbox")
+    if outbox == ".":
+        raise ManifestError("config.component.outbox must name a directory below the session, got '.'")
+    return outbox
 
 
 _MANIFEST_FIELDS = {
