@@ -172,6 +172,32 @@ async def test_a_fix_whose_judgement_cannot_be_written_is_taken_back(tmp_path):
     assert await rig.conclusion() is Conclusion.SPLIT_REQUESTED
 
 
+class _RefusesLineage:
+    """Refuses every lineage write."""
+
+    def __init__(self, inner: LocalBlackboard) -> None:
+        self.inner = inner
+
+    async def record_lineage(self, event):
+        raise OSError("no space left on device")
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+async def test_a_fork_whose_split_cannot_be_recorded_is_taken_back(tmp_path):
+    rig = await _rig(tmp_path, wrap=_RefusesLineage)
+    branch = await _fork(rig)
+
+    with pytest.raises(OSError, match="no space"):
+        await rig.gate.land_split(branch)
+    await rig.gate.settle_voided(branch, "start failed")
+
+    assert await rig.repo.head(branch) == ROOT
+    assert await rig.branch(branch) is None
+    assert await rig.conclusion() is Conclusion.RECORDED_ONLY
+
+
 async def test_a_landing_whose_waiter_gives_up_still_lands(tmp_path):
     rig = await _rig(tmp_path, wrap=lambda blackboard: _Stalls(blackboard, Conclusion.SPLIT_COMMITTED))
     branch = await _fork(rig)
