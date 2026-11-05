@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A tuned table is judged unread only when the server that ran it logged hits.
-
-On GLM-5.3 both tuned tables were recorded ``zero_hit`` and refused, while the miss keys they covered had vanished
-from the round's log: the native AgentX server never had ``AITER_LOG_TUNED_CONFIG`` on, so hits went unlogged.
-"""
+"""A tuned table is judged unread only when the server that ran it logged hits."""
 
 from __future__ import annotations
 

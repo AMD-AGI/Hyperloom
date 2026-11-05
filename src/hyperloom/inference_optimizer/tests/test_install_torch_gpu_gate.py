@@ -73,12 +73,7 @@ _ROCM_BUILD = "__version__ = '2.11.0+rocm10.0.0'\n\n\nclass version:\n    hip = 
 
 @pytest.mark.skipif(not Path("/usr/bin/python3").exists(), reason="needs a system python3 to stub")
 def test_a_torch_that_exits_during_import_is_not_called_a_cuda_build(tmp_path):
-    """``import torch`` can pull in a module that calls ``sys.exit`` instead of raising.
-
-    SystemExit is not an ``Exception``, so the probe's verdict line never ran and
-    its noise reached the parser instead. Read as a CUDA build, the gate refused
-    to install on a pod whose torch was ``2.11.0+rocm10.0.0``.
-    """
+    """``import torch`` can pull in a module that calls ``sys.exit`` instead of raising."""
     result = _run_gate(tmp_path, torch_body=_EXITS_ON_IMPORT)
 
     assert "is CUDA-built on a ROCm pod" not in result.stdout, result.stdout

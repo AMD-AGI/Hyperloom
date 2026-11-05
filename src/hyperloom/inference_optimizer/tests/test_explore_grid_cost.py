@@ -13,11 +13,7 @@ def _grid(n: int) -> dict:
 
 
 def test_a_four_variant_grid_costs_four_rounds():
-    """Measured: a four-variant explore ran 39.9 minutes against the ~12 it was admitted at.
-
-    Every variant is its own server launch and benchmark on the one serving
-    lane, so a queue priced per task reads as a third of what it will take.
-    """
+    """Measured: a four-variant explore ran 39.9 minutes against the ~12 it was admitted at."""
     assert explore_admission_minutes(10.0, _grid(4)) == 40.0
 
 
@@ -33,11 +29,7 @@ def test_a_grid_the_executor_will_seed_is_priced_as_one_round():
 
 
 def test_the_phase_that_overran_would_now_refuse_its_queue():
-    """23 rounds queued in 52 minutes, none drained 95 minutes later, all cancelled at the exit.
-
-    Eleven explores of four variants charge 440 minutes against a 274-minute
-    phase, where per-task pricing charged 132 and called it affordable.
-    """
+    """23 rounds queued in 52 minutes, none drained 95 minutes later, all cancelled at the exit."""
     per_task = sum(explore_admission_minutes(10.0, _grid(4)) for _ in range(11))
 
     assert per_task == 440.0

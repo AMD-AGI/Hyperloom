@@ -323,7 +323,7 @@ def test_shape_cases_that_are_not_a_list_are_not_reshaped(task_dir: Path, task_p
 
 
 def test_a_decode_case_at_a_batch_size_the_trace_never_ran_is_refused(task_dir: Path, task_payload: dict) -> None:
-    """GLM-5.3 CONC10 ran VERIFY at bs=2..9, and a session still benchmarked verify_bs10."""
+    """A decode case at a batch size the trace never ran is refused."""
     task_payload["shape_cases"] = [
         {"name": "verify_bs3", "phase": "decode", "batch_size": 3, "shape": {"M": 9}},
         {"name": "verify_bs10", "phase": "decode", "shape": {"M": 30}},

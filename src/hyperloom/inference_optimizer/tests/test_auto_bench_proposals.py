@@ -216,7 +216,7 @@ async def test_no_second_batch_while_one_is_queued_or_the_phase_is_leaving():
 
 
 async def test_a_cycle_batch_that_ended_without_running_is_enqueued_again():
-    """GLM-5.3: recover cancelled a preempted pod's cycle batch, and its spent key left both levers pending."""
+    """A cycle batch cancelled before it ran is enqueued again under a fresh key, within the retry cap."""
     from hashlib import sha1
 
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_INCONCLUSIVE
@@ -271,7 +271,7 @@ async def test_an_agentx_stack_without_a_reference_gets_a_batch_of_its_two_bases
 
 
 async def test_a_moved_stack_gets_its_reference_batch_before_the_next_dispatch(monkeypatch):
-    """GLM-5.3: after a KEEP the next screened integrate was dispatched a second before the new reference was queued."""
+    """An adopted KEEP queues the moved stack's reference batch before the next dispatch."""
     monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
     moved = _agentx_phase()
     moved._coord.shared_state.optimization_stack = [{"kind": "code_patch"}]
@@ -287,7 +287,7 @@ async def test_a_moved_stack_gets_its_reference_batch_before_the_next_dispatch(m
 
 
 async def test_a_reference_batch_that_ended_without_running_is_enqueued_again(monkeypatch):
-    """GLM-5.3: recover cancelled a preempted pod's reference batch, and its spent key kept the screen shut all cycle."""
+    """A reference batch cancelled before it ran is enqueued again, within the retry cap."""
     monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
     fp = _agentx_phase()
     fp._coord.tasks.ended = {"cycle-reference-c0-s0": "cancelled", "cycle-reference-c0-s0-a1": "failed"}
@@ -300,7 +300,7 @@ async def test_a_reference_batch_that_ended_without_running_is_enqueued_again(mo
 
 
 async def test_a_reference_batch_whose_task_succeeded_on_a_failed_result_is_enqueued_again(monkeypatch):
-    """GLM-5.3: the executor returned cycle_bench_unavailable, the task settled succeeded, and the screen stayed shut."""
+    """A reference batch whose task succeeded on a failed result is enqueued again."""
     monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
     fp = _agentx_phase()
     fp._coord.shared_state.optimization_stack = [{"kind": "code_patch"}, {"kind": "code_patch"}]
@@ -420,7 +420,7 @@ async def test_a_bundle_screen_waits_for_the_batch_on_the_lanes_and_a_cancelled_
 
 
 async def test_a_bundle_replay_round_that_ended_without_running_is_enqueued_again(monkeypatch):
-    """GLM-5.3: recover cancelled a preempted pod's bundle round, and its spent key kept the bundle unmeasured."""
+    """A bundle replay round cancelled before it ran is enqueued again, within the retry cap."""
     monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
     fp = _two_dormant_patches(_agentx_phase())
     fp._coord.shared_state.cycle_bundle_screens = {_BUNDLE_KEY: "pass"}

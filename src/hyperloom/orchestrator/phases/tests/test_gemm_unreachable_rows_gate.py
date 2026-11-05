@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A tuned table whose rows no lookup the baseline logged can reach is not measured.
-
-On GLM-5.3 an a8w8 and a bf16 table written at an M aiter never looks up each spent an AgentX round to read
-``zero_hit`` afterwards; the baseline's own log already said so.
-"""
+"""A tuned table whose rows no lookup the baseline logged can reach is not measured."""
 
 from __future__ import annotations
 

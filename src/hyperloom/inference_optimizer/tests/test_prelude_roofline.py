@@ -683,12 +683,7 @@ async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
 
 @pytest.mark.asyncio
 async def test_kernel_entry_does_not_reprofile_the_stack_its_cycle_just_profiled(coord: Coordinator):
-    """The projection is compared with the anchor the last roofline left, never with the snapshot's measured tok/s.
-
-    Under AgentX the validated gain is the graded latency objective's: a GLM-5.3 session at +9.69% P50 projected
-    340.7 tok/s off a 310.6 baseline while its fresh snapshot recorded the 316.7 tok/s the stack measured, so every
-    KERNEL entry re-ran an hour-long profile a minute after the cycle's own.
-    """
+    """The projection is compared with the anchor the last roofline left, never with the snapshot's measured tok/s."""
     state = coord.shared_state
     state.baseline_tput = 310.62342
     state.cumulative_gain_validated = 9.694526883651713

@@ -178,7 +178,7 @@ class TestLoadTrace:
 
 class TestCollectivesAndDecodeSteps:
     def test_collective_kernels_are_their_own_category_and_not_launch_bound(self):
-        """GLM-5.3: allreduce and reduce_scatter matched the reduce and copy rules, 0.15 of a 0.257 share."""
+        """Collectives are not counted under the reduce or copy categories."""
         names = {
             "void aiter::reduce_scatter_cross_device_store<__hip_bfloat16, 4>": "collective",
             "void aiter::allreduce_fusion_kernel_1stage<__hip_bfloat16, 4>": "collective",

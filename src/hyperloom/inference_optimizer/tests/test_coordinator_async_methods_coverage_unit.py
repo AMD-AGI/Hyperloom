@@ -638,10 +638,7 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
 async def test_escalate_skip_to_kernel_outside_framework_agent_is_refused_to_its_sender(
     coord: Coordinator, phase: str
 ) -> None:
-    """Only the FRAMEWORK_AGENT exit reads skip_to_kernel; left pending elsewhere it would end that phase on arrival.
-
-    The sender is told, so it stops re-sending the hint.
-    """
+    """Only the FRAMEWORK_AGENT exit reads skip_to_kernel; left pending elsewhere it would end that phase on arrival."""
     coord.shared_state.phase = phase
     await coord.router._handle_escalate_strategy_change(
         "orchestration",

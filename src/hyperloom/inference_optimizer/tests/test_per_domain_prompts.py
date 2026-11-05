@@ -96,11 +96,7 @@ def test_throughput_authoring_domains_carry_the_altitude_block(domain_key: str):
 
 @pytest.mark.parametrize("domain_key", sorted({*_THROUGHPUT_AUTHORING_DOMAINS, "framework_rewrite_specialist"}))
 def test_every_patch_author_delivers_switched_rewrites_however_small(domain_key: str):
-    """Without the switch contract a below-threshold rewrite is reverted outright and never reaches a bundle.
-
-    It once reached only the framework-rewrite domain, so serving-framework specialists vetoed sub-threshold ideas
-    and the GLM-5.3 session ended with no dormant lever for the joint bench to combine.
-    """
+    """Without the switch contract a below-threshold rewrite is reverted outright and never reaches a bundle."""
     _assert_switch_contract(_build(domain_key), domain_key)
 
 

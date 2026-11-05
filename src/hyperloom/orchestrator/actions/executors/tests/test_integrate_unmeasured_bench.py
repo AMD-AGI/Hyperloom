@@ -70,7 +70,7 @@ async def test_a_bench_that_never_reached_the_server_is_unmeasured_not_reverted(
     [("        cache = self._indexer_cos_sin_cache", "reverted"), ("        cache = self._rope_cache", "failed")],
 )
 async def test_a_boot_crash_naming_what_the_patch_added_is_the_candidates(tmp_path, added, status):
-    """GLM-5.3: a patch read an attribute it never set; benching it again only crashed the server again."""
+    """A boot crash naming a line the patch added is the candidate's and reverts; one naming other code fails."""
     patch = tmp_path / "001.patch"
     patch.write_text(f"--- a/dsa_indexer.py\n+++ b/dsa_indexer.py\n@@ -1 +1 @@\n-        pass\n+{added}\n")
 

@@ -678,7 +678,7 @@ def test_the_dormant_lever_bundle_goes_ahead_of_queued_integrates():
 
 
 def test_a_cycle_batch_goes_ahead_of_queued_integrates():
-    """GLM-5.3: 17 integrates queued behind the reference batch would each take a full replay before the screen opened."""
+    """Cycle batches are dispatched ahead of queued integrates, so a switched integrate waits for its screen."""
     queued = [
         _task("patch-1", "integrate_patch"),
         _task("patch-2", "integrate_patch"),
@@ -1168,7 +1168,7 @@ async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path,
 
 
 async def test_a_tick_queues_the_cycle_batch_it_owes_before_the_dispatcher_pass(tmp_path, monkeypatch):
-    """GLM-5.3: after a resume the first pass dispatched a switched integrate a second before the reference was queued."""
+    """After a resume the reference batch is queued before the first pass dispatches a switched integrate."""
     import time
 
     coord = _coordinator(tmp_path, SharedState())

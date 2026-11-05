@@ -59,13 +59,7 @@ def test_a_patch_that_applies_is_grounded(tmp_path):
 
 
 def test_a_worktree_whose_parent_is_gone_is_unchecked_not_stale(tmp_path):
-    """The specialist worktrees are git worktrees of a checkout inside the pod.
-
-    Read anywhere else -- an archived session, a later leg, an operator on the
-    login node -- git exits 128 before it reads the patch. Recorded as stale,
-    every patch in the set is labelled broken on evidence about the machine,
-    and the note reaches whoever decides whether the round is worth running.
-    """
+    """The specialist worktrees are git worktrees of a checkout inside the pod."""
     root = _repo(tmp_path)
     worktree = tmp_path / "wt"
     _git("worktree", "add", "-q", str(worktree), "-b", "wtb", cwd=root)

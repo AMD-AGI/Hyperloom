@@ -17,6 +17,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 _WEIGHTS = {1: 0.5, 2: 0.5}
 _BANDS = cb.Bands(batch_pct=1.0, per_bs_pct=3.0, regress_pct=1.5)
+_DECODE = "[t TP0] Decode batch, #running-req: {n}, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
 
 
 def _arm(c1: float, c2: float, error: str = "") -> cba.ArmResult:
@@ -36,10 +37,13 @@ def test_candidates_are_graded_against_the_mean_of_two_agreeing_bases():
     assert summary["verdicts"]["faster"]["gain_pct"] == pytest.approx(5.0)
 
 
-def test_bases_that_disagree_void_the_batch_and_grade_nothing():
-    arms = {"base": _arm(10.0, 20.0), "c": _arm(9.0, 18.0), "base2": _arm(10.5, 21.0)}
+@pytest.mark.parametrize(
+    ("base2", "weights"), [pytest.param(_arm(10.5, 21.0), _WEIGHTS, id="bases-disagree"), (_arm(12.0, 24.0), {})]
+)
+def test_a_batch_its_bases_cannot_anchor_grades_nothing(base2, weights):
+    arms = {"base": _arm(10.0, 20.0), "c": _arm(9.0, 18.0), "base2": base2}
 
-    summary = cba.summarize_batch(arms, ["c"], _WEIGHTS, bands=_BANDS)
+    summary = cba.summarize_batch(arms, ["c"], weights, bands=_BANDS)
 
     assert (summary["valid"], summary["verdicts"]) == (False, {})
 
@@ -200,8 +204,7 @@ def test_a_base_off_the_previous_base2_twice_refuses_the_batch_before_its_candid
 
 
 def _referenced_state(tmp_path: Path, reference: dict | None, stack: list) -> SharedState:
-    decode = "[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
-    state = _workspace(tmp_path, decode, {"effective_argv": ["x"]})
+    state = _workspace(tmp_path, _DECODE.format(n=1), {"effective_argv": ["x"]})
     state.cycle_reference = reference
     state.optimization_stack = stack
     return state
@@ -227,8 +230,9 @@ def test_the_session_batch_reads_the_baselines_launch_log_corpus_and_vocabulary(
     workspace.mkdir(parents=True)
     launch = {"effective_argv": ["python3", "-m", "sglang.launch_server"], "runtime_environment": {"X": "1"}}
     (workspace / "agentx_server_launch.json").write_text(json.dumps(launch), encoding="utf-8")
-    decode = "[t TP0] Decode batch, #running-req: {n}, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
-    (workspace / "server.log").write_text("\n".join([decode.format(n=1)] * 3 + [decode.format(n=2)]), encoding="utf-8")
+    (workspace / "server.log").write_text(
+        "\n".join([_DECODE.format(n=1)] * 3 + [_DECODE.format(n=2)]), encoding="utf-8"
+    )
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text(json.dumps({"vocab_size": 154880}), encoding="utf-8")
@@ -315,14 +319,6 @@ async def test_a_cycle_batch_without_a_baseline_launch_fails_named(tmp_path, mon
     assert (result["status"], result["error_class"]) == ("failed", "cycle_bench_unavailable")
 
 
-def test_a_batch_with_no_weighted_batch_size_grades_nothing():
-    arms = {"base": _arm(10.0, 20.0), "c": _arm(5.0, 10.0), "base2": _arm(12.0, 24.0)}
-
-    summary = cba.summarize_batch(arms, ["c"], {}, bands=_BANDS)
-
-    assert (summary["valid"], summary["verdicts"]) == (False, {})
-
-
 def _workspace(tmp_path: Path, log: str, launch: dict) -> SharedState:
     workspace = tmp_path / "baseline" / "benchmark_sglang_1"
     workspace.mkdir(parents=True)
@@ -353,13 +349,12 @@ def test_a_session_batch_refuses_a_session_without_a_baseline_workspace(tmp_path
 
 
 def test_a_session_batch_runs_the_current_best_stack_once_a_round_moved_it(tmp_path):
-    decode = "[t TP0] Decode batch, #running-req: {n}, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
-    state = _workspace(tmp_path, decode.format(n=1), {"effective_argv": ["base"], "effective_env": {"HL_A": "0"}})
+    state = _workspace(tmp_path, _DECODE.format(n=1), {"effective_argv": ["base"], "effective_env": {"HL_A": "0"}})
     best = tmp_path / "runs" / "explore" / "v00" / "benchmark_sglang_2"
     best.mkdir(parents=True)
     launch = {"effective_argv": ["kept"], "effective_env": {"HL_A": "1"}}
     (best / "agentx_server_launch.json").write_text(json.dumps(launch), encoding="utf-8")
-    (best / "server.log").write_text(decode.format(n=4), encoding="utf-8")
+    (best / "server.log").write_text(_DECODE.format(n=4), encoding="utf-8")
     state.current_best = {"workspace": str(best)}
 
     spec = cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
@@ -368,9 +363,8 @@ def test_a_session_batch_runs_the_current_best_stack_once_a_round_moved_it(tmp_p
 
 
 def test_a_kept_stack_whose_round_kept_no_server_log_is_weighted_by_the_baselines(tmp_path):
-    """GLM-5.3: an AgentX integrate round keeps its launch but no server.log, so every moved stack's batch failed."""
-    decode = "[t TP0] Decode batch, #running-req: {n}, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
-    state = _workspace(tmp_path, decode.format(n=2), {"effective_argv": ["base"]})
+    """A kept round with a launch but no server.log is weighted by the baseline's log."""
+    state = _workspace(tmp_path, _DECODE.format(n=2), {"effective_argv": ["base"]})
     best = tmp_path / "runs" / "integrate_patch" / "variant_00" / "benchmark_sglang_4"
     best.mkdir(parents=True)
     (best / "agentx_server_launch.json").write_text(json.dumps({"effective_argv": ["kept"]}), encoding="utf-8")
@@ -382,8 +376,7 @@ def test_a_kept_stack_whose_round_kept_no_server_log_is_weighted_by_the_baseline
 
 
 def test_a_session_batch_refuses_a_current_best_without_its_launch_rather_than_bench_the_baseline(tmp_path):
-    decode = "[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
-    state = _workspace(tmp_path, decode, {"effective_argv": ["base"]})
+    state = _workspace(tmp_path, _DECODE.format(n=1), {"effective_argv": ["base"]})
     best = tmp_path / "runs" / "integrate" / "benchmark_sglang_3"
     best.mkdir(parents=True)
     state.current_best = {"workspace": str(best)}
@@ -393,13 +386,12 @@ def test_a_session_batch_refuses_a_current_best_without_its_launch_rather_than_b
 
 
 def test_a_session_batch_runs_the_launchs_effective_env_over_its_runtime_env(tmp_path):
-    decode = "[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
     launch = {
         "effective_argv": ["x"],
         "runtime_environment": {"A": "1", "B": "1"},
         "effective_env": {"B": "2", "C": "3"},
     }
-    state = _workspace(tmp_path, decode, launch)
+    state = _workspace(tmp_path, _DECODE.format(n=1), launch)
 
     spec = cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
 
@@ -418,8 +410,9 @@ def test_a_session_batch_runs_the_launchs_effective_env_over_its_runtime_env(tmp
 def test_a_session_batch_captures_a_moved_stack_no_capture_describes_at_its_heaviest_batch_size(
     tmp_path, stack, held, attribution_bs
 ):
-    decode = "[t TP0] Decode batch, #running-req: {n}, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
-    state = _workspace(tmp_path, "\n".join([decode.format(n=4)] * 3 + [decode.format(n=1)]), {"effective_argv": ["x"]})
+    state = _workspace(
+        tmp_path, "\n".join([_DECODE.format(n=4)] * 3 + [_DECODE.format(n=1)]), {"effective_argv": ["x"]}
+    )
     state.optimization_stack = stack
     state.last_attribution_trace = held
 

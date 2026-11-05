@@ -119,7 +119,7 @@ def test_the_rendering_names_what_to_fold_into_and_what_cannot(tmp_path):
 
 
 def test_a_collective_stage_is_not_a_launch_to_fold(tmp_path):
-    """GLM-5.3: the allreduce's second-stage rmsnorm ranked second in every VERIFY class; its time is the collective's."""
+    """A collective's fused second stage is a collective, not a fold candidate."""
     events = [
         step("step[VERIFY bs=2]", 0.0, 2000.0),
         *_chain(1.0, 20, ("gemm_a", "void aiter::local_device_load_rmsnorm<__hip_bfloat16, 4>", "gemm_b")),

@@ -144,7 +144,7 @@ def test_a_trace_without_decode_steps_lists_no_decode_class(tmp_path):
 
 
 def test_a_collective_row_says_its_time_includes_the_wait_for_other_ranks(tmp_path):
-    """GLM-5.3 EXTEND bs=1: cross_device_reduce ranked first at 194.8 ms/step on TP0 and spent 29.7 on TP2."""
+    """A collective is ranked from one rank but marked, since its time includes the wait for the others."""
     events = [
         step("step[VERIFY bs=4]", 0.0, 20.0),
         kernel("mfma_moe1_silu_mul", 1.0, 9.0),

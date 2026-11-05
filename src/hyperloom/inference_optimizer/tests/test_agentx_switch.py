@@ -80,11 +80,7 @@ def test_switch_off_no_agentx_leakage(tmp_path, monkeypatch):
 
 
 def test_switch_on_declares_the_run_agentic_to_the_harness(tmp_path, monkeypatch):
-    """The harness decides the context cap and the server's prefix cache by run type, and reads its own signal.
-
-    Naming the AgentX client script is not that signal, so without this an
-    AgentX replay is served as a fixed-sequence throughput sweep.
-    """
+    """The harness decides the context cap and the server's prefix cache by run type, and reads its own signal."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "true")
     # Only the MLPerf backend goes through this switch: the native Magpie backend pops benchmark_script and drives

@@ -198,11 +198,7 @@ def test_patch_directories_follow_controller_task_priority_among_equal_savings(t
 
 
 def test_the_largest_measured_saving_takes_the_round_the_phase_reserves(tmp_path: Path, monkeypatch) -> None:
-    """Only the first publication is sure of an E2E round; the analyst's priority predates every search.
-
-    A GLM-5.3 KERNEL measured a 1.04x priority-0 rewrite in that round, and the 2.47x priority-1 one behind it found
-    too little of the phase left to be measured at all.
-    """
+    """Only the first publication is sure of an E2E round; the analyst's priority predates every search."""
     root = tmp_path / "cycle" / "result" / "patches"
 
     ordered = _ordered(

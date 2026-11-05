@@ -1083,7 +1083,7 @@ class TestForgeGemmHelperCoverage:
         assert payload["max_recipes"] == lane_budget.FUSION_MAX_TARGETS
 
     async def test_a_session_too_short_for_one_recipe_declines_instead_of_running(self, tmp_path, monkeypatch):
-        """The share a GLM-5.3 session started forge-fuse on bought nothing but a reaped run."""
+        """A share too small for one recipe leaves the fusion lane unfunded."""
         result = await self._fusion_result(tmp_path, monkeypatch, max_minutes=20)
 
         assert result["status"] == "skipped"
@@ -1748,11 +1748,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_the_token_column_is_what_the_moe_lookups_missed_not_the_dense_m(self, tmp_path, monkeypatch):
-        """aiter pads the token count before the MoE lookup, so a raw dense M keys a row no lookup reads.
-
-        On GLM-5.3 the rows came from the dense GEMMs' sixteen prefill M values between 16639 and 32768, which all
-        pad to one key, while every decode lookup ran the untuned default.
-        """
+        """aiter pads the token count before the MoE lookup, so a raw dense M keys a row no lookup reads."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
 

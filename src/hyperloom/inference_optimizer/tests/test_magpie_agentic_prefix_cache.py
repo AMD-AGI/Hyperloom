@@ -34,14 +34,7 @@ def _runners(root: Path, body: str = _RUNNER) -> Path:
 
 
 def _mlperf_env(root: Path) -> dict[str, str]:
-    """The environment an MLPerf AgentX run prepares under.
-
-    Only that backend reaches ``prepare_agentx_runtime``: the native Magpie one
-    pops ``benchmark_script`` and drives Magpie's managed server, so no generic
-    script of ours launches its server. ``MAGPIE_PATH`` points at a tree with no
-    scripts so the patch under test is the one applied to the ``inferencex_path``
-    copy, which is the copy a session actually runs.
-    """
+    """The environment an MLPerf AgentX run prepares under."""
     return {
         "HYPERLOOM_AGENTIC_BACKEND": "mlperf",
         "MAGPIE_PATH": str(root / "absent-magpie"),
@@ -104,12 +97,7 @@ def test_a_script_whose_block_moved_is_reported_not_silently_accepted(tmp_path):
 
 
 def test_preparing_an_agentx_run_keeps_its_prefix_cache(tmp_path, monkeypatch):
-    """Baseline and profile shell out without the grid runner, so the patch has to live where both arrive.
-
-    Called from the grid runner alone it never reached a baseline --- the very
-    measurement every later round is compared against --- and a GLM-5.3 run
-    served its replay with the cache off while reporting the patch applied.
-    """
+    """Baseline and profile shell out without the grid runner, so the patch has to live where both arrive."""
     from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
     _runners(tmp_path)

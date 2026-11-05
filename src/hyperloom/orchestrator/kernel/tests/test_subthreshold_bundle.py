@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel wins the AgentX P50 threshold alone refused are deferred into one bundled E2E.
-
-On GLM-5.3 a fmoe_ck tune (+2.97%), an a8w8 tune (+2.77%) and a Controller rewrite (+2.7%) were each discarded, and
-the same pod measured them together at +13.1%.
-"""
+"""Kernel wins the AgentX P50 threshold alone refused are deferred into one bundled E2E."""
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,13 +16,8 @@ from hyperloom.orchestrator.phases.kernel import KernelPhase
 from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.tests._helpers import diff_against_head, git
 
-_GIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "bundle-test",
-    "GIT_AUTHOR_EMAIL": "bundle-test@local",
-    "GIT_COMMITTER_NAME": "bundle-test",
-    "GIT_COMMITTER_EMAIL": "bundle-test@local",
-}
 _P50 = "p50_gain_below_threshold"
 
 
@@ -43,36 +32,22 @@ def _revert(gain_pct: float, refused_by: str, **fields) -> dict:
     return {"status": "ok", "decision": "REVERT", "gain_pct": gain_pct, "refused_by": refused_by, **fields}
 
 
-def _git(repo: Path, *args: str) -> str:
-    env = {**os.environ, **_GIT_IDENTITY}
-    return subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True).stdout.strip()
-
-
 def _repo(tmp_path: Path, files: tuple[str, ...]) -> tuple[Path, str]:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _git(repo, "init")
+    git(repo, "init")
     for name in files:
         (repo / name).write_text("VALUE = 1\n", encoding="utf-8")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "baseline")
-    return repo, _git(repo, "rev-parse", "HEAD")
-
-
-def _patch(repo: Path, relative: str, content: str) -> str:
-    path = repo / relative
-    original = path.read_text(encoding="utf-8")
-    path.write_text(content, encoding="utf-8")
-    patch = _git(repo, "diff", "--binary", "--", relative)
-    path.write_text(original, encoding="utf-8")
-    return patch + "\n"
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "baseline")
+    return repo, git(repo, "rev-parse", "HEAD")
 
 
 def _publish(patches_root: Path, repo: Path, base: str, name: str) -> Path:
     operator_id = f"kernel:forge-loop:{name}:standalone:unknown:triton:mi355x"
     patch_dir = patches_root / operator_directory_name(operator_id)
     patch_dir.mkdir(parents=True)
-    (patch_dir / "change.patch").write_text(_patch(repo, f"{name}.py", "VALUE = 2\n"), encoding="utf-8")
+    (patch_dir / "change.patch").write_text(diff_against_head(repo, f"{name}.py", "VALUE = 2\n"), encoding="utf-8")
     (patch_dir / "report.md").write_text("# Report\n", encoding="utf-8")
     publication = {
         "schema_version": 2,
@@ -312,8 +287,8 @@ async def test_kernel_entry_measures_the_bundle_once_and_reverts_every_member(tm
     assert seen_on_disk == ["VALUE = 2\n"]
     assert jit == [("prepare", union), ("drop", union)]
     assert (repo / "mqa.py").read_text(encoding="utf-8") == "VALUE = 1\n"
-    assert _git(repo, "status", "--porcelain", "--untracked-files=no") == ""
-    assert _git(repo, "rev-parse", "HEAD") == base
+    assert git(repo, "status", "--porcelain", "--untracked-files=no") == ""
+    assert git(repo, "rev-parse", "HEAD") == base
     assert state.optimization_stack == []
     assert SharedState.load_or_init(session_dir).kernel_bundle_pending == []
 
@@ -420,7 +395,7 @@ async def test_a_kept_bundle_lands_as_one_stack_entry_with_its_envs_args_and_sou
         round_stop=lambda: None,
     )
 
-    head = _git(repo, "rev-parse", "HEAD")
+    head = git(repo, "rev-parse", "HEAD")
     keys = (
         "action",
         "variant_name",
@@ -453,7 +428,7 @@ async def test_a_kept_bundle_lands_as_one_stack_entry_with_its_envs_args_and_sou
     ]
     assert Path(state.optimization_stack[0]["source_snapshot"]).is_dir()
     assert state.current_best["tput"] == 113.0
-    assert _git(repo, "log", "-1", "--format=%P") == base
+    assert git(repo, "log", "-1", "--format=%P") == base
     assert (repo / "mqa.py").read_text(encoding="utf-8") == "VALUE = 2\n"
     assert jit == [("prepare", _FMOE_ENVS)]
     assert SharedState.load_or_init(session_dir).kernel_bundle_pending == []

@@ -25,12 +25,7 @@ def test_a_measured_result_at_or_over_the_bar_is_not_blocked():
 
 
 def test_a_round_that_never_reached_a_measurement_settles_nothing():
-    """The GLM-5.3 prefix-cache rounds died before the server served; the idea was worth 94% of the run's prefill.
-
-    Their `tps_delta_pct` is the zero the record defaults to. Read as a result,
-    a correct direction would be retired permanently on evidence that does not
-    exist.
-    """
+    """A round that died before the server served does not retire its direction."""
     for outcome in (
         "rejected_apply_fail",
         "reverted_smoke_fail",
@@ -70,11 +65,7 @@ def test_a_result_from_this_stack_settles_the_lever():
 
 
 def test_a_result_from_another_model_or_gpu_settles_nothing():
-    """The ledger is one file per workspace root, shared by every session that root has served.
-
-    A lever worth +0.4% against a 2% bar on Qwen3-8B/MI300X would otherwise
-    retire that direction for a GLM-5.3/MI355X session that never measured it.
-    """
+    """The ledger is one file per workspace root, shared by every session that root has served."""
     session = _this_session()
 
     assert _measured_on_this_stack(_stack_rec(model_class="Qwen3-8B"), session) is False

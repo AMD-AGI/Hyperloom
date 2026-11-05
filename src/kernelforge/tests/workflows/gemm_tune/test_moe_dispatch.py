@@ -305,7 +305,7 @@ class TestReadingBackWhatAiterServed:
 
 
 class TestOperandsFollowTheKeysActivation:
-    """GLM-5.3's MoE is the same per_1x32 fp4 path at Silu; refusing it threw away a whole tuned table."""
+    """The per_1x32 fp4 MoE path is accepted at Silu as well."""
 
     @staticmethod
     def _aiter_with_a_recording_tuner(monkeypatch, tmp_path) -> list[object]:

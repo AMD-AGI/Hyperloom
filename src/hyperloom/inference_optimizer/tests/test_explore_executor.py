@@ -3400,7 +3400,7 @@ def test_a_leave_one_out_arm_that_regressed_attributes_its_lever():
 
 
 def test_a_lever_attribution_arm_runs_after_the_candidates_that_could_keep():
-    """GLM-5.3: three 90-minute leave-one-out arms led every round, and preemption cancelled each before a proposal ran."""
+    """Leave-one-out attribution arms run after the arms that could KEEP."""
     from hyperloom.orchestrator.actions.executors.explore import _lever_seeded_payload
 
     levers = [
@@ -4229,7 +4229,7 @@ async def _round_preempted_on(sub, tr, tmp_path, *, key: str, params: dict, pree
 
 @pytest.mark.asyncio
 async def test_a_verdict_reached_before_the_round_died_is_not_measured_again(sub_agent_runner, tmp_path, monkeypatch):
-    """GLM-5.3: preemption killed a round 18 minutes into v01, and its retry measured v00's 90 minutes again."""
+    """A variant's verdict is persisted as it lands, so a retried round does not measure it again."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     state = SharedState()

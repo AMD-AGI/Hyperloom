@@ -223,11 +223,7 @@ async def test_a_leg_resumed_mid_forge_round_requeues_the_kernel_agent_and_stays
 
 @pytest.mark.asyncio
 async def test_a_leg_resumed_while_its_kernel_agent_ran_replaces_the_dead_legs_task(coord, monkeypatch):
-    """The stopped leg's kernel_agent row still reads running when the next leg starts; it is not a live round.
-
-    Reused as live, it was failed by the first tick's reconcile pass and the GLM-5.3 session left KERNEL as
-    ``kernel_settled`` the second it resumed, its Forge round never having started.
-    """
+    """The stopped leg's kernel_agent row still reads running when the next leg starts; it is not a live round."""
     from hyperloom.orchestrator.bus import resource_lock
 
     _arm_kernel_phase(coord.shared_state)

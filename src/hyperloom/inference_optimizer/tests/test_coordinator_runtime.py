@@ -2219,7 +2219,7 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
     [("cancelled", [], 1), ("succeeded", [], 0), ("cancelled", [{"status": "ok"}], 0)],
 )
 async def test_a_prelude_roofline_cancelled_outside_the_run_is_enqueued_again(session_dir, ended, attempts, requeued):
-    """GLM-5.3: recover cancelled the preempted pod's initial roofline and PRELUDE moved on with no profile at all."""
+    """An initial roofline cancelled by recovery is enqueued again before PRELUDE moves on."""
     from hyperloom.orchestrator.state.task_registry import TaskSpec
 
     c = Coordinator(session_dir, backends=_silent_backends())

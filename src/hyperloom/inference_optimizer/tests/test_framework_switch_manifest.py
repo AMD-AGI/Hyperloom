@@ -92,7 +92,7 @@ def test_a_credential_shaped_switch_carrying_a_string_value_is_dropped():
 
 
 def test_a_token_cache_switch_set_to_a_flag_or_a_count_is_kept():
-    """GLM-5.3's chat segment token cache was dropped for the word TOKEN, though a 1 or a size can hold no secret."""
+    """A TOKEN-named switch set to a flag or a count can hold no secret, so it is kept."""
     switches, problems = manifest.parse_manifest(
         [
             _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE"),
@@ -116,7 +116,7 @@ _NUMERIC_SWITCH_PATCH = """\
 
 
 def test_a_switch_the_patch_reads_as_a_number_needs_an_explicit_value():
-    """GLM-5.3: a KiB cutoff registered as "1" benched a 1 KiB fused-allreduce cutoff, the opposite of the patch."""
+    """A switch the patch reads as a number is not defaulted to "1"."""
     switches, problems = manifest.parse_manifest(
         [
             _entry("SGLANG_AITER_FUSED_AR_1STAGE_MAX_KB"),
@@ -993,7 +993,7 @@ async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_dormant_patch_is_reinstalled_on_a_fresh_tree_at_resume(tmp_path, monkeypatch):
-    """GLM-5.3: a preempted pod's replacement held none of the dormant code, so its switches benched nothing."""
+    """A resumed session on a fresh tree reinstalls its dormant patches before their switches are benched."""
     import subprocess
 
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict

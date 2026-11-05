@@ -1690,11 +1690,7 @@ def test_a_session_that_imports_a_benchmark_module_leaves_no_byte_code_to_reject
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Importing a module under a protected ``benchmark/`` directory reads it; it does not edit it.
-
-    A GLM-5.3 fusion author imported SGLang's benchmark package, the byte-code that import left beside those
-    modules was rejected as changed protected files, and the fusion lane aborted with no harness.
-    """
+    """Importing a module under a protected ``benchmark/`` directory reads it; it does not edit it."""
     repo, kernel, driver = _make_repo(tmp_path)
     (repo / ".gitignore").write_text("forge_driver.py\n__pycache__/\n")
     (repo / "benchmark").mkdir()

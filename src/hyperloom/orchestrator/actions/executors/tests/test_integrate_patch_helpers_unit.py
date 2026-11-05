@@ -707,11 +707,7 @@ def _deliverable_round(tmp_path, params):
 
 
 def test_a_round_benches_the_switches_its_specialist_declared(tmp_path):
-    """A delegate that omits the deliverable's switches must not bench the patch with its code path off.
-
-    A GLM-5.3 orchestrator queued the DSA graph-variant no-sync and prompt segment-cache patches with no env, though
-    each specialist declared the default-off switch its code path needs.
-    """
+    """A delegate that omits the deliverable's switches must not bench the patch with its code path off."""
     deliverable = _deliverable_round(tmp_path, {})
 
     assert deliverable.extra_envs == {"SGLANG_DSA_GRAPH_VARIANT_NO_SYNC": "1"}
