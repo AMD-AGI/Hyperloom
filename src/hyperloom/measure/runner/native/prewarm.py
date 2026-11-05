@@ -24,7 +24,7 @@ before, under the watchdog above.
 Given the card's CU count (``cu_num``), the build reads it as ``CU_NUM``, so aiter compiles the tables' rows of exactly
 that ``(gfx, cu_num)`` (it takes the count of ``GFX_CU_NUM_MAP`` otherwise, which a partitioned card does not have), and
 the built modules must pass the launch preflight's own coverage test for it
-(:func:`~hyperloom.orchestrator.actions.executors._aiter_jit.serving_modules_cover_csv`, over every table the image's
+(:func:`~hyperloom.orchestrator.actions.executors._aiter_jit.serving_modules_cover_rows`, over every table the image's
 launch loads) before anything is installed, or that preflight would move them aside again.
 
 The build runs under the environment a test's server has when nothing of the test sets a build variable
@@ -83,9 +83,10 @@ from hyperloom.orchestrator.actions.executors._aiter_jit import (
     AITER_ENV_TO_TUNED_FILE,
     AITER_PREWARM_MANIFEST,
     AITER_PREWARM_SCHEMA,
+    csv_jit_kernel_rows,
     csvs_aiter_will_load,
     read_prewarm_manifest,
-    serving_modules_cover_csv,
+    serving_modules_cover_rows,
     tuned_tables_sha256,
 )
 
@@ -338,7 +339,9 @@ def _uncovered(package: Path, built: Mapping[str, Path], target: tuple[str, int]
         if not tuned or not set(modules) & set(built):
             continue
         for table in csvs_aiter_will_load(package / _CONFIGS_DIR, tuned, ""):
-            if table.is_file() and not serving_modules_cover_csv(view, modules, table, frozenset({target})):
+            if table.is_file() and not serving_modules_cover_rows(
+                view, modules, csv_jit_kernel_rows(table, frozenset({target}))
+            ):
                 uncovered.append(table.name)
     return uncovered
 

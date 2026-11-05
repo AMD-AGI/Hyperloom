@@ -1318,19 +1318,27 @@ def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.M
 
 def test_maybe_gpu_specialist_lease_pytest_default_none(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
-    assert rs.maybe_gpu_specialist_lease(num_gpus=2) is None
+    assert rs.maybe_gpu_specialist_lease(ray_exec=rb.ray_exec_enabled(), num_gpus=2) is None
 
 
-def test_maybe_gpu_specialist_lease_zero_gpus_none(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
-    assert rs.maybe_gpu_specialist_lease(num_gpus=0) is None
+def test_maybe_gpu_specialist_lease_zero_gpus_none():
+    assert rs.maybe_gpu_specialist_lease(ray_exec=True, num_gpus=0) is None
+
+
+def test_maybe_gpu_specialist_lease_follows_the_callers_route_not_a_fresh_read(monkeypatch: pytest.MonkeyPatch):
+    """The admission's GPU ids already follow the route it was given, so the lease does not ask the route again."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
+    assert rb.ray_exec_enabled() is False
+    assert isinstance(rs.maybe_gpu_specialist_lease(ray_exec=True, num_gpus=2), rs.GpuSpecialistLease)
+    monkeypatch.setattr(rb, "ray_exec_enabled", lambda: True)
+    assert rs.maybe_gpu_specialist_lease(ray_exec=False, num_gpus=2) is None
 
 
 def test_maybe_gpu_specialist_lease_single_node_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    lease = rs.maybe_gpu_specialist_lease(num_gpus=2)
+    lease = rs.maybe_gpu_specialist_lease(ray_exec=rb.ray_exec_enabled(), num_gpus=2)
     assert isinstance(lease, rs.GpuSpecialistLease)
 
 
@@ -1338,7 +1346,7 @@ def test_maybe_gpu_specialist_lease_multi_node_none(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rs.maybe_gpu_specialist_lease(num_gpus=2) is None
+    assert rs.maybe_gpu_specialist_lease(ray_exec=rb.ray_exec_enabled(), num_gpus=2) is None
 
 
 # ── P3: serving_slot custom resource (T6) ────────────────────────────────────
@@ -1365,9 +1373,9 @@ def test_maybe_gpu_specialist_lease_serving_slot_passthrough(monkeypatch: pytest
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    disjoint = rs.maybe_gpu_specialist_lease(num_gpus=2)
+    disjoint = rs.maybe_gpu_specialist_lease(ray_exec=rb.ray_exec_enabled(), num_gpus=2)
     assert disjoint is not None and disjoint._serving_slot is False
-    whole = rs.maybe_gpu_specialist_lease(num_gpus=8, serving_slot=True)
+    whole = rs.maybe_gpu_specialist_lease(ray_exec=rb.ray_exec_enabled(), num_gpus=8, serving_slot=True)
     assert whole is not None and whole._serving_slot is True
 
 
