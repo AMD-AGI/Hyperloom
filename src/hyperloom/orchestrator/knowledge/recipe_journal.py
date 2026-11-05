@@ -424,8 +424,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         landed; a per-variant KEEP outside it did not adopt anything.
         """
         result_dict = _result_payload(result)
-        if result_dict.get("status") == STATUS_SCREENED:
-            # A cycle-bench batch measured no replay, so there is no fact for the recipe KB.
+        if result_dict.get("status") == STATUS_SCREENED:  # A cycle-bench batch measured no replay: no KB fact.
             return
         source_session_id = self._source_session_id()
         per_variant = result_dict.get("per_variant_outcomes")

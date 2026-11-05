@@ -438,11 +438,7 @@ class MagpieRound:
 def _magpie_process_env(config_path: Path, unset_envs: list[str] | None) -> dict[str, str]:
     """The scrubbed process environment a Magpie round starts from, before per-round pins."""
     env = scrub_benchmark_process_env(os.environ.copy())
-    apply_session_jit_cache(
-        env,
-        framework=benchmark_framework(config_path),
-        session_dir=_resolve_session_dir(),
-    )
+    apply_session_jit_cache(env, framework=benchmark_framework(config_path), session_dir=_resolve_session_dir())
     env["PYTHONUNBUFFERED"] = "1"
     from ._workload_envs import resolve_reference_launch
 

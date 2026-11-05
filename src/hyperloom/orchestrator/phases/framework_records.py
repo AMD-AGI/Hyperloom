@@ -25,6 +25,8 @@ from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attri
 from ..state.task_registry import TaskNotFound
 
 if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
     from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
@@ -627,6 +629,22 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
 
 class _AuthoredOutcomeMixin:
     """Bridges authored-deliverable outcomes into the FRAMEWORK progress ledger, the attempt ledger and the timeline."""
+
+    def _record_measured_patch_set(self, task: "Task", result: Any, verdict: "Verdict") -> None:
+        """Note the lines this round's patch changed and whether it stayed, so a later proposal can be told it repeats them."""
+        from ..framework.patch_overlap import record_measured_patch_set
+
+        params = task.params or {}
+        identity = params.get("patch_identity") if isinstance(params.get("patch_identity"), dict) else {}
+        status = str((getattr(result, "result", None) or {}).get("status") or "")
+        record_measured_patch_set(
+            self.shared_state,
+            task_id=str(task.task_id or ""),
+            patch_name=str(params.get("patch_name") or ""),
+            identity=identity,
+            outcome=verdict.name.lower(),
+            landed=status in _integrate_vocabulary.KEEP_STATUSES,
+        )
 
     def _authored_candidate_id(self, params: Mapping[str, Any]) -> str:
         """The FRAMEWORK candidate (a PR URL) an ``integrate_patch`` task's params name; empty when they name none."""

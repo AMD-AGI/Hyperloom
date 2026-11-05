@@ -295,23 +295,6 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         await self._maybe_rearm_authored_lane(result.result, to_mapping(task.params))
         await self._drain_apply_fail_retry_pending()
 
-    def _record_measured_patch_set(self, task: "Task", result: Any, verdict: Verdict) -> None:
-        """Note the lines this round's patch changed and whether it stayed, so a later proposal can be told it repeats them."""
-        from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
-        from ..framework.patch_overlap import record_measured_patch_set
-
-        params = task.params or {}
-        identity = params.get("patch_identity") if isinstance(params.get("patch_identity"), dict) else {}
-        status = str((getattr(result, "result", None) or {}).get("status") or "")
-        record_measured_patch_set(
-            self.shared_state,
-            task_id=str(task.task_id or ""),
-            patch_name=str(params.get("patch_name") or ""),
-            identity=identity,
-            outcome=verdict.name.lower(),
-            landed=status in KEEP_STATUSES,
-        )
-
     def record_unpromoted_candidate(self, task: "Task", result_payload: dict[str, Any]) -> None:
         """Stamp ``no_result_failed`` for an upstream-PR candidate task that settled without a promotable result."""
         params = task.params or {}
@@ -1856,10 +1839,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
                 enablement context travel to integrate_patch.
             done_payload: The specialist's ``specialist_done`` payload.
             deliverable: The integrate_patch params that say what to apply.
-            review: What accompanies the proposal to the review -- the bus
-                observation, and the measured rounds the deliverable's patch
-                repeats so the review can weigh a re-measurement without
-                anything being refused.
+            review: The bus observation, and the measured rounds the deliverable's patch repeats.
 
         Returns:
             The recorded proposal, or ``None`` when the Critic already ruled on

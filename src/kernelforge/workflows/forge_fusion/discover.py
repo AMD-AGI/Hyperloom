@@ -181,17 +181,10 @@ def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[
     """Distinct kernel names ranked by total duration, compute kernels included."""
     totals: dict[str, float] = defaultdict(float)
     for event in load_trace_events(trace_path):
-        if event.get("cat") != "kernel":
-            continue
-        try:
-            duration = float(event.get("dur"))
-        except (TypeError, ValueError):
-            continue
-        if duration <= 0:
-            continue
+        span = _kernel_span(event)
         name = str(event.get("name") or "")
-        if name:
-            totals[name] += duration
+        if span is not None and name:
+            totals[name] += span[0]
     ranked = sorted(totals.items(), key=lambda item: item[1], reverse=True)
     return [name for name, _ in ranked[:top_n]]
 
@@ -207,15 +200,10 @@ def stream_ordered_kernels(
     streams: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
     total_kernel_us = 0.0
     for event in load_trace_events(trace_path):
-        if event.get("cat") != "kernel":
+        span = _kernel_span(event)
+        if span is None or span[1] is None:
             continue
-        try:
-            timestamp = float(event.get("ts"))
-            duration = float(event.get("dur"))
-        except (TypeError, ValueError):
-            continue
-        if duration <= 0:
-            continue
+        duration, timestamp = span
         name = str(event.get("name") or "")
         args = event.get("args") if isinstance(event.get("args"), dict) else {}
         stream_key = (
