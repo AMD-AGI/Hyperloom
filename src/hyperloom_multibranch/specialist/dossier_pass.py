@@ -136,6 +136,7 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
     spec = replace(
         setup.spec,
         server_args=recipe.launch.server_args,
+        remove_args=recipe.launch.remove_args,
         envs=dict(recipe.launch.envs),
         workspace=str(worktree.path),
         seconds=seconds,

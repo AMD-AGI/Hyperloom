@@ -4,14 +4,17 @@
 import asyncio
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import LeaseCharge
-from hyperloom_multibranch.specialist import arbor_adapter
+from hyperloom_multibranch.specialist import arbor_adapter, dossier_pass
+from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE
 from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_PASS, MAPPED
 from hyperloom_multibranch.specialist.dossier_pass import (
@@ -103,12 +106,13 @@ async def _pass(
     arbor: bool = True,
     in_session: bool = False,
     held_by: tuple[str, LeaseCharge] = (DOSSIER_HOLDER, DOSSIER_CHARGE),
+    root: Recipe = ROOT,
 ) -> tuple[DossierOutcome, Toolbox, Path, DossierSetup]:
     """The dossier pass of a fake Arbor doing ``do``, on a rig whose toolbox has ``cards`` free, given ``seconds`` and
     ``start_seconds`` of wall time to start in, writing its dossier in its session (``in_session``) or, by default, in
     its checkout, its lease held as ``held_by`` says."""
 
-    rig = await branch_rig(tmp_path, ROOT, "a1")
+    rig = await branch_rig(tmp_path, root, "a1")
     files = {
         **CHECKOUT_FILES,
         "arbor/__main__.py": FAKE_DOSSIER,
@@ -163,6 +167,25 @@ async def test_the_pass_maps_on_its_own_lease_from_the_start_commit_and_gives_th
     assert config["server_flags"] == "--max-num-seqs 128 --tensor-parallel-size 1"  # the start commit's launch, its TP
     profile = json.loads((session / PROFILE_FILE).read_text())
     assert (profile["source"], profile["shares"]) == ("kernel shares", dict(SHARES.shares))
+
+
+async def test_the_pass_is_asked_for_the_start_s_launch_with_the_resolved_flags_it_removes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    specs: list[AgentSpec] = []
+    make_ready = dossier_pass.make_ready
+
+    async def recorded(source: str, spec: AgentSpec, *args):
+        specs.append(spec)
+        return await make_ready(source, spec, *args)
+
+    monkeypatch.setattr(dossier_pass, "make_ready", recorded)
+    root = replace(ROOT, launch=replace(ROOT.launch, remove_args=("--enforce-eager",)))
+
+    outcome, _toolbox, _checkout, _setup = await _pass(tmp_path, "mapped", root=root)
+
+    assert outcome.reason == MAPPED
+    assert (specs[0].server_args, specs[0].remove_args) == ("--max-num-seqs 128", ("--enforce-eager",))
 
 
 async def test_a_mapping_branch_s_pass_leases_its_cards_as_the_branch_and_charges_them_to_it(tmp_path: Path) -> None:
