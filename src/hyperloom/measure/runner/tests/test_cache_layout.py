@@ -40,6 +40,7 @@ from hyperloom.measure.runner.cache_layout import (
 )
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, copy_cache
 
+_REPO_ROOT = next(parent for parent in Path(__file__).resolve().parents if (parent / "pyproject.toml").is_file())
 _HASH = "a" * 64
 _RUNNER_MAIN = "src/hyperloom/measure/runner/__main__.py"
 
@@ -68,6 +69,12 @@ def test_the_lock_parser_reads_pins_with_their_hashes_and_skips_comments() -> No
 def test_the_lock_parser_refuses_what_is_not_a_pin_or_a_hash_and_names_the_line(text: str, line: int) -> None:
     with pytest.raises(CacheError, match=f"line {line} is not a pin or a hash"):
         parse_lock(text)
+
+
+def test_the_parser_reads_the_lock_of_this_repository() -> None:
+    pins = parse_lock((_REPO_ROOT / "requirements" / "runner.lock").read_text(encoding="utf-8"))
+    assert len(pins) > 20
+    assert all(pin.hashes for pin in pins)
 
 
 def _make_tree(root: Path) -> Path:
