@@ -135,6 +135,8 @@ MAPPED = "mapped"
 #: The command lines of Arbor's map: ``arbor.directions`` splits and generates one, the master in ``arbor.roles``
 #: deals from it.
 DIRECTIONS_MODULE, ROLES_MODULE = "arbor.directions", "arbor.roles"
+#: Where each of those command lines writes what it makes.
+OUT_FLAG = "--out"
 MAP_FILE = "directions.json"
 #: Where Arbor's dossier skill writes a dossier in its checkout and looks one up: a directory per dossier, with its
 #: index. Arbor ships dossiers of its own there, which git tracks.
@@ -782,7 +784,7 @@ async def split_directions(checkout: Path, map_file: Path, shares: int, out: Pat
 
     paths = tuple(out / f"share-{number}.json" for number in range(1, shares + 1))
     await _arbor_cli(
-        checkout, paths, DIRECTIONS_MODULE, "split", str(map_file), "--shares", str(shares), "--out", str(out)
+        checkout, paths, DIRECTIONS_MODULE, "split", str(map_file), "--shares", str(shares), OUT_FLAG, str(out)
     )
     return paths
 
@@ -793,7 +795,7 @@ async def generate_directions(checkout: Path, profile: Path, out: Path) -> Path:
     ``out``, which :func:`split_directions` splits as any map. Raise :class:`SplitFailed` with what Arbor printed when
     it cannot: a profile with no share above its cut, or an Arbor older than ``generate``."""
 
-    await _arbor_cli(checkout, (out,), DIRECTIONS_MODULE, "generate", "--profile", str(profile), "--out", str(out))
+    await _arbor_cli(checkout, (out,), DIRECTIONS_MODULE, "generate", "--profile", str(profile), OUT_FLAG, str(out))
     return out
 
 
@@ -808,7 +810,7 @@ async def deal_order(checkout: Path, deal: DealRequest) -> Path:
         args += ["--reports", *(str(report) for report in deal.reports)]
     for held in deal.held:
         args += ["--held-order", str(held)]
-    await _arbor_cli(checkout, (deal.out,), ROLES_MODULE, *args, "--out", str(deal.out))
+    await _arbor_cli(checkout, (deal.out,), ROLES_MODULE, *args, OUT_FLAG, str(deal.out))
     return deal.out
 
 
