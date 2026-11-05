@@ -493,6 +493,7 @@ def test_the_report_is_json_for_close_and_lines_for_people_and_is_written_whole(
     report = build_report(pack, _reference_image(tmp_path, _NEW_AITER))
 
     document = json.loads(json.dumps(report.to_json()))
+    assert document["mode"] == "warn"
     assert document["counts"] == {"pass": 11, "fail": 1, "unverifiable": 33}
     assert document["environment"]["python_version"].count(".") == 2
     assert document["environment"]["packages"]["vllm"] == {"installed": True, "version": None}
@@ -531,12 +532,32 @@ def test_a_failing_fact_stops_the_session_under_strict_and_carries_the_report(tm
     pack = load_pack(DEFAULT_PACK_PATH)
     with pytest.raises(ImageCheckFailed, match="aiter_merged_view") as stopped:
         run_image_check(mode=ImageCheckMode.STRICT, pack=pack, image=_reference_image(tmp_path, _NEW_AITER))
-    assert [fact.fact for fact in stopped.value.report.failed()] == ["aiter_merged_view"]
+    report = stopped.value.report
+    assert [fact.fact for fact in report.failed()] == ["aiter_merged_view"]
+    assert (report.summary()["mode"], report.to_json()["mode"]) == ("strict", "strict")
+    assert report.markdown_lines()[0].startswith(f"Image check (strict) of rule pack {pack.version}: ")
 
     other = tmp_path / "other"
     other.mkdir()
     healthy = run_image_check(mode=ImageCheckMode.STRICT, pack=pack, image=_reference_image(other, _OLD_AITER))
     assert healthy.failed() == ()
+    assert (healthy.summary()["mode"], healthy.to_json()["mode"]) == ("strict", "strict")
+
+
+def test_a_session_given_no_mode_runs_under_the_one_the_session_input_names_and_a_given_mode_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pack = load_pack(DEFAULT_PACK_PATH)
+    monkeypatch.setenv(MODE_ENV, "strict")
+    with pytest.raises(ImageCheckFailed) as stopped:
+        run_image_check(pack=pack, image=_reference_image(tmp_path, _NEW_AITER))
+    assert (stopped.value.report.summary()["mode"], stopped.value.report.to_json()["mode"]) == ("strict", "strict")
+
+    other = tmp_path / "other"
+    other.mkdir()
+    given = run_image_check(mode=ImageCheckMode.WARN, pack=pack, image=_reference_image(other, _NEW_AITER))
+    assert [fact.fact for fact in given.failed()] == ["aiter_merged_view"]
+    assert (given.summary()["mode"], given.to_json()["mode"]) == ("warn", "warn")
 
 
 class _Untouchable:
