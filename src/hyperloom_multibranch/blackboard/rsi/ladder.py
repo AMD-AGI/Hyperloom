@@ -100,9 +100,10 @@ TASK_LABELS = (MODEL, "gpu", "framework", "framework_version", "precision")
 TASK_SIZES = ("tp", "conc", "isl", "osl")
 #: How many runs a session gets when CLOSE reruns the scheduling replay, fewer than a study's so CLOSE stays short.
 CLOSE_REPLAY_RUNS = 50
-#: The fewest archived sessions R1 and a standing read the replay's interval over: it is bootstrapped over sessions, so
-#: over one its ends are that session's mean, and over two its low end is the smaller of their means.
-MIN_REPLAYED_SESSIONS = 3
+#: The fewest archived sessions R1 and a standing read the replay's interval over, as many as R3 pairs: it is
+#: bootstrapped over sessions, so over one its ends are that session's mean, and over two its low end is the smaller of
+#: their means.
+MIN_REPLAYED_SESSIONS = MIN_TRIALS
 STANDING_FORMAT = "multibranch.scheduling-replay-standing"
 BETTER = "better"
 WORSE = "worse"
