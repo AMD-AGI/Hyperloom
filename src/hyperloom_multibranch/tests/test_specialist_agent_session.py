@@ -7,7 +7,7 @@ import math
 import os
 import sys
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pytest
@@ -21,7 +21,7 @@ from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
-from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
+from hyperloom_multibranch.contracts.blackboard.records import LlmUsage, MergeAttempt
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, UsageSource
 from hyperloom_multibranch.contracts.toolbox import BranchLease, QueueState, SpecialistGrant
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -860,12 +860,36 @@ async def _idle_after_turns(rig, *last) -> SessionIdle:
     return idle.value
 
 
-async def _move_integration(rig) -> str:
-    """Merge another branch's commit onto the integration head; the new head."""
+@dataclass(frozen=True)
+class _Landed:
+    """Another branch's commit ``tip``, merged onto the integration head as ``onto`` in the repository."""
+
+    tip: str
+    onto: str
+
+
+async def _land_merge(rig) -> _Landed:
+    """Merge another branch's commit onto the integration head in the repository, as the integrator does before it
+    judges the merge."""
     chunking = RecipeDelta(config=ConfigDelta(server_args="--enable-chunked-prefill"))
     await rig.repo.create_branch("s0", rig.root)
     tip = await rig.repo.commit("s0", rig.root, apply(ROOT, chunking), "enable chunked prefill")
-    return await rig.repo.commit_integration(rig.root, chunking, (tip,))
+    return _Landed(tip, await rig.repo.commit_integration(rig.root, chunking, (tip,)))
+
+
+async def _judge_merge(rig, landed: _Landed) -> None:
+    integrator = LocalBlackboard(rig.toolbox_blackboard.root, Writer(Role.INTEGRATOR, "integrator"))
+    await rig.toolbox_blackboard.write_request(request("m0", intent(INTEGRATION_BRANCH, rig.root, "merge")))
+    await integrator.record_merge_attempt(MergeAttempt((landed.tip,), rig.root, request_id="m0"))
+    await rig.toolbox_blackboard.write_result(result("m0"))
+    await integrator.write_judgement("m0", judgement(3.1, ("m0",)), Conclusion.MERGED, landed.onto)
+
+
+async def _move_integration(rig) -> str:
+    """Merge another branch's commit onto the integration head and judge the merge; the new head."""
+    landed = await _land_merge(rig)
+    await _judge_merge(rig, landed)
+    return landed.onto
 
 
 async def test_an_idle_end_under_the_context_cap_is_resumed_with_what_changed_since(rig):
@@ -1159,12 +1183,17 @@ async def test_a_fresh_launch_shows_what_the_integration_head_holds_and_what_the
     assert f"{branched.merged[:12]} of s0" in prompt and f"Your head {branched.own} lacks of it" in prompt
 
 
-async def test_the_integration_head_moving_wakes_the_cli_with_what_it_now_holds(rig):
+async def test_the_integration_head_moving_wakes_the_cli_with_what_it_now_holds_once_the_merge_is_judged(rig):
     session, running = await _next_launch(rig, 1)
     _end_turn(rig)
     beats = rig.runner.beats
     await _until(lambda: rig.runner.beats > beats, "the turn's end to be waited out")
-    moved = await _move_integration(rig)
+    landed = await _land_merge(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.beats > beats + 1, "a poll past the merge landing")
+    assert rig.runner.sent == []
+    await _judge_merge(rig, landed)
+    moved = landed.onto
     await _until(lambda: len(rig.runner.sent) == 1, "the move to wake the CLI")
     await session.stop()
     await asyncio.wait_for(running, 1)

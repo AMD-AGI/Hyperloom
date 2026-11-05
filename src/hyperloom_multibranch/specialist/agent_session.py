@@ -91,10 +91,17 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     TestRecord,
 )
 from hyperloom_multibranch.contracts.blackboard.exhausted import exhausted_refusal
-from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, InboxKind, UsageSource
+from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
-from hyperloom_multibranch.specialist.following import REROOT, Followed, follow, integration_holdings, reroot_requested
+from hyperloom_multibranch.specialist.following import (
+    REROOT,
+    Followed,
+    follow,
+    integration_head,
+    integration_holdings,
+    reroot_requested,
+)
 from hyperloom_multibranch.specialist.judging import NOTICE, left_unjudged
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 from hyperloom_multibranch.specialist.prompts import (
@@ -374,7 +381,7 @@ class AgentSession:
         head = await sync_to_head(self._setup.repo, branch, worktree)
         recent = await self._place.blackboard.branch_log(branch)
         start = await self._briefed(head)
-        integration = await self._setup.repo.head(INTEGRATION_BRANCH)
+        integration = await self._integration_head()
         holdings = _joined(followed.detail if followed else "", await self._holdings(head))
         prompt = _joined(
             launch_prompt(start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end),
@@ -406,7 +413,7 @@ class AgentSession:
         kept = await asyncio.to_thread(worktree.head) == head
         if not kept:
             head = await sync_to_head(self._setup.repo, branch, worktree)
-        integration = IntegrationHeads(cli.integration, await self._setup.repo.head(INTEGRATION_BRANCH))
+        integration = IntegrationHeads(cli.integration, await self._integration_head())
         seen = _Seen(cli.seen_cursor, cli.logged, integration=integration.now)
         items, notices = await self._arrived(seen)
         resume = Resume(cli.reason, head, str(worktree.path), kept=kept)
@@ -442,7 +449,7 @@ class AgentSession:
                 return followed
             if any(await self._arrived(_Seen(cli.seen_cursor, cli.logged))):
                 return None
-            if await self._setup.repo.head(INTEGRATION_BRANCH) != cli.integration:
+            if await self._integration_head() != cli.integration:
                 return None
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), min(self._setup.poll_seconds, deadline - loop.time()))
@@ -630,7 +637,7 @@ class AgentSession:
         shared = await self._shared_profiles()
         landed = [_landed(record) for record in shared if record.request_id in seen.profiles and not record.in_flight]
         seen.profiles = {record.request_id for record in shared if record.in_flight}
-        integration = await self._setup.repo.head(INTEGRATION_BRANCH)
+        integration = await self._integration_head()
         moved = integration != seen.integration
         if not (items or notices or landed or moved or followed):
             return None
@@ -707,6 +714,9 @@ class AgentSession:
 
     async def _holdings(self, head: str) -> str:
         return await integration_holdings(self._setup.repo, await self._place.blackboard.snapshot(), head)
+
+    async def _integration_head(self) -> str:
+        return integration_head(await self._place.blackboard.snapshot())
 
     async def _candidates_unsettled(self) -> bool:
         """Whether a candidate test of the branch is in flight, or measured and neither judged nor closed by a notice
