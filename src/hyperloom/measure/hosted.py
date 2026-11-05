@@ -155,7 +155,8 @@ class Reverified:
 
 
 class _Events(Protocol):
-    def emit(self, type: str, data: Mapping[str, Any]) -> None: ...  # noqa: A002 - the events socket's name
+    def emit(self, type: str, data: Mapping[str, Any]) -> None:  # noqa: A002 - the events socket's name
+        """Hand over one event of ``type`` with ``data``."""
 
 
 @dataclass(frozen=True)
@@ -971,7 +972,8 @@ def _handle(runner: RunnerSandbox) -> Sandbox:
 class _WatchesStartup(Protocol):
     """A sandbox that can tell when its template's startup command, the runner, has exited (the local one can)."""
 
-    def startup_exit_code(self) -> int | None: ...
+    def startup_exit_code(self) -> int | None:
+        """The runner's exit code once it has exited; ``None`` while it runs or when the sandbox cannot tell."""
 
 
 def _startup_exit(handle: Sandbox) -> int | None:
