@@ -33,6 +33,7 @@ import logging
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from operator import attrgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -143,6 +144,7 @@ from hyperloom_multibranch.scheduling.stops import (
 )
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.widening import Widening
+from hyperloom_multibranch.specialist.agent_driver import Capabilities, driver_for
 from hyperloom_multibranch.specialist.agent_onboarding import ROOT_PROFILE_SOURCE, AttemptFailed
 from hyperloom_multibranch.specialist.arbor_adapter import REVIEW_HOST, REVIEW_OFF, SplitFailed
 from hyperloom_multibranch.specialist.map_session import MapCalls
@@ -189,6 +191,10 @@ COMPLETED_REASONS = frozenset(
 )
 CUT_SHORT = "CLOSE was cut short after a stop signal"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
+#: What the planners ask of an agent's driver: that the session's review of the map stands in for its own, and
+#: that it runs the dossier pass and generates a map (:class:`~.agent_driver.Capabilities`).
+_REVIEWS: Callable[[Capabilities], bool] = attrgetter("review_host")
+_MAPS: Callable[[Capabilities], bool] = attrgetter("dossier_pass")
 #: Why a session that was to stop after its map kept none.
 NO_ARBOR_TO_MAP = "no map: no agent named is an Arbor whose directions could be mapped"
 NO_MAP = "no map: the dossier pass set none and none could be generated from the root's shares"
@@ -593,7 +599,7 @@ class Session:
         if settings.agents and not settings.review_gate:
             self._decisions.record(Decision(DecisionKind.PRELUDE, REVIEW_SKIPPED, INTEGRATION_BRANCH, {}))
         if not settings.agents or settings.agent_directions:
-            if settings.agent_directions and settings.review_gate and await self._arbors():
+            if settings.agent_directions and settings.review_gate and await self._capable(_REVIEWS):
                 dossier = Path(settings.agent_dossier) if settings.agent_dossier else None
                 await self._review(Path(settings.agent_directions), dossier, MADE_BY_USER)
             return AgentBranches(settings.agents, await agent_plans(settings.agents, settings.agent_directions, work))
@@ -647,8 +653,8 @@ class Session:
         map_file = "" if outcome is None or outcome.map is None else str(outcome.map)
         if self._settings.review_gate:
             made_by = MADE_BY_PASS if map_file else MADE_BY_SHARES
-            arbors = await self._arbors()
-            map_file = map_file or (await self._generated(arbors, shares) if arbors else "")
+            mappers = await self._capable(_MAPS)
+            map_file = map_file or (await self._generated(mappers, shares) if mappers else "")
             dossier = None if outcome is None else outcome.dossier
             try:
                 await self._review(Path(map_file) if map_file else None, dossier, made_by, branch=branch)
@@ -744,7 +750,7 @@ class Session:
         ``MB-agent-map`` for a person to review (:func:`keep_map`). Without either, the session ends with why as its
         error."""
 
-        arbors = await self._arbors()
+        arbors = await self._capable(_MAPS)
         if not arbors:
             return SessionOutcome(SessionStopReason.MAPPED, None, None, NO_ARBOR_TO_MAP)
         first = min(arbors)
@@ -775,8 +781,15 @@ class Session:
         self._decisions.record(Decision(DecisionKind.PRELUDE, ROOT_SHARES_READ, INTEGRATION_BRANCH, read.detail))
         return read.shares
 
+    async def _capable(self, wanted: Callable[[Capabilities], bool]) -> dict[int, Path]:
+        """The agents of :meth:`_arbors` whose driver's capabilities have what ``wanted`` asks, by index."""
+
+        found = await self._arbors()
+        return {index: path for index, path in found.items() if wanted(driver_for(path).capabilities)}
+
     async def _arbors(self) -> dict[int, Path]:
-        """The Arbor agents of the run, by index; none, recorded, when a source cannot be fetched."""
+        """The agents of the run that take a share of the directions (the Arbor agents), by index; none, recorded,
+        when a source cannot be fetched."""
 
         try:
             return await arbor_agents(self._settings.agents, self._layout.agent_plans)

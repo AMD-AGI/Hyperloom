@@ -213,7 +213,7 @@ from hyperloom_multibranch.scheduling.review import (
 )
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
 from hyperloom_multibranch.specialist import autonomous_session
-from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
+from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, MARKERS, SplitFailed
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
@@ -1951,7 +1951,16 @@ async def test_two_agents_started_on_their_shares_both_have_their_keeps_merged_i
 async def _two_arbors(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
     """Every agent an Arbor checkout, with none fetched: real subprocesses would let the virtual clock run on."""
 
-    return dict.fromkeys(range(len(agents)), work_dir / "sources" / "0")
+    return dict.fromkeys(range(len(agents)), _arbor_checkout(work_dir / "sources" / "0"))
+
+
+def _arbor_checkout(path: Path) -> Path:
+    """``path`` with the files that make a checkout Arbor's, which the session asks its driver's capabilities of."""
+
+    for marker in MARKERS:
+        (path / marker).parent.mkdir(parents=True, exist_ok=True)
+        (path / marker).touch()
+    return path
 
 
 def _shares(stage: Stage) -> dict[str, str]:
@@ -2061,7 +2070,7 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
 
 
 async def _one_arbor(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
-    return {0: work_dir / "sources" / "0"}
+    return {0: _arbor_checkout(work_dir / "sources" / "0")}
 
 
 def _pass_wrote(tmp_path: Path) -> tuple[Path, Path]:
