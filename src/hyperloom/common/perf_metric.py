@@ -73,9 +73,10 @@ ERROR_RATE_SLACK_PCT = 0.5
 # Duration and error rate are members because they are decision inputs, not decoration: ``incomparability_reason``
 # refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped too many requests,
 # and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
-# are here for the same reason -- every input the verdict reads is recoverable from one block. The exception is the
+# are here for the same reason -- every input the verdict reads is recoverable from one block. The exceptions are the
 # unserved and total request counts the guard prefers when both sides carry them: they join once a ``main`` producer
-# stamps them, together with dropping the error-rate fallback in ``_failure_rates_pct``.
+# stamps them, together with dropping the error-rate fallback in ``_failure_rates_pct``. The checkpoint median is
+# record-only: it gates the early stop, which ``agentx_checkpoint.json`` and the REVERT reason record, not the verdict.
 GRADED_AXIS_KEYS = (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
