@@ -806,7 +806,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 make_parents=True,
                 fmt=JsonLineFormat(sort_keys=True),
             )
-        except Exception:
+        except OSError:
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
 
     def ensure_recipe_finalized(

@@ -729,7 +729,7 @@ def _driver_main(argv: list[str] | None = None) -> int:
 
     try:
         action = TargetedBuildAction.from_state(json.loads(plan_path.read_text(encoding="utf-8")))
-    except Exception as exc:  # outermost process entry: the failure is written to result.json
+    except (OSError, ValueError) as exc:
         log.warning("targeted build driver: failed to load plan.json: %s", exc, exc_info=True)
         result_path.write_text(
             json.dumps(
@@ -768,12 +768,23 @@ def _driver_main(argv: list[str] | None = None) -> int:
     return 0 if result.ok else 1
 
 
+#: Public name of the aiter recipe, whose preflight and budgets the native build store reuses.
+AiterBuild = _AiterBuild
+#: Public name of the sgl-kernel recipe, whose preflight and budgets the native build store reuses.
+SglKernelBuild = _SglKernelBuild
+#: Public name of the vLLM-from-source recipe, whose preflight and budgets the native build store reuses.
+VllmBuild = _VllmBuild
+
+
 if __name__ == "__main__":
     sys.exit(_driver_main())
 
 
 __all__ = [
+    "AiterBuild",
     "BuildHandle",
+    "SglKernelBuild",
+    "VllmBuild",
     "_driver_main",
     "_load_result_json",
     "classify_build_exit",

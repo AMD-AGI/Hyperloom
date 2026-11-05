@@ -140,7 +140,7 @@ class KeepCheckpointMixin:
             return None
         try:
             pending = json.loads(path.read_text())
-        except Exception as error:
+        except (OSError, ValueError) as error:
             raise ValueError(f"invalid pending KEEP metadata: {path}") from error
         relay_fields = {
             "agent_profile_id": "",

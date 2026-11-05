@@ -200,7 +200,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
         print("  langfuse          : flushed + breakdown attached")
-    except Exception:
+    except (OSError, ValueError):
         log.exception("recover: langfuse push failed (non-fatal)")
 
     # 3) Re-package the artifact bundle so /workspace carries the recovered SBD.
@@ -210,7 +210,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         pkg_path = package_session_artifacts(session_dir)
         if pkg_path is not None:
             print(f"  artifact package  : {pkg_path}")
-    except Exception:
+    except (OSError, ValueError):
         log.exception("recover: artifact package failed (non-fatal)")
 
     return 0

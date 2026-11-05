@@ -115,10 +115,10 @@ class CampaignMixin:
             raise RuntimeError("pre-published warm-start best artifact does not match the validated workspace state")
         return True
 
-    def _stage_validated_warm_start_state(self) -> None:
-        """Make iteration-zero warm-start state durable on the first save."""
+    def _validated_warm_start_head(self) -> str | None:
+        """The workspace HEAD when it is the validated warm start this fresh run adopts, else None."""
         if self.resume or not self.ic.warm_start_commit:
-            return
+            return None
         head = self._git("rev-parse", "HEAD").strip()
         if head != self.ic.warm_start_commit:
             raise RuntimeError("validated warm-start commit is not the current workspace HEAD")
@@ -129,6 +129,13 @@ class CampaignMixin:
             or self.ic.warm_start_mean_case_speedup is None
         ):
             raise RuntimeError("validated warm-start is missing performance baselines")
+        return head
+
+    def _stage_validated_warm_start_state(self) -> None:
+        """Make iteration-zero warm-start state durable on the first save."""
+        head = self._validated_warm_start_head()
+        if head is None:
+            return
         warm_start_bench = dict(self.ic.warm_start_bench or {})
         self.run_state.best = BestRecord(
             iteration=0,
@@ -147,18 +154,9 @@ class CampaignMixin:
 
     def _adopt_validated_warm_start(self) -> None:
         """Persist an applied KB seed as the recoverable local best at iteration 0."""
-        if self.resume or not self.ic.warm_start_commit:
+        head = self._validated_warm_start_head()
+        if head is None:
             return
-        head = self._git("rev-parse", "HEAD").strip()
-        if head != self.ic.warm_start_commit:
-            raise RuntimeError("validated warm-start commit is not the current workspace HEAD")
-        if (
-            self.ic.baseline_wall_ms is None
-            or self.ic.pristine_baseline_wall_ms is None
-            or self.ic.warm_start_wall_ms is None
-            or self.ic.warm_start_mean_case_speedup is None
-        ):
-            raise RuntimeError("validated warm-start is missing performance baselines")
         incumbent_wall_ms = self.ic.warm_start_wall_ms
         incumbent_mean_case_speedup = self.ic.warm_start_mean_case_speedup
         self.best_wall_ms = incumbent_wall_ms
@@ -204,6 +202,12 @@ class CampaignMixin:
             mean_case_speedup=self.ic.warm_start_mean_case_speedup,
         ):
             return
+        self._publish_warm_start_best(head, warm_start_bench, incumbent_wall_ms, incumbent_mean_case_speedup)
+
+    def _publish_warm_start_best(
+        self, head: str, warm_start_bench: dict, incumbent_wall_ms: float, incumbent_mean_case_speedup: float
+    ) -> None:
+        """Publish the adopted warm start as the iteration-0 best artifact."""
         result = IterationResult(
             iteration=0,
             duration_sec=0.0,
@@ -259,18 +263,7 @@ class CampaignMixin:
             self._restore_resume_baseline_case_times(self.run_state)
             if self._recovered_pending_keep is None:
                 self._reconcile_best_publication()
-            archive_next = self.archive.reconcile_next_iteration(
-                self.run_state.next_iteration,
-            )
-            event_next = max(
-                (
-                    int(event.get("iter", 0) or 0) + 1
-                    for event in self.state_store.read_events()
-                    if isinstance(event.get("iter"), (int, float))
-                ),
-                default=1,
-            )
-            self.run_state.next_iteration = max(archive_next, event_next)
+            self.run_state.next_iteration = self._reconciled_next_iteration()
             if self.run_state.termination_reason == "orchestration_failed":
                 if self.run_state.orchestration_circuit_state != ORCHESTRATION_CIRCUIT_OPEN:
                     raise ValueError("orchestration_failed resume requires an open circuit")
@@ -302,6 +295,21 @@ class CampaignMixin:
             if current_branch != self.ic.git_branch:
                 raise ValueError(f"failed to switch workspace to branch {self.ic.git_branch}")
             self.run_state = RunState()
+
+    def _reconciled_next_iteration(self) -> int:
+        """The next iteration number that neither the archive nor the event log has used."""
+        archive_next = self.archive.reconcile_next_iteration(
+            self.run_state.next_iteration,
+        )
+        event_next = max(
+            (
+                int(event.get("iter", 0) or 0) + 1
+                for event in self.state_store.read_events()
+                if isinstance(event.get("iter"), (int, float))
+            ),
+            default=1,
+        )
+        return max(archive_next, event_next)
 
     def _persist_pr_knowledge(self) -> None:
         """Persist the PR-knowledge snapshot and its provenance event.

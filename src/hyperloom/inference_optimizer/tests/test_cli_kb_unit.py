@@ -69,8 +69,10 @@ def test_bootstrap_recipe_kb_success(tmp_path, monkeypatch) -> None:
 def test_bootstrap_recipe_kb_t0_failure_continues(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
 
+    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError
+
     def _boom(*a, **k):
-        raise RuntimeError("t0 down")
+        raise LocalRecipeStoreError("t0 down")
 
     monkeypatch.setattr(cli_kb, "run_t0_anchor", _boom)
     args = _args()

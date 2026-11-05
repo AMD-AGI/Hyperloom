@@ -256,19 +256,18 @@ def _rejected_hunks(reject_path: Path) -> str:
     return reject_path.read_text(encoding="utf-8", errors=_DECODE_ERRORS).strip()
 
 
-def _apply_patch_no_git(
-    framework_root: Path,
-    patch_path: Path,
-    backup_root: Path,
-    *,
-    seq_offset: int = 0,
-) -> PatchApplyResult:
-    """Apply ``patch_path`` into ``framework_root`` without git, backing up targets."""
-    try:
-        patch_text = patch_path.read_text(encoding="utf-8", errors=_DECODE_ERRORS)
-    except OSError as exc:
-        return _nogit_failure(patch_path, f"cannot read patch file: {exc}", tried_levels=[])
+class _NoGitApply(NamedTuple):
+    """One no-git apply: the tree, the patch as written and as fed to the CLI, and where its backups go."""
 
+    framework_root: Path
+    patch_path: Path
+    patch_input: Path
+    patch_text: str
+    backup_root: Path
+
+
+def _sanitized_patch_input(patch_path: Path, patch_text: str, backup_root: Path) -> Path:
+    """The patch file to feed the CLI: a copy without contradicting index headers when it carries any."""
     # Feed the CLI a copy with contradicting index headers removed; keep the original path in feedback so advisories
     # point at what the author wrote.
     patch_input = patch_path
@@ -282,6 +281,101 @@ def _apply_patch_no_git(
             dropped_index_lines,
             patch_path.name,
         )
+    return patch_input
+
+
+def _unappliable_patch_result(job: _NoGitApply, probe: _StripLevelProbe) -> PatchApplyResult:
+    """The result for a patch no strip level applies: a satisfied no-op when it is already applied, else a failure."""
+    framework_root, patch_path, backup_root = job.framework_root, job.patch_path, job.backup_root
+    tried_levels = probe.tried_levels
+    # Before reporting failure, distinguish "does not apply" from "already
+    # applied". A specialist commonly writes a superset patch AND the subset
+    # it contains (e.g. an FLA-layout revert plus that same revert bundled
+    # with a config fix). Applying the superset makes every later subset
+    # hunk a no-op, and POSIX ``patch`` reports that as "Reversed (or
+    # previously applied) patch detected ... Skipping patch" with a non-zero
+    # exit -- indistinguishable, at the exit code, from a patch that simply
+    # does not fit. Treating it as a hard failure aborted the whole apply and
+    # reverted a combo that was in fact fully and correctly applied.
+    #
+    # A clean *reverse* dry-run is the unambiguous already-applied probe: it
+    # succeeds only when every hunk's post-state is already present in the
+    # tree, which is exactly the state a forward apply would produce. In that
+    # case the apply is a satisfied no-op -- report it as present, with no
+    # backups (the patch that really made those edits owns the backups needed
+    # for a correct revert).
+    if _reverse_applies_cleanly(framework_root, job.patch_input):
+        if not mark_prepared(backup_root):
+            return _nogit_failure(patch_path, "backup prepare record could not be persisted", tried_levels=tried_levels)
+        log.info(
+            "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
+            patch_path.name,
+        )
+        return PatchApplyResult(ok=True, present_by=PresenceCheck.PATCH_REVERSE_DRY_RUN)
+    combined_stderr = "\n".join(probe.stderrs)
+    err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
+    source_ctx = read_patch_source_context(job.patch_text, framework_root, radius=50)
+    feedback = ApplyFeedback(
+        patch=str(patch_path),
+        channel="nogit",
+        tried_levels=tried_levels,
+        stderr=combined_stderr,
+        source_context=source_ctx,
+    )
+    return PatchApplyResult(ok=False, error=err_msg, feedback=feedback)
+
+
+def _run_patch_cli(
+    job: _NoGitApply, detected_level: int, tried_levels: list[int], backups: list[dict[str, Any]]
+) -> PatchApplyResult:
+    """Apply the patch with the ``patch`` CLI at the detected strip level, over the backed-up targets."""
+    framework_root, patch_path = job.framework_root, job.patch_path
+    # Rejects land under the backup root, where no other apply writes; ``--no-backup-if-mismatch`` drops ``.orig``.
+    reject_path = job.backup_root / f"{patch_path.stem}.rej"
+    apply_argv = ["patch", f"-p{detected_level}", f"--reject-file={reject_path}", "--no-backup-if-mismatch"]
+    try:
+        cp2 = subprocess.run(
+            [*apply_argv, "-i", str(job.patch_input)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            cwd=str(framework_root),
+            stdin=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return _nogit_failure(patch_path, f"patch apply failed: {exc}", tried_levels=tried_levels, records=backups)
+    if cp2.returncode != 0:
+        rejected_hunks = _rejected_hunks(reject_path)
+        apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
+        source_ctx = read_patch_source_context(job.patch_text, framework_root, radius=50)
+        feedback = ApplyFeedback(
+            patch=str(patch_path),
+            channel="nogit",
+            tried_levels=[detected_level],
+            stderr=apply_stderr,
+            rejected_hunks=rejected_hunks,
+            source_context=source_ctx,
+        )
+        return PatchApplyResult(ok=False, error=apply_stderr, backups=backups, feedback=feedback)
+    return PatchApplyResult(ok=True, backups=backups)
+
+
+def _apply_patch_no_git(
+    framework_root: Path,
+    patch_path: Path,
+    backup_root: Path,
+    *,
+    seq_offset: int = 0,
+) -> PatchApplyResult:
+    """Apply ``patch_path`` into ``framework_root`` without git, backing up targets."""
+    try:
+        patch_text = patch_path.read_text(encoding="utf-8", errors=_DECODE_ERRORS)
+    except OSError as exc:
+        return _nogit_failure(patch_path, f"cannot read patch file: {exc}", tried_levels=[])
+
+    patch_input = _sanitized_patch_input(patch_path, patch_text, backup_root)
+    job = _NoGitApply(framework_root, patch_path, patch_input, patch_text, backup_root)
 
     try:
         probe = _detect_strip_level(framework_root, patch_input)
@@ -289,43 +383,7 @@ def _apply_patch_no_git(
         return _nogit_failure(patch_path, f"patch CLI unavailable or timed out: {exc}", tried_levels=[])
     detected_level, tried_levels = probe.level, probe.tried_levels
     if detected_level is None:
-        # Before reporting failure, distinguish "does not apply" from "already
-        # applied". A specialist commonly writes a superset patch AND the subset
-        # it contains (e.g. an FLA-layout revert plus that same revert bundled
-        # with a config fix). Applying the superset makes every later subset
-        # hunk a no-op, and POSIX ``patch`` reports that as "Reversed (or
-        # previously applied) patch detected ... Skipping patch" with a non-zero
-        # exit -- indistinguishable, at the exit code, from a patch that simply
-        # does not fit. Treating it as a hard failure aborted the whole apply and
-        # reverted a combo that was in fact fully and correctly applied.
-        #
-        # A clean *reverse* dry-run is the unambiguous already-applied probe: it
-        # succeeds only when every hunk's post-state is already present in the
-        # tree, which is exactly the state a forward apply would produce. In that
-        # case the apply is a satisfied no-op -- report it as present, with no
-        # backups (the patch that really made those edits owns the backups needed
-        # for a correct revert).
-        if _reverse_applies_cleanly(framework_root, patch_input):
-            if not mark_prepared(backup_root):
-                return _nogit_failure(
-                    patch_path, "backup prepare record could not be persisted", tried_levels=tried_levels
-                )
-            log.info(
-                "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
-                patch_path.name,
-            )
-            return PatchApplyResult(ok=True, present_by=PresenceCheck.PATCH_REVERSE_DRY_RUN)
-        combined_stderr = "\n".join(probe.stderrs)
-        err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
-        source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
-        feedback = ApplyFeedback(
-            patch=str(patch_path),
-            channel="nogit",
-            tried_levels=tried_levels,
-            stderr=combined_stderr,
-            source_context=source_ctx,
-        )
-        return PatchApplyResult(ok=False, error=err_msg, feedback=feedback)
+        return _unappliable_patch_result(job, probe)
 
     framework_root_resolved = framework_root.resolve()
     backup_root.mkdir(parents=True, exist_ok=True)
@@ -366,35 +424,7 @@ def _apply_patch_no_git(
             patch_path, "backup prepare record could not be persisted", tried_levels=tried_levels, records=backups
         )
 
-    # Rejects land under the backup root, where no other apply writes; ``--no-backup-if-mismatch`` drops ``.orig``.
-    reject_path = backup_root / f"{patch_stem}.rej"
-    apply_argv = ["patch", f"-p{detected_level}", f"--reject-file={reject_path}", "--no-backup-if-mismatch"]
-    try:
-        cp2 = subprocess.run(
-            [*apply_argv, "-i", str(patch_input)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-            cwd=str(framework_root),
-            stdin=subprocess.DEVNULL,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return _nogit_failure(patch_path, f"patch apply failed: {exc}", tried_levels=tried_levels, records=backups)
-    if cp2.returncode != 0:
-        rejected_hunks = _rejected_hunks(reject_path)
-        apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
-        source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
-        feedback = ApplyFeedback(
-            patch=str(patch_path),
-            channel="nogit",
-            tried_levels=[detected_level],
-            stderr=apply_stderr,
-            rejected_hunks=rejected_hunks,
-            source_context=source_ctx,
-        )
-        return PatchApplyResult(ok=False, error=apply_stderr, backups=backups, feedback=feedback)
-    return PatchApplyResult(ok=True, backups=backups)
+    return _run_patch_cli(job, detected_level, tried_levels, backups)
 
 
 __all__ = [

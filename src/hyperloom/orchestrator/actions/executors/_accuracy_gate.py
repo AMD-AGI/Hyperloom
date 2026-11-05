@@ -16,22 +16,20 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.gain_math import (
+    ACCURACY_METRICS,
+    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+    accuracy_meets_floor,
+    accuracy_passed,
+    finite_score,
+)
+from hyperloom_common.coerce import optional_positive_float
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom_common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
 
 log = logging.getLogger(__name__)
-
-ACCURACY_THRESHOLD = 0.05  # allowed deviation
-
-# Upstream rejects an AgentX submission whose error rate over completed requests exceeds 10% (InferenceX
-# ``validate_agentic_result.py``). A percentage because that is aiperf's unit: ``RequestErrorRateMetric`` is declared
-# PERCENT and derives ``100.0 * errors / total``.
-AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
-
-# Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two never
-# diverge.
-DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.5
 
 # Enablement admission, selected by the ``--enablement`` CLI flag.
 ENABLEMENT_MODE_OFF = "off"
@@ -126,25 +124,9 @@ def eval_enablement_allowed(shared_state: Any) -> bool:
     return resolve_enablement_mode(shared_state) in (ENABLEMENT_MODE_EVAL, ENABLEMENT_MODE_ALL)
 
 
-def _finite_score(score: Any) -> float | None:
-    """Return ``score`` as a finite float, or ``None`` when unusable."""
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
-        return None
-    val = float(score)
-    return val if math.isfinite(val) else None
-
-
-def accuracy_meets_floor(score: Any, floor: float) -> bool:
-    """True only when ``score`` is finite, strictly positive and ``>= floor``."""
-    val = _finite_score(score)
-    if val is None or val <= 0.0:
-        return False
-    return val >= floor
-
-
 def classify_accuracy_failure(score: Any, floor: float) -> str | None:
     """Classify an accuracy verdict; ``None`` means it passes the floor."""
-    val = _finite_score(score)
+    val = finite_score(score)
     if val is None:
         return EVAL_KIND_ACCURACY_UNAVAILABLE
     if val <= 0.0 or val < floor:
@@ -481,6 +463,11 @@ def parse_eval_results(
             "error": qg_out.get("error", "no quality_gate"),
         }
 
+    return _lm_eval_accuracy_result(workspace)
+
+
+def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
+    """Read the accuracy score from the latest lm-eval results*.json under ``workspace``."""
     search_paths = [
         workspace / "eval_*" / "**" / "results*.json",
         workspace / "**" / "results*.json",
@@ -503,7 +490,7 @@ def parse_eval_results(
 
     results = data.get("results", {})
     for task_name, metrics in results.items():
-        for key in ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none"):
+        for key in ACCURACY_METRICS:
             if key in metrics:
                 score = metrics[key]
                 if isinstance(score, (int, float)):
@@ -513,30 +500,11 @@ def parse_eval_results(
                         "task": task_name,
                         "metric": key,
                         "source_file": str(latest),
+                        # lm-eval's own wall-clock for the run; it ran inside the round's post-ready interval.
+                        "eval_runtime_sec": optional_positive_float(data.get("total_evaluation_time_seconds")),
                     }
 
     return {"accuracy": None, "error": f"no recognized metric in {latest}"}
-
-
-def post_ready_sec_without_eval(round_result: dict[str, Any]) -> Any:
-    """A round's post-ready time less its accuracy eval, which a hot pass rendered with RUN_EVAL off does not run.
-
-    The eval time is lm-eval's own clock, so it comes off only when the post-ready interval strictly encloses it.
-    """
-    post_ready = round_result.get("post_ready_runtime_sec")
-    eval_sec = _evaluation_seconds(round_result.get("accuracy_source"))
-    if isinstance(post_ready, (int, float)) and eval_sec is not None and eval_sec < post_ready:
-        return post_ready - eval_sec
-    return post_ready
-
-
-def _evaluation_seconds(results_file: Any) -> float | None:
-    """lm-eval's recorded wall-clock in ``results_file``, or ``None`` when there is no finite positive one."""
-    try:
-        seconds = float(json.loads(Path(results_file).read_text(encoding="utf-8")).get("total_evaluation_time_seconds"))
-    except (TypeError, ValueError, OSError, AttributeError):
-        return None
-    return seconds if math.isfinite(seconds) and seconds > 0.0 else None
 
 
 def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
@@ -569,19 +537,6 @@ def eval_probe_summary(probe: dict[str, Any] | None) -> str:
         f"{probe.get('max_completion_tokens_seen', 0)}-token cap; the model never "
         "emitted EOS, so the eval was cut short and scored ~0"
     )
-
-
-def accuracy_passed(
-    baseline_accuracy: float,
-    new_accuracy: float,
-    threshold: float = ACCURACY_THRESHOLD,
-) -> bool:
-    """Return True if accuracy drop is within tolerance."""
-    if baseline_accuracy <= 0:
-        # No baseline recorded; skip gate.
-        return True
-    drop = baseline_accuracy - new_accuracy
-    return drop <= threshold
 
 
 def grade_accuracy(
@@ -705,7 +660,6 @@ def enablement_correctness(
 
 
 __all__ = [
-    "ACCURACY_THRESHOLD",
     "BASELINE_ACCURACY_STOP_REASON",
     "BASELINE_EVAL_ACCURACY_FLOOR_KEY",
     "BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY",
@@ -713,7 +667,6 @@ __all__ = [
     "BASELINE_EVAL_FAILED_KEY",
     "BASELINE_EVAL_FAILURE_KIND_KEY",
     "BASELINE_EVAL_OBSERVED_ACCURACY_KEY",
-    "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
     "ENABLEMENT_MODES",
     "ENABLEMENT_MODE_ALL",
     "ENABLEMENT_REVALIDATION_REASON",
@@ -728,8 +681,6 @@ __all__ = [
     "EVAL_PROBE_FILENAME",
     "_extract_eval_contract_fields",
     "accuracy_keep_block",
-    "accuracy_meets_floor",
-    "accuracy_passed",
     "classify_accuracy_failure",
     "enablement_correctness",
     "eval_contract_fingerprint",

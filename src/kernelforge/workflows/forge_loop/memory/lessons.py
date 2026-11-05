@@ -550,43 +550,7 @@ premise rather than as an inventory of what is left:
 """
 
 
-def build_summary_prompt(
-    *,
-    iteration: int,
-    end_reason: str,
-    word_budget: int = SUMMARY_WORD_BUDGET,
-    pr_references: tuple[str, ...] = (),
-    pr_reference_context: str = "",
-) -> str:
-    """Build the factual-record prompt for the resumed Implementer."""
-    cutoff_note = ""
-    if is_cutoff(end_reason):
-        cutoff_note = (
-            "\nYour session did NOT end by choice — it was cut off "
-            f"({end_reason}). Say so explicitly, and state which direction you "
-            "were in the middle of and what had actually been observed so far. "
-            "Make clear that the attempt was incomplete.\n"
-        )
-
-    upstream_note = ""
-    if pr_references:
-        listed = ", ".join(pr_references)
-        reference_data = (pr_reference_context or "").strip()
-        details = (
-            f"\nThe exact read-only reference data available to the Implementer was:\n{reference_data}\n"
-            if reference_data
-            else ""
-        )
-        upstream_note = (
-            "\nThe session received these Prior Knowledge PR references: "
-            f"{listed}. If you actually applied or tested an idea from one of "
-            "them, include that action and its observed result in the factual "
-            "record. Do not classify references that the session did not "
-            "actually examine."
-            f"{details}\n"
-        )
-
-    return f"""\
+_SUMMARY_PROMPT_TEMPLATE = """\
 Stop working on the kernel. Iteration {iteration} is over and your edits have
 already been handed to the outer loop.
 
@@ -661,6 +625,54 @@ iteration should". The outer loop appends its measured outcome separately. If
 you nonetheless report that something could not be reached, item 6 applies to
 it: an unfalsified "cannot" is read as an open direction, not a closed one.
 """
+
+
+def build_summary_prompt(
+    *,
+    iteration: int,
+    end_reason: str,
+    word_budget: int = SUMMARY_WORD_BUDGET,
+    pr_references: tuple[str, ...] = (),
+    pr_reference_context: str = "",
+) -> str:
+    """Build the factual-record prompt for the resumed Implementer."""
+    cutoff_note = ""
+    if is_cutoff(end_reason):
+        cutoff_note = (
+            "\nYour session did NOT end by choice — it was cut off "
+            f"({end_reason}). Say so explicitly, and state which direction you "
+            "were in the middle of and what had actually been observed so far. "
+            "Make clear that the attempt was incomplete.\n"
+        )
+
+    upstream_note = ""
+    if pr_references:
+        listed = ", ".join(pr_references)
+        reference_data = (pr_reference_context or "").strip()
+        details = (
+            f"\nThe exact read-only reference data available to the Implementer was:\n{reference_data}\n"
+            if reference_data
+            else ""
+        )
+        upstream_note = (
+            "\nThe session received these Prior Knowledge PR references: "
+            f"{listed}. If you actually applied or tested an idea from one of "
+            "them, include that action and its observed result in the factual "
+            "record. Do not classify references that the session did not "
+            "actually examine."
+            f"{details}\n"
+        )
+
+    return _SUMMARY_PROMPT_TEMPLATE.format(
+        iteration=iteration,
+        cutoff_note=cutoff_note,
+        upstream_note=upstream_note,
+        word_budget=word_budget,
+        HELD_FIXED_PREFIX=HELD_FIXED_PREFIX,
+        NEGATIVES_PREFIX=NEGATIVES_PREFIX,
+        DISPROOF_PREFIX=DISPROOF_PREFIX,
+        REACH_CLASSES=REACH_CLASSES,
+    )
 
 
 CITATION_RULE = (

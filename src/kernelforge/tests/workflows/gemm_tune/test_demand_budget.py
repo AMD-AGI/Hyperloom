@@ -25,22 +25,10 @@ class _Ctx:
         self.output_dir = Path(".")
 
 
-def test_thorough_claims_fewer_shapes_than_fast():
-    fast = adc._demand_budget(_Ctx(3_600))
-    thorough = adc._demand_budget(_Ctx(3_600, thorough=True))
-    assert fast == (3_600 - adc._DEMAND_RESERVE_S) // adc._DEMAND_PER_SHAPE_COST_S
-    assert thorough == (3_600 - adc._DEMAND_RESERVE_S) // adc._DEMAND_PER_SHAPE_COST_THOROUGH_S
-    assert thorough < fast
-
-
-def test_claimed_shapes_fit_the_budget_in_both_modes():
-    for timeout_s in (900, 1_800, 3_600, 7_200):
-        for thorough, cost in (
-            (False, adc._DEMAND_PER_SHAPE_COST_S),
-            (True, adc._DEMAND_PER_SHAPE_COST_THOROUGH_S),
-        ):
-            n = adc._demand_budget(_Ctx(timeout_s, thorough=thorough))
-            assert n * cost <= timeout_s, (timeout_s, thorough, n)
+def test_no_cap_by_default_in_either_mode():
+    # The deadline decides how many shapes get tuned (the chunks measure the cost); a fixed per-shape cost does not.
+    assert adc._demand_budget(_Ctx(3_600)) is None
+    assert adc._demand_budget(_Ctx(1, thorough=True)) is None
 
 
 def test_override_wins_in_either_mode(monkeypatch):
@@ -49,25 +37,22 @@ def test_override_wins_in_either_mode(monkeypatch):
     assert adc._demand_budget(_Ctx(3_600, thorough=True)) == 5
 
 
-def test_garbage_override_falls_back_to_the_measured_cost(monkeypatch):
+def test_garbage_override_is_no_cap(monkeypatch):
     monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "not-a-number")
-    assert adc._demand_budget(_Ctx(3_600, thorough=True)) == (
-        (3_600 - adc._DEMAND_RESERVE_S) // adc._DEMAND_PER_SHAPE_COST_THOROUGH_S
-    )
+    assert adc._demand_budget(_Ctx(3_600, thorough=True)) is None
 
 
-def test_never_claims_zero_shapes():
-    # A budget smaller than one shape still has to tune something, or the run reports "no shapes" for what is really
-    # "no time".
-    assert adc._demand_budget(_Ctx(1, thorough=True)) == 1
-    assert adc._demand_budget(_Ctx(0)) == 1
+def test_every_ranked_shape_is_listed_without_a_cap(tmp_path):
+    keys = [{"M": 2048, "N": 4096 + 128 * i, "K": 4096, "requests": 50 - i} for i in range(40)]
+    ctx = _Ctx(600)
+    ctx.demand_json = _write_demand(tmp_path / "demand.json", keys)
 
+    out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
-def test_a_context_without_the_flag_is_treated_as_fast():
-    class _Old:
-        timeout_s = 3_600
-
-    assert adc._demand_budget(_Old()) == ((3_600 - adc._DEMAND_RESERVE_S) // adc._DEMAND_PER_SHAPE_COST_S)
+    assert out is not None
+    prefill = [line for line in _rows(out)[1:] if int(line.split(",")[0]) > 64]
+    # 600 s at the old fixed cost of 74 s a shape would have listed 6 shapes, band included.
+    assert len(prefill) == 40
 
 
 def _write_demand(path: Path, keys: list[dict], tuner: str = "a8w8_blockscale") -> Path:
@@ -170,14 +155,12 @@ class TestDemandKeepsTheDecodeBand:
 
 
 class TestTheBandIsPaidForOutOfTheBudget:
-    """The band is reserved out of the budget, never added on top of it.
+    """Under an operator's cap the band is reserved out of it, never added on top of it: the band's cost scales with
+    the dispatch group count, which the cap never saw."""
 
-    ``ctx.timeout_s`` is the tuner subprocess deadline, and a dense tuner killed
-    there returns no candidate at all -- so a shape list the lane cannot finish
-    does not merely lose its tail, it loses the prefill rows that used to
-    complete. The band's cost scales with the dispatch group count, which the
-    budget never saw.
-    """
+    @pytest.fixture(autouse=True)
+    def _cap(self, monkeypatch):
+        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "14")
 
     #: Enough distinct prefill buckets per group that the budget, not the demand
     #: report, is what bounds the selection.
@@ -193,9 +176,10 @@ class TestTheBandIsPaidForOutOfTheBudget:
         return _write_demand(path, keys)
 
     @pytest.mark.parametrize("groups", [1, 2, 4, 6, 8])
-    @pytest.mark.parametrize(("timeout_s", "thorough"), [(1_216, False), (3_600, False), (3_600, True)])
-    def test_prefill_plus_band_fits(self, tmp_path, groups, timeout_s, thorough):
-        ctx = _Ctx(timeout_s, thorough=thorough, conc=64)
+    @pytest.mark.parametrize("cap", ["7", "14", "47"])
+    def test_prefill_plus_band_fits(self, tmp_path, monkeypatch, groups, cap):
+        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, cap)
+        ctx = _Ctx(3_600, conc=64)
         ctx.demand_json = self._demand(tmp_path / "demand.json", groups)
 
         out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")

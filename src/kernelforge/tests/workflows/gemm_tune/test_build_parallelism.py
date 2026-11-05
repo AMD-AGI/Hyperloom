@@ -102,6 +102,8 @@ class TestWhatItDoesToTheEnvironment:
 
 class TestTheSubprocessGetsIt:
     def test_run_subprocess_passes_the_cap_to_the_child(self, monkeypatch, tmp_path):
+        # An inherited MAX_JOBS wins over the cap by design, and the ROCm vLLM images set one.
+        monkeypatch.delenv("MAX_JOBS", raising=False)
         monkeypatch.setattr(utils, "build_job_limit", lambda: 44)
         monkeypatch.setattr(utils, "cgroup_memory_limit", lambda: 128 * GIB)
         seen: dict[str, str] = {}

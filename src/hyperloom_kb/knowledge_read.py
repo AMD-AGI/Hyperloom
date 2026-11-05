@@ -182,14 +182,9 @@ class AnthropicPlannerBackend:
         self.model = config.model
         self._opener = opener
 
-    def complete(
-        self,
-        *,
-        system_prompt: str,
-        user_payload: str,
-        temperature: float,
-    ) -> str:
-        body = json.dumps(
+    def _request_body(self, system_prompt: str, user_payload: str, temperature: float) -> bytes:
+        """The Messages API request body that forces one call of the planner tool."""
+        return json.dumps(
             {
                 "model": self.model,
                 "max_tokens": self.config.max_output_tokens,
@@ -209,6 +204,15 @@ class AnthropicPlannerBackend:
                 },
             }
         ).encode()
+
+    def complete(
+        self,
+        *,
+        system_prompt: str,
+        user_payload: str,
+        temperature: float,
+    ) -> str:
+        body = self._request_body(system_prompt, user_payload, temperature)
         request = urllib.request.Request(
             f"{self.config.base_url}/v1/messages",
             data=body,
@@ -772,6 +776,14 @@ class WeightedQueryExecution:
     latency_ms: float
 
 
+@dataclass(frozen=True)
+class _PlanRecall:
+    executed: tuple[RetrievalCapability, ...]
+    unavailable: tuple[RetrievalCapability, ...]
+    contributions: tuple[MatchContribution, ...]
+    candidate_sets: tuple[tuple[CandidateHit, ...], ...]
+
+
 class QueryExecutor:
     """Execute a validated weighted plan over one immutable Query View."""
 
@@ -813,76 +825,16 @@ class QueryExecutor:
         started = time.perf_counter()
         owns_lease = lease is None
         active_lease = lease or self.acquire_view(plan.schema_ref, view=view)
-        executed: list[RetrievalCapability] = []
-        unavailable: list[RetrievalCapability] = []
-        contributions: list[MatchContribution] = []
-        candidate_sets: list[tuple[CandidateHit, ...]] = []
         try:
-            for signal in plan.signals:
-                capabilities = (
-                    (RetrievalCapability.EXACT,)
-                    if signal.is_structured
-                    else (
-                        RetrievalCapability.FUZZY,
-                        RetrievalCapability.SEMANTIC,
-                    )
-                )
-                for capability in capabilities:
-                    if capability not in configuration.capabilities:
-                        continue
-                    try:
-                        hits = self._recall_signal(
-                            signal,
-                            capability,
-                            configuration,
-                            active_lease.view,
-                            active_lease.lease_id,
-                        )
-                    except CapabilityUnavailable:
-                        unavailable.append(capability)
-                        continue
-                    executed.append(capability)
-                    adjusted: list[CandidateHit] = []
-                    for hit in hits:
-                        raw_score = hit.score if hit.score is not None else 1.0
-                        normalized_score = self._normalized_score(
-                            capability,
-                            raw_score,
-                        )
-                        contribution = normalized_score * signal.weight
-                        contributions.append(
-                            MatchContribution(
-                                signal.signal_id,
-                                capability,
-                                hit.experience_id,
-                                raw_score,
-                                normalized_score,
-                                contribution,
-                            )
-                        )
-                        adjusted.append(
-                            CandidateHit(
-                                hit.experience_id,
-                                capability,
-                                contribution,
-                                {
-                                    **hit.details,
-                                    "signal_id": signal.signal_id,
-                                    "signal_weight": signal.weight,
-                                    "raw_score": raw_score,
-                                    "normalized_score": normalized_score,
-                                },
-                            )
-                        )
-                    candidate_sets.append(tuple(adjusted))
+            recall = self._recall_plan(plan, configuration, active_lease)
             organized = self._service.organize(
-                tuple(candidate_sets),
+                recall.candidate_sets,
                 view=active_lease.view,
                 lease_id=active_lease.lease_id,
             )
             grouped = self._rank_groups(
                 organized,
-                tuple(contributions),
+                recall.contributions,
                 configuration.max_groups,
                 configuration.ranking_policy_ref,
                 configuration.representative_policy,
@@ -899,13 +851,85 @@ class QueryExecutor:
                 plan.plan_id,
                 grouped,
                 rendered,
-                tuple(dict.fromkeys(executed)),
-                tuple(dict.fromkeys(unavailable)),
+                tuple(dict.fromkeys(recall.executed)),
+                tuple(dict.fromkeys(recall.unavailable)),
                 (time.perf_counter() - started) * 1000,
             )
         finally:
             if owns_lease:
                 self.release_view(active_lease)
+
+    def _recall_plan(
+        self, plan: WeightedQueryPlan, configuration: RetrievalConfiguration, lease: ReadLease
+    ) -> _PlanRecall:
+        """Recall every signal of ``plan`` through each configured capability, weighting each hit by its signal."""
+        executed: list[RetrievalCapability] = []
+        unavailable: list[RetrievalCapability] = []
+        contributions: list[MatchContribution] = []
+        candidate_sets: list[tuple[CandidateHit, ...]] = []
+        for signal in plan.signals:
+            capabilities = (
+                (RetrievalCapability.EXACT,)
+                if signal.is_structured
+                else (
+                    RetrievalCapability.FUZZY,
+                    RetrievalCapability.SEMANTIC,
+                )
+            )
+            for capability in capabilities:
+                if capability not in configuration.capabilities:
+                    continue
+                try:
+                    hits = self._recall_signal(
+                        signal,
+                        capability,
+                        configuration,
+                        lease.view,
+                        lease.lease_id,
+                    )
+                except CapabilityUnavailable:
+                    unavailable.append(capability)
+                    continue
+                executed.append(capability)
+                adjusted: list[CandidateHit] = []
+                for hit in hits:
+                    contribution = self._contribution(signal, capability, hit)
+                    contributions.append(contribution)
+                    adjusted.append(
+                        CandidateHit(
+                            hit.experience_id,
+                            capability,
+                            contribution.contribution,
+                            {
+                                **hit.details,
+                                "signal_id": signal.signal_id,
+                                "signal_weight": signal.weight,
+                                "raw_score": contribution.raw_score,
+                                "normalized_score": contribution.normalized_score,
+                            },
+                        )
+                    )
+                candidate_sets.append(tuple(adjusted))
+        return _PlanRecall(tuple(executed), tuple(unavailable), tuple(contributions), tuple(candidate_sets))
+
+    def _contribution(
+        self, signal: QuerySignal, capability: RetrievalCapability, hit: CandidateHit
+    ) -> MatchContribution:
+        """What ``hit`` recalled through ``capability`` contributes to its Experience's score under ``signal``."""
+        raw_score = hit.score if hit.score is not None else 1.0
+        normalized_score = self._normalized_score(
+            capability,
+            raw_score,
+        )
+        contribution = normalized_score * signal.weight
+        return MatchContribution(
+            signal.signal_id,
+            capability,
+            hit.experience_id,
+            raw_score,
+            normalized_score,
+            contribution,
+        )
 
     def _recall_signal(
         self,

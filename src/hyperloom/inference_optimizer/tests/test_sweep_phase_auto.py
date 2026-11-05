@@ -217,6 +217,52 @@ def _ledger_rows(c: Coordinator, kernel_ids: list[str]) -> list[dict[str, Any]]:
     return [by_kernel[kid] for kid in kernel_ids]
 
 
+def _record_needs_review_pair(state: SharedState) -> None:
+    """Integrate k001 (+0.6%) and k004 (+0.8%) as NEEDS_REVIEW, the pair a stack validation combines."""
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        state.record_kernel_integrate_result(
+            {
+                "status": "ok",
+                "decision": "NEEDS_REVIEW",
+                "kernel_id": kid,
+                "patch_path": f"/tmp/{kid}_opt.cu",
+                "target_file": f"/tmp/{kid}.cu",
+                "new_tput": 100.0 + gain,
+                "gain_pct": gain,
+                "workspace": f"/tmp/integrate-{kid}",
+            }
+        )
+
+
+def _baseline_coordinator_with_needs_review_pair(tmp_path: Path) -> Coordinator:
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    _record_needs_review_pair(c.shared_state)
+    return c
+
+
+def _stack_keep(entries: list[dict[str, Any]], tmp_path: Path) -> dict[str, Any]:
+    """The KEEP a combined E2E validation of ``entries`` reports at +2% over a 100 tok/s anchor."""
+    return {
+        "status": "ok",
+        "decision": "KEEP",
+        "kernel_id": "+".join(e["kernel_id"] for e in entries),
+        "patch_path": "+".join(e["patch_path"] for e in entries),
+        "target_file": "+".join(e["target_file"] for e in entries),
+        "base_tput": 100.0,
+        "new_tput": 102.0,
+        "gain_pct": 2.0,
+        "workspace": str(tmp_path / "integrate-stack"),
+        "apply_result": {"status": "ok"},
+        "stack_kernel_ids": [e["kernel_id"] for e in entries],
+        "stack_validation": True,
+    }
+
+
 def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -229,19 +275,7 @@ def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
     c.shared_state.optimization_stack = [
         {"action": "integrate", "kernel_id": "k_prev", "tput": 110.0},
     ]
-    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result(
-            {
-                "status": "ok",
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kid,
-                "patch_path": f"/tmp/{kid}_opt.cu",
-                "target_file": f"/tmp/{kid}.cu",
-                "new_tput": 100.0 + gain,
-                "gain_pct": gain,
-                "workspace": f"/tmp/integrate-{kid}",
-            }
-        )
+    _record_needs_review_pair(c.shared_state)
     return c
 
 
@@ -574,25 +608,7 @@ async def test_stack_validation_preserves_actual_measurement(
 @pytest.mark.asyncio
 async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: Path):
     """Two positive sub-threshold kernel patches should get one combined E2E validation."""
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState(
-        baseline_tput=100.0,
-        current_best={"action": "baseline", "tput": 100.0},
-    )
-    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result(
-            {
-                "status": "ok",
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kid,
-                "patch_path": f"/tmp/{kid}_opt.cu",
-                "target_file": f"/tmp/{kid}.cu",
-                "new_tput": 100.0 + gain,
-                "gain_pct": gain,
-                "workspace": f"/tmp/integrate-{kid}",
-            }
-        )
+    c = _baseline_coordinator_with_needs_review_pair(tmp_path)
 
     validation_calls = 0
 
@@ -601,18 +617,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
         validation_calls += 1
         assert {e["kernel_id"] for e in entries} == {"k001", "k004"}
         return {
-            "status": "ok",
-            "decision": "KEEP",
-            "kernel_id": "+".join(e["kernel_id"] for e in entries),
-            "patch_path": "+".join(e["patch_path"] for e in entries),
-            "target_file": "+".join(e["target_file"] for e in entries),
-            "base_tput": 100.0,
-            "new_tput": 102.0,
-            "gain_pct": 2.0,
-            "workspace": str(tmp_path / "integrate-stack"),
-            "apply_result": {"status": "ok"},
-            "stack_kernel_ids": [e["kernel_id"] for e in entries],
-            "stack_validation": True,
+            **_stack_keep(entries, tmp_path),
             "stack_member_identities": [{k: e[k] for k in ("kernel_id", "patch_path", "target_file")} for e in entries],
         }
 
@@ -654,25 +659,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
 @pytest.mark.asyncio
 async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
     """A saved pending stack result should finish promotion without re-applying."""
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState(
-        baseline_tput=100.0,
-        current_best={"action": "baseline", "tput": 100.0},
-    )
-    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result(
-            {
-                "status": "ok",
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kid,
-                "patch_path": f"/tmp/{kid}_opt.cu",
-                "target_file": f"/tmp/{kid}.cu",
-                "new_tput": 100.0 + gain,
-                "gain_pct": gain,
-                "workspace": f"/tmp/integrate-{kid}",
-            }
-        )
+    c = _baseline_coordinator_with_needs_review_pair(tmp_path)
     stack = _ledger_rows(c, ["k001", "k004"])
     c.phase_kernel_stack._mark_stack_validation_in_progress(stack, "k001+k004")
     c.shared_state.pending_stack_validation_result = {
@@ -751,48 +738,17 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     monkeypatch,
 ):
     """Stack validation must run even when has_keep_pending_integrate is False."""
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState(
-        baseline_tput=100.0,
-        current_best={"action": "baseline", "tput": 100.0},
-    )
+    c = _baseline_coordinator_with_needs_review_pair(tmp_path)
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP.
-    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result(
-            {
-                "status": "ok",
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kid,
-                "patch_path": f"/tmp/{kid}_opt.cu",
-                "target_file": f"/tmp/{kid}.cu",
-                "new_tput": 100.0 + gain,
-                "gain_pct": gain,
-                "workspace": f"/tmp/integrate-{kid}",
-            }
-        )
     assert not kd.has_keep_pending_integrate(c.shared_state)
 
     validation_calls = []
 
     async def _fake_stack_validation(entries):
         validation_calls.append([e["kernel_id"] for e in entries])
-        return {
-            "status": "ok",
-            "decision": "KEEP",
-            "kernel_id": "+".join(e["kernel_id"] for e in entries),
-            "patch_path": "+".join(e["patch_path"] for e in entries),
-            "target_file": "+".join(e["target_file"] for e in entries),
-            "base_tput": 100.0,
-            "new_tput": 102.0,
-            "gain_pct": 2.0,
-            "workspace": str(tmp_path / "integrate-stack"),
-            "apply_result": {"status": "ok"},
-            "stack_kernel_ids": [e["kernel_id"] for e in entries],
-            "stack_validation": True,
-        }
+        return _stack_keep(entries, tmp_path)
 
     async def _noop_roofline(*, reason: str):
         return None

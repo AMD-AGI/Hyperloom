@@ -4,7 +4,7 @@
 """Process-wide observers of the single HTTP LLM requests the ``llm_config`` helpers issue.
 
 ``hyperloom.common`` may not import the trace packages, so a ledger that wants one row per gateway request registers
-an observer here. An observer fault never reaches the caller's request. The reader that folds a streamed Messages
+an observer here. An observer's I/O or data fault never reaches the caller's request. The reader that folds a streamed Messages
 reply back into one body lives here too: it is what marks an observation's first token.
 """
 
@@ -60,7 +60,7 @@ def _notify(record: LLMRequestRecord) -> None:
     for observer in tuple(_OBSERVERS):
         try:
             observer(record)
-        except Exception:
+        except (OSError, ValueError):
             log.debug("llm request observer %r failed", observer, exc_info=True)
 
 

@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any
+from typing import Literal
+
+from pydantic import Field, field_validator
 
 from kernelforge.agent_backends import (
     AgentBackend,
@@ -17,10 +17,11 @@ from kernelforge.agent_backends import (
     AgentToolPolicy,
     watchdog_timeout_sec,
 )
+from kernelforge.agent_backends.structured_output import AgentAnswer, StructuredOutputError
 from kernelforge.workflows.forge_loop.roles.agent_response import (
     AgentResponseIncompleteError,
     AgentResponseInfrastructureError,
-    validated_agent_text,
+    validated_agent_answer,
 )
 from kernelforge.workflows.forge_loop.roles.contracts import (
     LaneDrop,
@@ -29,49 +30,13 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
     SpecialistRound,
     SynthesizedPlan,
 )
-from kernelforge.workflows.forge_loop.roles.structured_output import (
-    build_repair_prompt,
-    extract_json_object,
-)
 
 
 PLAN_CRITIC_MAX_TURNS = 100
 PLAN_CRITIC_TIMEOUT_SEC = 600
-# One repair pass for a width block the review did not deliver.
-WIDTH_REPAIR_MAX_TURNS = 2
-WIDTH_REPAIR_TIMEOUT_SEC = 120
-# ...and, for the same reason, no more reasoning than restating a decision
-# takes. This is a ceiling, not a setting: a campaign already running below it
-# keeps its own effort. Without it the repair inherits the campaign's effort --
-# ``high`` by default -- to reformat one block it is forbidden to re-decide.
-WIDTH_REPAIR_EFFORT_CEILING = "low"
 _ERROR_DETAIL_MAX_CHARS = 2000
-_NARROWING_NOTE_MAX_CHARS = 240
 
 log = logging.getLogger(__name__)
-
-# The verdict is one prose line, matched by regex; only the width block is structured.
-_VERDICT_PATTERN = re.compile(
-    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?"
-    r"VERDICT(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?"
-    r"(ACCEPT|REVISE|REPLACE)\b"
-)
-
-# The one key the review's trailing width block is required to carry, and the schema shown to the review and to the
-# repair pass.
-_WIDTH_BLOCK_KEY = "lane_narrowing"
-_WIDTH_BLOCK_SCHEMA: dict[str, Any] = {
-    _WIDTH_BLOCK_KEY: [
-        {
-            "lane_id": "The integer lane_id from draft_lane_plans",
-            "reason": ("Why this lane is not worth an Implementer session of its own"),
-        }
-    ]
-}
-_WIDTH_BLOCK_LABEL = "plan critic width block"
-_WIDTH_BLOCK_ABSENT = f"the review ended with no {_WIDTH_BLOCK_KEY} block"
-# The two ways a round ends up not knowing what width the review wanted.
-_UNREAD_WIDTH_STATUSES = frozenset({"absent", "malformed"})
 
 
 def _bounded_error_detail(error: Exception) -> str:
@@ -83,36 +48,64 @@ def _bounded_error_detail(error: Exception) -> str:
     return detail[: _ERROR_DETAIL_MAX_CHARS - 3].rstrip() + "..."
 
 
-def _bounded_note(note: str) -> str:
-    """Return one bounded single line; every note here is persisted."""
-    line = " ".join(str(note).split())
-    if len(line) <= _NARROWING_NOTE_MAX_CHARS:
+class CriticLaneDrop(AgentAnswer):
+    """One lane the review judges not worth an Implementer session of its own."""
+
+    lane_id: int = Field(description="The integer lane_id from draft_lane_plans.")
+    reason: str = Field(description="One sentence saying what you found about this lane.")
+
+    @field_validator("lane_id")
+    @classmethod
+    def _names_a_lane(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("lane_id must name a lane, counting from 1")
+        return value
+
+    @field_validator("reason")
+    @classmethod
+    def _states_a_reason(cls, value: str) -> str:
+        line = " ".join(value.split())
+        if not line:
+            raise ValueError("a dropped lane needs the reason it is dropped")
         return line
-    return line[: _NARROWING_NOTE_MAX_CHARS - 3].rstrip() + "..."
 
 
-def _entry_note(problem: str, entry: object) -> str:
-    """Name one entry of a readable width block that could not be used."""
-    try:
-        rendered = json.dumps(entry, sort_keys=True)
-    except (TypeError, ValueError):  # pragma: no cover - json.loads output only
-        rendered = repr(entry)
-    return _bounded_note(f"{problem}: {rendered}")
+class PlanCriticAnswer(AgentAnswer):
+    """What one review of a round's plans comes to."""
 
+    verdict: Literal["ACCEPT", "REVISE", "REPLACE"] = Field(
+        description=(
+            "ACCEPT: the draft is worth executing. REVISE: the same broad route needs evidence, scope, sequencing, or "
+            "risk corrections. REPLACE: the draft continues a strategically dominated implementation route and should "
+            "instead validate a concrete alternative."
+        )
+    )
+    review: str = Field(
+        description=(
+            "The review in free-form Markdown, citing the source, profiling, benchmark, candidate-history, or "
+            "knowledge paths behind its important claims."
+        )
+    )
+    lane_narrowing: list[CriticLaneDrop] = Field(
+        description=(
+            "Every lane of the round not worth an Implementer session of its own. Every lane not named is run, so an "
+            "empty list runs the whole round; a review of one plan leaves it empty."
+        )
+    )
 
-@dataclass(frozen=True)
-class LaneNarrowingRuling:
-    """What one review's trailing width block asked for, and how it was read."""
+    @field_validator("review")
+    @classmethod
+    def _says_something(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("the review is empty")
+        return value
 
-    drops: tuple[LaneDrop, ...] = ()
-    notes: tuple[str, ...] = ()
-    status: str = "absent"
-    unread: bool = False
-
-    @property
-    def answered(self) -> bool:
-        """Whether a block was read, whatever it went on to ask for."""
-        return self.status == "answered"
+    def lane_drops(self) -> tuple[LaneDrop, ...]:
+        """The lanes the review drops, each once, in the order it named them."""
+        drops: dict[int, LaneDrop] = {}
+        for entry in self.lane_narrowing:
+            drops.setdefault(entry.lane_id, LaneDrop(lane_id=entry.lane_id, reason=entry.reason))
+        return tuple(drops.values())
 
 
 _PLAN_CRITIC_SYSTEM_PROMPT = """\
@@ -153,15 +146,7 @@ Cite concrete source, profiling, benchmark, candidate-history, or knowledge
 paths for important claims. State uncertainty when evidence is missing. Focus
 on issues that would change this iteration's plan rather than generic advice.
 
-Include exactly one routing line somewhere in otherwise free-form Markdown:
-VERDICT: ACCEPT
-VERDICT: REVISE
-VERDICT: REPLACE
-
-ACCEPT means the draft is worth executing. REVISE means the same broad route
-needs evidence, scope, sequencing, or risk corrections. REPLACE means the draft
-continues a strategically dominated implementation route and should instead
-validate a concrete alternative.
+Write the review itself in `review` and route the draft with `verdict`.
 """
 
 _PLAN_CRITIC_ROUND_BLOCK = """\
@@ -183,15 +168,11 @@ One verdict covers the round and applies to every lane that runs. REVISE and
 REPLACE are for what the round should do differently, not for a wording
 preference in one plan.
 
-How wide the round runs is a separate answer, given per lane, and it is the one
-part of this review a machine reads rather than a person. End the review --
-after all of your prose, as its last content -- with exactly one JSON object
-naming every lane you judge not worth an Implementer session of its own: ground
-the evidence does not support, or another lane's change in different words.
-
-```json
-{"lane_narrowing": [{"lane_id": 2, "reason": "the epilogue rewrite is lane 1's change in different words"}]}
-```
+How wide the round runs is a separate answer, given per lane in
+`lane_narrowing`: name every lane you judge not worth an Implementer session of
+its own -- ground the evidence does not support, or another lane's change in
+different words -- with the reason you found. The reason is recorded with the
+round.
 
 A lane whose `joint` is true was given wider ground than a region on purpose:
 it holds a change and the launch configuration that change invalidates, whose
@@ -202,131 +183,9 @@ it, exactly as for any other lane, and the round then measures nothing on the
 ground it widened -- so weigh the `fallback` as what the lane still returns, and
 name the lane only if even that is not worth its session.
 
-`lane_narrowing` is a list. Each entry has `lane_id`, the integer lane_id from
-draft_lane_plans, and `reason`, one non-empty sentence saying what you found.
-Every lane you do not name is run, so a round you want whole still ends with the
-block, empty:
-
-```json
-{"lane_narrowing": []}
-```
-
-Emit the block either way. An empty list and a missing block are different
-answers, and only the first one means "run every lane". The reason is recorded
-with the round, so a drop whose reason cannot be read keeps its lane.
 At least one lane always runs, so drop only what the round is better off
 without.
 """
-
-
-_WIDTH_REPAIR_SYSTEM_PROMPT = """\
-You are reformatting one machine-read block that a completed plan review was
-required to end with and did not. Return exactly one JSON object and no other
-text.
-
-Carry over only the width decision the review already made in its own words: a
-lane it said outright was not worth an Implementer session of its own. Use the
-lane numbers and the reasons the review itself gave. If the review named no such
-lane, return the empty list -- that is a complete answer, and it is the right
-one whenever you would otherwise be guessing.
-
-Do not read files, do not re-review the plans, and do not add a lane or a reason
-the review did not state.
-"""
-
-
-def parse_plan_critic_verdict(text: str) -> str:
-    """Parse the first explicit verdict; non-empty unmarked reviews revise."""
-    review = str(text or "").strip()
-    if not review:
-        raise ValueError("plan critic returned no review")
-    match = _VERDICT_PATTERN.search(review)
-    return match.group(1).upper() if match else "REVISE"
-
-
-def _lane_id_of(raw: object) -> int | None:
-    """Return the positive lane a width-block entry names, or None."""
-    if isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        lane_id = raw
-    elif isinstance(raw, str) and raw.strip().isdigit():
-        lane_id = int(raw.strip())
-    else:
-        return None
-    return lane_id if lane_id >= 1 else None
-
-
-def parse_plan_critic_width_block(text: str) -> LaneNarrowingRuling:
-    """Read the width ruling the review was required to end with."""
-    review = str(text or "")
-    marker = review.rfind(f'"{_WIDTH_BLOCK_KEY}"')
-    if marker < 0:
-        return LaneNarrowingRuling(
-            notes=(_bounded_note(_WIDTH_BLOCK_ABSENT),),
-            status="absent",
-            unread=True,
-        )
-    start = review.rfind("{", 0, marker)
-    if start < 0:
-        return LaneNarrowingRuling(
-            notes=(_bounded_note(f"the review named {_WIDTH_BLOCK_KEY} outside any JSON object"),),
-            status="malformed",
-            unread=True,
-        )
-    try:
-        payload = extract_json_object(review[start:], _WIDTH_BLOCK_LABEL)
-    except ValueError as error:
-        return LaneNarrowingRuling(
-            notes=(_bounded_note(str(error)),),
-            status="malformed",
-            unread=True,
-        )
-    entries = payload.get(_WIDTH_BLOCK_KEY)
-    if not isinstance(entries, list):
-        return LaneNarrowingRuling(
-            notes=(_bounded_note(f"{_WIDTH_BLOCK_KEY} was not a list"),),
-            status="malformed",
-            unread=True,
-        )
-    drops, notes, unread = _read_lane_drops(entries)
-    return LaneNarrowingRuling(
-        drops=drops,
-        notes=notes,
-        status="answered",
-        unread=unread,
-    )
-
-
-def _read_lane_drops(
-    entries: Sequence[object],
-) -> tuple[tuple[LaneDrop, ...], tuple[str, ...], bool]:
-    """Turn one readable width block's entries into drops, naming the rest."""
-    drops: list[LaneDrop] = []
-    notes: list[str] = []
-    seen: set[int] = set()
-    unread = False
-    for entry in entries:
-        if not isinstance(entry, dict):
-            notes.append(_entry_note("unreadable lane drop", entry))
-            unread = True
-            continue
-        lane_id = _lane_id_of(entry.get("lane_id"))
-        reason = " ".join(str(entry.get("reason") or "").split())
-        if lane_id is None:
-            notes.append(_entry_note("lane drop names no lane", entry))
-            unread = True
-            continue
-        if not reason:
-            notes.append(_entry_note("lane drop states no reason", entry))
-            unread = True
-            continue
-        if lane_id in seen:
-            notes.append(_entry_note("lane drop repeats a lane", entry))
-            continue
-        seen.add(lane_id)
-        drops.append(LaneDrop(lane_id=lane_id, reason=reason))
-    return tuple(drops), tuple(notes), unread
 
 
 def build_plan_critic_prompts(
@@ -400,6 +259,28 @@ class PlanCriticAgent:
         """The wall-clock a review of this many plans is allowed."""
         return min(self.timeout_sec * max(1, drafts), self.ceiling_sec)
 
+    def _review_spec(
+        self, context: OrchestrationContext, system_prompt: str, user_prompt: str, budget_sec: int
+    ) -> AgentRunSpec:
+        """The read-only session that reviews one round's plans."""
+        return AgentRunSpec(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            role="plan critic",
+            cwd=context.workspace,
+            writable=False,
+            timeout_sec=budget_sec,
+            tool_policy=AgentToolPolicy(
+                read=True,
+                search=True,
+                write=False,
+                shell=False,
+                max_turns=self.max_turns,
+            ),
+            protected_globs=["*"],
+            output_schema=PlanCriticAnswer,
+        )
+
     async def review(
         self,
         *,
@@ -415,22 +296,7 @@ class PlanCriticAgent:
         try:
             result = await asyncio.wait_for(
                 self.backend.run(
-                    AgentRunSpec(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        role="plan critic",
-                        cwd=context.workspace,
-                        writable=False,
-                        timeout_sec=budget_sec,
-                        tool_policy=AgentToolPolicy(
-                            read=True,
-                            search=True,
-                            write=False,
-                            shell=False,
-                            max_turns=self.max_turns,
-                        ),
-                        protected_globs=["*"],
-                    ),
+                    self._review_spec(context, system_prompt, user_prompt, budget_sec),
                     usage=usage,
                 ),
                 timeout=watchdog_timeout_sec(budget_sec),
@@ -439,180 +305,28 @@ class PlanCriticAgent:
             return self._fail_open(error, started_at=started_at)
 
         try:
-            review = validated_agent_text(result, role="plan critic")
-            verdict_explicit = _VERDICT_PATTERN.search(review) is not None
-            verdict = parse_plan_critic_verdict(review)
+            answer = validated_agent_answer(result, PlanCriticAnswer, role="plan critic")
         except (
             AgentResponseInfrastructureError,
             AgentResponseIncompleteError,
-            ValueError,
+            StructuredOutputError,
         ) as error:
             return self._fail_open(error, started_at=started_at)
 
-        ruling = await self._width_ruling(
-            context=context,
-            review=review,
-            drafts=len(drafts),
-            usage=usage,
-        )
         duration_sec = time.monotonic() - started_at
-        verdict_source = "explicit" if verdict_explicit else "inferred"
-        if not verdict_explicit:
-            log.warning("plan critic omitted an explicit VERDICT; inferring REVISE")
-        self._log_width_ruling(ruling)
+        lane_drops = answer.lane_drops()
         log.info(
-            "plan critic completed verdict=%s source=%s width=%s lane_drops=%d duration=%.3fs",
-            verdict,
-            verdict_source,
-            ruling.status,
-            len(ruling.drops),
+            "plan critic completed verdict=%s lane_drops=%d duration=%.3fs",
+            answer.verdict,
+            len(lane_drops),
             duration_sec,
         )
         return PlanCriticOutcome(
-            verdict=verdict,
-            review=review,
+            verdict=answer.verdict,
+            review=answer.review,
             duration_sec=duration_sec,
-            verdict_source=verdict_source,
-            lane_drops=ruling.drops,
-            narrowing_notes=ruling.notes,
-            narrowing_status=ruling.status,
+            lane_drops=lane_drops,
         )
-
-    async def _width_ruling(
-        self,
-        *,
-        context: OrchestrationContext,
-        review: str,
-        drafts: int,
-        usage=None,
-    ) -> LaneNarrowingRuling:
-        """Read the review's width block, repairing it once if it cannot be."""
-        if drafts <= 1:
-            volunteered = parse_plan_critic_width_block(review)
-            return volunteered if volunteered.answered else LaneNarrowingRuling(status="not_asked")
-        ruling = parse_plan_critic_width_block(review)
-        if ruling.answered:
-            return ruling
-        return await self._repaired_width_ruling(
-            context=context,
-            review=review,
-            ruling=ruling,
-            usage=usage,
-        )
-
-    async def _repaired_width_ruling(
-        self,
-        *,
-        context: OrchestrationContext,
-        review: str,
-        ruling: LaneNarrowingRuling,
-        usage=None,
-    ) -> LaneNarrowingRuling:
-        """Spend one call to recover a width ruling the review did not format."""
-        detail = ruling.notes[0] if ruling.notes else _WIDTH_BLOCK_ABSENT
-        try:
-            result = await asyncio.wait_for(
-                self.backend.run(
-                    AgentRunSpec(
-                        role="plan critic repair",
-                        system_prompt=_WIDTH_REPAIR_SYSTEM_PROMPT,
-                        user_prompt=build_repair_prompt(
-                            label=_WIDTH_BLOCK_LABEL,
-                            original_response=review,
-                            validation_error=detail,
-                            output_schema=_WIDTH_BLOCK_SCHEMA,
-                        ),
-                        cwd=context.workspace,
-                        writable=False,
-                        timeout_sec=self._repair_budget(),
-                        max_reasoning_effort=WIDTH_REPAIR_EFFORT_CEILING,
-                        tool_policy=AgentToolPolicy(
-                            read=False,
-                            search=False,
-                            write=False,
-                            shell=False,
-                            max_turns=WIDTH_REPAIR_MAX_TURNS,
-                        ),
-                        protected_globs=["*"],
-                    ),
-                    usage=usage,
-                ),
-                timeout=watchdog_timeout_sec(self._repair_budget()),
-            )
-            repaired = validated_agent_text(
-                result,
-                role=_WIDTH_BLOCK_LABEL,
-                allow_incomplete=True,
-            )
-        except Exception as error:  # isolation boundary: one width-block repair call
-            log.warning("plan critic width repair pass failed: %s", error, exc_info=True)
-            return self._unrepaired(
-                ruling,
-                f"one repair pass for the width block failed: {_bounded_error_detail(error)}",
-            )
-        recovered = parse_plan_critic_width_block(repaired)
-        if not recovered.answered:
-            return self._unrepaired(
-                ruling,
-                "one repair pass returned no readable width block either",
-            )
-        log.info(
-            "plan critic width block was recovered by one repair pass (%s); it asks to drop %d lane(s)",
-            ruling.status,
-            len(recovered.drops),
-        )
-        return LaneNarrowingRuling(
-            drops=recovered.drops,
-            notes=(
-                *ruling.notes,
-                *recovered.notes,
-                _bounded_note("the review did not end with a readable width block; one repair pass restated it"),
-            ),
-            status="repaired",
-            # What the first reading could not find has been found.
-            unread=recovered.unread,
-        )
-
-    def _repair_budget(self) -> int:
-        """The wall-clock one repair pass is allowed, never above the review's."""
-        return max(1, min(WIDTH_REPAIR_TIMEOUT_SEC, self.timeout_sec))
-
-    @staticmethod
-    def _unrepaired(
-        ruling: LaneNarrowingRuling,
-        note: str,
-    ) -> LaneNarrowingRuling:
-        """Keep the unreadable ruling, naming the repair pass that was spent."""
-        return LaneNarrowingRuling(
-            drops=ruling.drops,
-            notes=(*ruling.notes, _bounded_note(note)),
-            status=ruling.status,
-            unread=True,
-        )
-
-    @staticmethod
-    def _log_width_ruling(ruling: LaneNarrowingRuling) -> None:
-        """Report how the width block read, at the severity that reading earns."""
-        if not ruling.notes:
-            return
-        detail = "; ".join(ruling.notes)
-        if ruling.status in _UNREAD_WIDTH_STATUSES:
-            log.warning(
-                "plan critic width ruling was never read (%s), so no lane can be dropped on it: %s",
-                ruling.status,
-                detail,
-            )
-        elif ruling.unread:
-            log.warning(
-                "plan critic width block was read and part of what it asked for was not: %s",
-                detail,
-            )
-        else:
-            log.info(
-                "plan critic width block was read (%s): %s",
-                ruling.status,
-                detail,
-            )
 
     @staticmethod
     def _fail_open(
@@ -632,5 +346,4 @@ class PlanCriticAgent:
             verdict="NOT_REVIEWED",
             error=detail,
             duration_sec=duration_sec,
-            verdict_source="error",
         )

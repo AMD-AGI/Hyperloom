@@ -21,11 +21,10 @@ from hyperloom.orchestrator.lever import (
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from ..kernel import kernel_decisions
 from ..state.shared_state import (
-    ESCALATE_HINT_SKIP_TO_KERNEL,
-    ESCALATE_HINT_SKIP_TO_SWEEP,
     _LIFECYCLE_CAP,
     is_valid_escalate_hint,
 )
+from .exit_predicates import budget_exit, framework_exit, framework_plateau
 from .phase_chain import (
     LIFECYCLE_STATUS_ENTER,
     PHASE_ALLOWED_ACTIONS,
@@ -46,6 +45,13 @@ from .phase_chain import (
     make_lifecycle_event,
     phase_index,
     render_phase_action_bullets,
+)
+from .prelude_exits import (
+    _baseline_is_anchored,
+    _cold_anchor_shortfall,
+    _prelude_budget_line,
+    _prelude_viability,
+    hot_pass_cost_sec,
 )
 
 
@@ -69,8 +75,10 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_CLOSE: 0.02,
 }
 
-# Share of the session held back for the phases that actually produce a result.
+# Share of the session held back for the phases that actually produce a result, and the reason a round
+# PRELUDE can no longer pay for out of what is left outside it is refused.
 OPTIMIZATION_RESERVE_PCT: float = 0.50
+RETRY_PAST_THE_RESERVE: str = "retry_past_the_optimization_reserve"
 
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container lifetime.
 DEFAULT_LONGRUN_MAX_MINUTES: int = 14 * 24 * 60
@@ -563,12 +571,13 @@ def warm_replay_in_flight(state: Any) -> bool:
     return str(outcome.get("status") or "").strip() == "in_flight"
 
 
+GEAK_STATUS_ERROR = "error"
 # The statuses a finished GEAK run writes to ``geak_result.status``.
 GEAK_TERMINAL_STATUSES = frozenset(
     {
         "ok",
         "no_gain",
-        "error",
+        GEAK_STATUS_ERROR,
         "timeout",
         "failed",
         "skipped",
@@ -671,18 +680,10 @@ def measured_seconds(state: Any, field: str) -> float | None:
 def boot_cost_sec(state: Any) -> float | None:
     """What bringing this workload's server up costs, or ``None`` when unmeasured."""
     total_sec = measured_seconds(state, "baseline_runtime_sec")
-    post_ready_sec = measured_seconds(state, "baseline_post_ready_runtime_sec")
+    post_ready_sec = measured_seconds(state, _POST_READY_FIELD)
     if total_sec is None or post_ready_sec is None:
         return None
     return max(0.0, total_sec - post_ready_sec)
-
-
-def benchmark_cost_sec(state: Any) -> float | None:
-    """What one benchmark pass costs on a server already up, or ``None``."""
-    hot_sec = measured_seconds(state, "baseline_warm_runtime_sec")
-    if hot_sec is not None:
-        return hot_sec
-    return measured_seconds(state, "baseline_post_ready_runtime_sec")
 
 
 def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
@@ -690,17 +691,17 @@ def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
     first_pass_sec = measured_seconds(state, "baseline_runtime_sec")
     if first_pass_sec is None or not double_run:
         return first_pass_sec
-    second_pass_sec = benchmark_cost_sec(state)
+    fields = ("baseline_warm_runtime_sec", _POST_READY_FIELD, "baseline_eval_runtime_sec")
+    second_pass_sec = hot_pass_cost_sec(*(measured_seconds(state, field) for field in fields))
     return first_pass_sec if second_pass_sec is None else first_pass_sec + second_pass_sec
 
 
 def one_more_measurement_sec(state: Any) -> float | None:
-    """What the next measured variant will cost, or ``None`` when unmeasured."""
+    """A boot plus one benchmark pass (the warm runtime once measured, else the cold post-ready time), or ``None``."""
     boot_sec = boot_cost_sec(state)
-    benchmark_sec = benchmark_cost_sec(state)
-    if boot_sec is None or benchmark_sec is None:
-        return None
-    return boot_sec + benchmark_sec
+    warm_sec = measured_seconds(state, "baseline_warm_runtime_sec")
+    benchmark_sec = warm_sec or measured_seconds(state, _POST_READY_FIELD)
+    return None if boot_sec is None or benchmark_sec is None else boot_sec + benchmark_sec
 
 
 def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) -> bool:
@@ -723,13 +724,21 @@ def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) ->
 
 
 def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]]:
-    """Seconds PRELUDE may still spend, and the numbers the figure is built from."""
+    """Seconds PRELUDE may still spend, and the numbers the figure is built from.
+
+    The reserve is an absolute share of the session, so once preparation has eaten past it the subtraction
+    would run negative. A negative is not a quantity of seconds anyone can spend: the figure is floored at
+    zero, the same shape :meth:`SharedState.session_budget_usable_sec` keeps, so every caller reads one
+    meaning -- zero is "nothing left outside the reserve", not a debt that grows while the phase waits.
+    Reaching zero refuses a baseline retry at admission (:func:`a_retry_past_the_reserve_line`) and is a
+    terminal for an idle PRELUDE (:func:`.prelude_exits._prelude_budget_line`), not a number the phase sits on.
+    """
     max_sec = _max_minutes(state) * 60.0
     usable = state.session_budget_usable_sec()
     if max_sec <= 0.0 or usable is None:
         return None, {"reason": "unbounded_budget"}
     reserve_sec = max_sec * OPTIMIZATION_RESERVE_PCT
-    affordable_sec = usable - reserve_sec
+    affordable_sec = max(0.0, usable - reserve_sec)
     return affordable_sec, {
         "optimization_reserve_sec": round(reserve_sec, 1),
         "session_usable_sec": round(usable, 1),
@@ -738,11 +747,7 @@ def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]
     }
 
 
-def prelude_can_afford(
-    state: Any,
-    *,
-    expected_cost_sec: float,
-) -> tuple[bool, dict[str, Any]]:
+def prelude_can_afford(state: Any, *, expected_cost_sec: float) -> tuple[bool, dict[str, Any]]:
     """Decide whether PRELUDE can still buy an optional arm costing ``expected_cost_sec``."""
     cost = max(0.0, float(expected_cost_sec or 0.0))
     affordable_sec, evidence = prelude_affordable_seconds(state)
@@ -750,6 +755,38 @@ def prelude_can_afford(
     if affordable_sec is None:
         return True, priced
     return affordable_sec >= cost, priced
+
+
+def round_headroom_sec(state: Any) -> tuple[float | None, dict[str, Any]]:
+    """Seconds this round's budget may still spend, and the numbers behind it."""
+    if state is None:
+        return None, {"reason": "no_session_state"}
+    usable_sec = state.session_budget_usable_sec()
+    if usable_sec is None:
+        return None, {"reason": "unbounded_session_budget"}
+    return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}
+
+
+def a_use_must_follow_the_round(state: Any) -> bool:
+    """Whether this round is only worth running if something can be measured after it."""
+    return str(getattr(state, "phase", "") or "").strip().upper() == PHASE_PRELUDE
+
+
+def a_retry_past_the_reserve_line(state: Any) -> tuple[bool, dict[str, Any]]:
+    """Whether this is a PRELUDE baseline retry the phase can no longer pay for.
+
+    Once PRELUDE's own allowance past the reserve (:func:`prelude_affordable_seconds`) is gone, a leg that already
+    failed a baseline may not retry; only this leg's failures count, so a resumed leg still gets its first one.
+    """
+    if not a_use_must_follow_the_round(state):
+        return False, {}
+    leg_failures = int(getattr(state, "baseline_failures_this_leg", 0) or 0)
+    if leg_failures < 1:
+        return False, {}
+    affordable_sec, evidence = prelude_affordable_seconds(state)
+    if affordable_sec is None or affordable_sec > 0.0:
+        return False, {}
+    return True, {"reason": RETRY_PAST_THE_RESERVE, "baseline_failures_this_leg": leg_failures, **evidence}
 
 
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
@@ -857,13 +894,14 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
     steers elsewhere; the phase advances only once none of them is paying.
     """
     overrides = _resolve_plateau_overrides(state)
-    plateau = _framework_plateau(
+    plateau = framework_plateau(
         {**_config_lever_evidence(state, overrides), **_patch_lever_evidence(state, overrides)},
     )
     return (plateau.config_dry and plateau.source_dry), plateau.arms
 
 
 _STOP_TIME_EXHAUSTED = "time_exhausted"
+_POST_READY_FIELD = "baseline_post_ready_runtime_sec"
 
 #: SWEEP's close reason per ``reloop_blocked`` value.
 _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
@@ -908,6 +946,15 @@ class PhaseFlags:
     enablement_enabled: bool = False
 
 
+@dataclass(frozen=True)
+class WorkInFlight:
+    """Which phases still have work of their own queued or running, as one decision sees it."""
+
+    enablement: bool = False
+    kernel: bool = False
+    prelude: bool = False
+
+
 def _base_workflow_predicate_inputs(
     state: Any,
     *,
@@ -947,6 +994,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
     warm_status = str(outcome.get("status") or "").strip() if isinstance(outcome, dict) else ""
     return {
         "failure_streak": int(state.baseline_failure_streak or 0),
+        "failures_this_leg": int(state.baseline_failures_this_leg or 0),
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": to_float(state.baseline_tput) or 0.0,
@@ -956,6 +1004,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "runtime_sec": optional_positive_float(state.baseline_runtime_sec),
         "post_ready_runtime_sec": optional_positive_float(state.baseline_post_ready_runtime_sec),
         "warm_runtime_sec": optional_positive_float(state.baseline_warm_runtime_sec),
+        "eval_runtime_sec": optional_positive_float(state.baseline_eval_runtime_sec),
     }
 
 
@@ -1008,6 +1057,11 @@ def _kernel_predicate_inputs(
         "controller_task_count": int(controller.get("task_count") or 0),
         "controller_reason": str(controller.get("reason") or ""),
     }
+    if pending["optimizer"] == "geak":
+        geak = state.geak_result if isinstance(state.geak_result, dict) else {}
+        pending["geak_status"] = str(geak.get("status") or "").strip().lower()
+        pending["geak_error_class"] = str(geak.get("error_class") or "")
+        pending["geak_error"] = str(geak.get("error") or "")[:500]
     plateau = {
         "idle_ticks": int(state.kernel_idle_ticks or 0),
         "idle_since_unix": _kernel_idle_since_unix(state),
@@ -1080,8 +1134,7 @@ def workflow_predicate_inputs(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
+    in_flight: WorkInFlight = WorkInFlight(),
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
     current = (state.phase or "").strip().upper() or PHASE_PRELUDE
@@ -1091,16 +1144,17 @@ def workflow_predicate_inputs(
         current=current,
         now_unix=frozen_now,
         flags=flags,
-        enablement_in_flight=enablement_in_flight,
+        enablement_in_flight=in_flight.enablement,
     )
     if current == PHASE_PRELUDE:
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
+        inputs["pending_work"] = {"prelude_work_in_flight": bool(in_flight.prelude)}
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
         inputs["baseline"] = {"tput": to_float(state.baseline_tput) or 0.0, **_initial_analysis_inputs(state)}
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
-            "enablement_in_flight": bool(enablement_in_flight),
+            "enablement_in_flight": bool(in_flight.enablement),
         }
     elif current == PHASE_FRAMEWORK_AGENT:
         inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(state, now_unix=frozen_now)
@@ -1108,7 +1162,7 @@ def workflow_predicate_inputs(
         inputs["pending_work"], inputs["plateau"], inputs["budget"] = _kernel_predicate_inputs(
             state,
             now_unix=frozen_now,
-            kernel_work_in_flight=kernel_work_in_flight,
+            kernel_work_in_flight=in_flight.kernel,
         )
     elif current == PHASE_SWEEP:
         inputs["sweep_result"], inputs["budget"] = _sweep_predicate_inputs(state, now_unix=frozen_now)
@@ -1133,98 +1187,6 @@ def _transition_result(
     predicate_inputs: dict[str, Any],
 ) -> tuple[str, str, dict[str, Any]]:
     return target, reason, {**evidence, "predicate_inputs": predicate_inputs}
-
-
-def _prelude_viability(baseline: dict[str, Any]) -> dict[str, Any]:
-    usable = to_float(baseline.get("session_usable_sec"))
-    runtime = optional_positive_float(baseline.get("runtime_sec"))
-    post_ready = optional_positive_float(baseline.get("post_ready_runtime_sec"))
-    warm = optional_positive_float(baseline.get("warm_runtime_sec"))
-    benchmark = warm or post_ready
-    round_sec = None
-    if runtime is not None and post_ready is not None and benchmark is not None:
-        round_sec = max(0.0, runtime - post_ready) + benchmark
-        priced_by = "boot_plus_benchmark"
-    else:
-        round_sec = runtime
-        priced_by = "cold_round"
-    if usable is None or round_sec is None:
-        return {}
-    return {
-        "session_usable_sec": round(usable, 1),
-        "measured_round_sec": round(round_sec, 1),
-        "priced_by": priced_by,
-        "affordable_rounds": round(usable / round_sec, 2),
-        "fits_one_optimization_round": usable >= round_sec,
-    }
-
-
-def _budget_exit(
-    budget: dict[str, Any],
-    *,
-    exhausted_reason: str,
-    evidence: dict[str, Any],
-) -> tuple[str, dict[str, Any]] | None:
-    remaining = to_float(budget.get("remaining_sec"))
-    elapsed = to_float(budget.get("entry_elapsed_sec")) or 0.0
-    cumulative = to_float(budget.get("cumulative_elapsed_sec")) or 0.0
-    timing = {
-        **evidence,
-        "entry_elapsed_seconds": elapsed,
-        "cumulative_elapsed_seconds": cumulative,
-    }
-    if remaining is not None and remaining <= 0.0:
-        return exhausted_reason, timing
-    return None
-
-
-class _FrameworkPlateau(NamedTuple):
-    """Whether each FRAMEWORK_AGENT arm has stopped paying, and the arm evidence that says so."""
-
-    config_dry: bool
-    source_dry: bool
-    arms: dict[str, Any]
-    did_work: bool
-
-
-def _framework_plateau(plateau: dict[str, Any]) -> _FrameworkPlateau:
-    """Read the per-arm plateau verdicts off the FRAMEWORK_AGENT predicate inputs."""
-    recent_gain = to_float(plateau.get("recent_keep_gain_pct")) or 0.0
-    keep_threshold = to_float(plateau.get("keep_gain_threshold_pct")) or 0.0
-    empty_streak = int(plateau.get("empty_streak") or 0)
-    empty_threshold = int(plateau.get("empty_streak_threshold") or 0)
-    source_streak = int(plateau.get("source_consecutive_no_keep") or 0)
-    source_threshold = int(plateau.get("source_threshold") or 0)
-    config_dry = recent_gain < keep_threshold and empty_streak >= empty_threshold
-    source_dry = source_streak >= source_threshold or bool(plateau.get("source_candidates_exhausted"))
-    return _FrameworkPlateau(
-        config_dry=config_dry,
-        source_dry=source_dry,
-        arms={
-            **{key: value for key, value in plateau.items() if key not in {"attempt_count", "specialist_round_count"}},
-            "config_arm_plateaued": config_dry,
-            "source_arm_plateaued": source_dry,
-            "switch_bottleneck": bool(config_dry or source_dry),
-        },
-        did_work=int(plateau.get("attempt_count") or 0) > 0 or int(plateau.get("specialist_round_count") or 0) > 0,
-    )
-
-
-def _framework_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    plateau = _framework_plateau(dict(inputs.get("plateau") or {}))
-    arms = plateau.arms
-    hint = str(inputs.get("hint") or "")
-    if hint == ESCALATE_HINT_SKIP_TO_KERNEL and plateau.did_work:
-        return "optimize_no_more_leverage", {**arms, "evidence": "llm_escalation", "hint": hint}
-    if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
-        return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
-    if plateau.config_dry and plateau.source_dry:
-        return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
-    return _budget_exit(
-        dict(inputs.get("budget") or {}),
-        exhausted_reason="optimize_phase_budget_exhausted",
-        evidence=arms,
-    )
 
 
 def _controller_round_settled(pending: dict[str, Any], macro_cycle: Any) -> bool:
@@ -1270,11 +1232,17 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
                 "reason": str(pending.get("controller_reason") or ""),
             }
         if not work_pending:
+            if pending.get("geak_status") == GEAK_STATUS_ERROR:
+                return "kernel_geak_failed", {
+                    "geak_status": GEAK_STATUS_ERROR,
+                    "error_class": pending.get("geak_error_class"),
+                    "error": pending.get("geak_error"),
+                }
             return "kernel_no_more_leverage", {"evidence": "kernel_settled"}
         idle = _kernel_idle_exit(plateau, inputs.get("now_unix"))
         if idle is not None:
             return idle
-    return _budget_exit(
+    return budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="kernel_phase_budget_exhausted",
         evidence={"rejected_kernel_count": int(plateau.get("rejected_kernel_count") or 0)},
@@ -1303,7 +1271,7 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
         return "sweep_done", evidence
     # Anything else -- nothing landed yet, or a sweep the orchestrator cancelled -- leaves the phase to its budget:
     # a cancelled sweep was stopped by a session-wide stop that already decided the run is over.
-    return _budget_exit(
+    return budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
         evidence={"sweep_status": status} if status else {},
@@ -1375,17 +1343,10 @@ def compute_next_phase(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
+    in_flight: WorkInFlight = WorkInFlight(),
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
-    inputs = workflow_predicate_inputs(
-        state,
-        flags=flags,
-        now_unix=now_unix,
-        enablement_in_flight=enablement_in_flight,
-        kernel_work_in_flight=kernel_work_in_flight,
-    )
+    inputs = workflow_predicate_inputs(state, flags=flags, now_unix=now_unix, in_flight=in_flight)
     return replay_next_phase(inputs)
 
 
@@ -1446,34 +1407,6 @@ def _terminal_close_transition(inputs: dict[str, Any]) -> tuple[str, str, dict[s
     return None
 
 
-def _cold_anchor_shortfall(baseline: dict[str, Any]) -> dict[str, Any] | None:
-    """The evidence that retrying a dropped measure round no longer fits the session's budget."""
-    if not bool(baseline.get("measure_round_dropped")):
-        return None
-    usable = to_float(baseline.get("session_usable_sec"))
-    runtime = optional_positive_float(baseline.get("runtime_sec"))
-    benchmark = optional_positive_float(baseline.get("warm_runtime_sec")) or optional_positive_float(
-        baseline.get("post_ready_runtime_sec")
-    )
-    retry = runtime
-    if runtime is not None and benchmark is not None:
-        retry += benchmark
-    viability = _prelude_viability(baseline)
-    use_sec = to_float(viability.get("measured_round_sec")) or runtime
-    if usable is None or retry is None or use_sec is None or usable >= retry + use_sec:
-        return None
-    return {"terminal": True, "baseline_anchor": "cold", "retry_round_sec": round(retry, 1), **viability}
-
-
-def _baseline_is_anchored(baseline: dict[str, Any]) -> bool:
-    """Whether a measured baseline the rest of the session can be compared against is in hand."""
-    return (
-        str(baseline.get("warm_replay_status") or "") != "in_flight"
-        and not bool(baseline.get("measure_round_dropped"))
-        and (to_float(baseline.get("tput")) or 0.0) > 0.0
-    )
-
-
 def _anchored_baseline_transition(
     inputs: dict[str, Any],
     flags: dict[str, Any],
@@ -1498,6 +1431,7 @@ def _prelude_transition(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """The transition PRELUDE takes once its baseline round has settled."""
     baseline = dict(inputs.get("baseline") or {})
+    pending = dict(inputs.get("pending_work") or {})
     streak = int(baseline.get("failure_streak") or 0)
     if streak >= 3:
         return _transition_result(
@@ -1506,7 +1440,7 @@ def _prelude_transition(
             {"terminal": True, "baseline_failure_streak": streak},
             inputs,
         )
-    shortfall = _cold_anchor_shortfall(baseline)
+    shortfall = _cold_anchor_shortfall(baseline, pending)
     if shortfall is not None:
         return _transition_result(PHASE_CLOSE, "prelude_cold_anchor_low_budget", shortfall, inputs)
     if bool(flags.get("enablement_enabled")) and streak >= 1:
@@ -1532,6 +1466,9 @@ def _prelude_transition(
             },
             inputs,
         )
+    reserve_line = _prelude_budget_line(baseline, pending)
+    if reserve_line is not None:
+        return _transition_result(PHASE_CLOSE, "prelude_budget_exhausted", reserve_line, inputs)
     return None
 
 
@@ -1560,7 +1497,7 @@ def _framework_transition(
     flags: dict[str, Any],
 ) -> tuple[str, str, dict[str, Any]] | None:
     """The transition FRAMEWORK_AGENT takes when its leverage or its budget runs out."""
-    normal = _framework_exit(inputs)
+    normal = framework_exit(inputs)
     if normal is None:
         return None
     if bool(flags.get("kernel_enabled")):
@@ -1857,6 +1794,7 @@ __all__ = [
     "LifecycleMark",
     "PhaseClock",
     "PhaseFlags",
+    "WorkInFlight",
     "lifecycle_label",
     "make_lifecycle_event",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
@@ -1874,7 +1812,7 @@ __all__ = [
     "append_phase_evidence_row",
     "append_phase_history_event",
     "baseline_round_cost_sec",
-    "benchmark_cost_sec",
+    "hot_pass_cost_sec",
     "boot_cost_sec",
     "measured_seconds",
     "one_more_measurement_sec",

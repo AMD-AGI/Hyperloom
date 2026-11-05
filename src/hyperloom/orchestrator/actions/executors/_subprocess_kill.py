@@ -49,6 +49,18 @@ COOPERATIVE_REAP_BUDGET_SEC: float = (
 )
 
 
+def _terminate_single_process(proc: subprocess.Popen, grace_seconds: float) -> None:
+    """Terminate ``proc`` alone, escalating to kill after ``grace_seconds``, where process groups are unavailable."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=grace_seconds)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
@@ -64,14 +76,7 @@ def kill_my_spawned_server(
             kill_tree(collect_tree(marked), grace_sec=grace_seconds, confirm_sec=grace_seconds)
         return
     if os.name != "posix":
-        try:
-            proc.terminate()
-            proc.wait(timeout=grace_seconds)
-        except (subprocess.TimeoutExpired, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+        _terminate_single_process(proc, grace_seconds)
         return
 
     try:
@@ -207,6 +212,8 @@ ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
 _SERVER_READY_MARKERS: tuple[str, ...] = (
     "Application startup complete",
     "Uvicorn running on",
+    # vLLM's Rust frontend (`vllm serve` with VLLM_USE_RUST_FRONTEND=1) runs no uvicorn; this is its ready line.
+    "OpenAI server is ready to accept requests",
     "The server is fired up and ready to roll",
 )
 
@@ -230,6 +237,23 @@ _AGENTX_WARMUP_BEGIN_MARKERS: tuple[str, ...] = ("(warmup) started",)
 _AGENTX_MEASURED_BEGIN_MARKERS: tuple[str, ...] = ("(profiling) started",)
 _AGENTX_MEASURED_END_MARKERS: tuple[str, ...] = ("(profiling) complete",)
 _READY_PHASE = "ready"
+
+#: aiter's line as it starts building a JIT module (``[aiter] [pid=.. pname=..] start build [<module>] under ...``). It
+#: writes nothing more until the module is built, and a server whose first request after ready reaches a module it lacks
+#: builds it inside that request: a CK-tile GEMM builds slowest when several tests build at once, past the
+#: silence window. So a log whose last line is such a line is active, each build for at most as long as a module of its
+#: kind may take; a build that hangs goes silent from there.
+_AITER_BUILD_START = re.compile(r"\[aiter\] (?:\[[^\]]*\] )*start build (?:\[([A-Za-z0-9_.-]+)\])?")
+#: How long one quiet build counts as activity: ``MODULE_BUILD_LIMIT_SEC`` and ``CKTILE_MODULE_BUILD_LIMIT_SEC`` of
+#: ``hyperloom.measure.jit.modules``, which this layer does not import (a test holds them equal).
+_AITER_BUILD_LIMIT_SEC = 600.0
+_AITER_CKTILE_BUILD_LIMIT_SEC = 2700.0
+
+
+def _aiter_build_limit_sec(module: str) -> float:
+    """How long a quiet build of the aiter module ``module`` counts as the server's activity."""
+    return _AITER_CKTILE_BUILD_LIMIT_SEC if "cktile" in module else _AITER_BUILD_LIMIT_SEC
+
 
 # aiperf writes only this file: an AgentX benchmark directory has no ``benchmark_stdout.log`` / ``benchmark_stderr.log``
 # the way a synthetic one does, so the phase lines are unreachable unless it is scanned explicitly.
@@ -359,10 +383,7 @@ class _StreamCapture:
         """Report one unit of child output to the caller's liveness callback."""
         if self._on_output is None:
             return
-        try:
-            self._on_output()
-        except Exception as exc:  # outermost liveness sink: reporting never breaks capture
-            log.debug("_subprocess_kill: liveness callback failed: %s", exc, exc_info=True)
+        self._on_output()
 
     def _pump(self, pipe, chunks: list[str], mirror) -> None:
         """Read available bytes without waiting for a newline or a complete codepoint."""
@@ -398,9 +419,10 @@ class _StreamCapture:
             pass  # a closed or broken mirror stream must not stop the capture
 
 
+_SERVER_LOG_NAME: str = "server.log"
 # Glob (relative to the watched path's directory) for nested per-run server logs Magpie writes when its wrapper
 # ignores ``$SERVER_LOG`` and emits to a ``benchmark_<framework>_<timestamp>/server.log`` subdir instead.
-_NESTED_SERVER_LOG_GLOB: str = "benchmark_*/server.log"
+_NESTED_SERVER_LOG_GLOB: str = f"benchmark_*/{_SERVER_LOG_NAME}"
 
 
 def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
@@ -619,6 +641,8 @@ class _LogScan(NamedTuple):
     saw_warmup_begin: bool = False
     saw_measured_begin: bool = False
     saw_measured_end: bool = False
+    #: The last whole line a server log gained in this pass, ``None`` when none gained one.
+    server_line: str | None = None
 
     def including(self, scan: "_IncrementScan", path: str, previous_offset: int) -> "_LogScan":
         """What this pass has found once one log's increment is folded in."""
@@ -632,6 +656,7 @@ class _LogScan(NamedTuple):
             saw_warmup_begin=self.saw_warmup_begin or scan.saw_warmup_begin,
             saw_measured_begin=self.saw_measured_begin or scan.saw_measured_begin,
             saw_measured_end=self.saw_measured_end or scan.saw_measured_end,
+            server_line=self.server_line,
         )
 
 
@@ -647,6 +672,9 @@ class _IncrementScan(NamedTuple):
     residual: str = ""
     active: bool = True
     saw_measured_end: bool = False
+    #: The last whole line with text that the increment holds, other than a health probe's access line (a monitor's poll
+    #: is answered while the engine builds), ``None`` when it holds none.
+    last_line: str | None = None
 
 
 #: Access lines for the endpoints monitors poll on their own tick. An HTTP front end whose engine died keeps answering
@@ -718,6 +746,8 @@ class _LogCursor:
             self.offsets[path] = scan.offset
             self.residuals[path] = scan.residual
             found = found.including(scan, path, prev)
+            if scan.last_line is not None and (path == server_log_path or Path(path).name == _SERVER_LOG_NAME):
+                found = found._replace(server_line=scan.last_line)
         return found
 
 
@@ -755,7 +785,8 @@ def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") 
     saw_warmup_begin = any(marker in chunk for marker in _AGENTX_WARMUP_BEGIN_MARKERS)
     saw_measured_begin = any(marker in chunk for marker in _AGENTX_MEASURED_BEGIN_MARKERS)
     complete = [line for line in chunk[: tail_at + 1].splitlines() if line.strip()] if tail_at >= 0 else []
-    active = not complete or any(not _HEALTH_PROBE_LINE.search(line) for line in complete)
+    spoken = [line for line in complete if not _HEALTH_PROBE_LINE.search(line)]
+    active = not complete or bool(spoken)
     return _IncrementScan(
         size,
         saw_ready,
@@ -766,6 +797,7 @@ def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") 
         residual=next_residual,
         active=active,
         saw_measured_end=any(marker in chunk for marker in _AGENTX_MEASURED_END_MARKERS),
+        last_line=spoken[-1] if spoken else None,
     )
 
 
@@ -788,47 +820,39 @@ _KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
 
 
 def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) -> Any:
-    """Build the KV-metrics recorder for this round, or ``None`` when it is off or cannot be built.
-
-    Collection is strictly observational, so every failure here is swallowed: a round that produces a good benchmark
-    number and no KV metrics is a far better outcome than one that dies because a telemetry import went wrong.
-    """
+    """Build the KV-metrics recorder for this round, or ``None`` when it is off."""
     if not server_log_path:
         return None
     if not env_flag(_KV_METRICS_ENV, default=True):
         return None
-    try:
-        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
+    from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
 
-        workspace = Path(server_log_path).parent
-        return KvMetricsRecorder(
-            # The workspace is where the port actually lives: it is pinned in the round's materialized
-            # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
-            poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
-            # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
-            # publishes a progress address and the poller then never resolves a URL.
-            progress=AiperfProgressPoller(workspace),
-            kv_round=KvRound(
-                output_path=str(workspace / KV_ARTIFACT_NAME),
-                scope={
-                    "server_log_path": str(server_log_path),
-                    "workspace": workspace.name,
-                    "run_path": _run_relative_path(workspace),
-                    "session": os.path.basename(
-                        os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
-                    ),
-                },
-            ),
-        )
-    except Exception:
-        log.warning("kv_metrics: recorder could not be built; this round collects nothing", exc_info=True)
-        return None
+    workspace = Path(server_log_path).parent
+    return KvMetricsRecorder(
+        # The workspace is where the port actually lives: it is pinned in the round's materialized
+        # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
+        poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
+        # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
+        # publishes a progress address and the poller then never resolves a URL.
+        progress=AiperfProgressPoller(workspace),
+        kv_round=KvRound(
+            output_path=str(workspace / KV_ARTIFACT_NAME),
+            scope={
+                "server_log_path": str(server_log_path),
+                "workspace": workspace.name,
+                "run_path": _run_relative_path(workspace),
+                "session": os.path.basename(
+                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
+                ),
+            },
+        ),
+    )
 
 
 class _RecorderFanout:
     """Drives this round's recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
 
-    Each call is isolated: one recorder raising must not starve the others of their phase marks or their ``close``.
+    Each recorder absorbs its own scrape and write failures; anything else it raises fails the round.
     """
 
     def __init__(self, recorders: list[Any], *, ready_phase: str = "measured") -> None:
@@ -837,10 +861,7 @@ class _RecorderFanout:
 
     def _each(self, method: str, *args: Any, **kwargs: Any) -> None:
         for recorder in self._recorders:
-            try:
-                getattr(recorder, method)(*args, **kwargs)
-            except Exception:
-                log.warning("round recorder %s.%s failed", type(recorder).__name__, method, exc_info=True)
+            getattr(recorder, method)(*args, **kwargs)
 
     def note_phase(self, phase: str, mono: float) -> None:
         self._each("note_phase", self._ready_phase if phase == _READY_PHASE else phase, mono)
@@ -860,7 +881,16 @@ class _RecorderFanout:
         self._each("tick", mono)
 
     def close(self, *, aborted: bool = False) -> None:
-        self._each("close", aborted=aborted)
+        """Close every recorder, then raise the first error one of them raised."""
+        first_error: Exception | None = None
+        for recorder in self._recorders:
+            try:
+                recorder.close(aborted=aborted)
+            except Exception as exc:  # noqa: BLE001 - re-raised once every recorder is closed
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> _RecorderFanout:
@@ -1043,6 +1073,9 @@ class _RoundActivity:
     cursor: _LogCursor
     last_activity_at: float
     ready: bool = False
+    #: The aiter module the server log's last line says is being built, and since when; ``None`` while none is.
+    building: str | None = None
+    build_since: float = 0.0
 
     def note_log_progress(
         self, server_log_path: str | None, recorders: _RecorderFanout, capture: _StreamCapture, now: float
@@ -1056,11 +1089,24 @@ class _RoundActivity:
                 recorders.note_phase(_READY_PHASE, now)
             if scan.grew:
                 self.last_activity_at = now
+            if scan.server_line is not None:
+                self._note_build(scan.server_line, now)
             recorders.note_client_phases(scan, now)
             if scan.saw_progress or scan.child_spoke:
                 capture.note_output()
+        if self.building is not None:
+            until = self.build_since + _aiter_build_limit_sec(self.building)
+            self.last_activity_at = max(self.last_activity_at, min(now, until))
         if capture.last_activity_at is not None:
             self.last_activity_at = max(self.last_activity_at, capture.last_activity_at)
+
+    def _note_build(self, line: str, now: float) -> None:
+        """Follow the build the server log's newest line says aiter started, or that none is under way."""
+        found = _AITER_BUILD_START.search(line)
+        module = None if found is None else (found.group(1) or "")
+        if module is not None and module != self.building:
+            self.build_since = now
+        self.building = module
 
     def reusing_warm_server(self, server_log_path: str | None, elapsed: float) -> bool:
         """Whether a round found no log baseline and has since run long enough to be reusing a warm server."""

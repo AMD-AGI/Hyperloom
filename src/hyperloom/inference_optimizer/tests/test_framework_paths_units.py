@@ -22,6 +22,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 from hyperloom.orchestrator.kernel import patch_jit_cache, patch_rebuild
+from hyperloom.orchestrator.tests._helpers import git_repo_tracking
 
 
 @pytest.fixture(autouse=True)
@@ -800,25 +801,9 @@ class TestResolveFrameworkTree:
             fp.resolve_framework_tree(name)
 
 
-def _git_tracking(checkout: Path, *files: str) -> Path:
-    import subprocess
-
-    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
-    for rel in files:
-        target = checkout / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("x = 1\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
-    subprocess.run(
-        ["git", "-C", str(checkout), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
-        check=True,
-    )
-    return checkout
-
-
 class TestFrameworkApplyTree:
     def test_a_package_in_a_checkout_is_edited_at_the_checkout(self, tmp_path):
-        checkout = _git_tracking(tmp_path / "sglang", "python/sglang/__init__.py")
+        checkout = git_repo_tracking(tmp_path / "sglang", "python/sglang/__init__.py")
         tree = fp.framework_apply_tree(f"{checkout}/python/sglang/")
         assert tree == fp.FrameworkTree(tree=checkout / "python" / "sglang", root=checkout, checkout=True)
 
@@ -829,7 +814,7 @@ class TestFrameworkApplyTree:
         assert fp.framework_apply_tree(f"{package}/") == fp.FrameworkTree(tree=package, root=package, checkout=False)
 
     def test_an_untracked_package_under_some_repository_is_not_that_repository(self, tmp_path):
-        project = _git_tracking(tmp_path / "project", "README.md")
+        project = git_repo_tracking(tmp_path / "project", "README.md")
         package = project / ".venv" / "site-packages" / "vllm"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("", encoding="utf-8")

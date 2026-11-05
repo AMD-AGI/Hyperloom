@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +26,7 @@ from kernelforge.workflows.rewrite_controller.forge_runner import (
 )
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
 from kernelforge.workflows.rewrite_controller.publisher import PATCH_FILENAME
-from kernelforge.workflows.rewrite_controller.recovery import recover_task_result
+from kernelforge.workflows.rewrite_controller.recovery import RecoveryResult, recover_task_result
 from kernelforge.workflows.rewrite_controller.state import TaskStateStore
 from kernelforge.workflows.rewrite_controller.task import load_task
 from kernelforge.workflows.rewrite_controller.worktree import (
@@ -161,6 +161,69 @@ def _keep_preparation_audit(
         log.warning("could not keep the preparation audit for %s: %s", task.operator_id, error)
 
 
+def _skipped_result(task: KernelRewriteTask | None, reason: str) -> SingleTaskResult:
+    """A dispatch that stopped before any worktree was created."""
+    return SingleTaskResult(
+        task=task,
+        worktree=None,
+        forge_outcome=None,
+        patch_path=None,
+        status=TASK_STATUS_SKIPPED,
+        reason=reason,
+    )
+
+
+def _failed_result(
+    task: KernelRewriteTask,
+    worktree: OperatorWorktree | None,
+    outcome: ForgeLoopOutcome | None,
+    reason: str,
+) -> SingleTaskResult:
+    """A dispatch that ran and published nothing."""
+    return SingleTaskResult(
+        task=task,
+        worktree=worktree,
+        forge_outcome=outcome,
+        patch_path=None,
+        status=TASK_STATUS_FAILED,
+        reason=reason,
+    )
+
+
+def _settled_result(
+    task: KernelRewriteTask,
+    worktree: OperatorWorktree,
+    outcome: ForgeLoopOutcome,
+    recovered: RecoveryResult,
+    state_store: TaskStateStore,
+) -> SingleTaskResult:
+    """Record the finished forge-loop as succeeded when a result was published, else as failed."""
+    if recovered.patch_dir is not None:
+        patch_path = recovered.patch_dir / PATCH_FILENAME
+        state_store.transition(
+            TASK_STATUS_SUCCEEDED,
+            reason=(
+                "published from forge-loop checkpoint" if outcome.timed_out else "published from completed forge-loop"
+            ),
+            result_patch_dir=str(recovered.patch_dir),
+        )
+        return SingleTaskResult(
+            task=task,
+            worktree=worktree,
+            forge_outcome=outcome,
+            patch_path=patch_path,
+            status=TASK_STATUS_SUCCEEDED,
+        )
+    forge_failure = _failure_detail(outcome)
+    reason = (
+        forge_failure
+        if outcome.timed_out or outcome.returncode != 0 or outcome.result is None
+        else recovered.reason or forge_failure
+    )
+    state_store.transition(TASK_STATUS_FAILED, reason=reason)
+    return _failed_result(task, worktree, outcome, reason)
+
+
 def dispatch_single_task(
     task_dir: str | Path,
     *,
@@ -176,14 +239,7 @@ def dispatch_single_task(
         record_state=True,
     )
     if parsed.task is None:
-        return SingleTaskResult(
-            task=None,
-            worktree=None,
-            forge_outcome=None,
-            patch_path=None,
-            status=TASK_STATUS_SKIPPED,
-            reason=parsed.reason,
-        )
+        return _skipped_result(None, parsed.reason)
 
     task = parsed.task
     state_store = TaskStateStore(task_path)
@@ -192,14 +248,7 @@ def dispatch_single_task(
     starved = _insufficient_gpus(task)
     if starved:
         state_store.transition(TASK_STATUS_SKIPPED, reason=starved)
-        return SingleTaskResult(
-            task=task,
-            worktree=None,
-            forge_outcome=None,
-            patch_path=None,
-            status=TASK_STATUS_SKIPPED,
-            reason=starved,
-        )
+        return _skipped_result(task, starved)
     state_store.transition(
         TASK_STATUS_RUNNING,
         workspace_dir=str(operator_workspace(task, layout)),
@@ -224,56 +273,13 @@ def dispatch_single_task(
             ),
         )
         _persist_forge_loop_output(task_path, outcome)
-        recovered = recover_task_result(
-            layout,
-            task_path,
-            update_state=False,
-        )
-        if recovered.patch_dir is not None:
-            patch_path = recovered.patch_dir / PATCH_FILENAME
-            state_store.transition(
-                TASK_STATUS_SUCCEEDED,
-                reason=(
-                    "published from forge-loop checkpoint"
-                    if outcome.timed_out
-                    else "published from completed forge-loop"
-                ),
-                result_patch_dir=str(recovered.patch_dir),
-            )
-            return SingleTaskResult(
-                task=task,
-                worktree=worktree,
-                forge_outcome=outcome,
-                patch_path=patch_path,
-                status=TASK_STATUS_SUCCEEDED,
-            )
-        forge_failure = _failure_detail(outcome)
-        reason = (
-            forge_failure
-            if outcome.timed_out or outcome.returncode != 0 or outcome.result is None
-            else recovered.reason or forge_failure
-        )
-        state_store.transition(TASK_STATUS_FAILED, reason=reason)
-        return SingleTaskResult(
-            task=task,
-            worktree=worktree,
-            forge_outcome=outcome,
-            patch_path=None,
-            status=TASK_STATUS_FAILED,
-            reason=reason,
-        )
+        recovered = recover_task_result(layout, task_path, update_state=False)
+        return _settled_result(task, worktree, outcome, recovered, state_store)
     except Exception as error:  # isolation boundary: one prepared operator task
         log.warning("single-task dispatch failed for %s: %s", task_path, error, exc_info=True)
         reason = f"single-task dispatch failed: {error}"
         state_store.transition(TASK_STATUS_FAILED, reason=reason)
-        return SingleTaskResult(
-            task=task,
-            worktree=worktree,
-            forge_outcome=outcome,
-            patch_path=None,
-            status=TASK_STATUS_FAILED,
-            reason=reason,
-        )
+        return _failed_result(task, worktree, outcome, reason)
     finally:
         # The controller's closing sweep cannot stand in for this one. It runs
         # after every task's release, and a borrowed repository has by then given
@@ -281,14 +287,20 @@ def dispatch_single_task(
         # exported from is already unreachable. This is the last moment the tree
         # and the branch still exist, so a recovery that failed for a passing
         # reason gets one more attempt here. Publication is idempotent.
-        if worktree is not None and worktree.inplace:
-            with contextlib.suppress(Exception):  # broad-suppress: last-chance recovery; the tree goes either way
-                recover_task_result(layout, task_path, update_state=False)
-        # After that, never before: the patch is what the campaign was for, and
-        # this returns the tree the patch was built in. A private checkout is
-        # left standing instead, because the closing sweep does read those.
-        _keep_preparation_audit(layout, task, worktree)
-        release_operator_worktree(worktree)
+        try:
+            if worktree is not None and worktree.inplace:
+                try:
+                    recover_task_result(layout, task_path, update_state=False)
+                except (subprocess.SubprocessError, OSError):
+                    log.warning(
+                        "last-chance recovery of %s failed; the tree is released either way", task_path, exc_info=True
+                    )
+        finally:
+            # After that, never before: the patch is what the campaign was for, and
+            # this returns the tree the patch was built in. A private checkout is
+            # left standing instead, because the closing sweep does read those.
+            _keep_preparation_audit(layout, task, worktree)
+            release_operator_worktree(worktree)
 
 
 __all__ = [

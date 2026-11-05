@@ -30,6 +30,7 @@ from hyperloom_common.llm.llm_config import (
     preferred_agent_backend,
     with_synthesized_anthropic_keys,
 )
+from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom_common.fs_utils import is_network_fs
 from hyperloom_common.llm.llm_headers import expand_env_refs
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -55,6 +56,8 @@ from .framework_probe import (
     _resolve_framework_build,
     _setup_install_command,
 )
+from .geak_binaries import check_geak_binaries
+from .ir3_probe import run_ir3_probe_script
 from .preflight_env import (
     _ANTHROPIC_FALLBACK_KEYS,
     _PROVIDER_FALLBACK_KEYS,
@@ -71,7 +74,7 @@ from .credentials import (
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
-    _sync_geak_config_base_url,
+    _sync_geak_config_endpoint,
     _validate_credentials,
 )
 from ..session.paths import (
@@ -616,6 +619,11 @@ def _ensure_lm_eval_dep(
             "detail": {"installed": list(missing)},
         }
     # The image already ships lm_eval.
+    return _install_missing_lm_eval_deps(python_exe, pip_extra, missing)
+
+
+def _install_missing_lm_eval_deps(python_exe: str, pip_extra: list[str], missing: list[str]) -> dict[str, Any]:
+    """Install the ``lm_eval[api]`` dependencies an image that ships ``lm_eval`` lacks."""
     targets = missing
     print(f"Preflight: installing {' '.join(targets)} (accuracy gate; missing: {' '.join(missing)}) ...")
     subprocess.run(
@@ -1084,10 +1092,7 @@ def _run_install_step(
     try:
         result = action()
     except BaseException as exc:
-        try:
-            _fail_install_step(event, step_id=step_id, category=category, exc=exc)
-        except Exception:
-            log.warning("failed to record SBD V6 install-step failure", exc_info=True)
+        _fail_install_step(event, step_id=step_id, category=category, exc=exc)
         raise
     outcome = dict(result) if isinstance(result, dict) else {}
     status = str(outcome.pop("status", "applied") or "applied")
@@ -1221,14 +1226,6 @@ def _export_gateway_alias(gateway_url: str) -> None:
             prev = os.environ.get(alias, "")
             os.environ[alias] = gateway_url
             print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
-
-
-def _sync_geak_config_endpoint() -> None:
-    """A supplied GEAK_CONFIG yaml may carry its own endpoint; sync it so an override reaches GEAK."""
-    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
-    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
-    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
-        print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
 
 
 def _ensure_magpie(
@@ -1445,6 +1442,10 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
             category="check",
             action=_check_kernel_tuning_clis,
         )
+        if not forge_explicitly_enabled():
+            _run_install_step(
+                install_event, step_id="check_geak_binaries", category="check", action=check_geak_binaries
+            )
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _run_install_step(install_event, step_id="check_tracelens_cli", category="check", action=_check_tracelens_cli)
         _run_install_step(
@@ -1495,10 +1496,8 @@ def _validate_explicit_server_limits(args: argparse.Namespace) -> None:
     validate_server_args(effective, resolve_serving_model_path(model, model_base=pins.get("HL_MODEL_BASE")))
 
 
-def _preflight(args: argparse.Namespace) -> tuple[str, str]:
-    """Auto-install missing runtime deps and export auth aliases."""
-    _pin_resumed_session_args(args)
-    install_event = _begin_install_event(args)
+def _normalize_preflight_env(args: argparse.Namespace, install_event: dict[str, Any]) -> None:
+    """Load the operator env files, normalize provider and framework env, and validate credentials."""
     _run_install_step(
         install_event,
         step_id="load_dotenv",
@@ -1543,6 +1542,84 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
         detail={"exit_code": 0},
     )
 
+
+def _check_host_runtime(install_event: dict[str, Any]) -> None:
+    """Normalize the ROCm device env and run the GPU, shm and platform-tuning checks."""
+    # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
+    _normalize_hip_visible_devices()
+    _run_install_step(
+        install_event,
+        step_id="check_gpu_visibility",
+        category="check",
+        action=_check_gpu_visibility,
+    )
+    _run_install_step(
+        install_event,
+        step_id="check_shm_disk",
+        category="check",
+        action=_check_shm_disk,
+    )
+    _run_install_step(
+        install_event,
+        step_id="check_platform_tuning",
+        category="check",
+        action=_check_platform_tuning,
+    )
+
+
+def _install_bench_client_deps(install_event: dict[str, Any], *, benchmark_python: str, pip_extra: list[str]) -> None:
+    """Install the bench-serving and accuracy-gate client deps into the benchmark interpreter."""
+    # 1b.
+    _run_install_step(
+        install_event,
+        step_id="ensure_bench_serving_deps",
+        category="install",
+        action=lambda: _ensure_bench_serving_deps(benchmark_python, pip_extra),
+    )
+
+    # 1c. lm_eval — GSM8K accuracy gate, multi-node only (the helper gates itself).
+    _run_install_step(
+        install_event,
+        step_id="ensure_lm_eval",
+        category="install",
+        action=lambda: _ensure_lm_eval_dep(
+            benchmark_python,
+            pip_extra,
+        ),
+    )
+
+
+def _run_closing_preflight_steps(
+    install_event: dict[str, Any], args: argparse.Namespace, *, magpie_python: str, resolved_urls: tuple[str, str]
+) -> None:
+    """Run the IR-3 PR Monitor probe and emit the preflight diagnostics snapshot."""
+    # --- IR-3: PR Monitor reachability probe (soft degrade) ---
+    _run_install_step(
+        install_event,
+        step_id="ir3_pr_monitor_probe",
+        category="degrade",
+        action=lambda: _run_ir3_preflight(args),
+    )
+
+    # --- Single canonical diagnostics block ---
+    _run_install_step(
+        install_event,
+        step_id="diagnostics_snapshot",
+        category="diagnostic",
+        action=lambda: _emit_preflight_diagnostics(
+            magpie_python=magpie_python,
+            anthropic_base_url=resolved_urls[0],
+            args=args,
+        ),
+    )
+
+
+def _preflight(args: argparse.Namespace) -> tuple[str, str]:
+    """Auto-install missing runtime deps and export auth aliases."""
+    _pin_resumed_session_args(args)
+    install_event = _begin_install_event(args)
+    _normalize_preflight_env(args, install_event)
+
     # --- Resolve install interpreters --- Resolve the ACTIVE benchmark backend first so a bypass-only environment (no
     # Magpie / no /opt/venv) never routes installs through Magpie's interpreter.
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (
@@ -1572,26 +1649,7 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
     resolved_urls = _export_llm_endpoints()
 
-    # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
-    _normalize_hip_visible_devices()
-    _run_install_step(
-        install_event,
-        step_id="check_gpu_visibility",
-        category="check",
-        action=_check_gpu_visibility,
-    )
-    _run_install_step(
-        install_event,
-        step_id="check_shm_disk",
-        category="check",
-        action=_check_shm_disk,
-    )
-    _run_install_step(
-        install_event,
-        step_id="check_platform_tuning",
-        category="check",
-        action=_check_platform_tuning,
-    )
+    _check_host_runtime(install_event)
 
     # --- Runtime dep install --- 1.
     _run_install_step(
@@ -1601,24 +1659,7 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
         action=lambda: _ensure_ray(benchmark_python, pip_extra),
     )
 
-    # 1b.
-    _run_install_step(
-        install_event,
-        step_id="ensure_bench_serving_deps",
-        category="install",
-        action=lambda: _ensure_bench_serving_deps(benchmark_python, pip_extra),
-    )
-
-    # 1c. lm_eval — GSM8K accuracy gate, multi-node only (the helper gates itself).
-    _run_install_step(
-        install_event,
-        step_id="ensure_lm_eval",
-        category="install",
-        action=lambda: _ensure_lm_eval_dep(
-            benchmark_python,
-            pip_extra,
-        ),
-    )
+    _install_bench_client_deps(install_event, benchmark_python=benchmark_python, pip_extra=pip_extra)
 
     # 1d.
     _run_install_step(
@@ -1644,25 +1685,7 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
 
     _check_kernel_and_tracelens_clis(install_event, args)
 
-    # --- IR-3: PR Monitor reachability probe (soft degrade) ---
-    _run_install_step(
-        install_event,
-        step_id="ir3_pr_monitor_probe",
-        category="degrade",
-        action=lambda: _run_ir3_preflight(args),
-    )
-
-    # --- Single canonical diagnostics block ---
-    _run_install_step(
-        install_event,
-        step_id="diagnostics_snapshot",
-        category="diagnostic",
-        action=lambda: _emit_preflight_diagnostics(
-            magpie_python=magpie_python,
-            anthropic_base_url=resolved_urls[0],
-            args=args,
-        ),
-    )
+    _run_closing_preflight_steps(install_event, args, magpie_python=magpie_python, resolved_urls=resolved_urls)
 
     _finish_install_event(
         install_event,
@@ -1703,32 +1726,7 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
     if explicit_pr:
         env["SKIP_PR_PROBE"] = "1"
 
-    try:
-        subprocess.run(
-            ["bash", str(script)],
-            env=env,
-            check=False,
-            timeout=60,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        log.warning("IR-3 preflight script error: %s", exc)
-        marker: dict[str, Any] = {
-            "kb_reachable": False,
-            "pr_reachable": False,
-            "kb_skipped": True,
-            "pr_skipped": explicit_pr,
-        }
-    else:
-        try:
-            marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            log.warning("IR-3 marker unreadable: %s", exc)
-            marker = {
-                "kb_reachable": False,
-                "pr_reachable": False,
-                "kb_skipped": True,
-                "pr_skipped": explicit_pr,
-            }
+    marker = run_ir3_probe_script(script, env, marker_path=marker_path, explicit_pr=explicit_pr)
 
     if not explicit_pr and not marker.get("pr_reachable", False) and not marker.get("pr_skipped", False):
         args.pr_monitor_enabled = False

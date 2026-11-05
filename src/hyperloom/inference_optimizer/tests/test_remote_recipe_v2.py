@@ -840,6 +840,76 @@ def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
     assert set(refs).issubset({artifact.path for artifact in bundle.artifacts})
 
 
+def test_kernel_gemm_config_env_paths_are_published_as_refs(tmp_path: Path) -> None:
+    """A config-file env names the tables the champion ran with, so it must travel as refs, not donor paths."""
+    bf16 = tmp_path / "gemm_bf16.csv"
+    bf16.write_text("M,N,K\n16,512,7168\n", encoding="utf-8")
+    fp8 = tmp_path / "gemm_fp8.csv"
+    fp8.write_text("M,N,K\n32,512,7168\n", encoding="utf-8")
+    state = _state(tmp_path)
+    for row in state.optimization_stack:
+        if row["action"] == "gemm_tuning":
+            row["candidate_extra_envs"] = {"AITER_CONFIG_GEMM_BF16": f"{bf16}:{fp8}"}
+            row["extra_envs"] = {"AITER_CONFIG_GEMM_BF16": f"{bf16}:{fp8}"}
+
+    bundle = _build(state, tmp_path / "files-gemm-env")
+
+    row = bundle.knowledge["value"]["kernel"]["gemm"]["optimizations"][0]
+    refs = row["candidate_extra_envs"]["AITER_CONFIG_GEMM_BF16"].split(":")
+    assert [Path(ref).name for ref in refs] == ["gemm_bf16.csv", "gemm_fp8.csv"]
+    assert all(ref.startswith("kernel/gemm/artifacts/") for ref in refs)
+    assert row["extra_envs"]["AITER_CONFIG_GEMM_BF16"] == ":".join(refs)
+    staged = {artifact.path: artifact.source for artifact in bundle.artifacts}
+    assert set(refs) <= set(staged)
+    assert staged[refs[1]].read_text(encoding="utf-8") == fp8.read_text(encoding="utf-8")
+    # Every element counts as a ref, so the bundle is neither short a file nor carrying an orphan.
+    bundle.validate()
+    assert set(refs) <= extract_knowledge_artifact_refs(bundle.knowledge, list(staged))
+
+
+def test_adopted_config_env_refs_follow_the_renamed_artifact(tmp_path: Path) -> None:
+    prior_root = tmp_path / "prior-env"
+    prior_ref = "kernel/gemm/artifacts/tuned.csv"
+    bf16_ref = "kernel/gemm/artifacts/gemm_bf16.csv"
+    (prior_root / "files" / "kernel" / "gemm" / "artifacts").mkdir(parents=True)
+    (prior_root / "files" / prior_ref).write_text("prior\n", encoding="utf-8")
+    (prior_root / "files" / bf16_ref).write_text("prior bf16\n", encoding="utf-8")
+    prior_row = {
+        "id": "prior-gemm",
+        "tuned_file": prior_ref,
+        "extra_envs": {"AITER_CONFIG_GEMM_BF16": f"{prior_ref}:{bf16_ref}"},
+    }
+    (prior_root / "recipe.json").write_text(
+        json.dumps(
+            {
+                "value": {
+                    "kernel": {
+                        "gemm": {"optimizations": [prior_row]},
+                        "fusion": {"items": []},
+                        "rewrite": {"items": []},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = _state(tmp_path)
+    state.warm_replay_outcome = {"status": "reproduced", "kernel": {"status": "kept", "kept": 1}}
+    state.warm_kernel_kb_plan = [{"column": "gemm", "decision": "KEEP", "recipe_row": prior_row}]
+    sections = KnowledgeSections(tmp_path / "draft-env", warm_start_dir=prior_root)
+
+    bundle = _build(state, tmp_path / "files-prior-env", sections=sections)
+
+    optimizations = bundle.knowledge["value"]["kernel"]["gemm"]["optimizations"]
+    adopted = next(row for row in optimizations if row.get("id") == "prior-gemm")
+    elements = adopted["extra_envs"]["AITER_CONFIG_GEMM_BF16"].split(":")
+    # This session staged its own tuned.csv, so the prior table was renamed; the env value must name the new ref.
+    assert adopted["tuned_file"] != prior_ref
+    assert elements == [adopted["tuned_file"], bf16_ref]
+    assert set(elements) <= {artifact.path for artifact in bundle.artifacts}
+    bundle.validate()
+
+
 def test_micro_keep_with_e2e_revert_but_no_integrate_stack_is_not_written(
     tmp_path: Path,
 ) -> None:

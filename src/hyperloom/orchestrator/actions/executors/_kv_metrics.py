@@ -664,23 +664,30 @@ def port_from_server_log(workspace: Any) -> int | None:
         root = Path(workspace)
         for pattern in ("server.log", "*/server.log"):
             for candidate in sorted(root.glob(pattern)):
-                # The banner is near the top; a served round's log grows to megabytes and is on shared storage.
-                with candidate.open(encoding="utf-8", errors="ignore") as handle:
-                    head = handle.read(_SERVER_LOG_HEAD_BYTES)
-                for line in head.splitlines():
-                    # Matched on what the line is about rather than on its exact wording. The observed builds say
-                    # "Starting vLLM server on http://0.0.0.0:8000"; older ones and SGLang say "Uvicorn running on".
-                    # A list of phrasings misses the next build's wording, so the test is the combination -- a
-                    # line announcing the server, carrying a URL with a port.
-                    if not _SERVER_BIND_HINT.search(line):
-                        continue
-                    match = _SERVER_BIND_URL.search(line)
-                    if match:
-                        port = _port_value(match.group(1))
-                        if port is not None:
-                            return port
+                port = _logged_bind_port(candidate)
+                if port is not None:
+                    return port
     except OSError:
         return None
+    return None
+
+
+def _logged_bind_port(candidate: Path) -> int | None:
+    """The first usable port a server log's head announces binding to, or ``None``."""
+    # The banner is near the top; a served round's log grows to megabytes and is on shared storage.
+    with candidate.open(encoding="utf-8", errors="ignore") as handle:
+        head = handle.read(_SERVER_LOG_HEAD_BYTES)
+    for line in head.splitlines():
+        # Matched on what the line is about rather than on its exact wording. The observed builds say
+        # "Starting vLLM server on http://0.0.0.0:8000"; older ones and SGLang say "Uvicorn running on".
+        # A list of phrasings misses the next build's wording, so the test is the combination -- a
+        # line announcing the server, carrying a URL with a port.
+        if not _SERVER_BIND_HINT.search(line):
+            continue
+        match = _SERVER_BIND_URL.search(line)
+        port = _port_value(match.group(1)) if match else None
+        if port is not None:
+            return port
     return None
 
 
@@ -728,10 +735,9 @@ def port_from_server_command(workspace: Any) -> int | None:
             for candidate in sorted(root.glob(pattern)):
                 text = candidate.read_text(encoding="utf-8", errors="ignore")
                 match = re.search(r"(?:^|\s)--port(?:=|\s+)(\d+)(?:\s|$)", text)
-                if match:
-                    port = _port_value(match.group(1))
-                    if port is not None:
-                        return port
+                port = _port_value(match.group(1)) if match else None
+                if port is not None:
+                    return port
     except OSError:
         return None
     return None

@@ -188,6 +188,23 @@ def _source_shard_isolation(path: Path, owner_pid: int) -> AiterCacheIsolation:
     )
 
 
+def _log_prune_outcome(cache_root: Path, stats: dict[str, Any], max_bytes: int) -> None:
+    """Warn when a prune left the cache over budget, otherwise note what it freed."""
+    if stats["after_bytes"] > max_bytes:
+        log.warning(
+            "AITER cache remains over budget: root=%s size=%d max=%d",
+            cache_root,
+            stats["after_bytes"],
+            max_bytes,
+        )
+    elif stats["deleted_shards"]:
+        log.info(
+            "pruned %d AITER cache shard(s), freeing %d bytes",
+            len(stats["deleted_shards"]),
+            stats["deleted_bytes"],
+        )
+
+
 def prune_aiter_cache_shards(
     cache_root: Path,
     *,
@@ -252,19 +269,7 @@ def prune_aiter_cache_shards(
         except OSError:
             stats["errors"] += 1
 
-    if stats["after_bytes"] > policy.max_bytes:
-        log.warning(
-            "AITER cache remains over budget: root=%s size=%d max=%d",
-            cache_root,
-            stats["after_bytes"],
-            policy.max_bytes,
-        )
-    elif stats["deleted_shards"]:
-        log.info(
-            "pruned %d AITER cache shard(s), freeing %d bytes",
-            len(stats["deleted_shards"]),
-            stats["deleted_bytes"],
-        )
+    _log_prune_outcome(cache_root, stats, policy.max_bytes)
     return stats
 
 

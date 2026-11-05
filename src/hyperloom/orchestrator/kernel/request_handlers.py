@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
 
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from ..actions.executors.trace_analyze import trace_analyze_handler
@@ -40,6 +41,7 @@ from ._integrate_payload import (
     _resolve_integrate_payload,
 )
 from ._integrate_rebaseline import (
+    _IntegrateRebaseline,
     _cpp_itfs_rebuild_check,
     _forced_cpp_itfs_rebuild,
     _integrate_rebaseline,
@@ -107,9 +109,7 @@ async def integrate_handler(
     ``gain_pct`` follows ``graded_objective`` and ``bench_result`` retains the
     E2E measurement.
     """
-    from ..actions.executors._accuracy_gate import EVAL_KIND_CONTEXT_TOO_SMALL
     from ..actions.executors.benchmark_result import is_valid_measurement
-    from ..measurement.integrate_performance import assess_integrate_performance
     from ..state.shared_state import SharedState
 
     requested_controls = _request_overrides_serving_controls(payload)
@@ -130,14 +130,9 @@ async def integrate_handler(
             return missing_inputs
 
     state = SharedState.load_or_init(session_dir)
-    apply_result = _applied_patch_result(payload, session_dir=session_dir, preapplied_git_patch=preapplied_git_patch)
-    if mode == "env_only" and apply_result.get("status") == "skipped":
-        apply_result = {
-            "status": "ok",
-            "reason": "env_only_no_patch_applied",
-            "kernel_id": payload.get("kernel_id"),
-        }
-    log.info("integrate_handler: apply_result=%s", apply_result)
+    apply_result = _apply_for_integrate(
+        payload, session_dir=session_dir, mode=mode, preapplied_git_patch=preapplied_git_patch
+    )
     unapplied = _unapplied_patch_failure(payload, apply_result)
     if unapplied is not None:
         return unapplied
@@ -170,26 +165,85 @@ async def integrate_handler(
 
     rebuild_check = _cpp_itfs_rebuild_check(apply_result)
     if not rebuild_check.get("verified", True):
-        return _integrate_failure(
-            payload,
-            apply_result,
-            _FailureVerdict(
-                "cpp_itfs_rebuild_not_verified",
-                "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary",
-                "NEEDS_REVIEW",
-            ),
-            rebuild_check=rebuild_check,
-        )
+        return _rebuild_not_verified_failure(payload, apply_result, rebuild_check)
 
     if paired_measurement:
-        return {
+        return _paired_measurement_result(base_tput, bench_result)
+    measured = _MeasuredIntegration(
+        payload=payload,
+        apply_result=apply_result,
+        rebaseline=rebaseline,
+        bench_result=bench_result,
+        rebuild_check=rebuild_check,
+    )
+    return _graded_integration(measured, state, performance_policy, preapplied_git_patch=preapplied_git_patch)
+
+
+def _apply_for_integrate(payload: dict, *, session_dir: Path, mode: str, preapplied_git_patch: bool) -> dict:
+    """Apply the integration's patch; an env-only run with no patch to apply counts as applied."""
+    apply_result = _applied_patch_result(payload, session_dir=session_dir, preapplied_git_patch=preapplied_git_patch)
+    if mode == "env_only" and apply_result.get("status") == "skipped":
+        apply_result = {
             "status": "ok",
-            "decision": "NEEDS_REVIEW",
-            "base_tput": base_tput,
-            "new_tput": float(bench_result.get("output_throughput") or 0.0),
-            "bench_result": bench_result,
-            "workspace": bench_result.get("workspace"),
+            "reason": "env_only_no_patch_applied",
+            "kernel_id": payload.get("kernel_id"),
         }
+    log.info("integrate_handler: apply_result=%s", apply_result)
+    return apply_result
+
+
+def _rebuild_not_verified_failure(payload: dict, apply_result: dict, rebuild_check: HandlerResult) -> HandlerResult:
+    """The failure of a re-baseline that did not run a freshly built cpp_itfs library."""
+    return _integrate_failure(
+        payload,
+        apply_result,
+        _FailureVerdict(
+            "cpp_itfs_rebuild_not_verified",
+            "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary",
+            "NEEDS_REVIEW",
+        ),
+        rebuild_check=rebuild_check,
+    )
+
+
+def _paired_measurement_result(base_tput: float, bench_result: dict) -> HandlerResult:
+    """The ungraded result of a paired GEMM measurement, left for review."""
+    return {
+        "status": "ok",
+        "decision": "NEEDS_REVIEW",
+        "base_tput": base_tput,
+        "new_tput": float(bench_result.get("output_throughput") or 0.0),
+        "bench_result": bench_result,
+        "workspace": bench_result.get("workspace"),
+    }
+
+
+@dataclass(frozen=True)
+class _MeasuredIntegration:
+    """An applied integration whose re-baseline measured a verified build."""
+
+    payload: dict
+    apply_result: dict
+    rebaseline: _IntegrateRebaseline
+    bench_result: dict
+    rebuild_check: HandlerResult
+
+
+def _graded_integration(
+    measured: _MeasuredIntegration,
+    state: Any,
+    performance_policy: dict[str, float],
+    *,
+    preapplied_git_patch: bool,
+) -> HandlerResult:
+    """Grade a measured integration on throughput and accuracy into its KEEP/REVERT result."""
+    from ..actions.executors._accuracy_gate import EVAL_KIND_CONTEXT_TOO_SMALL
+    from ..measurement.integrate_performance import assess_integrate_performance
+
+    payload = measured.payload
+    apply_result = measured.apply_result
+    rebaseline = measured.rebaseline
+    bench_result = measured.bench_result
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
     if performance.graded.degrade_reason:
         log.info("integrate_handler: grading unavailable (%s)", performance.graded.degrade_reason)
@@ -225,7 +279,7 @@ async def integrate_handler(
             cleanup=_settled_patch(confirmation.decision, apply_result, caller_owns_durability=preapplied_git_patch),
             accuracy_gate=accuracy_gate,
             source_import=confirmation,
-            rebuild_check=rebuild_check,
+            rebuild_check=measured.rebuild_check,
             server_args=rebaseline.server_args,
         )
     )

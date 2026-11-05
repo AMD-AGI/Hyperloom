@@ -99,14 +99,19 @@ def _live_file_restored(path: str):
         # Stay in the ``finally`` without returning: a return here would swallow an exception from the body when there
         # was nothing to restore.
         if original is not None and target is not None:
-            try:
-                if target.read_bytes() != original:
-                    target.write_bytes(original)
-                    if mode is not None:
-                        os.chmod(target, mode)
-                    log.info("restored %s to its pre-run contents", path)
-            except OSError as exc:
-                log.error("FAILED to restore %s (%s): the install may be left modified", path, exc)
+            _restore_live_file(path, target, original, mode)
+
+
+def _restore_live_file(path: str, target: Path, original: bytes, mode: Optional[int]) -> None:
+    """Write ``original`` back to ``target`` when its contents changed, logging an ``OSError``."""
+    try:
+        if target.read_bytes() != original:
+            target.write_bytes(original)
+            if mode is not None:
+                os.chmod(target, mode)
+            log.info("restored %s to its pre-run contents", path)
+    except OSError as exc:
+        log.error("FAILED to restore %s (%s): the install may be left modified", path, exc)
 
 
 def _serving_arm(label: str, server: SmokeServer, load: DecodeLoad, out: Path) -> tuple[bool, str, dict]:
@@ -115,6 +120,38 @@ def _serving_arm(label: str, server: SmokeServer, load: DecodeLoad, out: Path) -
     ok, reason = serving_smoke(server, load=load, metrics=metrics, log_path=str(out / f"compile_pass_{label}.log"))
     log.info("compile pass %s arm: ok=%s tok_s=%s reason=%s", label, ok, metrics.get("tok_s"), reason)
     return ok, reason, metrics
+
+
+def _record_enabled_arm(outcome: CompilePassOutcome, ok: bool, reason: str, enabled: dict) -> CompilePassOutcome:
+    """Record the enabled serving arm on ``outcome`` and decide whether the flip is kept."""
+    target_speedup = outcome.target_speedup
+    outcome.enabled_tok_s = enabled.get("tok_s")
+    outcome.pass_activated = enabled.get("pass_activated")
+    outcome.activation_evidence = list(enabled.get("activation_evidence") or [])
+    if not ok or not outcome.enabled_tok_s:
+        outcome.note = f"enabled arm failed: {reason}"
+        return outcome
+    outcome.validated = True
+    if outcome.pass_activated is False:
+        outcome.note = (
+            "the pass ran but matched NOTHING in this model's graph (0 sites fused): the flip buys nothing here"
+        )
+        return outcome
+    outcome.speedup = outcome.enabled_tok_s / float(outcome.baseline_tok_s or 0.0 or 1.0)
+    if outcome.speedup < target_speedup:
+        outcome.note = (
+            f"enabled arm is not faster: {outcome.baseline_tok_s} -> "
+            f"{outcome.enabled_tok_s} tok/s (speedup {outcome.speedup:.3f} "
+            f"< target {target_speedup})"
+        )
+        return outcome
+    outcome.kept = True
+    outcome.note = (
+        f"A/B kept: {outcome.baseline_tok_s} -> {outcome.enabled_tok_s} tok/s "
+        f"(speedup {outcome.speedup:.3f}), pass_activated="
+        f"{outcome.pass_activated}"
+    )
+    return outcome
 
 
 def _run_compile_pass(
@@ -180,30 +217,4 @@ def _run_compile_pass(
     # Fusion passes report what they rewrote at debug level; without this the run cannot tell "fused N sites" from
     # "matched nothing".
     ok, reason, enabled = _serving_arm("enabled", arm_server({"VLLM_LOGGING_LEVEL": "DEBUG"}), load, out)
-    outcome.enabled_tok_s = enabled.get("tok_s")
-    outcome.pass_activated = enabled.get("pass_activated")
-    outcome.activation_evidence = list(enabled.get("activation_evidence") or [])
-    if not ok or not outcome.enabled_tok_s:
-        outcome.note = f"enabled arm failed: {reason}"
-        return outcome
-    outcome.validated = True
-    if outcome.pass_activated is False:
-        outcome.note = (
-            "the pass ran but matched NOTHING in this model's graph (0 sites fused): the flip buys nothing here"
-        )
-        return outcome
-    outcome.speedup = outcome.enabled_tok_s / float(outcome.baseline_tok_s or 0.0 or 1.0)
-    if outcome.speedup < target_speedup:
-        outcome.note = (
-            f"enabled arm is not faster: {outcome.baseline_tok_s} -> "
-            f"{outcome.enabled_tok_s} tok/s (speedup {outcome.speedup:.3f} "
-            f"< target {target_speedup})"
-        )
-        return outcome
-    outcome.kept = True
-    outcome.note = (
-        f"A/B kept: {outcome.baseline_tok_s} -> {outcome.enabled_tok_s} tok/s "
-        f"(speedup {outcome.speedup:.3f}), pass_activated="
-        f"{outcome.pass_activated}"
-    )
-    return outcome
+    return _record_enabled_arm(outcome, ok, reason, enabled)

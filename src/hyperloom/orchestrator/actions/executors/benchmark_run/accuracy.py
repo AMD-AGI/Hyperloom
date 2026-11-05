@@ -255,9 +255,9 @@ class _BaselineAccuracyMixin:
             BASELINE_EVAL_FAILED_KEY,
             BASELINE_EVAL_FAILURE_KIND_KEY,
             BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
-            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
             eval_contract_fingerprint,
         )
+        from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 
         params = ctx.task.params or {}
         framework = _requested_framework(params)
@@ -284,7 +284,9 @@ class _BaselineAccuracyMixin:
         result: dict[str, Any],
     ) -> None:
         """Halt the run for an eval-rooted baseline failure, fail-fast path."""
-        from .._accuracy_gate import accuracy_meets_floor, request_baseline_accuracy_stop
+        from hyperloom.common.gain_math import accuracy_meets_floor
+
+        from .._accuracy_gate import request_baseline_accuracy_stop
 
         params = ctx.task.params or {}
         framework = _requested_framework(params)
@@ -331,14 +333,9 @@ class _BaselineAccuracyMixin:
             return
         acc = result.get("accuracy")
         eval_enablement = self._eval_enablement_active(ctx)
-        from .._accuracy_gate import (
-            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
-            EVAL_KIND_GENERATION_PATHOLOGY,
-            accuracy_meets_floor,
-            classify_accuracy_failure,
-            eval_probe_summary,
-            request_baseline_accuracy_stop,
-        )
+        from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR, accuracy_meets_floor
+
+        from .._accuracy_gate import request_baseline_accuracy_stop
 
         floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
         # Floor 0.0 is the non-enablement "any positive accuracy is usable" rule; ``accuracy_meets_floor`` already
@@ -381,31 +378,7 @@ class _BaselineAccuracyMixin:
         # Route into enablement instead of stopping: the throughput baseline stays for diagnostics but is blocked from
         # anchoring.
         if eval_enablement:
-            kind = classify_accuracy_failure(acc, floor)
-            evidence = (
-                f"baseline accuracy did not meet floor: accuracy={acc} floor={floor} "
-                f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
-                f"source={result.get('accuracy_source')}"
-            )
-            # A tripped probe means the eval was cut short because the model never stopped generating, not that it
-            # answered and got them wrong.
-            if probe := result.get("eval_probe"):
-                kind = EVAL_KIND_GENERATION_PATHOLOGY
-                evidence = f"{evidence}; {eval_probe_summary(probe)}"
-            self._stamp_eval_failure_contract(
-                ctx,
-                result,
-                kind=kind or "",
-                observed_accuracy=float(acc) if isinstance(acc, (int, float)) else None,
-                evidence=evidence,
-            )
-            log.warning(
-                "baseline_executor: accuracy %s below floor %.4f (kind=%s); routing to "
-                "enablement instead of stopping the run.",
-                acc,
-                floor,
-                kind,
-            )
+            self._route_baseline_accuracy_to_enablement(ctx, result, acc, floor)
             return
         # Only a *missing* reference can be explained by a dead server. A measured zero -- including one salvaged
         # from a sibling attempt -- means the eval did run and did write its results, so blaming the death here would
@@ -426,6 +399,46 @@ class _BaselineAccuracyMixin:
             )
         request_baseline_accuracy_stop(shared_state, context=context, cause=cause)
 
+    def _route_baseline_accuracy_to_enablement(
+        self,
+        ctx: RunnerContext,
+        result: dict[str, Any],
+        acc: Any,
+        floor: float,
+    ) -> None:
+        """Stamp an under-floor baseline accuracy as an eval failure for enablement to act on."""
+        from .._accuracy_gate import (
+            EVAL_KIND_GENERATION_PATHOLOGY,
+            classify_accuracy_failure,
+            eval_probe_summary,
+        )
+
+        kind = classify_accuracy_failure(acc, floor)
+        evidence = (
+            f"baseline accuracy did not meet floor: accuracy={acc} floor={floor} "
+            f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
+            f"source={result.get('accuracy_source')}"
+        )
+        # A tripped probe means the eval was cut short because the model never stopped generating, not that it
+        # answered and got them wrong.
+        if probe := result.get("eval_probe"):
+            kind = EVAL_KIND_GENERATION_PATHOLOGY
+            evidence = f"{evidence}; {eval_probe_summary(probe)}"
+        self._stamp_eval_failure_contract(
+            ctx,
+            result,
+            kind=kind or "",
+            observed_accuracy=float(acc) if isinstance(acc, (int, float)) else None,
+            evidence=evidence,
+        )
+        log.warning(
+            "baseline_executor: accuracy %s below floor %.4f (kind=%s); routing to "
+            "enablement instead of stopping the run.",
+            acc,
+            floor,
+            kind,
+        )
+
     def _apply_salvaged_accuracy(
         self,
         result: dict[str, Any],
@@ -435,7 +448,7 @@ class _BaselineAccuracyMixin:
         expected_handoff: bool = False,
     ) -> float:
         """Record a salvaged sibling accuracy, publishing it as the gate reference only when it can serve as one."""
-        from .._accuracy_gate import accuracy_meets_floor
+        from hyperloom.common.gain_math import accuracy_meets_floor
 
         acc_val = float(salvaged["accuracy"])
         result["accuracy"] = acc_val
@@ -475,12 +488,14 @@ class _BaselineAccuracyMixin:
         if not runs_root.exists():
             return None
         try:
-            from .._accuracy_gate import _finite_score, parse_eval_results
+            from hyperloom.common.gain_math import finite_score
+
+            from .._accuracy_gate import parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
         except (OSError, ValueError, AttributeError, TypeError):
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
-        if _finite_score(eval_data.get("accuracy")) is None:
+        if finite_score(eval_data.get("accuracy")) is None:
             return None
         return eval_data

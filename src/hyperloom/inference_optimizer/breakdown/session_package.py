@@ -607,20 +607,7 @@ def package_session_artifacts(
     tmp_path = Path(tmp)
     try:
         with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            written: list[tuple[str, int]] = []
-            write_failures: list[str] = []
-            for p, rel, sz in selected:
-                try:
-                    if rel == _STATE_JSON_REL:
-                        data = _exported_state_bytes(p)
-                        zf.writestr(rel, data)
-                        sz = len(data)
-                    else:
-                        zf.write(p, arcname=rel)
-                    written.append((rel, sz))
-                except OSError:
-                    write_failures.append(rel)
-                    log.warning("session package: failed to add %s", rel)
+            written, write_failures = _write_zip_members(zf, selected)
             # Built here so it describes the members that exist, not the ones that were selected.
             manifest = _build_manifest(plan, written, write_failures)
             zf.writestr(MANIFEST_JSON_NAME, json.dumps(manifest, indent=2))
@@ -654,3 +641,25 @@ def package_session_artifacts(
             log.exception("session package: loose copy failed (non-fatal)")
 
     return target
+
+
+def _write_zip_members(
+    zf: zipfile.ZipFile,
+    selected: list[tuple[Path, str, int]],
+) -> tuple[list[tuple[str, int]], list[str]]:
+    """Add the selected files to ``zf``; return the ``(rel, size)`` written and the rels that failed."""
+    written: list[tuple[str, int]] = []
+    write_failures: list[str] = []
+    for p, rel, sz in selected:
+        try:
+            if rel == _STATE_JSON_REL:
+                data = _exported_state_bytes(p)
+                zf.writestr(rel, data)
+                sz = len(data)
+            else:
+                zf.write(p, arcname=rel)
+            written.append((rel, sz))
+        except OSError:
+            write_failures.append(rel)
+            log.warning("session package: failed to add %s", rel)
+    return written, write_failures

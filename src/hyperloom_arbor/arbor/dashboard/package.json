@@ -1,0 +1,13 @@
+{
+  "name": "arbor-dashboard",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Arbor campaign dashboard: one campaign live (local), or every campaign on the share (global). No runtime dependencies.",
+  "scripts": {
+    "global": "node server.mjs global"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

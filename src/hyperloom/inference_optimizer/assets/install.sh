@@ -72,12 +72,7 @@ REPO_ROOT="$(resolve_repo_root)"
 
 scrub_stale_workspace_env_for_setup_dotenv() {
   setup_dotenv_is_authoritative || return 0
-  if ! runtime_env_var_is_readonly USER_DATA_PATH; then
-    unset USER_DATA_PATH
-  fi
-  unset HYPERLOOM_RUNTIME_DIR
-  unset KERNEL_AGENT_ENV
-  unset HYPERLOOM_ROOT
+  runtime_env_forget_stale_workspace
   unset HYPERLOOM_KERNEL_AGENT_ROOT
   unset KERNEL_AGENT_ROOT
   unset FRAMEWORK_AGENT_ROOT
@@ -113,14 +108,12 @@ fi
 if [ -z "${_user_data_was_set}" ]; then
   echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
-HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
-KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+# HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV and HYPERLOOM_ROOT (legacy, kept for compatibility).
+runtime_env_derive_runtime_paths
 VLLM_IMAGE_SOURCE_ROOT="/app/vllm"
 VLLM_IMAGE_SOURCE_COMMIT="f46a9dfe2c5f57bebbd29556cbbb25eabd874226"
 VLLM_IMAGE_REPO="${VLLM_IMAGE_REPO:-https://github.com/vllm-project/vllm.git}"
 VLLM_IMAGE_SOURCE_ACTIVE=0
-# Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
-HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
 # $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
 # wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).

@@ -1318,12 +1318,7 @@ def _merge_acceptances(
     unmatched: list[dict[str, Any]] = []
     for kind in (_ACCEPTANCE_AUTHORED, _ACCEPTANCE_ENV):
         for ordinal, entry in enumerate(acceptances.get(kind, [])):
-            target = None
-            if kind == _ACCEPTANCE_AUTHORED:
-                for field in ("kernel_id", "short_name", "cand_tag"):
-                    target = by_identity.get(str(entry.get(field) or ""))
-                    if target is not None:
-                        break
+            target = _authored_target(entry, by_identity) if kind == _ACCEPTANCE_AUTHORED else None
             if target is None:
                 row = _acceptance_attempt(entry, ordinal=ordinal)
                 row["rebench_ref"] = geak_ref
@@ -1337,6 +1332,12 @@ def _merge_acceptances(
                 if key not in {"event_id", "ordinal", "acceptance_kind", "source_kind", "kernel_id", "short_name"}
             }
     return unmatched
+
+
+def _authored_target(entry: Mapping[str, Any], by_identity: Mapping[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the attempt row an authored acceptance names, matched by its first known identity."""
+    keys = (str(entry.get(field) or "") for field in ("kernel_id", "short_name", "cand_tag"))
+    return next((by_identity[key] for key in keys if key in by_identity), None)
 
 
 def _settle(

@@ -57,7 +57,7 @@ _CONSTRAINT_RULES: list[tuple[re.Pattern, str]] = [
     ),
     (
         re.compile(r"out of resource|shared memory|triton.*(compil|jit)|tl\.constexpr", re.IGNORECASE),
-        "Keep the Triton kernel within gfx942 limits: bound BLOCK size and "
+        "Keep the Triton kernel within the target GPU's limits: bound BLOCK size and "
         "shared-memory usage and fix tl.constexpr shapes so the kernel JIT-compiles.",
     ),
     (

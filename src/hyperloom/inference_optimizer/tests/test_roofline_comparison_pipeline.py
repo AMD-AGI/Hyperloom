@@ -604,6 +604,21 @@ class TestFormatTableRendersCeiling:
         assert "Roofline ceiling" not in text
 
 
+def _capture_roofline_arm(monkeypatch) -> dict[str, object]:
+    """Stub the state roofline breakdown at a 1000 tok/s memory-bound ceiling and record the arm it is asked for."""
+    from hyperloom.inference_optimizer import roofline_ceiling
+    from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
+
+    seen_arm: dict[str, object] = {}
+
+    def _capture(_state, **kw):
+        seen_arm["arm"] = kw.get("arm")
+        return RooflineBreakdown(1000.0, 5000.0, 1000.0, "memory")
+
+    monkeypatch.setattr(roofline_ceiling, "compute_roofline_breakdown_from_state", _capture)
+    return seen_arm
+
+
 class TestRecordTraceAnalyzeStampsCeiling:
     """``record_trace_analyze`` stamps ceiling + achieved + within + gap onto every history snapshot."""
 
@@ -654,22 +669,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
 
     def test_forced_baseline_arm_overrides_promoted_current_best(self, tmp_path, monkeypatch):
         """A delayed PRELUDE roofline (payload roofline_arm=baseline) records as baseline even after warm-replay promoted a fp8 current_best — the ceiling is computed for the baseline arm and achieved uses baseline_tput."""
-        from hyperloom.inference_optimizer import roofline_ceiling
-        from hyperloom.inference_optimizer.roofline_ceiling import (
-            RooflineBreakdown,
-        )
-
-        seen_arm: dict[str, object] = {}
-
-        def _capture(_state, **kw):
-            seen_arm["arm"] = kw.get("arm")
-            return RooflineBreakdown(1000.0, 5000.0, 1000.0, "memory")
-
-        monkeypatch.setattr(
-            roofline_ceiling,
-            "compute_roofline_breakdown_from_state",
-            _capture,
-        )
+        seen_arm = _capture_roofline_arm(monkeypatch)
         from hyperloom.orchestrator.state.shared_state import SharedState
 
         md = tmp_path / "analysis.md"
@@ -780,22 +780,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
 
     def test_current_best_arm_keeps_arm_when_tput_missing(self, tmp_path, monkeypatch):
         """A current_best-tagged snapshot keeps its arm even when current_best carries no live tput; the ceiling must not downgrade to baseline."""
-        from hyperloom.inference_optimizer import roofline_ceiling
-        from hyperloom.inference_optimizer.roofline_ceiling import (
-            RooflineBreakdown,
-        )
-
-        seen_arm: dict[str, object] = {}
-
-        def _capture(_state, **kw):
-            seen_arm["arm"] = kw.get("arm")
-            return RooflineBreakdown(1000.0, 5000.0, 1000.0, "memory")
-
-        monkeypatch.setattr(
-            roofline_ceiling,
-            "compute_roofline_breakdown_from_state",
-            _capture,
-        )
+        seen_arm = _capture_roofline_arm(monkeypatch)
         from hyperloom.orchestrator.state.shared_state import SharedState
 
         md = tmp_path / "analysis.md"

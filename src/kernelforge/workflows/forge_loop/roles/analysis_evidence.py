@@ -72,26 +72,14 @@ class AnalysisEvidenceMixin:
             )
         except subprocess.TimeoutExpired as error:
             message = f"cumulative Analysis diff timed out for {evidence_commit}..{canonical_commit}: {error}"
-            result = AnalysisDiffResult(error=message)
-            self._analysis_diff_results[cache_key] = result
-            self.persistence_degraded = True
-            self.persistence_errors.append(message)
-            self.persistence_errors = self.persistence_errors[-10:]
-            log.warning(message)
-            return result
+            return self._record_analysis_diff_failure(cache_key, message)
         if completed.returncode != 0:
             message = (
                 "could not build cumulative Analysis diff for "
                 f"{evidence_commit}..{canonical_commit}: "
                 f"{completed.stderr.strip()}"
             )
-            result = AnalysisDiffResult(error=message)
-            self._analysis_diff_results[cache_key] = result
-            self.persistence_degraded = True
-            self.persistence_errors.append(message)
-            self.persistence_errors = self.persistence_errors[-10:]
-            log.warning(message)
-            return result
+            return self._record_analysis_diff_failure(cache_key, message)
         try:
             atomic_write_text(path, completed.stdout, options=DURABLE)
         except OSError as error:
@@ -105,6 +93,16 @@ class AnalysisEvidenceMixin:
             return result
         result = AnalysisDiffResult(path=str(path.resolve()))
         self._analysis_diff_results[cache_key] = result
+        return result
+
+    def _record_analysis_diff_failure(self, cache_key: tuple[str, str], message: str) -> AnalysisDiffResult:
+        """Cache ``message`` as the diff's degradation and report it as a persistence error."""
+        result = AnalysisDiffResult(error=message)
+        self._analysis_diff_results[cache_key] = result
+        self.persistence_degraded = True
+        self.persistence_errors.append(message)
+        self.persistence_errors = self.persistence_errors[-10:]
+        log.warning(message)
         return result
 
     def _canonical_commit(self) -> str:
@@ -139,28 +137,7 @@ class AnalysisEvidenceMixin:
         evidence_refs = self._orchestration_evidence_refs(
             workspace, source_map_path, cumulative_diff.path, canonical_commit
         )
-        knowledge_index = ""
-        local_knowledge_root = getattr(self.config, "local_knowledge_dir", None)
-        if local_knowledge_root:
-            try:
-                from kernelforge.knowledge import build_forge_knowledge
-
-                backend = self.ic.kernel_backend.strip() or self.ic.backend
-                root = Path(local_knowledge_root)
-                include_aiter = backend == "aiter" or any(
-                    "aiter" in Path(source).parts for source in self._target_source_files()
-                )
-                knowledge_index = build_forge_knowledge(
-                    root,
-                    language=resolve_language_dirs(backend, root),
-                    include_aiter=include_aiter,
-                    # The orchestration context is inlined into every specialist
-                    # and analysis prompt, so the ablation has to reach it too or
-                    # it only measures half the knowledge block's cost.
-                    defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
-                )
-            except OSError:
-                log.debug("failed to build orchestration knowledge index", exc_info=True)
+        knowledge_index = self._orchestration_knowledge_index()
 
         return self._with_evidence_standing(
             OrchestrationContext(
@@ -188,6 +165,32 @@ class AnalysisEvidenceMixin:
                 evidence_refs=evidence_refs,
             )
         )
+
+    def _orchestration_knowledge_index(self) -> str:
+        """The local knowledge index for this backend, or "" when there is none or it cannot be built."""
+        knowledge_index = ""
+        local_knowledge_root = getattr(self.config, "local_knowledge_dir", None)
+        if local_knowledge_root:
+            try:
+                from kernelforge.knowledge import build_forge_knowledge
+
+                backend = self.ic.kernel_backend.strip() or self.ic.backend
+                root = Path(local_knowledge_root)
+                include_aiter = backend == "aiter" or any(
+                    "aiter" in Path(source).parts for source in self._target_source_files()
+                )
+                knowledge_index = build_forge_knowledge(
+                    root,
+                    language=resolve_language_dirs(backend, root),
+                    include_aiter=include_aiter,
+                    # The orchestration context is inlined into every specialist
+                    # and analysis prompt, so the ablation has to reach it too or
+                    # it only measures half the knowledge block's cost.
+                    defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
+                )
+            except OSError:
+                log.debug("failed to build orchestration knowledge index", exc_info=True)
+        return knowledge_index
 
     def _with_evidence_standing(self, context):
         """``context`` with where its Analysis evidence stands against its commit: freshness, scores and diff."""
@@ -391,39 +394,7 @@ class AnalysisEvidenceMixin:
 
         previous = self._active_analysis_context
         if previous is not None and previous.evidence_commit == evidence_commit:
-            current_cases = {case.case_id: case for case in context.cases}
-            cases = [
-                replace(
-                    old_case,
-                    latency_ms=current_cases[old_case.case_id].latency_ms,
-                    flags=tuple(dict.fromkeys((*old_case.flags, *stale_flags))),
-                )
-                for old_case in previous.cases
-                if old_case.case_id in current_cases
-            ]
-            superseded_kinds = {
-                "analysis_cumulative_diff",
-                "candidate_archive",
-                "latest_lesson",
-                "lesson_directory",
-                "run_state",
-                "supervisor_guidance",
-            }
-            refs.update((ref.path, ref) for ref in previous.evidence_refs if ref.kind not in superseded_kinds)
-            if stale:
-                source_map = Path(previous.source_map_path).resolve()
-                if source_map.is_file():
-                    refs[str(source_map)] = EvidenceRef(
-                        kind="analysis_source_map",
-                        path=str(source_map),
-                        summary=(f"Source map produced with the stale Analysis evidence at commit {evidence_commit}."),
-                    )
-            return replace(
-                attached,
-                source_map_path=(context.source_map_path if stale else previous.source_map_path),
-                cases=tuple(cases) if cases else context.cases,
-                evidence_refs=tuple(refs.values()),
-            )
+            return self._carried_analysis_context(context, attached, previous, refs, stale_flags)
 
         root = self._published_analysis_bundle_root(evidence_commit)
         if root is None:
@@ -443,6 +414,44 @@ class AnalysisEvidenceMixin:
             cases=tuple(
                 replace(case, flags=tuple(dict.fromkeys((*case.flags, *stale_flags)))) for case in context.cases
             ),
+            evidence_refs=tuple(refs.values()),
+        )
+
+    def _carried_analysis_context(self, context, attached, previous, refs: dict, stale_flags: tuple[str, ...]):
+        """``attached`` keeping the cases and evidence the previous context carried for the same evidence commit."""
+        stale = attached.evidence_stale
+        evidence_commit = attached.evidence_commit
+        current_cases = {case.case_id: case for case in context.cases}
+        cases = [
+            replace(
+                old_case,
+                latency_ms=current_cases[old_case.case_id].latency_ms,
+                flags=tuple(dict.fromkeys((*old_case.flags, *stale_flags))),
+            )
+            for old_case in previous.cases
+            if old_case.case_id in current_cases
+        ]
+        superseded_kinds = {
+            "analysis_cumulative_diff",
+            "candidate_archive",
+            "latest_lesson",
+            "lesson_directory",
+            "run_state",
+            "supervisor_guidance",
+        }
+        refs.update((ref.path, ref) for ref in previous.evidence_refs if ref.kind not in superseded_kinds)
+        if stale:
+            source_map = Path(previous.source_map_path).resolve()
+            if source_map.is_file():
+                refs[str(source_map)] = EvidenceRef(
+                    kind="analysis_source_map",
+                    path=str(source_map),
+                    summary=(f"Source map produced with the stale Analysis evidence at commit {evidence_commit}."),
+                )
+        return replace(
+            attached,
+            source_map_path=(context.source_map_path if stale else previous.source_map_path),
+            cases=tuple(cases) if cases else context.cases,
             evidence_refs=tuple(refs.values()),
         )
 
@@ -590,33 +599,40 @@ class AnalysisEvidenceMixin:
             f"Evidence stale: {'yes' if context.evidence_stale else 'no'}",
             f"Source map: {context.source_map_path}",
         ]
-        if context.evidence_stale and context.cumulative_diff_error:
-            lines.append(
-                "The profiling evidence predates the current canonical and "
-                "the cumulative diff is unavailable. Treat inherited "
-                "measurements as historical evidence only, inspect the "
-                "current source directly, and never present them as current."
-            )
-        elif context.evidence_stale:
-            lines.append(
-                "The profiling evidence predates the current canonical. Use "
-                "the current timings and cumulative diff to interpret it; "
-                "never present inherited measurements as current."
-            )
-        if context.cumulative_diff_path:
-            lines.append(f"Cumulative diff since evidence: {context.cumulative_diff_path}")
-        elif context.cumulative_diff_error:
-            lines.append(f"Cumulative diff unavailable: {context.cumulative_diff_error}")
-        if catalog is not None:
-            lines.append(f"Artifact catalog: {catalog.path}")
-            lines.append(
-                "The catalog states what every file contains, which "
-                "information it exposes, and whether the artifact is "
-                "COMPLETE, AVAILABLE, SKIPPED, or FAILED."
-            )
+        lines.extend(_analysis_evidence_notes(context, catalog))
         lines.extend(f"{reference.kind}: {reference.path}" for reference in analysis_refs)
         lines.extend(_case_evidence_lines(context.cases))
         return "\n".join(lines)
+
+
+def _analysis_evidence_notes(context, catalog) -> list[str]:
+    """The staleness, cumulative-diff and artifact-catalog notes of the implementer's evidence map."""
+    lines = []
+    if context.evidence_stale and context.cumulative_diff_error:
+        lines.append(
+            "The profiling evidence predates the current canonical and "
+            "the cumulative diff is unavailable. Treat inherited "
+            "measurements as historical evidence only, inspect the "
+            "current source directly, and never present them as current."
+        )
+    elif context.evidence_stale:
+        lines.append(
+            "The profiling evidence predates the current canonical. Use "
+            "the current timings and cumulative diff to interpret it; "
+            "never present inherited measurements as current."
+        )
+    if context.cumulative_diff_path:
+        lines.append(f"Cumulative diff since evidence: {context.cumulative_diff_path}")
+    elif context.cumulative_diff_error:
+        lines.append(f"Cumulative diff unavailable: {context.cumulative_diff_error}")
+    if catalog is not None:
+        lines.append(f"Artifact catalog: {catalog.path}")
+        lines.append(
+            "The catalog states what every file contains, which "
+            "information it exposes, and whether the artifact is "
+            "COMPLETE, AVAILABLE, SKIPPED, or FAILED."
+        )
+    return lines
 
 
 def _case_evidence_lines(cases: tuple[CaseEvidence, ...]) -> list[str]:

@@ -10,6 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.gain_math import (
+    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+    accuracy_meets_floor,
+    accuracy_passed,
+)
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
@@ -38,35 +44,17 @@ class TestParseEvalResults:
         assert out["metric"] == "exact_match,strict-match"
         assert out["source_file"].endswith("results.json")
 
-    @pytest.mark.parametrize(
-        ("recorded", "post_ready", "expected"),
-        [
-            ("450.0", 550.0, 100.0),
-            (450.0, 550.0, 100.0),
-            (550.0, 550.0, 550.0),
-            (900.0, 550.0, 550.0),
-            ("inf", 550.0, 550.0),
-            ("nan", 550.0, 550.0),
-            ("0", 550.0, 550.0),
-            ("n/a", 550.0, 550.0),
-            (None, 550.0, 550.0),
-            ("450.0", None, None),
-        ],
-        ids=["enclosed", "numeric", "equal", "oversized", "inf", "nan", "zero", "text", "unrecorded", "no-post-ready"],
-    )
-    def test_post_ready_time_drops_only_an_eval_it_encloses(self, tmp_path, recorded, post_ready, expected):
+    @pytest.mark.parametrize(("recorded", "expected"), [("7043.486084267031", 7043.486084267031), (None, None)])
+    def test_reports_lm_evals_own_runtime(self, tmp_path, recorded, expected):
+        eval_dir = tmp_path / "eval_001"
+        eval_dir.mkdir()
         results = {"results": {"gsm8k": {"exact_match,strict-match": 0.845}}}
         if recorded is not None:
             results["total_evaluation_time_seconds"] = recorded
-        results_file = tmp_path / "results.json"
-        results_file.write_text(json.dumps(results))
-        round_result = {"post_ready_runtime_sec": post_ready, "accuracy_source": str(results_file)}
-        assert ag.post_ready_sec_without_eval(round_result) == expected
-
-    @pytest.mark.parametrize("source", ["", "eval_unavailable", None])
-    def test_post_ready_time_is_kept_without_a_readable_results_file(self, tmp_path, source):
-        round_result = {"post_ready_runtime_sec": 550.0, "accuracy_source": source}
-        assert ag.post_ready_sec_without_eval(round_result) == 550.0
+        (eval_dir / "results.json").write_text(json.dumps(results))
+        out = ag.parse_eval_results(tmp_path)
+        assert out["accuracy"] == pytest.approx(0.845)
+        assert out["eval_runtime_sec"] == (pytest.approx(expected) if expected is not None else None)
 
     def test_falls_back_to_secondary_metric(self, tmp_path):
         eval_dir = tmp_path / "eval_002"
@@ -106,18 +94,18 @@ class TestParseEvalResults:
 
 class TestAccuracyPassed:
     def test_baseline_zero_skips_gate(self):
-        assert ag.accuracy_passed(0.0, 0.42) is True
-        assert ag.accuracy_passed(-0.1, 0.0) is True
+        assert accuracy_passed(0.0, 0.42) is True
+        assert accuracy_passed(-0.1, 0.0) is True
 
     def test_within_default_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.76) is True
+        assert accuracy_passed(0.80, 0.76) is True
 
     def test_outside_default_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.70) is False
+        assert accuracy_passed(0.80, 0.70) is False
 
     def test_custom_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.70, threshold=0.11) is True
-        assert ag.accuracy_passed(0.80, 0.68, threshold=0.10) is False
+        assert accuracy_passed(0.80, 0.70, threshold=0.11) is True
+        assert accuracy_passed(0.80, 0.68, threshold=0.10) is False
 
 
 class TestRequireKernelAccuracyDefault:
@@ -198,8 +186,8 @@ class TestGradeIntegrateAccuracy:
 class TestEnablementReaders:
     def test_floor_default_rejects_a_collapsed_model(self):
         """The default must be strong enough to be the only correctness authority."""
-        assert ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
-        assert not ag.accuracy_meets_floor(0.00076, ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
+        assert DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
+        assert not accuracy_meets_floor(0.00076, DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
 
     def test_missing_mode_is_fail_closed(self):
         """A caller that cannot supply the field has not opted in."""
@@ -244,7 +232,7 @@ class TestAccuracyValidator:
         ],
     )
     def test_meets_floor(self, score, floor, expected):
-        assert ag.accuracy_meets_floor(score, floor) is expected
+        assert accuracy_meets_floor(score, floor) is expected
 
     def test_classify(self):
         assert ag.classify_accuracy_failure(0.5, 0.2) is None
@@ -351,7 +339,7 @@ class TestTheAgentXValidityGate:
 
     def test_the_threshold_is_inclusive(self, tmp_path):
         """Upstream rejects above the threshold, so exactly at it still passes."""
-        ws = self._result(tmp_path, request_error_rate=ag.AGENTX_ERROR_RATE_THRESHOLD_PCT)
+        ws = self._result(tmp_path, request_error_rate=AGENTX_ERROR_RATE_THRESHOLD_PCT)
         assert ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")["accuracy"] == 1.0
 
     def test_a_rate_past_the_threshold_fails(self, tmp_path):

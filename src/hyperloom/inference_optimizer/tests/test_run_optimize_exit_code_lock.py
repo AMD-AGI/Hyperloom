@@ -119,3 +119,28 @@ def test_session_busy_exits_with_session_busy_code(tmp_path: Path) -> None:
         assert exc.value.code == ocli.SESSION_BUSY_EXIT_CODE == 3
     finally:
         held.release()
+
+
+def test_a_raising_stop_still_releases_the_lock_and_writes_the_terminal_artifacts(tmp_path: Path, monkeypatch) -> None:
+    calls: list[tuple] = []
+
+    class _Coordinator:
+        shared_state = SharedState()
+        stop_classification = "time_budget"
+
+        async def stop(self) -> None:
+            raise RuntimeError("cancel defect")
+
+    class _Lock:
+        def release(self) -> None:
+            calls.append(("release",))
+
+    monkeypatch.setattr(
+        ocli, "_write_cli_terminal_artifacts", lambda session_dir, _state, reason: calls.append(("terminal", reason))
+    )
+
+    with pytest.raises(RuntimeError, match="^cancel defect$"):
+        asyncio.run(ocli._close_optimize_run(_Coordinator(), _Lock(), tmp_path, None))
+
+    assert calls == [("release",), ("terminal", "time_budget")]
+    assert (tmp_path / "state.json").is_file()

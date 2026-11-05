@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 from hyperloom.inference_optimizer.session.paths import workspace_root
 
@@ -58,14 +60,13 @@ def _build_split_cmd(
     ]
     if args.split_llm_inference:
         split_cmd += ["--llm-inference"]
-        conc = args.split_conc or os.environ.get("CONC", "").strip()
-        if str(conc).strip():
-            split_cmd += ["--CONC", str(conc).strip()]
-        osl = args.split_osl or os.environ.get("OSL", "").strip()
-        if str(osl).strip():
-            split_cmd += ["--OSL", str(osl).strip()]
-        r_raw = args.split_r or os.environ.get("RANDOM_RANGE_RATIO", "")
-        r_str = str(r_raw).strip()
+        conc = str(args.split_conc).strip()
+        if conc:
+            split_cmd += ["--CONC", conc]
+        osl = str(args.split_osl).strip()
+        if osl:
+            split_cmd += ["--OSL", osl]
+        r_str = str(args.split_r).strip()
         if r_str:
             try:
                 float(r_str)
@@ -74,6 +75,37 @@ def _build_split_cmd(
             else:
                 split_cmd += ["--R", r_str]
     return split_cmd
+
+
+def _refuse_missing_steady_state_mode(
+    mode_to_chunks: "dict[str, tuple[str, list[Path]]]",
+    steady_state_mode: str,
+    *,
+    split_dir: "Path",
+    analysis_trace_path: "Path",
+    health_warnings: "list[dict]",
+) -> NoReturn:
+    """Record a blocking warning naming the modes the splitter did produce, then refuse the requested one."""
+    available = [m for m, (_, ch) in mode_to_chunks.items() if ch]
+    warning = {
+        "code": "steady_state_chunk_missing",
+        "severity": "blocking",
+        "requested_mode": steady_state_mode,
+        "available_modes": available,
+        "remediation": (
+            "Re-issue roofline with env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
+            f"{available} (or pass --steady-state-mode directly)."
+        ),
+        "trace_input": str(analysis_trace_path),
+        "split_dir": str(split_dir),
+    }
+    health_warnings.append(warning)
+    raise RuntimeError(
+        f"steady_state_chunk_missing: requested "
+        f"--steady-state-mode={steady_state_mode} but "
+        f"splitter produced no matching chunk under {split_dir}"
+    )
 
 
 def _collect_split_chunks(
@@ -130,25 +162,12 @@ def _collect_split_chunks(
     }
     chunk_label, selected_chunks = mode_to_chunks[steady_state_mode]
     if not selected_chunks:
-        available = [m for m, (_, ch) in mode_to_chunks.items() if ch]
-        warning = {
-            "code": "steady_state_chunk_missing",
-            "severity": "blocking",
-            "requested_mode": steady_state_mode,
-            "available_modes": available,
-            "remediation": (
-                "Re-issue roofline with env "
-                "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
-                f"{available} (or pass --steady-state-mode directly)."
-            ),
-            "trace_input": str(analysis_trace_path),
-            "split_dir": str(split_dir),
-        }
-        health_warnings.append(warning)
-        raise RuntimeError(
-            f"steady_state_chunk_missing: requested "
-            f"--steady-state-mode={steady_state_mode} but "
-            f"splitter produced no matching chunk under {split_dir}"
+        _refuse_missing_steady_state_mode(
+            mode_to_chunks,
+            steady_state_mode,
+            split_dir=split_dir,
+            analysis_trace_path=analysis_trace_path,
+            health_warnings=health_warnings,
         )
 
     selected_chunk = selected_chunks[0]
@@ -187,6 +206,55 @@ def _validate_selected_chunk(
             f"busy_ratio={low_quality_warning['busy_ratio'] * 100:.3f}%; "
             f"better alternates: {low_quality_warning['non_empty_modes']}"
         )
+
+
+_SPLIT_MANIFEST_NAME = "split_manifest.json"
+# Manifest keys carried into split_meta; root_family* is written only for annotation-derived roots.
+_SPLIT_MANIFEST_KEYS = ("status", "method", "phase_confidence", "root_family", "root_family_known")
+
+
+def _read_split_manifest(split_dir: "Path") -> "dict | None":
+    """The splitter's ``split_manifest.json``, or None when it is missing or not a JSON object."""
+    try:
+        manifest = json.loads((split_dir / _SPLIT_MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _record_split_manifest(args, split_dir: "Path", split_meta: dict, health_warnings: "list[dict]") -> None:
+    """Carry the manifest's verdict into ``split_meta``; warn when it is absent or cannot vouch for the phases."""
+    manifest = _read_split_manifest(split_dir)
+    if manifest is None:
+        health_warnings.append(
+            {
+                "code": "trace_split_manifest_missing",
+                "severity": "warning",
+                "split_dir": str(split_dir),
+                "message": (
+                    f"TraceLens splitter wrote no readable {_SPLIT_MANIFEST_NAME}; the split's quality is unrecorded."
+                ),
+            }
+        )
+        return
+    split_meta.update({key: manifest[key] for key in _SPLIT_MANIFEST_KEYS if key in manifest})
+    phase_confidence = manifest.get("phase_confidence")
+    if not args.split_llm_inference or phase_confidence == "high":
+        return
+    health_warnings.append(
+        {
+            "code": "trace_split_phase_unconfirmed",
+            "severity": "warning",
+            "phase_confidence": phase_confidence,
+            "method": manifest.get("method"),
+            **({"root_family": manifest["root_family"]} if "root_family" in manifest else {}),
+            "split_dir": str(split_dir),
+            "message": (
+                f"TraceLens splitter rated its phase labels {phase_confidence!r} (method {manifest.get('method')}); "
+                "the phase chunks may not hold the phases they are named for."
+            ),
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -258,6 +326,7 @@ def _run_trace_split(
             "returncode": split_rc,
         }
     )
+    _record_split_manifest(args, split_dir, split_meta, health_warnings)
 
     _validate_selected_chunk(
         split_dir,

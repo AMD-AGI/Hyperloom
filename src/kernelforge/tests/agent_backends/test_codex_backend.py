@@ -29,6 +29,7 @@ from kernelforge.agent_backends.base import (
     StdioMcpServer,
 )
 from kernelforge.agent_backends.registry import resolve_agent_runtime
+from kernelforge.agent_backends.structured_output import AgentAnswer, output_json_schema
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import (
     is_api_failure,
@@ -396,6 +397,7 @@ class _FakeCodexSdk:
     AsyncCodex = _FakeAsyncCodex
     Codex = _FakeCodex
     CodexConfig = _FakeCodexConfig
+    CodexError = type("CodexError", (Exception,), {})
     Sandbox = _FakeSandbox
 
 
@@ -474,6 +476,20 @@ def test_codex_sdk_sandbox_keeps_runtime_and_write_policy_separate(
     sandbox = backend._sdk_sandbox(_FakeCodexSdk, spec)
 
     assert sandbox == expected
+
+
+class _Findings(AgentAnswer):
+    findings: list[str]
+
+
+def test_a_codex_turn_is_held_to_the_answer_schema_its_spec_names() -> None:
+    """Codex constrains the turn's final message itself; a free-form turn is given no schema."""
+    backend = CodexBackend(runtime=AgentRuntimeConfig(provider="codex", model="gpt-test"))
+    held = AgentRunSpec(system_prompt="Inspect only.", user_prompt="Return findings.", cwd=".", output_schema=_Findings)
+    free = AgentRunSpec(system_prompt="Inspect only.", user_prompt="Return findings.", cwd=".")
+
+    assert backend._turn_options(_FakeCodexSdk, held)["output_schema"] == output_json_schema(_Findings)
+    assert "output_schema" not in backend._turn_options(_FakeCodexSdk, free)
 
 
 def test_normalize_codex_sdk_result() -> None:
@@ -1916,6 +1932,7 @@ def test_codex_safety_error_marks_a_verdict_and_not_a_failed_query(
 def test_codex_verify_rejection_survives_a_failing_second_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The author needs the violating paths, not a complaint about a restore."""
     from kernelforge.agent_backends import codex as codex_module
@@ -1954,8 +1971,13 @@ def test_codex_verify_rejection_survives_a_failing_second_rollback(
         failing_second_rollback,
     )
 
-    with pytest.raises(WorkspaceSafetyError, match="forge_driver.py"):
-        asyncio.run(_backend(fake).run(_author_spec(repo, kernel, driver)))
+    with caplog.at_level("WARNING", logger="kernelforge.agent_backends.codex"):
+        with pytest.raises(WorkspaceSafetyError, match="forge_driver.py"):
+            asyncio.run(_backend(fake).run(_author_spec(repo, kernel, driver)))
+
+    assert [record.getMessage() for record in caplog.records if "rollback" in record.getMessage()] == [
+        "workspace rollback after a failed verify also failed"
+    ]
 
 
 def test_codex_writable_author_accepts_inherited_dirty_non_target_state(

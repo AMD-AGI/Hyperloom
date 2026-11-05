@@ -182,7 +182,7 @@ def trace_write(write: WriteTrace) -> None:
         if write.error is not None:
             fields.append(f"error={type(write.error).__name__}:{_short(write.error)}")
         _emit(fields)
-    except Exception:
+    except (TypeError, ValueError):
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 
@@ -211,7 +211,7 @@ def trace_skip(
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
         _emit(fields)
-    except Exception:
+    except (TypeError, ValueError):
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 

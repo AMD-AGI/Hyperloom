@@ -41,6 +41,56 @@ class ServerSpec:
     profile_dir: str | None = None
 
 
+def _vllm_server_command(spec: ServerSpec, extra_args: list[str], *, framework_python: str) -> list[str]:
+    """Build the vLLM server launch argv, with the torch profiler when ``spec.profile_dir`` is set."""
+    if framework_python:
+        cmd = [
+            framework_python,
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            spec.model,
+            "--port",
+            str(spec.port),
+            "--tensor-parallel-size",
+            str(spec.tp),
+            "--trust-remote-code",
+        ]
+    else:
+        cmd = [
+            "vllm",
+            "serve",
+            spec.model,
+            "--port",
+            str(spec.port),
+            "--tensor-parallel-size",
+            str(spec.tp),
+            "--trust-remote-code",
+        ]
+    if spec.max_model_len:
+        cmd += ["--max-model-len", str(spec.max_model_len)]
+    if not spec.profile_dir:
+        return cmd + list(extra_args)
+    # vLLM enables the torch profiler via --profiler-config (the legacy VLLM_TORCH_PROFILER_DIR env is
+    # ignored), without which /start_profile returns 404 and no trace is written.
+    #
+    # Last, after extra_args, the way Magpie's launcher orders its own: EXTRA_VLLM_ARGS has to carry a
+    # torch_profiler_dir for the argv preflight to accept the profile bounds beside it -- ProfilerConfig
+    # refuses `profiler=torch` without one -- and that value is a placeholder standing in for whatever the
+    # launcher computes. Emitting it first would let the placeholder win vLLM's last-wins dotted-flag merge
+    # and send the trace somewhere this backend's discovery never looks.
+    return (
+        cmd
+        + list(extra_args)
+        + [
+            "--profiler-config.profiler",
+            "torch",
+            "--profiler-config.torch_profiler_dir",
+            spec.profile_dir,
+        ]
+    )
+
+
 def build_server_command(
     spec: ServerSpec,
     extra_args: list[str],
@@ -73,52 +123,7 @@ def build_server_command(
         ]
         return cmd + list(extra_args)
     if fw == "vllm":
-        if framework_python:
-            cmd = [
-                framework_python,
-                "-m",
-                "vllm.entrypoints.openai.api_server",
-                "--model",
-                model,
-                "--port",
-                str(port),
-                "--tensor-parallel-size",
-                str(tp),
-                "--trust-remote-code",
-            ]
-        else:
-            cmd = [
-                "vllm",
-                "serve",
-                model,
-                "--port",
-                str(port),
-                "--tensor-parallel-size",
-                str(tp),
-                "--trust-remote-code",
-            ]
-        if max_model_len:
-            cmd += ["--max-model-len", str(max_model_len)]
-        if not profile_dir:
-            return cmd + list(extra_args)
-        # vLLM enables the torch profiler via --profiler-config (the legacy VLLM_TORCH_PROFILER_DIR env is
-        # ignored), without which /start_profile returns 404 and no trace is written.
-        #
-        # Last, after extra_args, the way Magpie's launcher orders its own: EXTRA_VLLM_ARGS has to carry a
-        # torch_profiler_dir for the argv preflight to accept the profile bounds beside it -- ProfilerConfig
-        # refuses `profiler=torch` without one -- and that value is a placeholder standing in for whatever the
-        # launcher computes. Emitting it first would let the placeholder win vLLM's last-wins dotted-flag merge
-        # and send the trace somewhere this backend's discovery never looks.
-        return (
-            cmd
-            + list(extra_args)
-            + [
-                "--profiler-config.profiler",
-                "torch",
-                "--profiler-config.torch_profiler_dir",
-                profile_dir,
-            ]
-        )
+        return _vllm_server_command(spec, extra_args, framework_python=framework_python)
     if fw == "atom":
         cmd = [
             interp,

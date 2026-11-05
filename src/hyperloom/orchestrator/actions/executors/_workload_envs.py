@@ -553,13 +553,19 @@ def _resolve_framework_repo_path(
 VLLM_SOURCE_ROOT_ENVS: tuple[str, ...] = ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR")
 
 
+def _vllm_image_source(bench: dict[str, Any], envs: dict[str, Any]) -> str:
+    """The prepared image checkout ``install.sh`` activates (``HYPERLOOM_VLLM_IMAGE_SOURCE=1``), which the server of a
+    vLLM ``bench`` imports ahead of the installed wheel; ``""`` when there is none."""
+    if str(bench.get("framework") or "").strip().lower() != "vllm":
+        return ""
+    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
+        return ""
+    return _resolve_framework_repo_path(envs, framework="vllm")
+
+
 def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> None:
     """Route a prepared image checkout into the vLLM server launch."""
-    if str(bench.get("framework") or "").strip().lower() != "vllm":
-        return
-    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
-        return
-    repo_path = _resolve_framework_repo_path(envs, framework="vllm")
+    repo_path = _vllm_image_source(bench, envs)
     if not repo_path:
         return
     for name in VLLM_SOURCE_ROOT_ENVS:
@@ -783,10 +789,9 @@ def _visible_gpu_count() -> int:
             indices: set[str] = set()
             for line in (proc.stdout or "").splitlines():
                 stripped = line.strip()
-                if stripped.startswith("GPU["):
-                    idx, _, _ = stripped[4:].partition("]")
-                    if idx:
-                        indices.add(idx)
+                idx, _, _ = stripped[4:].partition("]")
+                if stripped.startswith("GPU[") and idx:
+                    indices.add(idx)
             return len(indices)
     return 0
 
@@ -899,6 +904,8 @@ class _RequestWindow(NamedTuple):
     vllm_profiler_cap: int
     atom_caps: _AtomTracelensCaps | None
     xdit_profiler_args: tuple[str, ...] = ()
+    #: The copy of the framework TraceLens's patch was laid in (``_server_patcher``), which the server must import.
+    patched_copy: Path | None = None
 
 
 def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> None:
@@ -1052,15 +1059,19 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     atom_caps: _AtomTracelensCaps | None = None
     vllm_flags: list[tuple[str, str]] = []
     vllm_cap = 0
+    patched_copy: Path | None = None
     if is_profile and serves_requests:
         from ._profile_setup import prepare_profile
 
-        outcome = prepare_profile(bench, envs)
+        checkout = _vllm_image_source(bench, envs)
+        # The copy TraceLens's patch is laid in goes ahead of that checkout (``materialize_config_with_envs``).
+        outcome = prepare_profile(bench, envs, vllm_checkout=Path(checkout) if checkout else None)
         osl_val = int(envs["OSL"])
         profile_num_prompts = outcome.num_prompts
         atom_caps = outcome.atom_caps
         vllm_flags = outcome.vllm_flags
         vllm_cap = outcome.vllm_cap
+        patched_copy = outcome.patched_copy
     if serves_requests:
         # NUM_PROMPTS / NUM_WARMUPS are serving-request concepts; xDiT drives its
         # own iteration count, so leave them untouched.
@@ -1073,7 +1084,7 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
     return _RequestWindow(
-        isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps, xdit_saved_args
+        isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps, xdit_saved_args, patched_copy
     )
 
 
@@ -1504,11 +1515,20 @@ def prepare_grid_benchmark_config(
     target: BenchmarkTarget = BenchmarkTarget(),
     options: MaterializeOptions = MaterializeOptions(),
 ) -> Path:
-    """Keep the verified native baseline intact until the grid composes its candidate."""
-    from .magpie_agentx import native_config
+    """Keep the verified native baseline intact until the grid composes its candidate.
+
+    A native workload YAML that was never materialized (the pre-baseline fallback) is
+    materialized first, so the operator ``--server-args`` reach every candidate.
+    """
+    from .magpie_agentx import load_benchmark, native_config
 
     if native_config(config_path):
-        return config_path
+        agentx = load_benchmark(config_path)["agentx"]
+        if isinstance(agentx, dict) and "append_args" in agentx.get("launch_overrides", {}):
+            return config_path
+        return materialize_benchmark_config(
+            config_path, output_dir, launch=LaunchLayer(args_mode=launch.args_mode), target=target, options=options
+        )
     return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
 
 
@@ -1525,15 +1545,15 @@ def materialize_benchmark_config(
 
     from hyperloom.common.benchmark_config import is_magpie_agentx
     from hyperloom_common.coerce import to_str_list
-    from .magpie_agentx import LaunchChanges, apply_launch_changes, materialize_agentx, recipe_option_names
+    from .magpie_agentx import LaunchChanges, apply_launch_changes, materialize_agentx, recipe_base_launch
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not is_magpie_agentx(config["benchmark"]):
         return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
     replacing = launch.args_mode == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
-    recipe_options = recipe_option_names(config_path)
-    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe_options=recipe_options)
+    recipe = recipe_base_launch(config_path)
+    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe=recipe, accepted=True)
     from hyperloom_common.env import is_truthy
 
     unset_envs = to_str_list(launch.unset_envs)
@@ -1559,7 +1579,7 @@ def materialize_benchmark_config(
         unset_envs,
         replacing,
     )
-    apply_launch_changes(config["benchmark"], changes, recipe_options=recipe_options)
+    apply_launch_changes(config["benchmark"], changes, recipe=recipe, accepted=True)
     return materialize_agentx(
         config,
         output_dir / options.out_name,
@@ -1621,6 +1641,9 @@ def materialize_config_with_envs(
     _apply_caller_removals(envs, framework_env, launch.remove_args, launch.unset_envs, stale)
     _restate_profile_capture(envs, framework_env, window, replace_args)
     _apply_vllm_source_runtime(bench, envs)
+    if window.patched_copy is not None:
+        # Last, as a vLLM source checkout put first on the path above would shadow the copy.
+        prepend_launch_path(envs, "PYTHONPATH", str(window.patched_copy))
     _drop_benchmark_credentials(envs)
     seal_server_argv(envs, bench.get("framework"))
     output_dir.mkdir(parents=True, exist_ok=True)

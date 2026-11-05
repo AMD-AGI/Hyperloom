@@ -27,6 +27,15 @@ def _csv(rows):
     return "\n".join([_HDR, *rows]) + "\n"
 
 
+def _shapes(untuned: Path) -> set[tuple[str, str, str]]:
+    return {tuple(line.split(",")[:3]) for line in untuned.read_text(encoding="utf-8").splitlines()[1:]}
+
+
+def _of(rows, shapes):
+    """The fixture rows whose (M, N, K) is one of ``shapes``."""
+    return [row for row in rows if tuple(row.split(",")[2:5]) in shapes]
+
+
 def _aiter_root(tmp_path, *, direct=True, shim=False, gradlib=False) -> Path:
     root = tmp_path / "aiter"
     targets = []
@@ -85,9 +94,12 @@ def _prep(tmp_path, monkeypatch, *, tuned_rows, profile_rows=(), rc=1, root=None
 
     def _fake_run(cmd, **kwargs):
         captured["cmd"] = list(cmd)
+        captured.setdefault("cmds", []).append(list(cmd))
         if tuned_rows is not None:
-            Path(cmd[cmd.index("-o") + 1]).write_text(_csv(tuned_rows), encoding="utf-8")
-            Path(cmd[cmd.index("-o2") + 1]).write_text(_csv(profile_rows), encoding="utf-8")
+            # Like aiter, a chunk writes rows only for the shapes it was given.
+            given = _shapes(Path(cmd[cmd.index("-i") + 1]))
+            Path(cmd[cmd.index("-o") + 1]).write_text(_csv(_of(tuned_rows, given)), encoding="utf-8")
+            Path(cmd[cmd.index("-o2") + 1]).write_text(_csv(_of(profile_rows, given)), encoding="utf-8")
         return rc, "", stderr
 
     monkeypatch.setattr(sd, "run_subprocess", _fake_run)
