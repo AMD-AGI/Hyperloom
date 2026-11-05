@@ -17,8 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _aiter_jit
+from hyperloom.orchestrator.actions.executors import _aiter_jit, _aiter_serving_once
 from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
+
+_PREPARE = "hyperloom.orchestrator.actions.executors._aiter_serving_once.prepare_serving_so_for_csvs"
 
 
 @pytest.fixture(autouse=True)
@@ -28,9 +30,11 @@ def _isolate_serving_package(tmp_path, monkeypatch):
     (package / "__init__.py").write_text("raise AssertionError('AITER must not be imported')\n", encoding="utf-8")
     monkeypatch.delitem(sys.modules, "aiter", raising=False)
     monkeypatch.syspath_prepend(str(tmp_path))
-    for name in ("AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT"):
+    for name in ("AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT", "GPU_ARCHS", "CU_NUM"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(_aiter_jit, "AITER_JIT_PROBE_PATHS", ())
+    monkeypatch.setattr(_aiter_jit, "card_target", lambda: None)
+    monkeypatch.setattr(_aiter_serving_once, "HOST_DIR", tmp_path / "host")
 
 
 def _configs(tmp_path: Path) -> Path:
@@ -153,7 +157,7 @@ def test_unset_csvs_respect_package_and_wrapper_boundaries(tmp_path, monkeypatch
 
     assert "aiter" not in sys.modules
     if cache_location == "wrapper-override":
-        assert outcome == {"action": "skip", "jit_dir": str(jit)}
+        assert outcome == {"action": "skip", "jit_dir": str(jit), "targets": []}
         assert (jit / name).read_bytes() == b"a8w8_blockscale_bpreshuffle_old"
         assert (jit / "build" / "stamp").read_bytes() == b"runtime build"
         assert (jit / "module_attention.so").read_bytes() == b"unrelated"
@@ -277,14 +281,11 @@ async def test_the_preflight_runs_even_when_the_round_names_no_csv(tmp_path, mon
     """No env is exactly the case that needs the unset-branch check, not a reason to skip."""
     seen: list[dict] = []
 
-    def _prepare(envs, backup_dir=None):
+    def _prepare(envs, backup_dir=None, environ=None):
         seen.append(dict(envs))
         return {"action": "skip"}
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._aiter_jit.prepare_serving_so_for_csvs",
-        _prepare,
-    )
+    monkeypatch.setattr(_PREPARE, _prepare)
 
     await launch_mod._prepare_aiter_serving_so({"RUN_EVAL": "false"})
 
@@ -295,14 +296,11 @@ async def test_the_preflight_runs_even_when_the_round_names_no_csv(tmp_path, mon
 async def test_only_the_csv_variables_travel(tmp_path, monkeypatch):
     seen: list[dict] = []
 
-    def _prepare(envs, backup_dir=None):
+    def _prepare(envs, backup_dir=None, environ=None):
         seen.append(dict(envs))
         return {"action": "skip"}
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._aiter_jit.prepare_serving_so_for_csvs",
-        _prepare,
-    )
+    monkeypatch.setattr(_PREPARE, _prepare)
 
     await launch_mod._prepare_aiter_serving_so(
         {
@@ -321,13 +319,10 @@ async def test_only_the_csv_variables_travel(tmp_path, monkeypatch):
 async def test_a_preflight_failure_does_not_abort_the_round(tmp_path, monkeypatch):
     """A jit directory the check cannot read is not a reason to lose the measurement."""
 
-    def _prepare(envs, backup_dir=None):
+    def _prepare(envs, backup_dir=None, environ=None):
         raise OSError("jit dir is read-only")
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._aiter_jit.prepare_serving_so_for_csvs",
-        _prepare,
-    )
+    monkeypatch.setattr(_PREPARE, _prepare)
 
     await launch_mod._prepare_aiter_serving_so({"AITER_CONFIG_GEMM_BF16": "/tuned/bf16.csv"})
 
