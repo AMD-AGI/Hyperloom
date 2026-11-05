@@ -62,7 +62,7 @@ if TYPE_CHECKING:
 #: The holder of the pass's lease, and the name of its worktree and directory beside the branches': it is no branch.
 DOSSIER_HOLDER = "dossier"
 #: The pass's card time is the integration branch's.
-DOSSIER_CHARGE = LeaseCharge(LeaseKind.PRELUDE_CHILD, INTEGRATION_BRANCH)
+DOSSIER_CHARGE = LeaseCharge(LeaseKind.AUTONOMOUS, INTEGRATION_BRANCH)
 POLL_SECONDS = 10.0
 #: How long past its deadline the pass has to write its exit and end of itself before it is killed: Arbor ends a run
 #: by its deadline on its own.
