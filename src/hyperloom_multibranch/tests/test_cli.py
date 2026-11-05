@@ -253,6 +253,14 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--max-branches", "0"],
         ["run", *WORKLOAD_ARGS, "--max-parallel-tests", "0"],
         ["run", *WORKLOAD_ARGS, "--judge-interval-sec", "0"],
+        ["run", *WORKLOAD_ARGS, "--max-hours", "nan"],
+        ["run", *WORKLOAD_ARGS, "--max-hours", "inf"],
+        ["run", *WORKLOAD_ARGS, "--judge-interval-sec", "nan"],
+        ["run", *WORKLOAD_ARGS, "--judge-interval-sec", "inf"],
+        ["run", *WORKLOAD_ARGS, "--agent-dossier-minutes", "nan"],
+        ["run", *WORKLOAD_ARGS, "--agent-dossier-minutes", "inf"],
+        ["run", *WORKLOAD_ARGS, "--agent-share-minutes", "nan"],
+        ["run", *WORKLOAD_ARGS, "--agent-share-minutes", "inf"],
         ["run", *WORKLOAD_ARGS, "--conc", "many"],
         ["run", *WORKLOAD_ARGS[:-2]],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "h100"],
@@ -350,14 +358,14 @@ def test_the_agent_directions_map_is_kept_by_its_absolute_path(tmp_path: Path, m
 def test_the_dossier_pass_has_ninety_minutes_unless_the_run_gives_it_others_and_none_below_zero() -> None:
     assert _settings("--autonomous-agent", "/agents/arbor").agent_dossier_minutes == DOSSIER_MINUTES == 90.0
     assert _settings("--agent-dossier-minutes", "0").agent_dossier_minutes == 0.0
-    with pytest.raises(ValueError, match="--agent-dossier-minutes -5 is negative"):
+    with pytest.raises(ValueError, match=r"--agent-dossier-minutes must be 0 \(runs no dossier pass\) or positive"):
         _settings("--agent-dossier-minutes", "-5")
 
 
 def test_the_shares_need_an_arbor_iteration_s_63_minutes_unless_the_run_says_otherwise_and_none_below_zero() -> None:
     assert _settings("--autonomous-agent", "/agents/arbor").agent_share_minutes == SHARE_MINUTES == 63.0
     assert _settings("--agent-share-minutes", "0").agent_share_minutes == 0.0
-    with pytest.raises(ValueError, match="--agent-share-minutes -1 is negative; 0 always opens the shares"):
+    with pytest.raises(ValueError, match=r"--agent-share-minutes must be 0 \(always opens the shares\) or positive"):
         _settings("--agent-share-minutes", "-1")
 
 

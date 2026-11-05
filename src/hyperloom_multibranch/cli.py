@@ -35,7 +35,8 @@ one given with no agent, is a usage error. Without one, two or more Arbors split
 Arbor run once on a mapping branch EXPLORE opens beside the others, for at most ``--agent-dossier-minutes`` (default
 90), or, when it gives none or the minutes are 0, a map Arbor generates from the root's profile (its op shares, else its
 kernel shares); each share then opens as a branch of its own, when it still has ``--agent-share-minutes`` (default 63,
-0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative value of either is a usage error.
+0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative or non-finite value of either,
+as of any other limit, is a usage error.
 ``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
 serving template; a name that is not one directory, or one given with no agent, is a usage error, and a pack the Arbor
 checkout lacks is refused when the branch starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX
@@ -702,7 +703,7 @@ def settings_from(
     does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
     """
 
-    errors = _shape_errors(args) + _ep_errors(args) + _positive(args, ("tp", "conc", "judge_interval_sec"))
+    errors = _shape_errors(args) + _ep_errors(args) + _positive(args, ("tp", "conc"))
     errors += _limit_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
@@ -735,8 +736,8 @@ def settings_from(
         agent_directions=_agent_directions(args.agent_directions, agents),
         agent_pack=_agent_pack(args.agent_pack, agents),
         agent_launch=_agent_launch(args.agent_launch, agents),
-        agent_dossier_minutes=_minutes("--agent-dossier-minutes", args.agent_dossier_minutes, "runs no dossier pass"),
-        agent_share_minutes=_minutes("--agent-share-minutes", args.agent_share_minutes, "always opens the shares"),
+        agent_dossier_minutes=args.agent_dossier_minutes,
+        agent_share_minutes=args.agent_share_minutes,
         agent_port=_agent_port(args.agent_port, agents),
         stop_after_map=_stop_after_map(args.stop_after_map, agents, args.agent_directions),
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
@@ -745,18 +746,27 @@ def settings_from(
 
 
 def _limit_errors(args: argparse.Namespace) -> list[str]:
-    """What is wrong with the session's limits: its hours, GPU hours, LLM dollars and dev sandboxes."""
+    """What is wrong with the session's limits: its hours, GPU hours, LLM dollars, judge interval, agent minutes and
+    dev sandboxes."""
 
-    errors: list[str] = []
-    if args.max_hours < 0:
-        errors.append("--max-hours must be 0 (no limit) or a positive number of hours")
-    if not math.isfinite(args.max_gpu_hours) or args.max_gpu_hours < 0:
-        errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
-    if not math.isfinite(args.max_llm_usd) or args.max_llm_usd < 0:
-        errors.append("--max-llm-usd must be 0 (no limit) or a positive number of dollars")
-    if args.dev_leases < 0:
-        errors.append("--dev-leases must be 0 (none) or a positive number of sandboxes")
-    return errors
+    hours, gpu_hours, usd = args.max_hours, args.max_gpu_hours, args.max_llm_usd
+    judge, dossier, share = args.judge_interval_sec, args.agent_dossier_minutes, args.agent_share_minutes
+    return [
+        *_limit_error("--max-hours", hours, hours >= 0, "0 (no limit) or a positive number of hours"),
+        *_limit_error("--max-gpu-hours", gpu_hours, gpu_hours >= 0, "0 (no limit) or a positive number of hours"),
+        *_limit_error("--max-llm-usd", usd, usd >= 0, "0 (no limit) or a positive number of dollars"),
+        *_limit_error("--judge-interval-sec", judge, judge > 0, "a positive number of seconds"),
+        *_limit_error("--agent-dossier-minutes", dossier, dossier >= 0, "0 (runs no dossier pass) or positive"),
+        *_limit_error("--agent-share-minutes", share, share >= 0, "0 (always opens the shares) or positive"),
+        *_limit_error("--dev-leases", args.dev_leases, args.dev_leases >= 0, "0 (none) or a positive number"),
+    ]
+
+
+def _limit_error(option: str, value: float, in_range: bool, rule: str) -> list[str]:
+    """``option`` must be ``rule`` unless ``value`` is finite and ``in_range``: a NaN is in no range, and an infinite
+    limit is no limit, so neither may pass as one."""
+
+    return [] if in_range and math.isfinite(value) else [f"{option} must be {rule}"]
 
 
 def _parallel_tests(args: argparse.Namespace, tests_that_fit: Callable[[int], int]) -> int:
@@ -771,12 +781,6 @@ def _parallel_tests(args: argparse.Namespace, tests_that_fit: Callable[[int], in
     if parallel > fitting:
         raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests that run at once at TP")
     return parallel
-
-
-def _minutes(option: str, minutes: float, zero: str) -> float:
-    if minutes < 0:
-        raise ValueError(f"{option} {minutes:g} is negative; 0 {zero}")
-    return minutes
 
 
 def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
