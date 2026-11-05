@@ -574,7 +574,7 @@ def test_parse_reads_the_last_decision_object() -> None:
         ({"open": 0}, JudgeDecision()),
     ],
 )
-def test_a_reply_in_the_mb1_format_still_parses(reply: dict[str, object], decision: JudgeDecision) -> None:
+def test_a_reply_in_the_older_format_still_parses(reply: dict[str, object], decision: JudgeDecision) -> None:
     assert parse_decision(_reply(reply)) == decision
 
 
