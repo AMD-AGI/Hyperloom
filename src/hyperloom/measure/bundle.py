@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from hyperloom.measure import fsafe
 from hyperloom.measure.docs import DocumentError, parse_json_object
@@ -72,7 +72,8 @@ class ResultRejected(Exception):
 
 
 class MaterializeError(Exception):
-    """The verified files could not be placed without overwriting something; nothing was left behind."""
+    """The verified files could not be placed: a name was taken, or a copy did not come out whole; nothing was left
+    behind."""
 
 
 @dataclass(frozen=True)
@@ -136,13 +137,19 @@ def verify_bundle(
     """
     root_fd = _open_staging(Path(staging_dir))
     try:
-        manifest_raw = _read_small(root_fd, MANIFEST_NAME, MAX_MANIFEST_BYTES, RejectReason.MANIFEST_MISSING)
-        signature = _read_small(root_fd, SIGNATURE_NAME, MAX_SIGNATURE_BYTES, RejectReason.SIGNATURE_MISSING)
+        manifest_raw = _read_small(
+            root_fd, MANIFEST_NAME, MAX_MANIFEST_BYTES, RejectReason.MANIFEST_MISSING, RejectReason.MANIFEST_TOO_LARGE
+        )
+        # No signature is that long, so an oversized one is a bad signature, not a large manifest.
+        signature = _read_small(
+            root_fd, SIGNATURE_NAME, MAX_SIGNATURE_BYTES, RejectReason.SIGNATURE_MISSING, RejectReason.BAD_SIGNATURE
+        )
         fingerprint = _check_signature(manifest_raw, signature, expected.public_key_pem)
         manifest, document = _parse_manifest(manifest_raw)
         _check_identity(manifest, fingerprint, expected)
         if max_total_bytes is not None and manifest.total_size() > max_total_bytes:
-            raise ResultRejected(RejectReason.TOO_LARGE, f"{manifest.total_size()} > {max_total_bytes}")
+            # The sum is not shown: sizes thousands of digits long can add up to more digits than str() converts.
+            raise ResultRejected(RejectReason.TOO_LARGE, f"the listed files hold more than {max_total_bytes} bytes")
         _check_files(root_fd, manifest)
     finally:
         os.close(root_fd)
@@ -177,21 +184,27 @@ def _open_staging(staging_dir: Path) -> int:
         raise ResultRejected(RejectReason.STAGING_MISSING, "the staging directory does not exist") from None
     except fsafe.UnsafeEntry as exc:
         raise ResultRejected(RejectReason.UNSAFE_PATH, str(exc)) from None
+    except OSError as exc:
+        raise _unreadable(os.fspath(staging_dir), exc) from None
 
 
-def _read_small(root_fd: int, name: str, limit: int, missing: RejectReason) -> bytes:
-    try:
-        fd = fsafe.open_beneath(root_fd, name)
-    except fsafe.MissingEntry:
-        raise ResultRejected(missing, name) from None
-    except fsafe.UnsafeEntry as exc:
-        raise ResultRejected(RejectReason.UNSAFE_PATH, str(exc)) from None
+def _unreadable(what: str, exc: OSError) -> ResultRejected:
+    """The refusal for a staging entry the operating system would not let us read: the sandbox wrote the directory, so
+    whatever it holds that cannot be read (or that changed while it was read) is refused, never raised past the
+    caller."""
+    return ResultRejected(RejectReason.UNSAFE_PATH, f"{what}: cannot be read ({exc.strerror or type(exc).__name__})")
+
+
+def _read_small(root_fd: int, name: str, limit: int, missing: RejectReason, too_large: RejectReason) -> bytes:
+    fd = _open_listed(root_fd, name, missing=missing)
     try:
         data = os.read(fd, limit + 1)
+    except OSError as exc:
+        raise _unreadable(name, exc) from None
     finally:
         os.close(fd)
     if len(data) > limit:
-        raise ResultRejected(RejectReason.MANIFEST_TOO_LARGE, name)
+        raise ResultRejected(too_large, f"{name} is longer than {limit} bytes")
     return data
 
 
@@ -255,6 +268,8 @@ def _read_checked(root_fd: int, entry: ManifestFile) -> bytes:
     fd = _open_listed(root_fd, entry.path)
     try:
         data = b"".join(fsafe.stream(fd, entry.size))
+    except OSError as exc:
+        raise _unreadable(entry.path, exc) from None
     finally:
         os.close(fd)
     _compare(entry.path, len(data), hashlib.sha256(data).hexdigest(), entry.size, entry.sha256)
@@ -268,13 +283,15 @@ def _compare(relative: str, actual_size: int, actual_sha: str, size: int, sha256
         raise ResultRejected(RejectReason.FILE_HASH_MISMATCH, relative)
 
 
-def _open_listed(root_fd: int, relative: str) -> int:
+def _open_listed(root_fd: int, relative: str, *, missing: RejectReason = RejectReason.FILE_MISSING) -> int:
     try:
         return fsafe.open_beneath(root_fd, relative)
     except fsafe.MissingEntry:
-        raise ResultRejected(RejectReason.FILE_MISSING, relative) from None
+        raise ResultRejected(missing, relative) from None
     except fsafe.UnsafeEntry as exc:
         raise ResultRejected(RejectReason.UNSAFE_PATH, str(exc)) from None
+    except OSError as exc:
+        raise _unreadable(relative, exc) from None
 
 
 def _check_files(root_fd: int, manifest: ResultManifest) -> None:
@@ -282,6 +299,12 @@ def _check_files(root_fd: int, manifest: ResultManifest) -> None:
         present = set(fsafe.walk_regular_files(root_fd))
     except fsafe.UnsafeEntry as exc:
         raise ResultRejected(RejectReason.UNSAFE_PATH, str(exc)) from None
+    except fsafe.MissingEntry as exc:
+        raise ResultRejected(
+            RejectReason.UNSAFE_PATH, f"{exc}: went away while the staging directory was read"
+        ) from None
+    except OSError as exc:
+        raise _unreadable("the staging directory", exc) from None
     listed = {entry.path for entry in manifest.files}
     extra = sorted(present - listed - set(RESERVED_NAMES))
     if extra:
@@ -290,6 +313,8 @@ def _check_files(root_fd: int, manifest: ResultManifest) -> None:
         fd = _open_listed(root_fd, entry.path)
         try:
             sha256, size = fsafe.sha256_and_size(fd, entry.size)
+        except OSError as exc:
+            raise _unreadable(entry.path, exc) from None
         finally:
             os.close(fd)
         _compare(entry.path, size, sha256, entry.size, entry.sha256)
@@ -363,17 +388,33 @@ def _copy_checked(root_fd: int, entry: ManifestFile, parent: int, name: str) -> 
     try:
         target = fsafe.create_exclusive(parent, name)
         try:
-            for chunk in fsafe.stream(source, entry.size):
+            for chunk in _read_staged(source, entry):
                 total += len(chunk)
                 if total > entry.size:
                     break
                 digest.update(chunk)
-                os.write(target, chunk)
+                fsafe.write_all(target, chunk)
+            written = os.fstat(target).st_size
         finally:
             os.close(target)
     finally:
         os.close(source)
     _compare(entry.path, total, digest.hexdigest(), entry.size, entry.sha256)
+    _check_written(entry.path, written, entry.size)
+
+
+def _read_staged(source: int, entry: ManifestFile) -> Iterator[bytes]:
+    """The bytes of a listed file as :func:`fsafe.stream` reads them; an error reading the staging copy is a refusal."""
+    try:
+        yield from fsafe.stream(source, entry.size)
+    except OSError as exc:
+        raise _unreadable(entry.path, exc) from None
+
+
+def _check_written(relative: str, written: int, size: int) -> None:
+    """Refuse a copy whose file does not hold the listed size, whatever the writes reported."""
+    if written != size:
+        raise MaterializeError(f"{relative}: the copy holds {written} bytes, the manifest lists {size}")
 
 
 def _place_all(files: tuple[ManifestFile, ...], scratch_fd: int, out_fd: int) -> None:
@@ -381,30 +422,30 @@ def _place_all(files: tuple[ManifestFile, ...], scratch_fd: int, out_fd: int) ->
     created: list[str] = []
     try:
         for entry in files:
-            _place(entry.path, scratch_fd, out_fd, created)
+            _place(entry, scratch_fd, out_fd, created)
             placed.append(entry.path)
     except BaseException:
         _roll_back(out_fd, placed, created)
         raise
 
 
-def _place(rel: str, scratch_fd: int, out_fd: int, created: list[str]) -> None:
-    *parents, name = rel.split("/")
+def _place(entry: ManifestFile, scratch_fd: int, out_fd: int, created: list[str]) -> None:
+    *parents, name = entry.path.split("/")
     source_parent = fsafe.open_dir_beneath(scratch_fd, parents)
     try:
         try:
             destination = fsafe.open_dir_beneath(out_fd, parents, created=created)
         except fsafe.UnsafeEntry:
-            raise MaterializeError(f"{rel} lies behind a symlink in the output directory") from None
+            raise MaterializeError(f"{entry.path} lies behind a symlink in the output directory") from None
         try:
-            _link_or_copy(source_parent, destination, name)
+            _link_or_copy(source_parent, destination, name, entry.size)
         finally:
             os.close(destination)
     finally:
         os.close(source_parent)
 
 
-def _link_or_copy(source_parent: int, destination: int, name: str) -> None:
+def _link_or_copy(source_parent: int, destination: int, name: str, size: int) -> None:
     try:
         os.link(name, name, src_dir_fd=source_parent, dst_dir_fd=destination, follow_symlinks=False)
         return
@@ -413,10 +454,12 @@ def _link_or_copy(source_parent: int, destination: int, name: str) -> None:
     except OSError as exc:
         if exc.errno not in (errno.EPERM, errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK):
             raise
-    _copy_exclusive(source_parent, destination, name)
+    _copy_exclusive(source_parent, destination, name, size)
 
 
-def _copy_exclusive(source_parent: int, destination: int, name: str) -> None:
+def _copy_exclusive(source_parent: int, destination: int, name: str, size: int) -> None:
+    """Copy a checked file of the scratch directory to the output directory when it cannot be linked there; a copy that
+    does not come out whole is removed before anything else happens."""
     source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=source_parent)
     try:
         try:
@@ -424,8 +467,9 @@ def _copy_exclusive(source_parent: int, destination: int, name: str) -> None:
         except FileExistsError:
             raise MaterializeError(f"{name} appeared in the output directory during placement") from None
         try:
-            for chunk in fsafe.stream(source):
-                os.write(target, chunk)
+            for chunk in fsafe.stream(source, size):
+                fsafe.write_all(target, chunk)
+            _check_written(name, os.fstat(target).st_size, size)
         except BaseException:
             os.unlink(name, dir_fd=destination)
             raise
