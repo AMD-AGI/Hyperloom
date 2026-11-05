@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+
+# Local trajectory fallback (used when session_root is not host-writable)
+.arbor/
+configs/agentx-glm52-live-test.json
+configs/agentx-glm52-quick.json
+configs/agentx-glm52-test.json
+configs/agentx-dsv4-sglang.json
+configs/agentx-glm52-sglang.json
+port_forward.py
+patches/
+one_batch_patched.py
+sikl-attn-profile-*/
+*.local.json
+sessions/
