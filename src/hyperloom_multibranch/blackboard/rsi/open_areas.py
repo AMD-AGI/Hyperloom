@@ -79,6 +79,12 @@ class OpenAreas:
         left, needed = self.minutes_left, self.first_commit_minutes
         return left is not None and needed is not None and left < needed
 
+    @property
+    def exhausted(self) -> bool:
+        """Whether a profile is known and leaves no op open for a new branch."""
+
+        return bool(self.profiled) and not self.ops
+
     def render(self) -> str:
         if self.profiled:
             lines = [f"Open areas for a new branch, from the profile of {self.profiled}:"]

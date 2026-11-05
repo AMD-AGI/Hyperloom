@@ -128,7 +128,8 @@ class JudgeView:
     K of to why, as :func:`held_branches` finds them when the view is built; it is what the prompt shows.
     ``queued`` maps a branch to its explore tests not measured yet, as :func:`queued_intents` finds them, and
     ``building`` to the native builds not ready yet that its tests in flight wait for; a branch with none is not in
-    either. ``open_areas`` says where a new branch could open and ``playbook`` is the scheduling playbook the session
+    either. ``focus`` maps a branch to the focus its ``OPEN`` lineage names; a branch opened on none is not in it.
+    ``open_areas`` says where a new branch could open and ``playbook`` is the scheduling playbook the session
     plays, as the RSI renders them; both are empty for a session that reads no archive.
     """
 
@@ -160,6 +161,7 @@ class JudgeView:
     held: Mapping[str, HoldReason]
     queued: Mapping[str, tuple[QueuedIntent, ...]]
     building: Mapping[str, tuple[BuildStatus, ...]]
+    focus: Mapping[str, str]
     open_areas: str = ""
     playbook: str = ""
 
@@ -375,6 +377,8 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         "queued_intents": [_queued_row(item, view.now) for item in view.queued.get(entry.branch, ())],
         "waiting_builds": [_build_row(build) for build in view.building.get(entry.branch, ())],
     }
+    if entry.kind is BranchKind.SPECIALIST:
+        row["focus"] = view.focus.get(entry.branch, "")
     if entry.branch == INTEGRATION_BRANCH:
         row["profile_running"] = view.profile_running
     behind = view.behind_integration_pct.get(entry.branch)

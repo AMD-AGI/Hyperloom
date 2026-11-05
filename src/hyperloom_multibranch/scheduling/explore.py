@@ -18,7 +18,8 @@ next interval, when the scheduler itself frees a slot: a repair branch stopped a
 specialist gave up, a fork the gate did not land, or an admitted fork or repair that failed to start; and when an event
 changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck of the
 profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch the
-judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
+judge opens after the opening batch starts from the integration head, briefed on a focus; in a session that plays a
+playbook, one opens while the open areas leave no op open only on a focus the judge names. The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
 events since its last call, how far each branch lies behind the integration head, which branches lead it while their
 commits fail to merge, whether a profile of the integration head runs, the GPU hours (tests' GPU time plus card
@@ -48,9 +49,10 @@ from pathlib import Path
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ConflictingWrite
-from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, BlackboardSnapshot, priced_usd
+from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, BlackboardSnapshot, OpShares, priced_usd
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierScoring, probation_event
+from hyperloom_multibranch.blackboard.rsi.open_areas import OpenAreas
 from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookPlay
 from hyperloom_multibranch.blackboard.rsi.session import judge_history, judge_open_areas
 from hyperloom_multibranch.blackboard.rsi.stranded import stranded_leads
@@ -88,7 +90,7 @@ from hyperloom_multibranch.scheduling.roster import (
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
-from hyperloom_multibranch.scheduling.widening import Widening
+from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +214,8 @@ class Explorer:
         self._play = steering.play
         self._manifest = steering.manifest
         self._scored: tuple[BranchProgress, ...] = ()
-        self._too_late = False
+        self._areas: OpenAreas | None = None
+        self._areas_profile: OpShares | None = None
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -381,6 +384,7 @@ class Explorer:
             held=await self._held(specialists, progress),
             queued=queued_intents(snapshot.records, snapshot.intents),
             building=await waiting_builds(self._toolbox, snapshot.records),
+            focus={node.branch: node.focus for node in snapshot.lineage.branches if node.focus},
         )
         view = self._with_playbook(view, snapshot)
         try:
@@ -399,9 +403,11 @@ class Explorer:
         if self._play is None:
             return view
         left, playbook = view.explore_remaining_seconds, self._play.playbook
-        areas = judge_open_areas(snapshot, self._progress.history, self._metric, seconds_left=left, playbook=playbook)
-        self._too_late = areas.too_late
-        return replace(view, open_areas=areas.render(), playbook=self._play.render())
+        self._areas = judge_open_areas(
+            snapshot, self._progress.history, self._metric, seconds_left=left, playbook=playbook
+        )
+        self._areas_profile = snapshot.op_shares.get(self._areas.profiled)
+        return replace(view, open_areas=self._areas.render(), playbook=self._play.render())
 
     async def _specialist_states(self) -> dict[str, SpecialistStatus]:
         """What the specialist lifecycle reports of the specialist of every live specialist branch; a branch it does
@@ -495,14 +501,15 @@ class Explorer:
             return True
         self._desk.fill_free_slots()
         focus = await self._focus(decision, start) if start.origin is BranchOrigin.REFILL else ()
-        await self._open_batch(self._playbook_room(decision.open_count, start), decision.open_k, start, focus)
+        await self._open_batch(self._playbook_room(decision.open_count, start, focus), decision.open_k, start, focus)
         return False
 
-    def _playbook_room(self, count: int, start: BatchStart) -> int:
+    def _playbook_room(self, count: int, start: BatchStart, focus: tuple[BranchFocus, ...]) -> int:
         """How many of the ``count`` branches the judge asks for the playbook the session plays lets open, a cut
-        recorded: no more specialist branches running at once than its ``max_open``, and no refill once the round's
-        open areas found too little time left for a new branch's first commit. The forks and repairs the rule gate asks
-        for are not the judge's opens."""
+        recorded: no more specialist branches running at once than its ``max_open``, no refill once the round's open
+        areas found too little time left for a new branch's first commit, and while they leave no op open, no refill
+        but those briefed on a ``focus`` the judge named. The forks and repairs the rule gate asks for are not the
+        judge's opens."""
 
         if self._play is None or count <= 0:
             return count
@@ -512,10 +519,20 @@ class Explorer:
             entries = self._roster.entries()
             running = sum(1 for entry in entries if entry.kind is BranchKind.SPECIALIST and entry.stop is None)
             room = min(room, max(0, cap - running))
-        if start.origin is BranchOrigin.REFILL and self._too_late:
+        areas = self._areas if start.origin is BranchOrigin.REFILL else None
+        too_late, exhausted = areas is not None and areas.too_late, areas is not None and areas.exhausted
+        if too_late:
             room = 0
+        elif exhausted:
+            room = min(room, len(focus))
         if room < count:
-            detail = {"requested": count, "opened": room, "max_open": cap, "too_late": self._too_late}
+            detail = {
+                "requested": count,
+                "opened": room,
+                "max_open": cap,
+                "too_late": too_late,
+                "no_open_area": exhausted,
+            }
             self._decisions.record(Decision(DecisionKind.OPEN, PLAYBOOK_OPEN_CUT_REASON, detail=detail))
         return room
 
@@ -535,7 +552,15 @@ class Explorer:
         await asyncio.to_thread(_record_versions, self._manifest, played)
 
     async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[BranchFocus, ...]:
-        return await self._events.focus_on(start.start_commit, decision.focus, decision.open_count)
+        """The focus of each branch the judge opens from ``start`` after the opening batch: in a session that plays a
+        playbook, the profile op the judge named for it, else the round's open areas in turn, and only the named ones
+        while those areas leave no op open; in one that plays none, as :meth:`SessionEvents.focus_on` gives it."""
+
+        if self._areas is None:
+            return await self._events.focus_on(start.start_commit, decision.focus, decision.open_count)
+        ranked = [item.op for item in self._areas.ops]
+        focus = refill_focus(decision.focus, decision.open_count, self._areas_profile, ranked)
+        return tuple(aim for aim in focus if aim.text) if self._areas.exhausted else focus
 
     async def _open_batch(
         self, count: int, k: int, start: BatchStart, focus: tuple[BranchFocus, ...] = ()

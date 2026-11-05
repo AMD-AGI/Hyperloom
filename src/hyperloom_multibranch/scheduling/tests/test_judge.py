@@ -140,6 +140,7 @@ def _view(
     queued: dict[str, tuple[QueuedIntent, ...]] | None = None,
     building: dict[str, tuple[BuildStatus, ...]] | None = None,
     roofline_ceiling: dict[str, float] | None = None,
+    focus: dict[str, str] | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -183,6 +184,7 @@ def _view(
         specialists=specialists or {},
         held=held or {},
         queued=queued or {},
+        focus=focus or {},
         building=building or {},
     )
 
@@ -330,6 +332,31 @@ def test_the_prompt_says_a_free_slot_may_be_opened_without_a_stop() -> None:
 
     assert "free_branch_slots counts the branches you may open at this call having stopped nothing" in prose
     assert "Leaving a free slot unopened needs a reason; opening into it does not." in prose
+
+
+def test_a_playbook_session_s_prompt_leaves_a_free_slot_free_while_no_open_area_is_left() -> None:
+    prose = " ".join(PLAYBOOK_JUDGE_PROMPT.split())
+
+    assert "needs a reason; opening into it does not" not in prose
+    assert "When the open areas list no op, leave a free slot free" in prose
+    assert "the scheduler then opens only the branches you name a focus for" in prose
+    assert "only for an angle its history has not tried" in prose
+    assert "briefed on the open areas' ops in turn" in prose
+    assert "so refill the free slots" not in prose
+
+
+def test_every_specialist_row_shows_its_focus_a_stopped_one_included() -> None:
+    focused = (
+        _entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),
+        _entry("b01"),
+        _entry("b03", stopped=True, origin=BranchOrigin.REFILL),
+    )
+
+    rows = {row["branch"]: row for row in _state(_view(roster=focused, focus={"b03": "act_mul"}))["branches"]}
+
+    assert (rows["b03"]["focus"], rows["b03"]["stopped"]) == ("act_mul", "judge: flat")
+    assert rows["b01"]["focus"] == "" and "focus" not in rows[INTEGRATION_BRANCH]
+    assert "a stopped branch keeps it" in " ".join(PLAYBOOK_JUDGE_PROMPT.split())
 
 
 def test_a_branch_whose_specialist_is_not_known_shows_none() -> None:

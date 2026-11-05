@@ -121,23 +121,31 @@ def test_the_cold_start_the_real_toolbox_measured_is_what_the_signals_carry_to_t
 
 
 SHARES = OpShares("c-head", "job-1", "profile-1", {"attention": 22.0, "moe_gemm": 41.5, "allreduce": 9.0})
+LARGEST = ("moe_gemm", "attention", "allreduce")
 
 
 def _texts(focus: tuple[BranchFocus, ...]) -> tuple[str, ...]:
     return tuple(aim.text for aim in focus)
 
 
-def test_a_refill_takes_the_judges_focus_and_else_the_largest_ops_of_its_start_commit() -> None:
-    assert _texts(refill_focus(("attention", ""), 3, SHARES)) == ("attention", "moe_gemm", "attention")
+def test_a_refill_takes_the_judges_focus_and_else_the_ranked_ops() -> None:
+    assert _texts(refill_focus(("attention", ""), 3, SHARES, LARGEST)) == ("attention", "moe_gemm", "attention")
 
 
-def test_a_refill_the_judge_left_open_spreads_over_the_profile_and_wraps() -> None:
-    focus = refill_focus((), 4, SHARES)
+def test_a_refill_the_judge_left_open_spreads_over_the_ranked_ops_and_wraps() -> None:
+    focus = refill_focus((), 4, SHARES, LARGEST)
     assert focus == tuple(BranchFocus(op, op) for op in ("moe_gemm", "attention", "allreduce", "moe_gemm"))
 
 
 def test_a_refill_from_a_commit_never_profiled_has_no_focus_unless_the_judge_names_one() -> None:
-    assert refill_focus(("attention",), 2, None) == (BranchFocus("attention", "attention"), BranchFocus("", ""))
+    assert refill_focus(("attention",), 2, None, ()) == (BranchFocus("attention", "attention"), BranchFocus("", ""))
+
+
+def test_a_refill_with_no_op_ranked_reads_the_judges_text_as_a_profile_op_and_leaves_the_rest_unfocused() -> None:
+    assert refill_focus(("", "moe_gemm (fused)"), 2, SHARES, ()) == (
+        BranchFocus("", ""),
+        BranchFocus("moe_gemm (fused)", "moe_gemm"),
+    )
 
 
 PROFILED = OpShares(
@@ -177,4 +185,4 @@ PROFILED = OpShares(
     ],
 )
 def test_a_refill_keeps_the_judges_text_and_reads_its_op_as_the_profile_op_it_names_first(asked: str, op: str) -> None:
-    assert refill_focus((asked,), 1, PROFILED) == (BranchFocus(asked, op),)
+    assert refill_focus((asked,), 1, PROFILED, ()) == (BranchFocus(asked, op),)
