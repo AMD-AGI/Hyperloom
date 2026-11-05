@@ -8,17 +8,18 @@ from __future__ import annotations
 import statistics
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+    GRADED_REQUESTS_TOTAL,
+    GRADED_UNSERVED_REQUESTS,
+)
 from hyperloom.contracts.measurement import RequestClasses, RoundValue, TestResult, Validity
 from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
 
 _MEASURE = "measure"
-#: Requests the server left unserved (a transport failure or zero output tokens), summed over the measured rounds.
-GRADED_UNSERVED_REQUESTS = "graded_unserved_requests"
 #: Requests answered with output tokens the client still counted failed, summed over the measured rounds.
 GRADED_SHORT_REQUESTS = "graded_short_requests"
-#: Requests profiled, summed over the measured rounds: the denominator of the two counts above.
-GRADED_REQUESTS_TOTAL = "graded_requests_total"
 
 
 class UnreadableResult(ValueError):
@@ -123,9 +124,7 @@ def _require_measurement(result: TestResult) -> None:
 
 
 __all__ = [
-    "GRADED_REQUESTS_TOTAL",
     "GRADED_SHORT_REQUESTS",
-    "GRADED_UNSERVED_REQUESTS",
     "UnreadableResult",
     "agentx_reading",
     "dropped_requests",

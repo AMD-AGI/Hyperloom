@@ -4,19 +4,22 @@
 import pytest
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
-from hyperloom.common.perf_metric import GRADED_DURATION, GRADED_ERROR_RATE, GRADED_INTVTY_P50, GRADED_OUTPUT
+from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+    GRADED_REQUESTS_TOTAL,
+    GRADED_UNSERVED_REQUESTS,
+)
 from hyperloom.contracts.measurement import AccuracyValue, RequestClasses, RoundValue, TestResult, Validity
 from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
 from hyperloom_multibranch.rulegate.readings import (
+    GRADED_SHORT_REQUESTS,
     UnreadableResult,
     agentx_reading,
     dropped_requests,
     inferencex_reading,
-)
-from hyperloom_multibranch.rulegate.readings import (
-    GRADED_REQUESTS_TOTAL,
-    GRADED_SHORT_REQUESTS,
-    GRADED_UNSERVED_REQUESTS,
 )
 
 STRICT, FLEXIBLE, _, ACC = ACCURACY_METRICS
