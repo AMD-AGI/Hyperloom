@@ -64,7 +64,7 @@ def _measured_on_this_stack(rec: dict[str, Any], state: Any) -> bool:
     as much as to the config; an accuracy regression travels with the config, so that gate matches the fingerprint.
     """
     return all(
-        str(rec.get(field) or "").strip() == str(getattr(state, field, "") or "").strip()
+        str(rec.get(field) or "").strip() == getattr(state, field).strip()
         for field in ("model_class", "gpu_type", "precision")
     )
 

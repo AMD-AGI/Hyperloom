@@ -355,19 +355,17 @@ class IntegratePromotionMixin:
             return False
         default_on = str(result.get("framework_lever_outcome") or "") == "default_on"
         layer = {key: result.get(key) for key in ("source_snapshot", "source_snapshot_complete", "framework_root")}
-        recorded = bool(
-            self.shared_state.record_authored_framework_levers(
-                levers,
-                default_on=default_on,
-                specialist_task_id=str(result.get("specialist_task_id") or ""),
-                source_layer=None if default_on or not layer["source_snapshot"] else layer,
-            )
+        recorded = self.shared_state.record_authored_framework_levers(
+            levers,
+            default_on=default_on,
+            specialist_task_id=str(result.get("specialist_task_id") or ""),
+            source_layer=None if default_on or not layer["source_snapshot"] else layer,
         )
         if result.get(SCREEN_PARAM) == SCREEN_CYCLE:
             # Admitted unmeasured: the cycle bench, not a replay bundle, decides what these levers are worth.
             for entry in levers:
                 self.shared_state.record_framework_lever_attribution(
-                    str((entry or {}).get("switch") or ""), gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING
+                    entry["switch"], gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING
                 )
             return recorded
         if recorded:

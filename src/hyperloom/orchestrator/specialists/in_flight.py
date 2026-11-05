@@ -42,7 +42,7 @@ def held_module_group(params: Mapping[str, Any]) -> str:
     Only with the cycle bench switched on, and never for the Coordinator-owned custom specialist.
     """
     group = str(params.get("module_group") or "").strip().lower()
-    if not cycle_bench_enabled() or group not in MODULE_GROUPS or is_custom_specialist_dispatch(dict(params)):
+    if not cycle_bench_enabled() or group not in MODULE_GROUPS or is_custom_specialist_dispatch(params):
         return ""
     return group
 

@@ -167,11 +167,10 @@ def _round_entry_extras(
 
 def _module_table_source(state: Any) -> str:
     """The current stack's cycle-bench capture when it parses into a table, else the opening profile's capture."""
-    held = getattr(state, "last_attribution_trace", None) or {}
-    current = held.get("stack_len") == len(getattr(state, "optimization_stack", None) or [])
-    if held.get("trace") and current and decode_module_lines(held["trace"]):
-        return str(held["trace"])
-    return str(getattr(state, "last_profile_trace", "") or "")
+    held = state.last_attribution_trace
+    if held.get("stack_len") == len(state.optimization_stack) and decode_module_lines(held["trace"]):
+        return held["trace"]
+    return state.last_profile_trace
 
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):

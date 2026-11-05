@@ -385,9 +385,9 @@ class _PhaseStateMixin:
 
     def record_explore_verdicts(self, update: dict[str, Any]) -> None:
         """Merge an update's ``tested`` and ``rejected`` rows by fingerprint, without closing a round."""
-        prior = self.explore_search if isinstance(self.explore_search, dict) else {}
+        prior = self.explore_search
         merged = dict(prior)
-        cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
+        cur_cycle = self.macro_cycle
         # A re-measured fingerprint replaces its earlier row because that is what a fresh measurement means.
         tested = {**(prior.get("tested") or {}), **(update.get("tested") or {})}
         _stamp_cycle(tested.values(), cur_cycle)
@@ -436,7 +436,7 @@ class _PhaseStateMixin:
             {
                 "task_id": task_id,
                 "patch_name": patch_name,
-                "files": list(identity.get("files") or []),
+                "files": list(identity["files"]),
                 "line_keys": line_keys,
                 "outcome": outcome,
                 "landed": landed,
@@ -467,7 +467,7 @@ class _PhaseStateMixin:
         for entry in switches:
             if not isinstance(entry, dict):
                 continue
-            row = _lever_row(entry, bool(default_on), specialist_task_id=str(specialist_task_id or ""), ts=now)
+            row = _lever_row(entry, bool(default_on), specialist_task_id=specialist_task_id, ts=now)
             if source_layer:
                 row["source_layer"] = dict(source_layer)
             name = row["switch"]
@@ -497,11 +497,11 @@ class _PhaseStateMixin:
         A lever switched on later by a replay round still runs this code, so its row is not skipped.
         """
         layers: dict[str, dict[str, Any]] = {}
-        for row in self.authored_framework_levers or []:
-            layer = row.get("source_layer") if isinstance(row, dict) else None
-            if layer and layer.get("source_snapshot"):
+        for row in self.authored_framework_levers:
+            layer = row.get("source_layer")
+            if layer:
                 layers.setdefault(
-                    str(layer["source_snapshot"]),
+                    layer["source_snapshot"],
                     {**layer, "scope": "source_patch", "variant_name": row.get("specialist_task_id"), "ts": row["ts"]},
                 )
         return list(layers.values())
@@ -523,7 +523,7 @@ class _PhaseStateMixin:
                 continue
             updated = dict(row)
             updated["attributed_gain_pct"] = float(gain_pct) if isinstance(gain_pct, (int, float)) else None
-            updated["attribution_source"] = str(source or "")
+            updated["attribution_source"] = source
             if updated != row:
                 rows[index] = updated
                 self.authored_framework_levers = rows
