@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.geak_checkout import resolve_e2e_runner
 from hyperloom.orchestrator.kernel import geak_runner as psr
 
 
@@ -45,7 +46,7 @@ def test_resolve_runner_falls_back_to_cache_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("GEAK_ROOT", raising=False)
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
 
-    assert psr._resolve_runner() == str(runner)
+    assert resolve_e2e_runner() == str(runner)
 
 
 def test_resolve_runner_prefers_newest_pinned_geak_in_cache(tmp_path, monkeypatch):
@@ -63,7 +64,7 @@ def test_resolve_runner_prefers_newest_pinned_geak_in_cache(tmp_path, monkeypatc
     monkeypatch.delenv("GEAK_ROOT", raising=False)
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(cache))
 
-    assert psr._resolve_runner() == str(new_runner)
+    assert resolve_e2e_runner() == str(new_runner)
 
 
 def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
@@ -146,6 +147,72 @@ def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
     assert out["flushed_on_term"] is True
     rp = json.loads((tmp_path / "out" / "result.json").read_text())
     assert rp["flushed_on_term"] is True
+
+
+def test_failed_run_writes_its_error_last_on_stderr(tmp_path, monkeypatch, capsys):
+    """The kernel phase logs only the tail of the runner's stderr, so the error must end it."""
+    handoff = tmp_path / "handoff.json"
+    handoff.write_text(json.dumps(_handoff()), encoding="utf-8")
+    monkeypatch.setattr(
+        psr,
+        "call_geak",
+        lambda *_a, **_k: {
+            "status": "error",
+            "error": "runtime ERROR: R9600D serving policy is unvalidated",
+            "stderr_tail": "x" * 5000,
+            "result_path": str(tmp_path / "result.json"),
+        },
+    )
+
+    assert psr.main([str(handoff), str(tmp_path / "out"), "--timeout-s", "60"]) == 1
+    err = capsys.readouterr().err
+    assert err.rstrip().endswith("runtime ERROR: R9600D serving policy is unvalidated")
+
+
+def test_timed_out_run_fails_and_writes_its_error_on_stderr(tmp_path, monkeypatch, capsys):
+    handoff = tmp_path / "handoff.json"
+    handoff.write_text(json.dumps(_handoff()), encoding="utf-8")
+    monkeypatch.setattr(
+        psr,
+        "call_geak",
+        lambda *_a, **_k: {"status": "timeout", "error": "workflow exceeded 3600s", "stderr_tail": ""},
+    )
+
+    assert psr.main([str(handoff), str(tmp_path / "out"), "--timeout-s", "60"]) == 1
+    assert capsys.readouterr().err.rstrip().endswith("workflow exceeded 3600s")
+
+
+def test_failed_run_redacts_credentials_on_stderr(tmp_path, monkeypatch, capsys):
+    handoff = tmp_path / "handoff.json"
+    handoff.write_text(json.dumps(_handoff()), encoding="utf-8")
+    monkeypatch.setattr(
+        psr,
+        "call_geak",
+        lambda *_a, **_k: {
+            "status": "error",
+            "error": "runtime (node) failed (rc=1): Authorization: Bearer abcdef0123456789",
+            "stderr_tail": "Ocp-Apim-Subscription-Key: s3cr3tvalue",
+        },
+    )
+
+    assert psr.main([str(handoff), str(tmp_path / "out"), "--timeout-s", "60"]) == 1
+    err = capsys.readouterr().err
+    assert "abcdef0123456789" not in err
+    assert "s3cr3tvalue" not in err
+    assert "[REDACTED]" in err
+
+
+def test_successful_run_writes_nothing_on_stderr(tmp_path, monkeypatch, capsys):
+    handoff = tmp_path / "handoff.json"
+    handoff.write_text(json.dumps(_handoff()), encoding="utf-8")
+    monkeypatch.setattr(
+        psr,
+        "call_geak",
+        lambda *_a, **_k: {"status": "ok", "throughput_speedup": 1.1, "stderr_tail": "noise", "error": ""},
+    )
+
+    assert psr.main([str(handoff), str(tmp_path / "out"), "--timeout-s", "60"]) == 0
+    assert capsys.readouterr().err == ""
 
 
 def test_sigkill_escalation_when_child_ignores_sigterm(tmp_path, monkeypatch):
