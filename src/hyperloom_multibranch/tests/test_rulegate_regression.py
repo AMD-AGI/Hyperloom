@@ -534,6 +534,28 @@ async def test_the_pools_cases_run_on_the_root_once_and_a_case_on_the_root_alrea
     assert len(session.seeded()) == 1
 
 
+async def test_a_pooled_run_that_raises_leaves_the_pool_to_the_next_check(session):
+    case = _pooled(b"clean case", "past-1 c7")
+    asked = []
+
+    def answer(request):
+        asked.append(request)
+        if len(asked) == 1:
+            raise OSError("the toolbox lost its connection")
+        return NOT_REPRODUCED
+
+    session.answers[case.case_id] = answer
+    regression_set = session.pooled_set(case)
+    with pytest.raises(OSError, match="lost its connection"):
+        await regression_set.check("c1", MERGE, sources=())
+
+    outcome = await regression_set.check("c1", MERGE, sources=())
+
+    on_root = await session.blackboard.regression_cases_for(ROOT)
+    assert [(case.case_ref, case.fix_commit) for case in on_root] == [("repro-case of past-1 c7", ROOT)]
+    assert outcome == RegressionOutcome(True, cases=2)
+
+
 @pytest.mark.parametrize("answer", [REPRODUCED, None, ""])
 async def test_a_pooled_case_that_does_not_run_clean_on_the_root_is_no_case_of_it(session, answer):
     case = _pooled(b"clean case", "past-1 c7")

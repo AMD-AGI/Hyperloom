@@ -232,10 +232,10 @@ class RegressionSet:
                 root = (await self._blackboard.baseline()).root_commit
             except NotRecorded:
                 return
-            pool, self._pool = self._pool, None
             held = await self._held(root)
-            fresh = [case for case in await pool.cases() if case.case_id not in held]
+            fresh = [case for case in await self._pool.cases() if case.case_id not in held]
             await _gathered(self._root_case(case, root) for case in fresh)
+            self._pool = None
 
     async def _held(self, root: str) -> set[str]:
         """The sha256 of each attachment of the cases ``root`` holds."""
