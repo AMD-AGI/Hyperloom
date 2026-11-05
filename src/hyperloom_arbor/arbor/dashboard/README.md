@@ -79,8 +79,8 @@ Changed:
   collector's `status.json`.
 - **Liveness from the Slurm job** (`--slurm-job`), as the Cluster A page's last
   fix did for chained campaigns: a driver inside a job on a GPU node is
-  invisible to a process check on the login node, and the first port showed
-  two running campaigns as "not running". Only a queued successor is "between
+  invisible to a process check on the login node, which shows a running
+  campaign as "not running". Only a queued successor is "between
   chunks"; a `squeue` that fails is "unknown".
 - **No node panel by default.** The realtime collector never samples GPU nodes:
   a probe during a measured replay perturbs it. The panel shows only when a

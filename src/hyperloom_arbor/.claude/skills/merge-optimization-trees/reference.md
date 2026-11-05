@@ -29,9 +29,9 @@ own output directory so their aggregate files cannot overwrite each other.
 ## Warm up before every measured run
 
 The first replay against a fresh server pays cold JIT compilation, tuned-config
-resolution, and an empty prefix cache. On three back-to-back replays on one
-server instance, the cold first replay is a **low outlier**: including it more
-than doubles the run-to-run spread.
+resolution, and an empty prefix cache. On back-to-back replays on one server
+instance, the cold first replay is a **low outlier**: including it widens the
+run-to-run spread considerably.
 
 This matters more in a knob sweep than anywhere else, because each knob state
 usually gets a fresh server — so **every measurement is a cold first replay**
@@ -95,9 +95,9 @@ match offline before the campaign starts. It is a two-line test and it has
 repeatedly been the difference between a campaign and a wasted one.
 
 - A harness matching `SwiGLU` collected nothing for a knob whose marker reads
-  `SiluAndMulWithClamp dispatch`. Checking all 15 anchors found 8 that could
-  never match — enough to discard 7 of 14 knobs while every run still reported
-  success and every number still looked fine.
+  `SiluAndMulWithClamp dispatch`. Checking every anchor found several that could
+  never match — enough to discard a large share of the knobs while every run
+  still reported success and every number still looked fine.
 - Substring patterns fail on hyphenation and on wording drift between a knob's
   name and its log line: `hidden quant` does not match
   `hidden-state MXFP8 producer`.
@@ -113,13 +113,13 @@ repeatedly been the difference between a campaign and a wasted one.
 This is the single most misleading instrument in the set. A marker reading
 
 ```
-DSv4.1 sparse MLA decode: knob=1 batch=1024 -> Triton decode (base path)
+DSv4.1 sparse MLA decode: knob=1 batch=<large> -> Triton decode (base path)
 ```
 
 was read as "this feature declines at C32, so it is inert there". It was not
 inert: later decode steps ran smaller batches that fell inside the kernel's
-33-72 row band, it dispatched, and it killed the server. The wrong reading
-survived two rounds of documentation.
+row band, it dispatched, and it killed the server. The wrong reading survived
+into the documentation.
 
 For any knob gated on batch size, sequence length or context length, the first
 log line is the *least* informative one. Count dispatches, or log once per
@@ -132,22 +132,23 @@ When a set of knobs fails as a set, halving the ON set finds the culprit in
 
 - **Re-run the control in the environment's CURRENT state.** Not the state it
   had before the failures. A container degraded over one session from passing
-  5-of-5 to 1-of-5 and was fixed by recreating it; without a control re-check
-  after the failures, every knob would have been blamed for the container.
+  every control run to failing most of them, and was fixed by recreating it;
+  without a control re-check after the failures, every knob would have been
+  blamed for the container.
 - **Confirm each step's environment actually took effect.** Read the marker and
   check the knob you turned off reads `knob=0` and its feature marker is
   absent. A bisect step that silently did not apply points at the wrong half.
 - **One failure is not evidence.** This class of fault also occurs
   intermittently on unmodified baselines. Require a repeated, arm-specific
-  pattern — 3 deaths in 3 attempts with the culprit on against 0 in 6 without
-  is a pattern; one death is an anecdote.
+  pattern — a death in every attempt with the culprit on against none in
+  several attempts without is a pattern; one death is an anecdote.
 - **Preserve every failed attempt.** Move its directory aside rather than
   letting the next run overwrite it; a server log is the only record of why a
   run died, and it is gone as soon as the next server starts.
 
-Expect the first hypothesis to be wrong. In the run that produced these notes,
-the most-suspected knob was cleared by the second bisect step, and the culprit
-was one that had been dismissed as "inert at this operating point".
+Expect the first hypothesis to be wrong. The most-suspected knob can be cleared
+early in the bisect, and the culprit can be one that had been dismissed as
+"inert at this operating point".
 
 ## Prove "one tree, environment only"
 

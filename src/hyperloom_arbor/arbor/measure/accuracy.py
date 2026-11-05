@@ -2,7 +2,7 @@
 
 A throughput gate cannot see accuracy: an FP8 MoE combine was merged on its
 throughput and then failed GSM8K far below its golden score, and a decode-only
-MTP setting cut GSM8K from 0.96 to 0.88 with no error and no slowdown
+MTP setting cut GSM8K sharply with no error and no slowdown
 (serving-playbook numerics-knobs.md §0). The packs' per-iteration correctness
 check is a floor for a broken model (Model M: 400 questions, pass at 0.92), not
 a comparison with the baseline.
@@ -60,8 +60,8 @@ ROOT_FILE = "baseline_accuracy.json"
 BASELINE_SOURCE = "the baseline's full GSM8K (baseline_record)"
 ROOT_SOURCE = "the root's full GSM8K, measured by this session"
 FLOOR_SOURCE = "GSM8K_MIN: no golden score on record"
-# What measuring the root needs before the deadline: one server boot and the full set (an 8B
-# model at TP1 on one MI350X takes a few minutes for each). A run with less left keeps the floor.
+# What measuring the root needs before the deadline: one server boot and the full set (a small
+# model on one GPU takes minutes for each). A run with less left keeps the floor.
 ROOT_NEED_S = 30 * 60
 # The full set's result beside its output (measure), which a KEEP's snapshot carries.
 ACCURACY_FILE = "accuracy.json"

@@ -3,8 +3,8 @@
 A rewrite's plan (the dossier skill's ``kernel-plan.md``) is a chain of stages
 per design, each with its own gate, because the campaign's A/B gate can judge
 nothing before the last one. Until now a plan's stage records lived in the
-agent's prose: C5 wrote 21 addenda, and its plan's own stage table stopped at
-S1. Here the plan carries its items in a block the harness reads:
+agent's prose: an agent could write addendum after addendum while its plan's
+own stage table never moved past S1. Here the plan carries its items in a block the harness reads:
 
     ## Items
 

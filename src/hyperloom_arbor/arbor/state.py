@@ -45,10 +45,10 @@ MAX_CONSECUTIVE_INVALID = 3
 # WHY THIS COUNTER EXISTS. `best_secondary` is a high-water mark over
 # single-replay measurements, so it is an UPWARD-BIASED estimator: each ratchet
 # keeps whichever draw happened to be high, and the bias grows with the number
-# of ratchet events. One campaign ratcheted three times and landed
-# above its own matched-draw cohort by most of its secondary band before any
-# real effect. Several later iterations were then each
-# REVERTED on the secondary axis alone -- one was a BYTE-IDENTICAL tree.
+# of ratchet events. A few ratchets can land the incumbent above its own
+# matched-draw cohort by most of its secondary band before any real effect.
+# Later iterations are then each REVERTED on the secondary axis alone -- even
+# a BYTE-IDENTICAL tree.
 #
 # The inference is statistical, not about any one change: several UNRELATED
 # changes reading null on the primary and failing only on the secondary is far
@@ -72,11 +72,11 @@ SECONDARY_SUSPECT_STREAK = 3
 # escalation, the LEARN mandate, and a reset from LEARN-with-findings. That
 # third wire is correct (without it an earlier campaign sat at
 # a high null_streak with many unresolved findings and never probed) but it makes the
-# counter unable to answer "are we converting effort into wins?". One
-# campaign went half its iterations without moving either bar while
-# `null_streak` read 0, because a REVERT raised it to 1 and the next
-# LEARN — closing several genuine findings — reset it to 0. It never reached
-# ESCALATE_NULL_STREAK, so nothing was ever rendered into the prompt.
+# counter unable to answer "are we converting effort into wins?". A campaign
+# can go many iterations without moving either bar while `null_streak` reads
+# 0, because a REVERT raises it to 1 and the next LEARN — closing genuine
+# findings — resets it to 0. It never reaches ESCALATE_NULL_STREAK, so
+# nothing is ever rendered into the prompt.
 #
 # So: one counter per question. `null_streak` keeps its meaning ("is this tier
 # dry?"), which foundation work legitimately answers. `barren_streak` answers
@@ -716,9 +716,8 @@ class CampaignState:
         wrong wire name, a pinned instrument that moved — none of these are
         evidence about the candidate. Reporting them as REVERT discarded
         working code, incremented ``null_streak``, and drove tier escalation
-        off manufactured nulls. In one campaign most REVERTs
-        were this, including repeated attempts at one FP8 o-projection
-        port that was correct the whole time.
+        off manufactured nulls. Such REVERTs can make up most of a
+        campaign's, and can reject a correct change again and again.
 
         So: the tree is NOT reverted, ``null_streak`` does NOT move, the tier
         counters do NOT move, and the caller retries. Only ``invalid_streak``
@@ -796,8 +795,8 @@ class CampaignState:
     def diagnose(self) -> str:
         """One line naming the regime, for the prompt header and the monitor.
 
-        A long drought was invisible because every counter anyone
-        looked at faithfully reported `null_streak=2`.
+        A long drought can stay invisible while every counter anyone
+        looks at faithfully reports a small `null_streak`.
         """
         return (f"iteration {self.iteration} | tier {self.tier} | "
                 f"barren {self.barren_streak} ({self.barren_stage()}) | "

@@ -56,7 +56,7 @@ def _lesson_label(lesson: dict) -> str:
     """`INTENT → VERDICT`, or the annotation's own word.
 
     Used by BOTH the per-iteration line and the header tally, because a
-    document that says "26 PROBE" above rows labelled "LEARN → KEEP" makes the
+    document that says "N PROBE" above rows labelled "LEARN → KEEP" makes the
     reader reconcile two vocabularies — the exact cost the split was meant to
     remove. Annotation rows (BASELINE / ESCALATE / NOTE) are exempt: no gate
     produced them and no intent was declared, so re-deriving a pair would print
@@ -121,8 +121,8 @@ def _render_history(lessons: list[dict]) -> str:
     #
     # Deliberately still a literal, and NOT the rule "verdict != REVERT" that
     # the intent split makes tempting. Those are not the same set: a LEARN that
-    # passed has verdict KEEP, so that rule would pin every probe — dozens
-    # in one campaign, almost all of whose artifacts live in `eval/`
+    # passed has verdict KEEP, so that rule would pin every probe — a campaign
+    # can run many, almost all of whose artifacts live in `eval/`
     # rather than in the tree. It would also pin ESCALATE. Which rows are worth
     # permanent prompt budget is a judgement about cost, not something derivable
     # from the verdict, so it stays written down.
@@ -402,9 +402,9 @@ def render_program(campaign, state, arbor_root: str | Path,
 
     sections.append(f"# {campaign.pack.name} — {campaign.goal}\n")
 
-    # The regime, stated once at the top. A long drought was
-    # invisible for as long as it was because every counter anyone looked at
-    # faithfully reported `null_streak=2`.
+    # The regime, stated once at the top. A long drought can stay invisible
+    # when every counter anyone looks at faithfully reports a small
+    # `null_streak`.
     if hasattr(state, "diagnose") and state.lessons:
         sections.append(f"_{state.diagnose()}_")
 

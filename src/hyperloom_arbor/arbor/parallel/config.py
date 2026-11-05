@@ -1,12 +1,12 @@
 """A parallel run's configuration: one JSON file, checked once, then pinned in the store.
 
-    {"run_id": "c6p", "store": "<campaigns>/parallel",
+    {"run_id": "<run id>", "store": "<campaigns>/parallel",
      "arbor_ref": "main@<sha>", "arbor_root": "<campaigns>/Arbor-par",
-     "template_config": "configs/mi350x/model-m-c8-c6.json",
-     "dossier_dir": "docs/dossier/model-m-mi350x/u3-c8",
+     "template_config": "configs/mi350x/model-m-c8.json",
+     "dossier_dir": "docs/dossier/model-m-mi350x/<round>",
      "gates": "configs/parallel/gates-c8.json", "lane_sessions": "<campaigns>/sessions",
      "max_lanes": 4, "max_rounds": 0, "no_keep_rounds": 2,
-     "seed": {"map": ".../11.u4-directions.md", "overlay": "configs/parallel/c6p-r01-lanes.json",
+     "seed": {"map": ".../11.uK-directions.md", "overlay": "configs/parallel/<run id>-r01-lanes.json",
               "bar_record": "..."},
      "image_src": {"vllm": "<the image's stock vllm/, unpacked on the host>"},
      "base_vmu": "<prefix of the base's .diff/.blobs; default the template's base_vmu>",

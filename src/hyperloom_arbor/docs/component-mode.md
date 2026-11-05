@@ -10,8 +10,8 @@ to empty, it rolls from node to node, ends rounds with its own same-node A/B and
 **Component mode** is Arbor run by a host that owns all of that: Hyperloom's multibranch (MB)
 today, which runs Arbor as an "autonomous branch" on a lease of GPUs, under its own deadline, and
 gates and merges what Arbor keeps. MB already runs Arbor this way, with a sandbox built around what standalone Arbor did wrong inside it: stopping MB's
-servers with a pattern `pkill`, running on cards outside its lease, iterating an hour after the
-session died, hanging for 511 minutes, loading kernel tables from paths outside the workspace.
+servers with a pattern `pkill`, running on cards outside its lease, iterating after the session
+died, hanging for hours, loading kernel tables from paths outside the workspace.
 Component mode makes Arbor do the right thing itself.
 
 Which side runs each step of an MB session, and the files between the two:
@@ -27,8 +27,8 @@ recorded in `session.json`, and a resumed session keeps it.
 "mode": "component",
 "component": {
   "host": "hyperloom-mb",
-  "deadline": "2026-10-29T03:20:00Z",
-  "seconds": 25200,
+  "deadline": "2030-01-01T00:00:00Z",
+  "seconds": 3600,
   "notes": "/abs/path/mb-integration.md",
   "bench_command": "python3 benchmark_serving.py ... --base-url http://127.0.0.1:{port} --result-dir {out}",
   "outbox": "keeps"
@@ -213,7 +213,8 @@ A second launch at each KEEP, component mode only.
 `arbor/measure/short_prompts.py`; the probe after correctness and the check after the critic in
 `arbor/policy/claude_loop.py`. Where the build settled what the design left open:
 - **What it answers:** AITER's vectorized_5d `mha_batch_prefill` gave wrong output on
-  short sequences in about one server process in three, and GSM8K did not see it. The design's
+  short sequences intermittently, in some server processes and not others, and GSM8K did not
+  see it. The design's
   "against the base server" was dropped: MB compared with the parent first and stopped
   (Hyperloom `b315477e5`), because exact greedy matching fires on the largest gains (fp8 KV,
   quantized GEMMs). A defect wrong in every process is one GSM8K already sees, so the check
@@ -232,18 +233,19 @@ A second launch at each KEEP, component mode only.
   session's first KEEP sets the floor (`<session>/short_prompts/floor.json`); a later KEEP whose
   processes differ on more prompts sent one at a time than the floor becomes REVERT, with the
   first differing positions in the reason. The batched half is recorded and refuses nothing:
-  on a GPU run an unchanged tree's two boots differed on none of the prompts sent one at a
-  time, and on most of the batched ones in their first tokens, because which prompts share a prefill batch changes
-  between boots and that flips near-tied greedy picks; pooled, that noise hid a small
-  single-request defect and could refuse a good KEEP. The second launch's server log is kept
+  an unchanged tree's two boots agree on the prompts sent one at a time but can differ on the
+  batched ones in their first tokens, because which prompts share a prefill batch changes
+  between boots and that flips near-tied greedy picks; pooled, that noise can hide a small
+  single-request defect and refuse a good KEEP. The second launch's server log is kept
   as `iter_N/server_2.log`. The record is `iter_N/short_prompts_check.json`; `keep.json` gets its
   brief, and a snapshot carries the record when the check ran.
 - **What refuses nothing:** an iteration probe that did not finish (no boot is spent then), a
   second boot that does not come up, no time left, a second probe that does not finish. The
   KEEP stands and `keep.json` says why, as MB's check does; MB re-gates every KEEP.
-- **Odds and cost:** two processes catch a one-in-three defect 4 times in 9 per KEEP, and every
-  later KEEP that carries it is another chance. The cost is one server boot and two probes per
-  KEEP (about 5 minutes on Model M at TP4), which a host should allow for in its deadline.
+- **Odds and cost:** a defect that shows in a fraction p of processes makes two processes differ
+  with probability 2p(1 - p) per KEEP, and every later KEEP that carries it is another chance.
+  The cost is one server boot and two probes per KEEP (several minutes for a large model), which
+  a host should allow for in its deadline.
 
 ### The host's plan
 
@@ -279,7 +281,7 @@ share; directions an Arbor finds outside its share come back as `proposals`.
 - **`component.profile`:** the host's profile file, which MB writes from the root's `OpShares`.
   It goes into the prompt at every iteration through the same capped reader as
   the notes (`_read_head`), and the agent profiles only what it does not cover. When MB has no
-  shares (GLM-5.3 AgentX: its head profile is refused as too large), the key is left out.
+  shares (its head profile can be refused as too large), the key is left out.
 - **The agent is told what the pass is for** (`dossier_pass_block`): LEARN only, every direction
   one Arbor's work, `depends_on` only where needed (joined directions go to one Arbor), every
   direction ranked.

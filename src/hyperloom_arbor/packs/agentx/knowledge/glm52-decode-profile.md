@@ -1,6 +1,6 @@
-# GLM-5.2 Decode Profile — Baseline
+# GLM-5.2 Decode Profile
 
-SIKL decode profile: TP=4, DP=4, ISL=100K, CONC=64, fp8_e4m3 KV.
+The profiled configuration (SIKL decode profile): TP=4, DP=4, ISL=100K, CONC=64, fp8_e4m3 KV.
 
 ## Hotspots (one decode step, all 78 layers), largest first
 

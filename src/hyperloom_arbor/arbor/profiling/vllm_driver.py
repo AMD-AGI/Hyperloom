@@ -260,7 +260,7 @@ def main(argv=None) -> int:
         "max_num_seqs": max(args.conc, 32),
         "gpu_memory_utilization": args.gpu_mem_util,
         "tokenizer_mode": args.tokenizer_mode,
-        # Required for DSv4.1-Flash and missing from the original C8 config:
+        # Required for DSv4.1-Flash, and easy to leave out of a config:
         # the recipe derives it as the first power of two >= max_num_seqs x
         # (1 + num_speculative_tokens). Top-level EngineArgs field that
         # forwards into CompilationConfig.

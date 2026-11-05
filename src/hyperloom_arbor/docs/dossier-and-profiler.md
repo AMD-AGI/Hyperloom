@@ -203,7 +203,6 @@ has, each kill and whether it can be reopened, the bar, the lessons.
     told to emit part 11's list, and a second list in the knowledge gives it two to choose from.
   - **Which pack:** a pack made for that model and workload, never `packs/serving`. The serving
     template is used by every host workload that has no pack of its own.
-  - **Size:** keep it short. Knowledge is in the prompt, whole, at every iteration; the C4 hand-off
-    is 32 KB.
+  - **Size:** keep it short. Knowledge is in the prompt, whole, at every iteration.
   - **Edits:** an edit reaches a running campaign at its next iteration. Knowledge is read each
     time the program is rendered; it is not pinned like the validator.

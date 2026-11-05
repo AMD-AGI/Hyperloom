@@ -50,7 +50,7 @@ Two independent checks — the deterministic one is complete, the trace one is a
 - **Deterministic selection (window-independent):** `OUTDIR=<run> scripts/verify_selection.sh` benches each kept shape merged-vs-stock with the exact serving types. Healthy = `tuned-selected = N of N`.
 - **Serving-trace firing:** `python3 scripts/verify_kernels_in_trace.py` — the exact `kernel_tuned` names appear as `Cijk_*` events in the tuned trace, 0 in baseline. A partial count is fine (short window). **Do NOT** use the bare `_UserArgs_` tag — stock kernels carry it too.
 
-Worked result (conc16, f32 workload): selection 27/27, trace 9–10/27 → PASS; e2e flat. With the wrong (bf16-out) workload: 0/27 — the canonical signature-mismatch failure.
+Worked result (f32 workload): every kept shape tuned-selected (`N of N`), a partial count in the trace → PASS; e2e flat. With the wrong (bf16-out) workload: none selected — the canonical signature-mismatch failure.
 
 ## Pitfalls & scale gotchas (read before a long run)
 - **Signature-exact match** (PITFALL #0): geko kernels are `Equality` — they fire only on an exact

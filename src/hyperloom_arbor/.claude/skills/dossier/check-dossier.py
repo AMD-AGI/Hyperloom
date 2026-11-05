@@ -2,8 +2,8 @@
 """Check a dossier, or one of its update rounds, before calling it done.
 
     python3 check-dossier.py <dir>                  # the dossier: README.md, parts 01-11
-    python3 check-dossier.py <dir> --round u3       # round u3: 03, 06, 07, 10 and 11 .u3 files
-    python3 check-dossier.py <dir> --round u3 --no-index   # a round staged outside the dossier
+    python3 check-dossier.py <dir> --round uK       # round K: 03, 06, 07, 10 and 11 .uK files
+    python3 check-dossier.py <dir> --round uK --no-index   # a round staged outside the dossier
 
 <dir> is the dossier's directory (docs/dossier/<model>-<workload>-<gpu>/), or
 for a round staged elsewhere (a campaign's <session>/reports/) that directory

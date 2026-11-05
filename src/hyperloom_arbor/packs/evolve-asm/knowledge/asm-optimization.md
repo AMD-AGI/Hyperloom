@@ -15,7 +15,7 @@ starting `.amdgcn`. Hand-tuned ASM is always the end state.
 | HBM bandwidth | 8 TB/s | **6.4 TB/s** |
 
 **Always use MAF (50% of FLOP peak, 80% of BW peak), never vendor peak.**
-A kernel at 41% MAF has real headroom. A kernel at 85%+ MAF is done.
+A kernel at half of MAF has real headroom. A kernel at 85%+ MAF is done.
 
 ## Tier ladder (enforced by orchestrator, not suggestions)
 
@@ -69,10 +69,10 @@ Key ratios:
 
 ```
 gpu_us: XX.X           ← one line per run (harness gates on weakest)
-sig_vgpr: 148          ← for MAP-Elites structural diversity tracking
-sig_barriers: 7
-sig_spills: 0
-sig_mfma: 32
+sig_vgpr: <n>          ← for MAP-Elites structural diversity tracking
+sig_barriers: <n>
+sig_spills: <n>
+sig_mfma: <n>
 ```
 
 ## Integration — aiter CSV deployment
@@ -80,5 +80,5 @@ sig_mfma: 32
 Winning tile configs are written to:
 `/workspace/knowledge_base/aiter/configs/model_configs/dsv41flash_fp8fp4_tuned_fmoe.csv`
 
-Use `--deploy --config-name decode_c5 --tile-config t64x128x256_w4_gui` with the bench driver.
+Use `--deploy --config-name <config> --tile-config <tile>` with the bench driver.
 The CSV is bind-mounted to the host git repo — changes are git-tracked automatically.

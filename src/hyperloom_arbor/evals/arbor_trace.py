@@ -526,8 +526,8 @@ def _migrate_fallback_events(trace_dir: Path) -> int:
     Hooks start firing at ``SessionStart``, which is necessarily before the
     agent can run ``mark session-start``. Those early rows land under
     ``~/.arbor/trajectories/<session_id>/`` and used to stay there: on a real
-    run that stranded 29 events, costing 15 orchestrator steps their timing and
-    permission mode. Moving them at open time closes the window.
+    run that stranded the early events, costing those orchestrator steps their
+    timing and permission mode. Moving them at open time closes the window.
     """
     moved = 0
     try:

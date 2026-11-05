@@ -81,7 +81,7 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out.
    - **The start:** `python3 -m arbor run --config hyperloom-mb/config.json`. The process must stay up for 300 s.
    - **Code:** `specialist/autonomous_session.py`, `specialist/agent_onboarding.py`, `specialist/arbor_adapter.py`.
 8. **Arbor runs.**
-   - **Before the first iteration:** the review gate ([how-it-works.md](how-it-works.md#before-the-first-iteration-the-review-gate)), then the init: it pins the validators and seeds the workspace. With its accuracy gate on, it then serves the root once and measures its full GSM8K (`<session>/baseline_accuracy.json`; about 2 min for Qwen3-8B on MI350X).
+   - **Before the first iteration:** the review gate ([how-it-works.md](how-it-works.md#before-the-first-iteration-the-review-gate)), then the init: it pins the validators and seeds the workspace. With its accuracy gate on, it then serves the root once and measures its full GSM8K (`<session>/baseline_accuracy.json`; a few minutes for a small model).
    - **Each iteration:** an agent turn, its server and the bench, the correctness checks, and its own gate.
    - **A KEEP:** written as a snapshot ([hosts.md](hosts.md#what-to-read-back)).
    - **Code:** `arbor/driver.py`, `arbor/component.py` (`snapshot_keep`).

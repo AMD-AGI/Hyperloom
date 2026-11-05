@@ -4,7 +4,7 @@ Ported from arbor/mesh2/keeper.py (<fork>/mesh3-confirm a691edc), with the
 mesh's storage helpers replaced by store.py's and the supervisor being
 `python3 -m arbor.parallel run`. Its history, as mesh2 wrote it:
 
-A supervisor once died on a login node and nothing noticed for hours. Its
+A supervisor once died on a login node and nothing noticed for a long time. Its
 log held a startup warning and no traceback, which is what an external kill
 looks like, and there were two suspects -- the login node's per-process
 memory limit and the per-user cgroup, which had been throttling it -- with no

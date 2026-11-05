@@ -51,8 +51,9 @@ def stop_server(container: str, gpu_ids: list[int] | None = None,
     """Stop the serving server gracefully (SIGTERM, wait, verify VRAM released).
 
     NEVER use pkill -9 / SIGKILL — SGLang holds KFD GPU memory until the
-    Python process exits cleanly. SIGKILL skips cleanup, leaving 250GB of
-    zombie VRAM that blocks the next launch with a memory-imbalance error.
+    Python process exits cleanly. SIGKILL skips cleanup, leaving most of each
+    GPU's memory held as zombie VRAM that blocks the next launch with a
+    memory-imbalance error.
 
     Waits until GPU VRAM drops below 10GB before returning so the next
     launch doesn't fail with 'memory capacity unbalanced'.

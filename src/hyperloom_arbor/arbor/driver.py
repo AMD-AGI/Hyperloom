@@ -322,8 +322,8 @@ def _main(argv: list[str] | None, held: dict) -> int:
             return rc
     elif campaign.config.get("docker_container"):
         # Not rolling, the flag KEEPs still go into a fresh container, and each KEEP's are
-        # mirrored below: a campaign's first iteration in a held job once ran
-        # without them, without --enable-expert-parallel.
+        # mirrored below: without them, the first iteration in a fresh container
+        # runs without a kept launch flag.
         from arbor.cluster import handoff
         handoff.restore_workspace_config(campaign.config, session_dir)
 
@@ -465,11 +465,10 @@ def _main(argv: list[str] | None, held: dict) -> int:
         #
         # That asymmetry mattered. A band narrower than the measurement noise
         # silently rejects real work, and the noise is routinely underestimated:
-        # the spread quoted across three campaigns came from two runs on
-        # one node, while re-measuring a byte-identical tree on its own node
-        # later differed by several times that. one campaign widened its secondary band
-        # only at the START of the next, after dozens of iterations under a
-        # bar it could not reach.
+        # a spread quoted from a couple of runs on one node can be several
+        # times smaller than what re-measuring a byte-identical tree on
+        # another node shows. A campaign that cannot widen its band mid-run
+        # can spend many iterations under a bar it cannot reach.
         #
         # Only the measurement block is refreshed. Validators, protected paths
         # and tools stay pinned to what the campaign started with, so a

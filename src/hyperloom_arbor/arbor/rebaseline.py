@@ -2,8 +2,8 @@
 
 A rolling chunk measures the current tree on its own node and makes that the bar
 (scripts/model-m-campaign/rebase_bar.py), so the gate and the agent compare against the
-node they run on. Read in sequence, though, the bar then jumps with the node: a campaign's
-bar dropped on a slower node after six KEEPs, which reads as a regression. So the scale
+node they run on. Read in sequence, though, the bar then jumps with the node: on a slower
+node it drops, even after several KEEPs, which reads as a regression. So the scale
 is interpolated instead of jumping with the node.
 
 Each REBASELINE lesson carries its step: the bar before it (the previous node's)

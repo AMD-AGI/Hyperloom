@@ -7,8 +7,8 @@ merges what Arbor keeps, and polls session.json's KEEP lessons as the keep
 signal (docs/component-mode.md, the design and the operator's decisions).
 
 MB built a sandbox around what standalone Arbor did wrong inside it: Arbor stopped MB's servers with a pattern `pkill`,
-ran on cards outside its lease, iterated an hour after the session died, hung
-for 511 minutes, and loaded kernel tables from paths outside the workspace.
+ran on cards outside its lease, kept iterating after the session had ended, hung
+in an agent turn with no bound, and loaded kernel tables from paths outside the workspace.
 This module is the part of the fix that is not the serving path:
 
 - **the switch**: ``"mode": "standalone" | "component"`` and the ``"component"``
@@ -119,8 +119,8 @@ STOP_AT = ("map",)
 # without the key, the first commit is the base (workspace.base_commit).
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
-# Each phase's cap, in minutes (``component.phase_minutes`` overrides). The
-# 511-minute hang MB saw was one agent turn with no bound at all.
+# Each phase's cap, in minutes (``component.phase_minutes`` overrides). A hang
+# MB saw was one agent turn with no bound at all.
 PHASE_MINUTES = {"agent": 90, "server": 45, "bench": 60, "critic": 15, "correctness": 30,
                  "short_prompts": 10}
 
@@ -208,7 +208,7 @@ def session_root(config) -> Path:
 
 def parse_deadline(value) -> float:
     """An absolute deadline: epoch seconds (a number or a numeric string), or ISO 8601
-    with a timezone ("2026-10-29T03:20:00Z"). ValueError otherwise: a deadline with no
+    with a timezone ("2030-01-01T00:00:00Z"). ValueError otherwise: a deadline with no
     timezone is read differently on every host."""
     if isinstance(value, bool):
         raise ValueError(f"deadline {value!r} is not a time")
@@ -783,7 +783,7 @@ def turn_block(config, session_dir=None, now: float | None = None) -> str:
     """The main agent's time this turn: its phase cap and what is left before the deadline.
 
     Under a host an agent once started an AITER fused-MoE tuning sweep inside a capped
-    turn, hit the cap before measuring, and lost half of Arbor's time: nothing had
+    turn, hit the cap before measuring, and lost much of Arbor's time: nothing had
     told it how long its turn was. Empty in standalone, where turns have no cap.
     """
     if not is_component(config):

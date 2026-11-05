@@ -1,16 +1,15 @@
 """Ask the installed engine what it supports, instead of hardcoding field names.
 
-The failure this prevents is concrete, and it has already happened twice in
-opposite directions on this project. The campaign container
-(``0.1.1.dev50+geed1f3d0c``) exposes a full torch-profiler schedule on
-``ProfilerConfig`` — ``delay_iterations``, ``warmup_iterations``,
-``active_iterations``, ``wait_iterations``, ``max_iterations``. The vLLM source
-checked out elsewhere on the same cluster (``0.1.dev12734+gd111bc53a``) has only
+The failure this prevents is concrete, and it goes both ways. A campaign's
+container can hold a newer vLLM build that exposes a full torch-profiler
+schedule on ``ProfilerConfig`` — ``delay_iterations``, ``warmup_iterations``,
+``active_iterations``, ``wait_iterations``, ``max_iterations``. A vLLM source
+tree checked out elsewhere can be an older build that has only
 ``delay_iterations`` and ``max_iterations``, and spells record-shapes
 ``torch_profiler_record_shapes``. A plan written against either tree breaks on
 the other: against the newer build you leave the schedule unconfigured and
 profile more than you meant to; against the older one you pass fields that do
-not exist and lose a GPU-hour to a ``TypeError``.
+not exist and lose GPU time to a ``TypeError``.
 
 Neither tree is "the" answer, which is the whole point. Profiling configuration
 is the fastest-drifting part of an engine, an optimization agent runs against

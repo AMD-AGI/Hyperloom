@@ -104,8 +104,9 @@ maintainers' vendoring tool, with the same omissions, placeholders, profiler ski
 copy that still names any of the replaced terms.
 
 This copy also carries a text-only scrub on top of the tag: internal board, job and plan references, operator decision
-logs, internal campaigns' runs, dates and figures and the private repository's access are removed. The vendoring tool carries the same
-scrub for later tags, as a patch over its output, and refuses a copy that still has such a reference.
+logs, the private repository's access, and the history of internal runs (their names, ids, dates, counts, times and
+figures) are removed. The vendoring tool carries the same scrub for later tags, as a patch over its output, and refuses
+a copy that still has such a reference.
 
 Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,
 `[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). Secret

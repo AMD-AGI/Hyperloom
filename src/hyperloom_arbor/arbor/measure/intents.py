@@ -30,8 +30,8 @@ WHY ``NOT_MEASURED`` IS. A bench that never ran, a server that never came up, a
 404 from the wrong wire name, a moved instrument — none of these say anything
 about the change. They are not a REVERT, they are the absence of a
 measurement: the tree stands, the counters do not move, and the caller retries.
-That rule was bought with six lost iterations of an earlier campaign, five
-of them the same FP8 o-projection port that was correct the whole time.
+That rule was bought with lost iterations: a change that was correct the whole
+time was reverted again and again.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ class Intent:
         campaign could escape escalation pressure by surveying.
 
     ``server``
-        ``skip_if_readonly`` lets the loop bypass the ~45-minute server run
+        ``skip_if_readonly`` lets the loop bypass the server run (tens of minutes)
         when the diff cannot change what the server does. Only a probe earns
         this, and only when its diff is confined to inert paths.
 
@@ -107,8 +107,8 @@ DEFAULT_NOISE_BAND_PCT = 1.0
 # How far a correctness fix may regress before it is refused. Wide on purpose:
 # the point of the intent is that the fix ships regardless of a small cost, and
 # only a catastrophe — a fix that disables a fast path outright — is worth
-# refusing. Without this, the loop reverts fixes for being slow, which is how
-# the FP8 o-projection's verification gate was lost while still inert.
+# refusing. Without this, the loop reverts fixes for being slow, and a fix can
+# be lost while it is still inert.
 DEFAULT_CORRECTNESS_CAP_PCT = 5.0
 
 
@@ -235,7 +235,7 @@ def tolerance(intent: Intent, measurement: dict) -> float:
 # The old (claim_class, decision) pair is still written to session.json and
 # still read by everything downstream — `check_review_consistency.py` counts
 # `l["decision"] == "KEEP"` straight out of the file, so promoting a probe to
-# KEEP would silently change the KEEP count of four archived campaigns. These
+# KEEP would silently change the KEEP count of archived campaigns. These
 # functions are the whole compatibility surface, and they are exact.
 
 # Rows in `lessons` that are ANNOTATIONS, not judgements. No gate produced
@@ -243,8 +243,7 @@ def tolerance(intent: Intent, measurement: dict) -> float:
 #   BASELINE  written by record_baseline, the opening measurement
 #   ESCALATE  written by apply_escalation, a forced tier move
 #   NOTE      written BY HAND by the campaign owner, to correct the record —
-#             e.g. "iteration 2's REVERT was a HARNESS failure, not a verdict".
-#             Three exist across the archived campaigns.
+#             e.g. "iteration N's REVERT was a HARNESS failure, not a verdict".
 #   REBASELINE  written by scripts/model-m-campaign/rebase_bar.py, the bar on a new node
 #   MAP_ROUND   written by apply_map_round (arbor/directions.py), a map round's event
 #   ROUND_END   written by arbor/rounds.py, a round end's request, incomplete A/B or stop
