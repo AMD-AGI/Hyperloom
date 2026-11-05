@@ -73,10 +73,8 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import ScriptedCompletion
 from hyperloom_multibranch.scheduling.final import CandidateCheck, FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.integrator import (
     ADOPTING_LEAD,
-    CONFLICT_TRUNCATED,
-    CONFLICT_UNRESOLVED,
-    RESOLVER_UNREACHED,
     SUPERSEDED,
+    ConflictLoss,
     MergeReport,
     _decision,
 )
@@ -420,19 +418,29 @@ async def test_close_counts_how_the_merges_went_and_met_conflicting_patches_from
             "c2",
             "i1",
             MergeOutcome.CONFLICT_SKIPPED,
-            f"{CONFLICT_UNRESOLVED}: patch/vllm/a.patch: no rewrite",
+            "patch/vllm/a.patch: no rewrite",
             rebased_patches=(_rebased("patch/vllm/0006-w.patch"),),
+            lost_to=ConflictLoss.UNRESOLVED,
         ),
-        MergeReport("c3", "i1", MergeOutcome.CONFLICT_SKIPPED, f"{CONFLICT_TRUNCATED}: patch/vllm/b.patch: cut off"),
-        MergeReport("c4", "i1", MergeOutcome.CONFLICT_SKIPPED, f"{RESOLVER_UNREACHED}: patch/vllm/c.patch: timeout"),
+        MergeReport(
+            "c3", "i1", MergeOutcome.CONFLICT_SKIPPED, "patch/vllm/b.patch: cut off", lost_to=ConflictLoss.TRUNCATED
+        ),
+        MergeReport(
+            "c4",
+            "i1",
+            MergeOutcome.CONFLICT_SKIPPED,
+            "patch/vllm/c.patch: timeout",
+            lost_to=ConflictLoss.RESOLVER_UNREACHED,
+        ),
         MergeReport("c5", "i1", MergeOutcome.CONFLICT_SKIPPED, "the merge does not combine: two kernels in one slot"),
         MergeReport("c6", "i1", MergeOutcome.PENDING, SUPERSEDED, resolved_patches=written[:1]),
         MergeReport(
             "c7",
             "i1",
             MergeOutcome.CONFLICT_SKIPPED,
-            f"{adopting}: {CONFLICT_UNRESOLVED}: patch/vllm/d.patch: no rewrite",
+            f"{adopting}: patch/vllm/d.patch: no rewrite",
             adopts="s3",
+            lost_to=ConflictLoss.UNRESOLVED,
         ),
         MergeReport("c8", "i1", MergeOutcome.MERGED, "gain +2.0%"),
     ):
