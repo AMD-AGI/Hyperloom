@@ -6,9 +6,9 @@
 A :class:`Playbook` has two parts. Its numbers (:class:`PlaybookNumbers`) are bounded (:data:`BOUNDS`) and applied by
 code: the stall bar, the probation and the new-branch grace the stall evidence reads (:meth:`Playbook.stop_rule`),
 which the scheduler's grace reads too, how many branches run at once and how late a new one opens, which the
-scheduler enforces on the judge's opens, and after how many failures an op leaves the open areas. Its rules, at most
-:data:`MAX_RULES`, each say whether they govern stops, K or opening, and hold what numbers cannot, such as which of
-two alike branches to stop.
+scheduler enforces on the judge's opens, and after how many branches focused on an op ended without a commit it leaves
+the open areas. Its rules, at most :data:`MAX_RULES`, each say whether they govern stops, K or opening, and hold what
+numbers cannot, such as which of two alike branches to stop.
 
 :data:`H0` is the first champion: the evidence rules, no text rules, every number at its default. A playbook never
 overrides the :data:`SAFETY_ENVELOPE`, which the judge reads beside it and the scheduler enforces: a branch with a
@@ -91,8 +91,9 @@ class PlaybookNumbers:
     stop candidates run ``probation_tests`` more judged tests first; a new branch keeps its grace until
     ``grace_tests`` of its explore tests succeeded and were judged. ``max_open`` caps the branches running at once,
     ``None`` for the run's cap; no branch the judge refills opens in the last ``last_open_minutes`` of EXPLORE,
-    ``None`` for the median time a new branch took to its first commit; an op that failed ``failed_op_limit`` times
-    this session leaves the open areas.
+    ``None`` for the median time a new branch took to its first commit; an op that ``failed_op_limit`` branches opened
+    on the integration head as it stands were focused on and stopped without a commit leaves the open areas until the
+    head moves.
     """
 
     stall_tests: int | None = None
@@ -165,7 +166,8 @@ class Playbook:
             "were judged.",
             f"- open: at most {opened} at once; after the opening batch, none once less of EXPLORE is left than {late}. "
             "The scheduler cuts an open past either.",
-            f"- an op that failed {n.failed_op_limit} times this session leaves the open areas.",
+            f"- spent: an op {n.failed_op_limit} branches opened on the integration head were focused on and ended "
+            "without a commit leaves the open areas until the head moves.",
             *(f"- rule ({rule.governs.value}): {rule.text}" for rule in self.rules),
             "Safety envelope, whatever the playbook says:",
             *(f"- {line}" for line in SAFETY_ENVELOPE),
