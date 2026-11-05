@@ -25,17 +25,20 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     fit_keys,
     refusals,
 )
-from hyperloom_multibranch.tests.test_specialist_agent_onboarding import Process, Sandbox, _setup
-from hyperloom_multibranch.tests.test_specialist_arbor_adapter import (
+from hyperloom_multibranch.tests.agent_rig import (
     CHECKOUT_FILES,
+    COMPONENT_AGENT,
     CONFIG_FILE,
     GATED_COMPONENT,
     MAP,
+    Component,
+    Process,
+    Sandbox,
     _committed,
+    _setup,
     _spec,
     _write,
 )
-from hyperloom_multibranch.tests.test_specialist_autonomous_session import COMPONENT_AGENT, Component
 
 #: An Arbor of 10-28, before the dossier pass and the root's profile (Arbor 15a46e6).
 BEFORE_PROFILE = (

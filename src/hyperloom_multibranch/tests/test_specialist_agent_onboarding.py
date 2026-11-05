@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -19,7 +18,6 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     GATEWAY_PAUSE_SECONDS,
     RETRY_SECONDS,
     AgentSpec,
-    CommandResult,
     ModelRefused,
     OnboardingSetup,
     agent_env,
@@ -32,6 +30,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
 from hyperloom_multibranch.specialist.arbor_adapter import MARKERS, is_arbor
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
+from hyperloom_multibranch.tests.agent_rig import Onboarder, Process, Sandbox, _setup
 
 SPEC = AgentSpec(
     model="/models/Qwen3-14B-FP8",
@@ -78,58 +77,6 @@ def _manifest(**overrides: Any) -> str:
     }
     document.update(overrides)
     return "Here it is:\n```json\n" + json.dumps(document) + "\n```"
-
-
-class Process:
-    def __init__(self, returncode: int | None, output: str = "") -> None:
-        self.returncode, self._output, self.killed = returncode, output, False
-
-    async def output(self) -> str:
-        return self._output
-
-    async def kill(self) -> None:
-        self.killed = True
-
-
-class Sandbox:
-    """Runs nothing: each install exits with the next of ``installs`` (0 once they run out), each start returns the
-    next of ``starts`` and, when ``keep`` is set, writes the agent's keep file the way a started agent would."""
-
-    def __init__(self, starts: list[Process], installs: tuple[int, ...] = (), keep: str = "") -> None:
-        self.starts, self.installs, self.keep = starts, list(installs), keep
-        self.ran: list[tuple[str, Path, Mapping[str, str]]] = []
-
-    async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
-        self.ran.append((command, cwd, env))
-        code = self.installs.pop(0) if self.installs else 0
-        return CommandResult(code, "ERROR: no matching distribution\n" if code else "")
-
-    async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> Process:
-        self.ran.append((command, cwd, env))
-        if self.keep:
-            (cwd / self.keep).parent.mkdir(parents=True, exist_ok=True)
-            (cwd / self.keep).write_text('{"keeps": 0}', encoding="utf-8")
-        return self.starts.pop(0)
-
-
-class Onboarder:
-    def __init__(self, answers: list[str]) -> None:
-        self.answers, self.prompts = answers, []
-
-    async def __call__(self, checkout: Path, prompt: str) -> str:
-        self.prompts.append(prompt)
-        return self.answers.pop(0)
-
-
-def _setup(sandbox: Sandbox, onboard, waits: list[float] | None = None) -> OnboardingSetup:
-    async def no_wait(seconds: float) -> None:
-        if waits is not None:
-            waits.append(seconds)
-
-    ticks = iter(range(1000))
-    return OnboardingSetup(
-        sandbox, onboard, start_seconds=3.0, poll_seconds=1.0, sleep=no_wait, clock=lambda: float(next(ticks))
-    )
 
 
 async def test_an_agent_is_fetched_onboarded_configured_installed_and_started(tmp_path: Path) -> None:
