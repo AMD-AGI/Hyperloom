@@ -19,13 +19,13 @@ cut short, lost or stopped included, so the stop can come up to one launch late,
 judge, patch resolver and the rule gate's fix critic as it returns. A cap is a usage error when the price sheet has no
 rate for the model the specialists run on or the one the judge, the patch resolver and the fix critic ask, whose calls
 would record tokens only.
-``--playbook`` says which scheduling playbook the session plays once ``HYPERLOOM_RSI_ARCHIVE`` names an archive:
+``--playbook`` says which scheduling playbook the session plays from the RSI archive ``HYPERLOOM_RSI_ARCHIVE`` names:
 ``champion``, ``challenger``, which plays the oldest playbook on trial in the pool beside it and the champion while
 none is, or ``auto`` (the default), a challenger session when the session's id draws it, half of them, so the
 playbooks on trial are played without anyone asking; the manifest fingerprint and the session's manifest record the
 label under ``playbook`` in
-``policy_versions``, and a challenger's fallback to the champion under ``playbook_fallback``. Without an archive, or
-under ``HYPERLOOM_RSI_WRITE_ONLY=1``, the session plays none and is judged as before the RSI: no stall evidence, safety
+``policy_versions``, and a challenger's fallback to the champion under ``playbook_fallback``. Under
+``HYPERLOOM_RSI_WRITE_ONLY=1`` the session plays none and is judged as before the RSI: no stall evidence, safety
 envelope or probation.
 Each ``--autonomous-agent SOURCE`` opens one branch where EXPLORE starts, after the user's directions and within
 ``--max-branches``, whose specialist runs that third-party agent end to end in a sandbox of its own; a source that
@@ -35,7 +35,8 @@ one given with no agent, is a usage error. Without one, two or more Arbors split
 Arbor run once on a mapping branch EXPLORE opens beside the others, for at most ``--agent-dossier-minutes`` (default
 90), or, when it gives none or the minutes are 0, a map Arbor generates from the root's profile (its op shares, else its
 kernel shares); each share then opens as a branch of its own, when it still has ``--agent-share-minutes`` (default 63,
-0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative value of either is a usage error.
+0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative or non-finite value of either,
+as of any other limit, is a usage error.
 ``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
 serving template; a name that is not one directory, or one given with no agent, is a usage error, and a pack the Arbor
 checkout lacks is refused when the branch starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX
@@ -107,7 +108,7 @@ import math
 import os
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -116,6 +117,7 @@ from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_co
 from hyperloom_common.env import EnvValueError
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
@@ -351,7 +353,7 @@ def _add_playbook_option(run: argparse.ArgumentParser) -> None:
         choices=[mode.value for mode in PlaybookMode],
         default=PlaybookMode.AUTO.value,
         help=(
-            "The scheduling playbook the session plays once the RSI archive is configured: the champion, or, in a "
+            "The scheduling playbook the session plays from the RSI archive: the champion, or, in a "
             "challenger session, the oldest playbook on trial; auto (the default) makes half the sessions, drawn by "
             "their id, challenger sessions."
         ),
@@ -577,9 +579,11 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
     if len(sources) > free:
         raise ValueError(f"--autonomous-agent is given {len(sources)} times, more than the {free} branches left")
     for source in sources:
-        scheme, found, rest = source.partition("://")
-        user, at, _host = rest.split("/", 1)[0].rpartition("@")
-        if found and at and (":" in user or scheme.lower() not in SSH_SCHEMES):
+        credentialed = CREDENTIALED_URL_RE.match(source)
+        if credentialed is None:
+            continue
+        scheme = credentialed["scheme"].removesuffix("://")
+        if ":" in credentialed["userinfo"] or scheme.lower() not in SSH_SCHEMES:
             raise ValueError(f"--autonomous-agent {scheme}://... carries credentials; give them in the environment")
     if ARBOR_KEYWORD in sources and not VENDORED_ARBOR.is_dir():
         raise ValueError(
@@ -702,7 +706,7 @@ def settings_from(
     does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
     """
 
-    errors = _shape_errors(args) + _ep_errors(args) + _positive(args, ("tp", "conc", "judge_interval_sec"))
+    errors = _shape_errors(args) + _ep_errors(args) + _positive(args, ("tp", "conc"))
     errors += _limit_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
@@ -735,8 +739,8 @@ def settings_from(
         agent_directions=_agent_directions(args.agent_directions, agents),
         agent_pack=_agent_pack(args.agent_pack, agents),
         agent_launch=_agent_launch(args.agent_launch, agents),
-        agent_dossier_minutes=_minutes("--agent-dossier-minutes", args.agent_dossier_minutes, "runs no dossier pass"),
-        agent_share_minutes=_minutes("--agent-share-minutes", args.agent_share_minutes, "always opens the shares"),
+        agent_dossier_minutes=args.agent_dossier_minutes,
+        agent_share_minutes=args.agent_share_minutes,
         agent_port=_agent_port(args.agent_port, agents),
         stop_after_map=_stop_after_map(args.stop_after_map, agents, args.agent_directions),
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
@@ -745,18 +749,27 @@ def settings_from(
 
 
 def _limit_errors(args: argparse.Namespace) -> list[str]:
-    """What is wrong with the session's limits: its hours, GPU hours, LLM dollars and dev sandboxes."""
+    """What is wrong with the session's limits: its hours, GPU hours, LLM dollars, judge interval, agent minutes and
+    dev sandboxes."""
 
-    errors: list[str] = []
-    if args.max_hours < 0:
-        errors.append("--max-hours must be 0 (no limit) or a positive number of hours")
-    if not math.isfinite(args.max_gpu_hours) or args.max_gpu_hours < 0:
-        errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
-    if not math.isfinite(args.max_llm_usd) or args.max_llm_usd < 0:
-        errors.append("--max-llm-usd must be 0 (no limit) or a positive number of dollars")
-    if args.dev_leases < 0:
-        errors.append("--dev-leases must be 0 (none) or a positive number of sandboxes")
-    return errors
+    hours, gpu_hours, usd = args.max_hours, args.max_gpu_hours, args.max_llm_usd
+    judge, dossier, share = args.judge_interval_sec, args.agent_dossier_minutes, args.agent_share_minutes
+    return [
+        *_limit_error("--max-hours", hours, hours >= 0, "0 (no limit) or a positive number of hours"),
+        *_limit_error("--max-gpu-hours", gpu_hours, gpu_hours >= 0, "0 (no limit) or a positive number of hours"),
+        *_limit_error("--max-llm-usd", usd, usd >= 0, "0 (no limit) or a positive number of dollars"),
+        *_limit_error("--judge-interval-sec", judge, judge > 0, "a positive number of seconds"),
+        *_limit_error("--agent-dossier-minutes", dossier, dossier >= 0, "0 (runs no dossier pass) or positive"),
+        *_limit_error("--agent-share-minutes", share, share >= 0, "0 (always opens the shares) or positive"),
+        *_limit_error("--dev-leases", args.dev_leases, args.dev_leases >= 0, "0 (none) or a positive number"),
+    ]
+
+
+def _limit_error(option: str, value: float, in_range: bool, rule: str) -> list[str]:
+    """``option`` must be ``rule`` unless ``value`` is finite and ``in_range``: a NaN is in no range, and an infinite
+    limit is no limit, so neither may pass as one."""
+
+    return [] if in_range and math.isfinite(value) else [f"{option} must be {rule}"]
 
 
 def _parallel_tests(args: argparse.Namespace, tests_that_fit: Callable[[int], int]) -> int:
@@ -771,12 +784,6 @@ def _parallel_tests(args: argparse.Namespace, tests_that_fit: Callable[[int], in
     if parallel > fitting:
         raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests that run at once at TP")
     return parallel
-
-
-def _minutes(option: str, minutes: float, zero: str) -> float:
-    if minutes < 0:
-        raise ValueError(f"{option} {minutes:g} is negative; 0 {zero}")
-    return minutes
 
 
 def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
@@ -991,10 +998,10 @@ def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -
 
 @dataclass(frozen=True)
 class HostedStart:
-    """What ``hosted run`` runs, and the seconds after which the grant's end stops it, ``None`` when it has none."""
+    """What ``hosted run`` runs, and the deadline of the grant it runs in."""
 
     run: Callable[[], int]
-    stop_after_sec: float | None
+    deadline: GrantDeadline
 
 
 def hosted_run() -> int:
@@ -1007,16 +1014,15 @@ def hosted_run() -> int:
         start = _hosted_start(host)
     except ValueError as exc:
         return _not_run(host.state_dir, EXIT_USAGE, exc)
-    except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     except ImportError as exc:
         log.exception("hosted run: a module the session needs is not installed")
         return _not_run(host.state_dir, EXIT_FAILED, exc)
-    if start.stop_after_sec is not None:
-        arm_grant_stop(max(0.0, start.stop_after_sec))
+    _stop_before_grant_ends(start.deadline)
     try:
         returncode = start.run()
-    except (CacheBuildError, ToolboxInputsError) as exc:
+    except (ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     root = recorded_session(host.state_dir)
     stop_reason = None if root is None else reported_stop_reason(root)
@@ -1039,7 +1045,15 @@ def _hosted_start(host: HostInfo) -> HostedStart:
         run = partial(final_only, persisted, ready.peer_factory, ready.services)
     else:
         run = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
-    return HostedStart(run, deadline.stop_after_sec)
+    return HostedStart(run, deadline)
+
+
+def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
+    """Arm the stop of this process one CLOSE grace before ``deadline``'s grant ends, at once when that has passed;
+    nothing when the grant states no runtime."""
+
+    if deadline.stop_after_sec is not None:
+        arm_grant_stop(max(0.0, deadline.stop_after_sec))
 
 
 def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
@@ -1078,26 +1092,28 @@ def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
 
 @dataclass(frozen=True)
 class HandedGrant:
-    """The grant ``run --measurement hosted`` measures in, and how much of it is left."""
+    """The grant ``run --measurement hosted`` measures in, how much of it is left, and the session's ``--max-hours``
+    cut to what it leaves."""
 
     host: HostInfo
     deadline: GrantDeadline
+    max_hours: float
 
 
 def _handed_grant(args: argparse.Namespace) -> HandedGrant:
-    """The grant handed to ``run --measurement hosted``, taken out of the environment; ``args.max_hours`` is cut to
-    what it leaves. Raises ValueError naming what is missing or refused, never a value."""
+    """The grant handed to ``run --measurement hosted``, taken out of the environment. Raises ValueError naming what
+    is missing or refused, never a value."""
 
     host = take_host_info(os.environ, require=HANDED_GRANT, require_run=False)
     deadline = grant_deadline(host, datetime.now(timezone.utc))
-    args.max_hours = deadline.session_hours(args.max_hours)
-    return HandedGrant(host, deadline)
+    return HandedGrant(host, deadline, deadline.session_hours(args.max_hours))
 
 
 def _run_settings(args: argparse.Namespace, grant: HandedGrant | None) -> RunSettings:
-    settings = settings_from(args) if grant is None else settings_from(args, grant_tests_that_fit(grant.host))
-    if grant is not None:
-        refuse_unhosted_branches(settings, grant.host, os.environ)
+    if grant is None:
+        return settings_from(args)
+    settings = replace(settings_from(args, grant_tests_that_fit(grant.host)), max_hours=grant.max_hours)
+    refuse_unhosted_branches(settings, grant.host, os.environ)
     return settings
 
 
@@ -1106,8 +1122,7 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
         ready = ready_session(settings.workload, load_peers)
     else:
         ready = hosted_ready_session(grant.host, settings.workload)
-        if grant.deadline.stop_after_sec is not None:
-            arm_grant_stop(max(0.0, grant.deadline.stop_after_sec))
+        _stop_before_grant_ends(grant.deadline)
     return run_session(settings, ready.peer_factory, ready.services)
 
 

@@ -44,7 +44,11 @@ from hyperloom_common.jsonio import read_json, read_jsonl
 from hyperloom_common.timeutil import epoch_iso
 from hyperloom.contracts.measurement import BuildPayment
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
-from hyperloom.inference_optimizer.session.session_paths import RESOURCES_RELATIVE_PATH
+from hyperloom.inference_optimizer.session.session_paths import (
+    CONTAINER_RECORD_KIND,
+    RESOURCES_RELATIVE_PATH,
+    SPECIALIST_RECORD_KIND,
+)
 from hyperloom_multibranch.contracts.blackboard.peers import SandboxFacts
 from hyperloom_multibranch.contracts.blackboard.records import SECONDS_PER_HOUR, BlackboardSnapshot, TestRecord
 from hyperloom_multibranch.blackboard.codec import encode
@@ -182,9 +186,6 @@ def agent_resources(runner_dir: Path | None) -> dict[str, object]:
     rows = _rows(runner_dir / RESOURCES_RELATIVE_PATH) if runner_dir is not None else None
     if rows is None:
         return {}
-    # agent_runner loads the main flow's runtime, which importing the multibranch command must not.
-    from hyperloom.orchestrator.specialists.agent_runner import CONTAINER_RECORD_KIND, SPECIALIST_RECORD_KIND
-
     found: dict[str, object] = {
         "specialist_resources": [row for row in rows if row.get("kind") == SPECIALIST_RECORD_KIND]
     }
