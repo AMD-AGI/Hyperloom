@@ -5,11 +5,13 @@
 
 Each file's merge base is its content under the stack the patch was written on; one side is the file under the stack
 it now lands on, the other the file with the patch's own change. Only a merge in which no line is changed by both sides
-yields a patch: an overlap is a choice between two edits, which a merge of text cannot make.
+yields a patch: an overlap is a choice between two edits, which a merge of text cannot make. Whether one side's
+change rewrites every line of the other's is what lets a merge pick one of them instead.
 """
 
 from __future__ import annotations
 
+import difflib
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -30,40 +32,33 @@ class _Overlap(Exception):
     """Both sides changed one line of a file."""
 
 
-def merge_files(
-    base: Files, ours: Files, theirs: Files, *, theirs_wins: bool = False
-) -> dict[str, bytes | None] | None:
+def merge_files(base: Files, ours: Files, theirs: Files) -> dict[str, bytes | None] | None:
     """``ours`` with what ``theirs`` changed from ``base`` in each path of ``theirs``; ``None`` when a path overlaps.
 
-    ``base`` and ``ours`` hold every path of ``theirs``. ``theirs_wins`` takes ``theirs``'s side of every overlap
-    instead (``git merge-file --theirs``), and of a file one side lacks: only to test whether ``theirs`` supersedes
-    what ``ours`` changed, never to rebase.
+    ``base`` and ``ours`` hold every path of ``theirs``.
     """
     merged = dict(ours)
     try:
         for path, change in theirs.items():
-            merged[path] = _merge_file(base[path], ours[path], change, theirs_wins)
+            merged[path] = _merge_file(base[path], ours[path], change)
     except _Overlap:
         return None
     return merged
 
 
-def _merge_file(base: bytes | None, ours: bytes | None, theirs: bytes | None, theirs_wins: bool) -> bytes | None:
+def _merge_file(base: bytes | None, ours: bytes | None, theirs: bytes | None) -> bytes | None:
     if theirs in (base, ours):
         return ours
     if base == ours:
         return theirs
     if base is None or ours is None or theirs is None:
-        if theirs_wins:
-            return theirs
         raise _Overlap
-    side_flag = ["--theirs"] if theirs_wins else []
     with tempfile.TemporaryDirectory(prefix=_SCRATCH_PREFIX) as scratch:
         sides = [Path(scratch) / name for name in ("ours", "base", "theirs")]
         for side, data in zip(sides, (ours, base, theirs)):
             side.write_bytes(data)
         done = subprocess.run(
-            git_argv("merge-file", "-p", "--quiet", *side_flag, *map(str, sides)),
+            git_argv("merge-file", "-p", "--quiet", *map(str, sides)),
             cwd=scratch,
             env=git_env(GIT_CEILING_DIRECTORIES=str(Path(scratch).parent)),
             capture_output=True,
@@ -75,6 +70,36 @@ def _merge_file(base: bytes | None, ours: bytes | None, theirs: bytes | None, th
     if done.returncode:
         raise _Overlap
     return done.stdout
+
+
+def rewrites(base: bytes | None, ours: bytes | None, theirs: bytes | None) -> bool:
+    """Whether ``theirs`` changes from ``base`` every line ``ours`` changes, so nothing of ``ours``'s change is left
+    where ``theirs`` stands in for it.
+
+    A line ``ours`` inserts counts as changed only inside a run of lines ``theirs`` rewrites, so a file ``ours``
+    creates never does: two insertions at one place are two changes, which git reports as a conflict. A file ``ours``
+    deletes is rewritten only by deleting it, and one ``ours`` edits never by deleting it.
+    """
+    if ours == base:
+        return True
+    if base is None or ours is None or theirs is None:
+        return base is not None and ours is None and theirs is None
+    lines = base.splitlines(keepends=True)
+    rewritten = _changed_lines(lines, theirs)
+    return all(
+        set(range(start, end)) <= rewritten if start < end else {start - 1, start} <= rewritten
+        for start, end in _hunks(lines, ours)
+    )
+
+
+def _hunks(lines: list[bytes], after: bytes) -> list[tuple[int, int]]:
+    """The runs of ``lines`` that ``after`` changes, as half-open line ranges; an empty one is an insertion there."""
+    matcher = difflib.SequenceMatcher(None, lines, after.splitlines(keepends=True), autojunk=False)
+    return [(start, end) for tag, start, end, _, _ in matcher.get_opcodes() if tag != "equal"]
+
+
+def _changed_lines(lines: list[bytes], after: bytes) -> set[int]:
+    return {line for start, end in _hunks(lines, after) for line in range(start, end)}
 
 
 def patch_between(before: Files, after: Files) -> str:
@@ -147,4 +172,4 @@ def _git(root: Path, *args: str, stdin: bytes = b"", **pinned: str) -> str:
     return done.stdout.decode()
 
 
-__all__ = ["Files", "merge_files", "patch_between", "renames"]
+__all__ = ["Files", "merge_files", "patch_between", "renames", "rewrites"]
