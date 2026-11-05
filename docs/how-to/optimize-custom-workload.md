@@ -424,28 +424,31 @@ is a module that produces that artifact.
 | Field | |
 |---|---|
 | `enabled` | bool, default `false`. Everything below is inert without it. |
-| `pin_all_others` | bool, default `true`. Every dimension not listed is exported at its benchmark value. Keep it on: each dynamic dimension is another chance for the compiler to fail to prove something. |
+| `pin_all_others` | bool, default `true`. Any input size you don't list is locked to the size used during benchmarking. Leave this on -- every size you allow to vary gives the compiler more to cope with, and more chances for it to give up. |
 | `dynamic_dims[].input` | the observation key as your **driver** spells it, not the agent's wrapper argument. |
 | `dynamic_dims[].dim` | 0-indexed axis in that tensor's shape. |
 | `dynamic_dims[].min` / `max` | inclusive bounds, `min >= 1` and `min < max`. |
 | `dynamic_dims[].derivation` | required, free text: how the bound was measured. |
 
-The ranges are yours to set and the agent is forbidden from changing them. Each is
-baked into the artifact permanently, so an input outside it is a hard runtime
-failure in deployment, not a fallback. `derivation` is required because a measured
-bound and a guess are indistinguishable at review time without it; if a dimension
-does not vary in deployment, leave it out and let it be pinned.
+The ranges are yours to set, and the agent is not allowed to change them. Each one
+is fixed into the compiled model for good: in production, an input outside the
+range you gave is a straight failure, not something that quietly falls back. Write
+`derivation` because months later nobody can tell a measured limit from a guess.
+If a size never varies in production, leave it out and let it be locked.
 
-A stray `aoti` block under `schema_version: 1` is ignored rather than honoured, so
-bumping the version is what turns the feature on.
+An `aoti` block is ignored under `"schema_version": 1`, so changing the version to
+`2` is what switches the feature on.
 
-**The export is gated.** Until a KEEP lands whose applied module exports,
-`explore`, `sweep`, `profile` and `roofline` are denied with `rule='export_gate'`.
-Those denials in the log are the design working, not a fault. The first export is
-kept on correctness even when it is slower than eager — recorded as
-`keep_reason: export_landed` — because an eager configuration is not a deliverable
-here; later candidates are then graded against that export rather than against
-eager.
+**Other work waits for the export.** Until one accepted change actually compiles
+the model, Hyperloom refuses to start the other kinds of work (`explore`, `sweep`,
+`profile`, `roofline`) and logs `rule='export_gate'` each time. Those refusals are
+the feature working, not a fault.
+
+The first compiled version is accepted even if it is *slower* than the original,
+uncompiled model, and is recorded as `keep_reason: export_landed`. It is accepted
+because it is correct, not because it is fast: you asked for a compiled model, so
+an uncompiled one is not something you can ship, however quick it is. Everything
+proposed after that is compared against the compiled version, not the original.
 
 **Don't let the module quietly fall back.** If compiling fails, let it fail. A
 module that catches the error and runs the original model instead still looks like
@@ -479,14 +482,17 @@ repository. Copy just the Python module beside the original script to use it in
 the original runtime; no Hyperloom installation is needed. Runtime validation
 remains the responsibility of that script.
 
-`deployment.json` always reports `"validation": "not_run"`, and always will. It
-cannot hold a verdict: a validation report is bound to the artifact by the
-SHA-256 of `deployment.json` itself, so writing the result into that file would
-change the hash the report refers to. A single-file export has no validation
-command at all -- it ships one module, with no `inference.py` or adapter to run.
-What vouches for the artifact is upstream of it: the per-candidate quality gate
-that every KEEP had to pass, and the source snapshot the module is checked
-against. Do not read the field as a failed check.
+`deployment.json` always reports `"validation": "not_run"`, and it can never say
+anything else. The check writes its result to a separate file and stamps it with a
+checksum of `deployment.json`. Putting the result inside `deployment.json` would
+change that checksum, so the result could no longer point at the thing it checked.
+A single-file export has no such check to run anyway -- it ships one module, with
+no `inference.py` or adapter.
+
+What stands behind the module is everything that happened before it was written
+out: every accepted change had to pass your own quality gate, and the module is
+compared against the copy saved at the moment it was accepted. Don't read the
+field as a check that failed.
 
 A module that exports needs more than a copy, and `reports/deployment.json`
 records it under `runtime_requirements`:
@@ -627,7 +633,7 @@ custom launch script fails explicitly instead of launching a serving framework.
 | `stop_reason: export_never_landed` | the run closed without an exporting KEEP; `ungated_close_reason` says what actually ended it, `export_attempts` how many rounds went by |
 | Export gate never opens, budget drains | `--phase-budget-framework-pct` affords fewer than two 60-min patch specialists; preflight warns with the share that fits |
 | `aoti` block appears to do nothing | it is ignored under `schema_version: 1`; bump to 2 |
-| A KEEP recorded at negative delta | the first export is kept on correctness (`keep_reason: export_landed`); later candidates grade against it, not eager |
+| A change accepted even though it made things slower | the first compiled version is accepted for being correct, not fast (`keep_reason: export_landed`); everything after it is compared against the compiled version, not the original |
 | Deployed module is slow on its first call, then fast | it compiles the AOTInductor package at the destination; see `runtime_requirements` |
 
 For failures unrelated to this path, see [Troubleshooting
