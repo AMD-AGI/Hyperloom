@@ -213,3 +213,33 @@ async def test_a_patch_to_a_component_with_a_native_tree_names_the_commit_that_t
     assert (component.upstream_repo, component.upstream_ref) == ("https://github.com/vllm-project/vllm.git", "2" * 40)
     assert "note" not in taken
     assert b"b/csrc/cache.cu" in LocalBlobStore(tmp_path / "blobs").get(component.patches[0].sha256)
+
+
+def _agent_commit(worktree, message: str) -> str:
+    git = ["git", "-c", "user.name=agent", "-c", "user.email=agent@a"]
+    subprocess.run([*git, "commit", "-qam", message], cwd=worktree, check=True)
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, check=True, capture_output=True, text=True).stdout
+
+
+async def test_a_change_the_specialist_committed_in_its_worktree_is_still_its_patch(rig):
+    await rig.server.call("worktree_sync")
+    rig.config.write_bytes(b"max_num_seqs = 256\n")
+    _agent_commit(rig.config.parent.parent, "max_num_seqs 256")
+
+    taken = await rig.server.call("worktree_patch", component="vllm")
+
+    assert taken["parent_commit"] == rig.root
+    (stored,) = apply(ROOT, RecipeDelta.from_document(taken["delta"])).component("vllm").patches
+    assert b"+max_num_seqs = 256" in rig.blobs.get(stored.sha256)
+
+
+async def test_a_sync_names_the_commits_of_the_specialist_s_it_drops(rig):
+    await rig.server.call("worktree_sync")
+    rig.config.write_bytes(b"max_num_seqs = 256\n")
+    commit = _agent_commit(rig.config.parent.parent, "max_num_seqs 256")
+
+    synced = await rig.server.call("worktree_sync")
+
+    assert synced["dropped_commits"] == [commit.strip()]
+    assert rig.config.read_bytes() == b"max_num_seqs = 128\n"
+    assert (await rig.server.call("worktree_sync"))["dropped_commits"] == []

@@ -64,6 +64,9 @@ _FIXED_CONFIG = (
 )
 _STAGE = ("add", "--all", "--")
 _HEAD = "HEAD"
+#: The commit the worktree's last sync made, kept apart for each worktree as ``refs/worktree/*`` is: an agent may commit
+#: its change on top, and the change is everything since.
+_SYNCED = "refs/worktree/hyperloom/synced"
 _REV_PARSE = "rev-parse"
 _GIT_DIR = ".git"
 _QUIET = "--quiet"
@@ -291,7 +294,8 @@ class Changes:
 
 
 class BranchWorktree:
-    """One branch's checkout of the source base; the experiment commit its HEAD holds is named in HEAD's subject."""
+    """One branch's checkout of the source base; the experiment commit it was last synced to is named in the subject of
+    the commit that sync made."""
 
     def __init__(
         self,
@@ -313,18 +317,22 @@ class BranchWorktree:
         return None if native is None else Upstream(native.upstream_repo, native.upstream_ref)
 
     def head(self) -> str | None:
-        """The experiment commit HEAD holds, or ``None`` while it holds the installed packages alone."""
-        subject = _git(self.path, "log", "-1", "--format=%s").strip()
-        return subject[len(HEAD_SUBJECT) :] if subject.startswith(HEAD_SUBJECT) else None
+        """The experiment commit the worktree was last synced to, or ``None`` before its first sync."""
+        synced = self._synced()
+        return (
+            None if synced is None else _git(self.path, "log", "-1", "--format=%s", synced).strip()[len(HEAD_SUBJECT) :]
+        )
 
-    def sync(self, head: str, patches: Sequence[bytes]) -> None:
-        """Make the worktree ``head``: the installed packages with its ``patches`` applied in order.
+    def sync(self, head: str, patches: Sequence[bytes]) -> tuple[str, ...]:
+        """Make the worktree ``head``: the installed packages with its ``patches`` applied in order; returns the
+        commits made in the worktree since its last sync, which it drops, the oldest first.
 
-        Uncommitted edits are dropped, so a change made against an older head never reaches a diff against this one.
+        Uncommitted edits are dropped too, so a change made against an older head never reaches a diff against this one.
         """
+        dropped = tuple(_git(self.path, "rev-list", "--reverse", f"{self._since()}..{_HEAD}").split())
         if self.head() == head:
-            self._reset(_HEAD)
-            return
+            self._reset(_SYNCED)
+            return dropped
         self._reset(BASE_BRANCH)
         with tempfile.TemporaryDirectory(prefix="mb-sync-") as scratch:
             for index, patch in enumerate(patches):
@@ -332,9 +340,12 @@ class BranchWorktree:
                 patch_file.write_bytes(patch)
                 _git(self.path, "apply", "--whitespace=nowarn", str(patch_file))
         _commit_all(self.path, f"{HEAD_SUBJECT}{head}")
+        _git(self.path, "update-ref", _SYNCED, _HEAD)
+        return dropped
 
     def diff(self, component: str) -> str:
-        """The worktree's change to ``component`` against its head, as the patch the toolbox applies; empty when none."""
+        """The worktree's change to ``component`` against its head, committed in the worktree or not, as the patch the
+        toolbox applies; empty when none."""
         return self._staged_diff(component, *_PLAIN)
 
     def commit(self) -> str:
@@ -418,7 +429,14 @@ class BranchWorktree:
     def _staged_diff(self, component: str, *options: str) -> str:
         paths = self._paths(component)
         _git(self.path, *_STAGE, *paths)
-        return _git(self.path, _DIFF, _CACHED, *options, _HEAD, "--", *paths)
+        return _git(self.path, _DIFF, _CACHED, *options, self._since(), "--", *paths)
+
+    def _synced(self) -> str | None:
+        return _git(self.path, "for-each-ref", "--format=%(objectname)", _SYNCED).strip() or None
+
+    def _since(self) -> str:
+        """The commit a change in the worktree is made on: its last sync's, or the installed packages before one."""
+        return self._synced() or BASE_BRANCH
 
     def _paths(self, component: str) -> tuple[str, ...]:
         """``component``'s package, the meta trees the source base laid out beside it, and its native tree, less the
