@@ -25,6 +25,8 @@ __all__ = ["COMPILED_REGISTRY_MARKER", "BuildLog", "scan_builds", "server_logs"]
 
 SERVER_LOG = "server.log"
 _MAX_LOG_BYTES = 256 * 1024**2
+#: The most of one line held at a time; a longer one is read in pieces of this size, which no build line comes near.
+_MAX_LINE_BYTES = 1024**2
 _MAX_LOGS = 64
 _NAME = r"(?:\[([A-Za-z0-9_.-]+)\]|(\S+?))"
 _START = re.compile(rf"start build {_NAME}(?:\s|$)")
@@ -92,12 +94,13 @@ def scan_builds(logs: Iterable[Path]) -> BuildLog:
 def _scan(
     handle: BinaryIO, seconds: dict[str, float], started: set[str], failed: dict[str, str], missing: dict[str, str]
 ) -> None:
+    """Read ``handle`` up to the budget, which bounds what is read whether or not the log breaks its lines. A failed-build
+    record still open where the reading stops (the log was cut inside it) names its module with what it said so far:
+    its opening tag already says the build failed."""
     budget = _MAX_LOG_BYTES
     record: _FailedBuild | None = None
-    for raw in handle:
+    while budget > 0 and (raw := handle.readline(min(budget, _MAX_LINE_BYTES))):
         budget -= len(raw)
-        if budget < 0:
-            return
         line = raw.decode("utf-8", errors="replace")
         if record is not None:
             if record.take(line):
@@ -120,6 +123,8 @@ def _scan(
         if done:
             name = _module(done)
             seconds[name] = max(seconds.get(name, 0.0), float(done.group(3)))
+    if record is not None:
+        failed.setdefault(record.module, record.excerpt())
 
 
 class _FailedBuild:
