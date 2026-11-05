@@ -17,6 +17,7 @@ import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 
@@ -47,13 +48,9 @@ def launch_usage(process_log: Path) -> LaunchUsage:
     session_id, model = "", UNNAMED
     for row in _rows(process_log):
         session_id = session_id or str(row.get("session_id") or row.get("thread_id") or "")
-        message, usage, per_model = row.get("message"), row.get("usage"), row.get("modelUsage")
-        if (
-            row.get("type") == "assistant"
-            and isinstance(message, Mapping)
-            and isinstance(message.get("usage"), Mapping)
-            and not str(message.get("model") or "").startswith(_SYNTHETIC)
-        ):
+        usage, per_model = row.get("usage"), row.get("modelUsage")
+        message = _model_call(row)
+        if message is not None:
             model = str(message.get("model") or UNNAMED)
             key = str(message.get("id") or f"#{len(unfinished)}")
             unfinished[key] = (model, TokenCounts.from_anthropic_usage(message["usage"]))
@@ -68,6 +65,18 @@ def launch_usage(process_log: Path) -> LaunchUsage:
     for named, counts in [*running.items(), *unfinished.values()]:
         _add(tokens, named, counts)
     return LaunchUsage(tokens, session_id)
+
+
+def _model_call(row: Mapping[str, object]) -> Mapping[str, Any] | None:
+    """The message of the Claude model call ``row`` logs; ``None`` for any other row."""
+    message = row.get("message")
+    if (
+        row.get("type") != "assistant"
+        or not isinstance(message, Mapping)
+        or not isinstance(message.get("usage"), Mapping)
+    ):
+        return None
+    return None if str(message.get("model") or "").startswith(_SYNTHETIC) else message
 
 
 def _add(tokens: dict[str, TokenCounts], model: str, counts: TokenCounts) -> None:
