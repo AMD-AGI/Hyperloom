@@ -12,7 +12,7 @@ import pytest
 
 from hyperloom_common.llm import llm_config
 from hyperloom_common.llm.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER, _ANTHROPIC_MANAGED_GATEWAY_ENVS
-from hyperloom.orchestrator.kernel.patch_conflict_merge import (
+from hyperloom.orchestrator.actions.executors.patch_conflict_merge import (
     STRATEGY_LLM,
     STRATEGY_STRICT,
     STRATEGY_THREE_WAY,
