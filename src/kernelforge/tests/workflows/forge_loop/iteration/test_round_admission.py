@@ -27,6 +27,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     RunState,
     apply_round_cost,
 )
+from kernelforge.workflows.forge_loop.iteration.iteration_types import _IterationFrame, _StagedMerge
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.workflows.forge_loop.roles.plan_critic import PLAN_CRITIC_TIMEOUT_SEC
 from kernelforge.workflows.forge_loop.iteration import round_admission
@@ -398,7 +399,7 @@ def test_the_finalize_reserve_is_its_own_bound_not_a_term_inside_admission(
     between = 0.5 * (clears_both + stacked)
     monkeypatch.setattr(loop, "_time_remaining", lambda: between)
 
-    assert loop._admit_next_round(1) == 3
+    assert loop._admit_next_round(1, requested_lanes=3) == 3
     assert loop._admit_dispatch(1) is True
     assert loop._is_budget_exhausted() is False
     # Both checks priced the round against the UNRESERVED remaining time. A
@@ -418,8 +419,54 @@ def test_the_finalize_reserve_is_its_own_bound_not_a_term_inside_admission(
     assert round_required > reserve
     monkeypatch.setattr(loop, "_time_remaining", lambda: reserve + 1.0)
     assert loop._is_budget_exhausted() is False
-    assert loop._admit_next_round(3) is None
+    assert loop._admit_next_round(3, requested_lanes=3) is None
     assert "ROUND REFUSED FOR BUDGET" in capsys.readouterr().out
+
+
+def _replanning_loop(tmp_path, monkeypatch, *, remaining_sec):
+    """A loop that holds no open round, as when the queued candidate it was priced around no longer applied."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    monkeypatch.setattr(loop, "_time_remaining", lambda: remaining_sec)
+    planned = []
+
+    async def _plan(*, iteration, orchestration_service, lanes=1):
+        planned.append((iteration, lanes, loop._round_started_at is not None))
+        await asyncio.sleep(0.01)
+        plan = workspace / "plan.md"
+        plan.write_text("# plan\n")
+        return plan, ""
+
+    monkeypatch.setattr(loop, "_run_orchestration", _plan)
+    frame = _IterationFrame(iteration=5, session_sink={}, merge=_StagedMerge(None, ""))
+    return loop, frame, planned
+
+
+def test_a_plan_bought_after_the_queued_candidate_no_longer_applies_is_an_admitted_round(tmp_path, monkeypatch):
+    loop, frame, planned = _replanning_loop(tmp_path, monkeypatch, remaining_sec=10_000.0)
+
+    plan = asyncio.run(loop._orchestrated_plan(frame, None, orchestration_service=object(), on_iteration=None))
+
+    assert plan is not None
+    # The plan was bought inside a one-lane round opened for it, and that round is what the ledger records.
+    assert planned == [(5, 1, True)]
+    loop._close_round()
+    recorded = loop.run_state.round_costs.recent[-1]
+    assert (recorded.iteration, recorded.lanes) == (5, 1)
+    assert recorded.planning_sec > 0
+
+
+def test_a_plan_the_budget_cannot_pay_for_after_a_dropped_candidate_ends_the_campaign(tmp_path, monkeypatch, capsys):
+    loop, frame, planned = _replanning_loop(tmp_path, monkeypatch, remaining_sec=0.0)
+
+    plan = asyncio.run(loop._orchestrated_plan(frame, None, orchestration_service=object(), on_iteration=None))
+
+    assert plan is None
+    assert planned == []
+    assert loop._round_started_at is None
+    assert loop.termination_reason == "round_budget_exhausted"
+    assert "ROUND REFUSED FOR BUDGET at iteration 5" in capsys.readouterr().out
 
 
 def test_is_force_stopped_detects_stop_file(tmp_path, monkeypatch):

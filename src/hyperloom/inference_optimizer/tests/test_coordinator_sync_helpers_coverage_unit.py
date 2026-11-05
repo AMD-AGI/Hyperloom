@@ -7,35 +7,19 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    Backend,
-    MockBackend,
-    ScriptedPlan,
-)
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.knowledge.recipe_journal import (
     workload_kb_tags,
 )
 from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _silent_plan() -> ScriptedPlan:
-    return ScriptedPlan(turns=[], default_intent=_heartbeat())
-
-
-def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
+from .conftest import make_coordinator
 
 
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
-    return Coordinator(session_dir, backends=_build_backends())
+    return make_coordinator(session_dir)
 
 
 # -- The specialist wall-clock deadline ------------------------------------

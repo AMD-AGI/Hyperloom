@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Mapping, NamedTuple
 
 from hyperloom_common.checkpoint_quant import WeightDeclaration, weight_declarations
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -31,6 +31,12 @@ _PRECISION_TAGS: dict[str, tuple[str, ...]] = {
     "fp32": ("fp32", "float32"),
 }
 
+
+def _with_precision_aliases(peaks: Mapping[str, float]) -> dict[str, float]:
+    """*peaks*, keyed by precision, under every tag :data:`_PRECISION_TAGS` reads that precision as."""
+    return {alias: tflops for tag, tflops in peaks.items() for alias in _PRECISION_TAGS[tag]}
+
+
 #: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase).
 #: ``hbm_bw_gbps`` is vendor peak; ``peak_tflops`` is DENSE peak (missing key
 #: ⇒ 0.0 falls back to T_mem).
@@ -38,7 +44,7 @@ HW_SPECS: dict[str, dict[str, Any]] = {
     product: {
         "hbm_gb": board.hbm_gb,
         "hbm_bw_gbps": board.hbm_bw_gbps,
-        "peak_tflops": board.vendor_peaks_by_tag(_PRECISION_TAGS),
+        "peak_tflops": _with_precision_aliases(board.vendor_peak_tflops),
     }
     for product, board in AMD_GPU_BOARDS.items()
     if board.hbm_bw_gbps is not None
@@ -1020,42 +1026,11 @@ def compute_roofline_breakdown_from_state(
 
 # TraceLens PerfModel per-op (bottom-up) roofline breakdown.
 
-#: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files (same HBM
-#: bandwidth as HW_SPECS, empirically-measured max throughput instead of vendor
-#: dense TFLOPS).
-_MI300X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 708.0,
-    "bfloat16": 708.0,
-    "fp16": 654.0,
-    "float16": 654.0,
-    "fp8": 1273.0,
-    "float8_e4m3fn": 1273.0,
-    "float8_e5m2": 1273.0,
-    "fp32": 163.0,
-    "float32": 163.0,
-}
-_MI325X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 843.0,
-    "bfloat16": 843.0,
-    "fp16": 794.0,
-    "float16": 794.0,
-    "fp8": 1519.0,
-    "float8_e4m3fn": 1519.0,
-    "float8_e5m2": 1519.0,
-    "fp32": 194.0,
-    "float32": 194.0,
-}
+#: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files: measured max throughput instead of vendor dense
+#: TFLOPS. Only the peaks; bandwidth and capacity always come from HW_SPECS, the board rows.
 HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
-    "mi300x": {
-        "hbm_bw_gbps": 5300.0,
-        "hbm_gb": 192.0,
-        "peak_tflops": _MI300X_ACHIEVABLE_TFLOPS,
-    },
-    "mi325x": {
-        "hbm_bw_gbps": 6000.0,
-        "hbm_gb": 256.0,
-        "peak_tflops": _MI325X_ACHIEVABLE_TFLOPS,
-    },
+    "mi300x": {"peak_tflops": _with_precision_aliases({"bf16": 708.0, "fp16": 654.0, "fp8": 1273.0, "fp32": 163.0})},
+    "mi325x": {"peak_tflops": _with_precision_aliases({"bf16": 843.0, "fp16": 794.0, "fp8": 1519.0, "fp32": 194.0})},
 }
 
 
@@ -1121,6 +1096,20 @@ class OpBreakdown:
     time_s: float  # roofline time (s) across all layers
     bound: str  # "compute" | "memory"
     pct_time: float  # fraction of total forward time (0–1)
+
+
+def _repeated_op_row(name: str, fl: float, by: float, rep: int, timing: tuple[float, str, float, float]) -> OpBreakdown:
+    """The breakdown row for an op that runs ``rep`` times per forward, from one run's roofline timing."""
+    t, side, _t_mem, _t_cmp = timing
+    return OpBreakdown(
+        name=name,
+        flops=fl * rep,
+        bytes_moved=by * rep,
+        ai=(fl / by if by else 0.0),
+        time_s=t * rep,
+        bound=side,
+        pct_time=0.0,  # filled after total is known
+    )
 
 
 @_dc.dataclass(frozen=True)
@@ -1196,7 +1185,7 @@ def compute_roofline_from_perfmodel(
 ) -> "PerfModelBreakdown | None":
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
     gpu_key = (target.gpu_type or "").strip().lower()
-    spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
+    spec = HW_SPECS.get(gpu_key)
     if spec is None:
         return None
 
@@ -1268,21 +1257,12 @@ def compute_roofline_from_perfmodel(
         for name, K, N, rep in linears:
             fl = _gemm_flops(M=M, N=N, K=K)
             by = _gemm_bytes(M=M, N=N, K=K, weight_bpe=bpe, act_bpe=act_bpe)
-            t, side, t_mem, t_cmp = _roofline_time(fl, by)
+            timing = _roofline_time(fl, by)
+            t, _side, t_mem, t_cmp = timing
             total_t += t * rep
             total_mem_t += t_mem * rep
             total_cmp_t += t_cmp * rep
-            op_rows.append(
-                OpBreakdown(
-                    name=name,
-                    flops=fl * rep,
-                    bytes_moved=by * rep,
-                    ai=(fl / by if by else 0.0),
-                    time_s=t * rep,
-                    bound=side,
-                    pct_time=0.0,  # filled after total is known
-                )
-            )
+            op_rows.append(_repeated_op_row(name, fl, by, rep, timing))
         # MoE FFN: FusedMoE formula with batch-aware coupon E_active.
         if n_moe_layers > 0:
             # Latent-MoE decoders run the experts below the residual width.
@@ -1292,40 +1272,22 @@ def compute_roofline_from_perfmodel(
             )
             fl_moe = _fused_moe_flops(moe)
             by_moe = _fused_moe_bytes(moe, weight_bpe=expert_bpe, act_bpe=act_bpe)
-            t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)
+            timing_moe = _roofline_time(fl_moe, by_moe)
+            t_moe, _side_moe, t_mem_moe, t_cmp_moe = timing_moe
             total_t += t_moe * n_moe_layers
             total_mem_t += t_mem_moe * n_moe_layers
             total_cmp_t += t_cmp_moe * n_moe_layers
-            op_rows.append(
-                OpBreakdown(
-                    name="moe_fused",
-                    flops=fl_moe * n_moe_layers,
-                    bytes_moved=by_moe * n_moe_layers,
-                    ai=(fl_moe / by_moe if by_moe else 0.0),
-                    time_s=t_moe * n_moe_layers,
-                    bound=side_moe,
-                    pct_time=0.0,
-                )
-            )
+            op_rows.append(_repeated_op_row("moe_fused", fl_moe, by_moe, n_moe_layers, timing_moe))
         # SDPA
         attn = _SdpaShape(B=batch, N_Q=s_q, H_Q=n_q_heads, N_KV=s_kv, H_KV=n_kv_heads, d_h_qk=hd, d_h_v=hd)
         fl_s = _sdpa_flops(attn, causal=s_q == s_kv)
         by_s = _sdpa_bytes(attn, act_bpe)
-        t_s, side_s, t_mem_s, t_cmp_s = _roofline_time(fl_s, by_s)
+        timing_s = _roofline_time(fl_s, by_s)
+        t_s, _side_s, t_mem_s, t_cmp_s = timing_s
         total_t += t_s * n_layers
         total_mem_t += t_mem_s * n_layers
         total_cmp_t += t_cmp_s * n_layers
-        op_rows.append(
-            OpBreakdown(
-                name="sdpa",
-                flops=fl_s * n_layers,
-                bytes_moved=by_s * n_layers,
-                ai=(fl_s / by_s if by_s else 0.0),
-                time_s=t_s * n_layers,
-                bound=side_s,
-                pct_time=0.0,
-            )
-        )
+        op_rows.append(_repeated_op_row("sdpa", fl_s, by_s, n_layers, timing_s))
         op_rows = [_dc.replace(op, pct_time=op.time_s / total_t) for op in op_rows]
         return total_t, total_mem_t, total_cmp_t, op_rows
 

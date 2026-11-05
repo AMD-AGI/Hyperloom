@@ -350,3 +350,23 @@ def _resolve_run_topology(args: argparse.Namespace) -> int:
             if v:
                 os.environ[env_key] = v
     return nodes_resolved
+
+
+def _refuse_multinode_partition_shape(nodes: int, mode: str) -> None:
+    """Warn that a multi-node session records no partition shape; exit 2 when a mode was asserted."""
+    # Unconditional: the misleading record is produced by observing at all, not by asking for a mode.
+    print(
+        f"WARN: this session has --nodes {nodes}, and a compute-partition shape "
+        f"describes one card. The benchmark node's topology cannot be read from here, "
+        f"so no shape is recorded for this session.",
+        file=sys.stderr,
+    )
+    if mode:
+        print(
+            f"ERROR: --compute-partition-mode {mode} cannot be checked on a "
+            f"--nodes {nodes} session: the assertion is about the benchmark node's "
+            f"card, which this process cannot read. An unverifiable assertion is not "
+            f"a satisfied one. Drop the flag to run multi-node.",
+            file=sys.stderr,
+        )
+        sys.exit(2)

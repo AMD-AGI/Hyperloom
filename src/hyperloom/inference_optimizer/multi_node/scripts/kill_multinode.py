@@ -182,24 +182,32 @@ def _gpu_used_mb_for_pgids(pgids: set[int]) -> float | None:
         if not isinstance(fields, dict):
             continue
         for key, val in fields.items():
-            if not key.startswith("PID"):
-                continue
-            try:
-                pid = int(key[3:])
-            except ValueError:
-                continue
-            try:
-                if os.getpgid(pid) not in pgids:
-                    continue
-            except OSError:
-                continue
-            parts = [x.strip() for x in str(val).split(",")]
-            if len(parts) >= 3:
-                try:
-                    total_b += float(parts[2])
-                except (TypeError, ValueError):
-                    pass
+            vram_b = _pgid_entry_vram_b(key, val, pgids)
+            if vram_b is not None:
+                total_b += vram_b
     return total_b / (1024.0 * 1024.0)
+
+
+def _pgid_entry_vram_b(key: str, val: object, pgids: set[int]) -> float | None:
+    """Return the VRAM bytes of one ``--showpids`` entry when its process is in ``pgids``."""
+    if not key.startswith("PID"):
+        return None
+    try:
+        pid = int(key[3:])
+    except ValueError:
+        return None
+    try:
+        if os.getpgid(pid) not in pgids:
+            return None
+    except OSError:
+        return None
+    parts = [x.strip() for x in str(val).split(",")]
+    if len(parts) < 3:
+        return None
+    try:
+        return float(parts[2])
+    except (TypeError, ValueError):
+        return None
 
 
 def _wait_gpu_reclaimed(target_used_mb: float, slack_mb: float, timeout_s: float) -> float | None:

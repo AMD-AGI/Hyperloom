@@ -67,8 +67,9 @@ _IDENTITY_FIELDS = frozenset(KERNEL_CANONICAL_DIMENSIONS)
 #: dimension of its own, so the host derives it and the agent does not supply
 #: it. A draft that still carries one is accepted and the value replaced: the
 #: agent has no channel to hear a refusal on, so a rule it can only learn by
-#: breaking costs the whole analysis budget.
-_AGENT_IDENTITY_FIELDS = _IDENTITY_FIELDS - {"kernel_name"}
+#: breaking costs the whole analysis budget. ``gpu`` is host-owned the same way:
+#: publication pins it from the hardware, which the agent cannot see.
+_AGENT_IDENTITY_FIELDS = _IDENTITY_FIELDS - {"kernel_name", "gpu"}
 #: What ``normalize_operator_name`` answers when no usable name survives. Read
 #: from the normalizer rather than spelled out so the two cannot drift. Every
 #: unnameable operator would otherwise share one canonical id, and with it one

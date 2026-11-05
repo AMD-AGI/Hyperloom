@@ -14,7 +14,7 @@ from typing import Any, NamedTuple
 
 # Capture-vs-workload trace classification, shared across routes so a sidecar is
 # recognised identically whichever backend reads the profile.
-from ._capture_shapes import is_capture_fragment as _shared_is_capture_fragment
+from ._capture_shapes import is_capture_fragment
 from ._kernel_classification import is_kernel_event
 
 
@@ -78,25 +78,6 @@ _PHASE_FRAGMENT_RE = re.compile(
     r"^(?:decode_only|mixed|prefill_only|prefilldecode)\w*_steady_state\w*"
     r"_rank_\d+\.trace\.json(?:\.gz)?$"
 )
-
-
-def _is_capture_fragment(path: Path, root: Path | None = None) -> bool:
-    """Whether a trace path is a CUDA-graph capture sidecar.
-
-    Thin alias over :func:`_capture_shapes.is_capture_fragment`, which both
-    trace-analysis routes share so the answer cannot drift between them. Both
-    callers here need that same answer: discovery demotes sidecars below a real
-    capture, and the preflight refuses an input made of nothing else.
-
-    Args:
-        path: The trace file path to classify.
-        root: Directory the classification is relative to, when known.
-
-    Returns:
-        True when ``path`` is a graph-capture sidecar rather than a workload
-        trace.
-    """
-    return _shared_is_capture_fragment(path, root)
 
 
 def _capture_classification_root(trace_input: Path) -> Path:
@@ -210,7 +191,7 @@ def _trace_input_sort_key(path: Path, root: Path | None = None) -> tuple[int, in
         return (0, -size, name)
     if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
         return (2, -size, name)
-    if _is_capture_fragment(path, root):
+    if is_capture_fragment(path, root):
         return (3, -size, name)
     return (1, -size, name)
 

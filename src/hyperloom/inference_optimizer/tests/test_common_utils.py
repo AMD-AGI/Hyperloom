@@ -343,9 +343,9 @@ def test_recover_session_nonfatal_langfuse_and_package_errors(tmp_path: Path, mo
     monkeypatch.setattr(
         breakdown_mod, "write_breakdown_json", lambda s: calls.append("write") or s / "session_breakdown.json"
     )
-    monkeypatch.setattr(emitter, "flush_session", lambda _s: (_ for _ in ()).throw(RuntimeError("langfuse down")))
+    monkeypatch.setattr(emitter, "flush_session", lambda _s: (_ for _ in ()).throw(OSError("langfuse down")))
     monkeypatch.setattr(
-        breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(RuntimeError("zip failed"))
+        breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(OSError("zip failed"))
     )
 
     rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
@@ -1191,6 +1191,10 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
 
     fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
     assert gpu_types._autodetect_gpu_type() is None
+
+    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(KeyError("device"))
+    with pytest.raises(KeyError, match="device"):
+        gpu_types._autodetect_gpu_type()
 
 
 def test_gpu_type_autodetect_is_none_when_torch_cannot_load_its_library(monkeypatch: pytest.MonkeyPatch) -> None:

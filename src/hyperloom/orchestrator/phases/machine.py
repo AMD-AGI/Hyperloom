@@ -161,21 +161,14 @@ class MachinePhase(CoordinatorCollaborator):
             # boot_origin is a dev-debug label, NOT written to KB.
             "boot_origin": "coordinator_fallback",
         }
-        try:
-            from ..knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
+        from ..knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
 
-            run_t0_anchor(
-                client,
-                state,
-                T0AnchorRequest(workload=workload, hw=hw, extra_attrs=extra_attrs),
-                session_dir=self.session_dir,
-            )
-        except Exception:  # isolation boundary: the SDK-path T0 anchor, which leaves warm start empty
-            log.exception(
-                "Coordinator T0 fallback: run_t0_anchor raised (workload=%s, hw=%s); warm_start stays empty",
-                workload,
-                hw,
-            )
+        run_t0_anchor(
+            client,
+            state,
+            T0AnchorRequest(workload=workload, hw=hw, extra_attrs=extra_attrs),
+            session_dir=self.session_dir,
+        )
 
     def phase_flags(self) -> _phase_state.PhaseFlags:
         """The run's phase toggles, as the transition predicates read them."""
@@ -195,15 +188,12 @@ class MachinePhase(CoordinatorCollaborator):
         if not state.stop_reason:
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
-    async def _next_phase(
-        self, *, enablement_in_flight: bool, kernel_work_in_flight: bool
-    ) -> tuple[str, str, dict[str, Any]] | None:
+    async def _next_phase(self, *, in_flight: _phase_state.WorkInFlight) -> tuple[str, str, dict[str, Any]] | None:
         """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
         state = self.shared_state
         next_phase = _phase_state.compute_next_phase(
             state,
-            enablement_in_flight=enablement_in_flight,
-            kernel_work_in_flight=kernel_work_in_flight,
+            in_flight=in_flight,
             flags=self.phase_flags(),
         )
         if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -285,8 +275,8 @@ class MachinePhase(CoordinatorCollaborator):
             log.exception("Coordinator: phase_transition event bus write failed")
 
     async def _fire_phase_entry(self, move: Transition) -> None:
-        """Run the entered phase's side effects, recording rather than raising a hook failure."""
-        # Phase-entry side effects are additive; hook failures are logged only. They run on the transition itself,
+        """Run the entered phase's side effects, recording rather than raising a hook's storage failure."""
+        # Phase-entry side effects are additive; storage failures are logged only. They run on the transition itself,
         # which is what callers advancing into CLOSE rely on to see the sequencer's settlement once it returns.
         try:
             await self._on_phase_entered(
@@ -295,7 +285,7 @@ class MachinePhase(CoordinatorCollaborator):
                 reason=move.reason,
                 evidence=move.evidence,
             )
-        except Exception as exc:  # isolation boundary: the entered phase's hook, kept apart from the transition
+        except (sqlite3.Error, OSError) as exc:
             log.exception("Coordinator: _on_phase_entered hook failed")
             # This hook is also what closes the left phase's event, so a raise here is the case where that event never
             # got its exit evidence.
@@ -367,10 +357,14 @@ class MachinePhase(CoordinatorCollaborator):
             return
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
+        in_prelude = str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE
         await self._release_holds_no_task_will_settle()
         next_phase = await self._next_phase(
-            enablement_in_flight=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
-            kernel_work_in_flight=kernel_facts.agent_in_flight,
+            in_flight=_phase_state.WorkInFlight(
+                enablement=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
+                kernel=kernel_facts.agent_in_flight,
+                prelude=in_prelude and await self._prelude_work_in_flight(),
+            ),
         )
         await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
         dispatcher = self._coord.dispatcher
@@ -391,6 +385,18 @@ class MachinePhase(CoordinatorCollaborator):
                 evidence=evidence if isinstance(evidence, dict) else {},
             )
         )
+
+    async def _prelude_work_in_flight(self) -> bool:
+        """Whether a task doing PRELUDE-owned work is queued or running.
+
+        PRELUDE's budget exits read an idle phase -- one with nothing left it can buy -- as a terminal CLOSE, and
+        :meth:`_drain_for_transition` cancels the queue and everything in flight for a terminal transition. Any arm
+        the phase is allowed to dispatch, a retried ``baseline`` among them, is work it is still waiting on, so it
+        is read off the same store the drain would cancel from.
+        """
+        kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(_phase_state.PHASE_PRELUDE, frozenset())
+        pending = list(await self.tasks.queued()) + list(await self.tasks.running())
+        return any(str(getattr(task, "kind", "") or "").strip() in kinds for task in pending)
 
     async def _release_holds_no_task_will_settle(self) -> None:
         """Settle what the current phase's exit is waiting on when the task that would have settled it is gone.

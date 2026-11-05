@@ -304,8 +304,7 @@ def _additional_directories(handoff: HandoffBundle) -> list[str]:
     return [str(path.resolve()) for path in sorted(directories, key=str)]
 
 
-def _system_prompt() -> str:
-    return """\
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are the KernelForge kernel rewrite opportunity analyst.
 
 Analyze the supplied workload, serving context, trace evidence, and source trees.
@@ -414,8 +413,7 @@ task.json must use this exact top-level structure:
     "producer": "forge-loop",
     "framework": "<framework>",
     "framework_version": "<version>",
-    "backend": "<backend>",
-    "gpu": "<gpu>"
+    "backend": "<backend>"
   },
   "base_commit": "",
   "repo_root": "<absolute Git top-level>",
@@ -447,14 +445,14 @@ gpu_pct is this operator's share of end-to-end GPU time, the measured number
 your ranking already rests on. It is recorded and reported, never checked and
 never acted on, so no task is refused over it; omit it when you have only
 corroborated evidence rather than trade it for a figure you did not measure.
-identity carries no kernel_name: the host derives that dimension from
-operator_name, so supplying one of your own decides nothing. Give operator_name
+identity carries no kernel_name or gpu: the host derives kernel_name from
+operator_name and gpu from the hardware it runs on, so supplying either decides nothing. Give operator_name
 the entry point as the source writes it, keeping camel case and any namespace
 prefix -- `aiter::fusedAddRmsNorm`, not `fused_add_rms_norm`. Upstream
 pull-request search splits that spelling into terms, and a name normalized
 before it arrives has no boundaries left to split on.
 All identity values must use normalized lowercase ASCII. For example, write
-`"gpu": "mi355x"`, never `"MI355X"`. identity.backend describes the
+`"framework": "vllm"`, never `"vLLM"`. identity.backend describes the
 kernel-building expertise, not the platform; it must be one of {kernel_backends}. Do not publish an
 operator whose implementation language has no matching registered backend.
 kernel_path and every source_files entry must be tracked, repo-relative files in
@@ -493,7 +491,13 @@ draft: rewrite its `task.json` as `{"withdrawn": "<why>"}`. You have no way to
 delete a directory, so this is how a draft is taken back, and a withdrawn one
 is neither published nor held against you. You cannot end the session while a
 refused draft is neither fixed nor withdrawn.
-""".replace("{kernel_backends}", ", ".join(f"`{backend}`" for backend in KERNEL_BACKENDS))
+"""
+
+
+def _system_prompt() -> str:
+    return _SYSTEM_PROMPT_TEMPLATE.replace(
+        "{kernel_backends}", ", ".join(f"`{backend}`" for backend in KERNEL_BACKENDS)
+    )
 
 
 def _user_prompt(handoff: HandoffBundle, staging_root: Path) -> str:
@@ -595,18 +599,9 @@ class OpportunityAnalysisAgent:
                     session = _AnalysisSession(self.backend, spec, tool_guard, layout, refused, deadline, usage)
                     agent_result, resume_publications = await session.resume_for_refused_staging_drafts(agent_result)
                     publications.update(_by_draft(resume_publications))
-                    end_reason = str(agent_result.end_reason or "").strip()
-                    if end_reason == "timeout":
-                        status = ANALYSIS_STATUS_TIMED_OUT
-                        reason = agent_result.stderr_tail or "opportunity analysis timed out"
-                    elif end_reason not in TERMINAL_END_REASONS:
-                        # A provider failure measured nothing, so it must not reach the controller as an answer: the
-                        # controller turns a completed analysis with no tasks into `no_opportunity`, which is a
-                        # verdict on the workload.
-                        status = ANALYSIS_STATUS_FAILED
-                        reason = (
-                            agent_result.stderr_tail or f"opportunity analysis ended with {end_reason or 'no reason'}"
-                        )
+                    unfinished = self._unfinished_session(agent_result)
+                    if unfinished is not None:
+                        status, reason = unfinished
                 except asyncio.CancelledError:
                     if status != ANALYSIS_STATUS_TIMED_OUT:
                         raise
@@ -630,6 +625,22 @@ class OpportunityAnalysisAgent:
         outcome = self._outcome(status, reason, publications, usage, started)
         _write_analysis_result(layout, outcome)
         return outcome
+
+    @staticmethod
+    def _unfinished_session(agent_result) -> tuple[str, str] | None:
+        """The status and reason of a session that timed out or ended without a terminal reason, else None."""
+        end_reason = str(agent_result.end_reason or "").strip()
+        if end_reason == "timeout":
+            return ANALYSIS_STATUS_TIMED_OUT, agent_result.stderr_tail or "opportunity analysis timed out"
+        if end_reason not in TERMINAL_END_REASONS:
+            # A provider failure measured nothing, so it must not reach the controller as an answer: the
+            # controller turns a completed analysis with no tasks into `no_opportunity`, which is a
+            # verdict on the workload.
+            return (
+                ANALYSIS_STATUS_FAILED,
+                agent_result.stderr_tail or f"opportunity analysis ended with {end_reason or 'no reason'}",
+            )
+        return None
 
     def _session_spec(
         self, handoff: HandoffBundle, layout: ControllerLayout, tool_guard: _AnalysisToolGuard

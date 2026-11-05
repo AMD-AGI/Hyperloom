@@ -6,16 +6,16 @@
 from __future__ import annotations
 
 import json
-import os
 import stat
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo  # noqa: F401
 from hyperloom.orchestrator.tests._fixtures import (  # noqa: F401
     NoLaunchBackendInstalled,
     _isolate_session_layout_env,
@@ -203,40 +203,6 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     sd = make_session_dir()
     seed_target_analysis_marker(sd)
     return sd
-
-
-def init_git_repo(
-    path: Path,
-    *,
-    seed_file: str = "src.py",
-    seed_text: str = "def f():\n    return 1\n",
-) -> None:
-    """Initialise a minimal git repo with one commit under ``path``."""
-    path.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
-    env["GIT_AUTHOR_EMAIL"] = "hyperloom@test.local"
-    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
-    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
-    subprocess.run(
-        ["git", "init", "-b", "main", str(path)],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    (path / seed_file).write_text(seed_text, encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
 
 
 def make_fake_claude(
@@ -441,27 +407,6 @@ def use_fake_specialist_cli(
     fake = make_fake_claude(tmp_path / "bin", behavior=behavior, payload=payload)
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(fake))
     return fake
-
-
-def git_commit_all(path: Path, message: str) -> None:
-    """Stage everything under ``path`` and commit with a fixed non-interactive identity."""
-    env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
-    env["GIT_AUTHOR_EMAIL"] = "hyperloom@test.local"
-    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
-    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", message],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
 
 
 @pytest.fixture
@@ -671,6 +616,147 @@ def serving_lease_on_a_ray_double(monkeypatch):
         lease.close()
 
 
+#: A ``ray`` package whose ``init`` answers as ``FAKE_RAY_HEAD`` says, logging each call with its pid.
+_FAKE_RAY_PACKAGE = """
+import ctypes, os, subprocess, sys, time
+
+from . import exceptions
+
+
+def _note(line):
+    with open(os.environ["FAKE_RAY_LOG"], "a", encoding="utf-8") as log:
+        log.write(line + "\\n")
+
+
+def init(address=None, **_kwargs):
+    _note(f"init {os.getpid()} {address}")
+    mode = os.environ["FAKE_RAY_HEAD"]
+    if mode in ("silent", "gilhold"):
+        # A raylet that never replies, after the driver started a process of its own.
+        daemon = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
+        _note(f"daemon {daemon.pid}")
+    if mode == "gilhold":
+        # Waiting the way Ray's registration does: in native code with the GIL held, so no other thread of the
+        # process runs until it returns. Bounded, so a test that connects to it in-process fails instead of hanging.
+        ctypes.PyDLL(None).sleep(int(os.environ.get("FAKE_RAY_GIL_HOLD_SEC", "3600")))
+        return
+    while mode == "silent":
+        time.sleep(3600)
+    if mode == "raises":
+        raise ConnectionError("the raylet refused the driver")
+    if mode == "mismatch":
+        raise RuntimeError("Version mismatch: The cluster was started with: Ray: 2.44.1")
+
+
+def shutdown():
+    _note(f"shutdown {os.getpid()}")
+"""
+
+#: The ``ray.exceptions`` of :data:`_FAKE_RAY_PACKAGE`.
+_FAKE_RAY_EXCEPTIONS = """
+class RayError(Exception):
+    pass
+"""
+
+#: A ``ray`` CLI whose every command succeeds, logging its arguments.
+_FAKE_RAY_CLI = """#!/bin/sh
+echo "$*" >> "$FAKE_RAY_CLI_LOG"
+"""
+
+
+class FakeRayHead:
+    """A Ray head as a driver sees it: a stand-in ``ray`` package on the child ``PYTHONPATH``, and a ``ray`` CLI.
+
+    The routing decision sees a running head (``ray status`` answers) and starts from no verdict, so the first
+    question about the Ray route runs the real connect probe against this package. ``ray start`` and ``ray stop``
+    succeed, so a head this process (re)starts is this one again.
+    """
+
+    def __init__(self, root: Path, monkeypatch) -> None:
+        import os
+
+        from hyperloom.orchestrator.actions.executors import _ray_runtime
+
+        package = root / "ray"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(_FAKE_RAY_PACKAGE, encoding="utf-8")
+        (package / "exceptions.py").write_text(_FAKE_RAY_EXCEPTIONS, encoding="utf-8")
+        self._package = package
+        cli = root / "bin" / "ray"
+        cli.parent.mkdir()
+        cli.write_text(_FAKE_RAY_CLI, encoding="utf-8")
+        cli.chmod(0o755)
+        self._log = root / "ray_calls.log"
+        self._log.touch()
+        self._cli_log = root / "ray_cli.log"
+        self._cli_log.touch()
+        self._monkeypatch = monkeypatch
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")])))
+        monkeypatch.setenv("PATH", os.pathsep.join(filter(None, [str(cli.parent), os.environ.get("PATH")])))
+        monkeypatch.setenv("FAKE_RAY_LOG", str(self._log))
+        monkeypatch.setenv("FAKE_RAY_CLI_LOG", str(self._cli_log))
+        monkeypatch.setenv("FAKE_RAY_HEAD", "answers")
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+        monkeypatch.setattr(_ray_runtime, "_HEAD_VERDICT", _ray_runtime._HeadVerdict())
+        monkeypatch.setattr(_ray_runtime, "ray_status_ok", lambda: True)
+
+    def answers(self, mode: str) -> None:
+        """Answer every later driver connect as ``mode``.
+
+        ``answers``, ``raises`` or ``mismatch``; ``silent`` never returns, and ``gilhold`` holds the GIL for
+        ``FAKE_RAY_GIL_HOLD_SEC`` and then connects.
+        """
+        self._monkeypatch.setenv("FAKE_RAY_HEAD", mode)
+
+    def import_in_process(self) -> Any:
+        """Make this package the ``ray`` this process imports, for the in-process connect."""
+        import importlib.util
+        import sys
+
+        # The submodule first, so the package's ``from . import exceptions`` finds it registered.
+        modules = {}
+        for name, path, search in (
+            ("ray.exceptions", self._package / "exceptions.py", None),
+            ("ray", self._package / "__init__.py", [str(self._package)]),
+        ):
+            spec = importlib.util.spec_from_file_location(name, path, submodule_search_locations=search)
+            modules[name] = importlib.util.module_from_spec(spec)
+            self._monkeypatch.setitem(sys.modules, name, modules[name])
+            spec.loader.exec_module(modules[name])
+        return modules["ray"]
+
+    def calls(self) -> list[tuple[str, int]]:
+        """Every ``init``, ``daemon`` and ``shutdown`` so far, with the pid it names."""
+        return [(kind, int(pid)) for kind, pid, *_ in (line.split() for line in self._log.read_text().splitlines())]
+
+    def connects(self) -> list[int]:
+        """The pid of every driver that called ``init``."""
+        return [pid for kind, pid in self.calls() if kind == "init"]
+
+    def cli_calls(self) -> list[str]:
+        """The arguments of every ``ray`` CLI command so far."""
+        return self._cli_log.read_text(encoding="utf-8").splitlines()
+
+    def kill_daemons(self) -> None:
+        """SIGKILL every process a driver started that still runs: a probe that worked leaves none."""
+        import contextlib
+        import os
+        import signal
+
+        for kind, pid in self.calls():
+            with contextlib.suppress(OSError):
+                if kind == "daemon" and b"time.sleep(3600)" in Path(f"/proc/{pid}/cmdline").read_bytes():
+                    os.kill(pid, signal.SIGKILL)
+
+
+@pytest.fixture
+def fake_ray_head(tmp_path: Path, monkeypatch):
+    """A running Ray head that answers a driver connect; tests switch it with :meth:`FakeRayHead.answers`."""
+    head = FakeRayHead(tmp_path / "fake_ray_head", monkeypatch)
+    yield head
+    head.kill_daemons()
+
+
 def cli_call_sequence(entry: str) -> list[str]:
     """Every call ``entry`` makes, in source order, descending into the CLI package's own functions.
 
@@ -715,3 +801,73 @@ def cli_call_sequence(entry: str) -> list[str]:
 
     assert entry in functions, f"{entry} is not a module-level function of the CLI any more"
     return walk(entry, ())
+
+
+def write_benchmark_yaml(
+    path: Path,
+    *,
+    model: str = "/path/models/Qwen-Qwen3-8B",
+    framework: str = "sglang",
+    precision: str = "bf16",
+    benchmark_script: str | None = "sglang_mi300x.sh",
+) -> None:
+    """Write a single-GPU local benchmark config with profiling off; a ``None`` script leaves the key unset."""
+    benchmark: dict[str, Any] = {
+        "framework": framework,
+        "model": model,
+        "precision": precision,
+        "run_mode": "local",
+        "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
+        "timeout_seconds": 600,
+        "profiler": {
+            "torch_profiler": {"enabled": False},
+            "system_profiler": {"enabled": False},
+            "tracelens": {"enabled": False},
+        },
+        "gpu_selection": {"auto": False},
+    }
+    if benchmark_script is not None:
+        benchmark["benchmark_script"] = benchmark_script
+    with path.open("w") as f:
+        yaml.safe_dump({"benchmark": benchmark}, f)
+
+
+def make_mock_critic_coordinator(session_dir: Path):
+    """A real Coordinator whose orchestration plan is empty and whose critic is the mock critic."""
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    backends = {
+        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
+        "critic": MockCriticBackend(),
+    }
+    return Coordinator(session_dir, backends=backends)
+
+
+def silent_backends() -> dict[str, object]:
+    """Orchestration and critic mock backends sharing one plan that only sends heartbeats."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+
+    silent = ScriptedPlan(
+        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+    )
+    return {
+        "orchestration": MockBackend(silent, name="o"),
+        "critic": MockBackend(silent, name="c"),
+    }
+
+
+def heartbeat_orchestration_with_mock_critic() -> dict[str, object]:
+    """A heartbeat-only orchestration backend beside the default mock critic."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+    )
+    return {
+        "orchestration": MockBackend(silent, name="orch"),
+        "critic": MockCriticBackend(),
+    }

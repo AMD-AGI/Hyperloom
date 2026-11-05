@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +59,6 @@ class PerfGateMixin:
         """Throughput KEEP / REVERT decision, or no verdict when the run stopped it."""
         specialist_task_id = attempt.specialist_task_id
         shared_state = attempt.shared_state
-        done_payload = attempt.done_payload
         assert attempt.output_root is not None
         base_tput = _live_base_tput(params, shared_state)
 
@@ -78,46 +78,8 @@ class PerfGateMixin:
                 "workspace": str(attempt.output_root),
             }
 
-        graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
-        delta_pct = _graded_delta_pct(graded, bench_result, base_tput)
-
-        accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
-        acc_block, acc_reason = _accuracy_block(params, accuracy_pass, specialist_task_id)
-        acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
-
-        gate_pass = (
-            graded.comparable
-            and delta_pct is not None
-            and delta_pct >= keep_threshold_pct
-            and not graded.veto_reason
-            and not acc_block
-        )
-        fix_finding = first_text(_done_field(done_payload, "resolves_finding"))
-        fix_refusals: list[str] = []
-        correctness_fix = False
-        if not gate_pass and fix_finding:
-            fix_delta_pct = gain_pct(graded.candidate, graded.reference) if graded.graded_on_intvty else delta_pct
-            fix_refusals = _correctness_fix_refusals(
-                fix_finding,
-                shared_state=shared_state,
-                bench_result=bench_result,
-                graded=graded,
-                delta_pct=fix_delta_pct,
-            ) + _fix_accuracy_refusals(accuracy_pass)
-            if not fix_refusals:
-                gate_pass = correctness_fix = True
-                delta_pct = fix_delta_pct
-        measured = _PatchMeasurement(
-            bench_result=bench_result,
-            new_tput=bench_result.get("output_throughput"),
-            delta_pct=delta_pct,
-            base_tput=base_tput,
-            keep_threshold_pct=keep_threshold_pct,
-            accuracy_pass=accuracy_pass,
-            acc_delta_pct=acc_delta_pct,
-            cfg_fingerprint=canonical_fingerprint(params.get("extra_server_args"), params.get("extra_envs")),
-            measured_against=_measured_against(params, base_tput=base_tput),
-        )
+        verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, _GateBasis(base_tput, keep_threshold_pct))
+        measured = verdict.measured
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)
 
@@ -140,43 +102,9 @@ class PerfGateMixin:
         if parity_revert is not None:
             return parity_revert
 
-        if gate_pass:
-            await self._maybe_write_framework_kb_record(measured.lesson("integrated"), attempt=attempt, params=params)
-            commit_failure, keep_committed = self._commit_accepted_work(
-                attempt, f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)"
-            )
-            if commit_failure:
-                return _uncommitted_revert(
-                    attempt,
-                    commit_failure,
-                    "KEEP",
-                    output_throughput=measured.new_tput,
-                    delta_pct=delta_pct,
-                    measured_against=measured.measured_against,
-                    bench_result=bench_result,
-                )
-            if correctness_fix:
-                reason = (
-                    f"correctness fix {fix_finding} verified at {_fix_axis(graded)} delta {measured.delta_pct:+.2f}%"
-                )
-                keep_reason, resolves_finding = KEEP_REASON_CORRECTNESS_FIX, fix_finding
-            else:
-                reason = f"throughput delta {measured.delta_pct:+.2f}% >= {measured.keep_threshold_pct:.2f}%"
-                keep_reason, resolves_finding = "", ""
-            return _kept_patch(
-                attempt,
-                measured,
-                params=params,
-                reason=reason,
-                keep_reason=keep_reason,
-                resolves_finding=resolves_finding,
-                # The bundle cleared the gate, so its switches join the running
-                # configuration and are registered as levers that are already on.
-                # Attribution from here is leave-one-out.
-                framework_levers=switch_manifest,
-                framework_lever_outcome=("default_on" if switch_manifest else ""),
-                switch_off_parity=parity,
-                **self._capture_source_layer(attempt, params, committed=keep_committed),
+        if verdict.passed:
+            return await self._keep_gated_patch(
+                attempt, verdict, params=params, switch_manifest=switch_manifest, parity=parity
             )
 
         # Two-tier verdict for a framework-rewrite patch. Every rewrite in it
@@ -201,21 +129,74 @@ class PerfGateMixin:
         await self._maybe_write_framework_kb_record(
             measured.lesson("reverted_smoke_fail"), attempt=attempt, params=params
         )
+        fix_refusals = verdict.fix_refusals
         reasons = _gate_failure_reasons(
-            graded,
+            verdict.graded,
             measured.delta_pct,
             measured.keep_threshold_pct,
-            acc_reason,
-            f"correctness fix {fix_finding} refused: {'; '.join(fix_refusals)}" if fix_refusals else "",
+            verdict.accuracy_reason,
+            f"correctness fix {verdict.fix_finding} refused: {'; '.join(fix_refusals)}" if fix_refusals else "",
             eval_probe_summary(gate_evidence.get("eval_probe")),
         )
         return _perf_revert(
             attempt,
             measured,
             status=_revert_status(
-                measured, accuracy_blocks=acc_block, accuracy_verdict=accuracy_pass, fix_refusals=fix_refusals
+                measured,
+                accuracy_blocks=verdict.accuracy_block,
+                accuracy_verdict=measured.accuracy_pass,
+                fix_refusals=fix_refusals,
             ),
             reason="; ".join(reasons) or "gate failed",
+        )
+
+    async def _keep_gated_patch(
+        self,
+        attempt: IntegrateAttempt,
+        verdict: _GateVerdict,
+        *,
+        params: dict[str, Any],
+        switch_manifest: list[dict[str, Any]],
+        parity: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Commit a patch that cleared the gate and return its KEEP verdict, or the revert when the commit failed."""
+        measured = verdict.measured
+        delta_pct = measured.delta_pct
+        fix_finding = verdict.fix_finding
+        await self._maybe_write_framework_kb_record(measured.lesson("integrated"), attempt=attempt, params=params)
+        commit_failure, keep_committed = self._commit_accepted_work(
+            attempt, f"hyperloom KEEP {attempt.specialist_task_id} ({delta_pct:+.2f}%)"
+        )
+        if commit_failure:
+            return _uncommitted_revert(
+                attempt,
+                commit_failure,
+                "KEEP",
+                output_throughput=measured.new_tput,
+                delta_pct=delta_pct,
+                measured_against=measured.measured_against,
+                bench_result=measured.bench_result,
+            )
+        if verdict.correctness_fix:
+            reason = f"correctness fix {fix_finding} verified at {_fix_axis(verdict.graded)} delta {measured.delta_pct:+.2f}%"
+            keep_reason, resolves_finding = KEEP_REASON_CORRECTNESS_FIX, fix_finding
+        else:
+            reason = f"throughput delta {measured.delta_pct:+.2f}% >= {measured.keep_threshold_pct:.2f}%"
+            keep_reason, resolves_finding = "", ""
+        return _kept_patch(
+            attempt,
+            measured,
+            params=params,
+            reason=reason,
+            keep_reason=keep_reason,
+            resolves_finding=resolves_finding,
+            # The bundle cleared the gate, so its switches join the running
+            # configuration and are registered as levers that are already on.
+            # Attribution from here is leave-one-out.
+            framework_levers=switch_manifest,
+            framework_lever_outcome=("default_on" if switch_manifest else ""),
+            switch_off_parity=parity,
+            **self._capture_source_layer(attempt, params, committed=keep_committed),
         )
 
     async def _parity_gate(
@@ -276,16 +257,7 @@ class PerfGateMixin:
         committed: bool,
     ) -> dict[str, Any]:
         """Snapshot the source files this KEEP leaves in the tree, so it can be replayed elsewhere."""
-        evidence: dict[str, Any] = {
-            "source_snapshot": "",
-            "source_manifest": "",
-            "source_snapshot_complete": False,
-            "source_import_root": "",
-            "source_realized_patch": "",
-            "source_artifacts_outside_root": 0,
-            "target_files": [],
-            "base_sha": "",
-        }
+        evidence = _empty_source_evidence()
         framework_root = attempt.framework_root
         if framework_root is None:
             return evidence
@@ -429,43 +401,7 @@ class PerfGateMixin:
                     "because the patch was shown to be non-inert"
                 ),
             }
-        delta_pct = gain_pct_or_zero(float(parity_tput), base_tput)
-        if abs(delta_pct) > band_pct:
-            return {
-                "ran": True,
-                "ok": False,
-                "tput": float(parity_tput),
-                "delta_pct": delta_pct,
-                "band_pct": band_pct,
-                "accuracy_pass": accuracy_pass,
-                "reason": (
-                    f"switch-off parity leg moved throughput {delta_pct:+.2f}% "
-                    f"(band +/-{band_pct:.2f}%): the patch changes behaviour with "
-                    f"every switch unset, so it is not a default-off rewrite"
-                ),
-            }
-        if accuracy_pass is False:
-            return {
-                "ran": True,
-                "ok": False,
-                "tput": float(parity_tput),
-                "delta_pct": delta_pct,
-                "band_pct": band_pct,
-                "accuracy_pass": accuracy_pass,
-                "reason": (
-                    "switch-off parity leg failed its correctness gate: the patch "
-                    "changes output with every switch unset"
-                ),
-            }
-        return {
-            "ran": True,
-            "ok": True,
-            "tput": float(parity_tput),
-            "delta_pct": delta_pct,
-            "band_pct": band_pct,
-            "accuracy_pass": accuracy_pass,
-            "reason": f"switch-off parity within +/-{band_pct:.2f}% ({delta_pct:+.2f}%)",
-        }
+        return _parity_verdict(parity_tput, accuracy_pass, base_tput, band_pct)
 
     async def _keep_inert_switches(
         self,
@@ -554,6 +490,146 @@ class PerfGateMixin:
             "framework_lever_outcome": "registered_off",
             "switch_off_parity": parity,
         }
+
+
+@dataclass(frozen=True)
+class _GateBasis:
+    """The base throughput a patch is graded against and the delta it has to clear."""
+
+    base_tput: float
+    keep_threshold_pct: float
+
+
+@dataclass(frozen=True)
+class _GateVerdict:
+    """The measurement the KEEP gate weighed, its verdict, and the accuracy and correctness-fix findings behind it."""
+
+    measured: _PatchMeasurement
+    graded: GradedComparison
+    passed: bool
+    accuracy_block: bool
+    accuracy_reason: str
+    fix_finding: str
+    fix_refusals: list[str]
+    correctness_fix: bool
+
+
+def _weigh_gate(
+    attempt: IntegrateAttempt,
+    params: dict[str, Any],
+    bench_result: dict[str, Any],
+    gate_evidence: dict[str, Any],
+    basis: _GateBasis,
+) -> _GateVerdict:
+    """Grade the bench against the base and weigh the accuracy gate and any correctness-fix claim."""
+    shared_state = attempt.shared_state
+    base_tput, keep_threshold_pct = basis.base_tput, basis.keep_threshold_pct
+    graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
+    delta_pct = _graded_delta_pct(graded, bench_result, base_tput)
+
+    accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
+    acc_block, acc_reason = _accuracy_block(params, accuracy_pass, attempt.specialist_task_id)
+    acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
+
+    gate_pass = (
+        graded.comparable
+        and delta_pct is not None
+        and delta_pct >= keep_threshold_pct
+        and not graded.veto_reason
+        and not acc_block
+    )
+    fix_finding = first_text(_done_field(attempt.done_payload, "resolves_finding"))
+    fix_refusals: list[str] = []
+    correctness_fix = False
+    if not gate_pass and fix_finding:
+        fix_delta_pct = gain_pct(graded.candidate, graded.reference) if graded.graded_on_intvty else delta_pct
+        fix_refusals = _correctness_fix_refusals(
+            fix_finding,
+            shared_state=shared_state,
+            bench_result=bench_result,
+            graded=graded,
+            delta_pct=fix_delta_pct,
+        ) + _fix_accuracy_refusals(accuracy_pass)
+        if not fix_refusals:
+            gate_pass = correctness_fix = True
+            delta_pct = fix_delta_pct
+    measured = _PatchMeasurement(
+        bench_result=bench_result,
+        new_tput=bench_result.get("output_throughput"),
+        delta_pct=delta_pct,
+        base_tput=base_tput,
+        keep_threshold_pct=keep_threshold_pct,
+        accuracy_pass=accuracy_pass,
+        acc_delta_pct=acc_delta_pct,
+        cfg_fingerprint=canonical_fingerprint(params.get("extra_server_args"), params.get("extra_envs")),
+        measured_against=_measured_against(params, base_tput=base_tput),
+    )
+    return _GateVerdict(
+        measured=measured,
+        graded=graded,
+        passed=gate_pass,
+        accuracy_block=acc_block,
+        accuracy_reason=acc_reason,
+        fix_finding=fix_finding,
+        fix_refusals=fix_refusals,
+        correctness_fix=correctness_fix,
+    )
+
+
+def _empty_source_evidence() -> dict[str, Any]:
+    """The source-layer evidence of a KEEP before anything was captured."""
+    return {
+        "source_snapshot": "",
+        "source_manifest": "",
+        "source_snapshot_complete": False,
+        "source_import_root": "",
+        "source_realized_patch": "",
+        "source_artifacts_outside_root": 0,
+        "target_files": [],
+        "base_sha": "",
+    }
+
+
+def _parity_verdict(
+    parity_tput: float, accuracy_pass: bool | None, base_tput: float, band_pct: float
+) -> dict[str, Any]:
+    """Judge a measured parity leg: inside the noise band around the base and passing its correctness gate."""
+    delta_pct = gain_pct_or_zero(float(parity_tput), base_tput)
+    if abs(delta_pct) > band_pct:
+        return {
+            "ran": True,
+            "ok": False,
+            "tput": float(parity_tput),
+            "delta_pct": delta_pct,
+            "band_pct": band_pct,
+            "accuracy_pass": accuracy_pass,
+            "reason": (
+                f"switch-off parity leg moved throughput {delta_pct:+.2f}% "
+                f"(band +/-{band_pct:.2f}%): the patch changes behaviour with "
+                f"every switch unset, so it is not a default-off rewrite"
+            ),
+        }
+    if accuracy_pass is False:
+        return {
+            "ran": True,
+            "ok": False,
+            "tput": float(parity_tput),
+            "delta_pct": delta_pct,
+            "band_pct": band_pct,
+            "accuracy_pass": accuracy_pass,
+            "reason": (
+                "switch-off parity leg failed its correctness gate: the patch changes output with every switch unset"
+            ),
+        }
+    return {
+        "ran": True,
+        "ok": True,
+        "tput": float(parity_tput),
+        "delta_pct": delta_pct,
+        "band_pct": band_pct,
+        "accuracy_pass": accuracy_pass,
+        "reason": f"switch-off parity within +/-{band_pct:.2f}% ({delta_pct:+.2f}%)",
+    }
 
 
 def _graded_delta_pct(graded: GradedComparison, bench_result: dict[str, Any], base_tput: float) -> float | None:

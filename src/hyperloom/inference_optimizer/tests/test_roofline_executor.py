@@ -1593,8 +1593,8 @@ async def test_the_compute_bound_reprofile_reports_both_of_its_steps(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path, monkeypatch):
-    """An attempt that raises must still appear in the event's ``runs``."""
+async def test_a_raising_compute_bound_reprofile_crashes_with_the_attempt_rowed(tmp_path, monkeypatch):
+    """An attempt that raises crashes the action, and must still appear in the event's ``runs``."""
     from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
     from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import PROFILE_ATTEMPT_COMPUTE_BOUND
 
@@ -1625,11 +1625,9 @@ async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path
             "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
+        pytest.raises(RuntimeError, match="^server boot failed on the compute-bound retry$"),
     ):
-        result = await executor(_n26_ctx(tmp_path))
-
-    # Fail-soft is preserved: the host-bound analysis remains the outcome.
-    assert result["status"] == "succeeded"
+        await executor(_n26_ctx(tmp_path))
 
     event = next(e for e in read_timeline_events(tmp_path) if e.get("type") == "roofline")
     action = event["ext"]["actions"][0]
@@ -1638,8 +1636,9 @@ async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path
     raised = profile["runs"][-1]
     assert raised["attempt_reason"] == PROFILE_ATTEMPT_COMPUTE_BOUND
     assert raised["status"] == "failed"
-    assert "server boot failed" in raised["failure"]["message"]
-    assert action["analysis"]["compute_bound_reprofile"]["adopted"] is False
+    assert raised["failure"]["message"] == (
+        "compute-bound re-profile raised: RuntimeError('server boot failed on the compute-bound retry')"
+    )
 
 
 @pytest.mark.asyncio
@@ -1672,3 +1671,55 @@ async def test_431_nonzero_hot_never_flags_degraded(tmp_path):
     warnings = state.last_trace_analyze.get("trace_health_warnings") or []
     codes = [w.get("code") for w in warnings if isinstance(w, dict)]
     assert "cuda_graph_attribution_degraded" not in codes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("warning_codes", "degraded"),
+    [
+        (["trace_quality_poor"], True),
+        (["kernel_source_unresolved"], True),
+        (["trace_split_phase_unconfirmed"], True),
+        (["trace_split_manifest_missing"], True),
+        (["trace_analysis_input_promoted"], False),
+        ([], False),
+    ],
+)
+async def test_a_degrading_analysis_warning_marks_the_roofline_degraded(tmp_path, warning_codes, degraded):
+    """Hot kernels on a degraded analysis still dispatch, but the result says the analysis is degraded."""
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    ta = _trace_analyze_success()
+    ta["hot_kernels"] = [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 30.0}]
+    ta["trace_report_path"] = str(md)
+    ta["trace_health_warnings"] = [{"code": code, "severity": "warning"} for code in warning_codes]
+
+    p1, p2 = _patch_subs(_profile_success("/tmp/trace.gz"), ta)
+    with p1, p2:
+        result = await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
+
+    assert (result["status"], result["kernel_attribution_degraded"], result["degraded"]) == (
+        "succeeded",
+        False,
+        degraded,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_adopted_compute_bound_analysis_decides_degraded(tmp_path, monkeypatch):
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    host_bound = _ta_ok(report_md=md)
+    host_bound["trace_health_warnings"] = [
+        {"code": "high_gpu_idle_pct", "severity": "warning"},
+        {"code": "trace_quality_poor", "severity": "warning"},
+    ]
+    compute_bound = _ta_ok(report_md=md)
+    compute_bound["hot_kernels"] = [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 30.0}]
+    p1, p2, _calls = _n26_patch_subs(_profile_ok(), [host_bound, compute_bound])
+    monkeypatch.setattr(roofline_mod, "is_multi_node", lambda: True)
+
+    with p1, p2:
+        result = await RooflineExecutor(shared_state=_state())(_n26_ctx(tmp_path))
+
+    assert (result["status"], result["degraded"]) == ("succeeded", False)

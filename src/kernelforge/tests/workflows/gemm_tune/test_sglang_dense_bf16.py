@@ -228,26 +228,26 @@ class TestWithHipblasltFlag:
         assert "gradlib" not in cap["cmd"][1]
 
 
-# ── --timeout is a whole-batch budget under --shape_grouped ──────────────────
+# ── aiter's --timeout ends a chunk before its process is killed ─────────────
 
 
 class TestBatchTimeout:
     def test_scales_with_shape_count(self, tmp_path):
-        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=100_000))
-        assert tuner._batch_timeout_s(1) == sd._PER_SHAPE_BUDGET_S
-        assert tuner._batch_timeout_s(10) == 10 * sd._PER_SHAPE_BUDGET_S
+        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path))
+        assert tuner._batch_timeout_s(1, 100_000) == sd._PER_SHAPE_BUDGET_S
+        assert tuner._batch_timeout_s(10, 100_000) == 10 * sd._PER_SHAPE_BUDGET_S
 
-    def test_capped_by_the_outer_timeout(self, tmp_path):
-        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=1_000))
-        assert tuner._batch_timeout_s(100) == 1_000 - sd._TIMEOUT_RESERVE_S
+    def test_capped_by_the_chunk_kill_timeout(self, tmp_path):
+        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path))
+        assert tuner._batch_timeout_s(100, 1_000) == 1_000 - sd._TIMEOUT_RESERVE_S // 2
 
     def test_never_exceeds_the_outer_kill_timeout(self, tmp_path):
-        # The floor used to be raised back to per_shape, handing aiter a deadline past the point the outer watchdog
-        # kills it -- so it never reached its own timeout and never flushed what it had.
-        for timeout_s in (1, 30, 60, 120, 180, 240):
+        # A deadline past the point the outer watchdog kills aiter means it never reaches its own timeout and never
+        # flushes what it had.
+        for outer_s in (1, 30, 60, 120, 180, 240):
             for thorough in (False, True):
-                tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=timeout_s, thorough=thorough))
-                assert 1 <= tuner._batch_timeout_s(8) <= timeout_s, (timeout_s, thorough)
+                tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, thorough=thorough))
+                assert 1 <= tuner._batch_timeout_s(8, outer_s) <= outer_s, (outer_s, thorough)
 
 
 class TestStaleArtifactsAreCleared:
@@ -282,49 +282,39 @@ class TestStaleArtifactsAreCleared:
         assert result.status != "ok"
 
     def test_thorough_gets_a_bigger_per_shape_budget(self, tmp_path):
-        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=100_000, thorough=True))
-        assert tuner._batch_timeout_s(2) == 2 * sd._PER_SHAPE_BUDGET_THOROUGH_S
+        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, thorough=True))
+        assert tuner._batch_timeout_s(2, 100_000) == 2 * sd._PER_SHAPE_BUDGET_THOROUGH_S
 
     def test_timeout_is_actually_passed(self, tmp_path, monkeypatch):
         cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
-        _run(tmp_path, timeout_s=100_000)
+        _run(tmp_path, timeout_s=100_000, mp=2)
         cmd = cap["cmd"]
-        # 2 shapes (1 NK pair x 2 M values) at the fast per-shape budget.
+        # 2 shapes (1 NK pair x 2 M values) in one chunk on two cards, at the fast per-shape budget.
         assert cmd[cmd.index("--timeout") + 1] == str(2 * sd._PER_SHAPE_BUDGET_S)
 
 
-class TestShapeBudgetIsModeAware:
-    """A thorough shape costs ~5.5x a fast one, so it cannot be counted the same."""
+class TestShapeCap:
+    """Only the operator caps the shape list; the deadline decides the rest, chunk by chunk."""
 
-    def test_fast_and_thorough_use_their_own_cost(self, tmp_path):
-        fast = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=3_600))
-        thorough = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=3_600, thorough=True))
+    def test_no_cap_by_default(self, tmp_path):
+        for thorough in (False, True):
+            assert sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=10, thorough=thorough))._shape_cap() is None
 
-        assert fast._shape_budget() == (3_600 - sd._TIMEOUT_RESERVE_S) // sd._PER_SHAPE_COST_S
-        assert thorough._shape_budget() == ((3_600 - sd._TIMEOUT_RESERVE_S) // sd._PER_SHAPE_COST_THOROUGH_S)
-        # The whole point: an hour buys far fewer shapes when every backend is searched, and claiming otherwise is
-        # what produced empty results.
-        assert thorough._shape_budget() < fast._shape_budget()
-
-    def test_thorough_budget_is_finishable(self, tmp_path):
-        """The claimed shapes must fit inside the aiter timeout they are given."""
-        for timeout_s in (1_800, 3_600, 7_200):
-            tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=timeout_s, thorough=True))
-            n = tuner._shape_budget()
-            assert n * sd._PER_SHAPE_COST_THOROUGH_S <= timeout_s
-
-    def test_explicit_override_still_wins(self, tmp_path, monkeypatch):
+    def test_explicit_override_caps(self, tmp_path, monkeypatch):
         monkeypatch.setenv(sd._MAX_SHAPES_ENV, "7")
-        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=3_600, thorough=True))
-        assert tuner._shape_budget() == 7
+        assert sd.SglangDenseBf16Tuner(_ctx(tmp_path, thorough=True))._shape_cap() == 7
 
-    def test_at_least_one_shape_even_on_a_tiny_budget(self, tmp_path):
-        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=10, thorough=True))
-        assert tuner._shape_budget() == 1
+    def test_garbage_override_is_no_cap(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(sd._MAX_SHAPES_ENV, "many")
+        assert sd.SglangDenseBf16Tuner(_ctx(tmp_path))._shape_cap() is None
 
-    def test_default_timeout_fits_all_82_measured_buckets(self, tmp_path):
-        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=10_800))
-        assert tuner._shape_budget() >= 82
+    def test_demand_keeps_every_bucket_without_a_cap(self, tmp_path, monkeypatch):
+        entry = {"keys": [{"M": 64 * (i + 1), "N": 4096, "K": 4096, "requests": 1} for i in range(90)]}
+        monkeypatch.setattr(sd, "load_demand", lambda _path: {"demands": [entry]})
+        monkeypatch.setattr(sd, "demand_for_tuner", lambda _report, _name: entry)
+        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=600, demand_json=tmp_path / "demand.json"))
+        # 600s at the old fixed cost would have bought 5 of them.
+        assert len(tuner._demand_shapes()) == len(sd.demand_shapes(entry)) > 5
 
     def test_demand_log_compares_buckets_to_buckets(self, tmp_path, monkeypatch, caplog):
         entry = {
@@ -347,11 +337,11 @@ class TestShapeBudgetIsModeAware:
         assert [shape["M"] for shape in shapes] == [512]
         assert "1 of 2 padded-M buckets selected" in caplog.text
         assert "covering 2 of 3 distinct raw keys" in caplog.text
-        assert "from 10800s timeout" in caplog.text
+        assert "cap 1, 10800s timeout" in caplog.text
 
 
-class TestDerivedShapesRespectTheBudget:
-    """The derived cross product used to ignore the budget the demand list honours."""
+class TestDerivedShapesUnderACap:
+    """With FORGE_DEMAND_MAX_SHAPES set, the derived cross product is trimmed to it."""
 
     def test_untouched_when_the_product_already_fits(self):
         m = [1, 8, 64, 512]
@@ -390,43 +380,41 @@ class TestDerivedShapesRespectTheBudget:
         assert sd._fit_m_values_to_budget(m, 2, 0) == m
         assert sd._fit_m_values_to_budget([], 4, 2) == []
 
-    def test_generated_csv_row_count_matches_the_budget(self, tmp_path, monkeypatch):
-        # The real generator's scale: the stub in _prep is too small to trim.
+    def test_generated_csv_row_count_matches_the_cap(self, tmp_path, monkeypatch):
         nk = [(4096, 4096), (4096, 14336), (14336, 4096), (6144, 4096)]
         ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-        cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
+        _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
         monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(nk))
         monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(ms))
+        monkeypatch.setenv(sd._MAX_SHAPES_ENV, "8")
 
         _run(tmp_path, timeout_s=1_800, thorough=True)
 
-        untuned = Path(cap["cmd"][cap["cmd"].index("-i") + 1])
-        rows = untuned.read_text(encoding="utf-8").strip().splitlines()[1:]
-        budget = (1_800 - sd._TIMEOUT_RESERVE_S) // sd._PER_SHAPE_COST_THOROUGH_S
-        # Untrimmed this is 4 x 14 = 56 shapes, ~23000s of work in a 1680s window.
-        assert len(nk) * len(ms) == 56
-        # At most one M per NK pair may overshoot: keeping every matmul beats covering more token counts on fewer of
-        # them.
-        assert len(rows) <= max(budget, len(nk))
+        rows = _untuned_rows(tmp_path)
+        assert len(rows) == 8
         # Every matmul still has an entry.
         assert len({(r.split(",")[1], r.split(",")[2]) for r in rows}) == len(nk)
 
-    def test_fast_mode_keeps_its_wider_m_coverage(self, tmp_path, monkeypatch):
-        nk = [(4096, 4096), (4096, 14336), (14336, 4096), (6144, 4096)]
-        ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-        cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(nk))
-        monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(ms))
 
-        _run(tmp_path, timeout_s=1_800, thorough=False)
+def _untuned_rows(tmp_path: Path) -> list[str]:
+    untuned = tmp_path / "tuners" / "sglang_dense_bf16" / "untuned_dense_bf16.csv"
+    return untuned.read_text(encoding="utf-8").strip().splitlines()[1:]
 
-        untuned = Path(cap["cmd"][cap["cmd"].index("-i") + 1])
-        rows = untuned.read_text(encoding="utf-8").strip().splitlines()[1:]
-        # 56 shapes at the fast cost is 5208s of work; the 1680s window pays for 18, so fast mode trims too -- just
-        # far less aggressively than thorough. (18, not 22: carrying torch for the baseline costs ~19s a shape, and
-        # the budget has to charge for it or the batch is cut off part-way.)
-        assert len(rows) == 4 * 4
-        assert len(rows) > 4 * 1
+
+class TestDerivedShapesWithoutACap:
+    """Without a cap every derived shape is listed; the deadline decides how many get tuned."""
+
+    NK = [(4096, 4096), (4096, 14336), (14336, 4096), (6144, 4096)]
+    MS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+
+    def test_every_shape_is_listed(self, tmp_path, monkeypatch):
+        _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
+        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(self.NK))
+        monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(self.MS))
+
+        _run(tmp_path, timeout_s=1_800, thorough=True)
+
+        assert len(_untuned_rows(tmp_path)) == len(self.NK) * len(self.MS)
 
 
 # ── row count, not exit code, decides the outcome ────────────────────────────
@@ -692,7 +680,7 @@ class TestUnverifiedShapes:
             tmp_path,
             monkeypatch,
             tuned_rows=[_row(1, 4096, 4096, "flydsl", 8.0)],
-            profile_rows=[_row(1, 4096, 4096, "torch", "inf")],
+            profile_rows=[_row(1, 4096, 4096, "torch", "inf"), _row(1, 4096, 4096, "flydsl", 8.0)],
         )
         res = _run(tmp_path)
         assert res.shape_results[0]["tuned_unverified"] is True

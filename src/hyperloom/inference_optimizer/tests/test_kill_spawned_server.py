@@ -931,22 +931,6 @@ def test_run_with_session_kill_reports_the_output_a_child_redirected_to_disk(tmp
     assert reported, "a child talking only through its redirected stderr was never reported alive"
 
 
-def test_run_with_session_kill_survives_a_broken_liveness_callback():
-    """Reporting is best-effort; a raising callback must not eat child output."""
-
-    def _boom() -> None:
-        raise RuntimeError("callback is broken")
-
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "print('still-captured', flush=True)"],
-        on_output=_boom,
-        watch=RoundWatch(timeout=10),
-    )
-
-    assert cp.returncode == 0
-    assert "still-captured" in (cp.stdout or "")
-
-
 def test_run_with_session_kill_legacy_timeout_still_raises():
     """With ``soft_deadline_sec`` None, a child exceeding the hard ``timeout`` still raises ``TimeoutExpired``."""
     with pytest.raises(subprocess.TimeoutExpired):
@@ -1074,6 +1058,17 @@ def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
 
 
 # ── Detokenizer-stall watchdog ──
+def test_scan_server_log_increment_detects_vllm_rust_frontend_ready(tmp_path):
+    """vLLM's Rust frontend (`vllm serve`, VLLM_USE_RUST_FRONTEND=1) runs no uvicorn; its own ready line is the ready
+    marker, colour codes included, or the boot guard ends the round at its boot share."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text(
+        "\x1b[36m(RustFrontend pid=4242)\x1b[0m \x1b[32mINFO\x1b[0m 10-29 06:18:45 [server/src/lib.rs:331] "
+        'OpenAI server is ready to accept requests bind_address="0.0.0.0:45369"\n'
+    )
+    assert _scan_server_log_increment(str(log_path), 0).saw_ready is True
+
+
 def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
     """The incremental scanner advances its offset and flags ready/progress
     markers only in the newly appended bytes."""

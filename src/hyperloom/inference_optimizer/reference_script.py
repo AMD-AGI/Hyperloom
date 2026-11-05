@@ -295,45 +295,34 @@ def _extract_server_args(tokens: list[str]) -> tuple[str, str | None]:
             i += 1
             continue
         name = _flag_name(tok)
+        value, span = _flag_value(tokens, i)
+        pair = tokens[i : i + span]
+        i += span
+        if value is None:
+            # bare store-true flag
+            if not _should_drop_flag(name):
+                kept.append(tok)
+            continue
         # capture model from --model / --model-path even though we drop it.
-        is_model_flag = name in ("--model", "--model-path")
-        if "=" in tok:  # --flag=value (self-contained)
-            value = tok.split("=", 1)[1]
-            if is_model_flag:
-                if not _has_var(value):
-                    model = Path(value).name
-                i += 1
-                continue
-            if _has_var(value) or _should_drop_flag(name):
-                i += 1
-                continue
-            kept.append(tok)
-            i += 1
+        if name in ("--model", "--model-path"):
+            if not _has_var(value):
+                model = Path(value).name
             continue
-        # ``--flag value`` or bare ``--flag``
-        has_value = i + 1 < n and not tokens[i + 1].startswith("-")
-        if has_value:
-            value = tokens[i + 1]
-            if is_model_flag:
-                if not _has_var(value):
-                    model = Path(value).name
-                i += 2
-                continue
-            if _has_var(value) or _should_drop_flag(name):
-                i += 2  # drop BOTH flag and its value (no orphan flag)
-                continue
-            kept.append(tok)
-            kept.append(value)
-            i += 2
-            continue
-        # bare store-true flag
-        if _should_drop_flag(name):
-            i += 1
-            continue
-        kept.append(tok)
-        i += 1
+        # a dropped valued flag takes its value with it (no orphan flag)
+        if not (_has_var(value) or _should_drop_flag(name)):
+            kept.extend(pair)
 
     return " ".join(kept), model
+
+
+def _flag_value(tokens: list[str], i: int) -> tuple[str | None, int]:
+    """Return the value of the flag at ``tokens[i]`` (None when bare) and how many tokens the flag spans."""
+    tok = tokens[i]
+    if "=" in tok:
+        return tok.split("=", 1)[1], 1
+    if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+        return tokens[i + 1], 2
+    return None, 1
 
 
 def _shell_ready_server_args(server_args: Any) -> str:

@@ -119,6 +119,16 @@ class LockedRunMixin:
             await self._resolve_analysis_context(actors.analysis_service)
         return actors
 
+    def _fan_out_ready(self, round_lanes: int, agent_fn, agent_factory, orchestration_service) -> bool:
+        """Whether this iteration can run its round as concurrent lanes."""
+        return (
+            not self._lane_queue
+            and round_lanes > 1
+            and agent_factory is not None
+            and agent_fn is not None
+            and orchestration_service is not None
+        )
+
     async def _run_locked(
         self,
         agents: LoopAgents,
@@ -154,13 +164,7 @@ class LockedRunMixin:
             # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
             # of buying it again.
             fan_out_plan: HeldRound | None = None
-            if hazard is None and (
-                not self._lane_queue
-                and round_lanes > 1
-                and agent_factory is not None
-                and agent_fn is not None
-                and orchestration_service is not None
-            ):
+            if hazard is None and self._fan_out_ready(round_lanes, agent_fn, agent_factory, orchestration_service):
                 fan_out_plan = await self._fan_out_round(
                     iteration=iteration,
                     orchestration_service=orchestration_service,

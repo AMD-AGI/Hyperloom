@@ -15,26 +15,7 @@ from pathlib import Path
 
 import pytest
 
-_RUNNER_REL = Path("python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py")
-_SOURCE = """\
-def capture():
-    return 1
-
-
-def done():
-    return 0
-"""
-_PATCH = """\
-diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
---- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-+++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-@@ -1,2 +1,5 @@
-+def _set_profile_trace_tag(self):
-+    return "_profile_runner_name"
-+
- def capture():
-     return 1
-"""
+from ._sglang_gc_patch_tree import RUNNER_PATCH, RUNNER_REL, RUNNER_SOURCE
 
 
 @pytest.fixture
@@ -51,9 +32,9 @@ def pod_patcher(monkeypatch):
 
 def _install(tmp_path: Path, monkeypatch, version: str) -> tuple[Path, Path]:
     repo = tmp_path / "sglang"
-    target = repo / _RUNNER_REL
+    target = repo / RUNNER_REL
     target.parent.mkdir(parents=True)
-    target.write_text(_SOURCE, encoding="utf-8")
+    target.write_text(RUNNER_SOURCE, encoding="utf-8")
     pkg = repo / "python" / "sglang"
     (pkg / "__init__.py").write_text("", encoding="utf-8")
 
@@ -68,7 +49,7 @@ def _install(tmp_path: Path, monkeypatch, version: str) -> tuple[Path, Path]:
     tracelens = tmp_path / "TraceLens"
     gc_dir = tracelens / "examples" / "custom_workflows" / "inference_analysis" / "sglang_gc_patch" / "sglang_0_5_21"
     gc_dir.mkdir(parents=True)
-    (gc_dir / "decode_cuda_graph_runner.patch").write_text(_PATCH, encoding="utf-8")
+    (gc_dir / "decode_cuda_graph_runner.patch").write_text(RUNNER_PATCH, encoding="utf-8")
     return target, tracelens
 
 
@@ -97,7 +78,7 @@ def test_pod_below_gate_stays_on_roofline(pod_patcher, tmp_path, monkeypatch):
 
     result = pod_patcher._apply_on_pod(tracelens_root=str(tracelens), sglang_version_pin=None)
     assert result["patch_set"] == "roofline"
-    assert target.read_text(encoding="utf-8") == _SOURCE
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
 
 def test_pod_without_exact_gc_set_skips_without_failing(pod_patcher, tmp_path, monkeypatch, capsys):
@@ -110,7 +91,7 @@ def test_pod_without_exact_gc_set_skips_without_failing(pod_patcher, tmp_path, m
     assert result["status"] == "skipped"
     assert result["error"] is None
     assert "no sglang_gc_patch set" in result["skip_reason"]
-    assert target.read_text(encoding="utf-8") == _SOURCE
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
     monkeypatch.setattr(
         sys,
@@ -133,7 +114,7 @@ def test_controller_roofline_choice_wins_over_pod_version(pod_patcher, tmp_path,
 
     result = pod_patcher._apply_on_pod(tracelens_root=str(tracelens), sglang_version_pin=None, patch_set="roofline")
     assert result["patch_set"] == "roofline"
-    assert target.read_text(encoding="utf-8") == _SOURCE
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
 
 @pytest.mark.parametrize(("mode", "expected"), [("sitecustomize", "graph-capture"), ("patched", "roofline")])

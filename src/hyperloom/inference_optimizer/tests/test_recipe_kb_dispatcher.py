@@ -76,7 +76,7 @@ def test_audit_is_local_and_best_effort(kb: RecipeKB) -> None:
     assert events[1]["resolution"] == "local"
     assert all(event["remote"] == "none" for event in events)
 
-    kb.audit_hook = lambda _event: (_ for _ in ()).throw(RuntimeError("down"))
+    kb.audit_hook = lambda _event: (_ for _ in ()).throw(OSError("down"))
     assert kb.get_recipe(canonical_id=_cid()) is not None
 
 

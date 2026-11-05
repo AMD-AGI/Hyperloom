@@ -44,7 +44,12 @@ def _coordinator(session_dir: Path):
         },
     )
     coord.sub.register_executor("kernel_agent", coord.phase_kernel.run_agent)
+    coord.sub.register_executor("roofline", _no_reprofile)
     return coord
+
+
+async def _no_reprofile(_ctx: Any) -> dict[str, Any]:
+    return {"status": "skipped"}
 
 
 async def _settle_unjoined_actions(coord: Any) -> None:

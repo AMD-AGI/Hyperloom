@@ -19,6 +19,8 @@ from kernelforge.workflows.forge_fusion.locate import FrameworkInstall, build_re
 from kernelforge.workflows.forge_fusion.patterns import PATTERNS, match_patterns
 from kernelforge.workflows.forge_fusion.vllm_passes import PassState
 
+from ._vllm_tree import fake_vllm_tree
+
 
 def _candidate_diag(shares, busy=0.21, category_bytes_share=None, **kw):
     return diagnose_from_shares(
@@ -224,17 +226,6 @@ class TestMemShareWiredIntoRecipes:
 
 
 # ─────────────────────── Deliverable 2: compile-pass gate ────────────────────
-def _fake_vllm(tmp_path, model_type: str, body: str):
-    mdir = tmp_path / "fw" / "vllm" / "model_executor" / "models"
-    mdir.mkdir(parents=True)
-    (mdir / f"{model_type}.py").write_text(body, encoding="utf-8")
-    model = tmp_path / "model"
-    model.mkdir()
-    (model / "config.json").write_text(
-        json.dumps({"model_type": model_type, "hidden_size": 2048, "num_attention_heads": 16}),
-        encoding="utf-8",
-    )
-    return str(model), str(tmp_path / "fw")
 
 
 class TestCompilePassHelper:
@@ -274,7 +265,7 @@ class TestCompilePassGateInRoutes:
         (tmp_path / "v").mkdir()
         (tmp_path / "s").mkdir()
         # vLLM: qk_norm_rope is an ENABLED compile pass -> dropped as already-satisfied.
-        model_v, root_v = _fake_vllm(tmp_path / "v", "qklm", body)
+        model_v, root_v = fake_vllm_tree(tmp_path / "v", "qklm", body)
         dv = _candidate_diag(shares)
         rv = build_recipes(
             dv,

@@ -53,8 +53,7 @@ class ExperimentTracker:
         if not transitioned:
             return exp
         for cb in self._on_complete_callbacks:
-            with contextlib.suppress(Exception):  # broad-suppress: caller-supplied observer
-                cb(exp)
+            cb(exp)
         return exp
 
     def _mark_interrupted_locked(self, exp: Experiment) -> Experiment:

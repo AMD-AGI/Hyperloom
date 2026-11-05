@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a local specialist launch decides before it spawns: GPU environment and the child's user."""
+"""What a specialist launch decides before it spawns: the child's environment, GPU visibility and user."""
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -15,13 +17,48 @@ from hyperloom.common.env_safety import (
     missing_launch_capabilities,
     specialist_run_as,
 )
+from hyperloom.common.proctree import REAP_MARK_ENV
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom_common.llm.llm_attribution import inject_env as inject_attribution_env
 
-from .agent_cli_config import SpecialistAgentUnavailableError
+from .agent_cli_config import SpecialistAgentUnavailableError, _build_specialist_env
 
 _GPU_IDS_ENV = "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"
 _AITER_JIT_ENV = "INFERENCE_OPTIMIZER_AITER_JIT_DIR"
 _MCP_FLAG = "--mcp-config"
+
+
+@dataclass(frozen=True)
+class SpecialistLaunch:
+    """A resolved launch: argv, child env, demote user, backend, and the task's prompt and log files."""
+
+    cmd: list[str]
+    env: dict[str, str]
+    run_as: RunAs | None
+    backend: str
+    prompt_file: Path
+    process_log: Path
+
+
+def compose_launch_env(task_id: str) -> tuple[dict[str, str], str]:
+    """Compose the child env for one launch; return it with the launch's reap mark."""
+    # Compose a minimal env. Provider credentials are inherited by default
+    # for compatibility with deployments that authenticate the agent CLI
+    # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
+    env = _build_specialist_env()
+    # Keep the spawned CLI off its non-essential traffic and auto-updater.
+    from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
+
+    apply_llm_stability_env(env)
+    # Unique to this launch, so every process the CLI starts can be found after it detaches.
+    reap_mark = uuid.uuid4().hex
+    env[REAP_MARK_ENV] = reap_mark
+    # The child spends against the gateway, so tag it or its spend lands
+    # under no component at all. The task tag is what attributes the
+    # requests of a child that dies before its result row -- the only
+    # place such a child's token usage survives is the gateway's log.
+    inject_attribution_env(env, component="specialist", operation="run_agent", task=task_id)
+    return env, reap_mark
 
 
 def apply_gpu_env(env: dict[str, str], workspace: Path, gpu_ids: Sequence[int], gpu_lease: object | None) -> None:

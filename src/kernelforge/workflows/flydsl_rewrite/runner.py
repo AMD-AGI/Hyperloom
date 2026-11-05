@@ -534,9 +534,30 @@ class _Rewrite:
         )
         _progress(f"KEEP KB publish ({commit[:12]}): {write.get('reason') or write.get('solution')}")
 
+    def _optimize(self, source_ms: float | None) -> dict:
+        """Run forge-loop OPTIMIZE on the correct port until the search cutoff; return its result."""
+        return run_optimize(
+            self.spec,
+            self.driver_path,
+            self.config,
+            OptimizeRequest(
+                self.experiments_dir,
+                self.request.optimize,
+                roofline_ceiling=self.request.roofline_ceiling,
+                permission_mode=self.request.permission_mode,
+                max_hours=max(1.0, (self.deadline_unix - time.time()) / 3600.0),
+                deadline_unix=self.deadline_unix,
+                stop_at_unix=self.search_stop_unix,
+                # Anchor the loop on the source, so every score it reports -- each KEEP published below and the
+                # run's final result -- already divides by the kernel this rewrite replaced.
+                source_ms=source_ms,
+                source_case_ms=self.preflight.source_case_ms,
+                on_new_best=self.publish_keep if self.request.rewrite_kb_enabled else None,
+            ),
+        )
+
     def finish(self, port: PortResult, port_commit: str, measurement: FlydslMeasurement) -> dict:
         """Publish the correct port as the interim best, OPTIMIZE it, then publish the final best with its patch."""
-        spec = self.spec
         source_ms = measurement.source_ms
         # The result JSON is written now, reflecting a SUCCESSFUL port (compiled + correct) with the ported kernel's
         # own time as the interim best.
@@ -556,25 +577,7 @@ class _Rewrite:
         opt: dict = {}
         optimize_ran = time.time() < self.search_stop_unix
         if optimize_ran:
-            opt = run_optimize(
-                spec,
-                self.driver_path,
-                self.config,
-                OptimizeRequest(
-                    self.experiments_dir,
-                    self.request.optimize,
-                    roofline_ceiling=self.request.roofline_ceiling,
-                    permission_mode=self.request.permission_mode,
-                    max_hours=max(1.0, (self.deadline_unix - time.time()) / 3600.0),
-                    deadline_unix=self.deadline_unix,
-                    stop_at_unix=self.search_stop_unix,
-                    # Anchor the loop on the source, so every score it reports -- each KEEP published below and the
-                    # run's final result -- already divides by the kernel this rewrite replaced.
-                    source_ms=source_ms,
-                    source_case_ms=self.preflight.source_case_ms,
-                    on_new_best=self.publish_keep if self.request.rewrite_kb_enabled else None,
-                ),
-            )
+            opt = self._optimize(source_ms)
         else:
             _progress("20-minute finalization reserve reached after PORT; skipping forge-loop")
         if optimize_ran and not opt.get("llm_usage_complete"):

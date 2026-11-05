@@ -430,8 +430,8 @@ def test_agent_prompt_snapshot_path(tmp_path):
     )
 
 
-@pytest.mark.asyncio
-async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
+async def _run_one_task(tmp_path, monkeypatch, kind: str, idempotency_key: str):
+    """Run one ``kind`` task in a fresh session; return the session, the task, its result and what its ctx carried."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "x.db")
@@ -445,16 +445,22 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
         return {"status": "succeeded"}
 
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
-    sub.register_executor("baseline", runner)
+    sub.register_executor(kind, runner)
     task, _ = await tasks.create_or_return_existing(
         TaskSpec(
-            kind="baseline",
+            kind=kind,
             params={},
-            idempotency_key="ws-test-1",
+            idempotency_key=idempotency_key,
         ),
     )
     res = await sub.run_task(task)
     db.close()
+    return sd, task, res, captured
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
+    sd, task, res, captured = await _run_one_task(tmp_path, monkeypatch, "baseline", "ws-test-1")
     assert res.state == "succeeded"
     assert captured["workspace"] == str(sd / "runs" / "baseline" / task.task_id)
     assert (sd / "runs" / "baseline" / task.task_id).is_dir()
@@ -464,29 +470,7 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
     """`target_analysis` is not in _RUNS_ACTIONS — runner shouldn't fabricate a path."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir()
-    db = SqliteConnection(tmp_path / "x.db")
-    locks = SqliteLeaseBackend(db)
-    tasks = TaskRegistry(db)
-    captured: dict = {}
-
-    async def runner(ctx) -> dict:
-        captured["workspace"] = ctx.extra.get("workspace")
-        captured["session_dir"] = ctx.extra.get("session_dir")
-        return {"status": "succeeded"}
-
-    sub = SubAgentRunner(locks, tasks, session_dir=sd)
-    sub.register_executor("target_analysis", runner)
-    task, _ = await tasks.create_or_return_existing(
-        TaskSpec(
-            kind="target_analysis",
-            params={},
-            idempotency_key="target-analysis-test-1",
-        ),
-    )
-    await sub.run_task(task)
-    db.close()
+    sd, _task, _res, captured = await _run_one_task(tmp_path, monkeypatch, "target_analysis", "target-analysis-test-1")
     # target_analysis has no runs/ subtree — workspace stays unset.
     assert captured["workspace"] is None
     assert captured["session_dir"] == str(sd)

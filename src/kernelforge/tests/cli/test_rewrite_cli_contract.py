@@ -85,8 +85,20 @@ def test_the_logical_op_name_is_one_required_option():
     assert logical.required is True
 
 
-def _invoke_rewrite(monkeypatch, tmp_path, name_flag, extra_args=()):
+_DETECT_ARCH = "kernelforge.workflows.forge_loop.campaign.campaign_config.detect_arch"
+
+
+@pytest.fixture(autouse=True)
+def _host_gpu(monkeypatch):
+    """A gfx950 host with no GPU_TARGET; setenv first so teardown also drops the one the command exports."""
+    monkeypatch.setenv("GPU_TARGET", "")
+    monkeypatch.delenv("GPU_TARGET")
+    monkeypatch.setattr(_DETECT_ARCH, lambda: "gfx950")
+
+
+def _invoke_rewrite(monkeypatch, tmp_path, name_flag, extra_args=(), host_arch="gfx950"):
     captured: dict = {}
+    monkeypatch.setattr(_DETECT_ARCH, lambda: host_arch)
 
     def fake_run_rewrite(request, config):
         captured.update(request=request, config=config)
@@ -142,6 +154,31 @@ def test_gpu_type_cli_override_reaches_rewrite_config(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert captured["config"].gpu_type == "mi300x"
     assert captured["config"].gpu_target == "gfx950"
+
+
+def test_the_default_rewrite_gpu_type_follows_the_host_arch(monkeypatch, tmp_path):
+    # Regression: an unset --gpu-type was always mi355x, so a gfx942 host filed its KB records under MI355X.
+    result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name", host_arch="gfx942")
+
+    assert result.exit_code == 0
+    assert captured["config"].gpu_target == "gfx942"
+    assert captured["config"].gpu_type == "mi300x"
+
+
+def test_rewrite_detects_the_gpu_target_when_none_is_given(monkeypatch, tmp_path):
+    # Regression: an unset --gpu-target fell through to Config's invented gfx942, which reached forge-loop explicitly.
+    result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name", host_arch="gfx950")
+
+    assert result.exit_code == 0
+    assert captured["config"].gpu_target == "gfx950"
+
+
+def test_rewrite_refuses_when_no_gpu_target_can_be_resolved(monkeypatch, tmp_path):
+    result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name", host_arch="")
+
+    assert result.exit_code != 0
+    assert "GPU_TARGET" in result.output
+    assert captured == {}
 
 
 def test_rewrite_rejects_an_unknown_option(monkeypatch, tmp_path):

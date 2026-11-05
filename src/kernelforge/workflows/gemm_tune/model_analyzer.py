@@ -126,6 +126,18 @@ def _resolve_llm_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def _first_group_weights(qconfig: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first dict-valued ``weights`` of a compressed-tensors ``config_groups``."""
+    groups = qconfig.get("config_groups", {})
+    if not isinstance(groups, dict):
+        return None
+    for grp in groups.values():
+        weights = grp.get("weights", {})
+        if isinstance(weights, dict):
+            return weights
+    return None
+
+
 def _extract_quant_info(config: dict[str, Any]) -> tuple[str, int, int]:
     """Extract quantization method, bits, and group_size from config."""
     qconfig = config.get("quantization_config", {})
@@ -144,21 +156,37 @@ def _extract_quant_info(config: dict[str, Any]) -> tuple[str, int, int]:
             group_size = int(qconfig["group_size"])
 
         # compressed-tensors style
-        if method == "compressed-tensors":
-            groups = qconfig.get("config_groups", {})
-            if isinstance(groups, dict):
-                for _, grp in groups.items():
-                    weights = grp.get("weights", {})
-                    if isinstance(weights, dict):
-                        nb = weights.get("num_bits")
-                        gs = weights.get("group_size")
-                        if nb is not None:
-                            bits = int(nb)
-                        if gs is not None:
-                            group_size = int(gs)
-                        break
+        weights = _first_group_weights(qconfig) if method == "compressed-tensors" else None
+        if weights is not None:
+            nb = weights.get("num_bits")
+            gs = weights.get("group_size")
+            if nb is not None:
+                bits = int(nb)
+            if gs is not None:
+                group_size = int(gs)
 
     return method, bits, group_size
+
+
+def _log_model_profile(profile: ModelProfile) -> None:
+    """Log the GEMM-relevant shape of an analyzed model."""
+    log.info(
+        "Model analysis: arch=%s, is_moe=%s, experts=%d, topk=%d, "
+        "hidden=%d, inter=%d, moe_inter=%d, heads=%d, kv_heads=%d, "
+        "quant=%s/%d-bit, dtype=%s",
+        profile.architecture,
+        profile.is_moe,
+        profile.num_experts,
+        profile.num_experts_per_tok,
+        profile.hidden_size,
+        profile.intermediate_size,
+        profile.moe_intermediate_size,
+        profile.num_attention_heads,
+        profile.num_key_value_heads,
+        profile.quant_method or "none",
+        profile.quant_bits,
+        profile.model_dtype,
+    )
 
 
 def analyze_model(model_path: str) -> ModelProfile:
@@ -239,21 +267,5 @@ def analyze_model(model_path: str) -> ModelProfile:
         raw_config=config,
     )
 
-    log.info(
-        "Model analysis: arch=%s, is_moe=%s, experts=%d, topk=%d, "
-        "hidden=%d, inter=%d, moe_inter=%d, heads=%d, kv_heads=%d, "
-        "quant=%s/%d-bit, dtype=%s",
-        arch,
-        is_moe,
-        num_experts,
-        topk,
-        hidden_size,
-        intermediate_size,
-        moe_intermediate_size,
-        num_attention_heads,
-        num_key_value_heads,
-        quant_method or "none",
-        quant_bits,
-        model_dtype,
-    )
+    _log_model_profile(profile)
     return profile

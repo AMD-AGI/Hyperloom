@@ -137,6 +137,11 @@ def _env_number(name: str, default: float, *, cast: Callable[[str], Any]) -> Any
     return value if value >= 0 else default
 
 
+def _policy_or_env(value: float | None, name: str, default: float, *, cast: Callable[[str], Any]) -> Any:
+    """``value`` when the policy sets it, else the operator override ``name`` or ``default``."""
+    return value if value is not None else _env_number(name, default, cast=cast)
+
+
 def is_api_failure(result: Any) -> bool:
     """Whether this session ended because the API failed, not because it answered."""
     reason = str(getattr(result, "end_reason", "") or "").strip()
@@ -275,6 +280,45 @@ async def _start(
             await wait(attempt)
 
 
+async def _resume_once(
+    backend: Any,
+    spec: AgentRunSpec,
+    result: AgentRunResult,
+    session_id: str,
+    *,
+    usage: Any,
+) -> AgentRunResult:
+    """Resume ``session_id`` once; a retryable failure returns ``result`` holding the newest handle."""
+    try:
+        resumed = await backend.resume(spec, session_id, RESUME_PROMPT, usage=usage)
+    except Exception as exc:
+        if not is_retryable_api_error(exc):
+            raise
+        log.warning(
+            "resume of session %s failed (%s: %s); will retry while budget remains",
+            session_id,
+            type(exc).__name__,
+            exc,
+        )
+        # Keep the newest handle: a resume that got as far as re-opening the thread may report a different id, and
+        # that is the one to continue.
+        result.session_id = resumable_session_id(exc) or session_id
+        return result
+    return _merged(result, resumed, session_id)
+
+
+def _mark_exhausted(result: AgentRunResult, attempts: int) -> None:
+    """Log the give-up and relabel ``result`` so no caller records it as an agent decision."""
+    log.error(
+        "agent session gave up after %d API failure(s); reporting %s so no "
+        "caller records this as an agent decision: %s",
+        attempts,
+        EXHAUSTED_END_REASON,
+        result.stderr_tail or result.end_reason,
+    )
+    result.end_reason = EXHAUSTED_END_REASON
+
+
 async def run_session_with_api_resume(
     backend: Any,
     spec: AgentRunSpec,
@@ -285,25 +329,17 @@ async def run_session_with_api_resume(
 ) -> AgentRunResult:
     """Run one agent session, resuming it whenever the API — not the agent — fails."""
     resume_budget = int(
-        policy.max_resumes
-        if policy.max_resumes is not None
-        else _env_number("FORGE_AGENT_API_MAX_RESUMES", DEFAULT_MAX_RESUMES, cast=int)
+        _policy_or_env(policy.max_resumes, "FORGE_AGENT_API_MAX_RESUMES", DEFAULT_MAX_RESUMES, cast=int)
     )
     base = float(
-        policy.base_delay_sec
-        if policy.base_delay_sec is not None
-        else _env_number("FORGE_AGENT_API_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float)
+        _policy_or_env(policy.base_delay_sec, "FORGE_AGENT_API_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float)
     )
     ceiling = float(
-        policy.max_delay_sec
-        if policy.max_delay_sec is not None
-        else _env_number("FORGE_AGENT_API_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float)
+        _policy_or_env(policy.max_delay_sec, "FORGE_AGENT_API_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float)
     )
 
     budget_sec = float(
-        policy.deadline_sec
-        if policy.deadline_sec is not None
-        else _env_number("FORGE_AGENT_API_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float)
+        _policy_or_env(policy.deadline_sec, "FORGE_AGENT_API_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float)
     )
     monotonic = clock.monotonic
     started_at = monotonic()
@@ -350,32 +386,10 @@ async def run_session_with_api_resume(
             resume_budget,
             result.stderr_tail or result.end_reason,
         )
-        try:
-            resumed = await backend.resume(spec, session_id, RESUME_PROMPT, usage=usage)
-        except Exception as exc:
-            if not is_retryable_api_error(exc):
-                raise
-            log.warning(
-                "resume of session %s failed (%s: %s); will retry while budget remains",
-                session_id,
-                type(exc).__name__,
-                exc,
-            )
-            # Keep the newest handle: a resume that got as far as re-opening the thread may report a different id, and
-            # that is the one to continue.
-            result.session_id = resumable_session_id(exc) or session_id
-            continue
-        result = _merged(result, resumed, session_id)
+        result = await _resume_once(backend, spec, result, session_id, usage=usage)
 
     if is_api_failure(result):
-        log.error(
-            "agent session gave up after %d API failure(s); reporting %s so no "
-            "caller records this as an agent decision: %s",
-            attempt,
-            EXHAUSTED_END_REASON,
-            result.stderr_tail or result.end_reason,
-        )
-        result.end_reason = EXHAUSTED_END_REASON
+        _mark_exhausted(result, attempt)
     return result
 
 

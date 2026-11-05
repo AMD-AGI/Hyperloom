@@ -415,36 +415,15 @@ def run_optimize(
     # Stream forge-loop output through stdout for the caller while collecting it to parse the sentinel-wrapped result.
     collected: list[str] = []
     kernel_path = Path(spec.flydsl_kernel)
-    fallback_content = kernel_path.read_bytes() if kernel_path.is_file() else None
-    fallback_mode = kernel_path.stat().st_mode & 0o777 if kernel_path.is_file() else None
+    run = _OptimizeRun(
+        spec=spec,
+        request=request,
+        fallback_content=kernel_path.read_bytes() if kernel_path.is_file() else None,
+        fallback_mode=kernel_path.stat().st_mode & 0o777 if kernel_path.is_file() else None,
+    )
     terminated_for_deadline = False
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=spec.workspace,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
-        )
-        assert proc.stdout is not None
-
-        def _stream_output() -> None:
-            for line in proc.stdout:
-                collected.append(line)
-                # The outer rewrite publishes the same result contract as forge-loop.
-                if RESULT_SENTINEL in line:
-                    continue
-                sys.stdout.write(line)
-                sys.stdout.flush()
-
-        stream_thread = threading.Thread(
-            target=_stream_output,
-            name="forge-rewrite-optimize-output",
-            daemon=True,
-        )
-        stream_thread.start()
+        proc, stream_thread = _launch_forge_loop(cmd, spec.workspace, collected)
         published_commit = ""
 
         def _publish_new_best() -> str:
@@ -490,44 +469,109 @@ def run_optimize(
     except (OSError, ValueError) as e:
         # A missing executable, a bad interpreter or a malformed command is a launch failure: the contract is to
         # return what was recovered rather than raise out of run_rewrite, which would skip the final result.
-        log.warning("optimize: forge-loop could not be launched/run (%s: %s)", type(e).__name__, e)
-        print(
-            f"  [forge-rewrite] OPTIMIZE launch failed ({type(e).__name__}: {e}); keeping the port-only result",
-            flush=True,
+        return _launch_failure_result(
+            run,
+            e,
+            "".join(collected),
+            terminated_for_deadline=terminated_for_deadline,
         )
-        _restore_best_kernel(
-            spec,
-            best_commit="",
-            fallback_content=fallback_content,
-            fallback_mode=fallback_mode,
-        )
-        # A loop that started and then lost its supervisor still spent tokens the caller must answer for.
-        failed: dict = {}
-        recovered = _experiment_llm_usage(
-            experiments_dir,
-            _announced_experiment_id("".join(collected)) or "",
-        )
-        if recovered:
-            failed["llm_usage"] = recovered
-        if terminated_for_deadline:
-            failed["terminated_for_deadline"] = True
-        return failed
     stdout_text = "".join(collected)
+    return _finished_result(run, proc, stdout_text, terminated_for_deadline=terminated_for_deadline)
 
-    result, expected_id = _trusted_loop_result(result_json, stdout_text, returncode=proc.returncode)
+
+@dataclass(frozen=True)
+class _OptimizeRun:
+    """One forge-loop launch: what it optimizes, and the kernel file to fall back on when no best is restorable."""
+
+    spec: RewriteSpec
+    request: OptimizeRequest
+    fallback_content: bytes | None
+    fallback_mode: int | None
+
+
+def _launch_forge_loop(
+    cmd: list[str],
+    cwd: str,
+    collected: list[str],
+) -> tuple[subprocess.Popen, threading.Thread]:
+    """Start forge-loop in its own session and stream its output to stdout while collecting it."""
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+    assert proc.stdout is not None
+
+    def _stream_output() -> None:
+        for line in proc.stdout:
+            collected.append(line)
+            # The outer rewrite publishes the same result contract as forge-loop.
+            if RESULT_SENTINEL in line:
+                continue
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+    stream_thread = threading.Thread(
+        target=_stream_output,
+        name="forge-rewrite-optimize-output",
+        daemon=True,
+    )
+    stream_thread.start()
+    return proc, stream_thread
+
+
+def _launch_failure_result(
+    run: _OptimizeRun,
+    error: Exception,
+    stdout_text: str,
+    *,
+    terminated_for_deadline: bool,
+) -> dict:
+    """Report a failed launch, restore the kernel, and return only the spend the loop recorded."""
+    log.warning("optimize: forge-loop could not be launched/run (%s: %s)", type(error).__name__, error)
+    print(
+        f"  [forge-rewrite] OPTIMIZE launch failed ({type(error).__name__}: {error}); keeping the port-only result",
+        flush=True,
+    )
+    _restore_best_kernel(
+        run.spec,
+        best_commit="",
+        fallback_content=run.fallback_content,
+        fallback_mode=run.fallback_mode,
+    )
+    # A loop that started and then lost its supervisor still spent tokens the caller must answer for.
+    failed: dict = {}
+    recovered = _experiment_llm_usage(
+        run.request.experiments_dir,
+        _announced_experiment_id(stdout_text) or "",
+    )
+    if recovered:
+        failed["llm_usage"] = recovered
+    if terminated_for_deadline:
+        failed["terminated_for_deadline"] = True
+    return failed
+
+
+def _finished_result(run: _OptimizeRun, proc, stdout_text: str, *, terminated_for_deadline: bool) -> dict:
+    """Restore the run's best kernel and return its trusted result, annotated with what this layer knows."""
+    result, expected_id = _trusted_loop_result(run.request.result_path, stdout_text, returncode=proc.returncode)
 
     restored = _restore_best_kernel(
-        spec,
+        run.spec,
         best_commit=str(result.get("best_commit") or ""),
-        fallback_content=fallback_content,
-        fallback_mode=fallback_mode,
+        fallback_content=run.fallback_content,
+        fallback_mode=run.fallback_mode,
     )
 
     # The result file only carries the ledger as of the KEEP that wrote it, so a cut-off or never-keeping run leaves
     # the experiment record holding more of the run's spend than the result does.
     nested_usage = _latest_ledger(
         result.get("llm_usage"),
-        _experiment_llm_usage(experiments_dir, expected_id),
+        _experiment_llm_usage(run.request.experiments_dir, expected_id),
     )
     annotated = _annotated_optimize_result(
         result,

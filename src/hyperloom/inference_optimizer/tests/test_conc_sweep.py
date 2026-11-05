@@ -864,11 +864,8 @@ def test_default_total_budget_is_two_and_half_hours():
 
 
 # Total wall-clock budget
-def test_run_conc_sweep_none_budget_disables_gate(
-    session_dir: Path,
-    baseline_yaml: Path,
-):
-    """``total_budget_sec=None`` disables the gate; every variant is launched."""
+def _sweep_two_concs(session_dir: Path, baseline_yaml: Path, *, total_budget_sec):
+    """Sweep concs 1 and 4 over a grid where every variant reaches 100 tok/s; return the payload and grid mock."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
@@ -889,9 +886,18 @@ def test_run_conc_sweep_none_budget_disables_gate(
                 state,
                 session_dir,
                 concs=[1, 4],
-                total_budget_sec=None,
+                total_budget_sec=total_budget_sec,
             )
         )
+    return payload, mock_run
+
+
+def test_run_conc_sweep_none_budget_disables_gate(
+    session_dir: Path,
+    baseline_yaml: Path,
+):
+    """``total_budget_sec=None`` disables the gate; every variant is launched."""
+    payload, mock_run = _sweep_two_concs(session_dir, baseline_yaml, total_budget_sec=None)
 
     assert payload["budget_exhausted"] is False
     assert payload["total_budget_sec"] is None
@@ -903,29 +909,7 @@ def test_run_conc_sweep_zero_budget_skips_without_running(
     baseline_yaml: Path,
 ):
     """``total_budget_sec=0`` is "no time left": skip, never run the ladder."""
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
-            side_effect=_fake_run_grid,
-        ) as mock_run,
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config",
-            side_effect=_fake_materialize,
-        ),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[1, 4],
-                total_budget_sec=0,
-            )
-        )
+    payload, mock_run = _sweep_two_concs(session_dir, baseline_yaml, total_budget_sec=0)
 
     assert payload["status"] == "skipped"
     assert payload["skip_reason"] == "no_time_budget_remaining"

@@ -93,7 +93,7 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens SHA.
-TRACELENS_REF="cf0221e3b1b1915d5272a10e2f5237d2d9c5f0cb"
+TRACELENS_REF="45c2dacdac26a958c5b52f792e070cb716daa73b"
 # Operator override iff TRACELENS_ROOT is not a TraceLens@<sha> checkout in the
 # cache root. Installs re-export that path (kernel-agent env, .env), so a
 # presence-only check would freeze a rerun on the old checkout instead of
@@ -259,6 +259,30 @@ remove_dotenv_var() {
   mv "$tmp" "$DOTENV"
   chmod 600 "$DOTENV" 2>/dev/null || true
 }
+
+# Remove $1 from .env when its value ends in $2, the shape install.sh derives
+# from a USER_DATA_PATH; an operator's value of any other shape is kept.
+remove_derived_dotenv_path() {
+  local key="$1" suffix="$2" line stripped value
+  [ -f "$DOTENV" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    stripped="${stripped#export }"
+    case "$stripped" in
+      "${key}="*)
+        value="${stripped#*=}"
+        value="${value%$'\r'}"
+        value="${value%\"}"; value="${value#\"}"
+        value="${value%\'}"; value="${value#\'}"
+        value="${value%/}"
+        case "$value" in
+          *"$suffix") remove_dotenv_var "$key"; return 0 ;;
+        esac
+        ;;
+    esac
+  done < "$DOTENV"
+}
+
 # In --check-only mode, downgrade post-install verification failures to a
 # warning so report_status can still enumerate what's missing. The caller
 # explicitly asked us NOT to install; failing on the first missing piece
@@ -560,8 +584,19 @@ ensure_fd_limit_for_ray() {
   return 0
 }
 
+# Whether the running head declares serving_slot, asked through a driver
+# connect. A raylet that accepts a driver and never registers it holds ray.init
+# forever, with the GIL held, so the connect is bounded from outside: `timeout`
+# signals the child's whole process group, SIGKILL 5 s after SIGTERM. The bound is
+# HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC, the one the optimizer puts on its own
+# connect probe (default 60 s). Returns 0 with the slot, 124 (timeout's own
+# status) when the head did not answer in time, saying so, and 1 otherwise.
 ray_head_has_serving_slot() {
-  python3 - <<'PY' >/dev/null 2>&1
+  local bound="${HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC:-}" rc=0
+  if ! [[ "$bound" =~ ^[0-9]+([.][0-9]+)?$ && "$bound" =~ [1-9] ]]; then
+    bound=60
+  fi
+  timeout -k 5 "$bound" python3 - <<'PY' >/dev/null 2>&1 || rc=$?
 import ray
 
 ray.init(address="auto", ignore_reinit_error=True, log_to_driver=False, logging_level="error")
@@ -571,6 +606,14 @@ finally:
     ray.shutdown()
 raise SystemExit(0 if "serving_slot" in resources else 1)
 PY
+  case "$rc" in
+    0) return 0 ;;
+    124 | 137)
+      warn "ray head did not answer a driver within ${bound}s (HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC); restarting local Ray head"
+      return 124
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # Idempotently bring up a Ray head node. Kernel backends submit Ray tasks with
@@ -632,11 +675,16 @@ ensure_ray_started() {
     return 0
   fi
   if ray status >/dev/null 2>&1; then
-    if ray_head_has_serving_slot; then
+    local slot_rc=0
+    ray_head_has_serving_slot || slot_rc=$?
+    if [ "$slot_rc" -eq 0 ]; then
       log "ray head already running with serving_slot"
       return 0
     fi
-    warn "ray head already running without serving_slot; restarting local Ray head"
+    # 124: the head did not answer at all, which ray_head_has_serving_slot reported.
+    if [ "$slot_rc" -ne 124 ]; then
+      warn "ray head already running without serving_slot; restarting local Ray head"
+    fi
   else
     log "no live ray head detected; starting one"
   fi
@@ -996,9 +1044,17 @@ write_env_file() {
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
 
+  # .env is shared by every session run from this checkout, so it keeps only the
+  # workspace root: a later run without USER_DATA_PATH in its shell still finds
+  # this workspace, and the paths below derive from that root again. They are not
+  # persisted (the env file above carries them to this workspace's runtime), and
+  # a copy an earlier install wrote is purged, or it would pair another
+  # workspace's runtime dir with this root. A value of another shape is an
+  # operator's own and stays.
   [ -n "${USER_DATA_PATH:-}" ] && upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
-  [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && upsert_dotenv_var HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
-  [ -n "${KERNEL_AGENT_ENV:-}" ] && upsert_dotenv_var KERNEL_AGENT_ENV "$KERNEL_AGENT_ENV"
+  remove_derived_dotenv_path HYPERLOOM_RUNTIME_DIR /runtime
+  remove_derived_dotenv_path KERNEL_AGENT_ENV /runtime/kernel-agent.env.sh
+  remove_derived_dotenv_path HYPERLOOM_ROOT /runtime/source-mirrors
   # Derived from the MAGPIE_REF / INFERENCEX_REF pins; a .env copy would read back as an override that skips them.
   remove_dotenv_var MAGPIE_PATH
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
@@ -1043,7 +1099,6 @@ write_env_file() {
     upsert_dotenv_var TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
     upsert_dotenv_var TL_EXTENSION "TraceLens_internal"
   fi
-  [ -n "${HYPERLOOM_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_ROOT "$HYPERLOOM_ROOT"
   # The runner lives in the GEAK checkout, so it follows GEAK_ROOT out of .env.
   if [ -z "${_geak_root_is_operator_override:-}" ]; then
     remove_dotenv_var GEAK_ROOT

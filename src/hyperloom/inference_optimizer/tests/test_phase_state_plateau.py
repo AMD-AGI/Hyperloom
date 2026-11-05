@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.orchestrator.phases.exit_predicates import framework_plateau
+
 from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB, is_valid_stop_reason
 from hyperloom.orchestrator.kernel import kernel_decisions
 from hyperloom.orchestrator.lever import LEVER_CONFIG
@@ -17,7 +19,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     _config_lever_evidence,
-    _framework_plateau,
     compute_next_phase,
     kernel_work_pending,
     PhaseFlags,
@@ -34,7 +35,7 @@ from hyperloom.orchestrator.state.shared_state import (
 
 def _config_dry(state, overrides):
     evidence = _config_lever_evidence(state, overrides)
-    return _framework_plateau(evidence).config_dry, evidence
+    return framework_plateau(evidence).config_dry, evidence
 
 
 def test_escalate_hint_vocab_closed():
@@ -392,6 +393,25 @@ def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status, mon
     target, reason, _ = out
     assert target == PHASE_SWEEP
     assert reason == "kernel_no_more_leverage"
+
+
+def test_a_failed_geak_run_exits_kernel_with_its_error():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.kernel_optimizer = "geak"
+    state.geak_result = {
+        "status": "error",
+        "error_class": "workflow_parse_error",
+        "error": "connect ECONNREFUSED 127.0.0.1:4000",
+    }
+
+    target, reason, evidence = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
+    evidence.pop("predicate_inputs")
+
+    assert (target, reason, evidence) == (
+        PHASE_SWEEP,
+        "kernel_geak_failed",
+        {"geak_status": "error", "error_class": "workflow_parse_error", "error": "connect ECONNREFUSED 127.0.0.1:4000"},
+    )
 
 
 def test_kernel_exits_when_every_hot_kernel_is_rejected_or_integrated():

@@ -212,6 +212,35 @@ def _row_for_chunk(rows: "list[dict[str, str]]", chunk_path: "Path") -> "dict[st
     return None
 
 
+def _read_execution_details(details_path: "Path") -> "list[dict[str, str]] | None":
+    """The splitter's ``execution_details.csv`` rows, or ``None`` when it is missing or unreadable."""
+    if not details_path.is_file():
+        return None
+    try:
+        with details_path.open("r", encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
+    except (OSError, csv.Error):
+        return None
+
+
+def _alternate_mode_ratios(
+    rows: "list[dict[str, str]]",
+    available_modes: "dict[str, tuple[str, list[Path]]]",
+    mode: str,
+) -> "list[tuple[str, float]]":
+    """The busy ratio of the first chunk of every other non-empty mode that reports one."""
+    ratios: list[tuple[str, float]] = []
+    for other_mode, (_label, chunks) in available_modes.items():
+        if other_mode == mode or not chunks:
+            continue
+        other_row = _row_for_chunk(rows, chunks[0])
+        oth_ratio = _read_busy_ratio(other_row)
+        if oth_ratio is None:
+            continue
+        ratios.append((other_mode, oth_ratio))
+    return ratios
+
+
 def _check_chunk_quality(
     *,
     split_dir: "Path",
@@ -225,13 +254,8 @@ def _check_chunk_quality(
     ``busy_ratio`` is below threshold is refused when a materially better
     alternative exists.
     """
-    details_path = split_dir / "execution_details.csv"
-    if not details_path.is_file():
-        return None
-    try:
-        with details_path.open("r", encoding="utf-8") as fh:
-            rows = list(csv.DictReader(fh))
-    except (OSError, csv.Error):
+    rows = _read_execution_details(split_dir / "execution_details.csv")
+    if rows is None:
         return None
 
     selected_row = _row_for_chunk(rows, selected_chunk)
@@ -251,13 +275,7 @@ def _check_chunk_quality(
     # When the selected chunk has no GPU work, any alternate carrying GPU events
     # is strictly better — skip the anti-thrash margin so the retry path has a target.
     alternates: list[tuple[str, float]] = []
-    for other_mode, (_label, chunks) in available_modes.items():
-        if other_mode == mode or not chunks:
-            continue
-        other_row = _row_for_chunk(rows, chunks[0])
-        oth_ratio = _read_busy_ratio(other_row)
-        if oth_ratio is None:
-            continue
+    for other_mode, oth_ratio in _alternate_mode_ratios(rows, available_modes, mode):
         if sel_events == 0:
             if oth_ratio > 0.0:
                 alternates.append((other_mode, oth_ratio))

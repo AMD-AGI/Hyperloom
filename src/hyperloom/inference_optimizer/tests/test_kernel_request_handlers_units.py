@@ -2158,6 +2158,39 @@ class TestReusableSourceRootsAtom:
         assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in resolve_known_source_prefixes())
 
 
+def _vllm_block_fp8_roofline_state(tmp_path):
+    """An fp8 vLLM session whose last profile is a roofline trace holding one block-scaled GEMM shape."""
+    roofline_trace = tmp_path / "roofline.trace.json"
+    roofline_trace.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {
+                        "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                        "args": {"Input Dims": [[4149, 5120], [34816, 5120]]},
+                    }
+                ]
+            }
+        )
+    )
+    return SharedState(
+        precision="fp8",
+        framework="vllm",
+        model_path="/models/qwen",
+        tp=1,
+        conc=64,
+        isl=1024,
+        osl=1024,
+        max_model_len=4096,
+        last_profile_trace=str(roofline_trace),
+        last_profile_status="succeeded",
+        last_trace_analyze={
+            "trace_input": str(roofline_trace),
+            "steady_state_trace": str(roofline_trace),
+        },
+    )
+
+
 class TestRunGemmTuningHandler:
     def test_resolves_split_aiter_meta_root_for_forge(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
@@ -3130,35 +3163,7 @@ class TestRunGemmTuningHandler:
         field,
         profile_value,
     ):
-        roofline_trace = tmp_path / "roofline.trace.json"
-        roofline_trace.write_text(
-            json.dumps(
-                {
-                    "traceEvents": [
-                        {
-                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
-                            "args": {"Input Dims": [[4149, 5120], [34816, 5120]]},
-                        }
-                    ]
-                }
-            )
-        )
-        state = SharedState(
-            precision="fp8",
-            framework="vllm",
-            model_path="/models/qwen",
-            tp=1,
-            conc=64,
-            isl=1024,
-            osl=1024,
-            max_model_len=4096,
-            last_profile_trace=str(roofline_trace),
-            last_profile_status="succeeded",
-            last_trace_analyze={
-                "trace_input": str(roofline_trace),
-                "steady_state_trace": str(roofline_trace),
-            },
-        )
+        state = _vllm_block_fp8_roofline_state(tmp_path)
         state.last_profile_workload = state.current_profile_workload_context()
         state.last_profile_workload[field] = profile_value
 
@@ -3201,35 +3206,7 @@ class TestRunGemmTuningHandler:
         recorded_runtime,
         current_best,
     ):
-        roofline_trace = tmp_path / "roofline.trace.json"
-        roofline_trace.write_text(
-            json.dumps(
-                {
-                    "traceEvents": [
-                        {
-                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
-                            "args": {"Input Dims": [[4149, 5120], [34816, 5120]]},
-                        }
-                    ]
-                }
-            )
-        )
-        state = SharedState(
-            precision="fp8",
-            framework="vllm",
-            model_path="/models/qwen",
-            tp=1,
-            conc=64,
-            isl=1024,
-            osl=1024,
-            max_model_len=4096,
-            last_profile_trace=str(roofline_trace),
-            last_profile_status="succeeded",
-            last_trace_analyze={
-                "trace_input": str(roofline_trace),
-                "steady_state_trace": str(roofline_trace),
-            },
-        )
+        state = _vllm_block_fp8_roofline_state(tmp_path)
         state.last_profile_workload = state.profile_workload_context(recorded_runtime)
         state.current_best = current_best
 
@@ -3773,7 +3750,7 @@ class TestRunGemmTuningHandler:
             ("fp8", "fp8_e4m3"),
             ("fp8", "e4m3fnuz"),
             ("fp8", "torch.float8_e4m3fn"),
-            ("fp16", "f16"),  # what this repo's _TRACE_DTYPE_SUFFIX emits
+            ("fp16", "f16"),  # the compact spelling kernel_candidates.json from earlier runs carries
             ("bf16", "b16"),
             ("mxfp4", "fp4x2"),
             ("fp4", "mxfp4"),

@@ -265,18 +265,7 @@ def run_controller(
     layout = ControllerLayout(Path(output_dir))
     _initialize_layout(layout)
 
-    started_unix = time.time()
-    started_at = _now_iso()
-    running = ControllerRunState(
-        status=CONTROLLER_STATUS_RUNNING,
-        handoff_dir=str(handoff_path),
-        output_dir=str(layout.output_dir),
-        budget_minutes=budget,
-        deadline_unix=started_unix + budget * 60.0,
-        started_at=started_at,
-    )
-    _write_state(layout, running)
-    _write_summary(layout, running)
+    running = _start_campaign(layout, handoff_path, budget)
 
     progress: dict[str, Any] = {}
 
@@ -335,6 +324,71 @@ def run_controller(
             progress,
         )
 
+    completed = _completed_state(running, analysis, schedule, patch_count, recovered)
+    _record_finished(layout, completed)
+    return completed
+
+
+def _record_finished(layout: ControllerLayout, completed: ControllerRunState) -> None:
+    """Persist the finished campaign's state and summary, and log its outcome."""
+    _write_state(layout, completed)
+    _write_summary(layout, completed)
+    log.info(
+        "kernel rewrite controller finished: status=%s tasks=%s patches=%s skipped=%s reason=%s",
+        completed.status,
+        completed.task_count,
+        completed.patch_count,
+        completed.skipped_task_count,
+        completed.reason,
+    )
+
+
+def _start_campaign(layout: ControllerLayout, handoff_path: Path, budget: float) -> ControllerRunState:
+    """Persist the running state of a campaign starting now, with its deadline."""
+    started_unix = time.time()
+    started_at = _now_iso()
+    running = ControllerRunState(
+        status=CONTROLLER_STATUS_RUNNING,
+        handoff_dir=str(handoff_path),
+        output_dir=str(layout.output_dir),
+        budget_minutes=budget,
+        deadline_unix=started_unix + budget * 60.0,
+        started_at=started_at,
+    )
+    _write_state(layout, running)
+    _write_summary(layout, running)
+    return running
+
+
+def _completed_state(
+    running: ControllerRunState, analysis, schedule, patch_count: int, recovered: list
+) -> ControllerRunState:
+    """The finished campaign's state: its verdict from analysis and dispatch, and everything it accounted for."""
+    status, reason = _campaign_verdict(analysis, schedule, patch_count)
+    return ControllerRunState(
+        **{
+            **running.to_dict(),
+            "status": status,
+            "finished_at": _now_iso(),
+            "reason": reason,
+            "analysis_status": analysis.status,
+            "analysis_reason": analysis.reason,
+            "analysis_published_task_count": analysis.published_task_count,
+            "analysis_rejected_task_count": analysis.rejected_task_count,
+            "analysis_rejected_tasks": analysis.rejected_tasks,
+            "analysis_llm_usage": _analysis_llm_usage(analysis),
+            "task_count": schedule.task_count,
+            "patch_count": patch_count,
+            "skipped_task_count": schedule.skipped_count,
+            "repository_pins": schedule.repository_pins,
+            "recovery_failures": _recovery_failures(recovered),
+            "forge_llm_usage": _forge_llm_usage(schedule.results),
+        }
+    )
+
+
+def _campaign_verdict(analysis, schedule, patch_count: int) -> tuple[str, str]:
+    """The campaign's final status and the reason for it."""
     if analysis.status != ANALYSIS_STATUS_COMPLETED and schedule.task_count == 0 and patch_count == 0:
         status = CONTROLLER_STATUS_FAILED
         reason = analysis.reason or "opportunity analysis did not complete"
@@ -356,37 +410,7 @@ def run_controller(
     else:
         status = CONTROLLER_STATUS_NO_RESULT
         reason = "prepared operator tasks produced no validated improvement"
-    completed = ControllerRunState(
-        **{
-            **running.to_dict(),
-            "status": status,
-            "finished_at": _now_iso(),
-            "reason": reason,
-            "analysis_status": analysis.status,
-            "analysis_reason": analysis.reason,
-            "analysis_published_task_count": analysis.published_task_count,
-            "analysis_rejected_task_count": analysis.rejected_task_count,
-            "analysis_rejected_tasks": analysis.rejected_tasks,
-            "analysis_llm_usage": _analysis_llm_usage(analysis),
-            "task_count": schedule.task_count,
-            "patch_count": patch_count,
-            "skipped_task_count": schedule.skipped_count,
-            "repository_pins": schedule.repository_pins,
-            "recovery_failures": _recovery_failures(recovered),
-            "forge_llm_usage": _forge_llm_usage(schedule.results),
-        }
-    )
-    _write_state(layout, completed)
-    _write_summary(layout, completed)
-    log.info(
-        "kernel rewrite controller finished: status=%s tasks=%s patches=%s skipped=%s reason=%s",
-        completed.status,
-        completed.task_count,
-        completed.patch_count,
-        completed.skipped_task_count,
-        completed.reason,
-    )
-    return completed
+    return status, reason
 
 
 __all__ = [

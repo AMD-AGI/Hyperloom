@@ -400,6 +400,27 @@ class PlanCriticAgent:
         """The wall-clock a review of this many plans is allowed."""
         return min(self.timeout_sec * max(1, drafts), self.ceiling_sec)
 
+    def _review_spec(
+        self, context: OrchestrationContext, system_prompt: str, user_prompt: str, budget_sec: int
+    ) -> AgentRunSpec:
+        """The read-only session that reviews one round's plans."""
+        return AgentRunSpec(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            role="plan critic",
+            cwd=context.workspace,
+            writable=False,
+            timeout_sec=budget_sec,
+            tool_policy=AgentToolPolicy(
+                read=True,
+                search=True,
+                write=False,
+                shell=False,
+                max_turns=self.max_turns,
+            ),
+            protected_globs=["*"],
+        )
+
     async def review(
         self,
         *,
@@ -415,22 +436,7 @@ class PlanCriticAgent:
         try:
             result = await asyncio.wait_for(
                 self.backend.run(
-                    AgentRunSpec(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        role="plan critic",
-                        cwd=context.workspace,
-                        writable=False,
-                        timeout_sec=budget_sec,
-                        tool_policy=AgentToolPolicy(
-                            read=True,
-                            search=True,
-                            write=False,
-                            shell=False,
-                            max_turns=self.max_turns,
-                        ),
-                        protected_globs=["*"],
-                    ),
+                    self._review_spec(context, system_prompt, user_prompt, budget_sec),
                     usage=usage,
                 ),
                 timeout=watchdog_timeout_sec(budget_sec),
@@ -500,6 +506,31 @@ class PlanCriticAgent:
             usage=usage,
         )
 
+    def _repair_spec(self, context: OrchestrationContext, review: str, detail: str) -> AgentRunSpec:
+        """The tool-less session that restates a review's width block."""
+        return AgentRunSpec(
+            role="plan critic repair",
+            system_prompt=_WIDTH_REPAIR_SYSTEM_PROMPT,
+            user_prompt=build_repair_prompt(
+                label=_WIDTH_BLOCK_LABEL,
+                original_response=review,
+                validation_error=detail,
+                output_schema=_WIDTH_BLOCK_SCHEMA,
+            ),
+            cwd=context.workspace,
+            writable=False,
+            timeout_sec=self._repair_budget(),
+            max_reasoning_effort=WIDTH_REPAIR_EFFORT_CEILING,
+            tool_policy=AgentToolPolicy(
+                read=False,
+                search=False,
+                write=False,
+                shell=False,
+                max_turns=WIDTH_REPAIR_MAX_TURNS,
+            ),
+            protected_globs=["*"],
+        )
+
     async def _repaired_width_ruling(
         self,
         *,
@@ -513,28 +544,7 @@ class PlanCriticAgent:
         try:
             result = await asyncio.wait_for(
                 self.backend.run(
-                    AgentRunSpec(
-                        role="plan critic repair",
-                        system_prompt=_WIDTH_REPAIR_SYSTEM_PROMPT,
-                        user_prompt=build_repair_prompt(
-                            label=_WIDTH_BLOCK_LABEL,
-                            original_response=review,
-                            validation_error=detail,
-                            output_schema=_WIDTH_BLOCK_SCHEMA,
-                        ),
-                        cwd=context.workspace,
-                        writable=False,
-                        timeout_sec=self._repair_budget(),
-                        max_reasoning_effort=WIDTH_REPAIR_EFFORT_CEILING,
-                        tool_policy=AgentToolPolicy(
-                            read=False,
-                            search=False,
-                            write=False,
-                            shell=False,
-                            max_turns=WIDTH_REPAIR_MAX_TURNS,
-                        ),
-                        protected_globs=["*"],
-                    ),
+                    self._repair_spec(context, review, detail),
                     usage=usage,
                 ),
                 timeout=watchdog_timeout_sec(self._repair_budget()),

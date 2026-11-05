@@ -249,6 +249,9 @@ class OrchestrationContext:
     last_critic_review: str = ""
     # Present only when the campaign has a roofline ceiling; each case's own figure rides on ``CaseEvidence.roofline``.
     roofline: CampaignRoofline | None = None
+    # Whether this round's plans go to the campaign's plan critic, when it has one. The loop decides it per round; it
+    # is not part of any prompt.
+    review_plan: bool = True
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
@@ -282,6 +285,19 @@ class OrchestrationContext:
         if self.search_mode not in {"EXPLOIT", "DIVERSIFY"}:
             raise ValueError("context.search_mode is unsupported")
         _text(self.search_objective, "context.search_objective")
+        self._validate_evidence_standing()
+        if self.search_mode_residence_remaining < 0:
+            raise ValueError("context.search_mode_residence_remaining must be non-negative")
+        case_ids = [case.case_id for case in self.cases]
+        if not case_ids:
+            raise ValueError("context.cases must not be empty")
+        if len(set(case_ids)) != len(case_ids):
+            raise ValueError("context.cases must have unique case_id values")
+        if self.roofline is not None and not isinstance(self.roofline, CampaignRoofline):
+            raise ValueError("context.roofline must be a CampaignRoofline or absent")
+
+    def _validate_evidence_standing(self) -> None:
+        """Validate the fields that place the Analysis evidence against the canonical commit."""
         _text(
             self.canonical_commit,
             "context.canonical_commit",
@@ -317,15 +333,6 @@ class OrchestrationContext:
             "context.cumulative_diff_error",
             allow_empty=True,
         )
-        if self.search_mode_residence_remaining < 0:
-            raise ValueError("context.search_mode_residence_remaining must be non-negative")
-        case_ids = [case.case_id for case in self.cases]
-        if not case_ids:
-            raise ValueError("context.cases must not be empty")
-        if len(set(case_ids)) != len(case_ids):
-            raise ValueError("context.cases must have unique case_id values")
-        if self.roofline is not None and not isinstance(self.roofline, CampaignRoofline):
-            raise ValueError("context.roofline must be a CampaignRoofline or absent")
 
     @property
     def case_ids(self) -> frozenset[str]:
@@ -665,10 +672,12 @@ class LaneGround:
 
 @dataclass(frozen=True)
 class SynthesizedPlan:
-    """One generated plan, the ground it was planned on, and its session."""
+    """One generated plan, the ground it was planned on, and its session with the system prompt it ran under."""
 
     text: str
     session_id: str = ""
+    # Resuming the session under any other system prompt rewrites the whole cached conversation instead of reading it.
+    system_prompt: str = ""
     ground: str = ""
     joint: bool = False
     fallback: str = ""
@@ -680,6 +689,9 @@ class SynthesizedPlan:
             "synthesized plan session_id",
             allow_empty=True,
         )
+        _text(self.system_prompt, "synthesized plan system_prompt", allow_empty=True)
+        if self.session_id and not self.system_prompt:
+            raise ValueError("a synthesized plan that keeps its session must name the system prompt it ran under")
         _text(self.ground, "synthesized plan ground", allow_empty=True)
         if not isinstance(self.joint, bool):
             raise ValueError("synthesized plan joint must be a boolean")

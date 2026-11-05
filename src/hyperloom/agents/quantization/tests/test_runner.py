@@ -228,6 +228,24 @@ async def test_run_one_attempt_captures_sdk_exception(tmp_path, fake_sdk, fake_o
 
 
 @pytest.mark.asyncio
+async def test_run_one_attempt_logs_the_sdk_traceback_without_a_log_callback(
+    tmp_path, fake_sdk, fake_options_cls, caplog
+):
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("x", encoding="utf-8")
+    fake_sdk.side_effect = RuntimeError("boom from SDK")
+    with caplog.at_level("WARNING", logger=runner_module.__name__):
+        await run_one_attempt(
+            AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=tmp_path),
+            skill_path=skill,
+            sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
+        )
+    (record,) = caplog.records
+    assert record.getMessage() == "quantization-agent SDK attempt 1 failed: RuntimeError: boom from SDK"
+    assert record.exc_info[1] is fake_sdk.side_effect
+
+
+@pytest.mark.asyncio
 async def test_run_one_attempt_skill_missing_raises(tmp_path, fake_sdk, fake_options_cls):
     qr = tmp_path / "qr"
     qr.mkdir()

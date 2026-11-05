@@ -26,10 +26,6 @@ from hyperloom.orchestrator.trace_analysis._kernel_roofline import (
     _flydsl_kernel_params,
     enrich_candidates_with_runtime_metadata,
 )
-from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import (
-    UPSTREAM_CATEGORY_TO_GEAK,
-    normalize_upstream_category,
-)
 
 
 class TestFlyDSLClassification(unittest.TestCase):
@@ -244,18 +240,14 @@ class TestSourceTypeAdmission(unittest.TestCase):
 class TestKernelCategoryDerivation(unittest.TestCase):
     """FlyDSL must surface as ``kernel_category="FlyDSL"``."""
 
-    def test_upstream_tracelens_flydsl_mapped(self) -> None:
-        self.assertEqual(UPSTREAM_CATEGORY_TO_GEAK["flydsl"], "FlyDSL")
-        self.assertEqual(normalize_upstream_category("flydsl"), "FlyDSL")
-        self.assertEqual(normalize_upstream_category("FlyDSL"), "FlyDSL")
-
     def test_derive_uses_tracelens_category_when_present(self) -> None:
-        cand = {
-            "name": "some_op",
-            "source_type": "flydsl",
-            "tracelens_category": "flydsl",
-        }
-        self.assertEqual(derive_kernel_category(cand), "FlyDSL")
+        for raw in ("flydsl", "FlyDSL"):
+            cand = {
+                "name": "some_op",
+                "source_type": "flydsl",
+                "tracelens_category": raw,
+            }
+            self.assertEqual(derive_kernel_category(cand), "FlyDSL")
 
     def test_derive_falls_back_to_source_type(self) -> None:
         cand = {"name": "some_op", "source_type": "flydsl"}

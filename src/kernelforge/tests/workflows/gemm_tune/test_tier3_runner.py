@@ -168,6 +168,7 @@ open({str(out)!r}, "w").write(os.environ.get("HIP_VISIBLE_DEVICES", "?"))
         # The generated tuner shells out to aiter like every other tuner, but
         # unlike them it gets one run: a build killed for memory comes back as
         # "the script it wrote does not work".
+        monkeypatch.delenv("MAX_JOBS", raising=False)
         monkeypatch.setattr(utils, "build_job_limit", lambda: 44)
         monkeypatch.setattr(utils, "cgroup_memory_limit", lambda: 128 * 1024**3)
         out = tmp_path / "jobs.txt"

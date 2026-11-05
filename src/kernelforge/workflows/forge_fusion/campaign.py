@@ -385,22 +385,7 @@ def run_recipe_campaign(
     collected: list[str] = []
     log_path = out / f"forge_loop_{stem}.log"
     try:
-        # Same process group: an orchestrator timing this pipeline out signals the group, and a detached campaign
-        # would go on holding the GPU and editing the framework after the parent reported a failure.
-        proc = subprocess.Popen(
-            cmd,
-            cwd=root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            collected.append(line)
-            sys.stdout.write(line)
-        returncode = proc.wait()
+        returncode = _stream_campaign(cmd, root, env, collected)
     except (OSError, subprocess.SubprocessError) as exc:
         log.error("forge-loop campaign for %s could not run: %s", recipe.pattern_id, exc)
         return _failed_campaign(f"{type(exc).__name__}: {exc}")
@@ -409,6 +394,37 @@ def run_recipe_campaign(
     if returncode != 0:
         log.error("forge-loop campaign for %s exited %s", recipe.pattern_id, returncode)
         return _failed_campaign(f"forge-loop exited {returncode}")
+    return _campaign_outcome(result_json, report_log, target_speedup, root, shadow_env)
+
+
+def _stream_campaign(cmd: list[str], root: str, env: dict[str, str], collected: list[str]) -> int:
+    """Run the forge-loop campaign, echoing and collecting its output; return its exit code."""
+    # Same process group: an orchestrator timing this pipeline out signals the group, and a detached campaign
+    # would go on holding the GPU and editing the framework after the parent reported a failure.
+    proc = subprocess.Popen(
+        cmd,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        collected.append(line)
+        sys.stdout.write(line)
+    return proc.wait()
+
+
+def _campaign_outcome(
+    result_json: str,
+    report_log: str,
+    target_speedup: float,
+    root: str,
+    shadow_env: dict[str, str] | None,
+) -> CampaignOutcome:
+    """Judge the campaign's result file and harness reports against the target speedup."""
     payload = _read_result_json(result_json)
     return CampaignOutcome(
         result=_to_validation_result(
@@ -425,37 +441,7 @@ def run_recipe_campaign(
     )
 
 
-def build_campaign_program_md(recipe: Recipe, brief: CampaignBrief) -> str:
-    """The task document handed to the loop's implementer for one recipe."""
-    harness_path, experience, fused_module = brief.harness_path, brief.experience, brief.fused_module
-    repo_scope, tracked_roots = brief.repo_scope, brief.tracked_roots
-    hints = "\n".join(f"  - {h}" for h in recipe.source_hints) or "  (none recorded)"
-    shapes = json.dumps(recipe.shapes or {}, indent=2, sort_keys=True)
-    experience_block = f"\n## What earlier attempts established\n{experience}\n" if experience else ""
-    # Files beyond the single call-site file that are ALSO tracked/keepable, named
-    # because the correct fix legitimately spans them (e.g. the kernel-selector that
-    # picks the output-dtype template). "Tracked" below must reflect them, or the
-    # loop would silently revert an edit the fix depends on.
-    extra_editable = [path for path in recipe.extra_files if path and path != recipe.source_file]
-    if repo_scope:
-        tracked_phrase = "this file and every file under the tracked root(s) named below"
-    elif extra_editable:
-        tracked_phrase = "this file, the framework source file above, and the additional in-scope file(s) listed below"
-    else:
-        tracked_phrase = "this file and the framework source file above"
-    # Under repo scope a new helper may legitimately have to sit somewhere else (a
-    # shared package several call sites can import), so the blanket ban becomes a
-    # default plus the one rule that actually binds: the loop commits new files only
-    # where it was told to look.
-    other_modules_rule = (
-        "You MAY add further helper modules when several call sites need to import "
-        "them; put each one inside a tracked root below, and be aware that a KEEP "
-        "commits a new file only alongside a tracked edit."
-        if repo_scope
-        else "Do NOT create any other new module."
-    )
-    module_block = (
-        f"""
+_FUSED_MODULE_SECTION = """
 ## Where the fused kernel goes (MANDATORY)
 Write the fused kernel into exactly this file, which already exists and is empty:
     {fused_module}
@@ -469,7 +455,7 @@ is fast in the harness; you are done when the framework's own forward path runs 
 So the change you leave behind must be a patch that applies to the framework tree
 and is complete on its own:
   1. REPLACE the original call site. Find where the framework's forward path issues
-     the chain you fused and make it call your entry point under {recipe.env_flag},
+     the chain you fused and make it call your entry point under {env_flag},
      falling back to the untouched chain when the flag is off. Edit the framework
      source above (and the additional in-scope files, if the fix spans them).
   2. Move EVERY part of the fusion into the framework. If the fusion needs its
@@ -497,43 +483,36 @@ The harness was written before your module existed and resolves the function
 through this attribute, so a module without it is a module the harness cannot
 call — it will score your fusion as absent.
 """
-        if fused_module
-        else ""
-    )
-    repo_block = (
-        (
-            "\n## Repo scope: the framework tree is yours to edit (tracked & keepable)\n"
-            "This fusion was NOT localized to one file. The call sites it replaces may\n"
-            "sit in several modules, and you may edit any file under the tracked root(s)\n"
-            "below — edits there are kept and reverted with the fusion like the call-site\n"
-            "file itself. Anything OUTSIDE them is untracked: the loop can neither keep\n"
-            "nor revert it, so an edit there vanishes along with the score it earned.\n"
-            "Tracked root(s):\n"
-            + "\n".join(f"    {root}" for root in tracked_roots)
-            + "\nChange only what the fusion needs, leave the flag-off path byte-identical,\n"
-            "and do not touch unrelated call sites.\n"
-        )
-        if (repo_scope and tracked_roots)
-        else ""
-    )
-    extra_block = (
-        (
-            "\n## Additional in-scope files you MAY edit (tracked & keepable)\n"
-            "The single call-site file is not always enough: a downstream consumer may\n"
-            "derive a property of its result (e.g. its output dtype, layout, or a kernel\n"
-            "instantiation) from the value you feed it, so a change at the call site alone\n"
-            "can LOOK correct in isolation yet shift that downstream property and regress\n"
-            "end-to-end. When that happens, prefer to leave the consumer's contract intact\n"
-            "and change only the producer; touch these files solely to keep the consumer's\n"
-            "observable output identical to eager. They are tracked by the loop, so edits\n"
-            "are kept/reverted with the fusion. Change ONLY what the fusion needs, and do\n"
-            "not alter unrelated call sites:\n" + "\n".join(f"    {e}" for e in extra_editable) + "\n"
-        )
-        if extra_editable
-        else ""
-    )
-    harness_block = (
-        f"""
+
+_REPO_SCOPE_HEADER = (
+    "\n## Repo scope: the framework tree is yours to edit (tracked & keepable)\n"
+    "This fusion was NOT localized to one file. The call sites it replaces may\n"
+    "sit in several modules, and you may edit any file under the tracked root(s)\n"
+    "below — edits there are kept and reverted with the fusion like the call-site\n"
+    "file itself. Anything OUTSIDE them is untracked: the loop can neither keep\n"
+    "nor revert it, so an edit there vanishes along with the score it earned.\n"
+    "Tracked root(s):\n"
+)
+
+_REPO_SCOPE_FOOTER = (
+    "\nChange only what the fusion needs, leave the flag-off path byte-identical,\n"
+    "and do not touch unrelated call sites.\n"
+)
+
+_EXTRA_FILES_HEADER = (
+    "\n## Additional in-scope files you MAY edit (tracked & keepable)\n"
+    "The single call-site file is not always enough: a downstream consumer may\n"
+    "derive a property of its result (e.g. its output dtype, layout, or a kernel\n"
+    "instantiation) from the value you feed it, so a change at the call site alone\n"
+    "can LOOK correct in isolation yet shift that downstream property and regress\n"
+    "end-to-end. When that happens, prefer to leave the consumer's contract intact\n"
+    "and change only the producer; touch these files solely to keep the consumer's\n"
+    "observable output identical to eager. They are tracked by the loop, so edits\n"
+    "are kept/reverted with the fusion. Change ONLY what the fusion needs, and do\n"
+    "not alter unrelated call sites:\n"
+)
+
+_HARNESS_SECTION = """
 ## Kernel-validation harness (READ-ONLY)
 The harness already exists at:
     {harness_path}
@@ -541,9 +520,61 @@ The driver the loop runs executes that harness and reads its JSON output. Do NOT
 modify or recreate it. It matches the glob ``*harness*.py`` and is protected by
 the in-session gate — any attempt to edit it will be rejected.
 """
-        if harness_path
+
+
+def _program_sections(recipe: Recipe, brief: CampaignBrief, extra_editable: list[str]) -> str:
+    """The fused-module, repo-scope, extra-file and harness sections of the task document."""
+    harness_path, fused_module = brief.harness_path, brief.fused_module
+    repo_scope, tracked_roots = brief.repo_scope, brief.tracked_roots
+    if repo_scope:
+        tracked_phrase = "this file and every file under the tracked root(s) named below"
+    elif extra_editable:
+        tracked_phrase = "this file, the framework source file above, and the additional in-scope file(s) listed below"
+    else:
+        tracked_phrase = "this file and the framework source file above"
+    # Under repo scope a new helper may legitimately have to sit somewhere else (a
+    # shared package several call sites can import), so the blanket ban becomes a
+    # default plus the one rule that actually binds: the loop commits new files only
+    # where it was told to look.
+    other_modules_rule = (
+        "You MAY add further helper modules when several call sites need to import "
+        "them; put each one inside a tracked root below, and be aware that a KEEP "
+        "commits a new file only alongside a tracked edit."
+        if repo_scope
+        else "Do NOT create any other new module."
+    )
+    module_block = (
+        _FUSED_MODULE_SECTION.format(
+            fused_module=fused_module,
+            other_modules_rule=other_modules_rule,
+            tracked_phrase=tracked_phrase,
+            env_flag=recipe.env_flag,
+        )
+        if fused_module
         else ""
     )
+    repo_block = (
+        (_REPO_SCOPE_HEADER + "\n".join(f"    {root}" for root in tracked_roots) + _REPO_SCOPE_FOOTER)
+        if (repo_scope and tracked_roots)
+        else ""
+    )
+    extra_block = (_EXTRA_FILES_HEADER + "\n".join(f"    {e}" for e in extra_editable) + "\n") if extra_editable else ""
+    harness_block = _HARNESS_SECTION.format(harness_path=harness_path) if harness_path else ""
+    return f"{module_block}{repo_block}{extra_block}{harness_block}"
+
+
+def build_campaign_program_md(recipe: Recipe, brief: CampaignBrief) -> str:
+    """The task document handed to the loop's implementer for one recipe."""
+    experience = brief.experience
+    hints = "\n".join(f"  - {h}" for h in recipe.source_hints) or "  (none recorded)"
+    shapes = json.dumps(recipe.shapes or {}, indent=2, sort_keys=True)
+    experience_block = f"\n## What earlier attempts established\n{experience}\n" if experience else ""
+    # Files beyond the single call-site file that are ALSO tracked/keepable, named
+    # because the correct fix legitimately spans them (e.g. the kernel-selector that
+    # picks the output-dtype template). "Tracked" below must reflect them, or the
+    # loop would silently revert an edit the fix depends on.
+    extra_editable = [path for path in recipe.extra_files if path and path != recipe.source_file]
+    sections = _program_sections(recipe, brief, extra_editable)
     call_site_line = (
         f"- Primary call site to edit: {recipe.source_file}"
         if extra_editable
@@ -560,7 +591,7 @@ the in-session gate — any attempt to edit it will be rejected.
 {call_site_line}
 - Env flag gating the fusion: {recipe.env_flag}
 - {recipe.description}
-{trace_kernels_block(recipe.trace_kernels)}{module_block}{repo_block}{extra_block}{harness_block}
+{trace_kernels_block(recipe.trace_kernels)}{sections}
 ## What to fuse
 {recipe.fusion_math}
 

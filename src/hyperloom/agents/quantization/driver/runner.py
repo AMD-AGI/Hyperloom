@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import shutil
 import tempfile
@@ -17,6 +18,7 @@ from hyperloom.agents.quantization.driver.result_collector import CollectedArtif
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest, OwedArtifact, run_deepseek_task
 from hyperloom_common.llm.llm_attribution import sdk_env_overlay
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
 DEFAULT_MAX_TURNS = 240  # Quark workflow has 4 STOPs + validator + eval
@@ -294,9 +296,10 @@ async def run_one_attempt(
             if log:
                 for text in _iter_message_text(message):
                     log(f"[claude-sdk] {text[:1000]}")
-    except Exception as exc:  # noqa: BLE001 - isolation boundary: one SDK quantization attempt
-        # Capture but don't raise: valid artifacts may exist before the abort.
+    except Exception as exc:  # isolation boundary: one SDK quantization attempt
+        # The SDK raises bare Exception; capture, since valid artifacts may exist before the abort.
         sdk_error = f"{type(exc).__name__}: {exc}"
+        logger.warning("quantization-agent SDK attempt %d failed: %s", attempt_number, sdk_error, exc_info=True)
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}\n{traceback.format_exc()}")
 

@@ -496,6 +496,8 @@ async def test_a_planned_round_records_the_commit_recovery_compares_against(tmp_
     plans = ("widen the loads", "stage through LDS")
 
     class OrchestrationService:
+        has_plan_critic = False
+
         async def run(self, context, **_kwargs):
             return SimpleNamespace(
                 dispatch_plan=None,

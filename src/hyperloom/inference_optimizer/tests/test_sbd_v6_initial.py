@@ -433,9 +433,29 @@ def test_unwrapped_preflight_failure_is_persisted_as_failed(tmp_path, monkeypatc
     assert breakdown["outcome"]["status"] == "failed"
 
 
-def test_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
+def _resume_into_a_failing_preflight(monkeypatch, resume_dir: Path) -> None:
+    """Resume ``resume_dir`` through ``optimize`` with a preflight that opens its install event, then raises."""
     import hyperloom.inference_optimizer.cli as optimizer_cli
     from hyperloom.inference_optimizer.cli import preflight
+
+    monkeypatch.setattr(
+        optimizer_cli,
+        "clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+
+    def fail_preflight(args):
+        preflight._begin_install_event(args)
+        raise RuntimeError("resume preflight failed")
+
+    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
+    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
+
+    with pytest.raises(RuntimeError, match="resume preflight failed"):
+        asyncio.run(optimizer_cli._run_optimize(args))
+
+
+def test_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
     workspace = tmp_path / "sessions"
@@ -457,21 +477,7 @@ def test_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(workspace))
     monkeypatch.delenv("MODEL_PATH", raising=False)
     monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
-    monkeypatch.setattr(
-        optimizer_cli,
-        "clean_stale_aiter_locks",
-        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
-    )
-
-    def fail_preflight(args):
-        preflight._begin_install_event(args)
-        raise RuntimeError("resume preflight failed")
-
-    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
-    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
-
-    with pytest.raises(RuntimeError, match="resume preflight failed"):
-        asyncio.run(optimizer_cli._run_optimize(args))
+    _resume_into_a_failing_preflight(monkeypatch, resume_dir)
 
     assert read_timeline_events(resume_dir) == [original_install_public]
     assert json.loads((resume_dir / "session_breakdown.json").read_text(encoding="utf-8")) == {"sentinel": "active"}
@@ -484,8 +490,6 @@ def test_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
 
 
 def test_resume_preflight_failure_does_not_overwrite_completed_outcome(tmp_path, monkeypatch):
-    import hyperloom.inference_optimizer.cli as optimizer_cli
-    from hyperloom.inference_optimizer.cli import preflight
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -513,21 +517,7 @@ def test_resume_preflight_failure_does_not_overwrite_completed_outcome(tmp_path,
     original_breakdown = (resume_dir / "session_breakdown.json").read_bytes()
     monkeypatch.setenv("USER_DATA_PATH", str(workspace))
     monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
-    monkeypatch.setattr(
-        optimizer_cli,
-        "clean_stale_aiter_locks",
-        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
-    )
-
-    def fail_preflight(args):
-        preflight._begin_install_event(args)
-        raise RuntimeError("resume preflight failed")
-
-    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
-    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
-
-    with pytest.raises(RuntimeError, match="resume preflight failed"):
-        asyncio.run(optimizer_cli._run_optimize(args))
+    _resume_into_a_failing_preflight(monkeypatch, resume_dir)
 
     assert (resume_dir / "session_breakdown.json").read_bytes() == original_breakdown
     assert [(event["type"], event["status"]) for event in read_timeline_events(resume_dir)] == [
