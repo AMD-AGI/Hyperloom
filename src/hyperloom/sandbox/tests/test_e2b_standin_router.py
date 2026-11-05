@@ -7,6 +7,7 @@ sandbox it looked up, and refuses a target that is not a path and an answer whos
 from __future__ import annotations
 
 import http.client
+import socket
 import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -115,4 +116,25 @@ def test_a_sandbox_that_does_not_exist_gets_the_502_e2b_gives(serve: Serve) -> N
     status, _, body = _ask(port, "/health", sandbox="sbx-nope")
 
     assert status == 502 and b"The sandbox sbx-nope was not found" in body
+    assert asked == []
+
+
+def test_a_refused_request_closes_the_connection_so_its_body_is_never_read_as_a_request(serve: Serve) -> None:
+    asked: list[str] = []
+    port = _router(serve, [], asked)
+    smuggled = f"GET /smuggled HTTP/1.1\r\nHost: router\r\nE2b-Sandbox-Id: {_SANDBOX}\r\n\r\n".encode()
+    head = (
+        f"POST /files HTTP/1.1\r\nHost: router\r\nE2b-Sandbox-Id: sbx-nope\r\nContent-Length: {len(smuggled)}\r\n\r\n"
+    )
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+        conn.sendall(head.encode() + smuggled)
+        answered = b""
+        try:
+            while chunk := conn.recv(65536):
+                answered += chunk
+        except TimeoutError:
+            pass  # a connection the router kept open: what it answered is all here
+
+    assert answered.startswith(b"HTTP/1.1 502 ") and answered.count(b"HTTP/1.1 ") == 1
     assert asked == []

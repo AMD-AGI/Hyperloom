@@ -308,9 +308,91 @@ def test_a_host_directory_that_cannot_be_used_leaves_the_preflight_to_run_unlock
     )
 
 
+def forged_attempt(image: Path) -> list[dict[str, Any]]:
+    """A record of attempts that says this container tried to build the image's module for this card already."""
+    return [
+        {
+            "jit_dir": str(image / "jit"),
+            "target": f"{GFX}/{CU}",
+            "tables_sha256": _aiter_jit.tuned_tables_sha256(image / "configs"),
+            "variables": [VARIABLE],
+            "result": "forged",
+            "at": "2026-01-01T00:00:00Z",
+        }
+    ]
+
+
+def unlocked_warnings(caplog: pytest.LogCaptureFixture, doing: str) -> list[str]:
+    lock = once.HOST_DIR / "preflight.lock"
+    return [
+        line
+        for line in (record.getMessage() for record in caplog.records if record.levelno == logging.WARNING)
+        if line.startswith(f"aiter serving preflight: this host's lock {lock} cannot be used")
+        and line.endswith(f"{doing} runs unlocked")
+    ]
+
+
+def test_a_lock_planted_as_a_link_is_not_followed(image, tmp_path, caplog) -> None:
+    """A link at the lock's name would have every boot empty the file it points at: the lock is never opened through a
+    link, and the preflight runs unlocked and says so."""
+    victim = tmp_path / "victim"
+    victim.write_text("a file the lock points at", encoding="utf-8")
+    once.HOST_DIR.mkdir(mode=0o700)
+    (once.HOST_DIR / "preflight.lock").symlink_to(victim)
+    caplog.set_level(logging.WARNING)
+
+    once.prepare_serving_so_once({}, {})
+
+    assert victim.read_text(encoding="utf-8") == "a file the lock points at"
+    assert unlocked_warnings(caplog, "the launch preflight of a boot")
+    assert not (image / "jit" / f"{MODULE}.so").exists(), "moved aside all the same: the boot builds it"
+
+
+@pytest.mark.parametrize("planted", ["group-writable", "others-writable", "another-account"])
+def test_a_host_directory_this_account_alone_cannot_write_is_neither_locked_in_nor_read(
+    image, monkeypatch, caplog, planted
+) -> None:
+    """Every account on the host shares ``/tmp``: a directory under the lock's name that another account made, or can
+    write, could hold a lock that is a link and a record that says the build was tried. The preflight takes no lock
+    there and reads and writes no record: it runs unlocked and says so, and nothing is built once."""
+    host = once.HOST_DIR
+    host.mkdir(mode=0o700)
+    (host / "attempts.json").write_text(json.dumps(forged_attempt(image)), encoding="utf-8")
+    if planted == "another-account":
+        uid = os.getuid()
+        monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+    else:
+        host.chmod(0o770 if planted == "group-writable" else 0o707)
+    before = {path.name: path.read_bytes() for path in host.iterdir()}
+    runner = Prewarm()
+    caplog.set_level(logging.WARNING)
+
+    result = once.build_image_own_once(runner)
+
+    assert runner.calls == [] and result.rebuild == once.Rebuild(left=(MODULE,), why="this host's lock cannot be used")
+    assert {path.name: path.read_bytes() for path in host.iterdir()} == before, "nothing is written in it"
+    assert unlocked_warnings(caplog, "the prewarm of the image's own serving modules")
+
+
+def test_a_record_of_attempts_planted_as_a_link_is_not_read(image, tmp_path) -> None:
+    host = once.HOST_DIR
+    host.mkdir(mode=0o700)
+    forged = tmp_path / "forged.json"
+    forged.write_text(json.dumps(forged_attempt(image)), encoding="utf-8")
+    (host / "attempts.json").symlink_to(forged)
+    runner = Prewarm()
+
+    result = once.build_image_own_once(runner)
+
+    assert len(runner.calls) == 1 and result.rebuild.built == (MODULE,), "the forged record did not stop the build"
+    assert not (host / "attempts.json").is_symlink() and json.loads(forged.read_text(encoding="utf-8"))[0][
+        "result"
+    ] == ("forged")
+
+
 def test_a_preflight_that_waits_for_the_lock_says_who_holds_it_and_what_it_does(image, monkeypatch, caplog) -> None:
     host = once.HOST_DIR
-    host.mkdir(parents=True)
+    host.mkdir(mode=0o700, parents=True)
     holder = {"pid": 4242, "since": "2026-11-03T00:00:00Z", "doing": "building module_gemm_a8w8 for gfx950/256"}
     (host / "preflight.lock").write_text(json.dumps(holder), encoding="utf-8")
     flock = fcntl.flock

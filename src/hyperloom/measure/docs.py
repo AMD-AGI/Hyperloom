@@ -5,7 +5,9 @@
 
 Both documents cross a trust boundary (the application writes one for the runner, the runner writes the other for the
 application), so reading is strict: unknown keys, wrong types, duplicate JSON keys and non-finite numbers are all
-refusals, and a bool is never accepted where a number is expected.
+refusals, and a bool is never accepted where a number is expected. Whatever the bytes hold, reading them raises
+:class:`DocumentError` and nothing else: a number no float holds, an integer longer than Python converts, nesting
+deeper than the parser's stack and a string with a lone surrogate are refusals too.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ T = TypeVar("T")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 PREFIXED_SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
 class DocumentError(ValueError):
@@ -34,7 +37,9 @@ def canonical_json(document: Any) -> str:
 
 
 def parse_json_object(raw: bytes, *, what: str) -> dict[str, Any]:
-    """Parse ``raw`` as one JSON object, refusing duplicate keys and NaN/Infinity."""
+    """Parse ``raw`` as one JSON object, refusing duplicate keys and NaN/Infinity, a number too large to be finite (such
+    as ``1e999``), an integer longer than Python converts, nesting deeper than the parser's stack and a string with a
+    lone surrogate."""
 
     def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         keys = [key for key, _ in pairs]
@@ -45,13 +50,47 @@ def parse_json_object(raw: bytes, *, what: str) -> dict[str, Any]:
     def no_constants(name: str) -> Any:
         raise DocumentError(f"{what}: {name} is not a JSON number")
 
+    def finite(text: str) -> float:
+        value = float(text)
+        if not math.isfinite(value):
+            raise DocumentError(f"{what}: {text[:40]} is not a finite number")
+        return value
+
     try:
-        document = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constants)
+        document = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constants, parse_float=finite
+        )
+    except DocumentError:
+        raise
+    except RecursionError:
+        raise DocumentError(f"{what}: nested deeper than the parser reads") from None
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DocumentError(f"{what}: not valid UTF-8 JSON ({type(exc).__name__})") from None
+    except ValueError:  # json converts an integer with int(), which refuses one longer than the interpreter's limit
+        raise DocumentError(f"{what}: holds an integer too long to convert") from None
     if not isinstance(document, dict):
         raise DocumentError(f"{what}: the top level must be a JSON object")
+    _refuse_lone_surrogates(document, what)
     return document
+
+
+def _refuse_lone_surrogates(document: dict[str, Any], what: str) -> None:
+    """Refuse a key or string that holds a lone surrogate, which json decodes from an escape such as ``"\\ud800"``.
+
+    UTF-8 cannot encode one, so a path naming it cannot be opened and a hash over it cannot be taken (I-JSON, RFC 7493,
+    forbids them for that reason). The walk keeps its own stack, so it goes as deep as the parser did.
+    """
+    pending: list[tuple[str, Any]] = [(what, document)]
+    while pending:
+        path, value = pending.pop()
+        if isinstance(value, str):
+            if _SURROGATE_RE.search(value):
+                raise DocumentError(f"{path}: not Unicode text that UTF-8 can encode (a lone surrogate)")
+        elif isinstance(value, dict):
+            pending.extend((path, key) for key in value)
+            pending.extend((f"{path}.{key}", item) for key, item in value.items())
+        elif isinstance(value, list):
+            pending.extend((f"{path}[{index}]", item) for index, item in enumerate(value))
 
 
 class Reader:
@@ -110,11 +149,15 @@ class Reader:
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise DocumentError(f"{self.at(key)}: expected a number")
-        if not math.isfinite(value):
+        try:
+            number = float(value)
+        except OverflowError:
+            raise DocumentError(f"{self.at(key)}: must be finite") from None
+        if not math.isfinite(number):
             raise DocumentError(f"{self.at(key)}: must be finite")
-        if minimum is not None and value < minimum:
+        if minimum is not None and number < minimum:
             raise DocumentError(f"{self.at(key)}: must be at least {minimum}")
-        return float(value)
+        return number
 
     def boolean(self, key: str) -> bool:
         value = self.raw(key)

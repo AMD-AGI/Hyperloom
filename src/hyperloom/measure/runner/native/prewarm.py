@@ -8,10 +8,10 @@ that does not ship a GEMM module generated from its tuned tables (:func:`~hyperl
 table_modules`) therefore compiles it at the first prefill of every fresh container, and sglang's scheduler watchdog
 (300 s unless the launch sets ``--watchdog-timeout``) can fire on every rank while it does.
 
-:func:`missing_prebuilt_modules` names those modules, and :func:`prewarm` removes the cost: it builds the ones aiter can
-build by name (:func:`~hyperloom.measure.runner.native.aiter_modules.buildable_modules`) with the CPU build runner of
-aiter's touched modules, from the image's own tree with no root changed, and installs each into the image's
-``aiter/jit`` with ``os.replace``, then records it in the manifest beside them
+:func:`prewarm` names those modules in its report and removes the cost: it builds the ones aiter can build by name
+(:func:`~hyperloom.measure.runner.native.aiter_modules.buildable_modules`) with the CPU build runner of aiter's touched
+modules, from the image's own tree with no root changed, and installs each into the image's ``aiter/jit`` with
+``os.replace``, then records it in the manifest beside them
 (:data:`~hyperloom.orchestrator.actions.executors._aiter_jit.AITER_PREWARM_MANIFEST`, whose format the launch preflight
 owns and reads).
 
@@ -96,7 +96,6 @@ __all__ = [
     "build_environment",
     "isolated_builder",
     "main",
-    "missing_prebuilt_modules",
     "preflight_build",
     "prewarm",
 ]
@@ -147,20 +146,6 @@ def _wanted(config: Mapping[str, Any], tables: Collection[str] | None) -> list[s
 
 def _missing(jit: Path, config: Mapping[str, Any], tables: Collection[str] | None) -> list[str]:
     return [name for name in _wanted(config, tables) if not (jit / f"{name}{_SO}").is_file()]
-
-
-def missing_prebuilt_modules(image_root: Path, tables: Collection[str] | None = None) -> list[str]:
-    """The modules the image's own tuned tables generate (by its ``optCompilerConfig.json``) that its ``aiter/jit`` lacks,
-    so a plain launch builds them at its first prefill; sorted.
-
-    ``image_root`` is the image's aiter package directory (the one holding ``jit/`` and ``configs/``); ``tables`` narrows
-    the modules to those generated from one of these ``AITER_CONFIG_*`` variables' tables (every tuned table when
-    ``None``).
-
-    Raises:
-        OSError, ValueError: The module config cannot be read: what is missing is not known.
-    """
-    return _missing(Path(image_root) / _JIT_DIR, read_config(config_path(Path(image_root))), tables)
 
 
 def build_environment(environ: Mapping[str, str], cu_num: int | None) -> dict[str, str]:
@@ -287,11 +272,14 @@ def prewarm(
     tables: Collection[str] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> PrewarmReport:
-    """Build the modules :func:`missing_prebuilt_modules` names that aiter can build by name, with ``builder``, and install
-    them into the image's ``aiter/jit`` (see the module); with ``cu_num``, only when they cover the image's tables for
-    ``(gfx, cu_num)``. ``environ`` is what ``builder`` builds under, which the manifest records
-    (:func:`build_environment` of this process's when ``None``). Never raises for a build or an install that fails: the
-    report says why, the image is unchanged, and the launch builds them at its first prefill."""
+    """Build the modules the image's own tuned tables generate (by its ``optCompilerConfig.json``) that its ``aiter/jit``
+    lacks and aiter can build by name, with ``builder``, and install them into it (see the module); with ``cu_num``, only
+    when they cover the image's tables for ``(gfx, cu_num)``. ``image_root`` is the image's aiter package directory (the
+    one holding ``jit/`` and ``configs/``); ``tables`` narrows the modules to those generated from one of these
+    ``AITER_CONFIG_*`` variables' tables (every tuned table when ``None``). ``environ`` is what ``builder`` builds under,
+    which the manifest records (:func:`build_environment` of this process's when ``None``). Never raises for a build or
+    an install that fails: the report says why, the image is unchanged, and the launch builds them at its first
+    prefill."""
     started = time.monotonic()
     package = Path(image_root)
     jit = package / _JIT_DIR
