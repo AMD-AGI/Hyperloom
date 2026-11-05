@@ -220,7 +220,7 @@ def build_trace_evidence_md(state: Any, *, session_dir: Path | None = None) -> s
     lines.extend(["```text", *_tuned_miss_lines(candidates_path, profiled), "```"])
     lines.extend(["", "## Recompiled Kernels", ""])
     lines.extend(_jit_variant_lines(session_dir))
-    capture = resolve_capture(getattr(state, "last_profile_trace", ""))
+    capture = resolve_capture(state.last_profile_trace)
     by_class = hot_kernels_by_class(capture)
     lines.extend(["", OBSERVED_DECODE_HEADING, ""])
     lines.extend(_observed_decode_lines(by_class))

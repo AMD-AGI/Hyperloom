@@ -71,5 +71,4 @@ def test_a_capture_with_no_launch_calls_cannot_be_read(tmp_path):
 def test_a_capture_without_steps_or_a_missing_one_reports_nothing(tmp_path):
     assert _run(tmp_path, [kernel("k", 1.0, 5.0, correlation=1), launch(1)]) == {}
     assert gc.graph_coverage("") == {}
-    assert gc.graph_coverage(None) == {}
     assert gc.graph_coverage(tmp_path / "absent.json") == {}

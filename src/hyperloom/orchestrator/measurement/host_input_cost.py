@@ -81,5 +81,5 @@ def input_cost(workspace: str | Path | None) -> dict[str, Any] | None:
         "low_ttft_ms": round(low_ttft, 1),
         "high_isl": int(high_isl),
         "high_ttft_ms": round(high_ttft, 1),
-        "flagged": bool(slope >= FLAG_MS_PER_100K),
+        "flagged": slope >= FLAG_MS_PER_100K,
     }

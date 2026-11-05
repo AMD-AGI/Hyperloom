@@ -48,9 +48,7 @@ def _dominant(counter: Counter, total: int) -> dict[str, Any] | None:
 def foldable_in_class(events: list[dict[str, Any]], windows: list[StepWindow]) -> list[dict[str, Any]]:
     """Launch-bound kernels in one window class, costliest first."""
     ordered = sorted(kernels_in(events, windows), key=lambda e: float(e["ts"]))
-    if not ordered:
-        return []
-    steps = max(1, len(windows))
+    steps = len(windows)
     totals: dict[str, float] = defaultdict(float)
     counts: Counter = Counter()
     before: dict[str, Counter] = defaultdict(Counter)
@@ -89,10 +87,8 @@ def foldable_in_class(events: list[dict[str, Any]], windows: list[StepWindow]) -
     return rows[:TOP_N]
 
 
-def foldable_launches(trace_path: str | Path | None) -> dict[str, list[dict[str, Any]]]:
+def foldable_launches(trace_path: str | Path) -> dict[str, list[dict[str, Any]]]:
     """Per window class, the launches worth folding away, costliest first."""
-    if not str(trace_path or "").strip():
-        return {}
     events = load_trace_events(trace_path)
     windows = step_windows(events)
     if not windows:
@@ -104,7 +100,7 @@ def foldable_launches(trace_path: str | Path | None) -> dict[str, list[dict[str,
     return {name: rows for name, rows in out.items() if rows}
 
 
-def render_foldable_launches(by_class: dict[str, list[dict[str, Any]]] | None, *, name_chars: int = 70) -> list[str]:
+def render_foldable_launches(by_class: dict[str, list[dict[str, Any]]], *, name_chars: int = 70) -> list[str]:
     """Render the launch census, naming what each candidate could fold into."""
     if not by_class:
         return []

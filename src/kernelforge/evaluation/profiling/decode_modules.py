@@ -60,14 +60,12 @@ class _Capture(NamedTuple):
     kernels: dict[str, str]
 
 
-def decode_modules(trace_path: str | Path | None) -> dict[str, dict[str, Any]]:
+def decode_modules(trace_path: str | Path) -> dict[str, dict[str, Any]]:
     """Per decode window class, its device time per step by module, largest first; empty without decode steps."""
     return _decode_capture(trace_path).table
 
 
-def _decode_capture(trace_path: str | Path | None) -> _Capture:
-    if not str(trace_path or "").strip():
-        return _Capture({}, {})
+def _decode_capture(trace_path: str | Path) -> _Capture:
     events = load_trace_events(trace_path)
     by_class: dict[str, list[StepWindow]] = defaultdict(list)
     for window in step_windows(events):
@@ -100,8 +98,6 @@ def _module_rows(totals: dict[str, float], *, steps: int) -> list[dict[str, Any]
         if us > top.get(module, (0.0, ""))[0]:
             top[module] = (us, name)
     total = sum(module_us.values())
-    if not total:
-        return []
     return [
         {
             "module": module,
@@ -154,9 +150,9 @@ def _parsed(capture: str, mtime: float) -> _Capture:
     return _decode_capture(capture)
 
 
-def render_decode_modules(table: dict[str, dict[str, Any]] | None) -> list[str]:
+def render_decode_modules(table: dict[str, dict[str, Any]]) -> list[str]:
     """Render modules as rows and decode classes as columns, ``ms/step (share)`` in each cell."""
-    classes, cells = _grid(table or {})
+    classes, cells = _grid(table)
     if not cells:
         return []
     lines = [f"| module | {' | '.join(classes)} | top kernel |", f"|---|{'---:|' * len(classes)}---|"]

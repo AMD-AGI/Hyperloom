@@ -54,10 +54,8 @@ def _kernel_time_in(events: list[dict[str, Any]], windows: list[StepWindow], lau
     return _KernelTime(kernels, eager, total_us, eager_us)
 
 
-def graph_coverage(trace_path: str | Path | None) -> dict[str, dict[str, Any]]:
+def graph_coverage(trace_path: str | Path) -> dict[str, dict[str, Any]]:
     """Per window class, how much of its kernel time replays a graph rather than launching per kernel."""
-    if not str(trace_path or "").strip():
-        return {}
     events = load_trace_events(trace_path)
     windows = step_windows(events)
     if not windows:
@@ -73,11 +71,11 @@ def graph_coverage(trace_path: str | Path | None) -> dict[str, dict[str, Any]]:
         kernels, eager, total_us, eager_us = _kernel_time_in(events, members, launched)
         if not kernels:
             continue
-        eager_time_share = eager_us / total_us if total_us else 0.0
+        eager_time_share = eager_us / total_us
         out[window_class] = {
-            "eager_kernels_per_step": round(eager / max(1, len(members)), 1),
+            "eager_kernels_per_step": round(eager / len(members), 1),
             "eager_time_pct": round(eager_time_share * 100.0, 1),
-            "ungraphed": bool(eager_time_share >= UNGRAPHED_SHARE),
+            "ungraphed": eager_time_share >= UNGRAPHED_SHARE,
         }
     return dict(sorted(out.items(), key=lambda kv: kv[1]["eager_time_pct"], reverse=True))
 

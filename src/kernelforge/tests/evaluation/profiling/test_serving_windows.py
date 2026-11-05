@@ -95,7 +95,6 @@ def test_a_capture_without_step_annotations_ranks_nothing(tmp_path):
 
     assert sw.hot_kernels_by_class(write_trace(tmp_path / "t.json.gz", events)) == {}
     assert sw.hot_kernels_by_class("") == {}
-    assert sw.hot_kernels_by_class(None) == {}
     assert sw.hot_kernels_by_class(tmp_path / "absent.json") == {}
 
 

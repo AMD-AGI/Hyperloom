@@ -123,14 +123,12 @@ def _kernels_in(events: list[dict[str, Any]], windows: list[StepWindow]) -> dict
     return totals
 
 
-def hot_kernels_by_class(trace_path: str | Path | None) -> dict[str, dict[str, Any]]:
+def hot_kernels_by_class(trace_path: str | Path) -> dict[str, dict[str, Any]]:
     """Per window class, the kernels that spent the most device time in it, worst first.
 
     Empty when the trace carries no step annotations, which is what a capture taken outside a serving loop looks
     like: the caller is told nothing rather than handed a ranking of everything.
     """
-    if not str(trace_path or "").strip():
-        return {}
     events = load_trace_events(trace_path)
     windows = step_windows(events)
     if not windows:
@@ -180,10 +178,8 @@ def _row(kernel: dict[str, Any]) -> str:
     return f"| {kernel['pct']:.1f}% | {kernel['ms']:.2f} | `{_short(kernel['name'])}`{marker} |"
 
 
-def render_hot_kernels_by_class(by_class: dict[str, dict[str, Any]] | None, *, top_n: int = 8) -> list[str]:
+def render_hot_kernels_by_class(by_class: dict[str, dict[str, Any]], *, top_n: int = 8) -> list[str]:
     """Render one ranking per window class, with what each class is, as report lines."""
-    if not by_class:
-        return []
     lines: list[str] = []
     for window_class, data in by_class.items():
         phase = "decode" if data["is_decode"] else "prefill"
@@ -209,13 +205,13 @@ OBSERVED_DECODE_HEADING = "## Observed Decode Classes"
 _OBSERVED_ROW_RE = re.compile(r"^- `[A-Z_]+ bs=(?P<bs>\d+)`:", re.MULTILINE)
 
 
-def render_observed_decode_classes(by_class: dict[str, dict[str, Any]] | None) -> list[str]:
+def render_observed_decode_classes(by_class: dict[str, dict[str, Any]]) -> list[str]:
     """One row per decode class, most steps first, with its share of all decode steps."""
     # IDLE is a DP-attention rank's empty forward (bs=0): it bounds no decode case.
     decode = sorted(
         (
             (window_class, data["steps"])
-            for window_class, data in (by_class or {}).items()
+            for window_class, data in by_class.items()
             if data["is_decode"] and step_kind(window_class) != "IDLE"
         ),
         key=lambda kv: (-kv[1], kv[0]),

@@ -59,11 +59,11 @@ def _gap(kind: str, key: str, symptom: str, *, severity: str, domain_hint: str) 
     }
 
 
-def _recompile_gaps(session_dir: Any) -> list[dict[str, Any]]:
+def _recompile_gaps(session_dir: Path) -> list[dict[str, Any]]:
     """Kernels compiled once per call shape, which no kernel rewrite can recover."""
     out: list[dict[str, Any]] = []
-    for row in variant_counts(jit_cache_dir(Path(str(session_dir or ".")))):
-        if not row.get("single_constant_leak"):
+    for row in variant_counts(jit_cache_dir(session_dir)):
+        if not row["single_constant_leak"]:
             continue
         widest = row["varying"][0]
         out.append(
@@ -93,13 +93,13 @@ def _foldable_gaps(trace_path: Any) -> list[dict[str, Any]]:
     widths: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = defaultdict(list)
     for window_class, rows in foldable_launches(trace_path).items():
         for row in rows:
-            if (row.get("after") or row.get("before")) and row["ms_per_step"] >= _FOLD_MIN_MS_PER_STEP:
+            if (row["after"] or row["before"]) and row["ms_per_step"] >= _FOLD_MIN_MS_PER_STEP:
                 widths[(step_kind(window_class), row["kernel"])].append((window_class, row))
     ranked = sorted(widths.values(), key=lambda seen: sum(row["ms_in_capture"] for _, row in seen), reverse=True)
     out: list[dict[str, Any]] = []
     for seen in ranked[:_PER_CENSUS_CAP]:
         window_class, row = max(seen, key=lambda item: item[1]["ms_in_capture"])
-        neighbour = row.get("after") or row.get("before")
+        neighbour = row["after"] or row["before"]
         out.append(
             _gap(
                 "foldable_launch",
@@ -120,7 +120,7 @@ def _graph_gaps(trace_path: Any) -> list[dict[str, Any]]:
     """Step classes paying a launch for every kernel they run."""
     out: list[dict[str, Any]] = []
     for window_class, row in graph_coverage(trace_path).items():
-        if not row.get("ungraphed"):
+        if not row["ungraphed"]:
             continue
         out.append(
             _gap(
@@ -143,7 +143,7 @@ def _graph_gaps(trace_path: Any) -> list[dict[str, Any]]:
 def _input_cost_gaps(workspace: Any) -> list[dict[str, Any]]:
     """Time paid per input token in front of the engine, where a cached prefix should cost nothing."""
     cost = input_cost(workspace)
-    if not cost or not cost.get("flagged"):
+    if cost is None or not cost["flagged"]:
         return []
     return [
         _gap(
@@ -160,7 +160,7 @@ def _input_cost_gaps(workspace: Any) -> list[dict[str, Any]]:
     ]
 
 
-def run_evidence_gaps(*, session_dir: Any, trace_path: Any, workspace: Any) -> list[dict[str, Any]]:
+def run_evidence_gaps(*, session_dir: Path, trace_path: str, workspace: str) -> list[dict[str, Any]]:
     """Every cause-shaped gap this run's own evidence supports.
 
     Each census reads its own artifact and is kept to it: a run whose JIT cache

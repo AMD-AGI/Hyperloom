@@ -66,22 +66,19 @@ def _varying_positions(suffixes: list[str]) -> list[dict[str, Any]]:
     return out
 
 
-def variant_counts(cache_root: str | Path | None) -> list[dict[str, Any]]:
+def variant_counts(cache_root: Path) -> list[dict[str, Any]]:
     """Per base kernel, how many variants a session compiled and where they differ, worst first.
 
     A cache this process cannot stat counts as a cache with nothing to report, so the other censuses rendered
     beside this one survive it.
     """
-    root = Path(str(cache_root or "")).expanduser()
-    if not str(cache_root or "").strip():
-        return []
     try:
-        if not root.is_dir():
+        if not cache_root.is_dir():
             return []
     except OSError:
         return []
     by_kernel: dict[str, list[str]] = {}
-    for meta in root.glob("**/*.json"):
+    for meta in cache_root.glob("**/*.json"):
         if meta.name.startswith("__grp__") or not meta.parent.is_dir():
             continue
         base, suffix = _variant_name(meta.parent)
@@ -116,13 +113,13 @@ def render_jit_variants(rows: list[dict[str, Any]] | None) -> list[str]:
         "|---|---:|---|---|",
     ]
     for row in rows:
-        widest = (row.get("varying") or [{}])[0]
+        widest = (row["varying"] or [{}])[0]
         after = str(widest.get("after") or "?")
         distinct = widest.get("distinct_values")
         spread = f"after `…_{after}_`: {distinct} values" if distinct else "spread across several"
         reading = (
             "one constant tracks a runtime quantity; each call shape pays a compile"
-            if row.get("single_constant_leak")
+            if row["single_constant_leak"]
             else "spread across constants, consistent with a tuning table"
         )
         lines.append(f"| `{row['kernel']}` | {row['variants']} | {spread} | {reading} |")

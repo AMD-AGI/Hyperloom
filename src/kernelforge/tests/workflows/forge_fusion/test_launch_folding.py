@@ -103,7 +103,6 @@ def test_a_row_carries_its_cost_over_the_whole_capture_beside_its_cost_per_step(
 def test_a_capture_without_steps_or_a_missing_one_reports_nothing(tmp_path):
     assert fl.foldable_launches(write_trace(tmp_path / "t.json", [kernel("k", 1.0, 4.0)])) == {}
     assert fl.foldable_launches("") == {}
-    assert fl.foldable_launches(None) == {}
     assert fl.foldable_launches(tmp_path / "absent.json") == {}
 
 

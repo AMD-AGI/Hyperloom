@@ -79,8 +79,6 @@ def test_the_worst_offender_comes_first(tmp_path):
 
 def test_an_absent_or_empty_cache_reports_nothing(tmp_path):
     assert jv.variant_counts(tmp_path / "absent") == []
-    assert jv.variant_counts(None) == []
-    assert jv.variant_counts("") == []
     (tmp_path / "empty").mkdir()
     assert jv.variant_counts(tmp_path / "empty") == []
 
