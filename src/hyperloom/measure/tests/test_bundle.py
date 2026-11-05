@@ -168,6 +168,32 @@ def test_a_signed_manifest_listing_a_path_utf8_cannot_encode_is_invalid(bundle, 
     assert _reason(bundle.staging, bundle) is RejectReason.MANIFEST_INVALID
 
 
+_KEY_REFUSED = "manifest: a key is not Unicode text that UTF-8 can encode"
+
+
+@pytest.mark.parametrize(
+    ("tamper", "reason", "detail"),
+    [
+        pytest.param({"inject": b'"\\ud800":{"\\udc00":1},'}, "manifest_invalid", _KEY_REFUSED, id="a-key-below-a-key"),
+        pytest.param(
+            {"inject": b'"\\ud800":["\\udc00"],'}, "manifest_invalid", _KEY_REFUSED, id="a-string-below-a-key"
+        ),
+        pytest.param({"unlisted": b"\xff"}, "unlisted_file", "\\udcff", id="an-unlisted-file-whose-name-is-not-utf8"),
+    ],
+)
+def test_a_refusal_that_names_what_utf8_cannot_encode_can_still_be_printed(bundle, tamper, reason, detail) -> None:
+    if "inject" in tamper:
+        _sign_raw(bundle, b"{" + tamper["inject"] + encode_manifest(bundle.document)[1:])
+    else:
+        (bundle.staging / "x").write_bytes(b"1")
+        os.rename(bytes(bundle.staging / "x"), bytes(bundle.staging) + b"/" + tamper["unlisted"])
+    with pytest.raises(ResultRejected) as raised:
+        verify_bundle(bundle.staging, verify_args(bundle))
+    assert raised.value.reason is RejectReason(reason)
+    assert raised.value.detail == detail, "what UTF-8 cannot encode is escaped, not dropped"
+    str(raised.value).encode("utf-8")
+
+
 def test_listed_sizes_adding_up_to_more_digits_than_str_converts_are_too_large_not_a_crash(bundle) -> None:
     document = copy.deepcopy(bundle.document)
     for entry in document["files"]:
