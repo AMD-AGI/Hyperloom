@@ -493,23 +493,32 @@ for number in range(1, shares + 1):
 """
 
 
-#: Arbor's master in a fake checkout, as the deal is agreed: the open directions of ``--map``, by rank, that no
-#: ``--reports`` closes or marks spent and no ``--held`` order holds, at most ``--size`` of them, written to ``--order``.
+#: Arbor's master in a fake checkout, as Arbor ``74933a2`` deals: the open directions of ``--map`` that no report
+#: settled, two reports gave back open (exhausted) or a ``--held-order`` (or ``--held`` id) holds; fresh ones before those
+#: reported back open once, then by rank; at most ``--size`` of them, always written to ``--out``.
 FAKE_ROLES = """
 import json, pathlib, sys
-args = sys.argv[1:]
+args = sys.argv[2:]
 def given(flag):
-    if flag not in args:
-        return []
-    rest = args[args.index(flag) + 1 :]
-    return rest[: next((index for index, word in enumerate(rest) if word.startswith("--")), len(rest))]
+    found = []
+    for index, word in enumerate(args):
+        if word == flag:
+            rest = args[index + 1 :]
+            found += rest[: next((n for n, w in enumerate(rest) if w.startswith("--")), len(rest))]
+    return found
 def directions(path):
     return json.loads(pathlib.Path(path).read_text())["directions"]
-settled = {e["id"] for r in given("--reports") for e in directions(r) if e.get("status", "open") != "open" or e.get("spent")}
-held = {e["id"] for order in given("--held") for e in directions(order)}
-live = [e for e in directions(given("--map")[0]) if e.get("status", "open") == "open" and e["id"] not in settled | held]
-dealt = sorted(live, key=lambda e: e.get("rank", 0))[: int(given("--size")[0])]
-pathlib.Path(given("--order")[0]).write_text(json.dumps({"directions": dealt}))
+reported = [e for r in given("--reports") + given("--report") for e in directions(r)]
+settled = {e["id"] for e in reported if e.get("status", "open") != "open"}
+back = [e["id"] for e in reported if e.get("status", "open") == "open"]
+exhausted = {i for i in back if back.count(i) >= 2}
+held = set(given("--held")) | {e["id"] for order in given("--held-order") for e in directions(order)}
+live = [e for e in directions(given("--map")[0]) if e.get("status", "open") == "open"]
+free = [e for e in live if e["id"] not in settled | exhausted | held]
+dealt = sorted(free, key=lambda e: (e["id"] in back, e.get("rank", 0)))[: int(given("--size")[0])]
+pathlib.Path(given("--out")[0]).write_text(json.dumps({"directions": dealt}))
+print(json.dumps({"order": given("--out")[0], "directions": [e["id"] for e in dealt], "free": len(free),
+                  "held": sorted(held), "settled": sorted(settled), "exhausted": sorted(exhausted)}))
 """
 
 

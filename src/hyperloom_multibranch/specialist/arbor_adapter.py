@@ -262,13 +262,13 @@ DOSSIER_PASS = ArborRun(f"{MB_DIR}/dossier.json", f"{MB_DIR}/dossier", stop_at="
 
 @dataclass(frozen=True)
 class DealRequest:
-    """What the master deals from: the session's map, the reports its workers handed back, the orders running workers
-    hold, and where the order goes, of at most ``size`` directions."""
+    """What the master deals from: the session's map, the reports its workers handed back, the shares and orders
+    running workers hold, and where the order goes (``out``), of at most ``size`` directions."""
 
     map_file: Path
     reports: tuple[Path, ...]
     held: tuple[Path, ...]
-    order: Path
+    out: Path
     size: int
 
 
@@ -798,18 +798,18 @@ async def generate_directions(checkout: Path, profile: Path, out: Path) -> Path:
 
 
 async def deal_order(checkout: Path, deal: DealRequest) -> Path:
-    """Have the master of the Arbor checkout ``checkout`` write ``deal.order``: the next open directions of
-    ``deal.map_file``, at most ``deal.size``, that no report closes and no held order holds, ranked as the map ranks
-    them. An order of no directions means nothing is left to deal. Raise :class:`SplitFailed` with what Arbor printed
-    when it cannot."""
+    """Have the master of the Arbor checkout ``checkout`` write the order ``deal.out``: at most ``deal.size`` open
+    directions of ``deal.map_file`` that no report settled and no held share or order holds, as Arbor picks them
+    (``python3 -m arbor.roles deal``, Arbor ``74933a2``). An order of no directions means nothing is left to deal.
+    Raise :class:`SplitFailed` with what Arbor printed when it cannot."""
 
-    args = ["deal", "--map", str(deal.map_file), "--order", str(deal.order), "--size", str(deal.size)]
+    args = ["deal", "--map", str(deal.map_file), "--size", str(deal.size)]
     if deal.reports:
         args += ["--reports", *(str(report) for report in deal.reports)]
-    if deal.held:
-        args += ["--held", *(str(order) for order in deal.held)]
-    await _arbor_cli(checkout, (deal.order,), ROLES_MODULE, *args)
-    return deal.order
+    for held in deal.held:
+        args += ["--held-order", str(held)]
+    await _arbor_cli(checkout, (deal.out,), ROLES_MODULE, *args, "--out", str(deal.out))
+    return deal.out
 
 
 async def _arbor_cli(checkout: Path, written: tuple[Path, ...], module: str, *args: str) -> None:

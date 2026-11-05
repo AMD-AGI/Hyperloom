@@ -32,7 +32,7 @@ class MapCalls:
     the Arbor ``source`` a mapping branch runs by ``deadline``, ``None`` to run none; ``split(branch, start_commit,
     map_for, outcome)``, which hands the map out to the Arbor agents ``map_for`` (``outcome`` ``None`` when no pass ran)
     and says how; ``deal(branch, agent, plan, report)``, which the run of the Arbor ``agent`` on ``plan`` calls with its
-    worker ``report`` when it hands its share back (``reported`` or ``spent``), before it finishes: the slot of
+    worker ``report`` when it hands its share back (exits ``reported``), before it finishes: the slot of
     ``branch`` is dealt the next order of the map, and it says how."""
 
     start: Callable[[str, str, float], Awaitable[DossierStart | None]]

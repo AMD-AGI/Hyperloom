@@ -2003,8 +2003,8 @@ def _one_reports(
 
     async def deal(_checkout: Path, request: DealRequest) -> Path:
         asked.append(request)
-        request.order.write_text(json.dumps({"directions": order}))
-        return request.order
+        request.out.write_text(json.dumps({"directions": order}))
+        return request.out
 
     async def reports(branch: str) -> None:
         await stage.time.sleep(REPORT_SECONDS)
@@ -2042,7 +2042,7 @@ async def test_a_reported_arbor_is_stopped_as_finished_and_its_slot_dealt_the_ne
     [dealt] = [row for row in rows if row["reason"] == DEALT]
     share = dealt["detail"]["branch"]
     assert (dealt["branch"], dealt["detail"]["status"]) == ("b01", "pending")
-    assert _shares(stage) == {share: str(request.order)}
+    assert _shares(stage) == {share: str(request.out)}
     assert roster[share]["from_branch"] == "b01"
     assert stage.sessions.started[share] == await stage.repo.head(INTEGRATION_BRANCH)
     # The share waited for the slot: it entered the roster only after b01 stopped and gave its cards back.

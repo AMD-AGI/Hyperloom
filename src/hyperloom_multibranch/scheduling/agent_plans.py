@@ -25,10 +25,10 @@ a source that cannot be fetched, no Arbor among the agents, fewer independent di
 with no shares Arbor can use.
 
 The session keeps the map it split (:class:`MapDealer`) for Arbor's master to deal from. An Arbor worker that hands its
-share back, every direction closed (``reported``) or every open one worked without a KEEP (``spent``), gives the
-scheduler its worker report as its run ends; the master folds every report so far into the map and deals the slot the
-worker frees its next order, at most :data:`DEAL_SIZE` open directions that no report closed and no running worker
-holds (:func:`~hyperloom_multibranch.specialist.arbor_adapter.deal_order`). The scheduler asks the fork desk for a share
+share back (it exits ``reported``, its report's ``ended`` saying why) gives the scheduler its worker report as its run
+ends; the master folds every report so far into the map and deals the slot the worker frees its next order, at most
+:data:`DEAL_SIZE` open directions that no report settled and no running worker holds, a direction reported back open
+by two workers never again (:func:`~hyperloom_multibranch.specialist.arbor_adapter.deal_order`). The scheduler asks the fork desk for a share
 branch on that order, which takes the slot once the worker's branch has stopped and its cards are back. An empty order
 asks for none, and the slot goes to the judge's refill. A worker's order stays held until it reports.
 
