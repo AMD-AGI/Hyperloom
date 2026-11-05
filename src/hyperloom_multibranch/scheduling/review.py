@@ -32,6 +32,7 @@ import getpass
 import hashlib
 import json
 import os
+import shlex
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -258,8 +259,8 @@ def _page(session: Path, shown: Reviewed, now: float) -> str:
         *(PAUSED if paused else RUNNING),
         "Read the map and the dossier below, edit either where it lies if you wish, then:",
         "",
-        f'    {COMMAND} --session {session} approve --note "..."',
-        f'    {COMMAND} --session {session} reject --note "..."',
+        f'    {_command(session, APPROVE)} --note "..."',
+        f'    {_command(session, REJECT)} --note "..."',
         "",
         *(PAUSED_DECIDED if paused else RUNNING_DECIDED),
         *([] if paused else _clock(session, shown, now)),
@@ -291,8 +292,12 @@ def _clock(session: Path, shown: Reviewed, now: float) -> list[str]:
         f"- **Asked:** {_iso(now)}",
         *by,
         f"- **EXPLORE ends:** {_iso(shown.explore_end or now)}, whenever you decide.",
-        f"- **Time left now:** `{COMMAND} --session {session} show`",
+        f"- **Time left now:** `{_command(session, SHOW)}`",
     ]
+
+
+def _command(session: Path, action: str) -> str:
+    return f"{COMMAND} --session {shlex.quote(str(session))} {action}"
 
 
 def add_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

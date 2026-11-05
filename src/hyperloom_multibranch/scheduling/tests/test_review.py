@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 from hyperloom_multibranch.scheduling.review import (
@@ -140,6 +141,16 @@ def test_a_review_in_explore_shows_its_clock_and_show_says_how_long_is_left_unti
     assert "\nStatus: pending\nNow " in str(show(directory))  # one of the two, whenever this runs
     decide(directory, True, "alice", "", NOW + 90 * 60)
     assert _time_left(load(directory) or {}, NOW + 95 * 60) == "" and "Now " not in str(show(directory))
+
+
+def test_the_page_s_commands_quote_a_session_path_a_shell_would_split(tmp_path: Path) -> None:
+    session = tmp_path / "MB session"
+    request(session / "MB-review", session, Reviewed(None, None, "dossier pass", explore_end=NOW + 3600), NOW)
+
+    page = (session / "MB-review" / REVIEW_PAGE).read_text()
+    quoted = shlex.quote(str(session))
+    assert quoted == f"'{session}'"
+    assert all(f"review --session {quoted} {action}" in page for action in ("approve --note", "reject --note", "show`"))
 
 
 def test_a_review_in_explore_whose_shares_open_whatever_the_time_has_no_time_to_decide_by(tmp_path: Path) -> None:
