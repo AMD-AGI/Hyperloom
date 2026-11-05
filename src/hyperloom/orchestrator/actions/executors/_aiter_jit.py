@@ -540,7 +540,14 @@ def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
     return list(dict.fromkeys(rows))
 
 
-def _serving_modules_cover_rows(jit_dir: Path, modules: tuple[str, ...], rows: list[tuple[str, str]]) -> bool:
+def serving_modules_cover_rows(jit_dir: Path, modules: tuple[str, ...], rows: list[tuple[str, str]]) -> bool:
+    """True when every JIT ``kernelName`` in ``rows`` appears in its serving .so.
+
+    ``libtype=asm`` (and other non-JIT backends) names are not linked into
+    ``module_*.so``. A name is looked up in the module of ``modules`` its ``libtype``
+    names, then in the one its prefix implies, falling back to ``modules``. Missing .so files mean the next start
+    will compile from the current CSV, so that case is treated as covered.
+    """
     if not rows:
         return True
     blobs: dict[str, bytes | None] = {}
@@ -574,17 +581,6 @@ def _serving_modules_cover_rows(jit_dir: Path, modules: tuple[str, ...], rows: l
         if saw_so and not found:
             return False
     return True
-
-
-def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path: Path) -> bool:
-    """True when every JIT ``kernelName`` in the CSV appears in its serving .so.
-
-    ``libtype=asm`` (and other non-JIT backends) names are not linked into
-    ``module_*.so``. A name is looked up in the module of ``modules`` its ``libtype``
-    names, then in the one its prefix implies, falling back to ``modules``. Missing .so files mean the next start
-    will compile from the current CSV, so that case is treated as covered.
-    """
-    return _serving_modules_cover_rows(jit_dir, modules, csv_jit_kernel_rows(csv_path))
 
 
 #: What hyperloom's prewarm writes beside the modules it built from the image's own tree and tables
@@ -737,7 +733,7 @@ def prepare_serving_so_for_csvs(
     )
     modules_needed: list[str] = []
     for modules, rows in tables:
-        if _serving_modules_cover_rows(jit_dir, modules, rows):
+        if serving_modules_cover_rows(jit_dir, modules, rows):
             continue
         modules_needed.extend(modules)
         for name, libtype in rows:
@@ -835,7 +831,7 @@ __all__ = [
     "registry_mismatch_modules",
     "result_is_aiter_jit_registry_mismatch",
     "serving_module_for_kernel",
-    "serving_modules_cover_csv",
+    "serving_modules_cover_rows",
     "sweep_stale_aiter_locks_if_dead",
     "_any_live_compiler",
     "_resolve_lock_sweep_dirs",
