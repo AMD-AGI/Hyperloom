@@ -90,10 +90,10 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
     TestRecord,
 )
+from hyperloom_multibranch.contracts.blackboard.exhausted import exhausted_refusal
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, InboxKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
-from hyperloom_multibranch.specialist.exhausted import exhausted_refusal
 from hyperloom_multibranch.specialist.following import REROOT, Followed, follow, integration_holdings, reroot_requested
 from hyperloom_multibranch.specialist.judging import NOTICE, left_unjudged
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage

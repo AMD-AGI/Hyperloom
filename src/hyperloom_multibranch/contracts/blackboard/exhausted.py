@@ -3,9 +3,10 @@
 
 """A specialist's record that its direction is done on a head: one branch-log entry, ``EXHAUSTED`` and a JSON object.
 
-It is kept for the record and stops nothing; one that cites no test is no record, as an untested direction is not
-done. The runtime deals the session's direction a record names to no new branch on that record's head, and when the
-branch gives up, it quotes the latest one in its notice. ``why`` is a closed vocabulary so that give-ups can be counted by cause.
+A specialist writes it and the specialist runtime and the startup brief read it. It is kept for the record and stops
+nothing; one that cites no test is no record, as an untested direction is not done. The runtime deals the session's
+direction a record names to no new branch on that record's head, and when the branch gives up, it quotes the latest
+one in its notice. ``why`` is a closed vocabulary so that give-ups can be counted by cause.
 A ``blocked_by_tool`` or ``needs_capability`` record whose detail names no file or call tried, or no error it gave, is
 refused (:func:`exhausted_refusal`): one that names neither can be neither checked nor reopened.
 """
@@ -19,7 +20,6 @@ from dataclasses import dataclass
 from enum import Enum
 
 from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord
-from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 
 EXHAUSTED_PREFIX = "EXHAUSTED "
 
@@ -112,17 +112,6 @@ def _parsed(content: str) -> Exhausted | None:
         return None
 
 
-def session_direction(named: str) -> str | None:
-    """The session direction a record's ``direction`` names: its name alone, or followed by a qualifier."""
-
-    named = named.strip().lower()
-    for direction in sorted(DIRECTIONS, key=lambda d: -len(direction_name(d))):
-        name = direction_name(direction).lower()
-        if named == name or (named.startswith(name) and not named[len(name)].isalnum()):
-            return direction
-    return None
-
-
 def exhausted_records(records: Iterable[BranchLogRecord]) -> list[Exhausted]:
     """The well-formed records among a branch's log entries that are not refused, oldest first."""
 
@@ -144,5 +133,4 @@ __all__ = [
     "exhausted_refusal",
     "latest_exhausted",
     "read_exhausted",
-    "session_direction",
 ]
