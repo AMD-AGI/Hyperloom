@@ -115,19 +115,6 @@ NEAR_BAR_COMPONENT = "near_bar_tests"
 STRANDED_COMPONENT = "stranded_lead_pct"
 CANDIDATE_COMPONENT = "stop_candidate"
 PROBATION_COMPONENT = "probation"
-#: The stall evidence's components, written beside every score of a running branch.
-EVIDENCE_COMPONENTS = frozenset(
-    {
-        STALLED_COMPONENT,
-        STALL_BAR_COMPONENT,
-        MERGED_COMPONENT,
-        MERGED_GAIN_COMPONENT,
-        NEAR_BAR_COMPONENT,
-        STRANDED_COMPONENT,
-        CANDIDATE_COMPONENT,
-        PROBATION_COMPONENT,
-    }
-)
 #: The share of stop candidates drawn for probation, once a stall.
 PROBATION_SHARE = 0.25
 #: How many judged tests past the bar a branch drawn for probation runs before it is a stop candidate: the horizon
@@ -137,6 +124,8 @@ PROBATION_TESTS = HORIZON_TESTS
 PROBATION_HOLD = "probation"
 NEAR_BAR_HOLD = "near_bar_lead"
 STRANDED_HOLD = "stranded_lead"
+#: What holds a branch outside the envelope: a candidate of it waiting for its confirm.
+PENDING_CONFIRM_HOLD = "pending_confirm"
 
 
 @dataclass(frozen=True)
@@ -621,7 +610,6 @@ class FrontierScoring(ProgressQuery):
 __all__ = [
     "AMDAHL_COMPONENT",
     "CANDIDATE_COMPONENT",
-    "EVIDENCE_COMPONENTS",
     "FRONTIER_LOG_FORMAT",
     "FRONTIER_V1_LABEL",
     "HEADROOM_COMPONENT",
@@ -633,6 +621,7 @@ __all__ = [
     "OBSERVATION_FLOOR_PCT",
     "OBSERVATION_SECONDS",
     "PENDING_COMPONENT",
+    "PENDING_CONFIRM_HOLD",
     "PROBATION_COMPONENT",
     "PROBATION_HOLD",
     "PROBATION_SHARE",

@@ -73,7 +73,14 @@ from hyperloom_multibranch.blackboard.rsi.ladder import (
 )
 from hyperloom_multibranch.blackboard.rsi.open_areas import OpenAreas, open_areas
 from hyperloom_multibranch.blackboard.rsi.outcomes import OUTCOMES_REPORT, OutcomePool, specialist_outcomes
-from hyperloom_multibranch.blackboard.rsi.playbook import FALLBACK_KEY, H0, PLAYBOOK_KEY, Playbook, PlaybookPool
+from hyperloom_multibranch.blackboard.rsi.playbook import (
+    CHAMPION_KEY,
+    FALLBACK_KEY,
+    H0,
+    PLAYBOOK_KEY,
+    Playbook,
+    PlaybookPool,
+)
 from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions, workload_kind
 from hyperloom_multibranch.blackboard.rsi.stops import stop_audit
 
@@ -214,7 +221,8 @@ def _trialled(
     """The session kept as a trial of the playbook it played, beside the pool, and what that settles: a playbook
     crowned or retired (:func:`~hyperloom_multibranch.blackboard.rsi.ladder.settle`). Its task names the configured
     ``budget_seconds``, as the archived tree does: the time a blackboard spans differs from session to session, and
-    R3 pairs and bands only sessions of one task."""
+    R3 pairs and bands only sessions of one task. Its champion is the one its policy versions name beside the playbook,
+    and the pool's at CLOSE for a session recorded before they named one."""
 
     versions = snapshot.fingerprints[-1].policy_versions if snapshot.fingerprints else {}
     played = versions.get(PLAYBOOK_KEY)
@@ -225,8 +233,9 @@ def _trialled(
     try:
         tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds)
         pool = PlaybookPool.beside(archive)
+        champion = versions.get(CHAMPION_KEY) or pool.champion().label
         audit = stop_audit(tree, stall_odds(archived_history(archive), tree.task, session=tree))
-        trial = trial_of(tree, audit, played, pool.champion().label, fell_back=bool(versions.get(FALLBACK_KEY)))
+        trial = trial_of(tree, audit, played, champion, fell_back=bool(versions.get(FALLBACK_KEY)))
         written = record_trial(pool, trial)
         settled = settle(pool, snapshot.taken_at, trial.task)
     except NotRecorded:

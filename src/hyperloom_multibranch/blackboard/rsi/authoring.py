@@ -18,16 +18,17 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import logging
 import math
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import typing
+from collections.abc import Mapping, Sequence
 
+from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.blackboard.rsi.archive import NO_ARCHIVE, SKIPPED, SearchTree, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.history import stall_odds
-from hyperloom_multibranch.blackboard.rsi.ladder import WORSE, measured, r1_reading, session_task, trials
+from hyperloom_multibranch.blackboard.rsi.ladder import WORSE, Complete, measured, r1_reading, session_task, trials
 from hyperloom_multibranch.blackboard.rsi.playbook import (
     BOUNDS,
     MAX_RULES,
@@ -56,8 +57,6 @@ from hyperloom_multibranch.blackboard.rsi.stops import StopAudit, stop_audit
 
 log = logging.getLogger(__name__)
 
-#: Asks the LLM with a system prompt and a prompt, and returns its answer.
-Complete = Callable[[str, str], Awaitable[str]]
 MAX_RATIONALE_CHARS = 600
 NOT_ARCHIVED = "the session's search tree is not in the archive"
 _MINUTE = 60.0
@@ -70,6 +69,11 @@ NO_CHANGE = "the LLM proposed no change"
 NO_MEASURE = "no decision measure varied in the champion's sessions of this task, so R3 could read none"
 #: The numbers that are whole though their default is ``None``.
 _WHOLE = frozenset({"stall_tests", "max_open"})
+#: Each number's type as :class:`PlaybookNumbers` declares it: a change may set a number to null, its default, only
+#: where that type admits ``None``.
+_NUMBER_TYPES = typing.get_type_hints(PlaybookNumbers)
+#: What a change names, one of them: a number, a rule to add, or the number of a rule to remove.
+_CHANGES = ("number", "add_rule", "remove_rule")
 
 PLAYBOOK_SYSTEM_PROMPT = f"""You improve the scheduling playbook of a multi-branch LLM inference optimization session.
 Specialist branches run in parallel, each testing changes to a serving recipe. Every round a judge decides which
@@ -176,6 +180,8 @@ def _changed_numbers(champion: Playbook, change: Mapping[str, object]) -> Playbo
     name, value = change.get("number"), change.get("value")
     if not isinstance(name, str) or name not in BOUNDS:
         raise ValueError(f"{name!r} is no number of the playbook")
+    if value is None and type(None) not in typing.get_args(_NUMBER_TYPES[name]):
+        raise ValueError(f"{name} takes a number, not null")
     if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
         raise ValueError(f"{name} takes a number, not {value!r}")
     if value is not None and not _finite(value):
@@ -201,20 +207,18 @@ def _changed_rules(champion: Playbook, change: Mapping[str, object]) -> tuple[Pl
 def read_change(
     answer: str, champion: Playbook, provenance: Mapping[str, str], now: float, measures: Sequence[str] = MEASURES
 ) -> tuple[Playbook | None, str]:
-    """The playbook ``answer`` proposes, one change to ``champion`` aimed at one of ``measures``, registered ``now``
-    with ``provenance``, and ``""``; or ``None`` and why there is none."""
+    """The playbook ``answer`` proposes in its last JSON object with a change, one change to ``champion`` aimed at one
+    of ``measures``, registered ``now`` with ``provenance``, and ``""``; or ``None`` and why there is none, which an
+    object of it with ``none`` gives where it holds one."""
 
     if not answer.strip():
         return None, "the answer is empty"
-    start, end = answer.find("{"), answer.rfind("}")
-    try:
-        document = json.loads(answer[start : end + 1]) if 0 <= start < end else None
-    except json.JSONDecodeError:
-        document = None
-    if not isinstance(document, dict):
+    declined = extract_last_json_with_key(answer, "none")
+    if declined is not None:
+        return None, f"{NO_CHANGE}: {declined['none']}"
+    document = extract_last_json_with_key(answer, "change")
+    if document is None:
         return None, "the answer holds no JSON object"
-    if "none" in document:
-        return None, f"{NO_CHANGE}: {document['none']}"
     change, measure = document.get("change"), document.get("measure")
     label, hypothesis = document.get("label"), document.get("hypothesis")
     if not isinstance(change, Mapping) or not isinstance(label, str) or not isinstance(hypothesis, str):
@@ -224,6 +228,9 @@ def read_change(
         return None, f"{label!r} gives no label a playbook may take"
     if measure not in measures:
         return None, f"{measure!r} is no decision measure R3 can read here; one of {', '.join(measures)}"
+    kinds = [key for key in _CHANGES if key in change]
+    if len(kinds) > 1:
+        return None, f"a change is one number or one rule added or removed, not {' and '.join(kinds)}"
     try:
         numbers = _changed_numbers(champion, change) if "number" in change else champion.numbers
         rules = champion.rules if "number" in change else _changed_rules(champion, change)
@@ -359,7 +366,6 @@ __all__ = [
     "NO_CHANGE",
     "NO_MEASURE",
     "PLAYBOOK_SYSTEM_PROMPT",
-    "Complete",
     "author_playbook",
     "measures_line",
     "playbook_prompt",

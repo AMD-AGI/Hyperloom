@@ -19,7 +19,7 @@ from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import PeerReplay
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.knowledge.replay_tables import StackSlot
-from hyperloom_multibranch.blackboard.rsi.briefing import CrossSessionBriefing
+from hyperloom_multibranch.blackboard.rsi.briefing import CrossSessionBriefing, RecallCache
 from hyperloom_multibranch.blackboard.rsi.tests.repos import FakeRepo
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock, request
 from hyperloom_multibranch.blackboard.tests.sessions import SPLIT_KV, scripted_session
@@ -68,7 +68,13 @@ async def test_a_peer_replay_takes_the_wider_table_and_names_no_loss(tmp_path: P
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(wide,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(narrow,))
     briefing = CrossSessionBriefing(
-        blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": head}), stack_slot=_slot(store)
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": head}),
+        stack_slot=_slot(store),
     )
 
     replayed = await briefing.peer_replay("r7")
@@ -88,7 +94,13 @@ async def test_a_peer_replay_drops_a_kernel_the_heads_wider_table_already_covers
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(narrow,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(wide,))
     briefing = CrossSessionBriefing(
-        blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": head}), stack_slot=_slot(store)
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": head}),
+        stack_slot=_slot(store),
     )
 
     with pytest.raises(ValueError, match="already has the change"):
@@ -111,7 +123,13 @@ async def _replayed_over(
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(head_art,))
     stack_slot = _slot(store, install(tmp_path / "image"))
     briefing = CrossSessionBriefing(
-        blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": head}), stack_slot=stack_slot
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": head}),
+        stack_slot=stack_slot,
     )
     return await briefing.peer_replay("r7"), store
 
@@ -155,7 +173,13 @@ async def test_a_peer_replay_names_the_swap_when_the_merge_would_refuse_the_tabl
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(theirs,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(own,))
     briefing = CrossSessionBriefing(
-        blackboard, branch="s3", repo=FakeRepo({"s3": "c3"}, {"c3": head}), stack_slot=_slot(store)
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": head}),
+        stack_slot=_slot(store),
     )
 
     replayed = await briefing.peer_replay("r7")

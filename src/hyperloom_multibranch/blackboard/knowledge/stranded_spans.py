@@ -4,8 +4,10 @@
 """How long each branch's lead over integration stayed stranded in a session, for CLOSE's breakdown.
 
 A lead is stranded while a branch's head leads integration's by more than the merge bar on the session's metric and
-one of the branch's commits has already failed to merge (``CommittedCommit.first_failed_at``), the view
-:mod:`~hyperloom_multibranch.blackboard.rsi.stranded` gives of one moment. Over the session,
+one of the branch's commits failed to merge and has not merged since, the view
+:mod:`~hyperloom_multibranch.blackboard.rsi.stranded` gives of one moment. A commit stands failed from its first failed
+merge (``CommittedCommit.first_failed_at``) until it merges or a later merge of it does not fail; the snapshot keeps
+only its first failure and its last merge, so a retry between two failures counts as failed. Over the session,
 each value holds from the commit that recorded it until the next one on its branch, so :func:`stranded_spans` adds up
 the minutes such a lead held, until the snapshot was taken, and finds when it peaked: a lead can stay stranded for
 hours.
@@ -13,11 +15,13 @@ hours.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
+from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, CommittedCommit
+from hyperloom_multibranch.contracts.blackboard.vocab import FAILED_MERGES
 
 _MINUTE = 60.0
 _PERCENT = 100.0
@@ -26,8 +30,8 @@ _PERCENT = 100.0
 @dataclass(frozen=True)
 class StrandedSpan:
     """A branch whose lead over integration on ``metric`` stayed over the merge bar ``bar_pct`` for ``minutes`` while
-    ``failed_commits`` of its commits had failed to merge: from ``first_at``, at most ``peak_lead_pct``, at
-    ``peak_at``. Times are the session's clock, as the records' ``at``."""
+    a commit of it stood failed to merge, ``failed_commits`` of its commits failing at some time: from ``first_at``, at
+    most ``peak_lead_pct``, at ``peak_at``. Times are the session's clock, as the records' ``at``."""
 
     branch: str
     metric: str
@@ -70,16 +74,36 @@ def _values(snapshot: BlackboardSnapshot, metric: str, root: float) -> _Values:
     return _Values(found, root)
 
 
+def _failed(commit: CommittedCommit, snapshot: BlackboardSnapshot) -> tuple[float, float] | None:
+    """From when until when ``commit`` stood failed to merge, the end infinite while it still does; ``None`` when no
+    merge of it failed."""
+
+    if commit.first_failed_at is None:
+        return None
+    until = math.inf
+    last = commit.last_merge
+    if last is not None and last.outcome not in FAILED_MERGES:
+        until = last.at
+    merged = snapshot.lineage.commit(commit.merged_into) if commit.merged_into is not None else None
+    if merged is not None:
+        until = min(until, merged.at)
+    return commit.first_failed_at, until
+
+
 def _span(
-    values: _Values, branch: str, failed: Sequence[float], end: float, bar: float
+    values: _Values, branch: str, failed: Sequence[tuple[float, float]], end: float, bar: float
 ) -> tuple[float, float, float, float] | None:
     """When the stranded lead of ``branch`` first held, how many minutes it held, and its peak with when; ``None`` when
-    it never held. ``failed`` are when its commits first failed to merge, the earliest first."""
+    it never held. ``failed`` are from when until when each of its commits stood failed to merge."""
 
-    events = sorted(when for when in values.times(branch) | values.times(INTEGRATION_BRANCH) | set(failed))
-    events = [when for when in events if failed[0] <= when <= end] or [failed[0]]
+    start = min(since for since, _ in failed)
+    bounds = {when for span in failed for when in span}
+    times = values.times(branch) | values.times(INTEGRATION_BRANCH) | bounds
+    events = sorted(when for when in times if start <= when <= end) or [start]
     first, minutes, peak, peak_at = None, 0.0, 0.0, 0.0
     for when, following in zip(events, [*events[1:], end]):
+        if not any(since <= when < until for since, until in failed):
+            continue
         head, base = values.at(branch, when), values.at(INTEGRATION_BRANCH, when)
         lead = (head / base - 1.0) * _PERCENT if head and base else None
         if lead is None or lead <= bar:
@@ -101,16 +125,17 @@ def stranded_spans(snapshot: BlackboardSnapshot, metric: str) -> tuple[StrandedS
     if bar is None or not root:
         return ()
     values = _values(snapshot, metric, root)
-    failed: dict[str, list[float]] = {}
+    failed: dict[str, list[tuple[float, float]]] = {}
     for commit in snapshot.committed:
-        if commit.first_failed_at is not None:
-            failed.setdefault(commit.branch, []).append(commit.first_failed_at)
+        held = _failed(commit, snapshot)
+        if held is not None:
+            failed.setdefault(commit.branch, []).append(held)
     spans = []
-    for branch, times in failed.items():
-        found = _span(values, branch, sorted(times), snapshot.taken_at, bar)
+    for branch, held_by in failed.items():
+        found = _span(values, branch, held_by, snapshot.taken_at, bar)
         if found is not None:
             first, minutes, peak, peak_at = found
-            spans.append(StrandedSpan(branch, metric, bar, first, minutes, peak, peak_at, len(times)))
+            spans.append(StrandedSpan(branch, metric, bar, first, minutes, peak, peak_at, len(held_by)))
     return tuple(sorted(spans, key=lambda span: -span.minutes))
 
 

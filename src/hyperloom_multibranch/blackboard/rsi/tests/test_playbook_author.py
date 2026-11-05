@@ -87,6 +87,14 @@ def test_an_answer_gives_one_change_to_the_champion_as_a_playbook_on_trial() -> 
     assert removed is not None and (removed.rules, removed.parent) == ((), "ruled")
 
 
+def test_an_answer_is_read_from_its_json_object_though_prose_with_braces_follows_it() -> None:
+    later, why = read_change(_answer(**LATER, measure="stop_value") + " It rests on {h(5), h(6)}.", H0, WHO, 1.0)
+    declined = read_change(_answer(none="nothing to try") + " The audit {as read} agrees.", H0, WHO, 1.0)
+
+    assert why == "" and later is not None and later.numbers == replaced(H0, stall_tests=8).numbers
+    assert declined == (None, f"{NO_CHANGE}: nothing to try")
+
+
 def test_an_answer_labelled_as_the_pool_would_refuse_is_registered_under_a_label_it_takes() -> None:
     proposed, why = read_change(_answer(**{**LATER, "label": "Stall 0.25 -> 8"}, measure="stop_value"), H0, WHO, 1.0)
 
@@ -124,12 +132,44 @@ def test_an_answer_labelled_as_the_pool_would_refuse_is_registered_under_a_label
             _answer(**{**LATER, "change": {"number": "probation_share", "value": 10**400}}, measure="stop_value"),
             "probation_share takes a finite number",
         ),
+        (
+            _answer(
+                **{
+                    **LATER,
+                    "change": {"number": "stall_tests", "value": 8, "add_rule": {"governs": "stop", "text": ALIKE}},
+                },
+                measure="stop_value",
+            ),
+            "a change is one number or one rule added or removed, not number and add_rule",
+        ),
+        (
+            _answer(
+                **{**LATER, "change": {"add_rule": {"governs": "stop", "text": ALIKE}, "remove_rule": 1}},
+                measure="stop_value",
+            ),
+            "a change is one number or one rule added or removed, not add_rule and remove_rule",
+        ),
     ],
 )
 def test_an_answer_that_is_no_valid_single_change_says_why(answer: str, why: str) -> None:
     proposed, found = read_change(answer, H0, WHO, 1.0)
 
     assert proposed is None and found.startswith(why)
+
+
+def test_a_number_takes_null_only_where_its_field_of_the_playbook_may_be_none() -> None:
+    capped = Playbook("capped", replaced(H0, max_open=4).numbers)
+    plain = ("probation_share", "probation_tests", "grace_tests", "failed_op_limit")
+
+    def nulled(name: str, champion: Playbook) -> tuple[Playbook | None, str]:
+        return read_change(
+            _answer(**{**LATER, "change": {"number": name, "value": None}}, measure="stop_value"), champion, WHO, 1.0
+        )
+
+    uncapped, why = nulled("max_open", capped)
+
+    assert why == "" and uncapped is not None and uncapped.numbers == H0.numbers
+    assert [nulled(name, H0) for name in plain] == [(None, f"{name} takes a number, not null") for name in plain]
 
 
 def test_the_author_reads_the_numbers_the_champion_the_audit_the_new_branches_and_the_ledger(

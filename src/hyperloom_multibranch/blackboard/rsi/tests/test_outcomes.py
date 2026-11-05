@@ -90,7 +90,7 @@ def test_an_explore_test_of_a_family_the_archive_tried_and_never_committed_in_is
         family.layer,
         tests=3,
         family_target=family.target,
-        family_mechanism=family.mechanism.value,
+        family_mechanism=family.mechanism,
     )
     past = tree("past", branch("b1", [], directions=(tried,)), task=task_conditions(snapshot.profile))
 

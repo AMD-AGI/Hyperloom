@@ -34,8 +34,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.io import atomic_write_json, atomic_write_text
+from hyperloom_common.io import atomic_write_bytes, atomic_write_json
 from hyperloom_common.timeutil import epoch_iso
+from hyperloom.common.gain_math import gain_pct
 from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.contracts.toolbox import QueueState
@@ -46,6 +47,7 @@ from hyperloom_multibranch.blackboard.rsi.analysis import direction_occupancy, h
 from hyperloom_multibranch.blackboard.rsi.frontier import (
     CANDIDATE_COMPONENT,
     MERGED_GAIN_COMPONENT,
+    PENDING_CONFIRM_HOLD,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
     TREND_COMPONENT,
@@ -60,8 +62,7 @@ DASHBOARD_HTML = "dashboard.html"
 
 
 def _gain(values: Mapping[str, float], baseline: Mapping[str, float], metric: str) -> float | None:
-    value, anchor = values.get(metric), baseline.get(metric)
-    return (value / anchor - 1.0) * 100.0 if value and anchor else None
+    return gain_pct(values.get(metric), baseline.get(metric, 0.0))
 
 
 def _evidence(row: BranchProgress) -> dict[str, Any] | None:
@@ -73,7 +74,7 @@ def _evidence(row: BranchProgress) -> dict[str, Any] | None:
     if row.frontier is None or STALLED_COMPONENT not in row.frontier.components:
         return None
     components = row.frontier.components
-    held = [what for what in ("pending_confirm" if row.pending else "", envelope_hold(components)) if what]
+    held = [what for what in (PENDING_CONFIRM_HOLD if row.pending else "", envelope_hold(components)) if what]
     return {
         "stalled_tests": components.get(STALLED_COMPONENT),
         "stall_bar": components.get(STALL_BAR_COMPONENT),
@@ -243,11 +244,13 @@ class DashboardFiles:
 
 
 def write_dashboard(directory: Path, dashboard: Mapping[str, Any]) -> DashboardFiles:
-    """Write the dashboard data and its page into ``directory``, each atomically."""
+    """Write the dashboard data and its page into ``directory``, each atomically, once the page is rendered; a lone
+    surrogate in the dashboard's text, which UTF-8 cannot encode, goes on the page as a character reference."""
 
     files = DashboardFiles(directory / DASHBOARD_JSON, directory / DASHBOARD_HTML)
+    page = render_html(dashboard).encode("utf-8", errors="xmlcharrefreplace")
     atomic_write_json(files.json, dict(dashboard))
-    atomic_write_text(files.html, render_html(dashboard))
+    atomic_write_bytes(files.html, page)
     return files
 
 

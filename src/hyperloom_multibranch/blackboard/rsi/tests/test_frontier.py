@@ -36,7 +36,6 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.rsi.archive import longest_root_test_seconds
 from hyperloom_multibranch.blackboard.rsi.frontier import (
     CANDIDATE_COMPONENT,
-    EVIDENCE_COMPONENTS,
     FRONTIER_LOG_FORMAT,
     FRONTIER_V1_LABEL,
     MERGED_COMPONENT,
@@ -236,7 +235,14 @@ def test_each_scored_branch_carries_its_stall_evidence_under_a_stop_rule_and_non
     assert (components[MERGED_COMPONENT], components[MERGED_GAIN_COMPONENT]) == (1.0, pytest.approx(4.0))
     assert (components[NEAR_BAR_COMPONENT], components[CANDIDATE_COMPONENT]) == (0.0, 0.0)
     assert PROBATION_COMPONENT not in components and STRANDED_COMPONENT not in components
-    assert not EVIDENCE_COMPONENTS & set(plain.components)
+    assert set(components) - set(plain.components) == {
+        STALLED_COMPONENT,
+        STALL_BAR_COMPONENT,
+        MERGED_COMPONENT,
+        MERGED_GAIN_COMPONENT,
+        NEAR_BAR_COMPONENT,
+        CANDIDATE_COMPONENT,
+    }
     assert plain.expected_gain_pct == s1.expected_gain_pct
 
 

@@ -13,7 +13,9 @@ import pytest
 
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ClaimKey, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.peers import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import (
+    BranchLogRecord,
     BranchNode,
     BranchProgress,
     CardHold,
@@ -263,6 +265,19 @@ def test_the_dashboard_is_written_as_json_and_html(busy: BlackboardSnapshot, tmp
     assert json.loads(files.json.read_text(encoding="utf-8")) == dashboard
     assert files.html.read_text(encoding="utf-8") == render_html(dashboard)
     assert "Toolbox queue" in files.html.read_text(encoding="utf-8")
+
+
+def test_a_lone_surrogate_in_agent_text_is_a_character_reference_on_the_page_and_both_files_are_written(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    cut = BranchLogEntry("s1", BranchLogType.HYPOTHESIS, "the MoE GEMM wants larger tiles \ud83d", ("r4",))
+    logs = {**snapshot.branch_logs, "s1": (*snapshot.branch_logs["s1"], BranchLogRecord("e9", 0.0, cut))}
+    dashboard = build_dashboard(dataclasses.replace(snapshot, branch_logs=logs), metric=METRIC)
+
+    files = write_dashboard(tmp_path / "out", dashboard)
+
+    assert json.loads(files.json.read_text(encoding="utf-8")) == dashboard
+    assert "<td>the MoE GEMM wants larger tiles &#55357;</td>" in files.html.read_text(encoding="utf-8")
 
 
 async def test_an_empty_blackboard_has_an_empty_page(tmp_path: Path) -> None:

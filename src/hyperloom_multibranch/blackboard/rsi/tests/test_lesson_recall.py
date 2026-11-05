@@ -17,7 +17,7 @@ from hyperloom_multibranch.contracts.blackboard.records import Learning, Learnin
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 from hyperloom_multibranch.blackboard.families import Family, Mechanism
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, NOTES_HEADING, RetrievalLog
-from hyperloom_multibranch.blackboard.rsi.briefing import CrossSessionBriefing
+from hyperloom_multibranch.blackboard.rsi.briefing import CrossSessionBriefing, RecallCache
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import GIST_CHARS, SHOWN_BEFORE, LessonRecall, edited_lessons
 from hyperloom_multibranch.blackboard.rsi.lessons import (
     LessonEvidence,
@@ -84,13 +84,11 @@ def test_a_lesson_bears_on_a_query_by_its_words_from_a_session_alike_enough_to_t
     pool.retire(LessonRetirement(gone, human_author("curator"), START, "fixed upstream"))
     recall = LessonRecall(pool=pool)
 
-    found = recall.past_for(snapshot, "cuda graph padding", limit=5)
-    split_kv = recall.past_for(snapshot, "attention split kv", limit=5)
+    found = recall.notes(snapshot, "cuda graph padding", limit=5)
+    split_kv = recall.notes(snapshot, "attention split kv", limit=5)
 
-    assert found is not None and [item.render() for item in found.items] == [
-        f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]"
-    ]
-    assert split_kv is not None and [item.render() for item in split_kv.items] == [
+    assert [item.render() for item in found.past] == [f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]"]
+    assert [item.render() for item in split_kv.past] == [
         f"- [past-1, tp differ, unmeasured] attention split kv pays only past conc 128 [{split}]"
     ]
     assert (recall.knows(graph), recall.knows(gone), recall.knows(lesson_id_for("nowhere"))) == (True, False, False)
@@ -98,8 +96,8 @@ def test_a_lesson_bears_on_a_query_by_its_words_from_a_session_alike_enough_to_t
     lesson(pool, "later", "written after this session read the pool")
     assert recall.past_revision() == read != pool.digest() == LessonRecall(pool=pool).past_revision()
     assert LessonRecall().past_revision() == ""
-    assert LessonRecall().past_for(snapshot, "cuda graph", limit=5) is None
-    assert recall.past_for(dataclasses.replace(snapshot, profile=None), "cuda graph", limit=5) is None
+    assert LessonRecall().notes(snapshot, "cuda graph", limit=5).past == ()
+    assert recall.notes(dataclasses.replace(snapshot, profile=None), "cuda graph", limit=5).past == ()
 
 
 def test_a_lesson_this_session_revised_or_retired_is_shown_no_more_and_the_standing_weighs_the_rest(
@@ -122,10 +120,10 @@ def test_a_lesson_this_session_revised_or_retired_is_shown_no_more_and_the_stand
         snapshot, learnings=tuple(LearningRecord(f"s1:{n}", START, item) for n, item in enumerate(edits, 1))
     )
 
-    found = LessonRecall(pool=pool).past_for(edited, "cuda graph capture fails batch size", limit=5)
+    found = LessonRecall(pool=pool).notes(edited, "cuda graph capture fails batch size", limit=5)
 
     assert edited_lessons(edited) == {revised, retired}
-    assert found is not None and [item.experience_id for item in found.items] == [trusted, doubted]
+    assert [item.experience_id for item in found.past] == [trusted, doubted]
 
 
 def test_one_list_puts_the_familys_notes_first_and_this_sessions_first_among_equals(
@@ -189,11 +187,15 @@ async def test_a_claim_names_a_lesson_its_launch_was_shown_already_by_its_gist_a
     whole = f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]"
     query = "cuda graph max batch size"
 
-    await CrossSessionBriefing(blackboard, focus="cuda graph", branch="s1", learnings=recall).startup_brief("c0")
+    await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, focus="cuda graph", branch="s1", learnings=recall
+    ).startup_brief("c0")
     again = await recall.about(snapshot, query, branch="s1")
     elsewhere = await recall.about(snapshot, query, branch="s2")
     asked = await recall.lines(snapshot, "cuda graph", limit=5, branch="s1")
-    await CrossSessionBriefing(blackboard, focus="moe", branch="s1", learnings=recall).startup_brief("c0")
+    await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, focus="moe", branch="s1", learnings=recall
+    ).startup_brief("c0")
     relaunched = await recall.about(snapshot, query, branch="s1")
 
     assert again == [NOTES_HEADING, f"- {SHOWN_BEFORE} {CORRECTION[: GIST_CHARS - 3]}... [{graph}]"]
@@ -204,7 +206,15 @@ async def test_the_brief_shows_past_lessons_as_learnt_before(tmp_path: Path, poo
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
     graph = lesson(pool, "graph", CORRECTION, evidence=MEASURED)
 
-    briefing = CrossSessionBriefing(blackboard, focus="cuda graph", branch="s3", learnings=LessonRecall(pool=pool))
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        focus="cuda graph",
+        branch="s3",
+        learnings=LessonRecall(pool=pool),
+    )
     brief = await briefing.startup_brief("c0")
 
     assert f"learnt before: [past-1, same conditions, measured] {CORRECTION} [{graph}]" in brief.lessons
