@@ -24,9 +24,11 @@ from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import rebench_round_sec
 from hyperloom_common.env import env_float, env_int
 from hyperloom_common.jsonio import read_json
+from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.launch_log_evidence import recipe_server_launch
+from hyperloom.inference_optimizer.agentx.report import replayed_trace, round_replay_client
 from ..actions.executors._recipe_script import resolve_launch_server_script
-from ..actions.executors._workload_envs import geak_metric_axis
+from ..actions.executors._workload_envs import geak_grading_fields, geak_metric_axis
 from ..bus.message_bus import Message
 from ..kernel.geak_config import _geak_has_accepted_kernel
 from ..kernel.lane_budget import INSUFFICIENT_BUDGET
@@ -384,6 +386,11 @@ class _GeakDispatchMixin:
         runner_env = dict(os.environ)
         runner_env["E2E_METRIC"] = metric
         runner_env[REAP_MARK_ENV] = uuid.uuid4().hex
+        workspace = self._accepted_round_workspace()
+        replay_client = round_replay_client(workspace) if workspace else None
+        if replay_client is not None and "AIPERF_BIN" not in runner_env:
+            runner_env["AIPERF_BIN"] = str(replay_client)
+            log.info("GEAK replays AgentX traces with the accepted round's aiperf: %s", replay_client)
         # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full
         # environment to the child, so the tag reaches the Claude CLI that actually spends.
         from hyperloom_common.llm.llm_attribution import inject_env
@@ -519,8 +526,51 @@ class _GeakDispatchMixin:
             state_max_model_len=int(self.shared_state.max_model_len or 0),
         )
 
-    def _geak_workload_spec(self, bench: Mapping[str, Any]) -> dict[str, Any]:
-        # Only AgentX materializations carry ``benchmark.workload_spec``; every other recipe
+    def _accepted_round_workspace(self) -> Path | None:
+        """The workspace of the round the current best was measured in, when the measurement names one."""
+        workspace = str(self.shared_state.current_best_measurement.get("benchmark_workspace") or "")
+        return Path(workspace) if workspace else None
+
+    def _native_agentx_workload_spec(self, conc: int) -> dict[str, Any]:
+        """Declare the trace the accepted Magpie round replayed, so GEAK searches on that workload.
+
+        Magpie composes the replay itself, so no recipe on this backend carries a ``workload_spec``;
+        the round's report names the corpus. GEAK keeps its canonical value for each field left out.
+        """
+        state = self.shared_state
+        workspace = self._accepted_round_workspace()
+        trace = replayed_trace(workspace) if workspace else None
+        replayed: dict[str, Any] = {}
+        if trace is None:
+            log.warning("workload_spec: no valid AgentX report under %s; GEAK replays its canonical corpus", workspace)
+        else:
+            log.info(
+                "workload_spec: %s replayed %d requests, mean isl=%d osl=%d",
+                trace.corpus,
+                trace.requests,
+                trace.mean_isl,
+                trace.mean_osl,
+            )
+            replayed = {
+                "corpus": trace.corpus,
+                "canonical_corpus": trace.corpus,
+                "num_entries": trace.entries,
+                "observed_isl": trace.mean_isl,
+                "observed_osl": trace.mean_osl,
+                "observed_requests": trace.requests,
+            }
+        return {
+            "kind": "agentx_trace_replay",
+            "client": "aiperf",
+            **replayed,
+            "concurrency": conc,
+            **geak_grading_fields(state.grading or None),
+        }
+
+    def _geak_workload_spec(self, bench: Mapping[str, Any], *, conc: int) -> dict[str, Any]:
+        if is_magpie_agentx(bench):
+            return self._native_agentx_workload_spec(conc)
+        # Only MLPerf AgentX materializations carry ``benchmark.workload_spec``; every other recipe
         # omits it so GEAK keeps today's synthetic path unchanged.
         spec = bench.get("workload_spec")
         if not isinstance(spec, dict) or not spec:
@@ -589,7 +639,7 @@ class _GeakDispatchMixin:
         }
         for key, value in (
             ("bench_protocol", self._resolve_bench_protocol(recipe_envs)),
-            ("workload_spec", self._geak_workload_spec(recipe_bench)),
+            ("workload_spec", self._geak_workload_spec(recipe_bench, conc=handoff["workload"]["conc"])),
             ("launch_server_script", launch_server_script),
             # Full layered environment and its matching measurement identity.
             ("baseline_env_spec", env_spec),
