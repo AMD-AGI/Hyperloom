@@ -26,7 +26,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling import branches
-from hyperloom_multibranch.scheduling.branches import BatchStart, BranchControl
+from hyperloom_multibranch.scheduling.branches import BatchStart, BranchControl, BranchFocus
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -50,6 +50,7 @@ from hyperloom_multibranch.specialist.directions import DIRECTIONS
 
 NOW = 1_700_000_000.0
 OPEN_BY = NOW + 3600.0
+ASKED = "aiter::add_rmsnorm_quant_kernel (norm): fuse with the following quant step"
 CLOCK = Clock(now=lambda: NOW)
 BASELINE = Recipe(BASE_IMAGE_DIGEST)
 
@@ -204,23 +205,27 @@ async def test_a_batch_stops_at_the_first_slot_an_admission_took_and_spends_no_b
     assert json.loads((tmp_path / "MB-roster.json").read_text())["issued_branch_ids"] == 4
 
 
-async def test_a_batch_keeps_each_branch_focus_unrendered_and_names_it_in_its_open_decision(tmp_path: Path) -> None:
+async def test_a_batch_briefs_and_logs_the_judges_focus_as_written_and_names_its_op_on_the_open_lineage(
+    tmp_path: Path,
+) -> None:
     bench = await Bench(tmp_path).rooted()
     briefs = SessionBriefs(bench.blackboard)
     bench.control = BranchControl(bench.context(tmp_path), bench.runtime, bench.toolbox, bench.repo, briefs)
 
     start = BatchStart(BranchOrigin.REFILL, await bench.control.integration_head(), OPEN_BY)
-    await bench.control.open_branches(2, 1, start, ("attention",))
+    await bench.control.open_branches(2, 1, start, (BranchFocus(ASKED, "aiter::add_rmsnorm_quant_kernel"),))
     await _runs_started()
 
     assert start.start_commit == bench.root
-    assert {branch: briefs.for_branch(branch).focus for branch in ("b01", "b02")} == {"b01": "attention", "b02": ""}
+    assert {branch: briefs.for_branch(branch).focus for branch in ("b01", "b02")} == {"b01": ASKED, "b02": ""}
     assert bench.sessions.briefs == {"b01": "", "b02": ""}
     opened = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
     assert [(row["branch"], row["detail"]["focus"]) for row in opened if row["kind"] == "open"] == [
-        ("b01", "attention"),
+        ("b01", ASKED),
         ("b02", ""),
     ]
+    view = {branch.branch: branch.focus for branch in (await bench.blackboard.lineage()).branches}
+    assert (view["b01"], view["b02"]) == ("aiter::add_rmsnorm_quant_kernel", "")
 
 
 async def test_user_branches_open_at_the_root_at_k_one_on_their_directions_up_to_the_free_slots(tmp_path: Path) -> None:
@@ -345,7 +350,12 @@ async def test_an_admitted_repair_is_cut_and_opens_at_its_commit_with_its_k_its_
     assert bench.sessions.repairs == {"b02": repair}
     assert bench.sessions.quota_at_start["b02"] == 2
     view = {branch.branch: branch for branch in (await bench.blackboard.lineage()).branches}
-    assert (view["b02"].start_commit, view["b02"].origin, view["b02"].repairs) == (fix, LineageKind.OPEN, "r1")
+    assert (view["b02"].start_commit, view["b02"].origin, view["b02"].repairs, view["b02"].focus) == (
+        fix,
+        LineageKind.OPEN,
+        "r1",
+        "",
+    )
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert (logged["kind"], logged["branch"]) == ("repair", "b02")
 
@@ -404,7 +414,7 @@ async def test_a_fork_the_gate_landed_opens_at_its_fix(tmp_path: Path) -> None:
 
     assert (bench.sessions.started["b02"], bench.sessions.k["b02"]) == (fix, 2)
     view = {branch.branch: branch for branch in (await bench.blackboard.lineage()).branches}
-    assert (view["b02"].origin, view["b02"].from_branch) == (LineageKind.SPLIT, "b01")
+    assert (view["b02"].origin, view["b02"].from_branch, view["b02"].focus) == (LineageKind.SPLIT, "b01", "")
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert (logged["kind"], logged["branch"], logged["detail"]["from_branch"]) == ("fork", "b02", "b01")
 
