@@ -460,7 +460,9 @@ class SessionEvents:
         """The focus of each of ``count`` branches opening on ``commit`` (:func:`refill_focus`), the ops the judge
         ``asked`` for taken over the op shares of ``commit`` or of the profile of its recipe."""
 
-        return refill_focus(asked, count, await self._profiler.shares_of(commit))
+        shares = await self._profiler.shares_of(commit)
+        largest = [op for op, _ in shares.largest(count)] if shares is not None else []
+        return refill_focus(asked, count, shares, largest)
 
     def _profile_move(self, head: str) -> None:
         if self._unprofiled_move is not None:

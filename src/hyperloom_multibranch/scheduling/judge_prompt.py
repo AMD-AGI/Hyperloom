@@ -4,7 +4,7 @@
 """The judge's system prompt: :data:`JUDGE_SYSTEM_PROMPT` in a session that plays no scheduling playbook, and
 :data:`PLAYBOOK_JUDGE_PROMPT` in one that plays one, where the stall evidence is the one stop rule for a stall.
 
-The two differ in five parts (:class:`PromptParts`). Each has a version in the session's manifest fingerprint, derived
+The two differ in eight parts (:class:`PromptParts`). Each has a version in the session's manifest fingerprint, derived
 from its text and the reply format every user prompt ends with (:data:`REPLY_FORMAT`).
 """
 
@@ -24,14 +24,18 @@ from hyperloom_multibranch.specialist.prompts import VERSION_HEX
 class PromptParts:
     """The parts of the judge's system prompt that differ between a session that plays a scheduling playbook and one
     that plays none: what a low expected gain asks for (``spend``), what a stall is (``stall``), what lying behind the
-    integration head is (``behind``), what a branch's grace counts (``grace``) and what the safety envelope holds
-    (``envelope``)."""
+    integration head is (``behind``), what a branch's grace counts (``grace``), what the safety envelope holds
+    (``envelope``), what a branch opened without a focus is briefed on (``default_focus``), when a free slot stays
+    free (``free_slot``) and what becomes of the slot of a branch out of ideas (``out_of_ideas``)."""
 
     spend: str
     stall: str
     behind: str
     grace: str
     envelope: str
+    default_focus: str
+    free_slot: str
+    out_of_ideas: str
 
 
 #: The parts of a session that plays no scheduling playbook.
@@ -50,6 +54,11 @@ merged, so it is a candidate to stop. A branch whose judged_since_commit is belo
 behind is no reason to stop it, as the commits it goes on making are what the integrator merges.""",
     grace=f"{SETTLED_TESTS} of its explore tests",
     envelope="",
+    default_focus="""\
+the largest ops of the integration head's latest profile in turn, the largest first, wrapping when more branches open
+than it has ops, or on none when that head was never profiled""",
+    free_slot="Leaving a free slot unopened needs a reason; opening into it does not.",
+    out_of_ideas="a branch out of ideas is one to stop and replace, so refill the free slots rather than stop the session",
 )
 #: The parts of a session that plays one: its stall evidence is the one stop rule for a stall.
 _WITH_PLAYBOOK = PromptParts(
@@ -78,6 +87,17 @@ the integrator merges.""",
     envelope="""
 stranded_lead and probation: the playbook's safety envelope keeps a branch whose head leads the integration head on
 commits that failed to merge, and one drawn for probation: you may lower their K, not stop them.""",
+    default_focus="""\
+the open areas' ops in turn, or on none when no profile of the integration head or a commit it builds on is
+known""",
+    free_slot="""\
+When the open areas list no op, leave a free slot free: give its tests to the running branches by raising their K
+where the caps allow, or to the pending forks and repairs; the scheduler then opens only the branches you name a focus
+for. Reopen an op a stopped branch was opened on only for an angle its history has not tried, and say in your
+reasoning which.""",
+    out_of_ideas="""\
+a branch out of ideas is one to stop, its slot refilled while an open area is left, rather than stop
+the session""",
 )
 
 
@@ -91,12 +111,12 @@ You may open branches at any call. opening is true only for the call that sizes 
 commit EXPLORE started on — the root commit, or the Recipe KB champion PRELUDE replayed onto it — at least one branch
 unless user branches opened already (an agent's branch does not count). A branch opened at a later call starts from the
 integration head, briefed on its focus: the op it should speed up. Name the focus of each, or leave it out and the
-branch is briefed on the largest ops of the integration head's latest profile in turn, the largest first, wrapping when
-more branches open than it has ops, or on none when that head was never profiled. The opening batch is given no focus. free_branch_slots counts the branches you may open at this call having
-stopped nothing; a stop frees one more for the same answer, and branches beyond the slots left are not opened. Leaving a
-free slot unopened needs a reason; opening into it does not. pending lists the forks and repairs the rule gate asked for
-that wait for a slot, oldest first, with how long each has waited: a slot your stops free goes to them first and only
-the slots left open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it
+branch is briefed on {{default_focus}}. The opening batch is given no focus. A specialist branch's focus is the op it
+was opened on, empty for none; a stopped branch keeps it, so its stopped line says how a branch on that op ended.
+free_branch_slots counts the branches you may open at this call having stopped nothing; a stop frees one more for the
+same answer, and branches beyond the slots left are not opened. {{free_slot}}
+pending lists the forks and repairs the rule gate asked for that wait for a slot, oldest first, with how long each has
+waited: a slot your stops free goes to them first and only the slots left open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it
 start.
 {{spend}}
 A branch's basis says what its expected gain rests on: its own trend, the floor of a direction still being observed,
@@ -122,7 +142,7 @@ stays stranded the integration branch, and every branch you open from it, goes o
 before stopping such a branch, whose head holds the gain the integration head lacks.
 bottleneck_moved: the profile of the integration head taken after it moved found its largest op changed, or that op's
 share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches still speeding up the previous largest op
-have less to gain, and a branch you open now without a focus is briefed from the new profile as above.
+have less to gain, and a branch you open now is briefed on the new profile unless you name its focus.
 The integration branch's profile_running is true while that profile runs: its PROFILE test holds one of the
 integration branch's K slots, so merge tests wait for it while that K is 1; size the integration branch's K with it.
 environment_changed: the toolbox quarantined a measurement node after an infrastructure failure (gpu_ids is empty for
@@ -183,8 +203,7 @@ against the tests the branch is about to report.
 A branch's waiting_builds are the native builds its tests wait for before they can run, each with its component and
 eta_seconds: a branch whose tests wait only on them is building, not stalled.
 Stop the session only when no branch is expected to gain anything worth the remaining time, and weigh that against
-explore_remaining_seconds: while hours of it are left and slots are free, a branch out of ideas is one to stop and
-replace, so refill the free slots rather than stop the session. Nothing measures convergence, so an early stop is
+explore_remaining_seconds: while hours of it are left and slots are free, {{out_of_ideas}}. Nothing measures convergence, so an early stop is
 your judgement that the time left cannot be spent at all.
 Answer with exactly ONE JSON object and nothing after it."""
 

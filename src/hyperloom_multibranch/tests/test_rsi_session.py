@@ -12,7 +12,8 @@ the envelope refuses, then the champion. A session without an archive, or under 
 none and runs as one without the RSI. Where the playbook meets the judge's own rules, its grace holds a stalled
 branch, a branch behind integration whose commits merge is no stop candidate, and a branch the judge stopped is scored
 no more while its tests run on. With too little of EXPLORE left for a new branch's first commit, every refill the
-judge asks for is cut.
+judge asks for is cut. A refill the judge names no focus for takes the open areas in turn, and is cut while they leave
+no op open; one it names a focus for opens on the profile op its text names.
 """
 
 from __future__ import annotations
@@ -73,6 +74,7 @@ from hyperloom_multibranch.scheduling.judge_prompt import (
 )
 from hyperloom_multibranch.scheduling.lifecycle import JUDGE_PROMPT_KEY
 from hyperloom_multibranch.scheduling.manifest import read_manifest
+from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import PlaybookMode
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
@@ -87,6 +89,7 @@ from hyperloom_multibranch.tests.test_skeleton import (
     EXPLORED,
     SETTINGS,
     WORKLOAD,
+    ProfilingToolbox,
     Stage,
     _decisions,
     _judge_prompts,
@@ -137,12 +140,13 @@ def no_archive(monkeypatch: pytest.MonkeyPatch) -> None:
 @dataclass
 class PlaybookJudge(ScriptedCompletion):
     """A judge that plays the playbook as written: the opening call opens ``opening`` branches at K 2, and every call
-    after it asks for ``refill`` more, stops each live specialist branch its stall evidence makes a stop candidate,
+    after it asks for ``refill`` more on ``focus``, stops each live specialist branch its stall evidence makes a stop candidate,
     and asks to stop each one of ``insist`` whatever holds it; a test double, not a placeholder."""
 
     opening: int = 2
     refill: int = 0
     insist: frozenset[str] = frozenset()
+    focus: tuple[str, ...] = ()
 
     async def __call__(self, system: str, user: str) -> CompletionReply:
         self.calls.append((system, user))
@@ -156,7 +160,8 @@ class PlaybookJudge(ScriptedCompletion):
             and "stopped" not in row
             and (_candidate(row) or row["branch"] in self.insist)
         ]
-        return self._answer({"open": self.refill, "open_k": 2, "branches": [], "stop": stops})
+        refill = {"open": self.refill, "open_k": 2, "focus": list(self.focus), "branches": [], "stop": stops}
+        return self._answer(refill)
 
     def _answer(self, document: dict[str, object]) -> CompletionReply:
         return CompletionReply(json.dumps(document), self.tokens, self.cost_usd)
@@ -490,3 +495,54 @@ async def test_with_too_little_of_explore_left_for_a_first_commit_every_refill_t
     cuts = [row["detail"] for row in _decisions(stage) if row["reason"] == PLAYBOOK_OPEN_CUT_REASON]
     assert cuts and all(detail["too_late"] and (detail["requested"], detail["opened"]) == (1, 0) for detail in cuts)
     assert "b03" not in await _stops(stage)
+
+
+def _focused_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judge: PlaybookJudge) -> Stage:
+    """A session on the root's profile of ``moe_gemm`` and ``attention`` with room for four branches, whose branches
+    test on without a commit, under a champion whose stall bar no branch reaches."""
+
+    archive = _archive(tmp_path, monkeypatch)
+    _crowned(archive, Playbook("no-stall", replaced(H0, stall_tests=20).numbers, parent=H0.label))
+    stage = _stage(tmp_path)
+    stage.settings = replace(SETTINGS, caps=RosterCaps(4, 2, 8), judge_interval_seconds=200.0)
+    stage.toolbox_type = ProfilingToolbox
+    stage.judge = judge
+    stage.scripts = dict.fromkeys(("b01", "b02", "b03", "b04"), FLAT)
+    return stage
+
+
+async def _lineage_focus(stage: Stage) -> dict[str, str]:
+    return {node.branch: node.focus for node in (await stage.handle(Role.OBSERVER).lineage()).branches}
+
+
+async def test_refills_the_judge_names_no_focus_for_take_the_open_areas_in_turn_then_are_cut_once_none_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = _focused_stage(tmp_path, monkeypatch, PlaybookJudge(opening=1, refill=1))
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    focus = await _lineage_focus(stage)
+    assert (focus["b01"], focus["b02"], focus["b03"]) == ("", "moe_gemm", "attention")
+    assert "b04" not in focus
+    assert any("- none: every large op is worked on or spent" in prompt for prompt in _judge_prompts(stage))
+    cuts = [row["detail"] for row in _decisions(stage) if row["reason"] == PLAYBOOK_OPEN_CUT_REASON]
+    assert cuts and all(detail["no_open_area"] and (detail["requested"], detail["opened"]) == (1, 0) for detail in cuts)
+    rows = _rounds(stage)[-1]
+    assert (rows["b02"]["focus"], rows["b03"]["focus"]) == ("moe_gemm", "attention")
+
+
+async def test_with_no_op_left_open_only_the_refill_the_judge_names_opens_on_the_profile_op_its_text_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    judge = PlaybookJudge(opening=1, refill=2, focus=("", "attention (fused softmax)"))
+    stage = _focused_stage(tmp_path, monkeypatch, judge)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    focus = await _lineage_focus(stage)
+    assert (focus["b02"], focus["b03"], focus["b04"]) == ("moe_gemm", "attention", "attention")
+    cuts = [row["detail"] for row in _decisions(stage) if row["reason"] == PLAYBOOK_OPEN_CUT_REASON]
+    assert cuts and all(detail["no_open_area"] and (detail["requested"], detail["opened"]) == (2, 1) for detail in cuts)
