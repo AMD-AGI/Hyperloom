@@ -498,6 +498,12 @@ class RealToolbox:
             raise UnknownTestRequest(job_id)
         return self._tools.status(job_id)
 
+    def tool_result(self, job_id: str) -> Mapping[str, Any]:
+        """The tool's own result of the job ``job_id`` once it ended, its ``error_class`` included when it failed."""
+        if self._tools is None:
+            raise UnknownTestRequest(job_id)
+        return self._tools.result(job_id)
+
     def record_cold_start(self, seconds: float) -> None:
         self._queue.cold_start_seconds = seconds
 
