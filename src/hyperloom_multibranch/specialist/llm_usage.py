@@ -3,10 +3,12 @@
 
 """What one agent CLI launch used, read from its stream-json log: the tokens of every model call, by model.
 
-Claude Code ends each query with a result row carrying what the query used, which counts it: the messages streamed
-before it carry placeholder output counts, some gateways zero their usage, and a message without an id cannot be told
-apart from its streamed repeats. The calls of a query the launch was killed in have no result row and are read from
-their messages, each id once. Codex logs each turn's usage when the turn completes, without the model.
+Claude Code ends each query with a result row, which counts it: the messages streamed before it carry placeholder
+output counts, some gateways zero their usage, and a message without an id cannot be told apart from its streamed
+repeats. The row's ``modelUsage`` holds the running totals of the CLI process per model, Task sub-agents included, so
+the last one counts every finished query of a log, which holds one launch; a row without it counts its own ``usage``
+under the model of the query's messages. The calls of a query the launch was killed in have no result row and are
+read from their messages, each id once. Codex logs each turn's usage when the turn completes, without the model.
 """
 
 from __future__ import annotations
@@ -39,12 +41,13 @@ class LaunchUsage:
 
 def launch_usage(process_log: Path) -> LaunchUsage:
     """Every model call a Claude or codex stream-json log records; none when the log is missing."""
+    running: dict[str, TokenCounts] = {}
     tokens: dict[str, TokenCounts] = {}
     unfinished: dict[str, tuple[str, TokenCounts]] = {}
     session_id, model = "", UNNAMED
     for row in _rows(process_log):
         session_id = session_id or str(row.get("session_id") or row.get("thread_id") or "")
-        message, usage = row.get("message"), row.get("usage")
+        message, usage, per_model = row.get("message"), row.get("usage"), row.get("modelUsage")
         if (
             row.get("type") == "assistant"
             and isinstance(message, Mapping)
@@ -54,12 +57,15 @@ def launch_usage(process_log: Path) -> LaunchUsage:
             model = str(message.get("model") or UNNAMED)
             key = str(message.get("id") or f"#{len(unfinished)}")
             unfinished[key] = (model, TokenCounts.from_anthropic_usage(message["usage"]))
+        elif row.get("type") == "result" and isinstance(per_model, Mapping) and per_model:
+            running = {str(name): _model_usage_tokens(counts) for name, counts in per_model.items()}
+            unfinished.clear()
         elif row.get("type") == "result" and isinstance(usage, Mapping):
             _add(tokens, model, TokenCounts.from_anthropic_usage(usage))
             unfinished.clear()
         elif row.get("type") == "turn.completed" and isinstance(usage, Mapping):
             _add(tokens, UNNAMED, _codex_tokens(usage))
-    for named, counts in unfinished.values():
+    for named, counts in [*running.items(), *unfinished.values()]:
         _add(tokens, named, counts)
     return LaunchUsage(tokens, session_id)
 
@@ -99,6 +105,16 @@ def _rows(process_log: Path) -> Iterator[Mapping[str, object]]:
 def _codex_tokens(usage: Mapping[str, object]) -> TokenCounts:
     cached = _count(usage, "cached_input_tokens")
     return TokenCounts(max(0, _count(usage, "input_tokens") - cached), _count(usage, "output_tokens"), cached)
+
+
+def _model_usage_tokens(counts: object) -> TokenCounts:
+    counts = counts if isinstance(counts, Mapping) else {}
+    return TokenCounts(
+        _count(counts, "inputTokens"),
+        _count(counts, "outputTokens"),
+        _count(counts, "cacheReadInputTokens"),
+        _count(counts, "cacheCreationInputTokens"),
+    )
 
 
 def _count(usage: Mapping[str, object], key: str) -> int:

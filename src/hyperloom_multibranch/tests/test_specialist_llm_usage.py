@@ -104,6 +104,34 @@ def test_a_finished_query_counts_by_its_result_row_and_a_killed_one_by_its_messa
     assert launch_usage(path).tokens == {OPUS: TokenCounts(14, 530, 3000)}
 
 
+def test_finished_queries_count_by_the_running_per_model_totals_of_their_last_result_row(tmp_path):
+    def result(opus_out, haiku_in):
+        return {
+            "type": "result",
+            "usage": {"input_tokens": 100, "output_tokens": 300},
+            "modelUsage": {
+                OPUS: {
+                    "inputTokens": 100,
+                    "outputTokens": opus_out,
+                    "cacheReadInputTokens": 7,
+                    "cacheCreationInputTokens": 3,
+                },
+                HAIKU: {"inputTokens": haiku_in, "outputTokens": 50},
+            },
+        }
+
+    path = _log(
+        tmp_path,
+        _message("m1", OPUS, input_tokens=100, output_tokens=9),
+        result(400, 9000),
+        _message("m2", OPUS, input_tokens=100, output_tokens=9),
+        result(800, 9500),
+        _message("m3", OPUS, input_tokens=2, output_tokens=5),
+    )
+
+    assert launch_usage(path).tokens == {OPUS: TokenCounts(102, 805, 7, 3), HAIKU: TokenCounts(9500, 50)}
+
+
 def test_messages_without_ids_are_read_from_the_result_rows_since_their_repeats_cannot_be_told_apart(tmp_path):
     repeated = {"type": "assistant", "message": {"model": OPUS, "usage": {"input_tokens": 10, "output_tokens": 4}}}
     path = _log(tmp_path, repeated, repeated, _result(input_tokens=10, output_tokens=4))
