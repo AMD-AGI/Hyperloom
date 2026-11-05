@@ -10,9 +10,9 @@ never run counts as not passed and makes the check ``incomplete``, which is neve
 
 The root's reading (:class:`LongContextRoot`, made by :func:`root_reading`) pools the complete checks of the session root's
 tests and states its score with a Wilson 95% interval; a candidate's result carries the reading the toolbox had when the
-candidate ended. :func:`refuses` is the bar the board decided (#142 c3219, bar (b)) for the gate to apply: a drop from the
-lower end of the root's interval of more than the check's own sampling noise, ``NOISE_SHARE`` of the items (3 of 64). Like the rest of the measurement
-contract they are frozen dataclasses that validate on construction and round-trip through ``to_document()`` and
+candidate ended. :func:`refuses` is the bar the gate applies: a drop from the lower end of the root's interval of more
+than the check's own sampling noise, ``NOISE_SHARE`` of the items (3 of 64). Like the rest of the measurement contract
+they are frozen dataclasses that validate on construction and round-trip through ``to_document()`` and
 ``from_document()``.
 """
 
@@ -313,7 +313,7 @@ def root_reading(checks: Iterable[tuple[str, LongContextResult]]) -> LongContext
 
 
 def refuses(candidate: LongContextResult | None, root: LongContextRoot | None) -> bool:
-    """Whether the candidate's check shows a drop beyond the check's own sampling noise (#142 c3219, bar (b)).
+    """Whether the candidate's check shows a drop beyond the check's own sampling noise.
 
     The drop is taken after the CI on the root's score: from the lower end of the root's 95% interval, in the candidate's
     items, ``root.ci_low * n - passed``. It refuses when that drop exceeds ``NOISE_SHARE`` of the candidate's ``n`` (3

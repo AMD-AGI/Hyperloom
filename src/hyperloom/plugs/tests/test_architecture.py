@@ -22,14 +22,15 @@ _HOSTED = (
     "hyperloom.hosted",
     "hyperloom.sandbox",
     "hyperloom.measure.hosted",
+    "hyperloom.measure.hosted_log",
+    "hyperloom.measure.jit.publish",
     "hyperloom.measure.sandboxes",
     "hyperloom.measure.consistency",
-    "hyperloom.measure.archive",
     "hyperloom.measure.runner",
     "hyperloom_multibranch",
 )
 # Packages that exist only on the multibranch development branch; main must stay self-contained.
-_DEV_ONLY = ("hyperloom.measure",)
+_DEV_ONLY: tuple[str, ...] = ()
 _E2B_OWNER = "hyperloom/sandbox/e2b.py"
 
 

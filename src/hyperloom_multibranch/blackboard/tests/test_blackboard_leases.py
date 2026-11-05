@@ -75,10 +75,10 @@ async def test_a_hosted_lease_goes_back_whole_and_a_cards_first_return_stands(op
     assert retried.returned == {0: START + 10.0} and retried.end_reason is LeaseEndReason.RELEASED
 
 
-async def test_the_prelude_childs_lease_is_charged_to_the_integration_branch(open_as: Open, clock: FakeClock) -> None:
+async def test_the_dossier_pass_lease_is_charged_to_the_integration_branch(open_as: Open, clock: FakeClock) -> None:
     toolbox = await _opened(open_as)
-    child = LeaseStart("lease-5", "prelude", INTEGRATION_BRANCH, LeaseKind.PRELUDE_CHILD, 1, START, gpu_ids=(7,))
-    await toolbox.record_lease_start(child)
+    dossier = LeaseStart("lease-5", "dossier", INTEGRATION_BRANCH, LeaseKind.AUTONOMOUS, 1, START, gpu_ids=(7,))
+    await toolbox.record_lease_start(dossier)
     await toolbox.record_lease_end(LeaseEnd("lease-5", START + 600.0, LeaseEndReason.RELEASED))
     clock.now = START + 900.0
 
