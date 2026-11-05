@@ -277,6 +277,11 @@ def agent_dir(session_dir: Path, role: str) -> Path:
     return Path(session_dir) / "agents" / role
 
 
+#: ``<sd>/agents/resources.jsonl``, relative to the session directory: the agent runner's resource readings of each
+#: specialist's run and of the container, one JSON object a line.
+RESOURCES_RELATIVE_PATH = Path("agents") / "resources.jsonl"
+
+
 def agent_prompt_snapshot(session_dir: Path, role: str, *, macro_cycle: int, phase: str = "") -> Path:
     """Compute the path to the per-agent system-prompt snapshot.
 
@@ -408,6 +413,7 @@ def failure_evidence_path(session_dir: Path, failure_id: str) -> Path:
 
 __all__ = [
     "BREAKDOWN_FILENAME",
+    "RESOURCES_RELATIVE_PATH",
     "allocate_turn_workdir",
     "agent_dir",
     "agent_mcp_setup_path",
