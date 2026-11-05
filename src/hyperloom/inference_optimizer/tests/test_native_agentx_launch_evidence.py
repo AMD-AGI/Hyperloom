@@ -61,8 +61,7 @@ def test_native_baseline_enforces_resolved_cache_gate(
 
     def run(cmd, **kwargs):
         rendered = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())["benchmark"]
-        watchdog = ["--watchdog-timeout", "1800"] if framework == "sglang" else []
-        assert rendered["agentx"]["launch_overrides"]["append_args"] == ([flag] if flag else []) + watchdog
+        assert rendered["agentx"]["launch_overrides"]["append_args"] == ([flag] if flag else [])
         output = Path(cmd[cmd.index("--output-dir") + 1])
         workspace = output / "benchmark_native_cache"
         workspace.mkdir(parents=True)

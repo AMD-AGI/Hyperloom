@@ -22,9 +22,6 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
 _ENCODING = "utf-8"
-#: vLLM's per-step timeout, at the value the InferenceX vLLM configs set (``assets/configs/baseline_vllm.yaml``).
-VLLM_STEP_TIMEOUT_ENV = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
-VLLM_STEP_TIMEOUT_SEC = 1200
 
 
 class ServerArgvInvalidError(ValueError):
@@ -60,10 +57,6 @@ class RecipeLaunch(NamedTuple):
 
     argv: Sequence[str] = ()
     env: Mapping[str, str] = MappingProxyType({})
-
-    def option_names(self) -> frozenset[str]:
-        """The ``--`` options the recipe's own argv sets."""
-        return frozenset(token.partition("=")[0] for token in self.argv if token.startswith("--"))
 
 
 def recipe_base_launch(config_path: Path) -> RecipeLaunch:
@@ -200,7 +193,7 @@ def apply_launch_changes(
         agentx = {"enabled": True}
         benchmark["agentx"] = agentx
     launch = agentx.setdefault("launch_overrides", {"version": 1})
-    recipe_options = recipe.option_names()
+    recipe_options = {token.partition("=")[0] for token in recipe.argv if token.startswith("--")}
     accepted_args = _launch_server_args(recipe, launch)
     accepted_envs = _launch_envs(recipe, benchmark, launch)
     appended_options = {token.partition("=")[0] for token in launch.get("append_args", []) if token.startswith("--")}
@@ -263,12 +256,10 @@ def materialize_agentx(
     output: Path,
     *,
     model_path: str | None = None,
-    recipe: RecipeLaunch = RecipeLaunch(),
 ) -> Path:
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
     bench = config["benchmark"]
-    _default_step_timeouts(bench, recipe.option_names())
     envs = bench.setdefault("envs", {})
     if model_path and Path(model_path).is_dir():
         envs["MODEL_PATH"] = model_path
@@ -279,25 +270,6 @@ def materialize_agentx(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
     return output
-
-
-def _default_step_timeouts(bench: dict[str, Any], recipe_options: frozenset[str]) -> None:
-    """Give the launch the per-step timeout the InferenceX launch gets, unless the recipe or the candidate sets one: a
-    first prefill that builds an aiter JIT module outlasts sglang's 300 s scheduler watchdog and vLLM's own step
-    timeout, either of which kills a healthy server. A candidate that unsets vLLM's variable keeps it unset."""
-    from hyperloom.inference_optimizer.grid_server_args import SGLANG_WATCHDOG_FLAG, inject_sglang_watchdog_timeout
-
-    launch = bench["agentx"].setdefault("launch_overrides", {"version": 1})
-    if str(bench.get("framework") or "").lower() == "vllm":
-        if VLLM_STEP_TIMEOUT_ENV not in launch.get("unset_env", []):
-            launch.setdefault("env", {}).setdefault(VLLM_STEP_TIMEOUT_ENV, str(VLLM_STEP_TIMEOUT_SEC))
-        return
-    if SGLANG_WATCHDOG_FLAG in recipe_options:
-        return
-    guarded = inject_sglang_watchdog_timeout(
-        _inherited_server_args(launch.get("append_args", [])), bench.get("framework")
-    )
-    launch["append_args"] = _server_argv(guarded, guarded)
 
 
 def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> None:
@@ -365,13 +337,9 @@ def enable_profile(config_path: Path) -> None:
     if patch.sitecustomize:
         apply_sglang_shape_tool(profile_env, shape_discovery=shape_discovery_enabled(bench))
     if framework == "vllm":
-        default = str(VLLM_STEP_TIMEOUT_SEC)
-        inherited = (
-            default if VLLM_STEP_TIMEOUT_ENV in launch["unset_env"] else os.environ.get(VLLM_STEP_TIMEOUT_ENV, default)
-        )
-        profile_env[VLLM_STEP_TIMEOUT_ENV] = str(
-            max(VLLM_STEP_TIMEOUT_SEC, int(server_env.get(VLLM_STEP_TIMEOUT_ENV, inherited)))
-        )
+        name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
+        inherited = "1200" if name in launch["unset_env"] else os.environ.get(name, "1200")
+        profile_env[name] = str(max(1200, int(server_env.get(name, inherited))))
     apply_launch_changes(bench, LaunchChanges(env=profile_env))
     torch_profiler = bench.setdefault("profiler", {}).setdefault("torch_profiler", {})
     torch_profiler["enabled"] = True
@@ -469,7 +437,7 @@ def materialize_variant(
         recipe=recipe,
     )
     _refuse_unrunnable_speculative_launch(config["benchmark"], recipe=recipe, model_path=model_path)
-    path = materialize_agentx(config, output / "config.yaml", model_path=model_path, recipe=recipe)
+    path = materialize_agentx(config, output / "config.yaml", model_path=model_path)
     bind_source_evidence(path, variant.source_patches)
     apply_native_runtime(path, variant.runtime_override, variant.overlay_pythonpath)
     return path

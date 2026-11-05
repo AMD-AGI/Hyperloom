@@ -36,8 +36,6 @@ def _spec_config(**overrides) -> str:
     return "--speculative-config " + json.dumps({k: v for k, v in config.items() if v is not None})
 
 
-#: The scheduler watchdog every sglang AgentX launch gets unless its recipe or candidate sets one.
-WATCHDOG = ["--watchdog-timeout", "1800"]
 VLLM_SYNTHETIC = _spec_config() + " --max-num-seqs 128"
 DSPARK_SYNTHETIC = "--speculative-config " + json.dumps(
     {
@@ -264,7 +262,6 @@ def _base_yaml(tmp_path: Path, framework: str, args: str, envs: dict[str, str]) 
 def _no_launcher_checkout(monkeypatch):
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SERVER_ARGS", raising=False)
-    monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
 
 
 def _build(tmp_path: Path, base: Path, variant: GridVariant, stack: LaunchLayer = LaunchLayer()) -> dict:
@@ -424,14 +421,14 @@ def test_building_a_native_variant_refuses_a_change_to_the_recipes_pinned_draft(
 def test_building_a_native_variant_keeps_other_knobs_open(tmp_path):
     config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, SGLANG_SYNTHETIC_ENV)
     launch = _build_native(tmp_path, config, GridVariant("v", extra_server_args="--mem-fraction-static 0.85"))
-    assert launch["append_args"] == [*WATCHDOG, "--mem-fraction-static", "0.85"]
+    assert launch["append_args"] == ["--mem-fraction-static", "0.85"]
 
 
 def test_a_variable_the_recipe_cleared_is_not_a_setting_it_pinned(tmp_path):
     """A ``None`` in the receipt records a name the launch cleared, so this recipe verifies a real draft."""
     config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {"SGLANG_SIMULATE_ACC_LEN": None})
     launch = _build_native(tmp_path, config, GridVariant("v", extra_server_args="--speculative-num-draft-tokens 6"))
-    assert launch["append_args"] == [*WATCHDOG, "--speculative-num-draft-tokens", "6"]
+    assert launch["append_args"] == ["--speculative-num-draft-tokens", "6"]
 
 
 def test_building_a_native_variant_pins_the_draft_the_accepted_stack_carries(tmp_path):
@@ -451,4 +448,4 @@ def test_resolving_the_session_launch_may_restate_the_recipes_draft(tmp_path):
         config, tmp_path / "accepted", launch=LaunchLayer(extra_server_args="--speculative-num-draft-tokens 6")
     )
     launch = yaml.safe_load(resolved.read_text(encoding="utf-8"))["benchmark"]["agentx"]["launch_overrides"]
-    assert launch["append_args"] == [*WATCHDOG, "--speculative-num-draft-tokens", "6"]
+    assert launch["append_args"] == ["--speculative-num-draft-tokens", "6"]
