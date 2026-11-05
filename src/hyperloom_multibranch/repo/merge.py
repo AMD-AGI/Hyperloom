@@ -16,11 +16,11 @@ session's fixed base image, so a recipe's upstream pin is provenance no merge ca
 candidate records without patching it changes nothing a test would build. The merged patch stacks are applied to the
 installed sources (the package, and the source trees beside it such as aiter's csrc) as the toolbox applies them when
 it builds a test's environment, so a conflict shows before the merge test is paid for. A patch the candidate brings
-that does not apply there is rebased by a three-way merge of the
-files it touches. Where a line is changed by both sides, a head patch the candidate's stack does not hold is replaced
-by the candidate's patch when that patch rewrites every line the head patch changes (see ``_replacement``); otherwise
-the candidate's patch is split by file: the files that merge three ways are carried rebased, and only the rest stays a
-conflict for the integrator's resolver (see ``_split``).
+that does not apply there is rebased by a three-way merge of the files it touches, a file it renames merged with the
+head's file at the old path. Where a line is changed by both sides, a head patch the candidate's stack does not hold is
+replaced by the candidate's patch when that patch rewrites every line the head patch changes (see ``_replacement``);
+otherwise the candidate's patch is split by file: the files that merge three ways are carried rebased, and only the
+rest stays a conflict for the integrator's resolver (see ``_split``).
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.framework.rows import cell
 from hyperloom.measure.compile import KernelLoadError, PatchApplyError, kernel_load_env, kernel_rows_only
 from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, ReplacedPatch, RepoMerge, UnitedTable
-from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between
+from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between, renames
 from hyperloom_multibranch.toolbox.kernel_artifacts import (
     KernelRowsConflict,
     KernelRowsError,
@@ -114,11 +114,41 @@ class _Settled:
 class _Sides:
     """The files a candidate's patch touches, three ways: ``original`` under the candidate's stack before it,
     ``changed`` with it, and ``current`` under the stack it now lands on, which also holds every file that stack
-    touches."""
+    touches. ``moved`` are the files the patch renames to a path the stack leaves empty, each new path with its old.
+
+    A rename merges as one file, as git merges it: the new path's base and ours are the old path's, so what the stack
+    changed in the old file lands in the new one, and deleting the old path is no change of its own.
+    """
 
     original: Files
     changed: Files
     current: Files
+    moved: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def base(self) -> Files:
+        return {
+            **self.original,
+            **{new: self.original[old] for new, old in self.moved.items()},
+            **{old: self.current[old] for old in self.moved.values()},
+        }
+
+    @property
+    def ours(self) -> Files:
+        return {**self.current, **{new: self.current[old] for new, old in self.moved.items()}}
+
+    def merged(self, paths: Collection[str]) -> dict[str, bytes | None] | None:
+        """``ours`` with the patch's change to ``paths`` merged in; ``None`` when a line overlaps."""
+        return merge_files(self.base, self.ours, {path: self.changed[path] for path in paths})
+
+    def units(self) -> list[tuple[str, ...]]:
+        """The paths the patch changes, a rename's two paths as one."""
+        touched = [path for path, content in self.changed.items() if content != self.original[path]]
+        return [
+            (path, self.moved[path]) if path in self.moved else (path,)
+            for path in touched
+            if path not in self.moved.values()
+        ]
 
 
 def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stored) -> RepoMerge:
@@ -537,13 +567,14 @@ def _sides(stack: ComponentPatches, theirs: ComponentPatches, patch: PatchRef, s
         current = stored.stack_files(stack, changed)
     except PatchApplyError:
         return None
-    return _Sides(original, changed, current)
+    moved = renames({path: original[path] for path in changed}, changed)
+    return _Sides(original, changed, current, {new: old for new, old in moved.items() if current[new] is None})
 
 
 def _rebased_text(stack: ComponentPatches, sides: _Sides) -> str | None:
     """The patch's change merged three ways into the files ``stack`` leaves, as a patch over ``stack``: empty when
     ``stack`` already makes the change, ``None`` when a line is changed by both."""
-    merged = merge_files(sides.original, sides.current, sides.changed)
+    merged = sides.merged(sides.changed)
     return None if merged is None else patch_between(sides.current, merged)
 
 
@@ -564,15 +595,15 @@ def _split(component: str, sides: _Sides, stored: Stored) -> _Split | None:
     A patch is resolved by one model call that rewrites all of it, so a large one is cut off by the gateway or by the
     output cap even when only a few of its files conflict.
     """
-    touched = [path for path, content in sides.changed.items() if content != sides.original[path]]
+    units = sides.units()
     merged, overlapping = dict(sides.current), []
-    for path in touched:
-        files = merge_files(sides.original, sides.current, {path: sides.changed[path]})
+    for unit in units:
+        files = sides.merged(unit)
         if files is None:
-            overlapping.append(path)
+            overlapping += unit
         else:
-            merged[path] = files[path]
-    if len(overlapping) == len(touched):
+            merged.update({path: files[path] for path in unit})
+    if len(overlapping) == sum(map(len, units)):
         return None
     text = patch_between(sides.current, merged)
     rest = patch_between(
@@ -594,7 +625,7 @@ def _replacement(
     together, and the patch stays a conflict for the integrator's resolver. A dependent the candidate brought or a
     foundation fix contributed is never taken out.
     """
-    wanted = merge_files(sides.original, sides.current, sides.changed, theirs_wins=True)
+    wanted = merge_files(sides.base, sides.ours, sides.changed, theirs_wins=True)
     if wanted is None:
         return None
     for head in (head for head in reversed(stack.patches) if head in heads):
