@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from hyperloom.contracts.measurement import RoundValue
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
@@ -203,3 +205,27 @@ async def test_a_conflicting_patch_is_written_readable_and_never_through_a_link_
     assert written == notes / head[:SHORT] / "vllm-fix.patch" and not written.is_symlink()
     assert written.read_text() == f"diff of patch/vllm/fix.patch at {head}\n"
     assert written.stat().st_mode & 0o044 == 0o044
+
+
+async def test_a_conflict_that_cannot_be_written_leaves_the_branch_where_it_was(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
+    conflict = PatchConflict("vllm", "patch/vllm/fix.patch", "does not apply")
+
+    class _Repo:
+        def __getattr__(self, name):
+            return getattr(rig.repo, name)
+
+        async def merge(self, candidate, onto):
+            return replace(await rig.repo.merge(candidate, onto), patch_conflicts=(conflict,))
+
+        async def patch_text(self, head, path):
+            return "diff\n"
+
+    (tmp_path / "workspace").write_text("not a directory")
+    notes = tmp_path / "workspace" / "rerooted"
+
+    with pytest.raises(OSError):
+        await follow(_Repo(), rig.blackboard, await rig.blackboard.snapshot(), ASKED, notes)
+
+    assert await rig.repo.head(BRANCH) == session.own and (await _row(rig, BRANCH)).head_commit == session.own
