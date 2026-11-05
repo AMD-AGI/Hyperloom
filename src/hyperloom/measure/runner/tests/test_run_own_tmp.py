@@ -69,14 +69,18 @@ def test_a_temporary_directory_the_server_is_already_given_is_left_as_it_is(
     environ = dict(inherited)
 
     with own_tmpdir(call, environ) as own:
-        assert own is None and environ == inherited
-    assert environ == inherited
+        during = dict(environ)
+    assert own is None and during == environ == inherited
 
 
 def test_the_runners_environment_is_put_back_when_the_test_fails(tmp_path) -> None:
     environ = {"TMPDIR": "  "}
+    own: Path | None = None
 
-    with pytest.raises(RuntimeError, match="server died"), own_tmpdir(_call(tmp_path, {}), environ) as own:
-        assert own is not None and environ["TMPDIR"] == str(own) and own.is_dir()
-        raise RuntimeError("server died")
-    assert environ == {"TMPDIR": "  "} and not own.exists()
+    with pytest.raises(RuntimeError, match="server died"):
+        try:
+            with own_tmpdir(_call(tmp_path, {}), environ) as own:
+                assert own is not None and environ["TMPDIR"] == str(own) and own.is_dir()
+                raise RuntimeError("server died")
+        finally:  # the failure has left own_tmpdir and goes on to the runner
+            assert environ == {"TMPDIR": "  "} and own is not None and not own.exists()
