@@ -21,6 +21,7 @@ import pytest
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.proctree import descendants
 from hyperloom.orchestrator.specialists import agent_runner
+from hyperloom.orchestrator.specialists import reap_watch
 from hyperloom.orchestrator.specialists import resources
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.agent_runner import (
@@ -540,6 +541,30 @@ async def test_beat_after_the_session_is_over_does_nothing(tmp_path: Path) -> No
     beats[0]()
     after = spec.heartbeat_path.exists() and spec.heartbeat_path.stat().st_mtime
     assert before == after
+
+
+async def test_poll_reads_a_files_activity_as_the_reap_loop_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``poll`` reads the heartbeat and the process log through the reap loop's own reading, so a change to how it
+    reads a file reaches both."""
+    stamp = real_time.time() - 7.0
+    read: list[Path] = []
+
+    def reading(path: Path) -> float:
+        read.append(path)
+        return stamp
+
+    monkeypatch.setattr(reap_watch, "last_activity", reading)
+    spec = make_spec(tmp_path / "w")
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(spec)
+    try:
+        status = await runner.poll(handle)
+    finally:
+        await stop_and_collect(runner, handle)
+    assert (status.state, status.last_heartbeat_unix) == ("running", stamp)
+    assert {spec.heartbeat_path, spec.workspace / reap_watch.PROCESS_LOG_NAME} <= set(read)
 
 
 async def test_a_failing_heartbeat_sink_does_not_stop_the_session(tmp_path: Path) -> None:

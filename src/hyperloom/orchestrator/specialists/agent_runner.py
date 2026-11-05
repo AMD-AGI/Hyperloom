@@ -59,7 +59,7 @@ from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_
 from .agent_cli_config import _build_specialist_env as build_specialist_env
 from .launch_env import prepare_demote, resolve_launch_user, stage_mcp_config, stamp_reap_mark
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
-from .reap_watch import cli_alive
+from .reap_watch import PROCESS_LOG_NAME, cli_alive, newest_activity
 from .resources import ContainerSnapshot, ProcessTreeSampler, dir_usage_bytes, read_container_cgroup
 from .subprocess_ import (
     ReapWatch,
@@ -109,7 +109,6 @@ DEFAULT_MCP_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
 ACTIVITY_CPU_SECONDS = 0.1
 
 CLAUDE_CONFIG_DIRNAME = ".claude-config"
-PROCESS_LOG = "process.log"
 PROMPT_FILE = "prompt.md"
 ISOLATED = "isolated"
 UNKNOWN = "unknown"
@@ -515,7 +514,7 @@ class LocalAgentRunner:
         version = await asyncio.to_thread(
             self._version_probe, spec.argv[0], {k: v for k, v in env.items() if v not in tokens}
         )
-        private = (spec.workspace / PROMPT_FILE, spec.workspace / PROCESS_LOG)
+        private = (spec.workspace / PROMPT_FILE, spec.workspace / PROCESS_LOG_NAME)
         # The child works in ``cwd``, so that is the tree it must be able to write.
         demote = await asyncio.to_thread(prepare_demote, run_as, spec.workspace, spec.cwd, env, private)
         command = argv if run_as is None else run_as.command(argv)
@@ -553,7 +552,7 @@ class LocalAgentRunner:
 
     async def poll(self, handle: AgentHandle) -> AgentStatus:
         session: _Session = handle.session
-        heartbeat = self._last_activity(session)
+        heartbeat = newest_activity((session.spec.heartbeat_path, session.spec.workspace / PROCESS_LOG_NAME))
         if not _ended(session):
             silent = await self._silent(session, heartbeat)
             # The look at the CLI runs on a thread, while the reap loop may end the session; a deadline kill takes
@@ -613,7 +612,7 @@ class LocalAgentRunner:
             raise RuntimeError(f"task {session.spec.task_id}: still running; cancel it before collect")
         if session.task is not None:
             await asyncio.wait_for(asyncio.shield(session.task), timeout=self._poll_interval * 4 + 60.0)
-        process_log = session.spec.workspace / PROCESS_LOG
+        process_log = session.spec.workspace / PROCESS_LOG_NAME
         await asyncio.to_thread(self._scrub_log, process_log, session.env_tokens)
         init = _read_init_message(process_log)
         self._write_runtime(session, plugins=init)
@@ -664,7 +663,7 @@ class LocalAgentRunner:
             stdin.seek(0)
         try:
             # Created fresh, never through a name a previous (possibly demoted) child left in the workspace.
-            with create_nofollow(spec.workspace, (PROCESS_LOG,), mode=PRIVATE_FILE_MODE) as out:
+            with create_nofollow(spec.workspace, (PROCESS_LOG_NAME,), mode=PRIVATE_FILE_MODE) as out:
                 proc = self._popen(
                     argv,
                     stdin=stdin,
@@ -765,16 +764,6 @@ class LocalAgentRunner:
                 os.close(fd)
         except OSError:
             log.debug("agent %s: cannot refresh the heartbeat file", session.spec.task_id, exc_info=True)
-
-    def _last_activity(self, session: _Session) -> float | None:
-        newest: float | None = None
-        for path in (session.spec.heartbeat_path, session.spec.workspace / PROCESS_LOG):
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                continue
-            newest = mtime if newest is None else max(newest, mtime)
-        return newest
 
     @staticmethod
     def _scrub_log(process_log: Path, secrets: tuple[str, ...]) -> None:
