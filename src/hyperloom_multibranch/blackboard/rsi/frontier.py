@@ -137,6 +137,8 @@ PROBATION_TESTS = HORIZON_TESTS
 PROBATION_HOLD = "probation"
 NEAR_BAR_HOLD = "near_bar_lead"
 STRANDED_HOLD = "stranded_lead"
+#: What holds a branch outside the envelope: a candidate of it waiting for its confirm.
+PENDING_CONFIRM_HOLD = "pending_confirm"
 
 
 @dataclass(frozen=True)
@@ -633,6 +635,7 @@ __all__ = [
     "OBSERVATION_FLOOR_PCT",
     "OBSERVATION_SECONDS",
     "PENDING_COMPONENT",
+    "PENDING_CONFIRM_HOLD",
     "PROBATION_COMPONENT",
     "PROBATION_HOLD",
     "PROBATION_SHARE",
