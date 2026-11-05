@@ -8,14 +8,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
 from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
-from ._apply_feedback import ApplyFeedback
+from ._apply_feedback import ApplyFeedback, PatchApplyResult
 from ._enablement_config import _established_enablement_config, _merge_established_server_args
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
@@ -39,9 +39,27 @@ from ._patch_sources import (
     resolved_explicit_root,
 )
 from ._setup_replay import replay_setup_commands
+from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
 from .source_tree_identity import new_recovery_record
 
 log = logging.getLogger(__name__)
+
+
+async def _merge_onto_kept_stack(attempt: IntegrateAttempt, patch: Path, strict: PatchApplyResult) -> PatchApplyResult:
+    """Land a patch the strict apply refused by merging it onto HEAD, which carries every KEEP so far.
+
+    A refused merge restores the files it touched to HEAD and keeps the strict failure, with its steps appended.
+    """
+    merge = await apply_patch_resolving_conflicts(
+        attempt.framework_root,
+        patch,
+        LandingContext(operator_id=attempt.specialist_task_id or patch.stem, landed_patches=list(attempt.applied)),
+    )
+    if not merge.applied:
+        return replace(strict, error=strict.error + merge.note())
+    log.info("integrate_patch: %s landed by %s merge%s", patch.name, merge.strategy, merge.note())
+    attempt.merged_patches.append({"patch": str(patch), "strategy": merge.strategy, "steps": list(merge.steps)})
+    return PatchApplyResult(ok=True)
 
 
 @dataclass(frozen=True)
@@ -61,7 +79,7 @@ class _PatchSeries:
         return bool(self.patches) and len(self.already_present) == len(self.patches)
 
 
-def _apply_patch_series(
+async def _apply_patch_series(
     attempt: IntegrateAttempt,
     patch_paths: list[Path],
     *,
@@ -97,6 +115,8 @@ def _apply_patch_series(
             break
         if git_head:
             result = _git_apply_collect_feedback(framework_root, patch)
+            if not result.ok:
+                result = await _merge_onto_kept_stack(attempt, patch, result)
         else:
             result = _apply_patch_no_git(framework_root, patch, backup_root, seq_offset=len(nogit_backups))
             nogit_backups.extend(result.backups)
@@ -256,7 +276,7 @@ class ApplyStageMixin:
             if shared_state is not None:
                 shared_state.save(self.session_dir)
 
-        series = _apply_patch_series(
+        series = await _apply_patch_series(
             attempt,
             patch_paths,
             git_head=recovery["git_head"],
