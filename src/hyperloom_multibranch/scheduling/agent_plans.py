@@ -37,13 +37,14 @@ from pathlib import Path
 
 from hyperloom_common.io import atomic_write_json
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
+from hyperloom_multibranch.specialist.agent_driver import driver_for
 from hyperloom_multibranch.specialist.agent_onboarding import (
     ROOT_PROFILE_SOURCE,
     AttemptFailed,
     fetch_source,
     root_profile,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import SplitFailed, generate_directions, is_arbor, split_directions
+from hyperloom_multibranch.specialist.arbor_adapter import SplitFailed, generate_directions, split_directions
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +76,11 @@ MADE_BY_SHARES = "generated from the root's shares"
 
 
 async def arbor_agents(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
-    """The Arbor agents among ``agents``: each one's index and its checkout, each distinct source fetched once under
-    ``work_dir``; raise :class:`~hyperloom_multibranch.specialist.agent_onboarding.AttemptFailed` or ``OSError`` when a
-    source cannot be fetched."""
+    """The agents among ``agents`` that take a share of the directions, their driver's
+    :attr:`~hyperloom_multibranch.specialist.agent_driver.Capabilities.plan_share` (the Arbor agents, Arbor's driver
+    the only one with it): each one's index and its checkout, each distinct source fetched once under ``work_dir``;
+    raise :class:`~hyperloom_multibranch.specialist.agent_onboarding.AttemptFailed` or ``OSError`` when a source cannot
+    be fetched."""
 
     checkouts = await _checkouts(agents, work_dir / SOURCES_DIR)
     return {index: path for index, agent in enumerate(agents) if (path := checkouts[agent]) is not None}
@@ -160,11 +163,12 @@ def keep_map(target: Path, map_file: Path, dossier: Path | None, made: Mapping[s
 
 
 async def _checkouts(agents: tuple[str, ...], root: Path) -> dict[str, Path | None]:
-    """Each distinct source of ``agents`` fetched once under ``root``, ``None`` for one that is not Arbor."""
+    """Each distinct source of ``agents`` fetched once under ``root``, ``None`` for one whose driver takes no share of
+    the directions."""
 
     checkouts: dict[str, Path | None] = {}
     for index, source in enumerate(dict.fromkeys(agents)):
         path = root / str(index)
         await fetch_source(source, path)
-        checkouts[source] = path if is_arbor(path) else None
+        checkouts[source] = path if driver_for(path).capabilities.plan_share else None
     return checkouts
