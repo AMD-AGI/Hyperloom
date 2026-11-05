@@ -1,0 +1,6 @@
+*.bak
+*.bak*
+island*.py
+island*.sh
+*_backup
+*_backup_*

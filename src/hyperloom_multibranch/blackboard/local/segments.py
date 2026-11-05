@@ -5,22 +5,24 @@
 
 Each blackboard handle is one writer and appends to a segment of its own, so no append needs a lock on any host, and a
 shared folder's lack of atomic cross-client appends never interleaves two rows. A line still being written is not
-valid JSON; readers skip it and see it whole on their next read.
+valid JSON; readers skip it and see it whole on their next read. An append that fails partway is cut back off, and a
+writer that cannot tell how its segment ends cuts a torn last line before it appends, so no row is glued onto one.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import secrets
 import socket
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from hyperloom_common.io import append_jsonl
 from hyperloom_common.jsonio import read_jsonl
 from hyperloom_multibranch.contracts.blackboard.vocab import Role
 from hyperloom_multibranch.blackboard.codec import key_sorted
@@ -30,6 +32,7 @@ log = logging.getLogger(__name__)
 ENTRY_VERSION = 1
 SEGMENT_SUFFIX = ".jsonl"
 SUMMARY_LIMIT = 160
+_TAIL_READ = 1 << 16
 _TOKEN = re.compile(r"[A-Za-z0-9_.:@/-]{1,200}")
 _HOST_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 _HOST_LIMIT = 40
@@ -148,6 +151,51 @@ def _read_entries(path: Path) -> list[Entry]:
     return entries
 
 
+def _cut_torn_tail(path: Path) -> None:
+    """Cut a last line that does not end in a newline, so the next row is not glued onto it."""
+
+    try:
+        handle = path.open("r+b")
+    except FileNotFoundError:
+        return
+    with handle:
+        end = handle.seek(0, os.SEEK_END)
+        if end == 0:
+            return
+        handle.seek(end - 1)
+        if handle.read(1) == b"\n":
+            return
+        cut = end
+        while cut > 0:
+            start = max(0, cut - _TAIL_READ)
+            handle.seek(start)
+            newline = handle.read(cut - start).rfind(b"\n")
+            if newline >= 0:
+                cut = start + newline + 1
+                break
+            cut = start
+        log.warning("blackboard: cutting a torn line of %d bytes off %s", end - cut, path)
+        handle.truncate(cut)
+
+
+def _append_line(path: Path, line: bytes) -> None:
+    """Append ``line`` whole, or put the segment back as it was when the write fails partway."""
+
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        size = os.fstat(fd).st_size
+        try:
+            written = 0
+            while written < len(line):
+                written += os.write(fd, line[written:])
+        except OSError:
+            with suppress(OSError):
+                os.ftruncate(fd, size)
+            raise
+    finally:
+        os.close(fd)
+
+
 class SegmentWriter:
     """Appends one writer's entries to its own segment, numbering them from 1; the file appears with its first row."""
 
@@ -155,6 +203,7 @@ class SegmentWriter:
         self.writer = require_token(writer, "writer")
         self.path = Path(segments_dir) / f"{writer}{SEGMENT_SUFFIX}"
         self._last_seq = max((entry.seq for entry in _read_entries(self.path)), default=0) if self.path.exists() else 0
+        self._ends_whole = False
 
     def append(self, build: Callable[[int], Entry]) -> Entry:
         """Append the entry ``build`` makes for the next sequence number, and return it."""
@@ -162,7 +211,13 @@ class SegmentWriter:
         entry = build(self._last_seq + 1)
         if entry.writer != self.writer or entry.seq != self._last_seq + 1:
             raise ValueError(f"segment {self.writer} expects seq {self._last_seq + 1}, got {entry.entry_id}")
-        append_jsonl(self.path, key_sorted(entry.to_dict()), make_parents=True)
+        line = json.dumps(key_sorted(entry.to_dict()), ensure_ascii=True) + "\n"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._ends_whole:
+            _cut_torn_tail(self.path)
+        self._ends_whole = False
+        _append_line(self.path, line.encode("ascii"))
+        self._ends_whole = True
         self._last_seq = entry.seq
         return entry
 
