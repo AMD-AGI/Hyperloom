@@ -493,12 +493,33 @@ for number in range(1, shares + 1):
 """
 
 
+#: Arbor's master in a fake checkout, as the deal is agreed: the open directions of ``--map``, by rank, that no
+#: ``--reports`` closes or marks spent and no ``--held`` order holds, at most ``--size`` of them, written to ``--order``.
+FAKE_ROLES = """
+import json, pathlib, sys
+args = sys.argv[1:]
+def given(flag):
+    if flag not in args:
+        return []
+    rest = args[args.index(flag) + 1 :]
+    return rest[: next((index for index, word in enumerate(rest) if word.startswith("--")), len(rest))]
+def directions(path):
+    return json.loads(pathlib.Path(path).read_text())["directions"]
+settled = {e["id"] for r in given("--reports") for e in directions(r) if e.get("status", "open") != "open" or e.get("spent")}
+held = {e["id"] for order in given("--held") for e in directions(order)}
+live = [e for e in directions(given("--map")[0]) if e.get("status", "open") == "open" and e["id"] not in settled | held]
+dealt = sorted(live, key=lambda e: e.get("rank", 0))[: int(given("--size")[0])]
+pathlib.Path(given("--order")[0]).write_text(json.dumps({"directions": dealt}))
+"""
+
+
 #: What an Arbor checkout needs for the adapter: its markers and the serving pack's validator.
 CHECKOUT_FILES = {
     "arbor/__init__.py": "",
     "arbor/__main__.py": FAKE_MAIN,
     "arbor/component.py": "# component mode\n",
     "arbor/directions.py": FAKE_DIRECTIONS,
+    "arbor/roles.py": FAKE_ROLES,
     "docs/hosts.md": "# Running Arbor inside a host (component mode)\n",
     "packs/serving/pack.yaml": "name: serving\n",
     "packs/serving/validator/bench.sh": "#!/usr/bin/env bash\n",
