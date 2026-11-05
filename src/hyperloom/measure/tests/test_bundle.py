@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import copy
+import errno
 import json
 import os
 import subprocess
@@ -147,6 +149,33 @@ def test_an_oversized_signature_is_a_bad_signature_not_an_oversized_manifest(bun
     assert _reason(bundle.staging, bundle) is RejectReason.BAD_SIGNATURE
 
 
+@pytest.mark.parametrize(
+    ("escape", "on_disk"),
+    [
+        pytest.param(b"\\ud800", None, id="a-high-surrogate-no-file-name-spells"),
+        pytest.param(b"\\udcff", b"\xff", id="a-low-surrogate-naming-a-file-whose-name-is-not-utf8"),
+    ],
+)
+def test_a_signed_manifest_listing_a_path_utf8_cannot_encode_is_invalid(bundle, escape: bytes, on_disk) -> None:
+    raw = encode_manifest(bundle.document)
+    tampered = raw.replace(b'"path":"server.log"', b'"path":"' + escape + b'"')
+    assert tampered != raw
+    _sign_raw(bundle, tampered)
+    if on_disk is None:  # not left in staging, so it is not refused as an unlisted file first
+        (bundle.staging / "server.log").unlink()
+    else:  # the name os.open spells for the escape, so the file is found and its bytes match
+        os.rename(bytes(bundle.staging / "server.log"), bytes(bundle.staging) + b"/" + on_disk)
+    assert _reason(bundle.staging, bundle) is RejectReason.MANIFEST_INVALID
+
+
+def test_listed_sizes_adding_up_to_more_digits_than_str_converts_are_too_large_not_a_crash(bundle) -> None:
+    document = copy.deepcopy(bundle.document)
+    for entry in document["files"]:
+        entry["size"] = int("9" * 4300)  # each as long as an integer the reader converts may be; their sum is longer
+    _sign_raw(bundle, encode_manifest(document))
+    assert _reason(bundle.staging, bundle, max_total_bytes=10**9) is RejectReason.TOO_LARGE
+
+
 def test_a_bundle_for_another_request_spec_or_sandbox_is_rejected(bundle) -> None:
     assert _reason(bundle.staging, bundle, request_id="other") is RejectReason.REQUEST_ID_MISMATCH
     assert _reason(bundle.staging, bundle, spec_fingerprint="0" * 16) is RejectReason.SPEC_FINGERPRINT_MISMATCH
@@ -264,16 +293,15 @@ def test_a_listed_file_as_deep_as_the_walk_goes_verifies_and_one_level_deeper_is
         _remove_nested(levels)
 
 
-def test_an_entry_removed_while_the_staging_directory_is_walked_is_refused_as_unsafe(bundle, monkeypatch) -> None:
+def _listed_then_removed(path: Path):
+    """``os.scandir`` that lists a directory and then removes ``path``: as if it went between the scan and its stat."""
     real_scandir = os.scandir
 
     class _ListedThenRemoved:
-        """The listing of a directory, after which ``server.log`` is removed: as if it went between scan and open."""
-
         def __init__(self, fd: int) -> None:
             with real_scandir(fd) as entries:
                 self._entries = list(entries)
-            (bundle.staging / "server.log").unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
 
         def __enter__(self):
             return iter(self._entries)
@@ -281,7 +309,44 @@ def test_an_entry_removed_while_the_staging_directory_is_walked_is_refused_as_un
         def __exit__(self, *exc_info) -> None:
             return None
 
-    monkeypatch.setattr(fsafe.os, "scandir", _ListedThenRemoved)
+    return _ListedThenRemoved
+
+
+def test_an_entry_removed_while_the_staging_directory_is_walked_is_refused_as_unsafe(bundle, monkeypatch) -> None:
+    monkeypatch.setattr(fsafe.os, "scandir", _listed_then_removed(bundle.staging / "server.log"))
+    assert _reason(bundle.staging, bundle) is RejectReason.UNSAFE_PATH
+
+
+def test_the_walk_names_an_entry_that_went_away_as_missing(bundle, monkeypatch) -> None:
+    monkeypatch.setattr(fsafe.os, "scandir", _listed_then_removed(bundle.staging / "server.log"))
+    root_fd = fsafe.open_root(bundle.staging)
+    try:
+        with pytest.raises(fsafe.MissingEntry, match="server.log"):
+            list(fsafe.walk_regular_files(root_fd))
+    finally:
+        os.close(root_fd)
+
+
+def _io_error(*args, **kwargs):
+    raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+
+def _below(root: Path, real, instead):
+    """``os.read`` or ``os.write`` (``real``), with ``instead`` used for a descriptor of a file below ``root``."""
+    prefix = f"{root.resolve()}/"
+
+    def chosen(fd, arg):
+        return (instead if os.readlink(f"/proc/self/fd/{fd}").startswith(prefix) else real)(fd, arg)
+
+    return chosen
+
+
+@pytest.mark.parametrize("step", ["open_root", "open_beneath", "read", "walk_regular_files", "sha256_and_size"])
+def test_an_io_error_reading_the_staging_directory_is_refused_as_unsafe_not_raised(bundle, monkeypatch, step) -> None:
+    if step == "read":  # the read of manifest.json
+        monkeypatch.setattr(bundle_mod.os, "read", _below(bundle.staging, os.read, _io_error))
+    else:
+        monkeypatch.setattr(fsafe, step, _io_error)
     assert _reason(bundle.staging, bundle) is RejectReason.UNSAFE_PATH
 
 
@@ -501,6 +566,79 @@ def test_a_copy_cut_short_by_a_file_size_limit_fails_and_lands_nothing(tmp_path:
     assert child.returncode == 0, child.stderr
     assert child.stdout.strip() in ("OSError", "MaterializeError"), "materialize returned over a truncated copy"
     assert list(out.iterdir()) == [], "nothing was placed, not even the scratch directory"
+
+
+def _no_link(*args, **kwargs):
+    raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+
+def _from_placement(monkeypatch, patch) -> None:
+    """Take the cross-device fallback, and run ``patch`` only once the checked copies are staged."""
+    place_all = bundle_mod._place_all
+
+    def patched(*args):
+        patch()
+        return place_all(*args)
+
+    monkeypatch.setattr(bundle_mod.os, "link", _no_link)
+    monkeypatch.setattr(bundle_mod, "_place_all", patched)
+
+
+@pytest.mark.parametrize("placement", ["linked", "copied"])
+def test_a_write_that_takes_part_of_a_chunk_is_continued_until_the_copy_is_whole(
+    bundle, tmp_path: Path, monkeypatch, placement: str
+) -> None:
+    out = tmp_path / "out"
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
+    real_write = os.write
+
+    def half(fd, data):
+        return real_write(fd, bytes(data[: max(1, len(data) // 2)]))
+
+    if placement == "copied":
+        _from_placement(monkeypatch, lambda: None)
+    monkeypatch.setattr(fsafe.os, "write", _below(out, real_write, half))
+    materialize(verified, out)
+    for relative, data in DEFAULT_FILES.items():
+        assert (out / relative).read_bytes() == data
+
+
+@pytest.mark.parametrize("placement", ["linked", "copied"])
+def test_a_copy_holding_less_than_its_writes_reported_is_not_placed(
+    bundle, tmp_path: Path, monkeypatch, placement: str
+) -> None:
+    out = tmp_path / "out"
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
+    real_write = os.write
+
+    def short(fd, data):  # reports every byte written, writes all but the last
+        real_write(fd, bytes(data[:-1]))
+        return len(data)
+
+    def lie() -> None:
+        monkeypatch.setattr(fsafe.os, "write", _below(out, real_write, short))
+
+    if placement == "copied":  # the scratch copy is whole: only the placement copy comes up short
+        _from_placement(monkeypatch, lie)
+    else:
+        lie()
+    with pytest.raises(MaterializeError, match="the copy holds"):
+        materialize(verified, out)
+    assert list(out.iterdir()) == [], "nothing was placed, not even the scratch directory"
+
+
+@pytest.mark.parametrize("step", ["read_file", "materialize"])
+def test_an_io_error_reading_a_listed_file_after_verification_is_refused_as_unsafe(
+    bundle, tmp_path: Path, monkeypatch, step: str
+) -> None:
+    out = tmp_path / "out"
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
+    monkeypatch.setattr(fsafe.os, "read", _below(bundle.staging, os.read, _io_error))
+    run = {"read_file": lambda: verified.read_file("server.log"), "materialize": lambda: materialize(verified, out)}
+    with pytest.raises(ResultRejected) as raised:
+        run[step]()
+    assert raised.value.reason is RejectReason.UNSAFE_PATH
+    assert not out.exists() or list(out.iterdir()) == []
 
 
 def test_read_file_refuses_a_file_changed_after_verification_and_an_unlisted_name(bundle) -> None:
