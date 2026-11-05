@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Arbor · parallel run</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="live-dot"></span>
+    <h1>Arbor · parallel run</h1>
+    <span class="sub" id="identity">loading…</span>
+  </div>
+  <div class="meta">
+    <span id="phase-chip" class="chip">—</span>
+    <span id="freshness" class="muted">—</span>
+  </div>
+</header>
+
+<main>
+  <section id="banner-area"></section>
+
+  <section class="cards" id="kpis">
+    <div class="card"><div class="label">Round</div><div class="value" id="kpi-round">—</div><div class="foot" id="kpi-round-foot">—</div></div>
+    <div class="card"><div class="label">Base</div><div class="value" id="kpi-base">—</div><div class="foot" id="kpi-base-foot">—</div></div>
+    <div class="card"><div class="label">Nodes busy</div><div class="value" id="kpi-nodes">—</div><div class="foot" id="kpi-nodes-foot">—</div></div>
+    <div class="card"><div class="label">Integrated</div><div class="value" id="kpi-kept">—</div><div class="foot" id="kpi-kept-foot">—</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Lanes <span class="muted" id="lanes-sub"></span></h2>
+    <div id="timeline"></div>
+    <div class="scroll" id="lanes"></div>
+  </section>
+
+  <section class="panel" id="map-panel">
+    <h2>The round's map <span class="muted" id="map-round"></span></h2>
+    <div id="mapstep"></div>
+    <div class="scroll" id="map"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Integration</h2>
+    <div class="scroll" id="integration"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Earlier rounds</h2>
+    <div id="rounds"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Events</h2>
+    <div class="scroll" id="events"></div>
+  </section>
+</main>
+<script src="/directions.js"></script>
+<script src="/parallel.js"></script>
+</body>
+</html>
