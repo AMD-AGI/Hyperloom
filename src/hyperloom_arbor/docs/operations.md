@@ -73,7 +73,7 @@ touch <store>/<run_id>/keeper/STOP
 The run config (`arbor/parallel/config.py`) requires `run_id`, `store`, `arbor_root`,
 `template_config`, `dossier_dir`, `gates` and `lane_sessions`; optional keys include `max_lanes`
 (4), `max_rounds`, `no_keep_rounds` (2), `seed`, `base_vmu`, and `cluster` (partition, account,
-time limit, scripts). State lives under `<store>/<run_id>/`. Built on 2026-10-20 and tested on
+time limit, scripts). State lives under `<store>/<run_id>/`. Tested on
 fakes only; `configs/parallel/*.json` are examples, never launched.
 
 ## Dashboards and collectors

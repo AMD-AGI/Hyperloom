@@ -610,7 +610,7 @@ def _mark_session_start(args) -> None:
         data.setdefault("claude_sessions", [])
         # Recorded because it is a property of the MODEL, not of the run or the
         # collector: some models return no reasoning text on any capture route
-        # while still billing the tokens. Probed 2026-08-24 against the gateway
+        # while still billing the tokens. Probed against the gateway
         # directly — opus-5 withholds, sonnet-4.6 and haiku-4.5 do not.
         # See docs/archive/evals-README.md, "Reasoning text".
         data["thinking_capture"] = "withheld-by-model"

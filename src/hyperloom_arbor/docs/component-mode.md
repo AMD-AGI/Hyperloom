@@ -124,16 +124,16 @@ manifest without either side writing host-specific code.
    `@host`; the heartbeat; target, round ends and rolling refused or ignored. Tested on `@host`
    fakes; then once on a node with a lease of 4 cards and something else on the other 4.
 2. **The KEEP snapshot,** the notes and the bench command in the prompts, the tables check.
-3. **The short-prompt check** (built 2026-10-28; the README section came with slice 2).
+3. **The short-prompt check** (the README section came with slice 2).
 
 ## 7. Decisions
 
 1. **An exhausted map with no time left for its update round: exit 0, and say why.** Every exit
    in component mode writes `<session>/component_exit.json` first: `{reason, iteration, keeps,
    map, deadline, ts}`, with `reason` one of `deadline`, `map_exhausted` (the map is closed and
-   its update round does not fit), `done` (STOP, max iterations), `sigterm`, and since 2026-10-30
-   `aborted` (the harness stopped measuring: `ABORTED.md`, its message as `detail`), and since
-   2026-10-31 `review_rejected` (a human rejected the campaign at the review gate); the same line
+   its update round does not fit), `done` (STOP, max iterations), `sigterm`,
+   `aborted` (the harness stopped measuring: `ABORTED.md`, its message as `detail`), and
+   `review_rejected` (a human rejected the campaign at the review gate); the same line
    goes to the log and the heartbeat. A host reads why Arbor ended instead of guessing from an exit code.
    **One exception exits non-zero** (for model gateway outages): `unreachable`, a streak that ended while the model could not be reached, exits 3 after
    writing its record. The host resumes it as it does a crash, instead of retiring the branch; the
@@ -145,7 +145,7 @@ manifest without either side writing host-specific code.
    a `docker_container` other than `"@host"` and `ARBOR_ROLL=1`: exit 2, before it touches the
    session, with the reason on stderr.
 
-## 8. As built (slice 1, 2026-10-28)
+## 8. As built (slice 1)
 
 The switch and the safety are in `arbor/component.py` and the sites the table names. Where the
 build settled what the design left open:
@@ -173,7 +173,7 @@ build settled what the design left open:
 - Standalone records `"mode": "standalone"` in session.json; its commands, prompts and stops are
   byte for byte as before.
 
-### Slice 2 (2026-10-28)
+### Slice 2
 
 The KEEP snapshot (§4, in the layout MB agreed), the tables check, the host's notes and bench
 command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), and the README's
@@ -197,7 +197,7 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
 - **`bench_command`:** `{out}` is a directory per replay (`iter_N/host_bench/`, or `run<i>/`
   under it), made empty by the harness; the bench agent reads the metric from it into
   `bench_output.json` with a fixed one-line command, and with `bench_repeats` the fixed mean
-  block aggregates, as with the pack's bench. Since 2026-10-30 the same command also takes the
+  block aggregates, as with the pack's bench. The same command also takes the
   pack's `secondary_metric` when the client gives it; before, the gate saw only the primary
   (`secondary: None` on every KEEP).
 - **`component.root`** (MB's request): MB's worktree is at the branch's start
@@ -207,7 +207,7 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   (`workspace.base_commit`); one the workspace lacks is refused at start (exit 2) and malformed
   is a config error. Without it, the first commit stays the base, for standalone use.
 
-### Slice 3 (2026-10-28): the short-prompt check
+### Slice 3: the short-prompt check
 
 A second launch at each KEEP, component mode only.
 `arbor/measure/short_prompts.py`; the probe after correctness and the check after the critic in
@@ -245,7 +245,7 @@ A second launch at each KEEP, component mode only.
   later KEEP that carries it is another chance. The cost is one server boot and two probes per
   KEEP (about 5 minutes on Model M at TP4), which a host should allow for in its deadline.
 
-### The host's plan (2026-10-29)
+### The host's plan
 
 `component.plan`: a host
 running several Arbors from one set of directions gives each its share. `component.plan_entries`
@@ -262,7 +262,7 @@ one map: its open directions, disjoint, each a valid `component.plan`. Direction
 `depends_on` stay together, since `deps_met` counts a dependency missing from a map as met; the
 groups are dealt in rank order to the share with the fewest directions ([hosts.md](hosts.md)).
 
-### The dossier pass (2026-10-29)
+### The dossier pass
 
 Agreed with MB. Before its branches
 open, the host runs one Arbor as a dossier pass, splits that pass's map, and gives each branch a

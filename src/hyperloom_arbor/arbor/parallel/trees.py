@@ -207,8 +207,8 @@ class Trees:
 
 
 # Bytecode a server compiles beside the sources is never part of a tree. Arbor's landed.patch
-# carries it when the workspace's baseline commit tracked it: 46 of b5m c003's 56 files were
-# __pycache__/*.pyc, binary hunks no source tree can take (2026-10-14).
+# carries it when the workspace's baseline commit tracked it: most of one lane's files were
+# __pycache__/*.pyc, binary hunks no source tree can take.
 _ARTIFACT_DIRS = ("__pycache__/",)
 _ARTIFACT_SUFFIXES = (".pyc", ".pyo")
 

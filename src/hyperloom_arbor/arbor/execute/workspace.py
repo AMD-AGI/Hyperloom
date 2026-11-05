@@ -206,11 +206,11 @@ def commit(container: str, workspace: str, message: str) -> str:
     and from landed.patch -- while still sitting on the container filesystem, so
     the bench measured it and the campaign booked the number.
 
-    v2 iteration 5 is the worked example: it added `configs/mxfp8_linear_tiles.json`
-    alongside a tuned-tile selector in rocm_native.py, booked it as a class-B
-    win, and only rocm_native.py entered the commit. Two iterations later the
-    table was gone, `_load_tuned_tiles()` was returning {} and all 99 tiles had
-    fallen back to the MiniMax-M3 defaults -- so the booked best pointed at a tree
+    One iteration is the worked example: it added a tile table under `configs/`
+    alongside a tuned-tile selector in the model code, booked it as a class-B
+    win, and only the selector entered the commit. Two iterations later the
+    table was gone, the selector's loader was returning {} and every tile had
+    fallen back to its default -- so the booked best pointed at a tree
     that no archived patch could rebuild.
 
     Safe here because the workspace has no submodules (checked) and

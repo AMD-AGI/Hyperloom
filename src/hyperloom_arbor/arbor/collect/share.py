@@ -7,11 +7,11 @@ Layout under the share root (default /path/to/arbor-share, on the share's pod)::
                                                             profiles, dossier, artifacts
 
 The pod is reached through the platform's ssh gateway, which takes ssh
-commands, scp and sftp but not rsync and not piped stdin (tested 2026-10-06).
+commands, scp and sftp but not rsync and not piped stdin.
 So an upload is one sftp batch: make the directories, put each file under a
 temporary name, rename it into place. sftp's rename replaces the target in one
 step, so a reader never sees half a file. The gateway also returns exit status
-0 for every command and delivers its stderr on stdout (tested 2026-10-07), so
+0 for every command and delivers its stderr on stdout, so
 ``check`` reads markers the command prints, never its exit status; sftp's own
 status is reliable.
 

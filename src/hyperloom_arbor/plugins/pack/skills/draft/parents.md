@@ -1,6 +1,6 @@
 # Which pack to start from
 
-Derive from the nearest pack that has worked, not from nothing. Sizes are of `pack.yaml` on `main` (2026-11-03).
+Derive from the nearest pack that has worked, not from nothing. Sizes are of `pack.yaml` at this tag.
 
 | The campaign | Parent | Why |
 | --- | --- | --- |

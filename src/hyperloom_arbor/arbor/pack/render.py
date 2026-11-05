@@ -414,13 +414,12 @@ def render_program(campaign, state, arbor_root: str | Path,
     # because it is the one place the pack states what this campaign IS
     # before it starts stating rules.
     #
-    # It was parsed into Pack.description from the beginning but never
-    # rendered until 2026-09-20. Packs had been written against the
-    # assumption that it reached the agent, so agentx-dsv41-5's header --
-    # "at CONCURRENCY 4", the C4 baseline and target, and the warning that
-    # the inherited roadmap's numbers are C32 LEADS -- was invisible to the
-    # agent it was written for, and the C4/C32 distinction survived only in
-    # the config goal and knowledge/operating-point.md.
+    # It was parsed into Pack.description from the beginning but at first
+    # never rendered. Packs had been written against the assumption that it
+    # reached the agent, so one pack's header -- its operating point, its
+    # baseline and target, and the warning that the inherited roadmap's
+    # numbers came from another operating point -- was invisible to the
+    # agent it was written for.
     if campaign.pack.description:
         sections.append(campaign.pack.description.strip())
 
