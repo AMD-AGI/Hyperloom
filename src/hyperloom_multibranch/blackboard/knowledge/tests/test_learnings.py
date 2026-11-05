@@ -15,7 +15,7 @@ from hyperloom_kb.collect import collect, load_mapping
 from hyperloom_multibranch.contracts.blackboard import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import Learning, LearningRecord, BlackboardSnapshot
-from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LearningKind
 from hyperloom_multibranch.blackboard.knowledge.experience import MAPPING_PATH as EXPERIENCE_MAPPING
 from hyperloom_multibranch.blackboard.knowledge.learnings import (
     EXPORT_FORMAT,
@@ -88,6 +88,20 @@ def test_each_current_learning_is_one_row_with_the_sessions_conditions_and_its_t
         [],
         False,
     )
+
+
+def test_a_learning_whose_cited_test_did_not_re_verify_is_unmeasured(snapshot: BlackboardSnapshot) -> None:
+    records = tuple(
+        dataclasses.replace(record, conclusion=Conclusion.UNVERIFIED, commit_id=None)
+        if record.request_id == "r1"
+        else record
+        for record in snapshot.records
+    )
+
+    document = export_document(dataclasses.replace(_with_learnings(snapshot), records=records))
+    rows = {row["entry_id"]: row for row in document["learnings"]}
+
+    assert (rows["s1:2"]["measured"], rows["s2:1"]["measured"]) == (False, True)
 
 
 def test_the_learnings_become_experiences_of_their_own_schema(snapshot: BlackboardSnapshot) -> None:

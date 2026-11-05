@@ -12,7 +12,8 @@ reads 0.39 at the source layer, not 1.0.
 
 :func:`discrimination` is the menu's offline check: leaving each session out, how well the families' commit odds tell
 its tests that committed from the rest, beside the layers' base rates alone. An archived direction keeps the family
-CLOSE classified from its change; an older one is classified from its words.
+CLOSE classified from its change; an older one, or one whose mechanism this version does not know, is classified from
+its words.
 """
 
 from __future__ import annotations
@@ -22,9 +23,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
-from hyperloom_multibranch.blackboard.families import Family, Mechanism, family_of
+from hyperloom_multibranch.blackboard.families import Family, family_of
+from hyperloom_multibranch.blackboard.knowledge.warm_start import FRAMEWORK_VERSION_LABEL, MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeDirection
-from hyperloom_multibranch.blackboard.rsi.history import MODEL_TYPE_LABEL
+from hyperloom_multibranch.blackboard.rsi.history import OTHER_MODEL_WEIGHT
 from hyperloom_multibranch.blackboard.rsi.report import table
 from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions
 
@@ -40,15 +42,14 @@ PRIOR_TRIALS = 4.0
 MAX_TRIALS = 10.0
 #: How many tests without a commit make a family barren: one tried that often never committed.
 BARREN_TRIALS = 2.0
-#: How much a session of another model type weighs; one on another framework version weighs as much less again.
-OTHER_MODEL_WEIGHT = 0.5
+#: A session of another model type weighs :data:`~.history.OTHER_MODEL_WEIGHT`; one on another framework version
+#: weighs as much less again.
 OTHER_VERSION_WEIGHT = OTHER_MODEL_WEIGHT
 #: What a session's evidence keeps for every :data:`AGE_SESSIONS` archived sessions newer than it.
 AGE_WEIGHT = OTHER_MODEL_WEIGHT
 AGE_SESSIONS = 5
 #: What a tie between a committing test and another counts for in the area under the curve.
 _TIE = 0.5
-FRAMEWORK_VERSION_LABEL = "framework_version"
 #: How many families a report lists.
 REPORT_ROWS = 20
 
@@ -56,8 +57,8 @@ REPORT_ROWS = 20
 def direction_family(direction: TreeDirection) -> Family:
     """The family of an archived direction: the one CLOSE kept, or one read off its words."""
 
-    if direction.family_target and direction.family_mechanism:
-        return Family(direction.family_target, Mechanism(direction.family_mechanism), direction.layer)
+    if direction.family_target and direction.family_mechanism is not None:
+        return Family(direction.family_target, direction.family_mechanism, direction.layer)
     return family_of(direction.target, direction.mechanism, direction.layer)
 
 
@@ -222,9 +223,7 @@ __all__ = [
     "AGE_WEIGHT",
     "BARREN_TRIALS",
     "BASE_RATES",
-    "FRAMEWORK_VERSION_LABEL",
     "MAX_TRIALS",
-    "OTHER_MODEL_WEIGHT",
     "OTHER_VERSION_WEIGHT",
     "PRIOR_TRIALS",
     "REPORT_ROWS",

@@ -25,10 +25,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin
+from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_TYPE_LABEL
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree, TreeBranch, TreeProbation
 from hyperloom_multibranch.blackboard.rsi.history import (
     HORIZON_TESTS,
-    MODEL_TYPE_LABEL,
     StallOdds,
     judged_tests,
     stall_odds,
