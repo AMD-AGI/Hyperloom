@@ -181,7 +181,7 @@ def _cut_torn_tail(path: Path) -> None:
 def _append_line(path: Path, line: bytes) -> None:
     """Append ``line`` whole, or put the segment back as it was when the write fails partway."""
 
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o666)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
     try:
         size = os.fstat(fd).st_size
         try:
