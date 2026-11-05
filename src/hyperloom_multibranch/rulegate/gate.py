@@ -147,7 +147,7 @@ class RuleGate:
 
     async def land_split(self, branch: str) -> bool:
         """Cut the fork reserved as ``branch`` at its candidate's parent and commit the fix on it; false when no fork
-        waits on ``branch``. A commit whose judgement cannot be written is taken back, and the error raised."""
+        waits on ``branch``. A commit whose judgement or split cannot be written is taken back, and the error raised."""
         # The scheduler bounds the landing with a timeout; giving up the wait must not leave a fork half landed.
         return await asyncio.shield(self._land(branch))
 
@@ -174,19 +174,19 @@ class RuleGate:
                 await self._blackboard.write_judgement(
                     request.request_id, split.judgement, Conclusion.SPLIT_COMMITTED, commit, recipe.digest()
                 )
+                await self._blackboard.record_lineage(
+                    LineageEvent(
+                        LineageKind.SPLIT,
+                        branch,
+                        commit_id=commit,
+                        from_commit=parent,
+                        from_branch=request.branch,
+                        reason=split.reason,
+                    )
+                )
             except Exception:
                 await self._repo.rewind(branch, commit, parent)
                 raise
-            await self._blackboard.record_lineage(
-                LineageEvent(
-                    LineageKind.SPLIT,
-                    branch,
-                    commit_id=commit,
-                    from_commit=parent,
-                    from_branch=request.branch,
-                    reason=split.reason,
-                )
-            )
             del self._reserved[branch]
             return True
 
