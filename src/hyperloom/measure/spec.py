@@ -172,7 +172,10 @@ class Config:
         r = Reader(value, path)
         config = cls(yaml=r.text("yaml") or "", sha256=r.text("sha256", pattern=SHA256_RE) or "")
         r.done()
-        actual = hashlib.sha256(config.yaml.encode()).hexdigest()
+        try:
+            actual = hashlib.sha256(config.yaml.encode()).hexdigest()
+        except UnicodeEncodeError:  # a lone surrogate, which a JSON escape can spell and UTF-8 cannot
+            raise DocumentError(f"{path}.yaml: not Unicode text that UTF-8 can encode") from None
         if actual != config.sha256:
             raise DocumentError(f"{path}.sha256: does not match the YAML text")
         return config
@@ -652,9 +655,14 @@ def _load_yaml(text: str) -> Any:
             "the spec fingerprint needs PyYAML: install hyperloom[runtime] or hyperloom[runner]"
         ) from exc
     try:
-        return yaml.safe_load(text)
+        value = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise DocumentError(f"spec.config.yaml: not valid YAML ({type(exc).__name__})") from None
+    try:
+        canonical_json(value)
+    except (TypeError, ValueError) as exc:  # a date, a set, binary or a non-finite float: YAML holds it, JSON does not
+        raise DocumentError(f"spec.config.yaml: holds a value JSON cannot hold ({exc})") from None
+    return value
 
 
 def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None = None) -> dict[str, Any]:

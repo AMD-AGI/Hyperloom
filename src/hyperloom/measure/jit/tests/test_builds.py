@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hyperloom.measure.jit import builds
 from hyperloom.measure.jit.builds import BuildLog, scan_builds, server_logs
 
 # The two shapes aiter writes: the cpp_itfs form (a path) and the module builder's (a bracketed md_name, in colour).
@@ -135,7 +136,50 @@ def test_a_build_that_finished_has_no_failure_and_an_open_record_at_the_end_of_t
     assert scan_builds([_log(tmp_path, MODULE)]).failed == {}
     cut = "failed jit build [module_cut]↓\n/a/b.cu:4:2: error: stops here\n"
 
-    assert scan_builds([_log(tmp_path, cut)]).failed == {}, "a record that never closed is not a finished account"
+    assert scan_builds([_log(tmp_path, cut)]).failed == {"module_cut": "a/b.cu:4: stops here"}, (
+        "the opening tag already says the build failed; the log was cut inside its record"
+    )
+
+
+class _Counted:
+    """A log file that adds up the bytes it hands to its reader, however they are asked for."""
+
+    def __init__(self, path: Path, handed: list[int]) -> None:
+        self._file = open(path, "rb")
+        self._handed = handed
+
+    def __enter__(self) -> _Counted:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._file.close()
+
+    def __iter__(self) -> _Counted:
+        return self
+
+    def __next__(self) -> bytes:
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def readline(self, size: int = -1) -> bytes:
+        line = self._file.readline(size)
+        self._handed.append(len(line))
+        return line
+
+
+def test_a_log_with_no_line_break_is_read_no_further_than_its_budget(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(builds, "_MAX_LOG_BYTES", 4096)
+    log = tmp_path / "server.log"
+    log.write_bytes(b"x" * 64 * 1024 + b"\n[aiter] start build [module_late] under /j\n")
+    handed: list[int] = []
+    monkeypatch.setattr(builds, "open", lambda path, mode: _Counted(path, handed), raising=False)
+
+    built = scan_builds([log])
+
+    assert sum(handed) <= 4096, "no more than the budget reaches memory, line break or not"
+    assert built.started == frozenset(), "a build line past the budget is not read"
 
 
 # The lines a server prints when CUDA-graph capture hits a kernel the loaded module lacks.
