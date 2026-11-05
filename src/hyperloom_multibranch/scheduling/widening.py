@@ -12,12 +12,13 @@ judge names for it, or else the largest op of the latest profile of the commit i
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, QueueState, Toolbox
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy
-from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS
+from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BranchFocus
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 
 #: Sandbox cold starts a new branch waits through before its tests start paying off: its first test's, and one more.
@@ -58,12 +59,14 @@ def toolbox_headroom(
     return allowed - queue_state.running - queue_state.queued
 
 
-def refill_focus(asked: tuple[str, ...], count: int, shares: OpShares | None) -> tuple[str, ...]:
-    """The focus of each of ``count`` branches opened after the opening batch, in order: the op the judge ``asked``
-    for it, else one of the largest ops of ``shares``, the start commit's op shares; ``""`` when neither names one.
+def refill_focus(asked: tuple[str, ...], count: int, shares: OpShares | None) -> tuple[BranchFocus, ...]:
+    """The focus of each of ``count`` branches opened after the opening batch, in order: what the judge ``asked`` for
+    it, else one of the largest ops of ``shares``, the start commit's op shares; ``""`` when neither names one.
 
-    The branches the judge left without a focus take those ops in turn, wrapping when the batch outruns them, so a
-    refill spreads over the profile instead of sending every branch it opens at the one largest op.
+    The judge's text is kept as written, and its op is the op of ``shares`` it names, so one op is one focus however
+    the judge annotates it. The branches the judge left without a focus take the largest ops in turn, wrapping when the
+    batch outruns them, so a refill spreads over the profile instead of sending every branch it opens at the one
+    largest op.
     """
 
     largest = [op for op, _ in shares.largest(count)] if shares is not None else []
@@ -72,8 +75,24 @@ def refill_focus(asked: tuple[str, ...], count: int, shares: OpShares | None) ->
         chosen = asked[index] if index < len(asked) else ""
         if not chosen and largest:
             chosen, taken = largest[taken % len(largest)], taken + 1
-        focus.append(chosen)
+        focus.append(BranchFocus(chosen, _profile_op(chosen, shares)))
     return tuple(focus)
+
+
+def _profile_op(text: str, shares: OpShares | None) -> str:
+    """The op of ``shares`` that ``text`` names first as a whole word, with or without its ``.kd`` suffix, the longer
+    of two named at one place; ``text`` itself when it names none."""
+
+    named = []
+    for op in shares.shares if shares is not None else ():
+        found = _named(text, op.removesuffix(".kd"))
+        if found is not None:
+            named.append((found.start(), -len(op), op))
+    return min(named)[2] if named else text
+
+
+def _named(text: str, op: str) -> re.Match[str] | None:
+    return re.search(rf"(?<!\w){re.escape(op)}(?!\w)", text) if op else None
 
 
 class Widening:
