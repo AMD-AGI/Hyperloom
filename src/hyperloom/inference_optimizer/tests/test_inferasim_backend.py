@@ -790,3 +790,26 @@ def test_launches_that_differ_in_an_env_lever_keep_separate_anchors(anchor_store
 
 def test_an_unpinned_launch_records_no_anchor(anchor_store):
     assert ia.record_measured_anchor(_spec(launch=ia.LAUNCH_UNPINNED), tpot_mean_ms=14.0) is None
+
+
+@pytest.mark.parametrize(
+    ("error", "raises"),
+    [(ib.InferasimBridgeError("no preset"), False), (OSError("read-only"), False), (TypeError("bad stack"), True)],
+    ids=["bridge", "io", "bug"],
+)
+def test_an_anchor_that_cannot_be_recorded_spares_the_round_but_a_bug_raises(tmp_path, monkeypatch, error, raises):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors.explore_prefilter import _prefilter
+
+    monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(tmp_path / "anchors"))
+
+    def materialize(gv, stack, subdir):
+        raise error
+
+    ctx = SimpleNamespace(materialize=materialize, output_root=tmp_path, runtime={}, gpu="mi300x")
+    measured = SimpleNamespace(tpot_mean_ms=10.0)
+    verdict = SimpleNamespace(stack=None, round_id="r1")
+    with pytest.raises(type(error)) if raises else nullcontext():
+        _prefilter._record_anchor(ctx, SimpleNamespace(name="v"), measured, verdict)

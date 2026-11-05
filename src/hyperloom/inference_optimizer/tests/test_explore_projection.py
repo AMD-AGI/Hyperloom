@@ -171,6 +171,17 @@ def test_a_failed_stack_projection_leaves_the_round_untouched(tmp_path):
     assert kept == variants and dropped == [] and summary is None
 
 
+@pytest.mark.parametrize("stack_fails", [True, False], ids=["stack", "variant"])
+def test_a_bug_in_a_projection_raises(tmp_path, stack_fails):
+    def project(spec, mode=None):
+        if stack_fails or spec.conc != 64:
+            raise TypeError("bad spec")
+        return _metrics(1000.0)
+
+    with pytest.raises(TypeError):
+        _route(tmp_path, [GridVariant(name="c8", extra_envs={"CONC": "8"})], project)
+
+
 def test_an_unknown_mode_leaves_the_round_untouched(tmp_path, monkeypatch):
     monkeypatch.setenv(ib.ENV_MODE, "benchmrak")
     variants = [GridVariant(name="c8", extra_envs={"CONC": "8"})]

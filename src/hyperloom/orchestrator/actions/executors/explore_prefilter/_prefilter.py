@@ -351,7 +351,7 @@ def _record_anchor(ctx: RoundContext, gv: GridVariant, result: Any, verdict: Ver
         spec.runtime, spec.gpu = ctx.runtime, ctx.gpu
         source = {"round_id": verdict.round_id, "variant": gv.name, "workspace": getattr(result, "workspace", None)}
         anchors.record_measured_anchor(spec, tpot_mean_ms=result.tpot_mean_ms, source=source)
-    except Exception as exc:  # noqa: BLE001 - an anchor is a by-product; never fail the round over it
+    except (bridge.InferasimBridgeError, OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("explore: could not record %s as an InferaSim anchor (%s)", gv.name, exc)
 
 

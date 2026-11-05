@@ -306,7 +306,7 @@ def _open_round(request: ProjectionRequest, project: Callable[..., Any] | None) 
         stack_spec = _spec_for(request, GridVariant(name=STACK), "stack")
         mode = anchors.resolve_mode(stack_spec)
         stack = project(stack_spec, mode=mode)
-    except Exception as exc:  # noqa: BLE001 - never fail the round over a projection
+    except (bridge.InferasimBridgeError, OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("explore projection: stack projection failed (%s); benchmarking the full round", exc)
         return None
     return _Round(
@@ -325,6 +325,8 @@ def _open_round(request: ProjectionRequest, project: Callable[..., Any] | None) 
 
 def _route_one(rnd: _Round, variant: GridVariant, idx: int) -> tuple[VariantProjection, float | None]:
     """Project one variant against the stack; the score is set only for a competitive one."""
+    from .inferasim_bridge import InferasimBridgeError
+
     rec = VariantProjection(name=variant.name)
     if not only_visible_levers(variant, rnd.mode):
         rec.reason = "lever_not_projected"
@@ -339,7 +341,7 @@ def _route_one(rnd: _Round, variant: GridVariant, idx: int) -> tuple[VariantProj
         return rec, None
     try:
         metrics = rnd.project(spec, mode=rnd.mode)
-    except Exception as exc:  # noqa: BLE001 - a variant that fails to project is benchmarked
+    except InferasimBridgeError as exc:
         log.warning("explore projection: could not project %r (%s); benchmarking it", variant.name, exc)
         rec.reason, rec.detail = "projection_failed", str(exc)[-300:]
         return rec, None

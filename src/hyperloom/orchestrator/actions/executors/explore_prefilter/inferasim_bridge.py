@@ -593,7 +593,7 @@ def _ensure_infera_importable() -> None:
     except Exception as exc:
         raise InferasimBridgeError(
             f"cannot import Infera 'infera.projection' (set {ENV_ROOT} to the Infera "
-            f"checkout or pip install amd-infera[projection]): {exc}"
+            f"checkout or pip install 'hyperloom[inferasim]'): {exc}"
         ) from exc
 
 

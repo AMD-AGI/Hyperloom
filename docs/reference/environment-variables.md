@@ -717,7 +717,12 @@ projected, the whole round is benchmarked. The round result carries a
 priced for.
 
 Infera is an optional dependency: point `HYPERLOOM_INFERASIM_ROOT` at an Infera
-checkout, or install the `inferasim` extra.
+checkout, or install the `inferasim` extra (`pip install 'hyperloom[inferasim]'`),
+which pins `amd-infera[projection]==0.3.3`. The checkout takes precedence when both
+are present. Either way, a projection also needs Origami, InferaSim's GEMM
+simulator, which is not on PyPI and is built against ROCm:
+`pip install 'git+https://github.com/ROCm/rocm-libraries.git#subdirectory=shared/origami/python'`.
+Without it every projection fails, and the round is benchmarked untouched.
 
 | Variable | Default | Description |
 |---|---|---|
