@@ -103,6 +103,7 @@ IMAGE_CHARS = 19
 #: How much of a blob's sha256 or an upstream commit a lead's line shows.
 SHORT_REF = 12
 MODEL_LABEL = "model"
+MODEL_TYPE_LABEL = "model_type"
 #: The one label a lead may differ in and still be read: a recipe measured on another framework release.
 FRAMEWORK_VERSION_LABEL = "framework_version"
 #: The KB labels of a recipe identity, in the order :func:`recipe_canonical_id` writes their slugs after the scheme.
@@ -110,7 +111,7 @@ IDENTITY_LABELS = (
     MODEL_LABEL,
     "hardware",
     "framework_name",
-    "model_type",
+    MODEL_TYPE_LABEL,
     "architectures",
     FRAMEWORK_VERSION_LABEL,
     "precision",
@@ -691,6 +692,7 @@ __all__ = [
     "LAUNCH_ONLY_REASON",
     "MAX_CANDIDATES",
     "MODEL_LABEL",
+    "MODEL_TYPE_LABEL",
     "PATCH_REFERENCE",
     "REPLAY_LEADS",
     "SHORT_REF",
