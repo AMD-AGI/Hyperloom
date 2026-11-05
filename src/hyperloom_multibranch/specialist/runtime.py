@@ -3,14 +3,15 @@
 
 """The specialist lifecycle: on each branch, the specialist's session and the branch's judge.
 
-A branch started with no direction, no repair and no third-party agent takes one of the session's
+A branch started with no direction, no repair, no focus and no third-party agent takes one of the session's
 :data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` that no branch has held yet, so the branches split the
 work instead of all sweeping the same settings, and a stopped branch's direction is not handed out again while another
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
 fewest running branches hold. A direction given to a branch counts when it is one of these. A direction whose
-specialist gave up finding nothing to test is not dealt again on that start commit while another is left there, nor on
-the head its last :mod:`~hyperloom_multibranch.contracts.blackboard.exhausted` record names, and neither is one any branch's
-record names done on the commit a branch starts at: a later head may open it again, the same one would not.
+specialist gave up finding nothing to test is not dealt again on that start commit, nor on the head its last
+:mod:`~hyperloom_multibranch.contracts.blackboard.exhausted` record names, and neither is one any branch's record names
+done on the commit a branch starts at: a later head may open it again, the same one would not. A branch whose start
+commit has every direction closed takes none.
 
 A branch's first session is made ready once (``preflight``); one that cannot be gives the specialist up with every
 reason in a notice, and a restart does not repeat it. A session that crashes is restarted on its branch, at most
@@ -197,6 +198,7 @@ class _Branch:
     judge_failed: bool = False
     unready: str = ""
     finished: str = ""
+    exhausted: str = ""
     judge: BranchJudge | None = None
 
 
@@ -249,7 +251,7 @@ class SpecialistRuntime:
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch in self._branches or branch in self._finishing:
             raise ValueError(f"branch {branch!r} already has a specialist")
-        if not task.direction.strip() and task.repair is None and not task.agent:
+        if not task.direction.strip() and task.repair is None and not task.agent and not task.focus:
             for state in self._branches.values():
                 await self._learn_exhausted(state)
             task = replace(task, direction=self._least_held(start_commit))
@@ -283,7 +285,14 @@ class SpecialistRuntime:
             return None
         running = not state.tasks[0].done()
         return SpecialistStatus(
-            running, state.crashes, state.lost, state.gave_up, state.judge_failed, state.unready, state.finished
+            running,
+            state.crashes,
+            state.lost,
+            state.gave_up,
+            state.judge_failed,
+            state.unready,
+            state.finished,
+            state.exhausted,
         )
 
     async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
@@ -411,13 +420,15 @@ class SpecialistRuntime:
 
     async def _close_direction(self, state: _Branch) -> str:
         """Deal the given-up branch's direction to no new branch on its start commit or on the head its specialist's
-        last exhausted record names; that record as the give-up notice quotes it, ``""`` without one."""
+        last exhausted record names; that record as the give-up notice quotes it, ``""`` without one, kept for its
+        status."""
         self._closed.add((state.start_commit, state.task.direction))
         exhausted = latest_exhausted(record.entry for record in await state.blackboard.branch_log(state.name))
         if exhausted is None:
             return ""
         self._closed.add((exhausted.head, state.task.direction))
-        return f"; its last exhausted record: {exhausted.summary()}"
+        state.exhausted = exhausted.summary()
+        return f"; its last exhausted record: {state.exhausted}"
 
     async def _learn_exhausted(self, state: _Branch) -> None:
         """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
@@ -434,8 +445,8 @@ class SpecialistRuntime:
 
     def _least_held(self, start_commit: str) -> str:
         running = [state.task.direction for state in self._branches.values()]
-        open_here = [d for d in DIRECTIONS if (start_commit, d) not in self._closed] or list(DIRECTIONS)
-        return min(open_here, key=lambda d: (self._held[d], running.count(d)))
+        open_here = [d for d in DIRECTIONS if (start_commit, d) not in self._closed]
+        return min(open_here, key=lambda d: (self._held[d], running.count(d)), default="")
 
     async def _judge(self, state: _Branch, judge: BranchJudge) -> None:
         try:

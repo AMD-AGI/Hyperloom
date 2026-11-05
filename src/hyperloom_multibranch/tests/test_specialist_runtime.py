@@ -515,6 +515,43 @@ async def test_two_idle_sessions_in_a_row_end_the_specialist_after_one_fresh_ses
     await runtime.stop(BRANCH)
 
 
+async def test_a_branch_opened_on_a_focus_is_dealt_no_direction_and_holds_none(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+
+    await runtime.start("focused", head, BranchTask(focus="act_mul + fp8 quant"))
+    await runtime.start("b0", head)
+    await _until(lambda: _true(len(runs.started) == 2), "the specialists to start")
+    for name in ("focused", "b0"):
+        await runtime.stop(name)
+
+    directions = {run.start.branch: run.start.task.direction for run in runs.started}
+    assert directions == {"focused": "", "b0": DIRECTIONS[0]}
+
+
+async def test_a_branch_whose_start_commit_has_every_direction_closed_is_dealt_none(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    writer = LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+
+    await runtime.start(BRANCH, head, BranchTask(direction="the user's own"))
+    for direction in DIRECTIONS:
+        record = {"direction": direction, "head": head, "tried": ["r1"], "why": "no_ceiling_above_bar"}
+        record |= {"detail": "nothing above the bar is left", "reopen_if": "the head moves"}
+        entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+        await writer.append_branch_log(entry)
+    await runtime.start("late", head)
+    await runtime.start("moved", "f" * 40)
+    await _until(lambda: _true(len(runs.started) == 3), "the specialists to start")
+    for name in (BRANCH, "late", "moved"):
+        await runtime.stop(name)
+
+    directions = {run.start.branch: run.start.task.direction for run in runs.started}
+    assert (directions["late"], directions["moved"]) == ("", DIRECTIONS[0])
+
+
 async def test_a_specialist_s_exhausted_record_is_in_its_give_up_notice_and_closes_its_direction_on_that_head(session):
     runs = _Runs(errors=(_idle(), _idle()))
     runtime = session.runtime(runs)
@@ -526,6 +563,7 @@ async def test_a_specialist_s_exhausted_record_is_in_its_give_up_notice_and_clos
 
     await runtime.start(BRANCH, head)
     await _until(lambda: _any_notice(session, "not restarted"), "the specialist to give up")
+    status = await runtime.status(BRANCH)
     await runtime.stop(BRANCH)
     await runtime.start("next", moved)
     await _until(lambda: _true(len(runs.started) == 3), "the next specialist to start")
@@ -534,6 +572,8 @@ async def test_a_specialist_s_exhausted_record_is_in_its_give_up_notice_and_clos
     (given_up,) = [notice for notice in await session.notices() if "not restarted" in notice]
     assert "blocked_by_tool: start_analysis refused the head's profile" in given_up
     assert runs.started[-1].start.task.direction == DIRECTIONS[1]
+    summary = "blocked_by_tool: start_analysis refused the head's profile; worth again if the analysis is allowed"
+    assert status.exhausted == summary
 
 
 async def test_a_direction_a_running_or_stopped_branch_recorded_exhausted_on_a_head_is_not_dealt_there(session):
