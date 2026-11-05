@@ -15,7 +15,7 @@ from jsonschema import Draft202012Validator
 
 from hyperloom.contracts.measurement import PhaseTiming
 from hyperloom.measure import signing
-from hyperloom.measure.docs import DocumentError
+from hyperloom.measure.docs import DocumentError, parse_json_object
 from hyperloom.measure.manifest import (
     CardOccupancyFacts,
     ResultManifest,
@@ -251,3 +251,23 @@ def test_duplicate_keys_in_the_manifest_are_refused() -> None:
     raw = encode_manifest(_document()).decode().replace('"timed_out":false', '"timed_out":false,"timed_out":true')
     with pytest.raises(DocumentError, match="duplicate"):
         ResultManifest.from_bytes(raw.encode())
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"a":[1e999]}',
+        b'{"a":{"b":-1e999}}',
+        b'{"\\ud800":1}',
+        b'{"a":["ok","\\udcff"]}',
+        b'{"a":{"b":"x\\ud800y"}}',
+    ],
+    ids=["infinity-in-an-array", "minus-infinity-in-an-object", "a-key", "a-string-in-an-array", "a-string-value"],
+)
+def test_the_reader_refuses_a_number_or_string_no_document_holds_wherever_it_sits(raw: bytes) -> None:
+    with pytest.raises(DocumentError):
+        parse_json_object(raw, what="doc")
+
+
+def test_the_reader_takes_an_escaped_surrogate_pair_as_the_one_character_it_spells() -> None:
+    assert parse_json_object(b'{"a":["\\ud83d\\ude00"]}', what="doc") == {"a": ["\U0001f600"]}

@@ -17,11 +17,15 @@ import stat
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 CHUNK = 1024 * 1024
 #: Modes of what this module creates, stated so the result never depends on the umask: owner only.
 FILE_MODE = 0o600
 DIR_MODE = 0o700
+#: How many directories deep :func:`walk_regular_files` goes; a directory below that is refused, so whoever wrote the
+#: tree bounds neither the walk's memory nor the descriptors it holds open (one per level).
+MAX_DEPTH = 128
 _RDONLY = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
 
 
@@ -129,6 +133,21 @@ def exists_beneath(root_fd: int, rel: str) -> bool:
     return True
 
 
+def write_all(fd: int, data: bytes) -> None:
+    """Write every byte of ``data`` to ``fd``.
+
+    ``os.write`` may write fewer bytes than it was given and still succeed: a file that reaches the size limit of the
+    process, or a filesystem that fills up, takes what fits and returns the count. The rest is written again, which
+    then fails with the error that stopped it, so a short write is never taken for a whole one.
+    """
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError(errno.EIO, "a write made no progress")
+        view = view[written:]
+
+
 def stream(fd: int, limit: int | None = None) -> Iterator[bytes]:
     """The remaining bytes of ``fd`` in chunks; with ``limit``, no more than ``limit + 1`` of them.
 
@@ -150,22 +169,64 @@ def sha256_and_size(fd: int, limit: int | None = None) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def walk_regular_files(root_fd: int, prefix: str = "") -> Iterator[str]:
-    """Relative paths of every regular file below ``root_fd``; a symlink or special file raises :class:`UnsafeEntry`."""
-    with os.scandir(root_fd) as entries:
-        listing = sorted(entries, key=lambda entry: entry.name)
-    for entry in listing:
-        rel = f"{prefix}{entry.name}"
-        mode = entry.stat(follow_symlinks=False).st_mode
-        if stat.S_ISLNK(mode):
-            raise UnsafeEntry(rel, "symlink")
-        if stat.S_ISDIR(mode):
-            child = _open_step(entry.name, _RDONLY | os.O_DIRECTORY, root_fd, rel)
-            try:
-                yield from walk_regular_files(child, f"{rel}/")
-            finally:
-                os.close(child)
-        elif stat.S_ISREG(mode):
-            yield rel
-        else:
-            raise UnsafeEntry(rel, "special file")
+def walk_regular_files(root_fd: int) -> Iterator[str]:
+    """Relative paths of every regular file below ``root_fd``, each directory's entries in name order.
+
+    A symlink or special file raises :class:`UnsafeEntry`, and so does a directory more than :data:`MAX_DEPTH` levels
+    down; an entry that goes away while it is walked raises :class:`MissingEntry`. The walk keeps its own stack instead
+    of recursing, so no depth of the tree reaches Python's recursion limit.
+    """
+    levels = [_Level(root_fd, "", _entries(root_fd))]
+    try:
+        while levels:
+            level = levels[-1]
+            entry = next(level.entries, None)
+            if entry is None:
+                levels.pop()
+                if levels:  # the caller's own descriptor stays open
+                    os.close(level.fd)
+                continue
+            rel = f"{level.prefix}{entry.name}"
+            mode = _mode(entry, rel)
+            if stat.S_ISLNK(mode):
+                raise UnsafeEntry(rel, "symlink")
+            if stat.S_ISDIR(mode):
+                if len(levels) > MAX_DEPTH:
+                    raise UnsafeEntry(rel, f"more than {MAX_DEPTH} directories deep")
+                levels.append(_open_level(level.fd, entry.name, rel))
+            elif stat.S_ISREG(mode):
+                yield rel
+            else:
+                raise UnsafeEntry(rel, "special file")
+    finally:
+        for level in levels[1:]:
+            os.close(level.fd)
+
+
+class _Level(NamedTuple):
+    """A directory the walk is in: its descriptor, the relative path its entries start with, and those left to see."""
+
+    fd: int
+    prefix: str
+    entries: Iterator[os.DirEntry[str]]
+
+
+def _entries(dir_fd: int) -> Iterator[os.DirEntry[str]]:
+    with os.scandir(dir_fd) as entries:
+        return iter(sorted(entries, key=lambda entry: entry.name))
+
+
+def _mode(entry: os.DirEntry[str], rel: str) -> int:
+    try:
+        return entry.stat(follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        raise MissingEntry(rel) from None
+
+
+def _open_level(parent_fd: int, name: str, rel: str) -> _Level:
+    child = _open_step(name, _RDONLY | os.O_DIRECTORY, parent_fd, rel)
+    try:
+        return _Level(child, f"{rel}/", _entries(child))
+    except BaseException:
+        os.close(child)
+        raise

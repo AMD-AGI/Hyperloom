@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, get_args
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
+from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 from hyperloom.sandbox.socket import Role
 
 __all__ = ["RESERVED_ENV_NAMES", "LocalTemplate"]
@@ -18,7 +19,7 @@ __all__ = ["RESERVED_ENV_NAMES", "LocalTemplate"]
 RESERVED_ENV_NAMES = frozenset(
     {
         "NODE_NAME",
-        "E2B_SANDBOX_ID",
+        SANDBOX_TAG_ENV,
         ROCR_VISIBLE_DEVICES_ENV,
         "HYPERLOOM_SIGNING_KEY_FILE",
         "HYPERLOOM_SANDBOX_ROOT",

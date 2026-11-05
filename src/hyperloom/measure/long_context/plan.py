@@ -81,8 +81,8 @@ class LongContextPlan:
             raise DocumentError(f"long context: max_new_tokens must be 1 to {REPLY_HEADROOM}")
         if not _in_range(self.concurrency, 1, _MAX_CONCURRENCY):
             raise DocumentError(f"long context: concurrency must be 1 to {_MAX_CONCURRENCY}")
-        if not math.isfinite(self.phase_cap_sec) or self.phase_cap_sec <= 0:
-            raise DocumentError("long context: phase_cap_sec must be a positive number")
+        if not math.isfinite(self.phase_cap_sec) or self.phase_cap_sec < 1:  # what :meth:`parse` reads back
+            raise DocumentError("long context: phase_cap_sec must be a number of at least 1")
         if len(self.trigger) > _MAX_TRIGGER_LINES:
             raise DocumentError(f"long context: at most {_MAX_TRIGGER_LINES} trigger lines")
         for index, line in enumerate(self.trigger):
