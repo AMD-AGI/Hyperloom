@@ -54,12 +54,7 @@ from hyperloom_multibranch.blackboard.rsi.lesson_curation import curate_lessons
 from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
-from hyperloom_multibranch.scheduling.integrator import (
-    ADOPTING_LEAD,
-    CONFLICT_TRUNCATED,
-    CONFLICT_UNRESOLVED,
-    RESOLVER_UNREACHED,
-)
+from hyperloom_multibranch.scheduling.integrator import ConflictLoss
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -73,12 +68,6 @@ IMAGE_CHECK_FILE = "image_check.json"
 #: The merge-log fields that name the patches a merge recovered a conflict with, by their key in
 #: ``close.merges.conflicts``.
 _RECOVERED_CONFLICTS = {"rebased": "rebased_patches", "replaced": "replaced_patches", "resolved": "resolved_patches"}
-#: The merge log's reasons for a merge lost to a conflicting patch, by their key in ``close.merges.conflicts.lost``.
-_LOST_CONFLICTS = {
-    "unresolved": CONFLICT_UNRESOLVED,
-    "truncated": CONFLICT_TRUNCATED,
-    "resolver_unreached": RESOLVER_UNREACHED,
-}
 
 
 def knowledge_steps(knowledge: KnowledgeClose, playbook: CloseStep, curation: CloseStep) -> dict[str, CloseStep]:
@@ -110,15 +99,6 @@ def _recovered_by(row: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(key for key, field in _RECOVERED_CONFLICTS.items() if row["detail"][field])
 
 
-def _lost_to(row: Mapping[str, Any]) -> str | None:
-    """The key of ``close.merges.conflicts.lost`` the merge of merge-log ``row`` counts under; ``None`` for a merge
-    not lost to a conflicting patch. A lead adoption's reason names the branch first."""
-
-    adopts = row["detail"]["adopts"]
-    reason = row["reason"].removeprefix(f"{ADOPTING_LEAD.format(adopts)}: ") if adopts else row["reason"]
-    return next((key for key, lost in _LOST_CONFLICTS.items() if reason.startswith(lost)), None)
-
-
 def _cross_image(leads: Sequence[WarmLead]) -> frozenset[str]:
     """The canonical ids of the champions among ``leads`` whose replay PRELUDE prepared from another image."""
 
@@ -138,13 +118,13 @@ def _merge_statistics(merge_log: Sequence[Mapping[str, Any]]) -> dict[str, objec
     merges = [row for row in merge_log if "outcome" in row["detail"]]
     outcomes = Counter(MergeOutcome(row["detail"]["outcome"]) for row in merges)
     recovered = [_recovered_by(row) for row in merges]
-    lost = [_lost_to(row) for row in merges]
+    lost = [row["detail"]["lost_to"] for row in merges]
     return {
         "attempts": {outcome.value: outcomes[outcome] for outcome in MergeOutcome},
         "conflicts": {
             "seen": sum(1 for by, lost_to in zip(recovered, lost) if by or lost_to),
             **{key: sum(key in by for by in recovered) for key in _RECOVERED_CONFLICTS},
-            "lost": {key: lost.count(key) for key in _LOST_CONFLICTS},
+            "lost": {loss.value: lost.count(loss.value) for loss in ConflictLoss},
         },
     }
 

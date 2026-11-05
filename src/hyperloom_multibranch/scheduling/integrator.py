@@ -53,6 +53,7 @@ import asyncio
 import hashlib
 from collections.abc import Awaitable, Sequence, Set
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from functools import partial
 
 from hyperloom_common.jsonio import extract_last_json_with_key
@@ -96,6 +97,16 @@ CONFLICT_UNRESOLVED = "unresolved patch conflict"
 RESOLVER_UNREACHED = "the patch resolver could not be asked"
 #: The same conflict, lost to an answer the output token cap cut off: a longer cap, not another model, would settle it.
 CONFLICT_TRUNCATED = "the patch resolver's answer was cut off at its output cap"
+
+
+class ConflictLoss(str, Enum):
+    """Why a merge was lost to a conflicting patch, as the merge log records it."""
+
+    UNRESOLVED = "unresolved"
+    TRUNCATED = "truncated"
+    RESOLVER_UNREACHED = "resolver_unreached"
+
+
 #: The JSON key the resolver's reply carries the rewritten patch under; ``null`` means it cannot be combined.
 PATCH_KEY = "patch"
 #: The resolver's answers per conflicting patch: a rewrite that does not apply is asked for once more, with why.
@@ -125,7 +136,8 @@ class MergeReport:
     loads a table neither branch measured, and the gain below was measured on it. ``replaced_patches`` are the head
     patches the merge took out for a candidate's patch that rewrites them, and the reason names them;
     ``rebased_patches`` the candidate's patches the three-way rebase settled, and ``resolved_patches`` those a model
-    rewrote. A skipped candidate carries what the repository's merge found before the skip.
+    rewrote. A skipped candidate carries what the repository's merge found before the skip, and ``lost_to`` says why
+    when a conflicting patch lost it.
 
     A merged candidate carries the gain its merge test was judged to make and the bar it was judged against;
     ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain; a tested one is judged as
@@ -148,6 +160,7 @@ class MergeReport:
     adopts: str = ""
     rebased_patches: tuple[RebasedPatch, ...] = ()
     resolved_patches: tuple[ResolvedPatch, ...] = ()
+    lost_to: ConflictLoss | None = None
 
 
 def _found(report: MergeReport, merge: RepoMerge) -> MergeReport:
@@ -367,12 +380,13 @@ def _verdict_on_head(judgement: Judgement) -> str:
 
 
 class _Skipped(Exception):
-    """A merge that cannot be tested; ``reason`` says why."""
+    """A merge lost to a conflicting patch; ``reason`` says why."""
 
-    def __init__(self, reason: str, merge: RepoMerge) -> None:
+    def __init__(self, reason: str, merge: RepoMerge, lost_to: ConflictLoss) -> None:
         super().__init__(reason)
         self.reason = reason
         self.merge = merge
+        self.lost_to = lost_to
 
 
 @dataclass(frozen=True)
@@ -525,7 +539,8 @@ class Integrator:
                 pending, f"the toolbox refused the merge test: {exc}", MergeOutcome.CONFLICT_SKIPPED
             )
         except _Skipped as exc:
-            return await self._skip(pending, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
+            skipped = await self._skip(pending, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
+            return replace(skipped, lost_to=exc.lost_to)
 
     async def _foundation_fixes(self) -> frozenset[str]:
         """The foundation fixes merged onto the integration branch, as the blackboard records them: no later merge may
@@ -560,11 +575,11 @@ class Integrator:
         try:
             return await self._resolver.resolve(merge, candidate)
         except CompletionFailed as exc:
-            raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}", merge) from exc
+            raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}", merge, ConflictLoss.RESOLVER_UNREACHED) from exc
         except ReplyTruncated as exc:
-            raise _Skipped(f"{CONFLICT_TRUNCATED}: {conflicts}: {exc}", merge) from exc
+            raise _Skipped(f"{CONFLICT_TRUNCATED}: {conflicts}: {exc}", merge, ConflictLoss.TRUNCATED) from exc
         except (BlobError, PatchUnresolved) as exc:
-            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}", merge) from exc
+            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}", merge, ConflictLoss.UNRESOLVED) from exc
 
     async def _skip(
         self, pending: MergeReport, reason: str, outcome: MergeOutcome, merge: RepoMerge | None = None
@@ -733,6 +748,7 @@ def _decision(report: MergeReport) -> Decision:
         "adopts": report.adopts,
         "gain_pct": report.gain_pct,
         "threshold_pct": report.threshold_pct,
+        "lost_to": None if report.lost_to is None else report.lost_to.value,
         "config_conflicts": [
             {"name": change.name, "before": change.before, "after": change.after} for change in report.config_conflicts
         ],
@@ -776,6 +792,7 @@ __all__ = [
     "RESOLVER_ATTEMPTS",
     "RESOLVER_UNREACHED",
     "RESOLVER_UNREACHED_RETRIES",
+    "ConflictLoss",
     "Integrator",
     "LlmPatchResolver",
     "MergeRecords",

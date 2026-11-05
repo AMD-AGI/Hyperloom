@@ -71,6 +71,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     RESOLVER_UNREACHED,
     RESOLVER_UNREACHED_RETRIES,
     SUPERSEDED,
+    ConflictLoss,
     Integrator,
     LlmPatchResolver,
     MergeRecords,
@@ -1092,24 +1093,26 @@ GATEWAY_TIMEOUT = "patch_resolve call failed: RuntimeError: HTTP 504 Gateway Tim
 
 
 @pytest.mark.parametrize(
-    ("scripted", "named", "calls"),
+    ("scripted", "named", "loss", "calls"),
     [
-        (ScriptedCompletion(fallback=json.dumps({"patch": None})), CONFLICT_UNRESOLVED, 1),
+        (ScriptedCompletion(fallback=json.dumps({"patch": None})), CONFLICT_UNRESOLVED, ConflictLoss.UNRESOLVED, 1),
         (
             ScriptedCompletion(error=CompletionFailed(GATEWAY_TIMEOUT)),
             RESOLVER_UNREACHED,
+            ConflictLoss.RESOLVER_UNREACHED,
             1 + RESOLVER_UNREACHED_RETRIES,
         ),
         (
             ScriptedCompletion(fallback='{"patch": "diff --git a/vllm/x.py', stop_reason=STOPPED_AT_MAX_TOKENS),
             CONFLICT_TRUNCATED,
+            ConflictLoss.TRUNCATED,
             1,
         ),
     ],
     ids=["model-declines", "call-fails", "answer-cut-off"],
 )
 async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
-    tmp_path: Path, scripted: ScriptedCompletion, named: str, calls: int
+    tmp_path: Path, scripted: ScriptedCompletion, named: str, loss: ConflictLoss, calls: int
 ) -> None:
     """A conflict the model declined, one it was never asked about and one whose answer the output cap cut off are
     all skipped, under reasons that tell them apart: a failed call or a cut-off answer says nothing about whether
@@ -1123,6 +1126,7 @@ async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
 
     assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED
     assert report.reason.startswith(named) and report.request_id is None
+    assert report.lost_to is loss and bench.logged()[0]["detail"]["lost_to"] == loss.value
     assert len(bench.completion.calls) == calls
     conflicting = bench.deltas["c1"].components[0].add_patches[1]
     assert conflicting.path in report.reason
