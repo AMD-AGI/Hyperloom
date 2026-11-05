@@ -39,6 +39,10 @@ class BenchmarkBackend(Protocol):
     #: its config's ``benchmark.envs`` to stop after the server phase; empty when the backend needs nothing said.
     boot_phase_envs: Mapping[str, str]
 
+    def owns_local_server(self, bench: dict) -> bool:
+        """Whether this backend launches the configured serving process itself."""
+        raise NotImplementedError
+
     def build_command(
         self,
         *,
@@ -58,6 +62,10 @@ class MagpieBackend:
     #: not one of its client-only keys as the persistent server's reuse identity: a boot round that carried the key
     #: would make every round that measures on that server fail its reuse check ("Reuse metadata mismatch").
     boot_phase_envs: Mapping[str, str] = MappingProxyType({})
+
+    def owns_local_server(self, bench: dict) -> bool:
+        """Only built-in scripts have the shared PORT server/client contract."""
+        return str(bench.get("benchmark_script") or "") in MAGPIE_BUILTIN_SCRIPTS
 
     def resolve_interpreter(self) -> str:
         """Return the Magpie-importable interpreter for the Magpie backend."""
@@ -108,6 +116,12 @@ class BypassBackend:
     #: The runner reads the phase from ``benchmark.envs`` (it has no reuse check on envs, and nothing else says it).
     boot_phase_envs: Mapping[str, str] = MappingProxyType({"MAGPIE_RUN_PHASE": "server"})
 
+    def owns_local_server(self, bench: dict) -> bool:
+        """Bypass launches supported serving frameworks without a Magpie script."""
+        from .bypass_engine import SERVER_FRAMEWORKS
+
+        return str(bench.get("framework") or "").lower() in SERVER_FRAMEWORKS
+
     def resolve_interpreter(self) -> str:
         """Return a plain python3 for bypass (no Magpie import needed)."""
         import shutil
@@ -145,17 +159,17 @@ class BypassBackend:
         ]
 
 
-def resolve_backend_name() -> str:
+def resolve_backend_name(*, env: Mapping[str, str] | None = None) -> str:
     """Resolve the active backend name from the environment."""
-    raw = (os.environ.get(BENCHMARK_BACKEND_ENV) or "").strip().lower()
+    raw = ((os.environ if env is None else env).get(BENCHMARK_BACKEND_ENV) or "").strip().lower()
     if not raw or raw not in KNOWN_BENCHMARK_BACKENDS:
         return DEFAULT_BENCHMARK_BACKEND
     return raw
 
 
-def resolve_backend() -> BenchmarkBackend:
+def resolve_backend(*, env: Mapping[str, str] | None = None) -> BenchmarkBackend:
     """Resolve the active benchmark backend instance."""
-    name = resolve_backend_name()
+    name = resolve_backend_name(env=env)
     if name == "bypass":
         return BypassBackend()
     return MagpieBackend()
