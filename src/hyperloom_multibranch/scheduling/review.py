@@ -9,16 +9,17 @@ its ``MB-review`` directory (:func:`request`): ``review.json``, the review's sta
 what the person reads: the map's directions, the dossier, and the commands. The person may edit the map file and the
 dossier where they lie, then decides with ``hyperloom-multibranch review --session DIR approve|reject``
 (:func:`decide`). That needs no running session: the file on the session's storage is the whole protocol, so a person
-on a login node can decide for a session on a GPU node.
+on a login node can decide for a session on a GPU node. The decision is who decided, when and why, and nothing that
+machine reads of the session's files, which it may see under other paths or not at all.
 
-The session polls the file (:func:`wait`). Approved, it reads the map and the dossier again from disk, so the edits
-are what its branches get, and ``review.json`` names every file the review changed. A map ``--agent-directions``
-gives is reviewed before EXPLORE: the session pauses, the pause does not count against ``--max-hours`` (EXPLORE ends
-that much later), and a rejection ends the session with ``review_rejected``. The map a mapping branch makes, the
-dossier pass's or one generated from the root's shares, is reviewed in EXPLORE, where only that branch waits: the
-other branches go on, the clock runs, and a rejection opens no share branch. That page has a clock: when EXPLORE ends,
-and by when a decision still leaves each share the time an Arbor needs for one iteration; ``show`` says how long is
-left.
+The session polls the file (:func:`wait`). Once a person decided, it names in ``review.json`` every file the review
+changed, reading them at its own paths. Approved, it reads the map and the dossier again from disk, so the edits are
+what its branches get. A map ``--agent-directions`` gives is reviewed before EXPLORE: the session pauses, the pause
+does not count against ``--max-hours`` (EXPLORE ends that much later), and a rejection ends the session with
+``review_rejected``. The map a mapping branch makes, the dossier pass's or one generated from the root's shares, is
+reviewed in EXPLORE, where only that branch waits: the other branches go on, the clock runs, and a rejection opens no
+share branch. That page has a clock: when EXPLORE ends, and by when a decision still leaves each share the time an
+Arbor needs for one iteration; ``show`` says how long is left.
 
 A session that stops after its map (``--stop-after-map``) does not pause: its stop is the review point, and its map is
 reviewed offline, then given to a second run (``--agent-directions``, ``--agent-dossier``).
@@ -176,35 +177,38 @@ def load(directory: Path) -> dict[str, Any] | None:
 async def wait(
     directory: Path, sleep: Callable[[float], Awaitable[None]], poll_seconds: float = POLL_SECONDS
 ) -> dict[str, Any]:
-    """Wait, reading ``directory``'s state every ``poll_seconds``, until a person decided; the decided state."""
+    """Wait, reading ``directory``'s state every ``poll_seconds``, until a person decided; the decided state, with the
+    files the review changed (``changed``), as the session reads them at the paths it asked about, written back."""
 
     while True:
         state = load(directory)
         if state is not None and state.get("status") in (APPROVED, REJECTED):
+            state["changed"] = _changed(state)
+            atomic_write_json(directory / REVIEW_FILE, state)
             return state
         await sleep(poll_seconds)
 
 
+def _changed(state: Mapping[str, Any]) -> list[str]:
+    """The files of the review ``state`` whose digest is not what it was when the review was asked for."""
+
+    map_file = None if state.get("map") is None else Path(state["map"])
+    dossier = None if state.get("dossier") is None else Path(state["dossier"])
+    before, after = state.get("requested_digests") or {}, digests(map_file, dossier)
+    return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
+
+
 def decide(directory: Path, approve: bool, by: str | None, note: str, now: float) -> list[str]:
     """Record a person's approval (``approve``) or rejection of the pending review in ``directory``, by ``by`` (the
-    login name when ``None``), with ``note``, and which files the review changed; ``[]`` when recorded, else why it
-    was not."""
+    login name when ``None``), with ``note``; ``[]`` when recorded, else why it was not. Which files the review
+    changed is the session's to say (:func:`wait`)."""
 
     state = load(directory)
     if state is None:
         return [f"no review is pending in {directory}"]
     if state.get("status") != PENDING:
         return [f"the review is already {state.get('status')}"]
-    map_file = None if state.get("map") is None else Path(state["map"])
-    dossier = None if state.get("dossier") is None else Path(state["dossier"])
-    before, after = state.get("requested_digests") or {}, digests(map_file, dossier)
-    state.update(
-        status=APPROVED if approve else REJECTED,
-        decided_at_iso=_iso(now),
-        by=by or _login(),
-        note=note,
-        changed=sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path)),
-    )
+    state.update(status=APPROVED if approve else REJECTED, decided_at_iso=_iso(now), by=by or _login(), note=note)
     atomic_write_json(directory / REVIEW_FILE, state)
     return []
 
@@ -320,7 +324,7 @@ def main(args: argparse.Namespace) -> int:
         print(f"not {DONE[args.action]}: {'; '.join(refused)}", file=sys.stderr)
         return EXIT_REFUSED
     state = load(directory) or {}
-    print(f"{DONE[args.action]} by {state.get('by')}; files changed during the review: {len(state.get('changed', []))}")
+    print(f"{DONE[args.action]} by {state.get('by')}; the session names the files changed once it reads the decision")
     return 0
 
 

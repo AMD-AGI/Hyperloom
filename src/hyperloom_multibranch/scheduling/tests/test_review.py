@@ -59,7 +59,13 @@ def test_a_request_writes_the_page_and_a_pending_state(tmp_path: Path) -> None:
     assert f"review --session {session} approve" in page and "07-profile.md, README.md" in page
 
 
-def test_an_approval_names_the_files_the_review_changed_and_a_second_decision_is_refused(tmp_path: Path) -> None:
+async def _unslept(seconds: float) -> None:
+    raise AssertionError(f"the review was decided, yet the wait slept {seconds} s")
+
+
+async def test_an_approval_records_who_and_why_and_the_session_names_the_files_the_review_changed(
+    tmp_path: Path,
+) -> None:
     map_file, dossier = _map_and_dossier(tmp_path)
     directory = tmp_path / "MB-review"
     request(directory, tmp_path, Reviewed(map_file, dossier, "dossier pass"), NOW)
@@ -69,11 +75,27 @@ def test_an_approval_names_the_files_the_review_changed_and_a_second_decision_is
 
     state = load(directory)
     assert state is not None
-    assert (state["status"], state["by"], state["note"]) == (APPROVED, "alice", "looks right")
-    assert state["changed"] == [str(dossier / "07-profile.md")]
+    assert (state["status"], state["by"], state["note"], state["changed"]) == (APPROVED, "alice", "looks right", [])
     assert state["decided_at_iso"] == "2026-11-01T02:27:40Z"
     assert decide(directory, False, "bob", "", NOW + 90) == ["the review is already approved"]
     assert show(directory) is not None and "Status: approved by alice" in str(show(directory))
+    decided = await wait(directory, _unslept)
+    assert decided["changed"] == [str(dossier / "07-profile.md")] and load(directory) == decided
+
+
+async def test_a_decision_from_a_machine_that_sees_none_of_the_session_s_files_changes_none_of_them(
+    tmp_path: Path,
+) -> None:
+    map_file, dossier = _map_and_dossier(tmp_path)
+    directory = tmp_path / "MB-review"
+    request(directory, tmp_path, Reviewed(map_file, dossier, "dossier pass"), NOW)
+    (tmp_path / "pass").rename(tmp_path / "mounted-elsewhere")
+
+    assert decide(directory, True, "alice", "", NOW + 60) == []
+
+    (tmp_path / "mounted-elsewhere").rename(tmp_path / "pass")
+    decided = await wait(directory, _unslept)
+    assert (decided["status"], decided["changed"]) == (APPROVED, [])
 
 
 def test_a_decision_with_no_review_pending_is_refused(tmp_path: Path) -> None:
@@ -139,5 +161,5 @@ async def test_the_wait_ends_once_a_person_decides(tmp_path: Path) -> None:
 
     decided = await wait(directory, sleep, poll_seconds=15.0)
 
-    assert decided["status"] == REJECTED and slept == [15.0, 15.0, 15.0]
+    assert decided["status"] == REJECTED and slept == [15.0, 15.0, 15.0] and decided["changed"] == []
     assert json.loads((directory / REVIEW_FILE).read_text())["note"] == "wrong directions"
