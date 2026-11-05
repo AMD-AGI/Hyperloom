@@ -61,7 +61,7 @@ _DETOKENIZER_STALL_ERROR = (
 
 
 async def _prepare_aiter_serving_so(extra_envs: dict[str, Any]) -> None:
-    """Rebuild the serving ``.so`` before boot when the CSVs it loads name kernels it lacks.
+    """Rebuild the serving ``.so`` before boot when the CSVs it loads build kernels for this GPU that it lacks.
 
     sglang starts against whatever ``get_config_file`` resolves each ``AITER_CONFIG_*`` to,
     and a kernel the compiled module never registered raises from inside graph capture. The

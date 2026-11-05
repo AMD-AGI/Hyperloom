@@ -17,8 +17,17 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.gpu_partition import PARTITION_CU_ENV, PARTITION_MODE_ENV
 from hyperloom.orchestrator.actions.executors import _aiter_jit
 from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
+
+
+@pytest.fixture(autouse=True)
+def _serving_mi355x(monkeypatch):
+    """The tables' rows are written for an unpartitioned MI355X, so every boot here serves on one."""
+    monkeypatch.setenv("GPU_TYPE", "mi355x")
+    for name in ("TARGET_GPU_TYPE", PARTITION_MODE_ENV, PARTITION_CU_ENV):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +85,7 @@ def _aiter_tree(tmp_path: Path, *, csv_rows: str, so_contains: bytes, overlay: b
     jit.mkdir(parents=True)
     (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"\x7fELF" + so_contains)
     configs = _configs(tmp_path)
-    header = "M,N,K,kernelName,libtype\n"
+    header = "gfx,cu_num,M,N,K,kernelName,libtype\n"
     (configs / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv").write_text(header, encoding="utf-8")
     if overlay:
         (configs / "model_configs" / "dsv3_a8w8_blockscale_bpreshuffle_tuned_gemm.csv").write_text(
@@ -93,7 +102,7 @@ def test_an_overlay_an_unset_env_merges_is_checked(tmp_path, monkeypatch):
     """
     jit = _aiter_tree(
         tmp_path,
-        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
+        csv_rows="gfx950,256,16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
         so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
         overlay=True,
     )
@@ -120,13 +129,16 @@ def test_an_overlay_an_unset_env_merges_is_checked(tmp_path, monkeypatch):
 def test_unset_csvs_respect_package_and_wrapper_boundaries(tmp_path, monkeypatch, cache_location, overlay):
     package_jit = _aiter_tree(
         tmp_path,
-        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_missing,ck\n",
+        csv_rows="gfx950,256,16,512,2048,a8w8_blockscale_bpreshuffle_missing,ck\n",
         so_contains=b"a8w8_blockscale_bpreshuffle_old",
         overlay=overlay,
     )
     if not overlay:
         shipped = package_jit.parent / "configs" / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
-        shipped.write_text("kernelName,libtype\na8w8_blockscale_bpreshuffle_missing,ck\n", encoding="utf-8")
+        shipped.write_text(
+            "gfx,cu_num,M,N,K,kernelName,libtype\ngfx950,256,16,512,2048,a8w8_blockscale_bpreshuffle_missing,ck\n",
+            encoding="utf-8",
+        )
     home = tmp_path / "home"
     jit = home / ".aiter" / "jit" if cache_location == "home" else tmp_path / "runtime" / "jit"
     (jit / "build").mkdir(parents=True)
@@ -137,7 +149,8 @@ def test_unset_csvs_respect_package_and_wrapper_boundaries(tmp_path, monkeypatch
     decoy_configs = jit.parent / "configs"
     decoy_configs.mkdir()
     (decoy_configs / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv").write_text(
-        "kernelName,libtype\na8w8_blockscale_bpreshuffle_old,ck\n", encoding="utf-8"
+        "gfx,cu_num,M,N,K,kernelName,libtype\ngfx950,256,16,512,2048,a8w8_blockscale_bpreshuffle_old,ck\n",
+        encoding="utf-8",
     )
     monkeypatch.delenv("AITER_JIT_DIR", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", raising=False)
@@ -175,7 +188,7 @@ def test_a_consistent_install_costs_nothing(tmp_path, monkeypatch):
     """This runs before every boot, so the common case must not rebuild anything."""
     jit = _aiter_tree(
         tmp_path,
-        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_built,ck\n",
+        csv_rows="gfx950,256,16,512,2048,a8w8_blockscale_bpreshuffle_built,ck\n",
         so_contains=b"a8w8_blockscale_bpreshuffle_built",
         overlay=True,
     )
@@ -191,13 +204,16 @@ def test_a_pinned_env_does_not_rebuild_for_a_table_it_turns_off(tmp_path, monkey
     """Setting the variable disables overlay discovery, so the overlay is out of scope."""
     jit = _aiter_tree(
         tmp_path,
-        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
+        csv_rows="gfx950,256,16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
         so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
         overlay=True,
     )
     monkeypatch.chdir(tmp_path)
     pinned = Path("pinned.csv")
-    pinned.write_text("M,N,K,kernelName,libtype\n16,512,2048,a8w8_blockscale_bpreshuffle_something_else,ck\n", "utf-8")
+    pinned.write_text(
+        "gfx,cu_num,M,N,K,kernelName,libtype\ngfx950,256,16,512,2048,a8w8_blockscale_bpreshuffle_something_else,ck\n",
+        "utf-8",
+    )
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs(
@@ -228,7 +244,10 @@ def test_a_tree_without_a_configs_dir_still_checks_what_the_round_named(tmp_path
     (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"\x7fELFbuilt")
     monkeypatch.chdir(tmp_path)
     pinned = Path("pinned.csv")
-    pinned.write_text("M,N,K,kernelName,libtype\n16,512,2048,a8w8_blockscale_bpreshuffle_missing,ck\n", "utf-8")
+    pinned.write_text(
+        "gfx,cu_num,M,N,K,kernelName,libtype\ngfx950,256,16,512,2048,a8w8_blockscale_bpreshuffle_missing,ck\n",
+        "utf-8",
+    )
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
     outcome = _aiter_jit.prepare_serving_so_for_csvs(
@@ -253,7 +272,7 @@ async def test_the_baseline_drop_stays_on_the_cache_filesystem(tmp_path, monkeyp
     """
     jit = _aiter_tree(
         tmp_path,
-        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
+        csv_rows="gfx950,256,16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
         so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
         overlay=True,
     )

@@ -12,6 +12,8 @@ import logging
 import os
 import re
 import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,9 @@ from hyperloom_common.aiter_jit_cache import (
     resolve_package_root,
     resolve_serving_context,
 )
+from hyperloom_common.coerce import to_int
+from hyperloom.common.gpu_partition import published_shape
+from hyperloom.inference_optimizer.gpu_types import amd_gpu_board
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +72,7 @@ _BATON_LOG_NAMES = {"server.log", "benchmark_stderr.log", "benchmark_stdout.log"
 # Bounds on the baton-wait scan: newest log files read, and bytes read from the end of each.
 _BATON_SCAN_MAX_FILES = 20
 _BATON_SCAN_TAIL_BYTES = 256 * 1024
+_ACTION_NOOP = "noop"
 
 
 def probe_aiter_jit_cache() -> dict[str, Any]:
@@ -514,39 +520,71 @@ def serving_module_for_kernel(kernel_name: str, libtype: str, table_modules: tup
     return None
 
 
-def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
-    """Each ``(kernelName, libtype)`` pair linked into a serving ``module_*.so``, once, in first-seen order.
+@dataclass(frozen=True)
+class AiterBuildTarget:
+    """The device aiter's GEMM codegen compiles tuned rows for (``aiter/jit/utils/chip_info.py::get_build_targets``)."""
+
+    gfx: str
+    cu_num: int
+
+    def builds(self, row: Mapping[str, str | None]) -> bool:
+        """Whether codegen keeps ``row``: ``build_targets.py::filter_tune_df`` matches ``gfx`` and ``cu_num`` exactly."""
+        return str(row.get("gfx") or "").strip() == self.gfx and to_int(row.get("cu_num")) == self.cu_num
+
+
+def _serving_build_target() -> AiterBuildTarget | None:
+    """The target aiter builds for on this host; ``None`` when the session's GPU is not a known board.
+
+    aiter counts CUs per rocminfo agent, which is a compute partition's width rather than the card's, so the width
+    the session observed and published at launch wins over the board's full count.
+    """
+    board = amd_gpu_board()
+    if board is None:
+        return None
+    return AiterBuildTarget(board.gfx, (published_shape() or {}).get("cu_per_partition") or board.compute_units)
+
+
+def _tuned_table_rows(csv_path: Path) -> list[dict[str, str]]:
+    """The rows of one tuned table, none when it cannot be read.
 
     The tables this reads ship with aiter, so their encoding and field sizes are not
     ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
     ``csv.Error``, and either escaping here would skip the whole coverage check.
     """
-    rows: list[tuple[str, str]] = []
     try:
         with csv_path.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
-                name = str(row.get("kernelName") or "").strip()
-                if not name:
-                    continue
-                libtype = str(row.get("libtype") or "").strip().lower()
-                if libtype in NON_JIT_SO_LIBTYPES:
-                    continue
-                if not libtype and name.startswith("_ZN"):
-                    continue
-                rows.append((name, libtype))
+            return list(csv.DictReader(handle))
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         log.warning("aiter_jit: cannot read tuned CSV %s (%s); treating it as covered", csv_path, exc)
         return []
-    return list(dict.fromkeys(rows))
+
+
+def csv_jit_kernel_rows(csv_paths: Sequence[Path], target: AiterBuildTarget) -> list[tuple[str, str]]:
+    """Each ``(kernelName, libtype)`` aiter compiles from these tables into a serving ``.so``, once, in first-seen order.
+
+    The tables come in the order aiter merges them. Its codegen (``chip_info.py::build_tune_dict``) keeps the rows
+    ``target`` builds and keys each module's rows by ``(gfx, cu_num, M, N, K)``, so a later row of the same shape --
+    another ``q_dtype_w`` -- replaces an earlier one and the earlier row's kernel is never compiled. ``kernelName``
+    is the compiled kernel's identifier also where codegen keys by ``kernelId``: the tuner writes that id's name.
+    """
+    built: dict[tuple[str, ...], tuple[str, str]] = {}
+    for csv_path in csv_paths:
+        for row in _tuned_table_rows(csv_path):
+            name = str(row.get("kernelName") or "").strip()
+            libtype = str(row.get("libtype") or "").strip().lower()
+            if not name or libtype in NON_JIT_SO_LIBTYPES or (not libtype and name.startswith("_ZN")):
+                continue
+            if target.builds(row):
+                built[(libtype, *(str(row.get(dim) or "").strip() for dim in ("M", "N", "K")))] = (name, libtype)
+    return list(dict.fromkeys(built.values()))
 
 
 def serving_modules_cover_rows(jit_dir: Path, modules: tuple[str, ...], rows: list[tuple[str, str]]) -> bool:
     """True when every JIT ``kernelName`` in ``rows`` appears in its serving .so.
 
-    ``libtype=asm`` (and other non-JIT backends) names are not linked into
-    ``module_*.so``. A name is looked up in the module of ``modules`` its ``libtype``
-    names, then in the one its prefix implies, falling back to ``modules``. Missing .so files mean the next start
-    will compile from the current CSV, so that case is treated as covered.
+    ``rows`` are what ``csv_jit_kernel_rows`` returns. A name is looked up in the module of ``modules`` its
+    ``libtype`` names, then in the one its prefix implies, falling back to ``modules``. Missing .so files mean the
+    next start will compile from the current tables, so that case is treated as covered.
     """
     if not rows:
         return True
@@ -694,6 +732,22 @@ def csvs_aiter_will_load(configs_dir: Path, tuned_file_name: str, value: str) ->
     return [configs_dir / f"{tuned_file_name}.csv", *overlays]
 
 
+def _modules_lacking_kernels(
+    jit_dir: Path, tables: Sequence[tuple[tuple[str, ...], list[tuple[str, str]]]]
+) -> list[str]:
+    """The modules of each table its serving .so does not cover, with the module each of its kernels resolves to."""
+    modules_needed: list[str] = []
+    for modules, rows in tables:
+        if serving_modules_cover_rows(jit_dir, modules, rows):
+            continue
+        modules_needed.extend(modules)
+        for name, libtype in rows:
+            resolved = serving_module_for_kernel(name, libtype, modules)
+            if resolved:
+                modules_needed.append(resolved)
+    return modules_needed
+
+
 def prepare_serving_so_for_csvs(
     envs: dict[str, str],
     *,
@@ -707,39 +761,41 @@ def prepare_serving_so_for_csvs(
         backup_dir: Where to back up selected modules and ``jit/build`` for invalidation.
 
     Returns:
-        A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``.
+        A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``; ``noop`` when
+        there is no jit dir, or no known GPU to tell which rows aiter builds.
     """
     context = resolve_serving_context(
         os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR"), jit_probe_paths=AITER_JIT_PROBE_PATHS
     )
     if context is None:
-        return {"action": "noop", "reason": "aiter jit dir not found"}
+        return {"action": _ACTION_NOOP, "reason": "aiter jit dir not found"}
+    target = _serving_build_target()
+    if target is None:
+        log.warning("aiter_jit: the serving GPU is not a known board; the serving .so is not checked against the CSVs")
+        return {"action": _ACTION_NOOP, "reason": "serving gpu unknown"}
     package_root, jit_build = context
     jit_dir = jit_build.parent
     configs_dir = package_root / "configs"
+    table_count = 0
     tables: list[tuple[tuple[str, ...], list[tuple[str, str]]]] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
         tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")
         if not tuned_file_name:
             continue
-        for csv_path in csvs_aiter_will_load(configs_dir, tuned_file_name, str(envs.get(env_var) or "")):
-            if csv_path.is_file():
-                tables.append((modules, csv_jit_kernel_rows(csv_path)))
+        csv_paths = [
+            p for p in csvs_aiter_will_load(configs_dir, tuned_file_name, str(envs.get(env_var) or "")) if p.is_file()
+        ]
+        table_count += len(csv_paths)
+        tables.append((modules, csv_jit_kernel_rows(csv_paths, target)))
     log.info(
-        "aiter_jit: checking %d tuned table(s), %d kernel(s), against the serving .so in %s",
-        len(tables),
+        "aiter_jit: checking %d tuned table(s), %d kernel(s) aiter builds for %s/%d, against the serving .so in %s",
+        table_count,
         sum(len(rows) for _, rows in tables),
+        target.gfx,
+        target.cu_num,
         jit_dir,
     )
-    modules_needed: list[str] = []
-    for modules, rows in tables:
-        if serving_modules_cover_rows(jit_dir, modules, rows):
-            continue
-        modules_needed.extend(modules)
-        for name, libtype in rows:
-            resolved = serving_module_for_kernel(name, libtype, modules)
-            if resolved:
-                modules_needed.append(resolved)
+    modules_needed = _modules_lacking_kernels(jit_dir, tables)
     own = image_own_modules(jit_dir, configs_dir, envs) if modules_needed else frozenset()
     modules_needed_t = tuple(m for m in dict.fromkeys(modules_needed) if m not in own)
     if not modules_needed_t:
@@ -782,7 +838,7 @@ def drop_serving_so_for_envs(
         os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR"), jit_probe_paths=AITER_JIT_PROBE_PATHS
     )
     if context is None:
-        return {"action": "noop", "reason": "aiter jit dir not found"}
+        return {"action": _ACTION_NOOP, "reason": "aiter jit dir not found"}
     package_root, jit_build = context
     jit_dir = jit_build.parent
     # A module a registry mismatch named is dropped even when it is the image's own: its tables changed under it.
@@ -815,6 +871,7 @@ __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
     "AITER_PREWARM_MANIFEST",
+    "AiterBuildTarget",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
     "COMPILED_REGISTRY_MARKER",
