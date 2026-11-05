@@ -16,7 +16,11 @@ Its brief has three parts:
   schema has no kernel family, so no recalled lead is a kernel change;
 * the menu: the direction families ranked for the branch on its start commit (:mod:`rsi.menu`), each with its best note
   under it, none for a branch of the menu's control. A claim's reply says the same of the claimed direction's family
-  (:meth:`direction_note`).
+  (:meth:`direction_note`);
+* the focus history: every stopped branch the scheduler opened on the same op as ``focus``, with its tests, its commits
+  and its latest exhausted record, so that a branch reopened on that op starts where those ended. A focus is the profile
+  op the scheduler read in the judge's words, or those words when they named none; either way the op is its first
+  word, without a namespace or a ``.kd`` suffix.
 
 A champion the start commit is already, or builds on, is no lead: the lessons name it first, as :data:`ON_HEAD`, and
 ``blackboard_replay`` refuses to replay it, since its change would undo what the head did since.
@@ -48,8 +52,10 @@ from typing import Protocol
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard, StartupBriefProvider
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer
+from hyperloom_multibranch.contracts.blackboard.exhausted import latest_exhausted
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
+    FocusBranch,
     PeerReplay,
     StartupBrief,
     UnfinishedLead,
@@ -184,6 +190,44 @@ def _repeated(snapshot: BlackboardSnapshot, start_commit: str) -> list[str]:
         f"this session: {direction} failed {count} times on the states this one builds on"
         for direction, count in repeated_failures(on_line)
     ]
+
+
+def _focus_op(focus: str) -> str:
+    """The op a focus names: its first word, lowercased, without a namespace or a ``.kd`` suffix; ``""`` for none."""
+
+    words = focus.split()
+    if not words:
+        return ""
+    return words[0].strip(":,;").lower().removesuffix(".kd").rsplit("::", 1)[-1]
+
+
+def _focus_history(snapshot: BlackboardSnapshot, focus: str, branch: str, start_commit: str) -> tuple[FocusBranch, ...]:
+    """The branches other than ``branch`` that were opened on ``focus``'s op and stopped, newest first."""
+
+    op = _focus_op(focus)
+    if not op:
+        return ()
+    tests = {item.branch: item.tests for item in snapshot.progress}
+    under = set(snapshot.lineage.ancestry(start_commit))
+    stopped = [
+        node
+        for node in snapshot.lineage.branches
+        if node.branch != branch and node.stop_reason is not None and _focus_op(node.focus) == op
+    ]
+    stopped.sort(key=lambda node: node.stopped_at or 0.0, reverse=True)
+    return tuple(
+        FocusBranch(
+            node.branch,
+            node.start_commit,
+            node.head_commit,
+            tests.get(node.branch, 0),
+            tuple(item.gain_pct for item in snapshot.committed if item.branch == node.branch),
+            node.stop_reason or "",
+            latest_exhausted(record.entry for record in snapshot.branch_logs.get(node.branch, ())),
+            node.head_commit in under,
+        )
+        for node in stopped
+    )
 
 
 def _learnt_lines(notes: Notes) -> list[str]:
@@ -483,6 +527,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             focus=self.focus,
             settings_menu=lists.get(SETTINGS, ()),
             code_menu=lists.get(CODE, ()),
+            focus_history=_focus_history(snapshot, self.focus, self.branch, start_commit),
         )
 
     def _record_brief(self, snapshot: BlackboardSnapshot, kept: Sequence[_Item], logged: Notes) -> None:
