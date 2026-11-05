@@ -61,8 +61,9 @@ Only a session that lends dev sandboxes (`multibranch.dev_leases`, `--dev-leases
 files stay in the session directory, so the template must mount the storage `USER_DATA_PATH` is on at the same path, read
 and write, and the model at the path the campaign spec names. The sandbox's commands run as root and are given the app
 host's LLM gateway variables (`ANTHROPIC_*`, `OPENAI_*`) and its CA bundle variables (`SSL_CERT_FILE` and the like), whose
-paths must exist in the sandbox too. A lease lives as long as its holder needs it, bounded by the grant's
-`max_runtime_sec`.
+paths must exist in the sandbox too. The gateway variables include its credentials, which any command in the sandbox can
+read, so give the app host a gateway key that agents' commands may see. A lease lives as long as its holder needs it,
+bounded by the grant's `max_runtime_sec`.
 
 ## Example: clusters with an NFS share
 
