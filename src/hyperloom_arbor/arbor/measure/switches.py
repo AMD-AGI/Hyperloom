@@ -5,9 +5,9 @@ the kernel plan (the dossier skill's kernel-plan.md, the kernels skill) asks
 five things of it: the switch defaults off, dispatch on every rank, zero JIT
 compiles while serving, both switch positions tested, and the accuracy gate.
 Until v0.9.1 the agent asserted them as flags in its STAGE line, which only
-parallel mode's lanes judge. A Hyperloom MB branch kept such a step
-(``HL_OSK_DECODE``, a split-K decode GEMM JIT-compiled at first call) whose
-per-GEMM check passed at three batch sizes; served with the switch on, GSM8K
+parallel mode's lanes judge. A Hyperloom MB branch kept such a step (a
+split-K decode GEMM behind a switch, JIT-compiled at first call) whose
+per-GEMM check passed at a few batch sizes; served with the switch on, GSM8K
 accuracy collapsed.
 
 So the harness checks every switch a KEEP lands, lane or not:

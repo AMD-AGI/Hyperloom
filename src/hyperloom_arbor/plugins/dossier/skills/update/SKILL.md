@@ -32,9 +32,9 @@ collective moved) and the step's time goes elsewhere, sometimes drastically.
 Part 7's rule (re-profile after a KEEP) keeps the profile current inside a
 campaign. It does not re-read the code or re-rank the directions, so the
 campaign goes on optimizing from a map of a tree that no longer exists. One
-campaign kept ten changes in forty iterations, a sequence-parallel prefill path
-among them, and its stack was then merged onto another team's, which partitions
-the MoE pooler another way; the dossier it started from describes neither tree.
+campaign kept many changes, a sequence-parallel prefill path among them, and
+its stack was then merged onto another team's, which partitions the MoE pooler
+another way; the dossier it started from describes neither tree.
 
 **When.** The operator decides, on signs like these:
 
@@ -136,8 +136,8 @@ measured. Then, on the served tree as it now is, in order:
      (config, tuning, framework, kernel), so a round that keeps working one
      level sees it.
 
-   The hand-off a restarted campaign reads is cut from this part. Model M's round
-   u2 did this step by hand as `11.u2-c2-ledger.md`. Across several Model M
+   The hand-off a restarted campaign reads is cut from this part. One Model M
+   round did this step by hand, as a ledger file beside its 11.uK. Across several Model M
    campaigns, a fair share of the KEEPs that came from a handed ranking reworked
    something an earlier map had killed. The core kernels there were killed on floors that a later
    campaign found the kernel under test had measured itself.

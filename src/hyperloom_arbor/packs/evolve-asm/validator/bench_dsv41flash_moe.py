@@ -41,28 +41,27 @@ def bench_moe1(args):
     # serve both: pinning the prefill tile (below) made every decode-regime shape
     # run the wrong kernel, measurably slower.
     #
-    # A search under the official validator (weakest-of-3, gfx950/MI355X) found
-    # t16x128x256 ahead of t64x128x256 at decode shapes and behind it at prefill
-    # shapes. Crossover is between M=256 and M=512 -- the same place the campaign
-    # splits decode/verify (M<=256) from prefill (M>=512).
+    # Under the official validator (weakest-of-3, gfx950/MI355X), t16x128x256
+    # leads t64x128x256 at decode shapes and trails it at prefill shapes. The
+    # crossover lies between M=256 and M=512, which is where decode/verify
+    # (M<=256) is split from prefill (M>=512).
     #
-    # t16x128x256/kw1/async is the unique optimum of a full tile_m x tile_n x
-    # k_wave grid at M=192; it is bit-exact against the reference config under
-    # real e8m0 scales.
-    # The prefill branch is an earlier search's result, unchanged.
+    # t16x128x256/kw1/async is the best point of a full tile_m x tile_n x
+    # k_wave grid at a decode shape; it is bit-exact against the reference
+    # config under real e8m0 scales.
+    # The prefill branch keeps its tile.
     # Env vars (FLYDSL_*) still override everything.
     #
-    # A later search split the decode branch at M=64. At very small M the launch
-    # is parallelism-starved, not bandwidth-bound: with tile_n=128 there are only
-    # 36 N-tiles x ceil(M/16) blocks (72 at M=32) for 256 CUs. tile_n=32 + k_wave=4
-    # quadruples the block count (288) and drops barriers 23->10, mfma 80->20.
-    # That trade only pays while the grid is under-occupied; once tile_n=128 alone
-    # fills the machine, the smaller tile is pure MFMA-efficiency loss. Measured
-    # interleaved with the official validator, t16x32x256/kw4 wins for M<=48,
-    # ties at M=64 and loses from M=96 up (worst at the DSpark verify shape),
-    # so the small-M tile is gated to M<=64 and M=96..256 keeps
-    # t16x128x256. Bit-exact vs the validator's reference config under real e8m0
-    # scales.
+    # The decode branch is split at M=64. At very small M the launch is
+    # parallelism-starved, not bandwidth-bound: with tile_n=128 there are too
+    # few blocks to cover the CUs. tile_n=32 + k_wave=4 multiplies the block
+    # count and cuts the barriers and MFMAs per block. That trade only pays
+    # while the grid is under-occupied; once tile_n=128 alone fills the
+    # machine, the smaller tile is pure MFMA-efficiency loss. Under the
+    # official validator, t16x32x256/kw4 wins at the smallest M, ties near
+    # M=64 and loses above it (worst at the DSpark verify shape), so the
+    # small-M tile is gated to M<=64 and M=96..256 keeps t16x128x256.
+    # Bit-exact vs the validator's reference config under real e8m0 scales.
     if M <= 64:
         _tm, _tn, _kw, _wpe, _bnt = 16, 32, 4, 3, 0    # small-batch decode
     elif M <= 256:
@@ -198,8 +197,8 @@ def bench_moe2(args):
     #      (M, topk, .), and is e8m0 too.  torch.ones() in e8m0 is byte 0x7F =
     #      2^0; a uint8 filled with 1 would mean 2^-126 (~0).
     # Before this fix every output element was inf/NaN and nondeterministic, so
-    # the SNR gate scored ~-716 dB even for the reference kernel compared against
-    # itself - no kernel could ever have passed.  Layout per aiter's own tuner,
+    # the SNR gate failed even for the reference kernel compared against itself
+    # - no kernel could ever have passed.  Layout per aiter's own tuner,
     # aiter_meta/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py:1694-1702.
     from aiter.ops.shuffle import shuffle_weight_a16w4
     from aiter.utility.fp4_utils import e8m0_shuffle

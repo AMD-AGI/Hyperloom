@@ -23,8 +23,8 @@ NUM_GPUS=${NUM_GPUS:-${TP:-1}}
 OUT_DIR=$(dirname "$BENCH_OUTPUT")
 mkdir -p "$OUT_DIR"
 
-# Post to the name the server registered, not an assumption (the v2 pack's correctness.sh lost a
-# correct iteration to a 404 on exactly this).
+# Post to the name the server registered, not an assumption (an assumed name answers 404, which
+# fails a correct iteration).
 WIRE=$(curl -sf "http://127.0.0.1:$PORT/v1/models" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null) \
     || WIRE=${MODEL_NAME:-model}

@@ -31,7 +31,7 @@ python3 packs/agentx/tools/kv_trace_simulator.py iter_N/kv_trace.jsonl --sweep
 
 # Try a specific config
 python3 packs/agentx/tools/kv_trace_simulator.py iter_N/kv_trace.jsonl \
-    --hicache-ratio 2.0 --gpu-tokens 2900000
+    --hicache-ratio <ratio> --gpu-tokens <tokens>
 ```
 
 ## Key numbers to look for

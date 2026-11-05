@@ -44,8 +44,8 @@ first. It names the dossier's directory, the files to write, and the campaign's 
   dtypes per component at the served precision; parameter and KV bytes per
   token; the kernel that serves each component in this build (from part 8).
 - **From:** the model's config and code in the pinned tree, read whole (a
-  truncated print of `quantization_config` once hid most of a 2,361-entry
-  exclude list); the checkpoint's `config.json` as the container sees it, its
+  truncated print of `quantization_config` once hid most of a long exclude
+  list); the checkpoint's `config.json` as the container sees it, its
   README, and the tensor dtypes in the safetensors headers (a router stored in
   fp32 was reported as BF16). Write the routing function out, and the MoE's
   dataflow in order, collectives included.
@@ -86,11 +86,11 @@ first. It names the dossier's directory, the files to write, and the campaign's 
   tree (AITER, CK) is read where it decides dispatch (part 8). Then:
   - **Line numbers come only from numbered output** (`cat -n`, `grep -n`,
     `nl`). A file too large for one read is read in numbered ranges, never in
-    unnumbered `sed -n` slices: one campaign's reader did that, and most
-    of its `amd/model.py` citations were wrong, one past the end of the file.
+    unnumbered `sed -n` slices: one campaign's reader did that, and many
+    of its citations were wrong, some past the end of the file.
   - **A reader's report is a lead, not a source.** Before a claim enters the
     dossier, the writer opens the cited range itself and confirms the named
-    class, function or line is there. B's writer copied two reports without
+    class, function or line is there. One writer copied reports without
     opening a source file; one claimed a missing capability the code already
     had, and it became a ranked direction.
   - **Write the part after the readers return**, not while one is still out.

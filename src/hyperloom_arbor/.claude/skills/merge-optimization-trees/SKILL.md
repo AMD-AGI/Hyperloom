@@ -27,9 +27,9 @@ knobs; select with a heuristic, never a brute-force sweep.
 > one git branch at the end, carrying every knob.
 >
 > This is worth stating because the other reading is natural and expensive. A
-> run of this skill produced seven sibling git branches, one per contended
-> candidate, and had to fold them back together afterwards — during which seven
-> knob declarations were silently lost and the merged branch could not start a
+> run of this skill produced one sibling git branch per contended candidate,
+> and had to fold them back together afterwards — during which knob
+> declarations were silently lost and the merged branch could not start a
 > server.
 
 ## Why this process exists
@@ -133,9 +133,9 @@ Then **test the lean set as a whole, at every operating point, before treating
 it as a baseline.** This step is the one that gets skipped, and it is the one
 that pays.
 
-Measured here: a six-knob lean set was published as "ready to run, nothing
-needs to be set". It ran at C8 and **killed the server at C32 in two of two
-attempts** — engine core dead, worker killed by a signal with no Python
+Measured here: a lean set of several knobs was published as "ready to run,
+nothing needs to be set". It ran at C8 and **killed the server at C32 on every
+attempt** — engine core dead, worker killed by a signal with no Python
 traceback, error text pointing nowhere near the cause.
 
 ### A default-ON knob is a promise that the configuration works
@@ -160,14 +160,14 @@ docker exec $C python3 -c "import vllm.envs as e; print(e.VLLM_ROCM_USE_HIP_SPAR
 The lean set fails as a set. Halve the ON knobs, measure, recurse into the
 failing half. `log2(N)` runs, not `N`.
 
-Actual sequence, six knobs, four runs:
+An illustrative sequence, several knobs, a few runs:
 
 | ON set | result |
 |---|---|
-| all six | died |
-| five (minus the most-suspected) | died → suspicion was wrong |
-| two known-active only | clean |
-| those two + one more | died → **culprit found** |
+| all of them | died |
+| all but the most-suspected | died → suspicion was wrong |
+| the known-active ones only | clean |
+| those + one more | died → **culprit found** |
 
 Note the second row. The first hypothesis was wrong and the bisect said so
 immediately — which is the point of bisecting rather than reasoning.
@@ -179,15 +179,16 @@ explicitly:
 
 1. **Re-run the CONTROL in the environment's current state**, not the state it
    had before the failures. A container here degraded over a session from
-   passing 5-of-5 to 1-of-5, and recreating it fixed it. The control re-check
-   passed at the current state, which is what licensed blaming the knobs.
+   passing every control run to failing most of them, and recreating it fixed
+   it. The control re-check passed at the current state, which is what
+   licensed blaming the knobs.
 2. **Confirm the knob you turned off is actually off** — read its marker
    (`knob=0`, feature marker absent) before drawing a conclusion from the run.
 
 **One failure is not evidence.** This class of fault also occurs
 intermittently on unmodified baselines. Require a repeated, arm-specific
-pattern: here it was 3 deaths in 3 attempts with the culprit on, 0 in 6
-without.
+pattern: a death in every attempt with the culprit on, none in several
+attempts without.
 
 Keep every failed attempt's log. Move it aside rather than overwriting it —
 the next run destroys the evidence otherwise.
@@ -212,7 +213,7 @@ See [reference.md](reference.md) for what makes two numbers comparable.
 > #### A short single replay can REJECT a side. It cannot accept one.
 >
 > Query-to-query variance on an agentic benchmark swamps the effects being
-> chased. On one node, four control screens of an identical config agreed
+> chased. On one node, control screens of an identical config agreed
 > tightly, but the same knob on the same tree, measured twice, spread almost as
 > wide as the effects being chased.
 >
@@ -220,8 +221,8 @@ See [reference.md](reference.md) for what makes two numbers comparable.
 > request count and prefix-cache hit rate, so the workload was the same and the
 > machine was not — read lower the second time. The apparent gain was noise.
 >
-> **Do not take a tight control spread as the noise floor.** Four controls
-> agreeing tightly says nothing about the tail. The honest estimate is a
+> **Do not take a tight control spread as the noise floor.** Controls
+> agreeing tightly say nothing about the tail. The honest estimate is a
 > *direct replicate* — the same configuration twice — and that was much wider.
 >
 > Keep the short screens: they legitimately reject the many candidates that do
@@ -270,7 +271,7 @@ Phase G — confirm    : re-measure the winning set at 3 seeds, both axes
 ```
 
 Total roughly `N + log2(N) + a few`, against `2^N`. **Never enumerate the
-power set**: fourteen features is 16384 configurations.
+power set**: twenty features is over a million configurations.
 
 Two legitimate shortcuts, and one that is not:
 
@@ -315,15 +316,15 @@ expensive option: it destroys the comparison and nobody re-derives it.
 ## Traps that have cost real time
 
 - **`logger.info_once` hides everything after the first call.** A marker
-  reading `knob=1 batch=1024 -> base path` was read as "this feature never
+  reading `knob=1 batch=<large> -> base path` was read as "this feature never
   runs at C32". It ran — on later, smaller batches — and crashed the server.
   For any knob whose behaviour depends on batch or shape, the first log line
   is the *least* informative one. Count dispatches, or log per distinct shape.
 - **Assert marker anchors against source before the campaign starts.** It is a
   two-line test. A harness grepping for `SwiGLU` collected nothing for a knob
-  whose marker says `SiluAndMulWithClamp`; checking all 15 anchors found 8 that
-  would never match, which would have discarded 7 of 14 knobs while every run
-  still reported success.
+  whose marker says `SiluAndMulWithClamp`; checking every anchor found several
+  that would never match, which would have discarded a large share of the
+  knobs while every run still reported success.
 - **A marker that fires either way proves nothing.** `SiluAndMulWithClamp
   dispatch:` logs the bound method of an unrelated op and appears with the knob
   on *or* off. The knob's own marker was a different string entirely.
@@ -346,7 +347,7 @@ expensive option: it destroys the comparison and nobody re-derives it.
 - **Deleting the losing side.** See step 6.
 - **Shipping a lean set you have not run at every operating point.**
 - **Merging instrumentation.** Timing hooks from a source tree are overhead,
-  not optimization. One campaign spent three iterations removing exactly what
+  not optimization. One campaign spent iterations removing exactly what
   another had added.
 - **Cross-axis credit.** A gain on tok/s/user at C4 is not evidence for
   tok/s/chip at C32.

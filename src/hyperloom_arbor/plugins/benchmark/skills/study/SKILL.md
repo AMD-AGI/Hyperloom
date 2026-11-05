@@ -17,7 +17,7 @@ A campaign that does not know its benchmark keeps the wrong changes, and they ar
 its result:
 - **Under the benchmark's correct rules,** a tuned config ran slower than the reference.
 - **Natural speculative acceptance** looked like a free P90 gain, where the benchmark fixes golden acceptance.
-- **A campaign scored output throughput** while the chart plots P90 interactivity, and its one adopted change
+- **A campaign scored output throughput** while the chart plots P90 interactivity, and a change it adopted
   lowered P90.
 
 This skill writes down, once per benchmark, what every campaign on it must respect and measure. The dossier's part 4

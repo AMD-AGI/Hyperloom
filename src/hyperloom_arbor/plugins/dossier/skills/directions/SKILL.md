@@ -54,8 +54,8 @@ campaign's map from it, and a dossier pass ends there. Check it first:
   - Part 11 lists rewrites in their own table, each with a kernel plan
     ([kernel-plan.md](kernel-plan.md)), even while increments lead.
 - **When rewrites go first: the increments are running out.** Watch for these
-  signs. They're calibrated on two earlier campaigns; revisit the numbers after
-  the first rewrite campaign.
+  signs. They're calibrated on earlier campaigns; revisit the numbers after the
+  first rewrite campaign.
   - **The KEEPs are small:** the median of the last five KEEPs is under 3×
     the gate.
   - **The probes kill their own leads:** five or more probes in a row each

@@ -321,12 +321,11 @@ def cmd_gate(args: argparse.Namespace) -> int:
             # Archive the diff BEFORE reverting. The revert itself is safe —
             # `git revert` keeps the original commit in history — but that
             # history lives only in the container, and a container lives only on
-            # one node whose docker store is not persistent. One campaign lost the patches
-            # of three iterations that way:
-            # three changes the gate scored as primary WINS and rejected for
-            # mechanical faults (a draw-contaminated secondary bar, and a
-            # correctness.sh crash on a null `content` field). By the time the
-            # node was revisited it held zero containers and zero images.
+            # one node whose docker store is not persistent. A campaign can lose the
+            # patches of changes the gate scored as primary WINS and rejected for
+            # mechanical faults (a draw-contaminated secondary bar, or a
+            # correctness.sh crash on a null `content` field): once the node's
+            # containers and images are gone, nothing of them is left to look at.
             #
             # Best-effort on purpose: a REVERT must still revert even if the
             # archive fails, so this never raises into the control flow.

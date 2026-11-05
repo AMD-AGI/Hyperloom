@@ -2,8 +2,8 @@
 """Check a dossier, or one of its update rounds, before calling it done.
 
     python3 -m arbor.dossier.check <dir>                  # the dossier: README.md, parts 01-11
-    python3 -m arbor.dossier.check <dir> --round u3       # round u3: 03, 06, 07, 10 and 11 .u3 files
-    python3 -m arbor.dossier.check <dir> --round u3 --no-index   # a round staged outside the dossier
+    python3 -m arbor.dossier.check <dir> --round uK       # round uK: 03, 06, 07, 10 and 11 .uK files
+    python3 -m arbor.dossier.check <dir> --round uK --no-index   # a round staged outside the dossier
 
 The dossier skill's ``check-dossier.py`` runs this module from the skill's place, for packs and callers that name it
 (the dossier plugin's skills call the module).

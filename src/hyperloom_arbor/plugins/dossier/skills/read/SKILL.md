@@ -76,4 +76,4 @@ python3 -m arbor.dossier.check <reports dir> --round uK --no-index   # a round s
 - **What fails a file:** missing, a copied template, a status of "missing", or a round the index doesn't list.
 - **What it doesn't judge:** whether the content is right. That's what each part's "Done when" is for.
 
-Calibrated on the Model M MI350X dossier: every real part has at least 635 words and 131 numbers, while a template skeleton with one line filled in has 17 words. A FAIL names the file and why. Write or finish that file. A part that genuinely can't be filled says so in its own status line ("not available", with the reason); it isn't left out.
+Calibrated on a real dossier: every real part clears the bar by a wide margin, while a template skeleton with one line filled in falls far below it. A FAIL names the file and why. Write or finish that file. A part that genuinely can't be filled says so in its own status line ("not available", with the reason); it isn't left out.
