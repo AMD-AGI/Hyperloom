@@ -633,14 +633,15 @@ async def test_the_brief_lists_the_stopped_branches_on_its_focus_op_with_their_e
     clock = FakeClock()
     blackboard = await scripted_session(tmp_path / "blackboard", clock)
     w = Writers(tmp_path / "blackboard", clock)
-    await _stopped_on(w, "s5", f"{ACT_MUL}.kd (activation mul + fp8 quant)", ("x1", "x2"), **FUSED)
-    await _stopped_on(w, "s6", f"{ACT_MUL}: fuse it into the GEMM epilogue")
+    await _stopped_on(w, "s5", ACT_MUL, ("x1", "x2"), **FUSED)
+    await _stopped_on(w, "s6", ACT_MUL)
     await _stopped_on(w, "s7", "aiter::add_rmsnorm_quant_kernel")
-    await w.as_role(Role.SCHEDULER).record_lineage(
-        LineageEvent(LineageKind.OPEN, "s8", from_commit="c1", focus=ACT_MUL)
-    )
+    for branch in ("s8", "s9"):
+        await w.as_role(Role.SCHEDULER).record_lineage(
+            LineageEvent(LineageKind.OPEN, branch, from_commit="c1", focus=ACT_MUL)
+        )
     briefs = SessionBriefs(blackboard)
-    briefs.for_branch("s9", f"{ACT_MUL}.kd")
+    briefs.for_branch("s9", f"the activation mul + fp8 quant ({ACT_MUL}.kd): fuse it into the GEMM epilogue")
 
     text = await briefs.text("s9", "c1")
 
@@ -660,7 +661,11 @@ async def test_a_brief_without_a_focus_or_with_no_branch_before_it_on_the_focus_
 ) -> None:
     clock = FakeClock()
     blackboard = await scripted_session(tmp_path / "blackboard", clock)
-    await _stopped_on(Writers(tmp_path / "blackboard", clock), "s5", ACT_MUL, ("x1",), **FUSED)
+    w = Writers(tmp_path / "blackboard", clock)
+    await _stopped_on(w, "s5", ACT_MUL, ("x1",), **FUSED)
+    await w.as_role(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, "s8", from_commit="c1", focus="aiter::add_rmsnorm_quant_kernel")
+    )
     briefs = SessionBriefs(blackboard)
     briefs.for_branch("s8", "aiter::add_rmsnorm_quant_kernel")
 
@@ -677,9 +682,27 @@ async def test_the_brief_lists_the_newest_branches_on_the_focus_and_counts_the_r
     opened = [f"t{index}" for index in range(FOCUS_BRANCHES + 2)]
     for branch in opened:
         await _stopped_on(w, branch, ACT_MUL)
+    await w.as_role(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, "s9", from_commit="c1", focus=ACT_MUL)
+    )
 
     brief = await CrossSessionBriefing(blackboard, focus=ACT_MUL, branch="s9").startup_brief("c1")
     shown = render_brief(brief).splitlines()
 
     assert [line.split()[1] for line in shown if line.startswith("- t")] == opened[::-1][:FOCUS_BRANCHES]
     assert f"... 2 earlier branches on it, {len(opened)} in all" in shown
+
+
+async def test_a_focus_that_names_no_op_recalls_only_the_branches_opened_on_the_same_words(tmp_path: Path) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    w = Writers(tmp_path / "blackboard", clock)
+    await _stopped_on(w, "s5", "Tune the MoE gate")
+    await _stopped_on(w, "s6", "Tune attention")
+    await w.as_role(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, "s9", from_commit="c1", focus="Tune attention")
+    )
+
+    brief = await CrossSessionBriefing(blackboard, focus="Tune attention", branch="s9").startup_brief("c1")
+
+    assert [item.branch for item in brief.focus_history] == ["s6"]
