@@ -8,7 +8,7 @@ service, the specialist runtime on them and the MCP service that serves the spec
 sandboxes, archive, submit log and measurement points under ``MB-toolbox``, and the patch and kernel files its
 environment compiler reads, like the repository, from the session's blob store at ``MB-blobs``. The MCP service listens on loopback for the whole session and hands every toolbox call to the loop the peers were built
 on; its learnings tool recalls this session's learnings and past sessions' lessons from the RSI lesson pool, and none
-from the Experience KB, as MB1 runs on none (:func:`specialist_recall`). Every test is measured on a
+from the Experience KB, as the multibranch optimizer uses none (:func:`specialist_recall`). Every test is measured on a
 :class:`MeasurementHost`: the :class:`ToolboxBackend` its tests run on -- this machine's cards
 (:class:`LocalCards`), or the host's sandbox service for a hosted session
 (:class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`) --, the image the launcher names in
@@ -316,8 +316,8 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost) -> Cano
 
 def specialist_recall(reports: Path) -> LessonRecall:
     """The specialists' learnings recall: this session's learnings, then past sessions' lessons from the RSI lesson
-    pool beside the environment's archive, each retrieval logged in ``reports``; no Experience KB, as MB1 runs on
-    none."""
+    pool beside the environment's archive, each retrieval logged in ``reports``; no Experience KB, as the multibranch
+    optimizer uses none."""
 
     return LessonRecall(pool=LessonPool.from_env(), log=RetrievalLog(reports / LEARNINGS_LOG))
 

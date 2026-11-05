@@ -7,7 +7,7 @@ and the dashboard.
 They read a blackboard that no longer changes. The write-back goes first, reading the patch and kernel files of the
 chosen commit's recipe from the session's blob store, then the blackboard's knowledge steps (the search tree to the
 archive, marking the replays of the champions PRELUDE prepared from another image; the Experiences and the specialists'
-learnings go nowhere while MB1 runs on no Experience KB, see
+learnings go nowhere while the session runs on no Experience KB, see
 :func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_close_knowledge`), because the breakdown records both
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM proposes one change to the scheduling playbook into the pool beside the archive (:func:`author_playbook`) and
