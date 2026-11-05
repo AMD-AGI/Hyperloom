@@ -23,7 +23,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, Conclusion, LearningKind
 from hyperloom_multibranch.blackboard.families import Component, Family, Mechanism
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
-from hyperloom_multibranch.blackboard.rsi.briefing import MENU_NOTE, CrossSessionBriefing
+from hyperloom_multibranch.blackboard.rsi.briefing import MENU_NOTE, CrossSessionBriefing, RecallCache
 from hyperloom_multibranch.blackboard.rsi.family_stats import BARREN_TRIALS, PRIOR_TRIALS, FamilyStat, base_rate
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
@@ -409,7 +409,16 @@ async def test_a_code_line_carries_its_familys_best_note_at_either_layer_and_the
     log = tmp_path / LEARNINGS_LOG
     recall = LessonRecall(pool=pool, log=RetrievalLog(log))
     menus = DirectionMenus(metric=METRIC)
-    briefing = CrossSessionBriefing(blackboard, metric=METRIC, branch=_shown(snapshot), menus=menus, learnings=recall)
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        metric=METRIC,
+        branch=_shown(snapshot),
+        menus=menus,
+        learnings=recall,
+    )
 
     brief = await briefing.startup_brief("c1")
 
@@ -424,7 +433,15 @@ async def test_a_code_line_carries_its_familys_best_note_at_either_layer_and_the
 async def test_a_brief_shows_its_branchs_two_lists_and_a_claims_note_comes_from_the_briefing(tmp_path: Path) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
     branch = _shown(await blackboard.snapshot())
-    briefing = CrossSessionBriefing(blackboard, metric=METRIC, branch=branch, menus=DirectionMenus(metric=METRIC))
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        metric=METRIC,
+        branch=branch,
+        menus=DirectionMenus(metric=METRIC),
+    )
 
     brief = await briefing.startup_brief("c1")
 
@@ -432,6 +449,9 @@ async def test_a_brief_shows_its_branchs_two_lists_and_a_claims_note_comes_from_
     assert (len(brief.settings_menu), len(brief.code_menu)) == (MENU_ITEMS, 1)
     assert f"{SETTINGS_TITLE}\n- {brief.settings_menu[0]}" in rendered and f"{CODE_TITLE}\n- " in rendered
     assert (await briefing.direction_note(KV_INTENT, KV_CHANGE)).startswith("your direction is KV cache")
-    assert await CrossSessionBriefing(blackboard).direction_note(KV_INTENT, KV_CHANGE) == ""
-    plain = await CrossSessionBriefing(blackboard, branch=branch).startup_brief("c1")
+    no_menus = CrossSessionBriefing(blackboard, recalls=RecallCache(), champions={}, refused={})
+    assert await no_menus.direction_note(KV_INTENT, KV_CHANGE) == ""
+    plain = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, branch=branch
+    ).startup_brief("c1")
     assert plain.settings_menu == () == plain.code_menu
