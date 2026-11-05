@@ -292,7 +292,7 @@ type = layers
 # Each module implements the protocols contracts declares for its peers, so the contracts sit below all of them.
 # A parenthesised layer is optional: it is not on main yet.
 layers =
-    (hyperloom_multibranch.cli) : (hyperloom_multibranch.scheduling) : (hyperloom_multibranch.specialist) : (hyperloom_multibranch.blackboard) : (hyperloom_multibranch.rulegate) : (hyperloom_multibranch.repo) : (hyperloom_multibranch.toolbox)
+    hyperloom_multibranch.cli : hyperloom_multibranch.scheduling : (hyperloom_multibranch.specialist) : (hyperloom_multibranch.blackboard) : (hyperloom_multibranch.rulegate) : (hyperloom_multibranch.repo) : (hyperloom_multibranch.toolbox)
     hyperloom_multibranch.contracts
 
 
