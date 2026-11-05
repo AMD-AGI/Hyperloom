@@ -15,7 +15,7 @@ from hyperloom.orchestrator.actions.executors import patch_conflict_merge
 from hyperloom.orchestrator.actions.executors._integrate_apply import _apply_patch_series
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
-from hyperloom.orchestrator.actions.executors.patch_conflict_merge import STRATEGY_LLM, STRATEGY_THREE_WAY
+from hyperloom.orchestrator.actions.executors.patch_conflict_merge import STRATEGY_THREE_WAY
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "merge-test",
@@ -96,43 +96,31 @@ async def test_a_patch_staled_by_a_kept_neighbour_lands_by_three_way(repo: Path)
     assert "return 10" in merged and "return 20" in merged
 
 
-async def test_a_resolution_dropping_the_kept_side_is_refused(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_an_overlapping_edit_goes_back_to_its_author(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     landed = _authored(repo, "a", _BASE.replace("return 1", "return alpha_landed()"))
     incoming = _authored(repo, "b", _BASE.replace("return 1", "return alpha_incoming()"))
     _keep(repo, landed)
     kept = (repo / _MODULE).read_text(encoding="utf-8")
-    monkeypatch.setattr(
-        patch_conflict_merge, "_conflict_resolver", _resolver_returning("    return alpha_incoming()\n")
-    )
+    calls: list[object] = []
+
+    def resolver() -> object:
+        calls.append("resolver")
+        return _resolver_returning("    return alpha_incoming()\n    return alpha_landed()\n")()
+
+    monkeypatch.setattr(patch_conflict_merge, "_conflict_resolver", resolver)
 
     attempt, series = await _series(repo, incoming)
 
+    assert calls == []
     assert attempt.applied == []
     assert attempt.merged_patches == []
     assert [row["patch"] for row in series.errors] == [str(incoming)]
     stderr = series.errors[0]["stderr"]
     assert "patch does not apply" in stderr
-    assert "merge dropped 1 added line(s)" in stderr
+    assert "three-way left conflicts" in stderr
     assert series.feedback
     assert (repo / _MODULE).read_text(encoding="utf-8") == kept
     assert _git(repo, "status", "--porcelain") == ""
-
-
-async def test_a_resolution_keeping_both_sides_lands(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    landed = _authored(repo, "a", _BASE.replace("return 1", "return alpha_landed()"))
-    incoming = _authored(repo, "b", _BASE.replace("return 1", "return alpha_incoming()"))
-    _keep(repo, landed)
-    both = "    if beta():\n        return alpha_incoming()\n    return alpha_landed()\n"
-    monkeypatch.setattr(patch_conflict_merge, "_conflict_resolver", _resolver_returning(both))
-
-    attempt, series = await _series(repo, incoming)
-
-    assert series.errors == []
-    assert attempt.applied == [incoming]
-    assert [row["strategy"] for row in attempt.merged_patches] == [STRATEGY_LLM]
-    merged = (repo / _MODULE).read_text(encoding="utf-8")
-    assert "return alpha_landed()" in merged and "return alpha_incoming()" in merged
-    compile(merged, _MODULE, "exec")
 
 
 def test_the_integrate_result_names_the_merged_patches(tmp_path: Path) -> None:

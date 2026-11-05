@@ -39,21 +39,27 @@ from ._patch_sources import (
     resolved_explicit_root,
 )
 from ._setup_replay import replay_setup_commands
-from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
+from .patch_conflict_merge import ConflictQuery, LandingContext, apply_patch_resolving_conflicts
 from .source_tree_identity import new_recovery_record
 
 log = logging.getLogger(__name__)
 
 
+async def _return_overlap_to_author(_query: ConflictQuery) -> None:
+    """Decline an overlapping region, so its specialist re-authors the patch on the kept stack under review."""
+
+
 async def _merge_onto_kept_stack(attempt: IntegrateAttempt, patch: Path, strict: PatchApplyResult) -> PatchApplyResult:
     """Land a patch the strict apply refused by merging it onto HEAD, which carries every KEEP so far.
 
-    A refused merge restores the files it touched to HEAD and keeps the strict failure, with its steps appended.
+    Only mechanical merges land. A refused merge restores the files it touched to HEAD and keeps the strict failure,
+    with its steps appended, for the apply_failed re-author.
     """
     merge = await apply_patch_resolving_conflicts(
         attempt.framework_root,
         patch,
         LandingContext(operator_id=attempt.specialist_task_id or patch.stem, landed_patches=list(attempt.applied)),
+        resolver=_return_overlap_to_author,
     )
     if not merge.applied:
         return replace(strict, error=strict.error + merge.note())
