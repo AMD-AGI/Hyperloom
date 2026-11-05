@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ from ..actions.executors._workload_envs import geak_metric_axis
 from ..bus.message_bus import Message
 from ..kernel.geak_config import _geak_has_accepted_kernel
 from ..kernel.lane_budget import INSUFFICIENT_BUDGET
+from ..source_materialization import SourceMaterializationError, materialize_source_stack
 from ..actions.executors._gpu_pin import (
     coerce_tp,
     resolve_gpu_pin,
@@ -393,9 +395,12 @@ class _GeakDispatchMixin:
             run_with_session_kill, cmd, env=runner_env, watch=RoundWatch(timeout=kill_timeout)
         )
 
-    def _accepted_launch_spec(self, *, agentx: bool) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    def _accepted_launch_spec(
+        self, *, agentx: bool, source_materialization: Mapping[str, Any] | None = None
+    ) -> tuple[dict[str, Any], Mapping[str, Any]]:
+        source_args = {"source_materialization": source_materialization} if source_materialization is not None else {}
         try:
-            env_spec = self._coord.writeback.build_env_spec()
+            env_spec = self._coord.writeback.build_env_spec(**source_args)
         except (OSError, TypeError, ValueError) as exc:
             raise EnvSpecUnserializable(str(exc)) from exc
         measurement = self.shared_state.current_best_measurement
@@ -409,6 +414,7 @@ class _GeakDispatchMixin:
                     measurement=measurement,
                     server_launch_flags=recipe_launch.flags,
                     server_launch_envs=recipe_launch.env,
+                    **source_args,
                 )
         return env_spec, measurement
 
@@ -565,9 +571,11 @@ class _GeakDispatchMixin:
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
         }
 
-    def _build_geak_handoff(self, *, agentx: bool) -> dict[str, Any]:
+    def _build_geak_handoff(
+        self, *, agentx: bool, source_materialization: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
         cb = self.shared_state.current_best
-        env_spec, measurement = self._accepted_launch_spec(agentx=agentx)
+        env_spec, measurement = self._accepted_launch_spec(agentx=agentx, source_materialization=source_materialization)
         spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
         accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
         extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
@@ -810,9 +818,14 @@ class _GeakDispatchMixin:
             self._settle_geak_runner_exit(proc, handoff=handoff, agentx=agentx, facts=facts), facts
         )
 
-    def _open_geak_handoff(self, *, agentx: bool) -> dict[str, Any] | None:
+    def _open_geak_handoff(
+        self, *, agentx: bool, source_materialization: Mapping[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         try:
-            handoff = self._build_geak_handoff(agentx=agentx)
+            source_args = (
+                {"source_materialization": source_materialization} if source_materialization is not None else {}
+            )
+            handoff = self._build_geak_handoff(agentx=agentx, **source_args)
         except EnvSpecUnserializable as exc:
             log.exception("geak: cannot serialize the accepted launch configuration")
             recorder = self.timeline()
@@ -898,11 +911,41 @@ class _GeakDispatchMixin:
         )
         self.shared_state.save(self.session_dir)
 
+    async def _prepare_geak_source(self) -> dict[str, Any] | None:
+        accepted = deepcopy(self.shared_state.current_best)
+        if not any(
+            isinstance(entry, Mapping) and entry.get("scope") == "source_patch"
+            for entry in accepted.get("optimization_stack") or []
+        ):
+            return None
+        source = await asyncio.to_thread(
+            materialize_source_stack, accepted, self.session_dir / "optimization_stack" / "materialized"
+        )
+        if accepted != self.shared_state.current_best:
+            raise SourceMaterializationError("current_best_changed", "accepted state changed during source capture")
+        return source
+
+    def _refuse_unresolved_geak_source(self, exc: SourceMaterializationError) -> None:
+        recorder = self.timeline()
+        if recorder is not None:
+            recorder.finish_failed(stage="geak_handoff", error_class=exc.error_class, message=str(exc))
+        self._settle_geak_skip(
+            {"status": "error", "error_class": exc.error_class, "reason": exc.reason, "error": str(exc)}
+        )
+
+    async def _open_materialized_geak_handoff(self, *, agentx: bool) -> dict[str, Any] | None:
+        try:
+            source = await self._prepare_geak_source()
+        except SourceMaterializationError as exc:
+            self._refuse_unresolved_geak_source(exc)
+            return None
+        return self._open_geak_handoff(agentx=agentx, source_materialization=source)
+
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
         agentx = not _geak_rebench.geak_harness_replays_workload(state)
-        handoff = self._open_geak_handoff(agentx=agentx)
+        handoff = await self._open_materialized_geak_handoff(agentx=agentx)
         if handoff is None:
             return
         cards = _resolve_handoff_physical_gpus(

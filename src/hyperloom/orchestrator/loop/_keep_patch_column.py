@@ -152,8 +152,8 @@ def _source_snapshot_layers(stack: Any) -> list[dict[str, Any]]:
     return [
         {
             "id": str(entry.get("variant_name") or entry.get("name") or ""),
-            # GEAK PYTHONPATHs this value; it is the import root inside the
-            # snapshot, not the snapshot's own top level.
+            # Retain the historical import-root handle as layer identity/context.
+            # GEAK source launches consume the complete materialization instead.
             "snapshot_dir": source_layer_overlay_dir(entry) if snapshot else "",
             "framework_root": str(entry.get("framework_root") or ""),
             "base_sha": str(entry.get("base_sha") or ""),
@@ -191,6 +191,8 @@ def _source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:
     }
     if "source_snapshot_complete" in result:
         handles["source_snapshot_complete"] = bool(result["source_snapshot_complete"])
+    if "source_artifacts_outside_root" in result:
+        handles["source_artifacts_outside_root"] = result["source_artifacts_outside_root"]
     if result.get("source_layer_landed") or result.get("patches_applied") or result.get("artifacts_applied"):
         handles["source_layer_landed"] = True
     return handles

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import signal
@@ -59,6 +60,24 @@ def _resolve_runner() -> str:
     )
 
 
+def _source_reader_error(handoff: dict, runner: str) -> dict | None:
+    """Refuse source-bearing handoffs an installed reader cannot reproduce."""
+    baseline = handoff.get("baseline_env_spec") or {}
+    if baseline.get("source_snapshots") and "source_materialization" not in baseline:
+        return {
+            "status": "error",
+            "error_class": "unresolved_baseline_source",
+            "error": "Accepted source layers require a complete source materialization before GEAK launches",
+        }
+    if "source_materialization" in baseline and not _supports_source_materialization(Path(runner)):
+        return {
+            "status": "error",
+            "error_class": "unsupported_source_materialization_reader",
+            "error": "GEAK must advertise SOURCE_MATERIALIZATION_SCHEMA_VERSION = 1 for accepted source trees",
+        }
+    return None
+
+
 def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int) -> dict:
     """Run GEAK e2e once and return the parsed result.json (+ run metadata)."""
     output_dir = Path(output_dir)
@@ -68,6 +87,10 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int) -> dict:
     handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
 
     runner = _resolve_runner()
+    rejected = _source_reader_error(handoff, runner)
+    if rejected is not None:
+        result_path.write_text(json.dumps(rejected, indent=2), encoding="utf-8")
+        return rejected
     cmd = [sys.executable, runner, str(handoff_path), str(result_path)]
 
     env = dict(os.environ)
@@ -122,6 +145,27 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int) -> dict:
         }
     )
     return result
+
+
+def _supports_source_materialization(runner: Path) -> bool:
+    """Read the consumer's literal protocol capability without importing it."""
+    try:
+        module = ast.parse(runner.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeError):
+        return False
+    values = []
+    for statement in module.body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "SOURCE_MATERIALIZATION_SCHEMA_VERSION"
+            for target in statement.targets
+        ):
+            values.append(statement.value)
+    return (
+        len(values) == 1
+        and isinstance(values[0], ast.Constant)
+        and type(values[0].value) is int
+        and values[0].value == 1
+    )
 
 
 def main(argv: list[str]) -> int:

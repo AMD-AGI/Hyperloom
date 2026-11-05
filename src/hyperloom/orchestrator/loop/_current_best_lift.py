@@ -155,6 +155,8 @@ def _variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
     # snapshot unusable, so truthiness must not drop it.
     if "source_snapshot_complete" in bv:
         fields["source_snapshot_complete"] = bool(bv["source_snapshot_complete"])
+    if "source_artifacts_outside_root" in bv:
+        fields["source_artifacts_outside_root"] = bv["source_artifacts_outside_root"]
     target_files = [str(path) for path in (bv.get("target_files") or []) if str(path).strip()]
     if target_files:
         fields["target_files"] = target_files
