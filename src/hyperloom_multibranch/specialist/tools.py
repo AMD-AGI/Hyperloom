@@ -47,8 +47,9 @@ async def sync_to_head(repo: ExperimentRepo, branch: str, worktree: BranchWorktr
     return head
 
 
-async def sync_to_commit(repo: ExperimentRepo, commit: str, worktree: BranchWorktree) -> None:
-    """Reset ``worktree`` to ``commit``: the installed packages with its recipe's patches applied."""
+async def sync_to_commit(repo: ExperimentRepo, commit: str, worktree: BranchWorktree) -> tuple[str, ...]:
+    """Reset ``worktree`` to ``commit``: the installed packages with its recipe's patches applied; returns the commits
+    made in the worktree that the reset dropped."""
     recipe = await repo.read_recipe(commit)
     patches = [
         (await repo.patch_text(commit, patch.path)).encode()
@@ -56,7 +57,7 @@ async def sync_to_commit(repo: ExperimentRepo, commit: str, worktree: BranchWork
         if worktree.holds(component.component)
         for patch in component.patches
     ]
-    await asyncio.to_thread(worktree.sync, commit, patches)
+    return await asyncio.to_thread(worktree.sync, commit, patches)
 
 
 def register_worktree_tools(
@@ -68,7 +69,10 @@ def register_worktree_tools(
     own = {"scopes": frozenset({SCOPE_SPECIALIST})}
     server.register(
         "worktree_sync",
-        description="Reset your worktree to your branch's head, dropping uncommitted edits; do it before each change.",
+        description=(
+            "Reset your worktree to your branch's head, dropping uncommitted edits and the commits you made in it since "
+            "the last reset (listed in dropped_commits; take their patch first to keep them); do it before each change."
+        ),
         schema=_NO_ARGUMENTS,
         handler=_sync(repo, worktrees),
         **own,
@@ -83,8 +87,8 @@ def register_worktree_tools(
     server.register(
         "worktree_patch",
         description=(
-            "Store your worktree's change to one component as a patch; returns the delta and parent to test. A component "
-            "new on your head gets the upstream commit its installed package was built from."
+            "Store your worktree's change to one component, committed or not, as a patch; returns the delta and parent "
+            "to test. A component new on your head gets the upstream commit its installed package was built from."
         ),
         schema=_PATCH,
         handler=_patch(repo, worktrees),
@@ -93,10 +97,11 @@ def register_worktree_tools(
 
 
 def _sync(repo: ExperimentRepo, worktrees: WorktreeFor) -> Callable[[dict[str, Any], CallContext], Any]:
-    async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
+    async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         worktree = worktrees(ctx.principal.branch)
-        head = await sync_to_head(repo, ctx.principal.branch, worktree)
-        return {"head": head, "worktree": str(worktree.path)}
+        head = await repo.head(ctx.principal.branch)
+        dropped = await sync_to_commit(repo, head, worktree)
+        return {"head": head, "worktree": str(worktree.path), "dropped_commits": list(dropped)}
 
     return handle
 
