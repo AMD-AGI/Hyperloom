@@ -477,12 +477,14 @@ repository. Copy just the Python module beside the original script to use it in
 the original runtime; no Hyperloom installation is needed. Runtime validation
 remains the responsibility of that script.
 
-`deployment.json` always reports `"validation": "not_run"`. It is a placeholder,
-not a verdict -- export never executes the module, so nothing is run to validate
-at CLOSE, for any workload. What vouches for the artifact is upstream of it: the
-per-candidate quality gate that every KEEP had to pass, and the source snapshot
-the module is checked against. Do not read the field as a failed check, and do
-not expect it to change.
+`deployment.json` always reports `"validation": "not_run"`, and always will. It
+cannot hold a verdict: a validation report is bound to the artifact by the
+SHA-256 of `deployment.json` itself, so writing the result into that file would
+change the hash the report refers to. A single-file export has no validation
+command at all -- it ships one module, with no `inference.py` or adapter to run.
+What vouches for the artifact is upstream of it: the per-candidate quality gate
+that every KEEP had to pass, and the source snapshot the module is checked
+against. Do not read the field as a failed check.
 
 A module that exports needs more than a copy, and `reports/deployment.json`
 records it under `runtime_requirements`:
@@ -585,12 +587,14 @@ Neither invocation requires Hyperloom. An application can import the exported
 `output = model(inputs)` repeatedly. Load it before importing torch or the workload
 so runtime environment settings and kernel bindings take effect.
 
-`deployment.json` distinguishes `exported` from `incomplete` and initially marks
-validation `not_run`. `--validate` produces a separate report bound to the export's
-SHA-256, compares dependency versions and runs the adapter's quality gate in the
-new process. Missing or changed captured files prevent execution. A campaign's
-latency result does not establish exported-model correctness or performance;
-validate on the target runtime and measure the application's inference separately.
+`deployment.json` distinguishes `exported` from `incomplete`. Its
+`"validation": "not_run"` never changes; the verdict lives in the separate report
+`--validate` writes (`validation.json` by default), bound to the export by the
+SHA-256 of `deployment.json`. That command compares dependency versions and runs
+the adapter's quality gate in the new process. Missing or changed captured files
+prevent execution. A campaign's latency result does not establish exported-model
+correctness or performance; validate on the target runtime and measure the
+application's inference separately.
 
 To regenerate an export after adding the contract to an existing workload,
 without resuming the campaign, run this in its model runtime:
