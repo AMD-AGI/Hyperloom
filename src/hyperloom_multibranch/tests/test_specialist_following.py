@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from hyperloom.contracts.measurement import RoundValue
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
@@ -77,6 +79,17 @@ async def test_a_head_on_the_integration_head_lacks_nothing_of_it(tmp_path):
 
     assert f"Your head {session.onto} holds all of it." in text and "[not on your head]" not in text
     assert "Commits of your head" not in text
+
+
+async def test_the_holdings_name_the_integration_head_the_blackboard_recorded_not_one_still_unjudged(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
+    await rig.repo.commit_integration(session.onto, OWN, (session.own,))
+
+    text = await integration_holdings(rig.repo, await rig.blackboard.snapshot(), session.own)
+
+    assert f"The integration head is {session.onto}: " in text
+    assert f"- {session.merged[:12]} of s0 (+3.00%)" in text
 
 
 async def test_following_moves_the_branch_and_carries_its_own_change_onto_the_integration_head(tmp_path):
@@ -192,3 +205,27 @@ async def test_a_conflicting_patch_is_written_readable_and_never_through_a_link_
     assert written == notes / head[:SHORT] / "vllm-fix.patch" and not written.is_symlink()
     assert written.read_text() == f"diff of patch/vllm/fix.patch at {head}\n"
     assert written.stat().st_mode & 0o044 == 0o044
+
+
+async def test_a_conflict_that_cannot_be_written_leaves_the_branch_where_it_was(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
+    conflict = PatchConflict("vllm", "patch/vllm/fix.patch", "does not apply")
+
+    class _Repo:
+        def __getattr__(self, name):
+            return getattr(rig.repo, name)
+
+        async def merge(self, candidate, onto):
+            return replace(await rig.repo.merge(candidate, onto), patch_conflicts=(conflict,))
+
+        async def patch_text(self, head, path):
+            return "diff\n"
+
+    (tmp_path / "workspace").write_text("not a directory")
+    notes = tmp_path / "workspace" / "rerooted"
+
+    with pytest.raises(OSError):
+        await follow(_Repo(), rig.blackboard, await rig.blackboard.snapshot(), ASKED, notes)
+
+    assert await rig.repo.head(BRANCH) == session.own and (await _row(rig, BRANCH)).head_commit == session.own

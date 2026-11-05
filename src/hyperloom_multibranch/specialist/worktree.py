@@ -13,11 +13,11 @@ against its head, a patch the toolbox applies where it applies every other.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -30,6 +30,7 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
+from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 
 #: The file in a base's git directory that names the paths each worktree links rather than holds.
 LINKED_PATHS = "hyperloom-third-party"
@@ -52,9 +53,21 @@ _GIT_IDENTITY = {
     "GIT_COMMITTER_NAME": "hyperloom-multibranch",
     "GIT_COMMITTER_EMAIL": "multibranch@hyperloom.invalid",
 }
-_FIXED_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "diff.noprefix=false")
+_FIXED_CONFIG = (
+    "-c",
+    "core.autocrlf=false",
+    "-c",
+    "core.safecrlf=false",
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicPrefix=false",
+)
 _STAGE = ("add", "--all", "--")
 _HEAD = "HEAD"
+#: The commit the worktree's last sync made, kept apart for each worktree as ``refs/worktree/*`` is: an agent may commit
+#: its change on top, and the change is everything since.
+_SYNCED = "refs/worktree/hyperloom/synced"
 _REV_PARSE = "rev-parse"
 _GIT_DIR = ".git"
 _QUIET = "--quiet"
@@ -89,23 +102,22 @@ def installed_upstream(package: PackageBase) -> Upstream | None:
     named = _BUILT_FROM.search(package.dist_version or "")
     if named is None:
         return None
+    # The image's checkout may belong to another user, and the system or global config that trusted it is not read.
+    trusted = ("-c", "safe.directory=*")
     try:
-        commit = _git(package.path, _REV_PARSE, "--verify", _QUIET, f"{named.group(1)}^{{commit}}").strip()
-        repo = _git(package.path, "remote", "get-url", "origin").strip()
+        commit = _git(package.path, *trusted, _REV_PARSE, "--verify", _QUIET, f"{named.group(1)}^{{commit}}").strip()
+        repo = _git(package.path, *trusted, "remote", "get-url", "origin").strip()
     except WorktreeError:
         return None
     return Upstream(repo, commit) if commit and repo else None
 
 
 def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
-    # An inherited GIT_* (GIT_DIR inside a hook) would aim the command at another repository.
-    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
-    if index is not None:
-        env["GIT_INDEX_FILE"] = str(index)
+    pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
     done = subprocess.run(
-        ["git", *_FIXED_CONFIG, *args],
+        git_argv(*_FIXED_CONFIG, *args),
         cwd=cwd,
-        env={**env, **_GIT_IDENTITY},
+        env=git_env(**pinned),
         input=stdin,
         capture_output=True,
         timeout=GIT_TIMEOUT_S,
@@ -133,6 +145,7 @@ class SourceBase:
     ) -> None:
         self.path = path
         self._native = dict(native or {})
+        self._worktrees: dict[Path, BranchWorktree] = {}
 
     def build(self, components: Sequence[str]) -> None:
         """Copy each component's installed package and meta trees to their upstream paths and commit them; a session
@@ -145,7 +158,7 @@ class SourceBase:
                 commit its version names (aiter from a wheel).
         """
         self.path.mkdir(parents=True)
-        _git(self.path, "init", f"--initial-branch={BASE_BRANCH}")
+        _git(self.path, *INIT, f"--initial-branch={BASE_BRANCH}")
         excluded = list(SKIPPED)
         links: list[tuple[str, str]] = []
         for component in components:
@@ -178,14 +191,15 @@ class SourceBase:
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
-        """The worktree of ``branch`` at ``path``, added at the installed packages the first time."""
+        """The worktree of ``branch`` at ``path``, added at the installed packages the first time; every call for
+        ``path`` returns the same one, so all its callers share its :attr:`~BranchWorktree.lock`."""
         if not path.exists():
             _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
         for prefix, target in linked_paths(path):
             if not (path / prefix).exists():
                 (path / prefix).parent.mkdir(parents=True, exist_ok=True)
                 (path / prefix).symlink_to(target)
-        return BranchWorktree(path, self._native)
+        return self._worktrees.setdefault(path, BranchWorktree(path, self._native))
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
         """Copy ``native`` to its upstream path, but for what ``laid`` already put there: the package a test loads is
@@ -283,7 +297,12 @@ class Changes:
 
 
 class BranchWorktree:
-    """One branch's checkout of the source base; the experiment commit its HEAD holds is named in HEAD's subject."""
+    """One branch's checkout of the source base; the experiment commit it was last synced to is named in the subject of
+    the commit that sync made.
+
+    Whoever runs git in it or reads its files as a change holds :attr:`lock` for the whole of that work: a sync's
+    reset, apply and commit, and a diff's stage, all go through the worktree's one tree and index.
+    """
 
     def __init__(
         self,
@@ -292,6 +311,7 @@ class BranchWorktree:
     ) -> None:
         self.path = path
         self._native = dict(native or {})
+        self.lock = threading.Lock()
 
     def holds(self, component: str) -> bool:
         """Whether the source base laid out ``component``; a recipe's patches to any other component are not here."""
@@ -305,18 +325,22 @@ class BranchWorktree:
         return None if native is None else Upstream(native.upstream_repo, native.upstream_ref)
 
     def head(self) -> str | None:
-        """The experiment commit HEAD holds, or ``None`` while it holds the installed packages alone."""
-        subject = _git(self.path, "log", "-1", "--format=%s").strip()
-        return subject[len(HEAD_SUBJECT) :] if subject.startswith(HEAD_SUBJECT) else None
+        """The experiment commit the worktree was last synced to, or ``None`` before its first sync."""
+        synced = self._synced()
+        return (
+            None if synced is None else _git(self.path, "log", "-1", "--format=%s", synced).strip()[len(HEAD_SUBJECT) :]
+        )
 
-    def sync(self, head: str, patches: Sequence[bytes]) -> None:
-        """Make the worktree ``head``: the installed packages with its ``patches`` applied in order.
+    def sync(self, head: str, patches: Sequence[bytes]) -> tuple[str, ...]:
+        """Make the worktree ``head``: the installed packages with its ``patches`` applied in order; returns the
+        commits made in the worktree since its last sync, which it drops, the oldest first.
 
-        Uncommitted edits are dropped, so a change made against an older head never reaches a diff against this one.
+        Uncommitted edits are dropped too, so a change made against an older head never reaches a diff against this one.
         """
+        dropped = tuple(_git(self.path, "rev-list", "--reverse", f"{self._since()}..{_HEAD}").split())
         if self.head() == head:
-            self._reset(_HEAD)
-            return
+            self._reset(_SYNCED)
+            return dropped
         self._reset(BASE_BRANCH)
         with tempfile.TemporaryDirectory(prefix="mb-sync-") as scratch:
             for index, patch in enumerate(patches):
@@ -324,9 +348,12 @@ class BranchWorktree:
                 patch_file.write_bytes(patch)
                 _git(self.path, "apply", "--whitespace=nowarn", str(patch_file))
         _commit_all(self.path, f"{HEAD_SUBJECT}{head}")
+        _git(self.path, "update-ref", _SYNCED, _HEAD)
+        return dropped
 
     def diff(self, component: str) -> str:
-        """The worktree's change to ``component`` against its head, as the patch the toolbox applies; empty when none."""
+        """The worktree's change to ``component`` against its head, committed in the worktree or not, as the patch the
+        toolbox applies; empty when none."""
         return self._staged_diff(component, *_PLAIN)
 
     def commit(self) -> str:
@@ -410,7 +437,14 @@ class BranchWorktree:
     def _staged_diff(self, component: str, *options: str) -> str:
         paths = self._paths(component)
         _git(self.path, *_STAGE, *paths)
-        return _git(self.path, _DIFF, _CACHED, *options, _HEAD, "--", *paths)
+        return _git(self.path, _DIFF, _CACHED, *options, self._since(), "--", *paths)
+
+    def _synced(self) -> str | None:
+        return _git(self.path, "for-each-ref", "--format=%(objectname)", _SYNCED).strip() or None
+
+    def _since(self) -> str:
+        """The commit a change in the worktree is made on: its last sync's, or the installed packages before one."""
+        return self._synced() or BASE_BRANCH
 
     def _paths(self, component: str) -> tuple[str, ...]:
         """``component``'s package, the meta trees the source base laid out beside it, and its native tree, less the

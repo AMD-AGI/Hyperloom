@@ -51,11 +51,18 @@ def reroot_requested(content: str) -> bool:
     return content.lstrip().startswith(REROOT)
 
 
-async def integration_holdings(repo: ExperimentRepo, snapshot: BlackboardSnapshot, head: str) -> str:
-    """What the integration head holds, and what of it the branch head ``head`` lacks; the branch's own commits that
-    are not on it, with their merges."""
+def integration_head(snapshot: BlackboardSnapshot) -> str:
+    """The integration head ``snapshot`` records, the one a specialist is shown and follows: the integrator lands a
+    merge in the repository before it writes the judgement, so the repository's head may be a commit the blackboard
+    knows nothing of yet."""
+    return {node.branch: node for node in snapshot.lineage.branches}[INTEGRATION_BRANCH].head_commit
 
-    onto = await repo.head(INTEGRATION_BRANCH)
+
+async def integration_holdings(repo: ExperimentRepo, snapshot: BlackboardSnapshot, head: str) -> str:
+    """What the integration head ``snapshot`` records (:func:`integration_head`) holds, and what of it the branch head
+    ``head`` lacks; the branch's own commits that are not on it, with their merges."""
+
+    onto = integration_head(snapshot)
     integration, own = await repo.read_recipe(onto), await repo.read_recipe(head)
     on_head = set(snapshot.lineage.ancestry(head))
     on_integration = set(snapshot.lineage.ancestry(onto))
@@ -88,9 +95,9 @@ async def follow(
 ) -> Followed | None:
     """Move the branch that ``asked`` to follow the integration head onto the integration head ``snapshot`` records,
     carrying its change the integration head lacks onto it as a delta, and record the move through ``blackboard``, the
-    branch's runtime handle; the patches of that change that do not apply there are written under ``notes``. ``None``
-    while the blackboard cannot record a move yet: the branch has not started there, or the integration branch has no
-    head.
+    branch's runtime handle; the patches of that change that do not apply there are written under ``notes`` before the
+    branch moves. ``None`` while the blackboard cannot record a move yet: the branch has not started there, or the
+    integration branch has no head.
 
     The integration head is the blackboard's, not the repository's: the integrator lands a merge before it writes the
     judgement, and the blackboard refuses a re-root onto a commit it has not recorded. A move the blackboard refuses all the
@@ -105,6 +112,7 @@ async def follow(
     branch, head, onto = asked.branch, await repo.head(asked.branch), integration.head_commit
     try:
         carried = await repo.merge(head, onto)
+        ported = await _write_conflicts(repo, head, carried, notes)
         await repo.reroot(branch, head, onto)
     except RecipeError as error:
         return Followed(
@@ -121,7 +129,6 @@ async def follow(
     except ConflictingWrite as error:
         await repo.rewind(branch, onto, head)
         return Followed(f"your branch was not re-rooted: the blackboard refused the move ({error})")
-    ported = await _write_conflicts(repo, head, carried, notes)
     notice = f"your branch was re-rooted from {head} onto the integration head {onto}"
     return Followed(notice, _carried(snapshot, head, onto, carried, ported))
 
@@ -228,4 +235,12 @@ def _carried(snapshot: BlackboardSnapshot, head: str, onto: str, carried: RepoMe
     return "\n".join(lines)
 
 
-__all__ = ["MERGED_SHOWN", "REROOT", "Followed", "follow", "integration_holdings", "reroot_requested"]
+__all__ = [
+    "MERGED_SHOWN",
+    "REROOT",
+    "Followed",
+    "follow",
+    "integration_head",
+    "integration_holdings",
+    "reroot_requested",
+]
