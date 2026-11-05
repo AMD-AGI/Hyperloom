@@ -25,7 +25,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 #: Names how :meth:`Roster.quota_policy` hands out K; recorded in the manifest fingerprint.
-QUOTA_POLICY_VERSION = "mb1-quota-5"
+QUOTA_POLICY_VERSION = "quota-5"
 
 
 class BranchKind(str, Enum):

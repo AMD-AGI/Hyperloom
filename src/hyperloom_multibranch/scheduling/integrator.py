@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The MB1 integrator: carries specialist commits onto the integration branch, in rounds of up to K merge tests.
+"""The integrator: carries specialist commits onto the integration branch, in rounds of up to K merge tests.
 
 Candidates are the blackboard's committed specialist commits, in the order it gives them (foundation fixes first, then
 by their own gain), whatever became of the branch that made them. Each is tried once per integration head, until it

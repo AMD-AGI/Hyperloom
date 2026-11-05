@@ -23,7 +23,7 @@ from hyperloom_multibranch.blackboard.rsi.session import (
 )
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 
-#: Why CLOSE wrote nothing to the Experience KB: MB1 runs on no Experience KB. The online Experience KB service
+#: Why CLOSE wrote nothing to the Experience KB: the session runs on no Experience KB. The online Experience KB service
 #: replaces it in a later milestone.
 MB_FAKE_EXPERIENCE_KB = "mb_fake_experience_kb"
 
