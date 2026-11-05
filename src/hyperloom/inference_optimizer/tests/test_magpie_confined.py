@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import os
 import signal
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -121,3 +123,20 @@ def test_the_sweep_spares_a_process_whose_environment_cannot_be_read(
     module.BenchmarkMode._cleanup_server_processes("sglang")
 
     assert signalled == []
+
+
+def test_magpie_run_by_the_backend_imports_the_standard_library_s_profile(tmp_path: Path) -> None:
+    magpie = tmp_path / "Magpie"
+    (magpie / "modes" / "benchmark").mkdir(parents=True)
+    for package in (magpie, magpie / "modes", magpie / "modes" / "benchmark"):
+        (package / "__init__.py").write_text("")
+    (magpie / "modes" / "benchmark" / "benchmarker.py").write_text("")
+    (magpie / "__main__.py").write_text("import cProfile\nimport profile\nprint(profile.__file__)\n")
+    argv = MagpieBackend().build_command(
+        python_exe=sys.executable, config_path=tmp_path / "c.yaml", output_dir=tmp_path
+    )
+
+    done = subprocess.run(argv, env={**os.environ, "PYTHONPATH": str(tmp_path)}, capture_output=True, text=True)
+
+    assert done.returncode == 0, done.stderr
+    assert Path(done.stdout.strip()).parent != Path(magpie_confined.__file__).parent
