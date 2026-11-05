@@ -283,8 +283,32 @@ def test_a_config_whose_yaml_is_not_unicode_text_is_refused_by_the_reader() -> N
     document = _edit(lambda d: d["config"][0].update(yaml="model: \ud800\n"))
     raw = json.dumps(document).encode()
     assert b"\\ud800" in raw, "the JSON text carries the lone surrogate as an escape"
-    with pytest.raises(DocumentError, match="spec.config"):
+    with pytest.raises(DocumentError, match=r"spec\.config\[0\]\.yaml"):
         MeasurementSpec.from_bytes(raw)
+    with pytest.raises(DocumentError, match=r"spec\.config\[0\]\.yaml"):  # a sheet built in code, not read from JSON
+        MeasurementSpec.from_document(document)
+
+
+#: YAML values the loader cannot load, or loads to a string UTF-8 cannot encode.
+_UNLOADABLE = {
+    "an-integer-past-the-digit-limit": "9" * 4301,
+    "nesting-past-the-loader-stack": "[" * 20_000 + "]" * 20_000,
+    "a-day-no-month-has": "2026-02-30",
+    "a-lone-surrogate": '"\\ud800"',
+}
+
+
+@pytest.mark.parametrize("name", sorted(_UNLOADABLE))
+def test_a_yaml_the_loader_cannot_load_or_utf8_cannot_encode_is_refused_when_fingerprinting(name: str) -> None:
+    with pytest.raises(DocumentError, match="spec.config.yaml"):
+        _fp(_edit(lambda d: _yaml(d, f"model: {_UNLOADABLE[name]}\n")))
+
+
+@pytest.mark.parametrize("name", sorted(_UNLOADABLE))
+def test_a_sweep_point_the_loader_cannot_load_or_utf8_cannot_encode_is_refused_by_the_reader(name: str) -> None:
+    point = point_yaml(conc=8) + f"extra: {_UNLOADABLE[name]}\n"
+    with pytest.raises(DocumentError, match="spec.config.yaml"):
+        MeasurementSpec.from_document(_sweep(point_yaml(conc=4), point))
 
 
 @pytest.mark.parametrize(

@@ -658,10 +658,12 @@ def _load_yaml(text: str) -> Any:
         value = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise DocumentError(f"spec.config.yaml: not valid YAML ({type(exc).__name__})") from None
+    except (ValueError, RecursionError) as exc:  # more digits than int() converts, a day no month has, deep nesting
+        raise DocumentError(f"spec.config.yaml: cannot be loaded ({type(exc).__name__})") from None
     try:
-        canonical_json(value)
-    except (TypeError, ValueError) as exc:  # a date, a set, binary or a non-finite float: YAML holds it, JSON does not
-        raise DocumentError(f"spec.config.yaml: holds a value JSON cannot hold ({exc})") from None
+        canonical_json(value).encode()
+    except (TypeError, ValueError) as exc:  # a date, a set, binary, a non-finite float or a lone surrogate
+        raise DocumentError(f"spec.config.yaml: holds a value UTF-8 JSON cannot hold ({exc})") from None
     return value
 
 
