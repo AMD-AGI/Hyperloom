@@ -255,9 +255,9 @@ class _BaselineAccuracyMixin:
             BASELINE_EVAL_FAILED_KEY,
             BASELINE_EVAL_FAILURE_KIND_KEY,
             BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
-            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
             eval_contract_fingerprint,
         )
+        from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 
         params = ctx.task.params or {}
         framework = _requested_framework(params)
@@ -284,7 +284,9 @@ class _BaselineAccuracyMixin:
         result: dict[str, Any],
     ) -> None:
         """Halt the run for an eval-rooted baseline failure, fail-fast path."""
-        from .._accuracy_gate import accuracy_meets_floor, request_baseline_accuracy_stop
+        from hyperloom.common.gain_math import accuracy_meets_floor
+
+        from .._accuracy_gate import request_baseline_accuracy_stop
 
         params = ctx.task.params or {}
         framework = _requested_framework(params)
@@ -331,11 +333,9 @@ class _BaselineAccuracyMixin:
             return
         acc = result.get("accuracy")
         eval_enablement = self._eval_enablement_active(ctx)
-        from .._accuracy_gate import (
-            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
-            accuracy_meets_floor,
-            request_baseline_accuracy_stop,
-        )
+        from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR, accuracy_meets_floor
+
+        from .._accuracy_gate import request_baseline_accuracy_stop
 
         floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
         # Floor 0.0 is the non-enablement "any positive accuracy is usable" rule; ``accuracy_meets_floor`` already
@@ -448,7 +448,7 @@ class _BaselineAccuracyMixin:
         expected_handoff: bool = False,
     ) -> float:
         """Record a salvaged sibling accuracy, publishing it as the gate reference only when it can serve as one."""
-        from .._accuracy_gate import accuracy_meets_floor
+        from hyperloom.common.gain_math import accuracy_meets_floor
 
         acc_val = float(salvaged["accuracy"])
         result["accuracy"] = acc_val
@@ -488,12 +488,14 @@ class _BaselineAccuracyMixin:
         if not runs_root.exists():
             return None
         try:
-            from .._accuracy_gate import _finite_score, parse_eval_results
+            from hyperloom.common.gain_math import finite_score
+
+            from .._accuracy_gate import parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
         except (OSError, ValueError, AttributeError, TypeError):
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
-        if _finite_score(eval_data.get("accuracy")) is None:
+        if finite_score(eval_data.get("accuracy")) is None:
             return None
         return eval_data

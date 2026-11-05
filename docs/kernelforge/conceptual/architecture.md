@@ -33,7 +33,7 @@ decide whether a change survives.
 
 ## Kernel backends
 
-Nine kernel backends carry backend expertise. A campaign selects one with
+Ten kernel backends carry backend expertise. A campaign selects one with
 `--kernel-backend <backend>`, and that backend contributes the domain prompt for
 the kernel the loop is editing.
 
@@ -47,6 +47,7 @@ the kernel the loop is editing.
 | `hip` | Raw HIP C++ and HipKittens: MFMA intrinsics, AGPR management, register pinning |
 | `hipblaslt` | Dense GEMM via hipBLASLt: TensileLite solutions, FP8, fused epilogues |
 | `fusion` | Decode-path kernel fusion for sglang and vLLM: CUDA-graph-safe Triton kernels |
+| `ave` | [AveLang](https://github.com/causalflow-ai/avelang) GPU kernels: register tiling, LDS layouts, memory access and synchronization |
 
 ## The measurement surface
 
