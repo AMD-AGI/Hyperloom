@@ -63,6 +63,7 @@ from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
 from .reap_watch import PROCESS_LOG_NAME, cli_alive, newest_activity
 from .resources import ContainerSnapshot, ProcessTreeSampler, dir_usage_bytes, read_container_cgroup
 from .subprocess_ import (
+    ReapKillUnconfirmed,
     ReapWatch,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
@@ -704,22 +705,23 @@ class LocalAgentRunner:
 
     async def _supervise(self, session: _Session) -> None:
         spec = session.spec
-        decided: dict[str, Any] = {}  # what the reap loop decided, still there when the kill that follows raises
         try:
             session.outcome = await self._dispatcher._reap_loop(
                 session.proc,
                 ReapWatch(workspace=spec.workspace, done_files=tuple(spec.done_paths), task_id=spec.task_id),
                 deadline=session.deadline,
                 started=session.started_mono,
-                outcome=decided,
             )
         except ScopeCancelled as exc:  # the caller's cancel scope fired: a stop request, not a failure
             session.cancelled = True
             session.outcome = {"exit_code": session.proc.poll(), "error": f"cancelled: {exc}"}
+        except ReapKillUnconfirmed as exc:  # the loop ended the CLI as timed out or silent; that stays the outcome
+            log.exception("agent %s: reap loop failed", spec.task_id)
+            error = f"{exc.outcome['error']}; reap loop failed: {exc!r}"
+            session.outcome = {**exc.outcome, "exit_code": session.proc.poll(), "error": error}
         except Exception as exc:
             log.exception("agent %s: reap loop failed", spec.task_id)
-            error = "; ".join(filter(None, (decided.get("error"), f"reap loop failed: {exc!r}")))
-            session.outcome = {**decided, "exit_code": session.proc.poll(), "error": error}
+            session.outcome = {"exit_code": session.proc.poll(), "error": f"reap loop failed: {exc!r}"}
         finally:
             # Supervision is over: stop sampling, then end what is left of the session off the event loop.
             session.torn_down = True

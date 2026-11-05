@@ -142,13 +142,11 @@ class SpecialistSubprocessConfig:
     heartbeat_stale_seconds: float = 900.0
     """Liveness window for the CLI's output, as :func:`~hyperloom.orchestrator.specialists.reap_watch.cli_alive` reads it.
 
-    Longer than the agent CLI's own API request timeout (600 s for Claude
-    Code), after which it logs a retry, so a CLI waiting on its model still
-    writes within it; a CLI waiting on a tool it started is alive however long it is quiet.
-    A process that never creates any of them is reaped after this window.
-    After one has appeared, its mtime can refresh the liveness clock
-    for one window before the subsequent stale window expires, yielding about
-    two windows of silence before reap.
+    Longer than the agent CLI's own API request timeout (600 s for Claude Code), after which it logs a retry, so a CLI
+    waiting on its model still writes within it; a CLI waiting on a tool it started is alive however long it is quiet.
+    A process that never writes any output is reaped after this window. After output has appeared, its mtime can
+    refresh the liveness clock for one window before the subsequent stale window expires, yielding about two windows
+    of silence before reap.
     """
 
 
@@ -447,6 +445,14 @@ def _launch_failure(process_log: Path, error: str) -> SpecialistSubprocessResult
         process_log_path=str(process_log),
         error=error,
     )
+
+
+class ReapKillUnconfirmed(ExecutionCleanupUnconfirmed):
+    """The reap loop's stale or deadline kill went unconfirmed; ``outcome`` is the result the loop decided on."""
+
+    def __init__(self, message: str, *, outcome: dict[str, Any], tree_pgid: int | None) -> None:
+        super().__init__(message, tree_pgid=tree_pgid)
+        self.outcome = outcome
 
 
 # Dispatcher
@@ -1047,39 +1053,35 @@ class SpecialistSubprocessDispatcher:
         *,
         deadline: Deadline | None,
         started: float,
-        outcome: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Poll the subprocess until it finishes, stalls, or times out.
 
-        Each tick checks (in order): a done-file at any candidate path
-        (graceful exit with a short grace window), natural process exit,
-        activity staleness (process.log or the dsh session log, unless the CLI waits on a tool it started; see
-        :func:`~hyperloom.orchestrator.specialists.reap_watch.cli_alive`), and the hard
-        wall-clock cap. Stale / timed-out
-        runs are killed via :meth:`_kill`. Partial checkpoints written along
-        the way are forwarded to ``progress_cb`` as they change.
+        Each tick checks (in order): a done-file at any candidate path (graceful exit with a short grace window),
+        natural process exit, activity staleness (process.log or the dsh session log, unless the CLI waits on a tool it
+        started; see :func:`~hyperloom.orchestrator.specialists.reap_watch.cli_alive`), and the hard wall-clock cap.
+        A stale or timed-out run is killed via :meth:`_kill` once the loop ends; an unconfirmed kill raises
+        :class:`ReapKillUnconfirmed`. Partial checkpoints written along the way are forwarded to ``progress_cb``.
 
         Args:
-            proc (Any): The running agent subprocess — a ``subprocess.Popen``
-                (local) or a :class:`_RayLeaseProcess` (Ray GPU-specialist
-                actor). Only ``poll`` / ``returncode`` / ``pid`` are used.
+            proc (Any): The running agent subprocess — a ``subprocess.Popen`` (local) or a :class:`_RayLeaseProcess`
+                (Ray GPU-specialist actor). Only ``poll`` / ``returncode`` / ``pid`` are used.
             watch (ReapWatch): The task workspace, done and partial-checkpoint
                 candidates, heartbeat file, progress callback and task id.
             deadline (Deadline | None): Absolute instant to kill at; ``None``
                 falls back to :data:`UNBOUNDED_REAP_CAP_SEC` from spawn.
             started (float): ``time.monotonic()`` value at spawn time.
-            outcome (dict[str, Any] | None): Filled in place as the loop
-                decides, and returned; a caller that passes one still reads
-                ``timed_out`` or ``stale_heartbeat`` when the kill that
-                follows raises. A fresh dict when ``None``.
 
         Returns:
-            dict[str, Any]: Outcome with ``exit_code``, ``elapsed``,
-                ``timed_out``, ``stale_heartbeat``, and ``error`` keys.
+            dict[str, Any]: Outcome with ``exit_code``, ``elapsed``, ``timed_out``, ``stale_heartbeat``, ``error``.
         """
         cfg = self.config
-        outcome = {} if outcome is None else outcome
-        outcome.update(exit_code=None, elapsed=0.0, timed_out=False, stale_heartbeat=False, error="")
+        outcome: dict[str, Any] = {
+            "exit_code": None,
+            "elapsed": 0.0,
+            "timed_out": False,
+            "stale_heartbeat": False,
+            "error": "",
+        }
         # An unbounded caller still gets a finite instant.
         hard_stop = deadline if deadline is not None else Deadline.after(UNBOUNDED_REAP_CAP_SEC, now=started)
         last_heartbeat_seen: float = started
@@ -1097,14 +1099,11 @@ class SpecialistSubprocessDispatcher:
             # done.json appeared — graceful exit with up to 30s grace.
             if any(p.exists() for p in watch.done_files):
                 await self._reap_after_done_file(proc, now, scope)
-                outcome["exit_code"] = proc.returncode
                 outcome["elapsed"] = time.monotonic() - started
                 break
 
             # Process exited on its own.
             if proc.poll() is not None:
-                outcome["exit_code"] = proc.returncode
-                outcome["elapsed"] = elapsed
                 break
 
             # Still running: republish any checkpoint written since the last tick.
@@ -1130,9 +1129,6 @@ class SpecialistSubprocessDispatcher:
                     f"heartbeat stale for {now - last_heartbeat_seen:.0f}s "
                     f"(> {cfg.heartbeat_stale_seconds:.0f}s threshold)"
                 )
-                self._kill(proc)
-                outcome["exit_code"] = proc.returncode
-                outcome["elapsed"] = time.monotonic() - started
                 break
 
             # Hard stop — the extension is re-read every poll so an
@@ -1141,11 +1137,15 @@ class SpecialistSubprocessDispatcher:
             if now >= kill_at:
                 outcome["timed_out"] = True
                 outcome["error"] = f"specialist subprocess killed {elapsed:.0f}s in, at its deadline"
-                self._kill(proc)
-                outcome["exit_code"] = proc.returncode
-                outcome["elapsed"] = time.monotonic() - started
                 break
 
+        if outcome["stale_heartbeat"] or outcome["timed_out"]:
+            try:
+                self._kill(proc)
+            except ExecutionCleanupUnconfirmed as exc:
+                raise ReapKillUnconfirmed(str(exc), outcome=outcome, tree_pgid=exc.tree_pgid) from exc
+            outcome["elapsed"] = time.monotonic() - started
+        outcome["exit_code"] = proc.returncode
         return outcome
 
     async def _reap_after_done_file(self, proc: Any, now: float, scope: CancelScope | None) -> None:
