@@ -8,11 +8,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
+from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
+from ._apply_feedback import ApplyFeedback, PatchApplyResult
 from ._enablement_config import _established_enablement_config, _merge_established_server_args
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
@@ -26,8 +29,8 @@ from ._integrate_results import (
     _reauthor_fields,
     _unresolved_root_rejection,
 )
-from ._nogit_patch import _is_git_tree
-from ._patch_git import _apply_patch_series, _git_stash_if_dirty, _PatchSeries
+from ._nogit_patch import _apply_patch_no_git, _is_git_tree
+from ._patch_git import _git_apply_collect_feedback, _git_stash_if_dirty
 from ._patch_sources import (
     _candidate_mutation_roots,
     _note_pre_mutation_head,
@@ -36,9 +39,97 @@ from ._patch_sources import (
     resolved_explicit_root,
 )
 from ._setup_replay import replay_setup_commands
+from .patch_conflict_merge import ConflictQuery, apply_patch_resolving_conflicts
 from .source_tree_identity import new_recovery_record
 
 log = logging.getLogger(__name__)
+
+
+async def _return_overlap_to_author(_query: ConflictQuery) -> None:
+    """Decline an overlapping region, so its specialist re-authors the patch on the kept stack under review."""
+
+
+async def _merge_onto_kept_stack(attempt: IntegrateAttempt, patch: Path, strict: PatchApplyResult) -> PatchApplyResult:
+    """Land a patch the strict apply refused by merging it onto HEAD, which carries every KEEP so far.
+
+    Only mechanical merges land. A refused merge restores the files it touched to HEAD and keeps the strict failure,
+    with its steps appended, for the apply_failed re-author.
+    """
+    merge = await apply_patch_resolving_conflicts(attempt.framework_root, patch, resolver=_return_overlap_to_author)
+    if not merge.applied:
+        return replace(strict, error=strict.error + merge.note())
+    log.info("integrate_patch: %s landed by %s merge%s", patch.name, merge.strategy, merge.note())
+    attempt.merged_patches.append({"patch": str(patch), "strategy": merge.strategy, "steps": list(merge.steps)})
+    return PatchApplyResult(ok=True)
+
+
+@dataclass(frozen=True)
+class _PatchSeries:
+    """What applying an attempt's patch series did to its framework tree."""
+
+    patches: list[Path]
+    #: The patch that stopped the series, and why; empty when every patch landed.
+    errors: list[dict[str, str]]
+    feedback: tuple[ApplyFeedback, ...]
+    #: One ``{patch, check}`` row per patch the tree already held in full, naming the check that showed it.
+    already_present: list[dict[str, str]]
+
+    @property
+    def changed_nothing(self) -> bool:
+        """Every patch landed and the tree already held each one, so the tree is unchanged."""
+        return bool(self.patches) and len(self.already_present) == len(self.patches)
+
+
+async def _apply_patch_series(
+    attempt: IntegrateAttempt,
+    patch_paths: list[Path],
+    *,
+    git_head: str,
+    backup_root: Path,
+) -> _PatchSeries:
+    """Apply each delivered patch to the attempt's tree, stopping at the first one that does not land.
+
+    A patch the tree already holds still lands, so one subset patch inside a larger
+    series does not fail the series. ``attempt.applied`` is appended to in place, so
+    a cancellation mid-series still leaves the undo able to see what reached the tree.
+    """
+    framework_root = attempt.framework_root
+    errors: list[dict[str, str]] = []
+    feedback: list[ApplyFeedback] = []
+    already_present: list[dict[str, str]] = []
+    nogit_backups: list[dict[str, Any]] = []
+    for patch in patch_paths:
+        # ``vet_patches`` runs at authoring time inside the specialist runner, so a
+        # patch from anywhere else -- ``params.patches``, every remotely-fetched
+        # ``upstream_pr`` diff -- arrives unvetted.
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            errors.append({"patch": str(patch), "stderr": f"unreadable: {exc!r}"})
+            break
+        if not is_unified_diff(text):
+            errors.append({"patch": str(patch), "stderr": "not a unified diff"})
+            break
+        escaping = patch_escapes_tree(text)
+        if escaping is not None:
+            errors.append({"patch": str(patch), "stderr": f"path escapes tree: {escaping!r}"})
+            break
+        if git_head:
+            result = _git_apply_collect_feedback(framework_root, patch)
+            if not result.ok:
+                result = await _merge_onto_kept_stack(attempt, patch, result)
+        else:
+            result = _apply_patch_no_git(framework_root, patch, backup_root, seq_offset=len(nogit_backups))
+            nogit_backups.extend(result.backups)
+        if not result.ok:
+            errors.append({"patch": str(patch), "stderr": result.error})
+            if result.feedback is not None:
+                feedback.append(result.feedback)
+            break
+        if result.present_by is not None:
+            already_present.append({"patch": str(patch), "check": result.present_by.value})
+        attempt.applied.append(patch)
+    return _PatchSeries(patch_paths, errors, tuple(feedback), already_present)
 
 
 def _changes_beyond_patches(attempt: IntegrateAttempt, deliverable: _Deliverable) -> bool:
@@ -186,7 +277,7 @@ class ApplyStageMixin:
             if shared_state is not None:
                 shared_state.save(self.session_dir)
 
-        series = _apply_patch_series(
+        series = await _apply_patch_series(
             attempt,
             patch_paths,
             git_head=recovery["git_head"],
