@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.url_userinfo import strip_url_userinfo
 from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeError
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_FRAMEWORK_VERSION_SLUG,
@@ -66,7 +67,7 @@ def launched_framework_version(framework: str, env: Mapping[str, str]) -> str:
 
 
 def framework_pin(root: Path | None) -> UpstreamPin | None:
-    """The framework checkout ``root``'s remote at its ``HEAD``; ``None`` without a checkout."""
+    """The framework checkout ``root``'s remote, without its userinfo, at its ``HEAD``; ``None`` without a checkout."""
 
     if root is None:
         return None
@@ -74,7 +75,8 @@ def framework_pin(root: Path | None) -> UpstreamPin | None:
     if not remotes:
         raise PreludeReadError(f"{root} has no git remote to pin the framework to")
     remote = DEFAULT_REMOTE if DEFAULT_REMOTE in remotes else remotes[0]
-    return UpstreamPin(repo_url=_git(root, "remote", "get-url", remote), ref=_git(root, "rev-parse", "HEAD"))
+    url = strip_url_userinfo(_git(root, "remote", "get-url", remote))
+    return UpstreamPin(repo_url=url, ref=_git(root, "rev-parse", "HEAD"))
 
 
 def root_recipe(framework: str, pin: UpstreamPin | None, base_image_digest: str) -> Recipe:

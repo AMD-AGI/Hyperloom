@@ -41,6 +41,15 @@ def test_the_root_is_the_named_checkout_at_its_head_on_the_image(tmp_path: Path)
     assert framework_pin(framework) == UpstreamPin(REMOTE_URL, head_of(framework))
 
 
+def test_the_root_pins_a_credentialed_remote_without_its_userinfo(tmp_path: Path) -> None:
+    framework = framework_checkout(tmp_path, remote="https://user:ghp_secret@example.invalid/sglang.git")
+
+    recipe = launched_root("sglang", {MB_FRAMEWORK_REPO_ENV: str(framework)}, IMAGE)
+
+    assert framework_pin(framework) == UpstreamPin(REMOTE_URL, head_of(framework))
+    assert recipe == root_recipe("sglang", UpstreamPin(REMOTE_URL, head_of(framework)), IMAGE)
+
+
 def test_a_framework_without_remote_cannot_be_pinned(tmp_path: Path) -> None:
     framework = framework_checkout(tmp_path, remote="")
     with pytest.raises(PreludeReadError, match="no git remote"):
