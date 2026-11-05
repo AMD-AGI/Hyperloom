@@ -1460,6 +1460,26 @@ def test_a_runner_cache_that_cannot_be_built_ends_the_run_for_good(host: Host, m
     assert "is not a commit of the source" in str(document["error"])
 
 
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_strict_image_check_that_fails_ends_the_hosted_run_for_good_naming_it(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
+    report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
+
+    def session_refused(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+        report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
+        raise ImageCheckFailed(report)
+
+    monkeypatch.setattr(cli, "run_session", session_refused)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert f"image check failed under {MODE_ENV}=strict: sglang.renamed-flag" in str(document["error"])
+
+
 @pytest.mark.usefixtures("ready_environment")
 def test_a_missing_package_of_the_hosted_extra_ends_the_run_for_good_naming_it(
     host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch

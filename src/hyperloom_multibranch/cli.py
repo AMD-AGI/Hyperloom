@@ -1007,7 +1007,7 @@ def hosted_run() -> int:
         start = _hosted_start(host)
     except ValueError as exc:
         return _not_run(host.state_dir, EXIT_USAGE, exc)
-    except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     except ImportError as exc:
         log.exception("hosted run: a module the session needs is not installed")
@@ -1016,7 +1016,7 @@ def hosted_run() -> int:
         arm_grant_stop(max(0.0, start.stop_after_sec))
     try:
         returncode = start.run()
-    except (CacheBuildError, ToolboxInputsError) as exc:
+    except (ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     root = recorded_session(host.state_dir)
     stop_reason = None if root is None else reported_stop_reason(root)
