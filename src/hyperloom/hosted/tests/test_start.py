@@ -65,7 +65,7 @@ def image(tmp_path) -> Path:
     return tools
 
 
-def _run(tmp_path, layer, image, **env):
+def _run(tmp_path, layer, image, *sh_options, **env):
     state = tmp_path / "state"
     state.mkdir(exist_ok=True)
     state.chmod(0o700)  # private to root, as shared storage may be
@@ -77,7 +77,9 @@ def _run(tmp_path, layer, image, **env):
         **env,
     }
     Path(full["TMPDIR"]).mkdir(exist_ok=True)
-    done = subprocess.run([SH, str(layer / "start.sh")], capture_output=True, text=True, env=full, timeout=60)
+    done = subprocess.run(
+        [SH, *sh_options, str(layer / "start.sh")], capture_output=True, text=True, env=full, timeout=60
+    )
     calls = tmp_path / "calls"
     return done, (calls.read_text().splitlines() if calls.exists() else [])
 
@@ -291,6 +293,23 @@ def test_in_a_real_one_id_user_namespace_the_kernels_map_is_read_and_the_account
     assert "uid 2000 is not mapped in this container's user namespace (/proc/self/uid_map: '0 " in done.stderr
     assert "EINVAL" in done.stderr and "fakeroot" in done.stderr
     assert not (tmp_path / "calls").exists(), "neither the account nor its group may be looked up or made"
+
+
+@needs_2000_mapped
+def test_the_script_checks_its_own_kernel_maps_before_it_looks_up_the_account(tmp_path, layer, image):
+    """The order the real-namespace test above proves, on a host that cannot make a user namespace (which skips that
+    test): the script's own trace (``sh -x``) on this host's maps shows ``require_mapped``, whose refusals are tested
+    above, called on /proc/self's maps and reading both of them before the first account lookup."""
+    done, calls = _run(tmp_path, layer, image, "-x")
+    assert done.returncode == 0, done.stderr
+    trace = [line.lstrip("+ ") for line in done.stderr.splitlines() if line.startswith("+")]
+    check = "require_mapped 2000 /proc/self/uid_map /proc/self/gid_map"
+    assert check in trace, done.stderr
+    lookups = [i for i, line in enumerate(trace) if line.startswith("getent ")]
+    assert lookups and trace.index(check) < lookups[0], done.stderr
+    for kind in ("uid", "gid"):
+        assert f"in_id_map 2000 /proc/self/{kind}_map" in trace[trace.index(check) : lookups[0]], done.stderr
+    assert calls and calls[0].startswith("getent "), calls
 
 
 @needs_2000_mapped
