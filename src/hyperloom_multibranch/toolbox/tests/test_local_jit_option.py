@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The shared compiled-code cache of the local toolbox: the directory named, else one below this host's temporary
-directory.
+"""The shared compiled-code cache of the local toolbox: the directory named, else this account's below this host's
+temporary directory, and never a link there nor one another account owns or can write.
 
 What is proved here is the wiring only: which directory the host publishes to and the runner reads. That a cache serves
 a test and is published to is proved by the measure package's own tests, and on a GPU by the toolbox's measured runs.
@@ -10,6 +10,9 @@ a test and is published to is proved by the measure package's own tests, and on 
 
 from __future__ import annotations
 
+import os
+import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -20,6 +23,7 @@ from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom_multibranch.toolbox.local_hosted import (
     DEFAULT_JIT_STORE,
     JIT_STORE_ENV,
+    JitStoreNotPrivate,
     LocalHostedToolbox,
     LocalOptions,
     jit_store_root,
@@ -28,6 +32,8 @@ from hyperloom_multibranch.toolbox.tests.helpers import lineage_blackboard
 from hyperloom_multibranch.toolbox.tests.test_local_hosted import _toolbox_of
 
 _RUNNER = "runner-1"
+#: An account other than the one running the suite.
+_NOBODY = 65534
 
 
 @pytest.fixture(autouse=True)
@@ -60,8 +66,14 @@ async def _closing_build(tmp_path: Path, **extra: Any) -> tuple[LocalHostedToolb
     return toolbox, branch_env
 
 
-def test_no_directory_named_means_the_default_below_the_hosts_temporary_directory(host_temp_dir: Path) -> None:
-    default = (host_temp_dir / DEFAULT_JIT_STORE).resolve()
+def _default_store(host_temp_dir: Path) -> Path:
+    return host_temp_dir / f"{DEFAULT_JIT_STORE}-{os.getuid()}"
+
+
+def test_no_directory_named_means_this_accounts_default_below_the_hosts_temporary_directory(
+    host_temp_dir: Path,
+) -> None:
+    default = _default_store(host_temp_dir)
 
     assert jit_store_root(LocalOptions(), {}) == default
     assert jit_store_root(LocalOptions(), {JIT_STORE_ENV: "  "}) == default, "a blank variable is not a directory"
@@ -70,13 +82,13 @@ def test_no_directory_named_means_the_default_below_the_hosts_temporary_director
 def test_the_host_environment_names_the_directory_when_the_option_does_not(tmp_path: Path) -> None:
     root = jit_store_root(LocalOptions(), {JIT_STORE_ENV: f" {tmp_path / 'from-env'} "})
 
-    assert root == (tmp_path / "from-env").resolve()
+    assert root == tmp_path / "from-env"
 
 
 def test_the_option_wins_over_the_environment(tmp_path: Path) -> None:
     options = LocalOptions(jit_store=tmp_path / "from-option")
 
-    assert jit_store_root(options, {JIT_STORE_ENV: str(tmp_path / "from-env")}) == (tmp_path / "from-option").resolve()
+    assert jit_store_root(options, {JIT_STORE_ENV: str(tmp_path / "from-env")}) == tmp_path / "from-option"
 
 
 def test_a_relative_directory_is_made_absolute_because_the_runner_starts_elsewhere(
@@ -84,8 +96,8 @@ def test_a_relative_directory_is_made_absolute_because_the_runner_starts_elsewhe
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
-    assert jit_store_root(LocalOptions(jit_store=Path("store")), {}) == (tmp_path / "store").resolve()
-    assert jit_store_root(LocalOptions(), {JIT_STORE_ENV: "store"}) == (tmp_path / "store").resolve()
+    assert jit_store_root(LocalOptions(jit_store=Path("store")), {}) == Path.cwd() / "store"
+    assert jit_store_root(LocalOptions(), {JIT_STORE_ENV: "store"}) == Path.cwd() / "store"
 
 
 async def test_a_toolbox_built_without_a_directory_publishes_to_the_default_and_its_runners_read_it(
@@ -94,7 +106,9 @@ async def test_a_toolbox_built_without_a_directory_publishes_to_the_default_and_
     toolbox, branch_env = await _closing_build(tmp_path)
 
     published = toolbox.backend._config.jit_store
-    assert published is not None and published.root == (host_temp_dir / DEFAULT_JIT_STORE).resolve()
+    assert published is not None and published.root == _default_store(host_temp_dir)
+    made = published.root.stat()
+    assert (made.st_uid, stat.S_IMODE(made.st_mode)) == (os.getuid(), 0o700), "made this account's, for it only"
     assert _runner_env(toolbox)[JIT_CACHE_ENV] == str(published.root)
     assert JIT_CACHE_ENV not in branch_env, "the agent's own sandboxes are not told where the cache is"
 
@@ -105,8 +119,8 @@ async def test_a_directory_in_the_options_is_where_the_host_publishes_and_the_ru
     toolbox, branch_env = await _closing_build(tmp_path, jit_store=store)
 
     published = toolbox.backend._config.jit_store
-    assert published is not None and published.root == store.resolve()
-    assert _runner_env(toolbox)[JIT_CACHE_ENV] == str(store.resolve())
+    assert published is not None and published.root == store
+    assert _runner_env(toolbox)[JIT_CACHE_ENV] == str(store)
     assert JIT_CACHE_ENV not in branch_env, "the agent's own sandboxes are not told where the cache is"
 
 
@@ -118,7 +132,7 @@ async def test_a_directory_in_the_host_environment_turns_the_cache_on_for_a_call
     toolbox, _ = await _closing_build(tmp_path)
 
     published = toolbox.backend._config.jit_store
-    assert published is not None and published.root == (tmp_path / "store").resolve()
+    assert published is not None and published.root == tmp_path / "store"
     assert _runner_env(toolbox)[JIT_CACHE_ENV] == str(published.root)
 
 
@@ -131,4 +145,94 @@ async def test_the_runner_reads_the_directory_the_host_publishes_to_even_when_th
         tmp_path, jit_store=store, runner_envs={JIT_CACHE_ENV: str(tmp_path / "elsewhere")}
     )
 
-    assert _runner_env(toolbox)[JIT_CACHE_ENV] == str(store.resolve())
+    assert _runner_env(toolbox)[JIT_CACHE_ENV] == str(store)
+
+
+def _another_accounts(directory: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``directory`` another account's: really, handed to user 65534, where the suite runs as root; elsewhere, as
+    the ownership check sees it (this account's uid reads as another's), since no other account is at hand."""
+    if os.geteuid() == 0:
+        os.chown(directory, _NOBODY, _NOBODY)
+        assert directory.stat().st_uid == _NOBODY != os.getuid()
+        return
+    uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+
+
+def _refused_build(tmp_path: Path, **extra: Any) -> str:
+    """Why building a toolbox with ``extra`` options was refused; nothing below the session was started."""
+    blackboard = lineage_blackboard(tmp_path / "blackboard")
+    with pytest.raises(JitStoreNotPrivate) as refused:
+        _toolbox_of(blackboard, tmp_path, tmp_path / "session", "a" * 40, **extra)
+    assert not (tmp_path / "session" / "sandboxes").exists(), "nothing was started"
+    return str(refused.value)
+
+
+async def test_a_store_another_account_owns_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = tmp_path / "store"
+    store.mkdir(mode=0o755)
+    _another_accounts(store, monkeypatch)
+
+    assert re.search(
+        f"{re.escape(str(store))} is not a directory of this account's", _refused_build(tmp_path, jit_store=store)
+    )
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o757, 0o1777])
+async def test_a_store_its_group_or_others_can_write_is_refused(tmp_path: Path, mode: int) -> None:
+    store = tmp_path / "store"
+    store.mkdir()
+    store.chmod(mode)
+
+    assert f"{store} is not a directory of this account's that only it can write" in _refused_build(
+        tmp_path, jit_store=store
+    )
+    assert stat.S_IMODE(store.stat().st_mode) == mode, "and it is left as it is"
+
+
+async def test_a_default_store_planted_before_the_toolbox_made_it_is_refused_not_used(
+    tmp_path: Path, host_temp_dir: Path
+) -> None:
+    planted = _default_store(host_temp_dir)
+    planted.mkdir()
+    planted.chmod(0o777)  # as another account on the host would leave it, to put its own snapshots in
+
+    assert str(planted) in _refused_build(tmp_path)
+
+
+def _theirs(path: Path) -> None:
+    """Hand ``path`` (a link is not followed) to user 65534 where the suite runs as root; elsewhere leave it this
+    account's: what is refused below is the link itself, whoever made it."""
+    if os.geteuid() == 0:
+        os.chown(path, _NOBODY, _NOBODY, follow_symlinks=False)
+
+
+@pytest.mark.parametrize(
+    "target_made", [False, True], ids=["to-a-missing-directory", "to-a-directory-of-this-accounts"]
+)
+async def test_a_link_planted_at_the_default_name_is_refused_not_followed(
+    tmp_path: Path, host_temp_dir: Path, target_made: bool
+) -> None:
+    """Followed, the link would have the toolbox make or take a private store in a directory another account can write,
+    which that account could later swap for one of its own."""
+    theirs = host_temp_dir / "theirs"
+    theirs.mkdir(mode=0o755)
+    target = theirs / "store"
+    if target_made:
+        target.mkdir(mode=0o700)
+    planted = _default_store(host_temp_dir)
+    planted.symlink_to(target)
+    _theirs(theirs)
+    _theirs(planted)
+
+    assert f"{planted} is not a directory of this account's" in _refused_build(tmp_path)
+    assert planted.is_symlink() and target.exists() == target_made, "the link is left as it is, nothing made through it"
+
+
+async def test_a_named_store_that_is_a_link_is_refused_even_to_a_directory_of_this_accounts(tmp_path: Path) -> None:
+    own = tmp_path / "own"
+    own.mkdir(mode=0o700)
+    store = tmp_path / "store"
+    store.symlink_to(own)
+
+    assert f"{store} is not a directory of this account's" in _refused_build(tmp_path, jit_store=store)
