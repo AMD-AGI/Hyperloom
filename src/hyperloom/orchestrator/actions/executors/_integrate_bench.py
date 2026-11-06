@@ -224,6 +224,7 @@ class BenchStageMixin:
                     session_deadline_sec=bench_leg.session_deadline_sec,
                     variant_expected_sec=bench_leg.variant_expected_sec,
                     keep_going_on_failure=False,
+                    phase_deadline=bench_leg.phase_deadline,
                 ),
             )
         finally:
