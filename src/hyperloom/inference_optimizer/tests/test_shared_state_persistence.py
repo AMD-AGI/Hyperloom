@@ -302,6 +302,16 @@ def test_reference_fields_survive_resume(tmp_path):
     assert restored.reference_model == "minimaxm3"
 
 
+def test_a_state_written_before_base_launch_digest_resumes_with_none_recorded():
+    raw = SharedState(session_id="old", reference_server_args="--block-size 128").to_dict()
+    del raw["base_launch_digest"]
+
+    restored = SharedState.from_dict(raw)
+
+    assert restored.base_launch_digest == ""
+    assert restored.reference_server_args == "--block-size 128"
+
+
 def test_save_renders_current_setting_sh(tmp_path, monkeypatch):
     """save() emits a re-parseable current_setting.sh from current_best."""
     monkeypatch.setenv("FRAMEWORK", "vllm")

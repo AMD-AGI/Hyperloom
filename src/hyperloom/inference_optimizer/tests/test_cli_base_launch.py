@@ -23,7 +23,8 @@ import pytest
 
 import inference_suite
 from hyperloom.inference_optimizer.cli import base_launch as bl
-from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE, read_base_launch
+from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE, read_base_launch, shared_state_fields
+from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite import SourceSnapshot
 from inference_suite.contracts import BaseLaunch, BaseLaunchError, Redacted, SourceKind, Topology
 from inference_suite.recipe.model import InferencexSnapshot, RepoBundle
@@ -115,10 +116,30 @@ def test_a_fresh_session_freezes_the_recipe_base_it_resolves(tmp_path, fetched, 
     assert (query.board, query.tp, query.ep, query.concurrencies, fetched[0][1]) == ("mi355x", 8, 1, (4, 64), None)
     assert read_base_launch(tmp_path) == base
     assert "Base launch     : inferencex" in capsys.readouterr().out
-    assert bl.reference_launch_fields(base) == {
+    assert shared_state_fields(base) == {
+        "base_launch_digest": base.digest(),
         "reference_server_args": " ".join(base.args),
         "reference_envs": dict(base.env),
+        "reference_model": "",
+        "reference_launch_controls": {},
     }
+
+
+def test_the_seeded_state_names_the_frozen_file_by_its_digest_across_a_resume(tmp_path, fetched):
+    base = _resolve(tmp_path, _args())
+
+    state = SharedState(session_id="s", **shared_state_fields(base))
+    state.save(tmp_path)
+    resumed = SharedState.from_dict(json.loads((tmp_path / "state.json").read_text()))
+
+    frozen = read_base_launch(tmp_path)
+    assert frozen is not None
+    assert resumed.base_launch_digest == frozen.digest() == base.digest()
+    assert resumed.base_launch_digest == json.loads((tmp_path / BASE_LAUNCH_FILE).read_text())["digest"]
+
+
+def test_a_session_that_froze_no_base_seeds_no_base_fields():
+    assert shared_state_fields(None) == {}
 
 
 def test_a_model_no_recipe_serves_runs_the_default_table_and_says_so(tmp_path, fetched, capsys):
@@ -145,7 +166,7 @@ def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_froze
     assert base.args == ("--tp", "4", "--mem-fraction-static", "0.7")
     assert isinstance(base.env["HF_TOKEN"], Redacted)
     assert "hunter2" not in (session / BASE_LAUNCH_FILE).read_text()
-    assert bl.reference_launch_fields(base)["reference_envs"] == {"SGLANG_USE_AITER": "1"}
+    assert shared_state_fields(base)["reference_envs"] == {"SGLANG_USE_AITER": "1"}
 
 
 @pytest.mark.parametrize(

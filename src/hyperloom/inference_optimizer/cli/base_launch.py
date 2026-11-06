@@ -18,9 +18,9 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import NoReturn
 
-from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
+from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.common.model_paths import hf_repo_id
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.visible_devices import detect_gpu_count
@@ -172,18 +172,4 @@ def resolve_base_launch(
     return base
 
 
-def reference_launch_fields(base: BaseLaunch | None) -> dict[str, Any]:
-    """The ``SharedState.reference_*`` fields ``base`` seeds while their readers still read them (units 1.14, 1.15)."""
-    if base is None:
-        return {}
-    return {
-        "reference_server_args": " ".join(base.args),
-        "reference_envs": {
-            name: value
-            for name, value in base.env.items()
-            if isinstance(value, str) and is_allowed_external_env_key(name)
-        },
-    }
-
-
-__all__ = ["reference_launch_fields", "resolve_base_launch"]
+__all__ = ["resolve_base_launch"]
