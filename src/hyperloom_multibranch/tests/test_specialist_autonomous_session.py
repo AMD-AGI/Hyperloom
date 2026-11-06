@@ -484,6 +484,35 @@ async def test_an_agent_whose_sandbox_ended_is_installed_in_the_sandbox_of_a_new
     await asyncio.wait_for(running, 10)
 
 
+async def test_a_new_sandbox_whose_install_failed_is_not_resumed_in_but_leased_and_installed_again(
+    tmp_path: Path,
+) -> None:
+    count = tmp_path / "installs"
+    # The second install, the first in the new sandbox, fails.
+    command = f"n=$(cat {count} 2>/dev/null || echo 0); echo $((n + 1)) > {count}; test $n -ne 1"
+    rig = await _rig(tmp_path, Agent(exit=3, resume="sleep 30", install=(command,)), deadline=time.time() + 600)
+
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    rig.sandbox.gone.add("L1")
+    failed = rig.restart()
+    with pytest.raises(SessionCrashed, match="install in its new sandbox failed"):
+        await asyncio.wait_for(failed.run(), 10)
+    await failed.stop()
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: rig.sandbox.started[-1] == "sleep 30", "the agent resumed")
+
+    assert count.read_text().strip() == "3"
+    assert rig.toolbox.released == ["L1", "L2"] and len(rig.toolbox.leases) == 3
+    await resumed.stop()
+    await asyncio.wait_for(running, 10)
+    await resumed.release()
+    assert rig.toolbox.released == ["L1", "L2", "L3"]
+
+
 async def test_a_keep_file_with_no_counter_is_one_keep_at_each_change(tmp_path: Path) -> None:
     rig = await _rig(tmp_path, Agent(keeps=(256,), keep={"path": "run/state.json"}, tail=30.0))
 
