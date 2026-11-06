@@ -337,3 +337,148 @@ def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_
     assert worktree.head() == "c1"
     assert base.worktree("s2", tmp_path / "s2").head() is None
     assert not ran.exists(), ran.read_text()
+
+
+def test_no_program_a_sandbox_writes_into_the_worktree_s_repository_runs_as_the_app(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    root = worktree.commit()
+    ran = tmp_path / "ran"
+    _plant_programs(base.path / ".git", worktree.path, ran)
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    patch = worktree.diff("vllm")
+    changed = worktree.changed("vllm")
+    since = worktree.diff_from(root, "vllm")
+    worktree.sync("c1", [patch.encode()])
+
+    assert not ran.exists(), ran.read_text()
+    assert "+max_num_seqs = 256" in patch and "+max_num_seqs = 256" in since
+    assert changed.written == ("vllm/config.py",)
+    assert worktree.head() == "c1"
+    assert (worktree.path / "vllm" / "config.py").read_bytes() == b"max_num_seqs = 256\n"
+
+
+def test_a_repository_made_a_partial_clone_by_its_config_fetches_nothing_behind_the_app_s_command(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    transport = tmp_path / "transport"
+    transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
+    transport.chmod(0o755)
+    git = base.path / ".git"
+    with (git / "config").open("a") as config:
+        config.write(
+            "[core]\n\trepositoryformatversion = 1\n"
+            f"\tsshCommand = {transport}\n[extensions]\n\tpartialClone = promisor\n"
+            '[remote "promisor"]\n\turl = ssh://example.invalid/repo\n\tpromisor = true\n'
+        )
+    blob = subprocess.run(
+        ["git", "-C", str(base.path), "rev-parse", "installed:vllm/config.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    (git / "objects" / blob[:2] / blob[2:]).unlink()
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    with pytest.raises(worktree_module.WorktreeError):
+        worktree.diff("vllm")
+
+    assert not ran.exists()
+
+
+def _plain_git(cwd: Path, *argv: str, stdin: str | None = None) -> str:
+    """git as a user runs it, with nothing but the repository's config: what proves a plant is live."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t")
+    env.update(GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    done = subprocess.run(["git", *argv], cwd=cwd, env=env, input=stdin, capture_output=True, text=True, check=False)
+    return done.stdout
+
+
+def test_a_signed_head_the_worktree_was_synced_to_starts_no_signature_program(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    synced = _plain_git(worktree.path, "rev-parse", "refs/worktree/hyperloom/synced").strip()
+    content = _plain_git(worktree.path, "rev-parse", f"{synced}^{{tree}}").strip()
+    forged = (
+        f"tree {content}\nparent {synced}\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\n"
+        "gpgsig -----BEGIN PGP SIGNATURE-----\n iQ==\n -----END PGP SIGNATURE-----\n\nhead c0\n"
+    )
+    signed = _plain_git(worktree.path, "hash-object", "-t", "commit", "-w", "--stdin", stdin=forged).strip()
+    _plain_git(worktree.path, "update-ref", "refs/worktree/hyperloom/synced", signed)
+    with (base.path / ".git" / "config").open("a") as config:
+        config.write(f"[log]\n\tshowSignature = true\n[gpg]\n\tprogram = {_recording_filter(tmp_path, ran)}\n")
+
+    assert worktree.head() == "c0"
+    assert not ran.exists(), ran.read_text()
+    _plain_git(worktree.path, "log", "-1", "--format=%s", signed)
+    assert ran.exists(), "plain git runs the signature program, so the plant is live"
+
+
+def test_a_submodule_the_installed_branch_holds_is_not_recursed_into_by_a_sync(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    source = tmp_path / "subsource"
+    _plain_git(tmp_path, "init", "-q", str(source))
+    (source / "f.txt").write_text("a\n")
+    (source / ".gitattributes").write_text("* filter=evil\n")
+    _plain_git(source, "add", "-A")
+    _plain_git(source, "commit", "-qm", "sub")
+    # A sandbox moves the installed branch to a commit with a submodule, whose repository lies in the worktree's admin
+    # directory with a filter of its own, and has every command recurse into submodules.
+    _plain_git(worktree.path, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(source), "sub")
+    _plain_git(worktree.path, "commit", "-qm", "with a submodule")
+    _plain_git(worktree.path, "update-ref", "refs/heads/installed", "HEAD")
+    sub = worktree.path / "sub"
+    _plain_git(sub, "config", "filter.evil.smudge", str(_recording_filter(tmp_path, ran)))
+    _plain_git(sub, "config", "filter.evil.clean", "cat")
+    (sub / "f.txt").write_text("changed\n")
+    _plain_git(base.path, "config", "submodule.recurse", "true")
+
+    worktree.sync("c1", [])
+
+    assert not ran.exists(), ran.read_text()
+    _plain_git(worktree.path, "reset", "-q", "--hard", "installed")
+    assert ran.exists(), "plain git recurses into the submodule and runs its smudge, so the plant is live"
+
+
+def test_a_repository_nested_in_the_worktree_runs_nothing_as_the_change_is_read(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    root = worktree.commit()
+    ran = tmp_path / "ran"
+    # The agent commits a repository of its own inside the package, then gives it a filter and a local change.
+    nested = worktree.path / "vllm" / "vendored"
+    _plain_git(tmp_path, "init", "-q", str(nested))
+    (nested / "f.txt").write_text("a\n")
+    _plain_git(nested, "add", "-A")
+    _plain_git(nested, "commit", "-qm", "nested")
+    _plain_git(worktree.path, "add", "vllm/vendored")
+    _plain_git(worktree.path, "commit", "-qm", "an agent's commit")
+    _plain_git(nested, "config", "filter.inner.clean", str(_recording_filter(tmp_path, ran)))
+    (nested / ".gitattributes").write_text("* filter=inner\n")
+    (nested / "f.txt").write_text("b\n")
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    patch = worktree.diff("vllm")
+    changed = worktree.changed("vllm")
+    since = worktree.diff_from(root, "vllm")
+
+    assert not ran.exists(), ran.read_text()
+    assert "+max_num_seqs = 256" in patch and "+max_num_seqs = 256" in since
+    assert "vllm/config.py" in changed.written
+    _plain_git(worktree.path, "add", "--all", "--", "vllm")
+    assert ran.exists(), "plain git's add checks the nested repository with its own filter, so the plant is live"
+
+
+def test_a_filter_driver_git_cannot_be_told_to_blank_refuses_the_command(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    with (base.path / ".git" / "config").open("a") as config:
+        config.write('[filter "a=b"]\n\tclean = false\n')
+
+    with pytest.raises(worktree_module.WorktreeError, match="'='"):
+        worktree.sync("c0", [])

@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -40,7 +41,8 @@ from time import monotonic
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
-from hyperloom_multibranch.repo.isolated_git import trusting
+from hyperloom_common.git_safety import NO_PROGRAMS
+from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
 from hyperloom_multibranch.specialist.agent_spec import ROOT_PROFILE_SOURCE, AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import (
@@ -409,9 +411,24 @@ async def _checkout_git(argv: list[str], checkout: Path) -> CommandResult:
 
 
 async def _git(argv: list[str], cwd: Path) -> CommandResult:
+    """``argv`` (``git <args>``) in ``cwd``; no program the config of the repository there names runs, its driver
+    programs included (:mod:`~hyperloom_multibranch.repo.isolated_git`), as the agent writes that config."""
+
     cwd.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, **NO_LAZY_FETCH}
+    try:
+        blanked = await asyncio.to_thread(blank_driver_programs, cwd, env, *leading_options(argv[1:]))
+    except (OSError, subprocess.SubprocessError) as error:
+        return CommandResult(1, f"git config in {cwd} cannot be read to blank its driver programs: {error}")
     process = await asyncio.create_subprocess_exec(
-        *argv, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        argv[0],
+        *NO_PROGRAMS,
+        *blanked,
+        *argv[1:],
+        cwd=cwd,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     output, _ = await process.communicate()
     return CommandResult(process.returncode or 0, output.decode(errors="replace"))

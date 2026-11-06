@@ -30,7 +30,14 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
-from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env, trusting
+from hyperloom_multibranch.repo.isolated_git import (
+    INIT,
+    blank_driver_programs,
+    git_argv,
+    git_env,
+    leading_options,
+    trusting,
+)
 
 #: The file in a base's git directory that names the paths each worktree links rather than holds.
 LINKED_PATHS = "hyperloom-third-party"
@@ -64,6 +71,7 @@ _FIXED_CONFIG = (
     "diff.mnemonicPrefix=false",
 )
 _STAGE = ("add", "--all", "--")
+_GITLINK = "160000"
 _HEAD = "HEAD"
 #: The commit the worktree's last sync made, kept apart for each worktree as ``refs/worktree/*`` is: an agent may commit
 #: its change on top, and the change is everything since.
@@ -73,8 +81,8 @@ _GIT_DIR = ".git"
 _QUIET = "--quiet"
 _DIFF = "diff"
 _CACHED = "--cached"
-#: A diff as the toolbox applies it, whatever colour or external diff driver the user's git config asks for.
-_PLAIN = ("--no-color", "--no-ext-diff")
+#: A diff as the toolbox applies it, whatever colour, external diff driver or text conversion a config asks for.
+_PLAIN = ("--no-color", "--no-ext-diff", "--no-textconv")
 
 
 class WorktreeError(RuntimeError):
@@ -113,13 +121,21 @@ def installed_upstream(package: PackageBase) -> Upstream | None:
 
 
 def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
-    """``git <args>`` in ``cwd``. The tree is trusted whoever owns it (``safe.directory``), as an earlier leg that made
-    it may have been another account: nothing its config names runs."""
+    """``git <args>`` in ``cwd``, a tree the run's sandboxes write: every driver program its config defines is blanked
+    (:func:`~hyperloom_multibranch.repo.isolated_git.blank_driver_programs`), as the add, diff, apply and reset here
+    would run one on the tree's files. The tree is trusted whoever owns it (``safe.directory``), as an earlier leg that
+    made it may have been another account: nothing its config names runs."""
     pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
+    env = git_env(**pinned)
+    trusted = trusting(cwd)
+    try:
+        blanked = blank_driver_programs(cwd, env, *trusted, *leading_options(args))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise WorktreeError(f"git config in {cwd} cannot be read to blank its filter drivers: {error}") from error
     done = subprocess.run(
-        git_argv(*trusting(cwd), *_FIXED_CONFIG, *args),
+        git_argv(*trusted, *_FIXED_CONFIG, *blanked, *args),
         cwd=cwd,
-        env=git_env(**pinned),
+        env=env,
         input=stdin,
         capture_output=True,
         timeout=GIT_TIMEOUT_S,
@@ -130,8 +146,17 @@ def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None =
     return done.stdout.decode()
 
 
+def _stage(cwd: Path, paths: Sequence[str] = (), index: Path | None = None) -> None:
+    """``git add --all`` of ``paths``, the whole tree when none, but for every repository nested in it that the index
+    tracks: add checks one for local changes by running git in it, under that repository's own config, which nothing
+    pinned here reaches. One the index does not track is added as it is, which runs nothing in it."""
+    entries = _git(cwd, "ls-files", "--stage", "-z", index=index).split("\0")
+    nested = [entry.partition("\t")[2] for entry in entries if entry.startswith(f"{_GITLINK} ")]
+    _git(cwd, *_STAGE, *paths, *(f":(exclude,literal){path}" for path in nested), index=index)
+
+
 def _commit_all(cwd: Path, message: str) -> None:
-    _git(cwd, *_STAGE)
+    _stage(cwd)
     _git(cwd, "commit", _QUIET, "--allow-empty", "-m", message)
 
 
@@ -373,7 +398,7 @@ class BranchWorktree:
         with tempfile.TemporaryDirectory(prefix="mb-diff-") as scratch:
             index = Path(scratch) / "index"
             _git(self.path, "read-tree", commit, index=index)
-            _git(self.path, *_STAGE, *paths, index=index)
+            _stage(self.path, paths, index)
             return _git(self.path, _DIFF, _CACHED, *_PLAIN, commit, "--", *paths, index=index)
 
     def diff_between(self, commit: str, before: Sequence[str], after: str, component: str) -> str:
@@ -438,7 +463,7 @@ class BranchWorktree:
 
     def _staged_diff(self, component: str, *options: str) -> str:
         paths = self._paths(component)
-        _git(self.path, *_STAGE, *paths)
+        _stage(self.path, paths)
         return _git(self.path, _DIFF, _CACHED, *options, self._since(), "--", *paths)
 
     def _synced(self) -> str | None:

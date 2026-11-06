@@ -145,7 +145,7 @@ def worktree_head(worktree: Path | None) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
-def _blank_driver_programs(git: list[str], worktree: Path, env: dict[str, str], timeout: float) -> list[str]:
+def blank_driver_programs(git: list[str], worktree: Path, env: dict[str, str], timeout: float) -> list[str]:
     """The ``-c <key>=`` pairs that blank every driver program the config ``git`` reads defines, includes followed.
 
     Raises:
@@ -202,7 +202,7 @@ def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -
         f"safe.directory={admin}",
         *NO_PROGRAMS,
     ]
-    argv = [*git, *_blank_driver_programs(git, worktree, env, timeout), *args]
+    argv = [*git, *blank_driver_programs(git, worktree, env, timeout), *args]
     # Decoded as file names are, so a path git prints goes back to git unchanged.
     return subprocess.run(
         argv,
@@ -242,6 +242,7 @@ __all__ = [
     "NO_TRANSPORT",
     "app_git",
     "app_git_diff",
+    "blank_driver_programs",
     "repo_root",
     "safe_directory_args",
     "trusted_admin_dir",

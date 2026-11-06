@@ -415,3 +415,51 @@ async def test_a_checkout_whose_commit_cannot_be_read_fails_the_attempt_naming_i
 
     with pytest.raises(AttemptFailed, match=f"reading the commit of {checkout}"):
         await fetch_source(str(_agent_repo(tmp_path)), checkout)
+
+
+async def test_no_program_the_agent_writes_into_its_checkout_s_config_runs_as_this_host(tmp_path: Path) -> None:
+    checkout = tmp_path / "agent" / "src"
+    await fetch_source(str(_agent_repo(tmp_path)), checkout)
+    ran = tmp_path / "ran"
+    program = tmp_path / "recording-filter"
+    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
+    program.chmod(0o755)
+    hook = tmp_path / "hook"
+    hook.write_text(f"#!/bin/sh\necho ran >> {ran}\n")
+    hook.chmod(0o755)
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(
+            f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n'
+            f"[core]\n\tfsmonitor = {hook}\n\thooksPath = {tmp_path}\n"
+        )
+    (tmp_path / "post-checkout").write_text(f"#!/bin/sh\necho ran >> {ran}\n")
+    (tmp_path / "post-checkout").chmod(0o755)
+    (checkout / ".gitattributes").write_text("* filter=own\n")
+    (checkout / "README.md").write_text("changed\n")
+
+    for argv in (["git", "status", "--porcelain"], ["git", "add", "--all"], ["git", "checkout", "--", "README.md"]):
+        done = await agent_onboarding._git(argv, checkout)
+        assert done.returncode == 0, done.output
+
+    assert not ran.exists(), ran.read_text()
+
+
+async def test_a_checkout_its_agent_made_a_partial_clone_fetches_nothing_behind_this_host_s_git(tmp_path: Path) -> None:
+    checkout = tmp_path / "agent" / "src"
+    commit = await fetch_source(str(_agent_repo(tmp_path)), checkout)
+    ran, transport = tmp_path / "ran", tmp_path / "transport"
+    transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
+    transport.chmod(0o755)
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(
+            f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = {transport}\n"
+            '[extensions]\n\tpartialClone = promisor\n[remote "promisor"]\n\turl = ssh://example.invalid/r\n'
+            "\tpromisor = true\n"
+        )
+    for packed in (checkout / ".git" / "objects" / "pack").glob("*"):
+        packed.unlink()
+    (checkout / ".git" / "objects" / commit[:2] / commit[2:]).unlink(missing_ok=True)
+
+    done = await agent_onboarding._git(["git", "cat-file", "-p", commit], checkout)
+
+    assert done.returncode != 0 and not ran.exists()
