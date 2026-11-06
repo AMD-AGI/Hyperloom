@@ -198,6 +198,10 @@ def _proc_listed() -> bool:
 def reap_sandbox_processes(procs: list[subprocess.Popen[bytes]], sandbox_id: str) -> Leftovers:
     """End all processes of a sandbox and confirm nothing is left.
 
+    What the launchers' reap and the tag sweep named is looked at once more when both are done: a process the launchers'
+    reap named may have died during the sweep, and one the sweep named as its window ended may have died since. Only one
+    that still runs as the incarnation named is left.
+
     Args:
         procs: The sandbox's launcher processes.
         sandbox_id: The id the sandbox put in its processes' environment.
@@ -205,7 +209,7 @@ def reap_sandbox_processes(procs: list[subprocess.Popen[bytes]], sandbox_id: str
     Returns:
         Leftovers: What of the sandbox is still running; clean when nothing is.
     """
-    return kill_launchers(procs) | sweep_tagged(sandbox_id)
+    return wait_exited(kill_launchers(procs) | sweep_tagged(sandbox_id))
 
 
 def wait_exited(left: Leftovers) -> Leftovers:

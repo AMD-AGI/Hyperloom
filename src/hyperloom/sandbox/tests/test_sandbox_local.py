@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import os
@@ -573,10 +574,11 @@ def _immortal(monkeypatch, pid: int) -> None:
     monkeypatch.setattr(os, "killpg", _killpg)
 
 
-def _detached_immortal(sb, monkeypatch) -> proctree.ProcessId:
-    """Start a process in ``sb`` that drops the sandbox's tag and leaves its session, and make it immortal."""
+def _detached_immortal(sb, monkeypatch, *, tagged: bool = False) -> proctree.ProcessId:
+    """Start a process in ``sb`` that leaves its session, and the sandbox's tag unless ``tagged``; make it immortal."""
     sb.write_file("/work/detach.py", _DETACHES.encode())
-    sb.run(f"env -u {SANDBOX_TAG_ENV} {sys.executable} detach.py", background=True)
+    keeps = "" if tagged else f"env -u {SANDBOX_TAG_ENV} "
+    sb.run(f"{keeps}{sys.executable} detach.py", background=True)
     pid = int(_read_when_present(sb, "/work/pid"))
     identity = proctree.proc_identity(pid)
     assert identity is not None
@@ -584,10 +586,15 @@ def _detached_immortal(sb, monkeypatch) -> proctree.ProcessId:
     return pid, identity[1]
 
 
-def _end(monkeypatch, process: proctree.ProcessId) -> None:
-    """Give the real signals back and kill ``process``, the one the test made immortal."""
+def _mortal(monkeypatch) -> None:
+    """Give the real signals back: the process the test made immortal dies of the next SIGKILL sent to it."""
     monkeypatch.setattr(os, "kill", _REAL_KILL)
     monkeypatch.setattr(os, "killpg", _REAL_KILLPG)
+
+
+def _end(monkeypatch, process: proctree.ProcessId) -> None:
+    """Give the real signals back and kill ``process``, the one the test made immortal."""
+    _mortal(monkeypatch)
     proctree.signal_processes([process], signal.SIGKILL)
     _wait(lambda: not proctree.running(process[0]), seconds=10)
 
@@ -671,6 +678,111 @@ def test_a_command_timeout_survivor_that_has_exited_by_the_kill_does_not_keep_th
     sb.kill()
     assert provider.quarantined == set()
     assert provider.pool.free_cards() == (0, 1)
+
+
+@pytest.mark.parametrize("dies_in_the_sweep", [True, False], ids=["dies-in-the-sweep", "outlives-the-sweep"])
+def test_a_survivor_the_launchers_reap_names_is_looked_at_again_after_the_tag_sweep(
+    make, monkeypatch, dies_in_the_sweep: bool
+) -> None:
+    monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    survivor = _detached_immortal(sb, monkeypatch, tagged=True)
+    named: list[reaper.Leftovers] = []
+    kill_launchers, sweep_tagged = reaper.kill_launchers, reaper.sweep_tagged
+
+    def _kill_launchers(procs, **kw) -> reaper.Leftovers:
+        named.append(kill_launchers(procs, **kw))
+        return named[-1]
+
+    def _sweep(sandbox_id: str) -> reaper.Leftovers:
+        if dies_in_the_sweep:
+            _mortal(monkeypatch)  # the sweep's SIGKILL now ends it
+        return sweep_tagged(sandbox_id)
+
+    monkeypatch.setattr(reaper, "kill_launchers", _kill_launchers)
+    monkeypatch.setattr(reaper, "sweep_tagged", _sweep)
+    try:
+        if dies_in_the_sweep:
+            sb.kill()
+            assert not proctree.running(survivor[0])
+            assert provider.quarantined == set()
+            assert provider.pool.free_cards() == (0, 1)
+        else:
+            with pytest.raises(SandboxUnavailable, match=rf"outlived SIGKILL \(pid {survivor[0]} \(.*, state S\)\)"):
+                sb.kill()
+            assert provider.quarantined == {0}
+            assert provider.pool.free_cards() == (1,)
+        assert named == [reaper.Leftovers((survivor,))], "the launchers' reap named the survivor before the sweep"
+    finally:
+        _end(monkeypatch, survivor)
+
+
+def test_a_named_survivor_that_dies_is_waited_when_it_is_this_process_s_child(make, monkeypatch) -> None:
+    """A survivor re-parented to this process (a child subreaper) leaves no zombie once it dies after it was named."""
+    monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0])
+    sb = _create(provider, "dev", "dev")
+    # Spawned without a Popen, so nothing but the reap waits for it, as for an orphan this process adopted.
+    pid = os.posix_spawn(
+        sys.executable,
+        [sys.executable, "-c", "import time; time.sleep(600)"],
+        {**os.environ, SANDBOX_TAG_ENV: sb.sandbox_id},
+    )
+    try:
+        _wait(lambda: pid in proctree.marked_pids(SANDBOX_TAG_ENV, sb.sandbox_id))
+        identity = proctree.proc_identity(pid)
+        assert identity is not None
+        survivor = (pid, identity[1])
+        _immortal(monkeypatch, pid)
+        sweep_tagged = reaper.sweep_tagged
+        named: list[reaper.Leftovers] = []
+
+        def _sweep_then_die(sandbox_id: str) -> reaper.Leftovers:
+            named.append(sweep_tagged(sandbox_id))
+            _mortal(monkeypatch)
+            proctree.signal_processes([survivor], signal.SIGKILL)
+            _wait(lambda: _state(pid) == "Z")
+            return named[-1]
+
+        monkeypatch.setattr(reaper, "sweep_tagged", _sweep_then_die)
+        sb.kill()
+        assert named == [reaper.Leftovers((survivor,))], "the sweep named it while it still ran"
+        assert provider.quarantined == set()
+        assert _state(pid) == "", "its zombie was waited"
+    finally:
+        _mortal(monkeypatch)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(pid, 0)
+
+
+@pytest.mark.parametrize("reused", [True, False], ids=["pid-reused", "same-process"])
+def test_a_named_pid_now_held_by_another_process_is_not_the_survivor(make, monkeypatch, reused: bool) -> None:
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    try:
+        identity = _wait(lambda: proctree.proc_identity(holder.pid))
+        # Reused: the survivor the sweep named under this pid started a tick earlier, died, and the pid went to holder.
+        named = (holder.pid, identity[1] - 1 if reused else identity[1])
+        sweep_tagged = reaper.sweep_tagged
+        monkeypatch.setattr(
+            reaper, "sweep_tagged", lambda sandbox_id: sweep_tagged(sandbox_id) | reaper.Leftovers((named,))
+        )
+        if reused:
+            sb.kill()
+            assert provider.quarantined == set()
+            assert provider.pool.free_cards() == (0, 1)
+        else:
+            with pytest.raises(SandboxUnavailable, match=rf"outlived SIGKILL \(pid {holder.pid} "):
+                sb.kill()
+            assert provider.quarantined == {0}
+        assert holder.poll() is None, "the reap leaves whatever runs under the pid alone"
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 def test_a_process_first_found_as_the_window_ends_is_signalled_before_it_is_named(monkeypatch) -> None:
