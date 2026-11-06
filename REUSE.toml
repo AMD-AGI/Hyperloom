@@ -98,3 +98,10 @@ path = "src/inference_suite/tests/fixtures/sglang/**"
 precedence = "override"
 SPDX-FileCopyrightText = "2023-2026 SGLang Team"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Responses of the vLLM recipes site (recipes.vllm.ai), which the vLLM recipes source is tested against.
+[[annotations]]
+path = "src/inference_suite/tests/fixtures/vllm_recipes/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2025-2026 vLLM Team"
+SPDX-License-Identifier = "Apache-2.0"

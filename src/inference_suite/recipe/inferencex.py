@@ -41,6 +41,8 @@ from inference_suite.recipe.model import (
     SourceGolden,
     SourceLaunch,
     SourceMiss,
+    VLLM_ENTRYPOINT,
+    VLLM_RUNNER_OWNED,
     boards_interchangeable,
 )
 
@@ -364,11 +366,9 @@ _ENGINES = {
         owned=SGLANG_RUNNER_OWNED,
     ),
     "vllm": _EngineRules(
-        entrypoint=("vllm", "serve"),
+        entrypoint=VLLM_ENTRYPOINT,
         frontend="vllm",
-        owned=frozenset(
-            {"model", "served-model-name", "host", "port", "headless", "master-addr", "nnodes", "node-rank"}
-        ),
+        owned=VLLM_RUNNER_OWNED,
         unported=frozenset({"connector"}),
     ),
     "atom": _EngineRules(
