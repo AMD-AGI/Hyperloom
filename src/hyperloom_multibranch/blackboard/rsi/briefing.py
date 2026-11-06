@@ -20,7 +20,10 @@ Its brief has three parts:
 * the focus history: every stopped branch whose ``OPEN`` names the focus the branch's own ``OPEN`` names, with its
   tests, its commits and its latest exhausted record, so that a branch reopened on that focus starts where those ended.
   An ``OPEN`` names the profile op the scheduler read in the judge's words, or those words when they named none, the
-  key :mod:`rsi.open_areas` counts a focus by.
+  key :mod:`rsi.open_areas` counts a focus by;
+* Arbor's map, which binds the branch: in the map's order, the directions of the session's map that name that focus
+  op, those a running Arbor branch holds, and those the map set aside, each with why. An open direction no running
+  branch holds that does not name the focus is left out, and a session without a map shows none.
 
 A champion the start commit is already, or builds on, is no lead: the lessons name it first, as :data:`ON_HEAD`, and
 ``blackboard_replay`` refuses to replay it, since its change would undo what the head did since.
@@ -56,11 +59,13 @@ from hyperloom_multibranch.contracts.blackboard.exhausted import latest_exhauste
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
     FocusBranch,
+    MapDirection,
     PeerReplay,
     StartupBrief,
     UnfinishedLead,
     WarmReplay,
 )
+from hyperloom_multibranch.blackboard.families import direction_names_op
 from hyperloom_multibranch.blackboard.knowledge.learning_recall import LearningRecall, Notes
 from hyperloom_multibranch.blackboard.knowledge.replay_tables import StackSlot, stack_added_kernels
 from hyperloom_multibranch.blackboard.knowledge.lessons import MAX_ITEMS, clipped, listed
@@ -192,11 +197,17 @@ def _repeated(snapshot: BlackboardSnapshot, start_commit: str) -> list[str]:
     ]
 
 
+def _focus_of(snapshot: BlackboardSnapshot, branch: str) -> str:
+    """The focus ``branch``'s ``OPEN`` names, empty for a branch opened without one."""
+
+    return next((node.focus for node in snapshot.lineage.branches if node.branch == branch), "")
+
+
 def _focus_history(snapshot: BlackboardSnapshot, branch: str, start_commit: str) -> tuple[FocusBranch, ...]:
     """The branches other than ``branch`` whose ``OPEN`` named the focus ``branch``'s names and that stopped, newest
     first; none for a branch opened without a focus."""
 
-    focus = next((node.focus for node in snapshot.lineage.branches if node.branch == branch), "")
+    focus = _focus_of(snapshot, branch)
     if not focus:
         return ()
     tests = {item.branch: item.tests for item in snapshot.progress}
@@ -219,6 +230,17 @@ def _focus_history(snapshot: BlackboardSnapshot, branch: str, start_commit: str)
             node.head_commit in under,
         )
         for node in stopped
+    )
+
+
+def _shown_map(snapshot: BlackboardSnapshot, branch: str) -> tuple[MapDirection, ...]:
+    """What ``branch`` is shown of Arbor's map, in the map's order: each direction that names its focus op, each a
+    running Arbor branch holds, and each the map set aside."""
+
+    focus = _focus_of(snapshot, branch)
+    holders = snapshot.map_holders()
+    return tuple(
+        item for item in snapshot.agent_map if not item.open or item.id in holders or direction_names_op(item, focus)
     )
 
 
@@ -519,6 +541,8 @@ class CrossSessionBriefing(StartupBriefProvider):
             settings_menu=lists.get(SETTINGS, ()),
             code_menu=lists.get(CODE, ()),
             focus_history=_focus_history(snapshot, self.branch, start_commit),
+            agent_map=_shown_map(snapshot, self.branch),
+            map_holders=snapshot.map_holders(),
         )
 
     def _record_brief(self, snapshot: BlackboardSnapshot, kept: Sequence[_Item], logged: Notes) -> None:

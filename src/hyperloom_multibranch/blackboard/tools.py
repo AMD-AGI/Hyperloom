@@ -108,6 +108,10 @@ CODE_TITLE = (
     "Source and kernel changes (a draw of each family's commit odds x the ceiling of what it acts on / the cost of "
     "a test):"
 )
+MAP_TITLE = (
+    "Arbor's map, binding: do not work a direction a running Arbor branch holds, and reopen a set-aside one only if "
+    "your intent answers its reason, saying how:"
+)
 _UNFINISHED = {
     UnfinishedReason.NOT_STACKABLE: "committed, merge not stackable",
     UnfinishedReason.NEAR_BAR: "kept accuracy, just short of its bar",
@@ -301,11 +305,27 @@ def _menu(menu: tuple[str, ...]) -> list[str]:
     return [text if text.startswith(" ") else f"- {text}" for text in menu]
 
 
+def _agent_map(brief: StartupBrief) -> list[str]:
+    """The directions of Arbor's map the brief shows: who holds each, or why the map set it aside, the why on a line
+    of its own so that clipping a long title never cuts it."""
+
+    shown = []
+    for item in brief.agent_map:
+        if not item.open:
+            shown += [f"- {item.id} (set aside, {item.status}): {item.title}", f"  why: {item.why or 'not given'}"]
+            continue
+        holder = brief.map_holders.get(item.id)
+        state = f"held by {holder}" if holder else "open, it names your focus"
+        shown.append(f"- {item.id} ({state}): {item.title}")
+    return shown
+
+
 def render_brief(brief: StartupBrief) -> str:
     sections = [f"Startup brief from {brief.start_commit}"]
     if brief.focus:
         sections.append(f"{FOCUS_LINE}{brief.focus}")
     for title, items in (
+        (MAP_TITLE, _agent_map(brief)),
         (FOCUS_HISTORY_TITLE, _focus_history(brief.focus_history)),
         ("Ceilings (largest ops; claim with target_share_pct):", _ceilings(brief.op_shares)),
         ("Tried:", [_tried(item) for item in brief.tried]),
@@ -728,6 +748,7 @@ __all__ = [
     "FOCUS_HISTORY_TITLE",
     "FOCUS_LINE",
     "LINE_CHARS",
+    "MAP_TITLE",
     "MAX_LINES",
     "MAX_REPLY_CHARS",
     "PATCH_PAGE_CHARS",
