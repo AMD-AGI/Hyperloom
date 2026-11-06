@@ -394,7 +394,8 @@ def close_knowledge(
     ``targets`` says where the KB steps write, the environment's KB by default; the archive steps write to the
     archive the environment names, the lessons to the pool beside it, which CLOSE writes to even when the session
     read nothing from it. ``cross_image`` names, by canonical id, the Recipe KB champions PRELUDE prepared from
-    another image than the session's, whose replays the archived tree marks.
+    another image than the session's, whose replays the archived tree marks. The scheduling replay runs before the
+    playbook trial is settled, so a CLOSE settles its trials on the standing it wrote itself, not on an earlier one.
     """
 
     archive = TreeArchive.from_env()
@@ -434,8 +435,8 @@ def close_knowledge(
         lessons=_lessons(snapshot, lesson_pool),
         lesson_standings=_standings(snapshot, lesson_pool, targets.receipt(LEARNINGS_LOG)),
         stop_audit=_audited(snapshot, metric, targets.receipt(STOP_AUDIT_REPORT)),
-        playbook_trial=_trialled(snapshot, metric, archive, budget_seconds=budget_seconds),
         scheduling_replay=_replayed(snapshot, archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
+        playbook_trial=_trialled(snapshot, metric, archive, budget_seconds=budget_seconds),
         specialist_outcomes=_outcomes(snapshot, archive, targets.receipts),
         judge_decisions=_decided(snapshot, archive, targets.judge_transcript),
         regression_cases=_pooled_cases(snapshot, archive, targets.blobs),

@@ -186,6 +186,28 @@ def test_close_keeps_a_session_that_played_a_playbook_as_its_trial_once(
 
 
 @pytest.mark.usefixtures("unconfigured")
+def test_close_settles_the_playbook_trial_on_the_standing_its_own_replay_wrote(
+    snapshot: BlackboardSnapshot,
+    tmp_path: Path,
+    archived: Callable[[Path], TreeArchive],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archived(tmp_path / "archive")
+    played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
+    closing = dataclasses.replace(snapshot, fingerprints=(*snapshot.fingerprints[:-1], played))
+    read: list[str] = []
+
+    def settled(pool: PlaybookPool, now: float, task: str = "") -> tuple[str, ...]:
+        read.extend(item.session_id for item in standings(pool)[-1:])
+        return ()
+
+    monkeypatch.setattr(session, "settle", settled)
+    close_knowledge(closing, METRIC, targets=CloseTargets(receipts=tmp_path / "reports"))
+
+    assert read == ["sess-1"]
+
+
+@pytest.mark.usefixtures("unconfigured")
 def test_a_trial_names_the_configured_budget_so_that_sessions_of_one_budget_pair(
     snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
