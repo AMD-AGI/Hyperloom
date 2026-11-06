@@ -91,7 +91,7 @@ from hyperloom.measure.phases import (
     PhaseRecorder,
 )
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS, launch_carriers
-from hyperloom.common.ports import DEV_SANDBOX_PORTS, pick_server_port
+from hyperloom.common.ports import pick_server_port
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_has_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
@@ -802,11 +802,6 @@ def _is_failure(result: VariantResult) -> bool:
     return result.status in {"failed", "skipped"}
 
 
-def _outside_dev_sandboxes(port: int) -> int:
-    """``port``, or another free one when the lifecycle's own pick fell in the block the dev sandboxes serve on."""
-    return pick_server_port() if port in DEV_SANDBOX_PORTS else port
-
-
 class _Lifecycle:
     """The persistent server one sweep arm shares: where its pid files are and which port it listens on."""
 
@@ -816,7 +811,7 @@ class _Lifecycle:
         info = resolve_lifecycle_params(run.call.points[0])
         self.pid_dir = pid_dir
         self.eligible = bool(info.get("eligible"))
-        self.port = _outside_dev_sandboxes(int(info.get("port") or 0))
+        self.port = int(info.get("port") or 0)
         self.framework = str(info.get("framework") or "")
         self.reason = str(info.get("reason") or "")
         self._phases = run.phases

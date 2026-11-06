@@ -17,8 +17,7 @@ from pathlib import Path
 __all__ = ["DEV_SANDBOX_PORTS", "RAY_WORKER_PORTS", "pick_server_port"]
 
 #: The ports reserved for dev-sandbox slots: slot ``i`` serves on ``32100 + 10 * i`` up to ``+ 9``, for up to a hundred
-#: slots. The consumer is ``hyperloom_multibranch.specialist.dev_sandbox`` (the ports its leases' commands get), which
-#: reads this one range so that both sides agree; nothing that measures may listen on a port in it.
+#: slots; nothing that measures may listen on a port in it.
 DEV_SANDBOX_PORTS = range(32100, 33100)
 
 #: The ports Ray workers bind: ``ray start``'s ``--min-worker-port``/``--max-worker-port`` defaults (10002-19999 in
