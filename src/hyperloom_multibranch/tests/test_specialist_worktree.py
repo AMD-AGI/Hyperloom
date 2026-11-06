@@ -2,14 +2,22 @@
 # SPDX-License-Identifier: MIT
 
 import subprocess
+from dataclasses import replace
 
 import pytest
 
 from hyperloom.contracts.recipe import ComponentPatches, PatchRef
-from hyperloom.measure.compile import COMPONENT_LAYOUTS, LocalBlobStore, PackageBase, apply_patch_stack
+from hyperloom.measure.compile import (
+    COMPONENT_LAYOUTS,
+    LocalBlobStore,
+    PackageBase,
+    UnsupportedComponentError,
+    apply_patch_stack,
+)
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.specialist import worktree as worktree_module
-from hyperloom_multibranch.specialist.worktree import SourceBase, Upstream
+from hyperloom_multibranch.specialist.worktree import SourceBase, Upstream, source_unkept
+from hyperloom_multibranch.tests.agent_rig import ROOT
 
 VLLM = "https://github.com/vllm-project/vllm"
 CONFIG, SCHEDULER = b"max_num_seqs = 128\n", b"policy = 'fcfs'\n"
@@ -282,3 +290,14 @@ def test_the_operator_s_git_config_changes_nothing_a_worktree_builds_or_patches(
     assert ("b/vllm/config.py" in kept, "b/vllm/lpm.py" in kept, outside) == (True, True, ())
     worktree.sync("c1", [patch.encode()])
     assert (worktree.head(), (worktree.path / "vllm" / "lpm.py").exists()) == ("c1", True)
+
+
+def test_a_framework_the_host_does_not_have_installed_has_no_source_change_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def absent(_layout):
+        raise UnsupportedComponentError("package vllm is not installed in this image")
+
+    monkeypatch.setattr(worktree_module, "locate_installed_package", absent)
+
+    assert "package vllm is not installed in this image" in source_unkept("vllm", replace(ROOT, components=()))
