@@ -188,20 +188,32 @@ def private_copy(source: Path, private: Path, sha: str) -> Path:
     The clone lies in the session directory, which the group's other accounts can write: they could put in its place
     a repository whose config git would obey as the application, or plant an object under the id of one of the
     commit's own, which git does not check as it reads one. The fetch sends the commit's objects through a pack whose
-    ids this side computes from their content, so a planted object fails it; it runs with no system or global config
-    and starts no program a config could name (:mod:`~hyperloom_multibranch.repo.isolated_git`), and the clone's config
-    is read only by git's serving side, which starts none.
+    ids this side computes from their content, so a planted object fails it; it runs with no system config and starts
+    no program a config could name (:mod:`~hyperloom_multibranch.repo.isolated_git`), and the clone's config is read
+    only by git's serving side, which starts none.
+
+    The clone is another account's when an earlier leg of the run made it. git's serving side refuses a repository
+    another account owns unless ``safe.directory`` names it in the system or global config (git 2.45.1 to 2.47, and
+    distribution builds that carry the CVE-2024-32004 fix, such as Ubuntu 22.04's and 24.04's), and a ``-c`` does not
+    reach it: git drops it from the environment of the local transport's ``git-upload-pack``. So the fetch's global
+    config is a file in ``private`` that holds only ``safe.directory`` for the clone, and the fetch names the clone by
+    the same resolved path.
 
     Raises:
         CacheBuildError: When the clone does not hold the commit whole as its ids name it.
     """
 
     copy = private / "source.git"
+    clone = os.path.realpath(source)
+    trusted = private / "trusted.gitconfig"
     object_format = ["--object-format=sha256"] if len(sha) == 64 else []
-    env = git_env(GIT_ALLOW_PROTOCOL="file")
+    env = git_env(GIT_ALLOW_PROTOCOL="file", GIT_CONFIG_GLOBAL=str(trusted))
     _git(git_argv(*INIT, _QUIET, "--bare", *object_format, str(copy)), f"creating {copy}", env)
+    for directory in (clone, os.path.join(clone, ".git")):
+        trust = ["--git-dir", str(copy), "config", "--file", str(trusted), "--add", "safe.directory", directory]
+        _git(git_argv(*trust), f"trusting {clone}", env)
     fetch = ["--git-dir", str(copy), "-c", "protocol.version=2", _FETCH, _QUIET, "--no-tags", "--depth", "1"]
-    _git(git_argv(*fetch, str(source), sha), f"copying {sha} from {source}", env)
+    _git(git_argv(*fetch, clone, sha), f"copying {sha} from {source}", env)
     return copy
 
 
