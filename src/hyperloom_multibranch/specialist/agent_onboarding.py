@@ -33,10 +33,10 @@ import json
 import os
 import re
 import shutil
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import monotonic
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
@@ -162,12 +162,9 @@ class OnboardingSetup:
     sandbox: AgentSandbox
     onboard: Onboard
     run: ArborRun = BRANCH_RUN
-    attempts: int = ATTEMPTS
     start_seconds: float = START_SECONDS
-    install_seconds: float = INSTALL_SECONDS
     poll_seconds: float = 5.0
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
-    clock: Callable[[], float] = time.monotonic
 
 
 @dataclass(frozen=True)
@@ -208,21 +205,21 @@ async def make_ready(source: str, spec: AgentSpec, agent_dir: Path, setup: Onboa
 
     failures: list[str] = []
     attempt, pause = 1, RETRY_SECONDS
-    until = setup.clock() + gateway_wait(spec)
+    until = monotonic() + gateway_wait(spec)
     while True:
         try:
             return await _attempt(source, spec, agent_dir, setup, tuple(failures))
         except (ModelRefused, ConfigRefused) as error:
             raise PreflightFailed([*failures, f"attempt {attempt}: {error}"]) from error
         except GatewayDown as error:
-            if setup.clock() + pause <= until:
+            if monotonic() + pause <= until:
                 await setup.sleep(pause)
                 pause = min(pause * 2, GATEWAY_PAUSE_SECONDS)
                 continue
             failures.append(f"attempt {attempt}: {error}")
         except (AttemptFailed, OSError) as error:
             failures.append(f"attempt {attempt}: {error}")
-        if attempt == setup.attempts:
+        if attempt == ATTEMPTS:
             raise PreflightFailed(failures)
         attempt += 1
         await setup.sleep(RETRY_SECONDS)
@@ -279,7 +276,7 @@ async def install(manifest: AgentManifest, setup: OnboardingSetup, checkout: Pat
     the output of the first that fails."""
 
     for command in manifest.install:
-        done = await setup.sandbox.run(command, checkout, env, setup.install_seconds)
+        done = await setup.sandbox.run(command, checkout, env, INSTALL_SECONDS)
         if done.returncode != 0:
             raise AttemptFailed(f"install `{command}` exited {done.returncode}: {tail(done.output)}")
 
@@ -327,9 +324,9 @@ async def _started(
     its refusal file when it ran as a component and refused its config, and :class:`ConfigRefused` then when the
     config is ``final``."""
 
-    until = setup.clock() + setup.start_seconds
+    until = monotonic() + setup.start_seconds
     keep = None if manifest.keep is None else checkout / manifest.keep.path
-    while setup.clock() < until and not (keep is not None and keep.exists()):
+    while monotonic() < until and not (keep is not None and keep.exists()):
         if (
             process.returncode == 0
             and manifest.snapshots is not None
