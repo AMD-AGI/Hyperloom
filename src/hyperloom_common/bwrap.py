@@ -45,6 +45,7 @@ __all__ = [
     "NESTED_SAFE",
     "SYSTEM_ROOTS",
     "BwrapPolicy",
+    "BwrapPolicyError",
     "BwrapProbe",
     "BwrapSetupError",
     "BwrapStatus",
@@ -62,9 +63,9 @@ Version = tuple[int, int, int]
 
 #: The oldest bubblewrap the adapter runs: ``--perms`` (the mode of a masked directory) arrived in 0.5.0.
 BWRAP_FLOOR: Version = (0, 5, 0)
-#: Before this version the mount points bubblewrap creates follow symlinks an agent left in a writable tree, out of
-#: the sandbox (GHSA-pxhw-h44j-8pfx): a mount there may land elsewhere and create a file or directory on the host, so
-#: older ones refuse it (:meth:`BwrapPolicy.problems`).
+#: Before this version the mount points bubblewrap creates follow symlinks an agent left in a writable tree (a writable
+#: bind, or a bound ``/tmp`` or ``/dev/shm``), out of the sandbox (GHSA-pxhw-h44j-8pfx): a mount there may land
+#: elsewhere and create a file or directory on the host, so older ones refuse it (:meth:`BwrapPolicy.problems`).
 NESTED_SAFE: Version = (0, 12, 0)
 #: The system trees a sandbox that runs programs binds read-only; a root that is a symlink (``/bin -> usr/bin``)
 #: becomes the same symlink, and one the host lacks is skipped.
@@ -108,6 +109,14 @@ _HOLD = "import signal; print('ready', flush=True); signal.pause()"
 
 class BwrapSetupError(RuntimeError):
     """bubblewrap could not set the sandbox up, so the command never started; the message is bubblewrap's line."""
+
+
+class BwrapPolicyError(ValueError):
+    """A policy the probed bubblewrap must not launch (:meth:`BwrapPolicy.problems`); nothing was started."""
+
+    def __init__(self, problems: Sequence[str]) -> None:
+        super().__init__("; ".join(problems))
+        self.problems = tuple(problems)
 
 
 def _shown(version: Version) -> str:
@@ -162,8 +171,9 @@ class BwrapPolicy:
     ``read_only`` and ``writable`` are bound (a missing read-only path is skipped); ``masked`` hides a path inside a
     bound tree: a directory becomes an empty mode-0000 tmpfs, anything else an unreadable ``/dev/null``. ``devices``
     are bound with device access (``/dev/kfd``, ``/dev/dri``). ``tmp`` and ``shm`` are bound at ``/tmp`` and
-    ``/dev/shm`` (a :class:`Scratch`; a sandbox whose commands share files there passes the same pair to each), else
-    each is a fresh tmpfs. ``sys_paths`` are bound read-only (a compile narrows ``/sys`` to the CPU tree).
+    ``/dev/shm`` (a :class:`Scratch`; a sandbox whose commands share files there passes the same pair to each, so
+    before :data:`NESTED_SAFE` nothing may be mounted below them), else each is a fresh tmpfs. ``sys_paths`` are bound
+    read-only (a compile narrows ``/sys`` to the CPU tree).
     ``own_network`` gives the sandbox a network of its own (loopback only). ``die_with_parent`` kills the sandbox when
     the *thread* that started it ends (``PR_SET_PDEATHSIG``), so it is only for a launch made on a thread that
     outlives it; without it, killing bubblewrap's own process leaves the sandbox running (kill its pid 1, the
@@ -201,9 +211,10 @@ class BwrapPolicy:
         A relative path; a bind or mask of a path the sandbox mounts itself (``/``, ``/proc`` and below, ``/dev``
         and below, ``/sys``, ``/tmp``); a device outside ``/dev``; a bind at or above an ``app_only`` path; and,
         before :data:`NESTED_SAFE`, a mount below what an agent could already have written: a read-only bind or mask
-        below a writable bind, and, for a launch that joins a :class:`Holder`, any bind or mask below the ``tmp`` or
-        ``shm`` that earlier commands shared. A writable path below another writable one is not a problem: it is
-        redundant and left out of the argv. Below a launch's own fresh ``tmp`` and ``shm`` nothing is checked.
+        below a writable bind, and any bind, mask or device below a bound ``tmp`` or ``shm`` (nothing tells a
+        directory no sandbox has used from one an earlier command or launch left a symlink in). A writable path below
+        another writable one is not a problem: it is redundant and left out of the argv. Below a fresh tmpfs ``/tmp``
+        or ``/dev/shm`` (``tmp`` or ``shm`` ``None``) nothing is checked.
         """
         named = (*self.read_only, *self.writable, *self.masked, *self.devices, *self.sys_paths, *self.app_only)
         relative = [
@@ -240,9 +251,11 @@ class BwrapPolicy:
 
     def _nesting_problems(self, version: Version) -> list[str]:
         writable = self._kept_writable()
-        shared = [mount for source, mount in ((self.tmp, _TMP), (self.shm, _SHM)) if source and self.join is not None]
+        bound = [mount for source, mount in ((self.tmp, _TMP), (self.shm, _SHM)) if source]
         nested = [(path, parent) for path in (*self.read_only, *self.masked) for parent in writable]
-        nested += [(path, parent) for path in (*self.read_only, *self.masked, *writable) for parent in shared]
+        nested += [
+            (path, parent) for path in (*self.read_only, *self.masked, *writable, *self.devices) for parent in bound
+        ]
         return [
             f"{path} would be mounted below the agent-writable {parent}, which needs bubblewrap "
             f"{_shown(NESTED_SAFE)} (this is {_shown(version)})"
@@ -262,12 +275,20 @@ class BwrapPolicy:
 
         return tuple(path for path in writable if not shown_by_parent(path))
 
-    def argv(self, launcher: Sequence[str], command: Sequence[str], *, status_fd: int | None = None) -> list[str]:
-        """The command line that runs ``command`` in this sandbox: ``launcher`` (:attr:`BwrapProbe.launcher`), the
-        namespace flags, every mount sorted by destination depth with the masks last (so a bind below ``/tmp`` or a
-        mask below a bind is not hidden by the mount above it), then ``--chdir``, the marks and
-        ``--json-status-fd``. The masks and symlinked roots are read from the filesystem now.
+    def argv(self, bwrap: BwrapProbe, command: Sequence[str], *, status_fd: int | None = None) -> list[str]:
+        """The command line that runs ``command`` in this sandbox with the probed ``bwrap``: its
+        :attr:`BwrapProbe.launcher`, the namespace flags, every mount sorted by destination depth with the masks last
+        (so a bind below ``/tmp`` or a mask below a bind is not hidden by the mount above it), then ``--chdir``, the
+        marks and ``--json-status-fd``. The masks and symlinked roots are read from the filesystem now.
+
+        Raises:
+            BwrapPolicyError: :meth:`problems` names any for ``bwrap``'s version.
+            RuntimeError: ``bwrap``'s probe failed.
         """
+        launcher = bwrap.launcher
+        refused = self.problems(bwrap.version or (0, 0, 0))  # set whenever the launcher is
+        if refused:
+            raise BwrapPolicyError(refused)
         tail = ["--chdir", self.chdir] if self.chdir else []
         for name, value in self.marks:
             tail += ["--setenv", name, value]
@@ -449,7 +470,6 @@ class _Canary:
     """A throwaway tree the probe's sandbox reads, writes and must not see."""
 
     root: str
-    scratch: Scratch
 
     @property
     def read_only(self) -> str:
@@ -457,39 +477,42 @@ class _Canary:
 
     def policy(self) -> BwrapPolicy:
         """The shape of an agent's policy: system roots, a read-only tree with a masked directory and file in it, a
-        writable tree, private ``/tmp`` and ``/dev/shm`` (all below the host's ``/tmp``, so the depth order counts)."""
+        writable tree, all below the host's ``/tmp`` and so below the sandbox's (a fresh tmpfs: binds below a bound
+        :class:`Scratch` need :data:`NESTED_SAFE`), where the depth order counts."""
         return BwrapPolicy(
             read_only=(*SYSTEM_ROOTS, *interpreter_roots(), self.read_only),
             writable=(os.path.join(self.root, "rw"),),
             masked=(os.path.join(self.read_only, "secret"), os.path.join(self.read_only, "secretfile")),
-            tmp=self.scratch.tmp,
-            shm=self.scratch.shm,
             die_with_parent=False,
         )
 
-    def run(self, launcher: Sequence[str], timeout: float) -> tuple[str, ...]:
-        """The problems the canary found through ``launcher``; ``subprocess.TimeoutExpired`` when it did not end."""
+    def run(self, bwrap: BwrapProbe, timeout: float) -> tuple[str, ...]:
+        """The problems the canary found through ``bwrap`` (the binary under test, before its probe has an answer);
+        ``subprocess.TimeoutExpired`` when it did not end."""
         policy = self.policy()
         args = (os.readlink("/proc/self/ns/pid"), self.read_only, *policy.writable, *policy.masked)
         status, write = os.pipe()
-        try:
-            process = subprocess.Popen(
-                policy.argv(launcher, [sys.executable, *_PYTHON_FLAGS, _CANARY, *args], status_fd=write),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env={"PATH": os.environ.get("PATH", os.defpath)},
-                pass_fds=(write,),
-            )
-        finally:
-            os.close(write)
-        with process, contextlib.closing(os.fdopen(status, "rb", buffering=0)) as status_file:
+        with contextlib.closing(os.fdopen(status, "rb", buffering=0)) as status_file:
             try:
-                out, err = process.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _kill_launch(process, status_file.fileno())
-                raise
+                process = subprocess.Popen(
+                    policy.argv(bwrap, [sys.executable, *_PYTHON_FLAGS, _CANARY, *args], status_fd=write),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env={"PATH": os.environ.get("PATH", os.defpath)},
+                    pass_fds=(write,),
+                )
+            except BwrapPolicyError as refused:
+                return tuple(f"the canary's policy: {problem}" for problem in refused.problems)
+            finally:
+                os.close(write)
+            with process:
+                try:
+                    out, err = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    _kill_launch(process, status_file.fileno())
+                    raise
         if process.returncode != 0:
             return (_last_line(err) or f"bubblewrap exited {process.returncode}",)
         try:
@@ -519,18 +542,14 @@ def _kill_launch(process: subprocess.Popen[str], status: int) -> None:
 @contextlib.contextmanager
 def _canary() -> Iterator[_Canary]:
     root = tempfile.mkdtemp(prefix="hl-bwrap-probe-")
-    scratch = None
     try:
         for name in ("ro/secret", "rw"):
             os.makedirs(os.path.join(root, name))
         for name, text in (("ro/visible", "visible\n"), ("ro/secretfile", "secret\n"), ("ro/secret/inner", "secret\n")):
             with open(os.path.join(root, name), "w", encoding="ascii") as handle:
                 handle.write(text)
-        scratch = Scratch.create()
-        yield _Canary(root, scratch)
+        yield _Canary(root)
     finally:
-        if scratch is not None:
-            scratch.remove()
         _remove_tree(root)
 
 
@@ -548,7 +567,7 @@ def _with_private_mounts(
             path, version, (*first, "unshare (util-linux) is not on PATH to give a launch its own mounts")
         )
     prefix = (unshare, *_PRIVATE_MOUNTS)
-    again = canary.run((*prefix, path), timeout)
+    again = canary.run(BwrapProbe(path, version, (), prefix=prefix), timeout)
     if again:
         return BwrapProbe(path, version, (*first, *(f"under unshare --mount: {problem}" for problem in again)))
     note = (
@@ -565,7 +584,7 @@ def _transient(path: str, version: Version | None, timeout: float) -> BwrapProbe
 def _canary_probe(path: str, version: Version, timeout: float) -> BwrapProbe:
     try:
         with _canary() as canary:
-            problems = canary.run((path,), timeout)
+            problems = canary.run(BwrapProbe(path, version, ()), timeout)
             if _unbindable(problems):
                 return _with_private_mounts(canary, path, version, problems, timeout)
             return BwrapProbe(path, version, problems)
@@ -574,13 +593,15 @@ def _canary_probe(path: str, version: Version, timeout: float) -> BwrapProbe:
 
 
 def probe_bwrap(bwrap: str | None = None, *, timeout: float = _TIMEOUT) -> BwrapProbe:
-    """Whether ``bwrap`` (default: the one on ``PATH``) runs a sandbox here: not setuid, at least
+    """Whether ``bwrap`` (an absolute path; default: the one on ``PATH``) runs a sandbox here: not setuid, at least
     :data:`BWRAP_FLOOR`, and a canary sandbox of an agent's shape holds (masks unreadable, read-only binds
     ``EROFS``, the writable tree writable, its own pid namespace, no capabilities, ``no_new_privs``). Not cached:
     :func:`bwrap_probe` is."""
     path = bwrap or shutil.which(_BWRAP)
     if path is None:
         return BwrapProbe(None, None, ("bubblewrap: not found on PATH",))
+    if not os.path.isabs(path):
+        return BwrapProbe(path, None, (f"bubblewrap at {path} is not an absolute path",))
     try:
         if os.stat(path).st_mode & stat.S_ISUID:
             return BwrapProbe(
@@ -636,10 +657,11 @@ def _probe_key(path: str | None) -> tuple[object, ...]:
     return (path, _identity(path), sys.executable, os.geteuid(), os.getegid(), namespaces, sysctls)
 
 
-def bwrap_probe() -> BwrapProbe:
-    """:func:`probe_bwrap` for the ``bwrap`` on ``PATH``, run once per process for each :func:`_probe_key`: a
-    concurrent caller waits for the one run, and a transient answer is not kept."""
-    path = shutil.which(_BWRAP)
+def bwrap_probe(bwrap: str | None = None) -> BwrapProbe:
+    """:func:`probe_bwrap` for ``bwrap`` (an absolute path, such as a hosting layer's; default: the ``bwrap`` on
+    ``PATH``), run once per process for each :func:`_probe_key`: a concurrent caller waits for the one run, and a
+    transient answer is not kept."""
+    path = bwrap or shutil.which(_BWRAP)
     key = _probe_key(path)
     with _PROBES_LOCK:
         found = _PROBES.get(key)
@@ -650,6 +672,33 @@ def bwrap_probe() -> BwrapProbe:
                 for note in found.notes:
                     log.info("bubblewrap: %s", note)
     return found
+
+
+def _parent(pid: int) -> int | None:
+    """The parent of process ``pid``; ``None`` when there is none by that number."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            return int(handle.read().rsplit(b")", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _child_pidfd(parent: int, pid: int) -> int:
+    """A pidfd of process ``pid`` when it is ``parent``'s child, else -1.
+
+    bubblewrap names its sandbox's pid 1 before it sets the sandbox up, and reaps it when the setup fails; the number
+    may then name an unrelated process, which a pidfd of it would let :meth:`Holder.stop` kill. The parent is read
+    after the pidfd is open: bubblewrap forks that one child, so a ``pid`` whose parent is bubblewrap's process is
+    still that child, and so was the process the pidfd opened.
+    """
+    try:
+        pidfd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return -1
+    if _parent(pid) == parent:
+        return pidfd
+    os.close(pidfd)
+    return -1
 
 
 def _first_line(fd: int, deadline: float) -> bytes:
@@ -682,39 +731,45 @@ class Holder:
     pidfd: int
 
     @classmethod
-    def start(cls, launcher: Sequence[str], policy: BwrapPolicy, *, timeout: float = _TIMEOUT) -> Holder:
-        """Start the holder in ``policy`` (which must bind ``sys.executable``'s :func:`interpreter_roots`).
+    def start(cls, bwrap: BwrapProbe, policy: BwrapPolicy, *, timeout: float = _TIMEOUT) -> Holder:
+        """Start the holder in ``policy`` (which must bind ``sys.executable``'s :func:`interpreter_roots`) with the
+        probed ``bwrap``.
 
         Raises:
+            BwrapPolicyError: ``policy`` must not be launched with ``bwrap`` (nothing was started).
             BwrapSetupError: bubblewrap could not set the sandbox up.
             TimeoutError: it neither started nor failed within ``timeout`` (the attempt is killed).
         """
         policy = dataclasses.replace(policy, die_with_parent=False, join=None, marks=())
         status, write = os.pipe()
         try:
-            process = subprocess.Popen(
-                policy.argv(launcher, [sys.executable, *_PYTHON_FLAGS, _HOLD], status_fd=write),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                pass_fds=(write,),
-                start_new_session=True,
-            )
-        finally:
-            os.close(write)
-        holder = cls(process, 0, -1)
-        try:
-            deadline = time.monotonic() + timeout
-            cloned = BwrapStatus.parse(_first_line(status, deadline))
-            with contextlib.suppress(ProcessLookupError):
-                if cloned.child_pid is not None:
-                    holder = cls(process, cloned.child_pid, os.pidfd_open(cloned.child_pid))
-            ready = _first_line(process.stdout.fileno(), deadline) if process.stdout else b""
-        except TimeoutError:
-            holder.stop()
-            raise
+            try:
+                process = subprocess.Popen(
+                    policy.argv(bwrap, [sys.executable, *_PYTHON_FLAGS, _HOLD], status_fd=write),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    pass_fds=(write,),
+                    start_new_session=True,
+                )
+            finally:
+                os.close(write)
+            return cls._started(process, status, time.monotonic() + timeout)
         finally:
             os.close(status)
+
+    @classmethod
+    def _started(cls, process: subprocess.Popen[bytes], status: int, deadline: float) -> Holder:
+        """The holder ``process`` is starting, once its pid 1 (named on the descriptor ``status``) says it is ready."""
+        holder = cls(process, 0, -1)
+        try:
+            cloned = BwrapStatus.parse(_first_line(status, deadline))
+            if cloned.child_pid is not None:
+                holder = cls(process, cloned.child_pid, _child_pidfd(process.pid, cloned.child_pid))
+            ready = _first_line(process.stdout.fileno(), deadline) if process.stdout else b""
+        except BaseException:
+            holder.stop()
+            raise
         if ready != b"ready" or holder.pidfd < 0:
             printed = holder.stop()
             raise BwrapSetupError(_last_line(printed) or f"bubblewrap exited {process.returncode}")
@@ -768,14 +823,14 @@ class Holder:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """``python -I -m hyperloom_common.bwrap probe``: ``ok bubblewrap X.Y.Z PATH`` and any note, exit 0; or one line
-    per problem, exit 1."""
+    """``python -I -m hyperloom_common.bwrap probe [--bwrap PATH]``: ``ok bubblewrap X.Y.Z PATH`` and any note, exit
+    0; or one line per problem, exit 1."""
     parser = argparse.ArgumentParser(
         prog="python -I -m hyperloom_common.bwrap", description="Check that bubblewrap can sandbox an agent here."
     )
     parser.add_argument("command", choices=("probe",))
-    parser.parse_args(argv)
-    found = probe_bwrap()
+    parser.add_argument("--bwrap", help="the bubblewrap to probe (default: the one on PATH)")
+    found = probe_bwrap(parser.parse_args(argv).bwrap)
     if found.ok and found.version is not None:
         print(f"ok bubblewrap {_shown(found.version)} {found.path}")
     for line in (*found.notes, *found.problems):
