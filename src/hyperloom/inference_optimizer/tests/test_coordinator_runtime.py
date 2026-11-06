@@ -918,14 +918,7 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     """When idempotency_key is under params, Coordinator treats it as the delegate key and removes it from executor params."""
     delegate = Intent(
         type=IntentType.DELEGATE,
-        payload={
-            "action_name": "explore",
-            "params": {
-                "idempotency_key": "explore-round-2",
-                # Admission refuses an explore with nothing to measure.
-                "grid": [{"name": "chunked_prefill", "extra_server_args": "--chunked-prefill-size 4096"}],
-            },
-        },
+        payload={"action_name": "baseline", "params": {"runs": 1, "idempotency_key": "baseline-nested-1"}},
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
@@ -936,19 +929,11 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
         captured["idempotency_key"] = ctx.task.idempotency_key
         return {"status": "succeeded", "tput": 1.0}
 
-    c.sub.register_executor("explore", _runner)
+    c.sub.register_executor("baseline", _runner)
     try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.baseline_config_path = str(session_dir / "baseline.yaml")
-        c.shared_state.last_profile_trace = str(session_dir / "trace.json.gz")
-        # params delegate requires a fresh roofline snapshot.
-        c.shared_state.last_trace_analyze = {
-            "trace_input": str(session_dir / "trace.json.gz"),
-            "analysis_md_text": "FAKE_REPORT",
-        }
-        c.shared_state.save(session_dir)
         await c.tick(1)
-        assert captured["idempotency_key"] == "explore-round-2"
+        await pump_until_settled(c.dispatcher)
+        assert captured["idempotency_key"] == "baseline-nested-1"
         assert "idempotency_key" not in captured["params"]
         denied = await c.bus.tail(topic="observation")
         assert not any(m.payload.get("rule") == "duplicate_idempotency_key" for m in denied)
