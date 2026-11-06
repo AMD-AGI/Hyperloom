@@ -25,7 +25,8 @@ from ..policy.gate import (
     validate_freeform_wave_task,
 )
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_TASK_RETRY, record_event, trajectory_scope
-from .runner import SpecialistFailureType, specialist_patch_preflight_error
+from .failure_class import SpecialistFailureType, classify_specialist_failure
+from .runner import specialist_patch_preflight_error
 
 if TYPE_CHECKING:
     from ..loop.coordinator import Coordinator
@@ -434,8 +435,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         cap = _auto_retry_cap()
         if cap <= 0:
             return False
-        from .runner import classify_specialist_failure
-
         result_dict = result.result if isinstance(result.result, dict) else {}
         runner_status = str(result_dict.get("runner_status") or "")
         # The specialist executor never raises, so the reason lives in the
