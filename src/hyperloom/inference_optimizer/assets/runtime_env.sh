@@ -49,9 +49,11 @@ _runtime_env_read_quoted_value() {
   done
 }
 
-# Which workspace a run uses, and so which kernel-agent.env.sh it gets, is decided here and nowhere else:
-# install.sh sets its paths through runtime_env_forget_stale_workspace and runtime_env_derive_runtime_paths, and
-# preflight (cli/preflight_env.py) asks runtime_env_kernel_agent_env_path for the file install.sh wrote.
+# Which workspace a run uses, and so which kernel-agent.env.sh it gets, follows one rule, kept here: install.sh sets
+# its paths through runtime_env_forget_stale_workspace and runtime_env_derive_runtime_paths, and the documented source
+# line and the slurm job ask runtime_env_kernel_agent_env_path for the file install.sh wrote. Preflight does not call
+# this file: cli/preflight_env.py mirrors the rule in Python (_workspace_selection, _kernel_agent_env_candidate), and
+# test_install_session_paths.py holds both to the same answer.
 #
 #   - A .env that `hyperloom setup` wrote (setup_dotenv_is_authoritative) names the workspace: the caller's
 #     USER_DATA_PATH and the paths derived from it are what an earlier workspace left in the shell, so they are
@@ -162,24 +164,35 @@ runtime_env_remove_legacy_kernel_agent_env() {
 # a link, that its group and others cannot write, and read only as a regular file of this account's, not a link, that
 # its group and others cannot write. This is that rule's one owner: install.sh's writers call it with `write` (which
 # makes the directory 0700 when missing; the file itself is renamed into place), and runtime_env_kernel_agent_env_path,
-# behind the documented source line and the slurm job, calls it to read. Preflight reads the file in Python
-# (_kernel_agent_env_problem in cli/preflight_env.py, with the same words); test_install_session_paths.py holds every
-# reader to the same refusals. Status 1 and a refusal on stderr naming the entry and why, never what the file holds.
+# behind the documented source line and the slurm job, calls it to read. A reader also refuses a directory or file that
+# does not exist: a path printed for it could be created by another account before the caller sources it. Preflight
+# reads the file in Python (_kernel_agent_env_problem in cli/preflight_env.py, with the same words);
+# test_install_session_paths.py holds every reader to the same refusals. Status 1 and why on stderr, naming the entry,
+# never what the file holds.
 runtime_env_private_kernel_agent_env() {
-  local file="$1" mode="${2:-read}" dir entry="" problem=""
+  local file="$1" mode="${2:-read}" dir
   dir="$(dirname -- "$file")"
   if [ "$mode" = write ] && [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
     # shellcheck disable=SC2174  # 0700 is for the file's own directory; the parents it may make are only ancestors
     mkdir -p -m 700 -- "$dir" || return 1
   fi
-  if [ -e "$dir" ] || [ -L "$dir" ]; then
-    entry="$dir" problem="$(_runtime_env_not_private "$dir" directory)"
+  _runtime_env_private_entry "$file" "$dir" directory || return 1
+  [ "$mode" = read ] || return 0
+  _runtime_env_private_entry "$file" "$file" 'regular file'
+}
+
+# Status 0 when $2, the kernel-agent env file $1 or its directory, exists and is a $3 that passes the rule; else
+# status 1 and why on stderr.
+_runtime_env_private_entry() {
+  local problem
+  if [ ! -e "$2" ] && [ ! -L "$2" ]; then
+    printf '[runtime-env ERROR] no kernel-agent env file at %s: %s does not exist; %s\n' "$1" "$2" \
+      "install.sh writes it on this container's own disk, so run install.sh in this container first, with the same workspace." >&2
+    return 1
   fi
-  if [ -z "$problem" ] && [ "$mode" = read ] && { [ -e "$file" ] || [ -L "$file" ]; }; then
-    entry="$file" problem="$(_runtime_env_not_private "$file" 'regular file')"
-  fi
+  problem="$(_runtime_env_not_private "$2" "$3")"
   [ -n "$problem" ] || return 0
-  printf '[runtime-env ERROR] refusing the kernel-agent env file %s: %s %s; %s\n' "$file" "$entry" "$problem" \
+  printf '[runtime-env ERROR] refusing the kernel-agent env file %s: %s %s; %s\n' "$1" "$2" "$problem" \
     "it carries credentials and is sourced, so it is only written and read in a directory of this account's that no other account can write. Set KERNEL_AGENT_ENV to a file in such a directory on this container's own disk, or TMPDIR to such a directory, and re-run install.sh." >&2
   return 1
 }
@@ -261,10 +274,12 @@ load_dotenv_no_clobber() {
   return 0
 }
 
-# Print the kernel-agent.env.sh install.sh writes for the checkout $1 (default $REPO_ROOT) under the caller's
-# environment, or nothing when no workspace is named; refuse it (status 1, nothing printed) when another account
-# could have written it (runtime_env_private_kernel_agent_env). Run it in a command substitution: it loads .env into
-# the shell that runs it.
+# Print the kernel-agent.env.sh install.sh wrote for the checkout $1 (default $REPO_ROOT) under the caller's
+# environment. Status 1 and nothing printed, with why on stderr, when no workspace is named, when install.sh has not
+# written the file in this container, or when another account could have written it
+# (runtime_env_private_kernel_agent_env); a caller sources the path only on status 0:
+#   kernel_agent_env_file="$(. .../runtime_env.sh; runtime_env_kernel_agent_env_path)" && . "$kernel_agent_env_file"
+# Run it in a command substitution: it loads .env into the shell that runs it.
 runtime_env_kernel_agent_env_path() {
   local REPO_ROOT="${1:-${REPO_ROOT:-}}"
   if [ -n "$REPO_ROOT" ]; then
@@ -273,7 +288,10 @@ runtime_env_kernel_agent_env_path() {
   fi
   runtime_env_forget_legacy_kernel_agent_env
   if [ -z "${KERNEL_AGENT_ENV:-}" ]; then
-    [ -n "${HYPERLOOM_RUNTIME_DIR:-}${USER_DATA_PATH:-}" ] || return 0
+    if [ -z "${HYPERLOOM_RUNTIME_DIR:-}${USER_DATA_PATH:-}" ]; then
+      printf '%s\n' "[runtime-env ERROR] no kernel-agent env file to load: none of KERNEL_AGENT_ENV, HYPERLOOM_RUNTIME_DIR, USER_DATA_PATH is set; export USER_DATA_PATH and run install.sh in this container first." >&2
+      return 1
+    fi
     runtime_env_derive_runtime_paths
   fi
   runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" || return 1
