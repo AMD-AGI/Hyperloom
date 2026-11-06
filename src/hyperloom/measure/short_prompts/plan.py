@@ -75,8 +75,8 @@ class ShortPromptPlan:
             raise DocumentError("short prompts: prompts_sha256 is not a sha256")
         if isinstance(self.max_new_tokens, bool) or not 1 <= self.max_new_tokens <= _MAX_NEW_TOKENS:
             raise DocumentError(f"short prompts: max_new_tokens must be 1 to {_MAX_NEW_TOKENS}")
-        if not math.isfinite(self.phase_cap_sec) or self.phase_cap_sec <= 0:
-            raise DocumentError("short prompts: phase_cap_sec must be a positive number")
+        if not math.isfinite(self.phase_cap_sec) or self.phase_cap_sec < 1:  # what :meth:`parse` reads back
+            raise DocumentError("short prompts: phase_cap_sec must be a number of at least 1")
         if len(self.trigger) > _MAX_TRIGGER_LINES:
             raise DocumentError(f"short prompts: at most {_MAX_TRIGGER_LINES} trigger lines")
         for index, line in enumerate(self.trigger):

@@ -101,8 +101,6 @@ class HostedToolboxInputs:
             from the name, so a role given as a bare name or a list says no card count and is refused.
         source_sha: The full lowercase commit hash that names the runner cache entry the runner's start-up script
             installs from (``HYPERLOOM_SOURCE_SHA``).
-        source_repo: Accepted and not used: the sealed runner has no network and installs from the runner cache, so it
-            no longer fetches from a repository. The field stays so a host that still sends it builds the inputs.
         tp: The session's tensor-parallel size: the cards of one runner sandbox and of one ``dev`` lease.
         dev_key: The API key of the ``dev`` role. Without it no branch sandbox is leased. Never in ``repr`` or a log.
         grant_limits: The grant's totals, a mapping with all of ``max_sandboxes``, ``max_gpus``, ``gpu_hours`` and
@@ -130,7 +128,6 @@ class HostedToolboxInputs:
     measurement_key: str = field(repr=False)
     sandbox_templates: Mapping[str, object]
     source_sha: str
-    source_repo: str | None = None
     tp: int = 1
     dev_key: str | None = field(default=None, repr=False)
     grant_limits: Mapping[str, float] | None = None
