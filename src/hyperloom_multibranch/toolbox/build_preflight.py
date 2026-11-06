@@ -17,6 +17,8 @@ configured, so a host that is set up wrong refuses at start, naming every item, 
   (``<sources>/<component>/<commit>``, at that commit), and no other commit of a component it has a directory for. The
   commit is read from the image's installed upstream (``sglang`` for ``sgl_kernel``, ``vllm`` for ``vllm``: its
   ``direct_url.json``, or the checkout it was installed from) or, for sglang, its checkout ``/sgl-workspace/sglang``;
+  for an image that names none, it is the commit the host's setup was told (``HYPERLOOM_BUILD_SGLANG_REF``, which
+  ``build_setup --sglang-ref`` records);
 - the importable TraceLens is the commit this repository pins (``TRACELENS_REF``): read from a git checkout or the
   installed version's ``+g<commit>``; when neither names a commit, the toolbox's TraceLens imports must succeed.
 
@@ -37,7 +39,7 @@ import subprocess
 import sys
 import sysconfig
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os import geteuid
 from pathlib import Path
 from shutil import which
@@ -60,6 +62,8 @@ __all__ = [
     "image_upstreams",
     "reach_problems",
     "signing_key_problem",
+    "site_upstreams",
+    "sources_problems",
     "tamper_problems",
     "tracelens_problem",
     "unreachable",
@@ -91,7 +95,8 @@ StatFn = Callable[[Path], os.stat_result]
 @dataclass(frozen=True)
 class PreflightSite:
     """What the build service was configured with: the store, its trust file and signing key, the upstream checkouts, the
-    image's packages and its interpreter."""
+    image's packages and its interpreter, and the commit of each component's upstream the host's setup was told, by
+    component (``sgl_kernel``: ``HYPERLOOM_BUILD_SGLANG_REF``), for an image that names none."""
 
     store: Path
     trust: Path
@@ -99,6 +104,7 @@ class PreflightSite:
     sources: Path
     image_root: Path
     python: str
+    named_commits: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -325,13 +331,26 @@ def image_checkouts(sources: Path, upstreams: Sequence[ImageUpstream]) -> list[P
     return [sources / up.component / up.ref for up in upstreams if (sources / up.component / up.ref).is_dir()]
 
 
-def _sources_problems(site: PreflightSite, upstreams: Sequence[ImageUpstream]) -> Iterator[str]:
-    """Whether ``HYPERLOOM_BUILD_SOURCES`` holds the image's checkouts (see the module)."""
+def site_upstreams(site: PreflightSite) -> list[ImageUpstream]:
+    """The upstream commit of each native component of ``site``'s image: the one the image names
+    (:func:`image_upstreams`), else the one ``site.named_commits`` gives."""
+    found = image_upstreams(site.image_root)
+    named = {up.component for up in found}
+    return found + [
+        ImageUpstream(component, commit, None)
+        for component, commit in site.named_commits.items()
+        if component not in named
+    ]
+
+
+def sources_problems(site: PreflightSite, upstreams: Sequence[ImageUpstream]) -> Iterator[str]:
+    """Whether ``HYPERLOOM_BUILD_SOURCES`` holds the checkouts of ``upstreams``, the image's (see the module)."""
     if not upstreams:
         names = " or ".join(_DISTRIBUTIONS.values())
         yield (
             f"the image's upstream commits cannot be read: HYPERLOOM_BUILD_IMAGE_ROOT {site.image_root} installs no "
-            f"{names} that names one and {IMAGE_SGLANG_CHECKOUT} is not a git checkout"
+            f"{names} that names one, {IMAGE_SGLANG_CHECKOUT} is not a git checkout and HYPERLOOM_BUILD_SGLANG_REF "
+            "is not set"
         )
         return
     for up in upstreams:
@@ -400,9 +419,9 @@ def build_preflight(site: PreflightSite) -> None:
         problems.append(f"the build service runs as uid {geteuid()}, not root: it cannot compile as user {NOBODY}")
     if which("setpriv") is None:
         problems.append(f"setpriv is not on PATH: the build service cannot compile as user {NOBODY}")
-    upstreams = image_upstreams(site.image_root)
+    upstreams = site_upstreams(site)
     checkouts = image_checkouts(site.sources, upstreams)
-    problems.extend(_sources_problems(site, upstreams))
+    problems.extend(sources_problems(site, upstreams))
     problems.extend(reach_problems(site, checkouts))
     problems.extend(tamper_problems(site, checkouts))
     tracelens_issue = tracelens_problem()
