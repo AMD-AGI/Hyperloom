@@ -191,10 +191,25 @@ def test_the_child_compiles_with_the_builder_of_the_tree_it_is_given(tmp_path: P
 
 
 def test_a_child_whose_builder_resolves_outside_the_tree_refuses_to_build(tmp_path: Path) -> None:
+    """The tree's builder is a link to one outside it, which would build (it stages a record): the child refuses it."""
+    outside = tmp_path / "outside" / "child.py"
+    outside.parent.mkdir()
+    outside.write_text(_MARKED_CHILD)
+    tree = _tree(tmp_path / "tree", _MARKED_CHILD)
+    (tree / _PACKAGES[-1] / "child.py").unlink()
+    (tree / _PACKAGES[-1] / "child.py").symlink_to(outside)
+
+    with pytest.raises(BuildInfraError, match="not to the tree under test"):
+        _built_with_source(tmp_path, tree)
+
+
+def test_a_tree_without_the_builder_builds_nothing(tmp_path: Path) -> None:
+    """The child runs under ``python -I``: the only builder it could find for a tree without one is an installed copy,
+    which it refuses, and with none installed it finds nothing to run. Either way nothing is built."""
     elsewhere = tmp_path / "tree-without-hyperloom"
     elsewhere.mkdir()
 
-    with pytest.raises(BuildInfraError, match="not to the tree under test"):
+    with pytest.raises(BuildInfraError, match="the build runner exited"):
         _built_with_source(tmp_path, elsewhere)
 
 

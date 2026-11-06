@@ -75,7 +75,10 @@ def test_runner_envs_add_to_the_image_variables_rather_than_replace_them(
     provider = LocalSandboxProvider([replace(template, command=probe)], gpus=(0,), base_dir=tmp_path / "sandboxes")
     sandbox = provider.create(template.name, role="measurement", timeout_sec=60, metadata={})
     try:
-        seen = _wait_for_file(sandbox, "/out/env")
+        # The probe the template started has written all it will once it has ended: wait for that, not for a deadline.
+        process, status = sandbox._startup  # type: ignore[attr-defined]
+        assert status.wait_exit(process, None) == 0
+        seen = sandbox.read_file("/out/env")
     finally:
         sandbox.kill()
     assert seen == b"/opt/rocm-own|/opt/rocm/lib"
@@ -116,17 +119,6 @@ def test_only_the_named_tool_repositories_are_taken_from_the_host() -> None:
     assert host_tool_repos({}) == {}
 
 
-def _wait_for_file(sandbox: Any, path: str, limit_sec: float = 30) -> bytes:
-    end = time.monotonic() + limit_sec
-    while True:
-        try:
-            return sandbox.read_file(path)
-        except FileNotFoundError:
-            if time.monotonic() > end:
-                raise
-            time.sleep(0.05)
-
-
 def _write(path: Path, text: str, written: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
@@ -149,13 +141,14 @@ def test_the_live_output_is_read_from_the_sandbox_of_the_unfinished_attempt(tmp_
     toolbox = LocalHostedToolbox.__new__(LocalHostedToolbox)
     journal = MeasurementJournal(tmp_path / "hosted")
     toolbox.backend, toolbox.sandboxes = SimpleNamespace(journal=journal), tmp_path / "sandboxes"  # type: ignore[assignment]
-    _write(
-        tmp_path / "sandboxes" / "lsb-1" / "fs" / "out" / "files" / "v" / "server.log", "decode batch\n", time.time()
-    )
+    written = time.time()
+    _write(tmp_path / "sandboxes" / "lsb-1" / "fs" / "out" / "files" / "v" / "server.log", "decode batch\n", written)
     assert toolbox._live_log("r1") is None
     journal.append(Record("r1", 1, STATE_SENT, "lsb-1", "tests/r1/attempt-1", "r1", {}))
     output = toolbox._live_log("r1")
-    assert output is not None and output[1] == "decode batch" and 0.0 <= output[0] < 60.0
+    read = time.time()
+    assert output is not None and output[1] == "decode batch", output
+    assert 0.0 <= output[0] <= read - written + 1e-6, "its age is the time since it was written, as of the reading"
     journal.append(Record("r1", 1, STATE_FINISHED, "lsb-1", "tests/r1/attempt-1", "r1", {}))
     assert toolbox._live_log("r1") is None
 
