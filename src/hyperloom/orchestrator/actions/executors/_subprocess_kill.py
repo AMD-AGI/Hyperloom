@@ -825,7 +825,8 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
         return None
     if not env_flag(_KV_METRICS_ENV, default=True):
         return None
-    from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
+    from ._kv_poll import AiperfProgressPoller, KvMetricsPoller
+    from ._kv_record import KV_ARTIFACT_NAME, KvMetricsRecorder, KvRound
 
     workspace = Path(server_log_path).parent
     return KvMetricsRecorder(
