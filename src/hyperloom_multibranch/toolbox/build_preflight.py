@@ -17,6 +17,8 @@ configured, so a host that is set up wrong refuses at start, naming every item, 
   (``<sources>/<component>/<commit>``, at that commit), and no other commit of a component it has a directory for. The
   commit is read from the image's installed upstream (``sglang`` for ``sgl_kernel``, ``vllm`` for ``vllm``: its
   ``direct_url.json``, or the checkout it was installed from) or, for sglang, its checkout ``/sgl-workspace/sglang``;
+  for an image that names none, it is the commit the host's setup was told (``HYPERLOOM_BUILD_SGLANG_REF``, which
+  ``build_setup --sglang-ref`` records);
 - the importable TraceLens is the commit this repository pins (``TRACELENS_REF``): read from a git checkout or the
   installed version's ``+g<commit>``; when neither names a commit, the toolbox's TraceLens imports must succeed.
 
@@ -36,9 +38,10 @@ import stat
 import subprocess
 import sys
 import sysconfig
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from os import geteuid
+from os import stat as stat_path
 from pathlib import Path
 from shutil import which
 from urllib.parse import unquote, urlparse
@@ -49,10 +52,12 @@ from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
 from hyperloom.orchestrator.trace_analysis import TRACELENS_REF
 
 __all__ = [
+    "FULL_COMMIT",
     "IMAGE_CHECKOUTS",
     "IMAGE_SGLANG_CHECKOUT",
     "ImageUpstream",
     "PreflightSite",
+    "SGL_KERNEL",
     "build_preflight",
     "changeable_by_others",
     "git_head",
@@ -60,22 +65,27 @@ __all__ = [
     "image_upstreams",
     "reach_problems",
     "signing_key_problem",
+    "site_upstreams",
+    "sources_problems",
     "tamper_problems",
     "tracelens_problem",
     "unreachable",
 ]
 
+#: The native component built from sglang's ``sgl-kernel``.
+SGL_KERNEL = "sgl_kernel"
+#: A full commit id as git names one: forty lowercase hexadecimal digits.
+FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 #: Where the sglang images keep the checkout their ``sglang`` is installed from.
 IMAGE_SGLANG_CHECKOUT = Path("/sgl-workspace/sglang")
 #: The image's own checkout of a component's upstream, where it keeps one.
-IMAGE_CHECKOUTS = {"sgl_kernel": IMAGE_SGLANG_CHECKOUT}
+IMAGE_CHECKOUTS = {SGL_KERNEL: IMAGE_SGLANG_CHECKOUT}
 _TRACELENS = "TraceLens"
 #: The modules of this repository that import TraceLens when the toolbox starts or analyses a trace.
 _TRACELENS_USERS = (
     "hyperloom.orchestrator.trace_analysis.tracelens_skill_runner",
     "hyperloom.orchestrator.trace_analysis.tracelens_analysis",
 )
-_COMMIT = re.compile(r"[0-9a-f]{40}")
 _VERSION_COMMIT = re.compile(r"\+g([0-9a-f]{7,40})")
 _GIT_TIMEOUT_SEC = 30
 _READ, _RUN = stat.S_IROTH, stat.S_IXOTH
@@ -85,13 +95,12 @@ _OTHERS_ACCESS = 0o077
 #: Write access by the group or others: what lets another user change a file or a directory's entries.
 _SHARED_WRITE = stat.S_IWGRP | stat.S_IWOTH
 
-StatFn = Callable[[Path], os.stat_result]
-
 
 @dataclass(frozen=True)
 class PreflightSite:
     """What the build service was configured with: the store, its trust file and signing key, the upstream checkouts, the
-    image's packages and its interpreter."""
+    image's packages and its interpreter, and the commit of each component's upstream the host's setup was told, by
+    component (``sgl_kernel``: ``HYPERLOOM_BUILD_SGLANG_REF``), for an image that names none."""
 
     store: Path
     trust: Path
@@ -99,6 +108,7 @@ class PreflightSite:
     sources: Path
     image_root: Path
     python: str
+    named_commits: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -113,7 +123,7 @@ class ImageUpstream:
 
 #: The installed distribution whose commit each native component
 #: (:data:`~hyperloom.measure.runner.native.recipes.RECIPE_FACTORIES`) is built from.
-_DISTRIBUTIONS = {"sgl_kernel": "sglang", "vllm": "vllm"}
+_DISTRIBUTIONS = {SGL_KERNEL: "sglang", "vllm": "vllm"}
 
 
 def _git(directory: Path, *args: str) -> str | None:
@@ -133,7 +143,7 @@ def _git(directory: Path, *args: str) -> str | None:
 def git_head(directory: Path) -> str | None:
     """The commit checked out in ``directory``, or ``None`` when it is not a git checkout git can read."""
     head = _git(directory, "rev-parse", "HEAD")
-    return head if head is not None and _COMMIT.fullmatch(head) else None
+    return head if head is not None and FULL_COMMIT.fullmatch(head) else None
 
 
 def _direct_url(distribution: importlib.metadata.Distribution) -> dict:
@@ -148,7 +158,7 @@ def _installed_upstream(image_root: Path, component: str, distribution: str) -> 
     for installed in importlib.metadata.distributions(name=distribution, path=[str(image_root)]):
         direct = _direct_url(installed)
         commit = (direct.get("vcs_info") or {}).get("commit_id")
-        if isinstance(commit, str) and _COMMIT.fullmatch(commit):
+        if isinstance(commit, str) and FULL_COMMIT.fullmatch(commit):
             return ImageUpstream(component, commit, None)
         url = urlparse(str(direct.get("url", "")))
         if url.scheme == "file":
@@ -185,27 +195,27 @@ def _describe(path: Path, found: os.stat_result) -> str:
     return f"{path} (mode {stat.S_IMODE(found.st_mode):04o}, owner uid {found.st_uid} gid {found.st_gid})"
 
 
-def unreachable(path: Path, *, run: bool = False, stat_fn: StatFn = os.stat) -> str | None:
+def unreachable(path: Path, *, run: bool = False) -> str | None:
     """Why user 65534 cannot reach ``path`` (list and enter a directory, read a file, and run it when ``run``), naming
     the first directory or file that stops it, on the path as given and as resolved; ``None`` when it can."""
     absolute = Path(os.path.abspath(path))
     for candidate in dict.fromkeys((absolute, Path(os.path.realpath(path)))):
         for directory in reversed(candidate.parents):
-            problem = _blocked(directory, _RUN, stat_fn, "pass through")
+            problem = _blocked(directory, _RUN, "pass through")
             if problem:
                 return problem
     target = Path(os.path.realpath(path))
     try:
-        is_dir = stat.S_ISDIR(stat_fn(target).st_mode)
+        is_dir = stat.S_ISDIR(stat_path(target).st_mode)
     except OSError:
         return f"{target} does not exist"
     wanted = _READ | _RUN if is_dir or run else _READ
-    return _blocked(target, wanted, stat_fn, "read and enter it" if is_dir else "run it" if run else "read it")
+    return _blocked(target, wanted, "read and enter it" if is_dir else "run it" if run else "read it")
 
 
-def _blocked(path: Path, bits: int, stat_fn: StatFn, what: str) -> str | None:
+def _blocked(path: Path, bits: int, what: str) -> str | None:
     try:
-        found = stat_fn(path)
+        found = stat_path(path)
     except OSError:
         return f"{path} does not exist"
     return None if _allows(found, bits) else f"{_describe(path, found)} does not let user {NOBODY} {what}"
@@ -325,13 +335,26 @@ def image_checkouts(sources: Path, upstreams: Sequence[ImageUpstream]) -> list[P
     return [sources / up.component / up.ref for up in upstreams if (sources / up.component / up.ref).is_dir()]
 
 
-def _sources_problems(site: PreflightSite, upstreams: Sequence[ImageUpstream]) -> Iterator[str]:
-    """Whether ``HYPERLOOM_BUILD_SOURCES`` holds the image's checkouts (see the module)."""
+def site_upstreams(site: PreflightSite) -> list[ImageUpstream]:
+    """The upstream commit of each native component of ``site``'s image: the one the image names
+    (:func:`image_upstreams`), else the one ``site.named_commits`` gives."""
+    found = image_upstreams(site.image_root)
+    named = {up.component for up in found}
+    return found + [
+        ImageUpstream(component, commit, None)
+        for component, commit in site.named_commits.items()
+        if component not in named
+    ]
+
+
+def sources_problems(site: PreflightSite, upstreams: Sequence[ImageUpstream]) -> Iterator[str]:
+    """Whether ``HYPERLOOM_BUILD_SOURCES`` holds the checkouts of ``upstreams``, the image's (see the module)."""
     if not upstreams:
         names = " or ".join(_DISTRIBUTIONS.values())
         yield (
             f"the image's upstream commits cannot be read: HYPERLOOM_BUILD_IMAGE_ROOT {site.image_root} installs no "
-            f"{names} that names one and {IMAGE_SGLANG_CHECKOUT} is not a git checkout"
+            f"{names} that names one, {IMAGE_SGLANG_CHECKOUT} is not a git checkout and HYPERLOOM_BUILD_SGLANG_REF "
+            "is not set"
         )
         return
     for up in upstreams:
@@ -400,9 +423,9 @@ def build_preflight(site: PreflightSite) -> None:
         problems.append(f"the build service runs as uid {geteuid()}, not root: it cannot compile as user {NOBODY}")
     if which("setpriv") is None:
         problems.append(f"setpriv is not on PATH: the build service cannot compile as user {NOBODY}")
-    upstreams = image_upstreams(site.image_root)
+    upstreams = site_upstreams(site)
     checkouts = image_checkouts(site.sources, upstreams)
-    problems.extend(_sources_problems(site, upstreams))
+    problems.extend(sources_problems(site, upstreams))
     problems.extend(reach_problems(site, checkouts))
     problems.extend(tamper_problems(site, checkouts))
     tracelens_issue = tracelens_problem()

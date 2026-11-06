@@ -16,6 +16,7 @@ from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.failure_signature import FailureSignature
+from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import RoundRequest
@@ -67,6 +68,7 @@ def test_extract_launch_log_empty_on_none_or_blank():
         ({"error": "bad --flag"}, "fast_exit_arg_error"),
         ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
         ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
+        ({"error": "gpu_selection.auto: needed 8 idle GPU(s) but only found 7"}, HOST_GPUS_UNAVAILABLE),
         ({"error": "budget reached"}, SESSION_TIME_EXHAUSTED_CLASS),
     ],
 )

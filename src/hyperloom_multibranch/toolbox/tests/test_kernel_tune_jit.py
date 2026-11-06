@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: MIT
 
 """What a ``kernel_tune`` job's tuner builds stays with the job: its ``AITER_JIT_DIR`` is a directory below the job's
-holding links to the image's prebuilt modules, and the image's ``aiter/jit`` is never written. Its temporary directory is
-the one it inherits, where Forge looks for the comparison files. Forge is a stand-in that builds a module and writes a
-comparison file where aiter would, through the variables it was given."""
+holding links to the image's prebuilt modules, and the image's ``aiter/jit`` is never written. Its temporary directory,
+where aiter's tuner writes the comparison files and Forge reads them back, is a new one of its own, removed when the
+tuning ends. Forge is a stand-in that builds a module and writes a comparison file where aiter would, through the
+variables it was given."""
 
 from __future__ import annotations
 
@@ -92,13 +93,14 @@ async def test_the_tuner_builds_into_a_jit_directory_of_the_job_and_never_into_t
     assert (own / BUILT).read_bytes() == b"built by the tuner", "what the tuner built stays with the job"
 
 
-async def test_the_tuner_keeps_the_temporary_directory_it_inherits_where_forge_reads_the_comparison_files(
+async def test_the_tuner_gets_a_temporary_directory_of_its_own_where_forge_reads_the_comparison_files(
     make: tuple[Make, BuildingForge], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     build, forge = make
     inherited = tmp_path / "inherited-tmp"
     inherited.mkdir()
     monkeypatch.setenv("TMPDIR", str(inherited))
+    monkeypatch.setattr(tempfile, "tempdir", str(inherited))
     rig = await build(cards=2)
     rig.landed()
     await record_test(rig.blackboard)
@@ -106,7 +108,8 @@ async def test_the_tuner_keeps_the_temporary_directory_it_inherits_where_forge_r
     assert await rig.finished(job) is JobStatus.SUCCEEDED
 
     ((_, env),) = forge.calls
-    assert env.get("TMPDIR") == str(inherited), (
-        "Forge reads the literal /tmp/aiter_compare, never a TMPDIR of the job's"
-    )
-    assert (inherited / "aiter_compare" / "shape0.pt").is_file()
+    own = Path(env["TMPDIR"])
+    assert own.parent == inherited, "a new directory below the toolbox's own temporary directory"
+    assert forge.seen[0]["tmp_is_dir"], "made before the tuner ran"
+    assert not own.exists(), "removed, with the comparison files in it, when the tuning ended"
+    assert not (inherited / "aiter_compare").exists(), "the toolbox's own temporary directory holds none"

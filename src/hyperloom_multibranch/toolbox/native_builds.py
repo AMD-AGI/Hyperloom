@@ -17,7 +17,9 @@ reads. So it also needs:
 - ``HYPERLOOM_BUILD_IMAGE_ROOT``: the image's directory of installed packages (``site-packages``);
 - ``HYPERLOOM_BUILD_GFX``: the GPU architecture the outputs are built for;
 - ``HYPERLOOM_BUILD_PYTHON`` (``python3`` when unset): the image's interpreter, which runs the compile;
-- ``HYPERLOOM_BUILDER_IMAGE`` (the active image when unset): the digest of the image the build runs in.
+- ``HYPERLOOM_BUILDER_IMAGE`` (the active image when unset): the digest of the image the build runs in;
+- ``HYPERLOOM_BUILD_SGLANG_REF`` (unset when the image names its own): the image's sglang commit, a full commit id, for
+  an image that names none (``build_setup --sglang-ref`` records it).
 
 A store and trust given without any of the four required ones refuse the build of the toolbox, naming the variable, and
 so does a host that is not ready for them (:func:`~hyperloom_multibranch.toolbox.build_preflight.build_preflight`;
@@ -59,7 +61,13 @@ from hyperloom.measure.runner.native.isolated import (
 )
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES, native_recipes
-from hyperloom_multibranch.toolbox.build_preflight import PreflightSite, build_preflight, signing_key_problem
+from hyperloom_multibranch.toolbox.build_preflight import (
+    FULL_COMMIT,
+    SGL_KERNEL,
+    PreflightSite,
+    build_preflight,
+    signing_key_problem,
+)
 from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
@@ -67,11 +75,13 @@ __all__ = [
     "BUILD_GFX_ENV",
     "BUILD_IMAGE_ROOT_ENV",
     "BUILD_PYTHON_ENV",
+    "BUILD_SGLANG_REF_ENV",
     "BUILD_SIGNING_KEY_ENV",
     "BUILD_SOURCES_ENV",
     "BUILDER_IMAGE_ENV",
     "NativeBuilds",
     "compiled_needs",
+    "named_commits",
     "native_builds",
     "with_native_plan",
 ]
@@ -82,6 +92,7 @@ BUILD_IMAGE_ROOT_ENV = "HYPERLOOM_BUILD_IMAGE_ROOT"
 BUILD_GFX_ENV = "HYPERLOOM_BUILD_GFX"
 BUILD_PYTHON_ENV = "HYPERLOOM_BUILD_PYTHON"
 BUILDER_IMAGE_ENV = "HYPERLOOM_BUILDER_IMAGE"
+BUILD_SGLANG_REF_ENV = "HYPERLOOM_BUILD_SGLANG_REF"
 _DEFAULT_PYTHON = "python3"
 
 logger = logging.getLogger(__name__)
@@ -111,6 +122,18 @@ def _required(environ: Mapping[str, str], name: str) -> str:
     return value
 
 
+def named_commits(environ: Mapping[str, str]) -> dict[str, str]:
+    """The upstream commit of each component ``environ`` names for an image that names none, by component.
+
+    Raises:
+        BuildStoreConfigError: ``HYPERLOOM_BUILD_SGLANG_REF`` is set to something other than a full commit id.
+    """
+    ref = environ.get(BUILD_SGLANG_REF_ENV, "").strip()
+    if ref and not FULL_COMMIT.fullmatch(ref):
+        raise BuildStoreConfigError(f"{BUILD_SGLANG_REF_ENV} must be a full lowercase commit id")
+    return {SGL_KERNEL: ref} if ref else {}
+
+
 def _signer(path: Path) -> Signer:
     """The service's key, from a file only this user can read: the compile runs as another user on this host, and a key
     it could read is a key it could forge records with.
@@ -137,8 +160,8 @@ def native_builds(
     """The native builds ``environ`` configures for a session on ``image_digest`` (see the module); ``None`` for none.
 
     Raises:
-        BuildStoreConfigError: The store is half configured, its trust or signing key cannot be read, or a variable the
-            service needs is not set.
+        BuildStoreConfigError: The store is half configured, its trust or signing key cannot be read, a variable the
+            service needs is not set, or the sglang commit it names is not a full commit id.
     """
     store = store_from_environment(environ)
     if store is None:
@@ -155,7 +178,7 @@ def native_builds(
     sources, image_root = Path(_required(environ, BUILD_SOURCES_ENV)), Path(_required(environ, BUILD_IMAGE_ROOT_ENV))
     runner_envs = {BUILD_STORE_ENV: environ[BUILD_STORE_ENV].strip(), BUILD_TRUST_ENV: environ[BUILD_TRUST_ENV].strip()}
     shared = (Path(runner_envs[BUILD_STORE_ENV]), Path(runner_envs[BUILD_TRUST_ENV]))
-    build_preflight(PreflightSite(*shared, key, sources, image_root, machine.python))
+    build_preflight(PreflightSite(*shared, key, sources, image_root, machine.python, named_commits(environ)))
     recipes = native_recipes()
     site = NativeSite(machine, recipes, sources, image_root)
     planner, isolated = NativePlanner(site, blobs), isolation()

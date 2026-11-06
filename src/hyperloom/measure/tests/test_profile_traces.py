@@ -87,3 +87,40 @@ def test_a_stale_directory_of_an_earlier_attempt_is_replaced_not_merged(tmp_path
     collect_traces(workspace, destination)
 
     assert sorted(p.name for p in (destination / "torch_trace").iterdir()) == ["new.pt.trace.json.gz"]
+
+
+def test_capture_traces_in_and_beside_the_workspace_are_both_kept_and_both_counted(tmp_path: Path) -> None:
+    workspace = tmp_path / "round" / "ws"
+    _file(workspace / "capture_traces" / "bs_1_rank0.json", b"inside 1")
+    _file(workspace / "capture_traces" / "bs_2_rank0.json", b"inside 2")
+    _file(workspace.parent / "capture_traces" / "bs_1_rank0.json", b"beside 1")
+    _file(workspace.parent / "capture_traces" / "bs_4_rank0.json", b"beside 4")
+    destination = tmp_path / "out" / "profile"
+
+    assert collect_traces(workspace, destination) == 2
+
+    kept = {p.relative_to(destination).as_posix(): p.read_bytes() for p in destination.rglob("*") if p.is_file()}
+    assert sorted(kept.values()) == [b"beside 1", b"beside 4", b"inside 1", b"inside 2"], "no trace was overwritten"
+    assert kept["capture_traces/bs_1_rank0.json"] == b"inside 1", "the round's own file keeps its name"
+    assert all(path.startswith("capture_traces/bs_") for path in kept), "each still reads as a capture sidecar"
+    assert has_traces(destination) and not has_step_traces(destination)
+    assert not (workspace / "capture_traces").exists() and not (workspace.parent / "capture_traces").exists()
+
+
+@pytest.mark.parametrize("file_first", [True, False], ids=["the-file-in-the-workspace", "the-file-beside-it"])
+def test_a_file_in_one_capture_traces_and_a_directory_of_its_name_in_the_other_are_both_kept(
+    tmp_path: Path, file_first: bool
+) -> None:
+    workspace = tmp_path / "round" / "ws"
+    inside, beside = workspace / "capture_traces", workspace.parent / "capture_traces"
+    with_file, with_directory = (inside, beside) if file_first else (beside, inside)
+    _file(with_file / "bs_1_rank0.json", b"file")
+    _file(with_file / "bs_2_rank0.json", b"file 2")
+    _file(with_directory / "bs_1_rank0.json" / "bs_4_rank0.json", b"nested")
+    destination = tmp_path / "out" / "profile"
+
+    assert collect_traces(workspace, destination) == 2
+
+    kept = sorted(p.read_bytes() for p in destination.rglob("*") if p.is_file())
+    assert kept == [b"file", b"file 2", b"nested"], "no trace was lost or overwritten"
+    assert not inside.exists() and not beside.exists()
