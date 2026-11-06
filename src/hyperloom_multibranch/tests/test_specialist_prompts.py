@@ -594,6 +594,25 @@ def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
     assert edited["specialist_launch"] == versions["specialist_launch"]
 
 
+@pytest.mark.parametrize(
+    ("name", "edit", "version"),
+    [
+        ("_DEV_SANDBOX", lambda text: text + " One more rule.", "specialist_role"),
+        ("_NATIVE", lambda text: text + " One more rule.", "specialist_role"),
+        ("_REFERENCES", lambda text: text + " One more rule.", "specialist_role"),
+        ("_HOLDS", lambda holds: {**holds, "geak": holds["geak"] + " more"}, "specialist_role"),
+        ("_LEASE_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
+        ("_WAIT_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
+    ],
+)
+def test_a_text_sent_only_under_some_settings_still_changes_its_prompt_s_version(monkeypatch, name, edit, version):
+    # A session with dev leases, native trees or references is told these texts, so they belong to its fingerprint.
+    before = prompt_versions()
+    monkeypatch.setattr(prompts, name, edit(getattr(prompts, name)))
+
+    assert prompt_versions()[version] != before[version]
+
+
 def test_a_launch_shows_the_latest_entries_cut_to_size_and_how_the_last_session_ended():
     entries = [_record(n) for n in range(RECENT_ENTRIES + 4)] + [_record(99, "x" * 1000, ("s1-17",))]
 
