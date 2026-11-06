@@ -45,6 +45,7 @@ from inference_suite.recipe.model import (
     SourceMiss,
     VLLM_ENTRYPOINT,
     VLLM_RUNNER_OWNED,
+    adaptive_verification_reason,
     boards_interchangeable,
 )
 
@@ -458,8 +459,8 @@ def _atom_tensor_parallel_size(gpus: int, config: Mapping[str, Any]) -> int:
 def _no_golden_reason(point: InferencexPoint, engine: str, args: Sequence[str]) -> str:
     if point.spec_decoding == "none":
         return "the launch drafts no tokens"
-    if engine == "vllm" and speculative_config(argv_flag_occurrences(args)).get("enable_adaptive_verification") is True:
-        return "vLLM adaptive verification is on, and InferenceX simulates no acceptance under it"
+    if engine == "vllm" and (adaptive := adaptive_verification_reason(speculative_config(argv_flag_occurrences(args)))):
+        return adaptive
     return "InferenceX simulates no acceptance length for this launch"
 
 

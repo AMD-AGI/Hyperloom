@@ -263,6 +263,16 @@ class SourceMiss:
     reason: str
 
 
+def adaptive_verification_reason(spec: Mapping[str, Any]) -> str | None:
+    """Why a vLLM draft ``spec`` gets no golden acceptance when its adaptive verification is on, else ``None``.
+
+    A per-key flag carries the value as text and the JSON object as a bool; vLLM parses both to the same bool.
+    """
+    if str(spec.get("enable_adaptive_verification")).lower() != "true":
+        return None
+    return "vLLM adaptive verification is on, and InferenceX simulates no acceptance under it"
+
+
 __all__ = [
     "ATOM_ENTRYPOINT",
     "ATOM_RUNNER_OWNED",
@@ -278,5 +288,6 @@ __all__ = [
     "SourceMiss",
     "VLLM_ENTRYPOINT",
     "VLLM_RUNNER_OWNED",
+    "adaptive_verification_reason",
     "boards_interchangeable",
 ]
