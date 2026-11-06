@@ -164,8 +164,8 @@ class FixedOutcome:
     stop: Stop | None
 
 
-class _ClientActivity:
-    """Counts the client's output as the server's activity, so a quiet server log mid-load is not a stall."""
+class OutputActivity:
+    """Counts a child's output as the server's activity, so a quiet server log while the child works is not a stall."""
 
     def __init__(self, server: Server, stdout: Path) -> None:
         self._server = server
@@ -197,26 +197,36 @@ def _run_pass(fixed_round: FixedRound, argv: tuple[str, ...], phase: Phase) -> t
     env = {**inherited_env(config.server), **client_env(fixed_round.tool)}
     fixed_round.clock.mark(phase)
     child = spawn(argv, env, layout.client_stdout, layout.client_stderr)
-    ended = wait_child(child, fixed_round.gate, _ClientActivity(fixed_round.server, layout.client_stdout).check)
+    ended = wait_child(child, fixed_round.gate, OutputActivity(fixed_round.server, layout.client_stdout).check)
     returncode = None if isinstance(ended, Stop) else ended.returncode
     return returncode, exit_stop(ended, _WHAT, layout.client_stderr)
+
+
+def _workload(config: SuiteConfig) -> FixedWorkload:
+    if config.fixed is None:
+        raise ValueError(f"the fixed load needs a fixed workload, got {config.workload.value}")
+    return config.fixed
+
+
+def measured_invocation(config: SuiteConfig, tool: ClientTool, base_url: str) -> ClientInvocation:
+    """The measured pass as ``launch.json`` records it, before the round's server is up."""
+    workload = _workload(config)
+    measured = ClientPass(workload.seed, workload.num_prompts, RunLayout(Path(config.paths.run_dir)).inferencex_result)
+    return ClientInvocation(
+        argv=client_argv(tool, base_url, config.server, workload, measured),
+        env=client_env(tool),
+        seed=workload.seed,
+        warmup_seed=workload.warmup_seed,
+    )
 
 
 def run_fixed(fixed_round: FixedRound) -> FixedOutcome:
     """Run the warmup pass (when the workload asks for one), then the measured pass, and read the measured result."""
     config = fixed_round.config
-    workload = config.fixed
-    if workload is None:
-        raise ValueError(f"run_fixed needs a fixed workload, got {config.workload.value}")
+    workload = _workload(config)
     layout = RunLayout(Path(config.paths.run_dir))
-    measured = ClientPass(workload.seed, workload.num_prompts, layout.inferencex_result)
-    measured_argv = client_argv(fixed_round.tool, fixed_round.server.base_url, config.server, workload, measured)
-    invocation = ClientInvocation(
-        argv=measured_argv,
-        env=client_env(fixed_round.tool),
-        seed=workload.seed,
-        warmup_seed=workload.warmup_seed,
-    )
+    invocation = measured_invocation(config, fixed_round.tool, fixed_round.server.base_url)
+    measured_argv = invocation.argv
     if workload.num_warmups:
         warmup = ClientPass(workload.warmup_seed, workload.num_warmups, None)
         warmup_argv = client_argv(fixed_round.tool, fixed_round.server.base_url, config.server, workload, warmup)
@@ -245,8 +255,10 @@ __all__ = [
     "ClientTool",
     "FixedOutcome",
     "FixedRound",
+    "OutputActivity",
     "client_argv",
     "client_env",
     "fixed_metrics",
+    "measured_invocation",
     "run_fixed",
 ]

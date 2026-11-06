@@ -24,6 +24,7 @@ from inference_suite.contracts.layout import RunLayout
 from inference_suite.contracts.report import EvalDefinition, FailedStep
 from inference_suite.eval.run import EVAL_MODULE, EvalRequest
 from inference_suite.frameworks import Framework, framework_facts
+from inference_suite.runtime.server import server_url
 
 #: Tokens left for the prompt, as InferenceX's ``run_lm_eval`` leaves them.
 PROMPT_ROOM_TOKENS = 4096
@@ -161,7 +162,7 @@ def plan_eval(config: SuiteConfig, launch: Launch, staged: StagedEval, layout: R
     )
     request = EvalRequest(
         task_yaml=str(staged.task_yaml),
-        base_url=f"http://{server.host}:{server.port}/v1/chat/completions",
+        base_url=f"{server_url(server)}/v1/chat/completions",
         served_model_name=server.served_model_name,
         output_dir=str(layout.eval_dir),
         probe_file=str(layout.eval_probe),
