@@ -114,6 +114,28 @@ paths must exist in the sandbox too. The gateway variables include its credentia
 read, so give the app host a gateway key that agents' commands may see. A lease lives as long as its holder needs it,
 bounded by the grant's `max_runtime_sec`.
 
+## One node: measuring on the app container's own cards
+
+A spec with `placement.measurement: local` and `placement.profile: hosted-gpu` measures on the cards of the app
+container itself, as `hyperloom-multibranch run` does on a machine's: tests, dev sandboxes and autonomous agents all
+run in the app container, so the run needs no measurement or `dev` template, no sandbox key, no
+`HYPERLOOM_SOURCE_REPO`/`HYPERLOOM_SOURCE_SHA` for the runner cache, and no grant. `placement.measurement: local` with
+`hosted-cpu` is refused. What changes on the app host:
+
+- Give the container the node's cards. As many tests run at once as its cards hold at the spec's TP, at most
+  `placement.max_parallel_tests`.
+- Every test runs the app container's own framework, so `HYPERLOOM_ACTIVE_IMAGE_REF` and
+  `HYPERLOOM_ACTIVE_IMAGE_DIGEST` name the image the app container runs, and the spec's `framework.image` must name it by
+  that digest (`<repository>@sha256:<digest>`); any other image is refused (exit code 2), and missing pins end the run
+  (exit code 1).
+- `HYPERLOOM_GRANT_LIMITS` is optional. Without it the spec's `budget.max_hours` bounds the session; with a
+  `max_runtime_sec`, the earlier of the two does. Its other totals are not read.
+- `HYPERLOOM_RUNNER_CACHE` is still required: the session stages its prompt sets and the inference_suite staging
+  every test runs there.
+- The agent and dev sandboxes and the tests run in this container, beside the run's credentials, so the run starts only
+  where they run isolated, as the specialists must: under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`). Where it
+  cannot sandbox them, the run ends before anything starts, naming them and why (exit code 1).
+
 ## Example: clusters with an NFS share
 
 On clusters where both the app host and the sandboxes mount one NFS share at `/mnt/shared`, NFS is the fast path and
