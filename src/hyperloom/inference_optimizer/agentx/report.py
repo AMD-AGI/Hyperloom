@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.agentx_workload import find_aiperf_artifact
 from hyperloom.common.launch_log_evidence import (
     engine_adjusted_settings_from_log,
     observed_server_config_from_log,
@@ -123,15 +124,16 @@ def native_launch_evidence(
 
 _SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
 # Magpie's AgentX report carries no sequence lengths; the aiperf summary it leaves in the round's workspace does.
-_AIPERF_EXPORT = Path("aiperf_artifacts") / "profile_export_aiperf.json"
+_AIPERF_SUMMARY = "profile_export_aiperf.json"
 
 
 def measured_corpus_shape(workspace: Path | None) -> dict[str, Any]:
     """The ISL/OSL percentiles the round replayed, from aiperf's export; ``{}`` when it does not carry both."""
-    if workspace is None:
+    path = None if workspace is None else find_aiperf_artifact(workspace, _AIPERF_SUMMARY)
+    if path is None:
         return {}
     try:
-        export = json.loads((Path(workspace) / _AIPERF_EXPORT).read_text(encoding="utf-8"))
+        export = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(export, dict):

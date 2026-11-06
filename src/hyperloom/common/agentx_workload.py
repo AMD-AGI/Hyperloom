@@ -28,6 +28,10 @@ AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
 # re-parented away from the client, so reaping the round's process tree never reaches it.
 AGENTX_SERVER_PIDFILE = "agentx_server.pid"
 
+# Where the AgentX client leaves aiperf's artifacts, relative to the round's directory; a round may nest its benchmark
+# one level down.
+AIPERF_ARTIFACT_DIRS = ("aiperf_artifacts", "*/aiperf_artifacts")
+
 BACKEND_ENV = "HYPERLOOM_AGENTIC_BACKEND"
 
 # The MLPerf agentic v6 corpus and the two flows ``run_agentic.sh`` accepts.
@@ -176,3 +180,16 @@ def canonical_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> flo
         return 0.0
     warmup = agentx_warmup_requests(conc) * CANON_SECONDS_PER_WARMUP_REQUEST
     return AGENTX_BOOT_ALLOWANCE_SEC + warmup + CANON_PROFILING_WINDOW_SEC + CANON_FINALISATION_SEC
+
+
+def find_aiperf_artifact(workspace: Path | str, name: str) -> Path | None:
+    """The aiperf artifact ``name`` of the round in ``workspace``, under one of :data:`AIPERF_ARTIFACT_DIRS`."""
+    try:
+        root = Path(workspace)
+        for directory in AIPERF_ARTIFACT_DIRS:
+            for candidate in sorted(root.glob(f"{directory}/{name}")):
+                if candidate.is_file():
+                    return candidate
+    except OSError:
+        return None
+    return None

@@ -43,6 +43,16 @@ def test_the_rounds_aiperf_export_gives_the_measurement_its_corpus_shape(tmp_pat
     assert measured["agentx_corpus_shape"] == _MEASURED
 
 
+def test_a_round_that_nests_its_benchmark_one_level_down_still_gives_its_corpus_shape(tmp_path):
+    workspace = tmp_path / "round"
+    artifacts = workspace / "benchmark_sglang_round" / "aiperf_artifacts"
+    artifacts.mkdir(parents=True)
+    export = {"input_sequence_length": _ISL, "output_sequence_length": _OSL}
+    (artifacts / "profile_export_aiperf.json").write_text(json.dumps(export))
+
+    assert _measure(workspace)["agentx_corpus_shape"] == _MEASURED
+
+
 @pytest.mark.parametrize("export", [None, {"input_sequence_length": _ISL}, {"input_sequence_length": "n/a"}])
 def test_a_round_without_both_lengths_reports_no_corpus_shape(tmp_path, export):
     assert "agentx_corpus_shape" not in _measure(_workspace(tmp_path, export))
