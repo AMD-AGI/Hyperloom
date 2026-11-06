@@ -1991,7 +1991,7 @@ _write_specialist_secret_env_opt_in() {
     log "would append HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1 to ${KERNEL_AGENT_ENV}"
     return 0
   fi
-  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" write || die "kernel-agent env file not updated"
   if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
     sed -i 's|^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=.*|export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1|' "$KERNEL_AGENT_ENV"
   else
@@ -2085,7 +2085,7 @@ PY
     log "would append INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=$roots to ${KERNEL_AGENT_ENV}"
     return 0
   fi
-  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" write || die "kernel-agent env file not updated"
   if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
     sed -i "s|^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=.*|export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=${roots}|" "$KERNEL_AGENT_ENV"
   else

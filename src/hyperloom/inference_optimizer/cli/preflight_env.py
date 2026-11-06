@@ -11,6 +11,7 @@ import io
 import os
 import re
 import shlex
+import stat
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -376,7 +377,8 @@ def _kernel_agent_env_candidate() -> str | None:
 
     ``KERNEL_AGENT_ENV``, unless it names the file's legacy place in the user's directory (``_legacy_kernel_agent_env``);
     else ``${TMPDIR:-/tmp}/hyperloom-<uid>-<first 16 hex of sha256(runtime dir)>/kernel-agent.env.sh``, the runtime dir
-    being ``HYPERLOOM_RUNTIME_DIR``, else ``USER_DATA_PATH/runtime``, each as ``_workspace_selection`` has it.
+    being ``HYPERLOOM_RUNTIME_DIR``, else ``USER_DATA_PATH/runtime``, each as ``_workspace_selection`` has it, and
+    hashed as ``_absolute_path`` makes it absolute.
     """
     selection = _workspace_selection()
     user_data = selection.get("USER_DATA_PATH") or ""
@@ -386,9 +388,22 @@ def _kernel_agent_env_candidate() -> str | None:
         return explicit
     if not runtime_dir:
         return None
-    key = hashlib.sha256(runtime_dir.encode()).hexdigest()[:16]
-    tmp = os.environ.get("TMPDIR") or "/tmp"  # nosec B108 - install.sh makes the directory below 0700 and checks it
+    key = hashlib.sha256(os.fsencode(_absolute_path(runtime_dir))).hexdigest()[:16]
+    tmp = os.environ.get("TMPDIR") or "/tmp"  # nosec B108 - every reader refuses what another account wrote there
     return f"{tmp}/hyperloom-{os.getuid()}-{key}/{_KERNEL_AGENT_ENV_NAME}"
+
+
+def _absolute_path(path: str) -> str:
+    """``path`` absolute: a leading ``~`` or ``~name`` expanded, a relative path put under ``os.getcwd()`` (what
+    ``cli.main`` makes ``USER_DATA_PATH`` absolute against), empty and ``.`` components dropped, nothing else resolved.
+
+    A copy of ``runtime_env_absolute_path`` in assets/runtime_env.sh, which keys the file for install.sh and the
+    documented ``source`` line; ``test_install_session_paths.py`` holds the two equal.
+    """
+    path = os.path.expanduser(path)
+    if not path.startswith("/"):
+        path = f"{os.getcwd()}/{path}"
+    return "/" + "/".join(part for part in path.split("/") if part not in ("", "."))
 
 
 def _legacy_kernel_agent_env(runtime_dir: str, user_data: str) -> set[str]:
@@ -400,7 +415,10 @@ def _legacy_kernel_agent_env(runtime_dir: str, user_data: str) -> set[str]:
 
 
 def _kernel_agent_env_path() -> Path:
-    """The kernel-agent env file this run sources; exit 2 when it cannot be resolved or does not exist."""
+    """The kernel-agent env file this run sources; exit 2 when it cannot be resolved, does not exist, or is not private.
+
+    Its directory and the file, where they exist, are held to ``_kernel_agent_env_problem`` before anything is read.
+    """
     candidate = _kernel_agent_env_candidate()
 
     if not candidate:
@@ -413,6 +431,12 @@ def _kernel_agent_env_path() -> Path:
         )
         sys.exit(2)
     env_path = Path(candidate)
+    for entry, is_dir in ((env_path.parent, True), (env_path, False)):
+        try:
+            entry_stat = entry.lstat()
+        except OSError:
+            continue
+        _require_private_kernel_agent_env(env_path, entry, entry_stat, is_dir=is_dir)
     if not env_path.is_file():
         print(
             f"Preflight: ERROR — kernel-agent env file not found at "
@@ -430,11 +454,65 @@ def _kernel_agent_env_path() -> Path:
     return env_path
 
 
+def _kernel_agent_env_problem(entry_stat: os.stat_result, *, is_dir: bool) -> str | None:
+    """Why an entry with this status cannot be, or hold, the kernel-agent env file; None when it can.
+
+    The file carries credentials and is sourced, so it is read only from a directory of this account's, not a link,
+    that its group and others cannot write, as a regular file of this account's, not a link, that they cannot write.
+    The rule's owner is ``runtime_env_private_kernel_agent_env`` in assets/runtime_env.sh (install.sh, the documented
+    ``source`` line, the slurm job); this is its copy for preflight, in the same words, and
+    ``test_install_session_paths.py`` holds every reader to the same refusals.
+    """
+    uid = os.geteuid()
+    if stat.S_ISLNK(entry_stat.st_mode):
+        return "is a symbolic link"
+    if not (stat.S_ISDIR if is_dir else stat.S_ISREG)(entry_stat.st_mode):
+        return f"is not a {'directory' if is_dir else 'regular file'}"
+    if entry_stat.st_uid != uid:
+        return f"belongs to uid {entry_stat.st_uid}, not to this account (uid {uid})"
+    if entry_stat.st_mode & 0o022:
+        return f"can be written by its group or others (mode {stat.S_IMODE(entry_stat.st_mode):o})"
+    return None
+
+
+def _require_private_kernel_agent_env(env_path: Path, entry: Path, entry_stat: os.stat_result, *, is_dir: bool) -> None:
+    """Exit 2 naming ``entry`` and why when ``_kernel_agent_env_problem`` refuses it, never showing what the file holds."""
+    problem = _kernel_agent_env_problem(entry_stat, is_dir=is_dir)
+    if problem is None:
+        return
+    print(
+        f"Preflight: ERROR — refusing the kernel-agent env file {env_path}: {entry} {problem}; it carries credentials "
+        f"and is sourced, so it is only written and read in a directory of this account's that no other account can "
+        f"write. Set KERNEL_AGENT_ENV to a file in such a directory on this container's own disk, or TMPDIR to such "
+        f"a directory, and re-run install.sh.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _read_kernel_agent_env(env_path: Path) -> str:
+    """The text of ``env_path``, checked again on the descriptors it is read through.
+
+    The directory is opened without following a link and the file opened inside it the same way, so neither can be
+    swapped between ``_kernel_agent_env_path``'s check and this read.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    dir_fd = os.open(env_path.parent, flags | os.O_DIRECTORY)
+    try:
+        _require_private_kernel_agent_env(env_path, env_path.parent, os.fstat(dir_fd), is_dir=True)
+        file_fd = os.open(env_path.name, flags, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+    with os.fdopen(file_fd, "rb") as handle:
+        _require_private_kernel_agent_env(env_path, env_path, os.fstat(handle.fileno()), is_dir=False)
+        return handle.read().decode("utf-8", errors="replace")
+
+
 def _load_kernel_agent_env_fallback() -> dict[str, Any]:
     """Auto-source the installer-written kernel-agent env file (see ``_kernel_agent_env_candidate``)."""
     env_path = _kernel_agent_env_path()
     try:
-        text = env_path.read_text(encoding="utf-8", errors="replace")
+        text = _read_kernel_agent_env(env_path)
     except OSError as exc:
         print(
             f"Preflight: ERROR — failed to read {env_path}: {exc}",
