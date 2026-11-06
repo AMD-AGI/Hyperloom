@@ -165,7 +165,7 @@ async def test_the_build_record_names_the_isolation_its_compile_had(tmp_path: Pa
             "under bubblewrap 0.9.0 /usr/bin/bwrap as this process's user, in a network namespace of their own "
             f"({ISOLATION_BWRAP_NETNS}): compiling as user 65534: not root",
         ),
-        (None, logging.WARNING, "every build will fail"),
+        (None, logging.WARNING, "cannot isolate a compile now: each build asks again"),
     ],
 )
 def test_the_session_logs_its_isolation_once(
@@ -376,6 +376,7 @@ def main(argv):
         "no_new_privs": status["NoNewPrivs"].strip(),
         "net": os.readlink("/proc/self/ns/net"),
         "pid": os.readlink("/proc/self/ns/pid"),
+        "environ": ",".join(sorted(os.environ)),
     }}
     record = {{"status": "failed", "outputs": [], "toolchain": seen, "log": "", "failure": "probe"}}
     (work / "staged.json").write_text(json.dumps(record))
@@ -392,8 +393,9 @@ def bwrap_tier(monkeypatch: pytest.MonkeyPatch) -> Isolation:
 
 @pytest.mark.agent_isolation
 def test_under_bubblewrap_the_compile_has_no_egress_no_key_a_dev_null_and_writes_only_its_work(
-    tmp_path: Path, bwrap_tier: Isolation
+    tmp_path: Path, bwrap_tier: Isolation, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("HYPERLOOM_TEST_SERVICE_TOKEN", "SECRET token of the build service")
     registered = confinement.PRIVATE_PATHS  # this test's own (conftest)
     key = tmp_path / "service.key"
     tree = tmp_path / "tree"
@@ -428,6 +430,7 @@ def test_under_bubblewrap_the_compile_has_no_egress_no_key_a_dev_null_and_writes
         "uid": str(os.getuid()),
         "caps": "0000000000000000",
         "no_new_privs": "1",
+        "environ": "HOME,LC_ALL,PATH,PWD,TMPDIR",
         ISOLATION_KEY: ISOLATION_BWRAP_NETNS,
     }
     assert (staged.staging / "written").read_text() == "x" and not (tree / "written").exists()
@@ -448,6 +451,35 @@ async def test_under_bubblewrap_a_cu_edit_is_built_stored_and_laid_from_a_worker
     assert rig.store.read(compiled.builds[0].inputs).toolchain[ISOLATION_KEY] == ISOLATION_BWRAP_NETNS
     _, farm = farm_of(rig, builds.resolved(AcceptedMeasurement(compiled, ())))
     assert (farm.site / fake.COMPONENT / fake.extension().name).read_bytes() == fake.compiled(EDITED_CU)
+
+
+def test_a_runner_given_what_chooses_its_isolation_asks_it_at_each_build(tmp_path: Path) -> None:
+    """A bubblewrap whose probe gave no answer in time at the start of the session may answer at a later build."""
+    answers: list[Isolation | None] = [None, Isolation((), None)]
+    tree = _tree(tmp_path / "tree", _MARKED_CHILD)
+
+    with pytest.raises(BuildInfraError, match="cannot isolate a native build"):
+        _built_with_source(tmp_path / "first", tree, lambda: answers.pop(0))
+    staged = _built_with_source(tmp_path / "second", tree, lambda: answers.pop(0))
+
+    assert staged.toolchain == {"tree": "marked", ISOLATION_KEY: "none"} and answers == []
+
+
+@pytest.mark.parametrize("found", [None, Isolation((), None, ISOLATION_BWRAP_NETNS)], ids=["none", "found"])
+def test_a_session_that_finds_no_isolation_at_its_start_asks_again_at_each_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found: Isolation | None
+) -> None:
+    given: list[object] = []
+    monkeypatch.setattr(
+        native_builds_module, "IsolatedBuilds", lambda planner, blobs, isolation, factories: given.append(isolation)
+    )
+
+    def choose() -> Isolation | None:
+        return found
+
+    native_builds(_configured(tmp_path), LocalBlobStore(tmp_path / "blobs"), IMAGE, isolation=choose)
+
+    assert given == [choose if found is None else found], "asked again where the start found none, else kept"
 
 
 def test_the_build_service_registers_its_signing_key_and_trust_file_as_the_apps_private_paths(tmp_path: Path) -> None:

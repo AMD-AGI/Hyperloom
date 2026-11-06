@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import stat
@@ -374,6 +375,25 @@ def _bwrap_only(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(preflight, "account_problem", lambda: NOT_ROOT)
     monkeypatch.setattr(
         preflight, "bwrap_isolation", lambda: BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 9, 0), ()))
+    )
+
+
+def test_a_bubblewrap_that_gave_no_answer_in_time_is_not_a_refusal_at_start(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The probe's own contract: an answer that did not come in time is never a final one."""
+    no_answer = "bubblewrap at /usr/bin/bwrap: no answer in 10 s"
+    monkeypatch.setattr(preflight, "which", shutil.which)
+    monkeypatch.setattr(preflight, "account_problem", lambda: NOT_ROOT)
+    monkeypatch.setattr(preflight, "bwrap_isolation", lambda: NoIsolation((no_answer,), transient=True))
+
+    with caplog.at_level(logging.WARNING, logger=preflight.logger.name):
+        build_preflight(ready)
+
+    (record,) = [r for r in caplog.records if r.name == preflight.logger.name]
+    assert record.levelno == logging.WARNING
+    assert f"({NOT_ROOT}) and bubblewrap gave no answer in time ({no_answer}); each build asks again" in (
+        record.getMessage()
     )
 
 

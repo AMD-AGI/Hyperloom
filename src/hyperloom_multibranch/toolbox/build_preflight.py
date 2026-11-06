@@ -8,7 +8,8 @@ configured, so a host that is set up wrong refuses at start, naming every item, 
 
 - the compile can be isolated: as user 65534 (the service runs as root, has ``setpriv``, and its user namespace maps
   65534), else under bubblewrap (:func:`~hyperloom.measure.runner.native.isolated.local_isolation`); a host where
-  neither works is refused naming both reasons;
+  neither works is refused naming both reasons (a bubblewrap whose probe gave no answer in time is not refused: that is
+  not a final answer, so it is logged and each build asks again);
 - what the compile runs is there: this process's interpreter, its environment and source tree (the build child imports
   the builder from it), the image's interpreter (``HYPERLOOM_BUILD_PYTHON``), the image's packages
   (``HYPERLOOM_BUILD_IMAGE_ROOT``) and the upstream checkouts; where the compile runs as user 65534, that user can reach
@@ -35,6 +36,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import json
+import logging
 import os
 import re
 import stat
@@ -76,6 +78,8 @@ __all__ = [
     "tracelens_problem",
     "unreachable",
 ]
+
+logger = logging.getLogger(__name__)
 
 #: The native component built from sglang's ``sgl-kernel``.
 SGL_KERNEL = "sgl_kernel"
@@ -426,18 +430,35 @@ def tracelens_problem(
     return None
 
 
+def _isolation_problems(account: str | None) -> list[str]:
+    """Why the compile can be isolated in neither tier, ``account`` naming why not as user 65534; nothing where one
+    works, nor where bubblewrap's probe gave no answer in time, which is logged instead: a later probe may answer, and
+    each build asks again."""
+    if account is None:
+        return []
+    bwrap = bwrap_isolation()
+    if not isinstance(bwrap, NoIsolation):
+        return []
+    if bwrap.transient:
+        logger.warning(
+            "native builds: the compile cannot run as user %s (%s) and bubblewrap gave no answer in time (%s); "
+            "each build asks again, and fails as the machine's while neither works",
+            NOBODY,
+            account,
+            bwrap.why,
+        )
+        return []
+    return [unisolated(account, bwrap)]
+
+
 def build_preflight(site: PreflightSite) -> None:
     """Check what the host's native builds need (see the module).
 
     Raises:
         BuildStoreConfigError: Naming every item that is not as it must be.
     """
-    problems: list[str] = []
     account = account_problem()
-    if account is not None:
-        bwrap = bwrap_isolation()
-        if isinstance(bwrap, NoIsolation):
-            problems.append(unisolated(account, bwrap))
+    problems = _isolation_problems(account)
     upstreams = site_upstreams(site)
     checkouts = image_checkouts(site.sources, upstreams)
     problems.extend(sources_problems(site, upstreams))

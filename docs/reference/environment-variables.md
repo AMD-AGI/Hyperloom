@@ -896,11 +896,14 @@ A native build's compile (`hyperloom.measure.runner.native.isolated`) has its ow
 user 65534 through `setpriv` (in a network namespace of its own where `unshare --net` works) when the build service is
 root and its user namespace maps 65534, else bubblewrap with the same probe and the same choice of binary: the compile
 runs as the service's own user with only its work directory writable, the toolchain, both interpreters, the tree the
-child imports from, the image's packages and the upstream build directory read-only, only `/sys/devices/system/cpu`
-of `/sys`, the base `/dev` nodes and no GPU, a network of its own (outside addresses give `ENETUNREACH`), and the
-signing key and trust file (registered as the app's private paths) absent, or masked where a bound tree holds them.
-The build record's `isolation` entry is `uid+netns`, `uid` or `bwrap+netns`. Where neither tier works, the toolbox
-refuses at start (`build_preflight`) and each build fails as the machine's, naming both reasons.
+child imports from, the image's packages and the upstream build directory read-only (an aiter module build lays its
+farm in the work directory, and the image's aiter directories the farm links into are read-only), only
+`/sys/devices/system/cpu` of `/sys`, the base `/dev` nodes and no GPU, a network of its own (outside addresses give
+`ENETUNREACH`), and the signing key and trust file (registered as the app's private paths) absent, or masked where a
+bound tree holds them; its environment is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation`
+entry is `uid+netns`, `uid` or `bwrap+netns`. Where neither tier works, the toolbox refuses at start
+(`build_preflight`) and each build fails as the machine's, naming both reasons; a bubblewrap whose probe gives no
+answer in time is not refused but logged, and each build asks again.
 
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they

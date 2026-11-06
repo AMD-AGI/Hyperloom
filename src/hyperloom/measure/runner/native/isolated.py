@@ -220,30 +220,42 @@ def compile_policy(work: Path, child: ChildInterpreter, laid: LaidTree, environ:
     needs under ``environ`` (:func:`~hyperloom.common.confinement.toolchain_paths`: the system roots, this process's
     interpreter's prefixes (the child's by default), the import path of the first ``python3`` on ``PATH``, every
     ``PATH`` entry, and each interpreter's own directory), the tree the child imports the builder from, the image's
-    packages and the upstream build directory. ``/sys`` is only the CPU tree, ``/dev`` only the base nodes
-    (``/dev/null`` and the like, no GPU), and the network is its own (loopback only). Every credential location of this
-    process and the files it registers (the signing key among them) is absent, or masked where a bound tree holds it
+    packages and the upstream build directory where they are not laid in ``work`` (:func:`_laid_in`: a farm's are,
+    and the bind of ``work`` shows them), and the image's directories the laid tree links into (``laid.linked``).
+    ``/sys`` is only the CPU tree, ``/dev`` only the base nodes (``/dev/null`` and the like, no GPU), and the network is
+    its own (loopback only). Every credential location of this process and the files it registers (the signing key
+    among them) is absent, or masked where a bound tree holds it
     (:func:`~hyperloom.common.confinement.credential_paths`).
 
     ``--die-with-parent`` is kept on whatever thread starts the compile: that thread waits for it, so it cannot end
     first, and only that flag lets a timeout's kill of bubblewrap end the sandbox, which runs in a session of its own.
 
     Raises:
-        BwrapPolicyError: A path the compile reads is reached through ``work``, which the compile writes.
+        BwrapPolicyError: A path the compile reads is reached through ``work``, which the compile writes (one named
+            below ``work`` that a link there points elsewhere is such a path).
     """
     writable = (work,)
     readable = (
         *toolchain_paths(environ, child.python, writable=writable),
         *toolchain_paths(environ, laid.machine.python, writable=writable),
         child.source,
-        laid.image_root,
-        laid.tracked,
+        *(path for path in (laid.image_root, laid.tracked) if not _laid_in(work, path)),
+        *laid.linked,
     )
     masked = credential_paths(environ, allowed=(*readable, *writable), writable=writable)
     confinement = Confinement(
         writable=writable, readable=readable, masked=masked, sys_paths=_COMPILE_SYS, own_network=True
     )
     return replace(confinement.policy(chdir=work), die_with_parent=True)
+
+
+def _laid_in(work: Path, path: Path) -> bool:
+    """Whether ``path`` is part of the tree laid in ``work``: named below it and resolving below it, so the writable bind
+    of ``work`` shows it as it is. Resolving it follows only what this process laid (nothing of the candidate has run in
+    ``work`` yet), and binds nothing either way: one that resolves elsewhere stays in the read-only set, which refuses
+    it."""
+    named, real = Path(os.path.normpath(path)), Path(os.path.realpath(path))
+    return named.is_relative_to(os.path.normpath(work)) and real.is_relative_to(os.path.realpath(work))
 
 
 def job_document(laid: LaidTree, factory: str) -> dict[str, Any]:
@@ -266,14 +278,16 @@ def job_document(laid: LaidTree, factory: str) -> dict[str, Any]:
 
 class IsolatedBuilds:
     """``runner(inputs) -> Build`` for :class:`~hyperloom_multibranch.toolbox.store_builds.StoreBuildDriver` (see the
-    module). ``factories`` name each component's recipe factory as ``module:function``; ``child`` says what runs the
-    child."""
+    module). ``isolation`` is how every compile is isolated, or what chooses it at each build (such as
+    :func:`local_isolation` for a session that found none at its start: a bubblewrap whose probe gave no answer in time
+    may answer later); ``factories`` name each component's recipe factory as ``module:function``; ``child`` says what
+    runs the child."""
 
     def __init__(
         self,
         planner: NativePlanner,
         blobs: BlobStore,
-        isolation: Isolation | None,
+        isolation: Isolation | Callable[[], Isolation | None] | None,
         factories: Mapping[str, str],
         child: ChildInterpreter = ChildInterpreter(),
     ) -> None:
@@ -284,7 +298,7 @@ class IsolatedBuilds:
         return partial(self._build, self._planner.planned(inputs))
 
     def _build(self, planned: PlannedBuild, scratch: Path) -> Staged:
-        isolation = self._isolation
+        isolation = self._isolation() if callable(self._isolation) else self._isolation
         if isolation is None:
             why = isolation_problem() or "the build runner was given no isolation"
             raise BuildInfraError(f"this host cannot isolate a native build: {why}; nothing was compiled")

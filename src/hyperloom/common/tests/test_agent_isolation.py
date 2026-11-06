@@ -257,6 +257,9 @@ def test_bubblewrap_alone_names_its_probe_s_reasons_where_it_finds_a_problem():
         ("bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",)
     )
     assert bwrap_isolation(probe=Probes(MISSING)) == NoIsolation(("bubblewrap: not found on PATH",))
+    assert bwrap_isolation(probe=Probes(NO_ANSWER)) == NoIsolation(
+        (f"bubblewrap at {LAYER}: no answer in 10 s",), transient=True
+    ), "a probe that gave no answer in time is not a final answer"
     assert bwrap_isolation(probe=Probes(ON_PATH)) == BwrapIsolation(ON_PATH)
     require_agent_isolation(bwrap=LAYER, probe=Probes(IN_LAYER))
     probes = Probes(IN_LAYER)

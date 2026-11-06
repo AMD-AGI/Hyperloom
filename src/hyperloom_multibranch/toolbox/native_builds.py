@@ -26,9 +26,10 @@ A store and trust given without any of the four required ones refuse the build o
 so does a host that is not ready for them (:func:`~hyperloom_multibranch.toolbox.build_preflight.build_preflight`;
 ``python -m hyperloom_multibranch.toolbox.build_setup`` sets one up). The compile runs in
 :class:`~hyperloom.measure.runner.native.isolated.IsolatedBuilds`, out of this process; a host that cannot isolate it
-fails each build as the machine's, never compiles in-process. The signing key and the trust file are registered as the
-app's private paths (:data:`~hyperloom.common.confinement.PRIVATE_PATHS`), so no bubblewrap sandbox of this process (a
-compile's, an agent's) shows them where a bound tree holds them.
+fails each build as the machine's, never compiles in-process (a session that finds no isolation at its start asks
+again at each build). The signing key and the trust file are registered as the app's private paths
+(:data:`~hyperloom.common.confinement.PRIVATE_PATHS`), so no bubblewrap sandbox of this process (a compile's, an
+agent's) shows them where a bound tree holds them.
 """
 
 from __future__ import annotations
@@ -190,7 +191,9 @@ def native_builds(
     site = NativeSite(machine, recipes, sources, image_root)
     planner, isolated = NativePlanner(site, blobs), isolation()
     modules = AiterModules(planner, history=partial(store.ready_records, AITER_COMPONENT, machine.image_digest))
-    runner = IsolatedBuilds(planner, blobs, isolated, {**RECIPE_FACTORIES, AITER_COMPONENT: AITER_RECIPE_FACTORY})
+    # A session that found no isolation at its start asks again at each build: bubblewrap may answer later.
+    chosen = isolation if isolated is None else isolated
+    runner = IsolatedBuilds(planner, blobs, chosen, {**RECIPE_FACTORIES, AITER_COMPONENT: AITER_RECIPE_FACTORY})
     _log_isolation(isolated)
     built = {**recipes, AITER_COMPONENT: aiter_module_recipe()}
     build_site = BuildSite(machine.image_digest, machine.builder_image_digest, machine.gfx_arch, built)
@@ -203,7 +206,9 @@ def _log_isolation(isolated: Isolation | None) -> None:
     if isolated is None:
         why = isolation_problem() or "it was given no isolation"
         logger.warning(
-            "native builds are configured and this host cannot isolate a compile: every build will fail: %s", why
+            "native builds are configured and this host cannot isolate a compile now: each build asks again, and "
+            "fails as the machine's while it cannot: %s",
+            why,
         )
     elif isolated.bwrap is not None:
         logger.info(

@@ -280,6 +280,25 @@ def test_a_program_directly_in_a_credential_location_binds_only_itself(tmp_path,
     assert tool in found and home not in found and home.parent not in found
 
 
+@pytest.mark.parametrize("variable", ["PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "MODEL_PATH"])
+def test_a_variables_entry_that_is_a_credential_location_is_not_bound_and_one_below_it_is(
+    tmp_path, monkeypatch, no_child_python, variable
+):
+    """Bound whole, the home would show every login in it, and no mask: a mask is only ever below a bound path."""
+    home, tools = tmp_path / "home", tmp_path / "tools"
+    login = _write(home / ".ssh/id_ed25519")
+    (home / "bin").mkdir()
+    tools.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    environ = {"PATH": "/usr/bin", variable: os.pathsep.join(map(str, (home, home / "bin", tools)))}
+
+    found = toolchain_paths(environ, "sh", writable=())
+
+    assert home not in found and {home / "bin", tools} <= set(found)
+    masked = credential_paths(environ, allowed=found)
+    assert _absent_inside(login, Confinement(readable=found, masked=masked).policy())
+
+
 def test_the_resolvers_target_is_readable_when_it_lies_outside_etc(tmp_path, monkeypatch, no_child_python):
     stub = _write(tmp_path / "run" / "stub-resolv.conf")
     link = tmp_path / "etc" / "resolv.conf"

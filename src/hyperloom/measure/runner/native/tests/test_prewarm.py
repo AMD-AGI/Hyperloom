@@ -27,6 +27,7 @@ from hyperloom.measure.runner.native.builder import BuildMachine, tree_dir
 from hyperloom.measure.runner.native.isolated import ISOLATION_UID, JOB_FILE, Isolation
 from hyperloom.measure.runner.native.prewarm import PrewarmError, isolated_builder
 from hyperloom.measure.runner.native.tests import _aiter_standin as standin
+from hyperloom.measure.runner.native.tests._bwrap_compile import bwrap_compile_isolation
 from hyperloom.orchestrator.actions.executors._aiter_jit import (
     AITER_PREWARM_MANIFEST,
     read_prewarm_manifest,
@@ -222,9 +223,16 @@ def test_a_manifest_of_another_schema_lists_nothing(tmp_path: Path) -> None:
 
 
 class CpuRig:
-    """The CPU build runner of touched modules over the stand-in aiter (no user change: the test's own)."""
+    """The CPU build runner of touched modules over the stand-in aiter, its compile under ``isolation`` (by default no
+    user change: the test's own)."""
 
-    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch, located: Path | None = None) -> None:
+    def __init__(
+        self,
+        tmp: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        located: Path | None = None,
+        isolation: Isolation = Isolation((), None),
+    ) -> None:
         self.package = standin.aiter_image(tmp / "image")
         (self.package / "jit" / f"{standin.MODULE}.so").unlink()
         found = located or self.package
@@ -232,9 +240,7 @@ class CpuRig:
         for module in (aiter_modules, farm_module, prewarm):
             monkeypatch.setattr(module, "locate_package", locate)
         machine = BuildMachine("prewarm", "prewarm", GFX, sys.executable)
-        self.builder = isolated_builder(
-            machine, isolation=lambda: Isolation((), None), factory=standin.FACTORY, environ={}
-        )
+        self.builder = isolated_builder(machine, isolation=lambda: isolation, factory=standin.FACTORY, environ={})
 
 
 def test_the_cpu_build_runner_builds_the_missing_modules_from_the_images_own_tree(tmp_path, monkeypatch) -> None:
@@ -246,6 +252,21 @@ def test_the_cpu_build_runner_builds_the_missing_modules_from_the_images_own_tre
     built = (rig.package / "jit" / f"{standin.MODULE}.so").read_bytes()
     assert built == standin.built(GFX, standin.IMAGE_KERNEL), "built for the target from the image's k.cu"
     assert set(read_prewarm_manifest(rig.package / "jit")) == {standin.MODULE}
+
+
+@pytest.mark.agent_isolation
+def test_under_bubblewrap_the_cpu_build_runner_builds_the_missing_modules_from_the_images_own_tree(
+    tmp_path, monkeypatch
+) -> None:
+    """The farm the compile builds from lies in its work directory and links into the image's aiter, which the sandbox
+    shows read-only."""
+    rig = CpuRig(tmp_path, monkeypatch, isolation=bwrap_compile_isolation(monkeypatch))
+
+    report = prewarm.prewarm(rig.package, rig.builder, gfx=GFX)
+
+    assert (report.built, report.failure) == ((standin.MODULE,), "")
+    built = (rig.package / "jit" / f"{standin.MODULE}.so").read_bytes()
+    assert built == standin.built(GFX, standin.IMAGE_KERNEL), "built for the target from the image's k.cu"
 
 
 def test_the_compile_is_handed_its_plan_and_its_job_readable_by_their_owner_alone(tmp_path, monkeypatch) -> None:

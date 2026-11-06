@@ -12,7 +12,7 @@ credential inside a bound tree. The masked paths come from configuration, never 
 (:func:`credential_paths`): this process's home, the XDG directories, every environment variable that names a credential
 location, Hugging Face's login files, and the files the app registers in :data:`PRIVATE_PATHS` as it creates them. So
 nothing broad under a credential location is bound because a program lives there: :func:`toolchain_paths` binds a
-program's own directory, and its parent only away from those locations.
+program's own directory, and its parent only away from those locations, and no search-path entry that is one.
 
 Nothing is resolved through what an agent writes. A name in a tree the agent writes may be a symlink it left there, to
 any host path, or become one before the next launch; so a path reached through such a tree (looked up in a directory
@@ -596,13 +596,15 @@ def toolchain_paths(environ: Mapping[str, str], argv0: str, *, writable: Iterabl
     sandbox mounts its own), ``/sys`` (:attr:`Confinement.sys_paths`), nor what lies in the trees the child writes
     (``writable``; its scratch too, when that is on the host) or is reached through them: those show it already, a
     read-only bind there would take the child's own files from it, and where a link there points is the agent's
-    choice."""
+    choice. Nor a variable's entry that is itself a credential location (a ``PATH`` entry that is the home): bound
+    whole, it would show every login in it, unmasked; a directory below one is bound, and the rest of it masked."""
     agent = _trees(writable)
+    logins = _credential_roots(environ)
     found: list[Path] = [Path(root) for root in SYSTEM_ROOTS]
     found.extend(Path(root) for root in interpreter_roots())
     found.extend(interpreter_search_path(environ, writable=agent))
     for name in (*SEARCH_PATH_VARIABLES, *CA_VARIABLES, *DATA_VARIABLES):
-        found.extend(_absolute_entries(environ.get(name, "")))
+        found.extend(entry for entry in _absolute_entries(environ.get(name, "")) if _real(entry) not in logins)
     found.extend(_program_dirs(argv0, environ, agent))
     found.extend(_resolver())
     return tuple(dict.fromkeys(path for path in found if path != _ROOT and not _agents(path, agent)))

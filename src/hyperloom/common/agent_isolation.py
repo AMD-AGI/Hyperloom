@@ -151,9 +151,11 @@ class BwrapIsolation:
 
 @dataclass(frozen=True)
 class NoIsolation:
-    """Unconfined, as before: a launch that need not be isolated, where no tier works. ``reasons`` name both tiers'."""
+    """Unconfined, as before: a launch that need not be isolated, where no tier works. ``reasons`` name both tiers'.
+    ``transient``: bubblewrap's probe gave no answer in time, so a later attempt may succeed."""
 
     reasons: tuple[str, ...]
+    transient: bool = False
 
     @property
     def why(self) -> str:
@@ -300,9 +302,10 @@ def choose_sandbox_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolati
 
 def bwrap_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolation | NoIsolation:
     """Bubblewrap alone, for a launcher with an account tier of its own (a native compile), which decides what to do
-    without it; where its probe finds a problem, :class:`NoIsolation` naming bubblewrap's reasons."""
+    without it; where its probe finds a problem, :class:`NoIsolation` naming bubblewrap's reasons, ``transient`` where
+    the probe gave no answer in time."""
     found = _bwrap(probe)
-    return BwrapIsolation(found) if found.ok else NoIsolation(_bwrap_reasons(found))
+    return BwrapIsolation(found) if found.ok else NoIsolation(_bwrap_reasons(found), found.transient)
 
 
 def require_agent_isolation(
