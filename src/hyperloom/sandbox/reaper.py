@@ -12,7 +12,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from hyperloom.common import proctree
+from hyperloom_common import proctree
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 
 __all__ = ["kill_launchers", "reap_sandbox_processes", "sweep_tagged"]
