@@ -819,7 +819,6 @@ async def test_rearm_kept_points_accepted_config_at_the_archived_copy(tmp_path):
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-1")
     # Read by the setting-script write that shares the rearm's archive block.
-    fake.shared_state.reference_model = ""
     fake.shared_state.tp = 8
     fake.shared_state.max_model_len = 0
     await fake.enablement_lane.maybe_rearm_enablement(

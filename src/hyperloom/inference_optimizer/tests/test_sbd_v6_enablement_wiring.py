@@ -137,7 +137,6 @@ def _lane(session_dir: Path, **overrides: Any):
         framework="sglang",
         model_name="zai-org/GLM-5",
         model_path="",
-        reference_model="",
         gpu_type="mi300x",
         tp=8,
         max_model_len=8192,

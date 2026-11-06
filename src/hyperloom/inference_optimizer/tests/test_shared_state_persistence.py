@@ -290,26 +290,44 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
         await c2.stop()
 
 
-def test_reference_fields_survive_resume(tmp_path):
-    """R3: reference_* fields persist through save → from_dict (resume)."""
-    s = SharedState(session_id="t", model_name="m", model_path="/x/m")
-    s.reference_server_args = "--block-size 128"
-    s.reference_envs = {"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}
-    s.reference_model = "minimaxm3"
-    restored = SharedState.from_dict(s.to_dict())
-    assert restored.reference_server_args == "--block-size 128"
-    assert restored.reference_envs == {"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}
-    assert restored.reference_model == "minimaxm3"
+_REFERENCE_FIELDS = {
+    "reference_server_args": "--block-size 128",
+    "reference_envs": {"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"},
+    "reference_launch_controls": {"args_mode": "replace"},
+    "reference_model": "minimaxm3",
+}
 
 
-def test_a_state_written_before_base_launch_digest_resumes_with_none_recorded():
-    raw = SharedState(session_id="old", reference_server_args="--block-size 128").to_dict()
+def test_a_new_state_persists_no_reference_launch():
+    assert not _REFERENCE_FIELDS.keys() & SharedState(session_id="t").to_dict().keys()
+
+
+def test_a_state_with_a_recorded_base_drops_its_reference_fields_on_resume():
+    raw = {**SharedState(session_id="seeded", base_launch_digest="sha256:abc").to_dict(), **_REFERENCE_FIELDS}
+
+    restored = SharedState.from_dict(raw)
+
+    assert restored.base_launch_digest == "sha256:abc"
+    assert not _REFERENCE_FIELDS.keys() & restored.to_dict().keys()
+
+
+@pytest.mark.parametrize("name", sorted(_REFERENCE_FIELDS))
+def test_a_session_whose_server_base_lived_in_state_refuses_to_resume(name):
+    raw = SharedState(session_id="old").to_dict()
+    del raw["base_launch_digest"]
+    raw[name] = _REFERENCE_FIELDS[name]
+
+    with pytest.raises(ValueError, match=f"{name}.*start a new session"):
+        SharedState.from_dict(raw)
+
+
+def test_a_state_written_before_base_launch_digest_without_a_reference_launch_resumes_with_none_recorded():
+    raw = {**SharedState(session_id="old").to_dict(), **dict.fromkeys(_REFERENCE_FIELDS, "")}
     del raw["base_launch_digest"]
 
     restored = SharedState.from_dict(raw)
 
     assert restored.base_launch_digest == ""
-    assert restored.reference_server_args == "--block-size 128"
 
 
 def test_save_renders_current_setting_sh(tmp_path, monkeypatch):
@@ -343,9 +361,10 @@ def test_save_renders_current_setting_sh(tmp_path, monkeypatch):
         "--max-num-seqs 128 --no-enable-prefix-caching",
     ],
 )
-def test_current_setting_carries_the_args_the_best_was_launched_with(tmp_path, recorded):
+def test_current_setting_carries_the_args_the_best_was_launched_with(tmp_path, monkeypatch, recorded):
     """The operator's base args reach the launcher, not only the optimizer's delta over them."""
-    state = SharedState(session_id="t", framework="vllm", reference_model="/models/M")
+    monkeypatch.setenv("MODEL_PATH", "/models/M")
+    state = SharedState(session_id="t", framework="vllm")
     state.current_best = {
         "extra_server_args": "",
         "extra_envs": {},
@@ -378,7 +397,7 @@ def test_save_current_setting_prefers_persisted_framework(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("pythonpath_source", ["unset", "empty", "inherited", "configured"])
-def test_saved_current_setting_loads_overlay_in_child(tmp_path, pythonpath_source):
+def test_saved_current_setting_loads_overlay_in_child(tmp_path, monkeypatch, pythonpath_source):
     """A saved recipe loads the literal overlay ahead of the prior import path."""
     overlay = tmp_path / "overlay ' $literal $(touch injected_dollar) `touch injected_backtick`"
     package = overlay / "sglang"
@@ -414,7 +433,8 @@ def test_saved_current_setting_loads_overlay_in_child(tmp_path, pythonpath_sourc
     if pythonpath_source == "configured":
         extra_envs["PYTHONPATH"] = str(configured)
         prior = str(configured)
-    state = SharedState(session_id="overlay", framework="sglang", reference_model="/models/M")
+    monkeypatch.setenv("MODEL_PATH", "/models/M")
+    state = SharedState(session_id="overlay", framework="sglang")
     state.current_best = {
         "extra_server_args": "--max-running-requests 4",
         "extra_envs": extra_envs,
@@ -446,8 +466,9 @@ def test_saved_current_setting_loads_overlay_in_child(tmp_path, pythonpath_sourc
 
 
 @pytest.mark.parametrize("overlay", [None, ""])
-def test_current_setting_without_overlay_is_unchanged(tmp_path, overlay):
-    state = SharedState(session_id="plain", framework="sglang", reference_model="/models/M", tp=2)
+def test_current_setting_without_overlay_is_unchanged(tmp_path, monkeypatch, overlay):
+    monkeypatch.setenv("MODEL_PATH", "/models/M")
+    state = SharedState(session_id="plain", framework="sglang", tp=2)
     state.current_best = {
         "extra_server_args": "--max-running-requests 4",
         "extra_envs": {"SGLANG_USE_AITER": "1"},

@@ -57,12 +57,9 @@ def _users(name: str) -> set[Path]:
     return users
 
 
-def test_no_module_but_the_state_reads_the_reference_fields():
+def test_no_module_reads_the_reference_fields():
     offenders = [
-        f"{relative}:{line}"
-        for relative, tree in _modules()
-        if relative != Path("hyperloom/orchestrator/state/shared_state.py")
-        for line in _attribute_reads(tree, _REFERENCE_FIELDS)
+        f"{relative}:{line}" for relative, tree in _modules() for line in _attribute_reads(tree, _REFERENCE_FIELDS)
     ]
     assert offenders == []
 

@@ -218,8 +218,8 @@ def build_manifest(
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": getattr(args, "kb_degraded_reason", None),
         "pr_degraded_reason": getattr(args, "pr_degraded_reason", None),
-        # Operator-supplied reference recipe source (audit only); the resolved server_args / envs / model are
-        # authoritative in state.json.
+        # Operator-supplied reference recipe source (audit only); the resolved launch is authoritative in
+        # base_launch.json.
         "reference_script": getattr(args, "reference_script", None),
     }
 
