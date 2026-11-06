@@ -9,6 +9,9 @@ model's HF card and the framework's latest release are recorded as the responses
 InferenceX point binds, its acceptance length, its golden overrides and the golden length of a cookbook launch are
 InferenceX's own code: they run here once, in an isolated interpreter of a throwaway virtual environment holding
 InferenceX's ``recipes`` dependencies, and their answers are recorded as data that resolving reads.
+
+InferenceX pins the load client of every base, so a session whose InferenceX cannot be read resolves nothing. Any
+other source that cannot be read stops the reading there, and the snapshot names it.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
@@ -40,7 +43,7 @@ from inference_suite.recipe.inferencex import (
     served_points,
 )
 from inference_suite.recipe.model import ApiResponse, InferencexSelection, InferencexSnapshot, RepoBundle, SourceMiss
-from inference_suite.recipe.resolve import SourceSnapshot
+from inference_suite.recipe.resolve import SourceSnapshot, UnreadSource
 from inference_suite.recipe.sglang_cookbook import (
     AGENTX_DIR,
     COOKBOOK_DIR,
@@ -355,32 +358,65 @@ def _with_answers(snapshot: SourceSnapshot, answers: InferencexAnswers) -> Sourc
     return dataclasses.replace(snapshot, inferencex=inferencex, golden_lengths=answers.golden_lengths)
 
 
+def _with_inferencex_answers(
+    snapshot: SourceSnapshot, query: LaunchQuery, checkout: Checkout, scratch: Path
+) -> SourceSnapshot:
+    points = served_points(query, snapshot.inferencex.bundle)
+    requests = _cookbook_agentx_requests(query, snapshot) if query.workload is Workload.AGENTX else ()
+    if not points and not requests:
+        return snapshot
+    project = checkout.root / PROJECT
+    python = inferencex_python(project, scratch / "venv")
+    return _with_answers(snapshot, inferencex_answers(python, project, points, requests))
+
+
+_Read = Callable[[SourceSnapshot], SourceSnapshot]
+
+
+def _recipe_reads(query: LaunchQuery, checkout: Checkout, scratch: Path) -> tuple[tuple[str, _Read], ...]:
+    """What is read after InferenceX's checkout, in order, each with the name of the source it reads."""
+    reads: list[tuple[str, _Read]] = []
+    if query.workload is Workload.AGENTX:
+        reads.append(
+            (
+                "the Hugging Face model card",
+                lambda snapshot: dataclasses.replace(snapshot, base_model=_base_model(query.model_id)),
+            )
+        )
+    reads += [
+        (
+            f"the {query.framework} releases",
+            lambda snapshot: dataclasses.replace(snapshot, latest_releases=_latest_releases(query.framework)),
+        ),
+        (f"the {query.framework} cookbook", lambda snapshot: _with_cookbook(snapshot, query, scratch)),
+        ("InferenceX's own code", lambda snapshot: _with_inferencex_answers(snapshot, query, checkout, scratch)),
+    ]
+    return tuple(reads)
+
+
 def fetch_sources(query: LaunchQuery, *, user_file: UserFile | None = None) -> SourceSnapshot:
     """Read every source ``query`` resolves from, at the head of its ``main`` and as of now.
 
     With the operator's ``user_file``, which is the base, only InferenceX is read: its commit pins the load client.
+    A source after InferenceX that cannot be read is named as the snapshot's ``unread``, and nothing after it is
+    read. Raises :class:`SourceFetchError` when InferenceX itself cannot be read.
     """
     fetched_unix = int(time.time())
     with tempfile.TemporaryDirectory(prefix="inference-suite-sources-") as scratch_dir:
         scratch = Path(scratch_dir)
-        checkout, inferencex = _inferencex(scratch / "inferencex")
+        try:
+            checkout, inferencex = _inferencex(scratch / "inferencex")
+        except SourceFetchError as error:
+            raise SourceFetchError(f"InferenceX, which pins the load client, could not be read: {error}") from error
+        snapshot = SourceSnapshot(inferencex, fetched_unix, user_file=user_file)
         if user_file is not None:
-            return SourceSnapshot(inferencex, fetched_unix, user_file=user_file)
-        agentx = query.workload is Workload.AGENTX
-        snapshot = SourceSnapshot(
-            inferencex,
-            fetched_unix,
-            base_model=_base_model(query.model_id) if agentx else None,
-            latest_releases=_latest_releases(query.framework),
-        )
-        snapshot = _with_cookbook(snapshot, query, scratch)
-        points = served_points(query, inferencex.bundle)
-        requests = _cookbook_agentx_requests(query, snapshot) if agentx else ()
-        if not points and not requests:
             return snapshot
-        project = checkout.root / PROJECT
-        python = inferencex_python(project, scratch / "venv")
-        return _with_answers(snapshot, inferencex_answers(python, project, points, requests))
+        for source, read in _recipe_reads(query, checkout, scratch):
+            try:
+                snapshot = read(snapshot)
+            except SourceFetchError as error:
+                return dataclasses.replace(snapshot, unread=UnreadSource(source, str(error)))
+        return snapshot
 
 
 __all__ = [
