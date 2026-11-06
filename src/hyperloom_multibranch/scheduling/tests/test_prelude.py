@@ -73,7 +73,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     session_gate,
 )
 from hyperloom_multibranch.tests.fakes import quick_polls  # noqa: F401
-from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig
 from hyperloom_multibranch.toolbox.analysis import CODE_TOOL_UNAVAILABLE
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
