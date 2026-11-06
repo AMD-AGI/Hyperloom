@@ -781,10 +781,11 @@ lease's root and, for an agent, its directory and worktree (a dev lease's worktr
 read-only); the image's installed frameworks are read-only but aiter, which writes its JIT modules and tuning files
 beside itself. Its environment is not the app's: the search paths, locale, models, the image's own settings and the
 LLM gateway with its credentials (`ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_CODE_OAUTH_TOKEN`, the proxies and CA bundle),
-with `HOME`, `CLAUDE_CONFIG_DIR`, a pip user site (`PIP_USER=1`) and `AITER_JIT_DIR`, `TRITON_CACHE_DIR` and
-`FLYDSL_RUNTIME_CACHE_DIR` of the sandbox's own (an agent's home is `sandbox/home` in its branch's session directory,
-where its Claude CLI's transcripts are read from). A Claude CLI there logs in only through those variables, never the
-app's `~/.claude`. A sandbox whose paths bubblewrap cannot bind safely (before 0.12, nothing may be bound below the
+with `HOME`, `CLAUDE_CONFIG_DIR`, a pip user site (`PIP_USER=1`) and `TRITON_CACHE_DIR` of the sandbox's own (an
+agent's home is `sandbox/home` in its branch's session directory, where its Claude CLI's transcripts are read from). A
+Claude CLI there logs in only through those variables, never the app's `~/.claude`. `AITER_JIT_DIR` and
+`FLYDSL_RUNTIME_CACHE_DIR` are aiter's defaults, its own writable tree, where the image's prebuilt JIT modules and
+FlyDSL kernels are. A sandbox whose paths bubblewrap cannot bind safely (before 0.12, nothing may be bound below the
 shared `/tmp`, so a session directory under `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run
 refuses it.
 

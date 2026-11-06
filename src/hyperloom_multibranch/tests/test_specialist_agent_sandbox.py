@@ -564,9 +564,7 @@ def test_confined_env_keeps_what_a_command_needs_and_nothing_else_of_the_app_s(t
         "XDG_CACHE_HOME": str(home / ".cache"),
         "PIP_USER": "1",
         "PYTHONUSERBASE": str(home / ".local"),
-        "AITER_JIT_DIR": str(home / ".aiter" / "jit"),
         "TRITON_CACHE_DIR": str(home / ".triton" / "cache"),
-        "FLYDSL_RUNTIME_CACHE_DIR": str(home / ".flydsl" / "cache"),
         "IS_SANDBOX": "1",
     }
     assert "HF_HUB_CACHE" not in confined_env({**environ, "HF_HOME": "/hf"}, home, {}), "an HF location is kept"
