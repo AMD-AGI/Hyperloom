@@ -5,10 +5,10 @@
 
 ``app_git`` starts no program a repository's config names, nor one a file that config includes names. The config
 keys git runs as a program were derived from git's own key list (``git help --config``) and documentation
-(``Documentation/config``, git 2.53), and each is handled one of three ways:
+(``Documentation/config``, git 2.53 and 2.56), and each is handled one of three ways:
 
 * pinned on the command line, which outranks every config file (``NO_PROGRAMS``);
-* blanked by name, for a key that carries a free-form driver name (``_DRIVER_PROGRAMS``);
+* blanked by name, for a key that carries a free-form driver or hook name (``_DRIVER_PROGRAMS``);
 * unreachable, because the environment allows no transport (``NO_TRANSPORT``): ssh and ``core.sshCommand``, git://
   and ``core.gitProxy``, ``ext::``, remote helpers, ``remote.<name>.uploadpack``/``receivepack``, and the
   credential helpers and askpass an http fetch would start.
@@ -90,11 +90,13 @@ NO_PROGRAMS = (
 )
 #: The environment that allows git no transport, so a fetch (a promisor remote's lazy one too) starts nothing.
 NO_TRANSPORT = MappingProxyType({"GIT_ALLOW_PROTOCOL": ""})
-# A driver has a free-form name that any in-tree .gitattributes can apply to any path, so no fixed pin covers one:
-# each such key the repository's config defines is blanked by name. Git runs no filter whose program is empty; for an
-# empty diff, merge or trailer program it starts nothing and that step fails instead.
+# A driver has a free-form name that any in-tree .gitattributes can apply to any path, and a hook defined in config
+# (git 2.54 on) a free-form name that core.hooksPath does not reach, so no fixed pin covers either: each such key the
+# repository's config defines is blanked by name. Git runs no filter whose program is empty; for an empty diff, merge
+# or trailer program it starts nothing and that step fails instead; a hook is disabled.
 _DRIVER_PROGRAMS = (
-    r"^(filter\..+\.(clean|smudge|process)|diff\..+\.(command|textconv)|merge\..+\.driver|trailer\..+\.(command|cmd))$"
+    r"^(filter\..+\.(clean|smudge|process)|diff\..+\.(command|textconv)|merge\..+\.driver|trailer\..+\.(command|cmd)"
+    r"|hook\..+\.command)$"
 )
 _NO_SUCH_KEY = 1  # git config's exit status when no key matches
 _ADD_BATCH = 256  # paths per add: at PATH_MAX each, 1 MiB, inside the kernel's 2 MiB for arguments
@@ -162,7 +164,12 @@ def _blank_driver_programs(git: list[str], worktree: Path, env: dict[str, str], 
     keys = sorted({os.fsdecode(key) for key in done.stdout.split(b"\0") if key})
     if any("=" in key for key in keys):
         raise OSError(errno.EINVAL, "a driver name holds '=', which git -c cannot override", str(worktree))
-    return [arg for key in keys for arg in ("-c", f"{key}=")]
+    return [arg for key in keys for arg in ("-c", _blanked(key))]
+
+
+def _blanked(key: str) -> str:
+    """The ``-c`` setting that stops the program ``key`` names: a hook is disabled, any other program emptied."""
+    return f"{key.rpartition('.')[0]}.enabled=false" if key.startswith("hook.") else f"{key}="
 
 
 def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -> subprocess.CompletedProcess[str]:
