@@ -28,7 +28,6 @@ from hyperloom_multibranch.contracts.toolbox import BuildStatus
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.blackboard import STALL_TESTS, LocalBlackboard
 from hyperloom_multibranch.blackboard.rsi.frontier import (
-    NEAR_BAR_COMPONENT,
     PROBATION_COMPONENT,
     SETTLED_TESTS,
     STRANDED_COMPONENT,
@@ -197,12 +196,11 @@ def _evidence(branch: str, **components: float) -> BranchProgress:
     return replace(_view().progress[0], branch=branch, frontier=FrontierScore(1.0, components))
 
 
-def test_the_safety_envelope_holds_a_branch_on_probation_or_with_a_near_bar_or_a_stranded_lead() -> None:
+def test_the_safety_envelope_holds_a_branch_on_probation_or_with_a_stranded_lead() -> None:
     scored = (
-        _evidence("b01", **{PROBATION_COMPONENT: 1.0, NEAR_BAR_COMPONENT: 1.0}),
-        _evidence("b02", **{NEAR_BAR_COMPONENT: 2.0}),
+        _evidence("b01", **{PROBATION_COMPONENT: 1.0, STRANDED_COMPONENT: 2.0}),
         _evidence("b04", **{STRANDED_COMPONENT: 3.5}),
-        _evidence("b05", **{NEAR_BAR_COMPONENT: 0.0}),
+        _evidence("b05"),
         _evidence("b06", **{PROBATION_COMPONENT: 1.0}),
         replace(_evidence("b07"), frontier=None),
     )
@@ -210,7 +208,6 @@ def test_the_safety_envelope_holds_a_branch_on_probation_or_with_a_near_bar_or_a
 
     assert envelope_holds(scored, gave_up) == {
         "b01": HoldReason.PROBATION,
-        "b02": HoldReason.NEAR_BAR,
         "b04": HoldReason.STRANDED,
     }
 
@@ -255,8 +252,8 @@ def test_a_playbook_session_s_prompt_makes_its_stall_evidence_the_one_stop_rule_
     assert "A low expected gain is no reason to stop a branch: its stall evidence is." in playbook
     assert "the scheduler cuts the opens it does not allow" in playbook
     assert "as many of its explore tests as the playbook's grace says" in playbook
-    assert "near_bar_lead, stranded_lead and probation" in playbook
-    for name in ("stop_candidate", "stall_bar", "near_bar_lead", "playbook"):
+    assert "stranded_lead and probation: the playbook's safety envelope keeps a branch whose head leads" in playbook
+    for name in ("stop_candidate", "stall_bar", "probation", "playbook"):
         assert name not in today
 
 
@@ -903,7 +900,7 @@ def test_the_grace_follows_the_playbook_played_now_and_is_the_settled_tests_with
     play = PlaybookPlay(PlaybookChoice(longer, H0, challenger=True))
 
     assert (session_grace(None), session_grace(play)) == (SETTLED_TESTS, 8)
-    assert play.fall_back(("stop of b01 refused for near_bar_lead",))
+    assert play.fall_back(("stop of b01 refused for stranded_lead",))
     assert session_grace(play) == H0.numbers.grace_tests
 
 
