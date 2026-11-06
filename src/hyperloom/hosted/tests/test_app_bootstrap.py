@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -39,17 +40,20 @@ def source(tmp_path) -> Path:
 
 
 def _bootstrap(tmp_path, **env):
-    state = tmp_path / "state"
-    state.mkdir(exist_ok=True)
+    state = Path(env.get("HYPERLOOM_STATE_DIR", tmp_path / "state"))
+    if not state.exists():
+        state.mkdir()
+    (tmp_path / "container-tmp").mkdir(exist_ok=True)
     full = {
         "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
         "HYPERLOOM_STATE_DIR": str(state),
         "USER_DATA_PATH": str(tmp_path / "data"),
+        "TMPDIR": str(tmp_path / "container-tmp"),
     }
     full.update(env)
     done = subprocess.run([BASH, str(SCRIPT)], capture_output=True, text=True, env=full, timeout=120)
     written = state / "exit.json"
-    return done.returncode, (json.loads(written.read_text()) if written.exists() else None), done.stderr
+    return done.returncode, (json.loads(written.read_text()) if written.is_file() else None), done.stderr
 
 
 def _expect_final(code, exit_file, stderr, message):
@@ -100,7 +104,49 @@ def test_a_repository_that_cannot_be_reached_is_left_to_a_restart(tmp_path):
 
 def test_the_script_leaves_no_build_directory_behind_when_it_fails(tmp_path, source):
     _bootstrap(tmp_path, HYPERLOOM_SOURCE_REPO=str(source), HYPERLOOM_SOURCE_SHA=_SHA)
-    assert not list((tmp_path / "data" / ".hyperloom").glob("build.*"))
+    assert list((tmp_path / "container-tmp").iterdir()) == []
+    assert list((tmp_path / "data").iterdir()) == []
+
+
+# -- the shared storage, which each leg may write as another account ---------------------------------------------
+def test_a_user_data_path_this_account_cannot_write_ends_the_run_for_good_naming_it(tmp_path):
+    data = tmp_path / 'we"ird\\data'
+    data.write_text("")  # no account can create a file in it
+    code, exit_file, stderr = _bootstrap(
+        tmp_path,
+        HYPERLOOM_SOURCE_REPO="o/r",
+        HYPERLOOM_SOURCE_SHA=_SHA,
+        USER_DATA_PATH=str(data),
+        PYTHON=sys.executable,
+    )
+    _expect_final(
+        code, exit_file, stderr, f"USER_DATA_PATH {data} cannot be written by this account (uid {os.geteuid()})"
+    )
+
+
+def test_a_state_dir_this_account_cannot_write_is_said_on_stderr_only(tmp_path):
+    state = tmp_path / "state-file"
+    state.write_text("")
+    code, exit_file, stderr = _bootstrap(
+        tmp_path,
+        HYPERLOOM_SOURCE_REPO="o/r",
+        HYPERLOOM_SOURCE_SHA=_SHA,
+        HYPERLOOM_STATE_DIR=str(state),
+        PYTHON=sys.executable,
+    )
+    assert (code, exit_file) == (2, None)
+    assert f"HYPERLOOM_STATE_DIR {state} cannot be written by this account" in stderr
+    assert state.read_text() == ""
+
+
+def test_an_exit_json_an_earlier_leg_left_is_replaced_never_rewritten(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "exit.json").write_text("{}")
+    (tmp_path / "the-old-inode").hardlink_to(state / "exit.json")
+    _expect_final(*_bootstrap(tmp_path, HYPERLOOM_SOURCE_SHA=_SHA), "HYPERLOOM_SOURCE_REPO is not set")
+    assert (tmp_path / "the-old-inode").read_text() == "{}"
+    assert sorted(path.name for path in state.iterdir()) == ["exit.json"]
 
 
 _STUB = """#!/bin/bash
@@ -147,6 +193,34 @@ def test_only_the_wheel_goes_into_the_framework_python_and_it_runs_the_entry(tmp
     assert calls[-1] == "-m hyperloom hosted run"  # exec'd with the framework Python
     assert not (tmp_path / "state" / "venv").exists()  # no environment of its own
     assert (tmp_path / "framework" / ".hyperloom-install").read_text().strip() == _git(source, "rev-parse", "HEAD")
+
+
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+def test_the_wheel_is_built_and_installed_off_the_shared_storage_and_leaves_nothing_there(tmp_path, source):
+    planted = tmp_path / "data" / ".hyperloom" / "wheels" / _git(source, "rev-parse", "HEAD")
+    planted.mkdir(parents=True)
+    (planted / ".complete").write_text("")
+    (planted / "hyperloom-0-py3-none-any.whl").write_text("another account's")
+    code, stderr, _, calls = _framework_run(tmp_path, source)
+    assert code == 0, stderr
+    (install,) = [c for c in calls if " install " in c]
+    wheel = Path(install.split()[-1])
+    assert wheel.parent.parent.parent == tmp_path / "container-tmp" and wheel.parent.parent.name.startswith(
+        "hyperloom-wheel."
+    )
+    assert list((tmp_path / "container-tmp").iterdir()) == [], "the build directory is removed"
+    assert sorted(path.name for path in (tmp_path / "data").rglob("*")) == sorted(
+        [".hyperloom", "wheels", planted.name, ".complete", "hyperloom-0-py3-none-any.whl"]
+    ), "nothing written to the shared storage, nothing read from it"
+
+
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+def test_a_new_container_builds_the_wheel_again(tmp_path, source):
+    _framework_run(tmp_path, source)
+    (tmp_path / "calls").unlink()
+    (tmp_path / "framework" / ".hyperloom-install").unlink()  # a new container's environment holds no install
+    code, _, _, calls = _framework_run_again(tmp_path, source)
+    assert code == 0 and [c for c in calls if " wheel " in c] and [c for c in calls if " install " in c]
 
 
 @pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
