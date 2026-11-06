@@ -210,23 +210,23 @@ class TestFailedStepClasses:
     def test_every_failed_step_has_a_class(self):
         from inference_suite.contracts import FailedStep
 
-        from hyperloom.orchestrator.actions.executors._grid_runner import failed_step_error_class
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 
         classes = {step: failed_step_error_class(step) for step in FailedStep}
         assert all(classes.values())
         assert len(set(classes.values())) == len(FailedStep)
 
     def test_action_owned_steps_are_not_mapped_twice(self):
-        from hyperloom.orchestrator.actions.executors import _grid_runner
+        from hyperloom.orchestrator.actions.executors import _failed_step
         from hyperloom.orchestrator.state.failure_evidence import FAILED_STEP_ERROR_CLASSES
 
-        assert not set(_grid_runner._ACTION_OWNED_STEP_CLASSES) & set(FAILED_STEP_ERROR_CLASSES)
+        assert not set(_failed_step._ACTION_OWNED_STEP_CLASSES) & set(FAILED_STEP_ERROR_CLASSES)
 
     def test_replaced_failures_keep_their_class(self):
         from inference_suite.contracts import FailedStep
 
         from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
-        from hyperloom.orchestrator.actions.executors._grid_runner import failed_step_error_class
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
         from hyperloom.orchestrator.actions.executors._spec_decode_pin import SPECULATIVE_DECODING_PINNED
         from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
 
@@ -244,7 +244,7 @@ class TestFailedStepClasses:
     def test_new_step_classes_carry_their_attribution(self):
         from inference_suite.contracts import FailedStep
 
-        from hyperloom.orchestrator.actions.executors._grid_runner import failed_step_error_class
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 
         environment = {
             FailedStep.DISK_FULL,

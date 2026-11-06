@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple, NoReturn
 
 import yaml
-from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
 
 from hyperloom_common.env import env_flag, is_truthy
@@ -33,14 +32,7 @@ from hyperloom.common.env_safety import (
 )
 
 from ...phases import machine_state as _phase_state
-from ...state.failure_evidence import (
-    BENCHMARK_REPORT_MISSING,
-    DETOKENIZER_STALL,
-    FAILED_STEP_ERROR_CLASSES,
-    MAGPIE_NONZERO_INVALID_MEASUREMENT,
-    MAGPIE_TIMEOUT,
-    YAML_BUILD_ERROR,
-)
+from ...state import failure_evidence
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ..stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -601,21 +593,6 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
     return _STOPPED_BY_THE_RUN.get(int(returncode))
 
 
-# The failed steps whose class an action module owns; every other step is mapped in
-# ``failure_evidence``. A round inference_suite stopped on its deadline or on cancel was
-# stopped by this run, so it is recorded as the run's own stop rather than as a failure.
-_ACTION_OWNED_STEP_CLASSES: dict[FailedStep, str] = {
-    FailedStep.GOLDEN_OWNED_TOUCHED: SPECULATIVE_DECODING_PINNED,
-    FailedStep.DEADLINE_EXHAUSTED: SESSION_TIME_EXHAUSTED_CLASS,
-    FailedStep.CANCELLED: ORCHESTRATOR_CANCELLED_CLASS,
-}
-
-
-def failed_step_error_class(step: FailedStep) -> str:
-    """Return the ``error_class`` a round that failed at ``step`` is recorded under."""
-    return _ACTION_OWNED_STEP_CLASSES.get(step) or FAILED_STEP_ERROR_CLASSES[step]
-
-
 def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
     """Resolve ``(session_deadline_sec, variant_expected_sec)`` for a :func:`run_grid` call."""
     if shared_state is None:
@@ -657,9 +634,9 @@ def _invalid_measurement_error(
             error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
         if not error.strip():
             error = redact_secret_values(_report_errors_summary(report))
-        return _RoundError(error, MAGPIE_NONZERO_INVALID_MEASUREMENT)
+        return _RoundError(error, failure_evidence.MAGPIE_NONZERO_INVALID_MEASUREMENT)
     if not report:
-        return _RoundError(death_excerpt or "benchmark_report missing", BENCHMARK_REPORT_MISSING)
+        return _RoundError(death_excerpt or "benchmark_report missing", failure_evidence.BENCHMARK_REPORT_MISSING)
     return _RoundError(
         death_excerpt or "benchmark_report missing valid throughput/completed requests",
         "benchmark_report_invalid_metric",
@@ -996,7 +973,7 @@ async def _variant_yaml_or_abort(
     try:
         return await _variant_yaml(run, at, into=into, lifecycle=lifecycle)
     except Exception as exc:  # re-raised as _VariantAborted by _abort_variant
-        error_class = failure_class or getattr(exc, "error_class", YAML_BUILD_ERROR)
+        error_class = failure_class or getattr(exc, "error_class", failure_evidence.YAML_BUILD_ERROR)
         log.warning(
             "grid_runner: variant %s aborted: %s: %r",
             _variant_tag(run, at),
@@ -1303,7 +1280,7 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
         )
         _abort_variant(
             at,
-            _VariantFailure(MAGPIE_TIMEOUT, str(exc), f"timeout: {exc}"),
+            _VariantFailure(failure_evidence.MAGPIE_TIMEOUT, str(exc), f"timeout: {exc}"),
             server_log_path=_existing_log_path(at.path / "server.log"),
             runtime_sec=round(max(0.0, time.time() - started_unix), 2),
             nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in harvested],
@@ -1327,7 +1304,7 @@ def _abort_on_detokenizer_stall(run: _GridRun, at: _VariantSlot, round_: _Benchm
     _abort_variant(
         at,
         _VariantFailure(
-            DETOKENIZER_STALL,
+            failure_evidence.DETOKENIZER_STALL,
             "server reported ready but emitted no log output (hung engine / detokenizer stall); "
             "reaped by the detokenizer-stall watchdog",
             "detokenizer_stall: server ready but log went silent",
@@ -1771,7 +1748,7 @@ def _attach_grid_launch_evidence(
             break
         if result.status == "skipped" or result.error_class in {  # skipped or refused: never launched a measurement
             speculative_capability.CAPABILITY_UNSUPPORTED,
-            YAML_BUILD_ERROR,
+            failure_evidence.YAML_BUILD_ERROR,
             _BENCHMARK_CAP_ERROR,
             _WARMUP_YAML_BUILD_ERROR,
             SPECULATIVE_DECODING_PINNED,
