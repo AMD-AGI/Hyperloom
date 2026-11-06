@@ -8,9 +8,14 @@ from __future__ import annotations
 import time
 
 from kernelforge.workflows.forge_loop.iteration.handoffs import HandoffStore
+from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.campaign.loop_log import LOOP_BANNER, experiment_line
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
-from kernelforge.workflows.forge_loop.roles.prompt_view import MAX_RECENT_ATTEMPT_LINES, render_long_horizon_header
+from kernelforge.workflows.forge_loop.roles.prompt_view import (
+    MAX_RECENT_ATTEMPT_LINES,
+    OptionalRecords,
+    render_long_horizon_header,
+)
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, MAX_PINNED_ITERATIONS, RunState
 
 
@@ -66,7 +71,10 @@ def _long_horizon_header(
     return render_long_horizon_header(
         state,
         outcomes,
-        include_handoffs=bool(handoff_store and handoff_store.latest()),
+        records=OptionalRecords(
+            handoffs=bool(handoff_store and handoff_store.latest()),
+            unmeasured_lanes=ExperimentsLayout(store.root).unmeasured_lane_index.is_file(),
+        ),
     )
 
 
