@@ -6,11 +6,12 @@
 Every agent's branch gets ports of its own: the branch first built takes the first port block, the next the following
 one, and a branch keeps its block for the session, a restart included. Its sandbox runs on the cards its preflight
 leases from the toolbox: on this host (:class:`LocalAgentSandboxes`), in the lease's directory with the lease's
-environment on top of the session's, or, on the hosted backend, in the leased ``dev`` sandbox
-(:class:`RemoteAgentSandboxes`), rooted in the branch's session directory. Its onboarding model is the specialists' CLI
-(:mod:`agent_onboard`) with its spend recorded in the branch's blackboard, where the agent's own spend goes too, read
-from the transcripts of the Claude CLI's directory the sandbox gives the agent (:mod:`agent_spend`). Given the gate's
-benchmark client (:mod:`gate_client`), each agent's spec names it aimed at the branch's first port.
+environment on top of the session's, in bubblewrap where it can sandbox an agent here, or, on the hosted backend, in
+the leased ``dev`` sandbox (:class:`RemoteAgentSandboxes`), rooted in the branch's session directory. Its onboarding
+model is the specialists' CLI (:mod:`agent_onboard`) with its spend recorded in the branch's blackboard, where the
+agent's own spend goes too, read from the transcripts of the Claude CLI's directory the sandbox gives the agent
+(:mod:`agent_spend`). Given the gate's benchmark client (:mod:`gate_client`), each agent's spec names it aimed at the
+branch's first port.
 
 The dossier pass (:mod:`dossier_pass`) runs on the same: in EXPLORE as the run of a mapping branch (:mod:`map_session`),
 in the branch's place on its port block, its lease charged to it; in a session that stops after its map, with a port
@@ -24,7 +25,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from functools import partial
+from functools import cached_property, partial
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
@@ -36,7 +37,15 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSandbox, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
-from hyperloom_multibranch.specialist.agent_sandbox import FrameworkProtection, LocalAgentSandbox, framework_protection
+from hyperloom.common.agent_isolation import BwrapIsolation
+from hyperloom_multibranch.specialist.agent_sandbox import (
+    FrameworkProtection,
+    LocalAgentSandbox,
+    SandboxIsolation,
+    SandboxPaths,
+    framework_protection,
+    sandbox_isolation,
+)
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, BranchPlace, Processes, SessionBlackboard
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend
 from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, AutonomousSession, AutonomousSetup
@@ -50,7 +59,12 @@ from hyperloom_multibranch.specialist.dossier_pass import (
 from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, branch_place
-from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox, claude_config_dir, forwarded_env
+from hyperloom_multibranch.specialist.remote_sandbox import (
+    HOME_DIR,
+    RemoteAgentSandbox,
+    claude_config_dir,
+    forwarded_env,
+)
 from hyperloom_multibranch.specialist.runtime import Session, SessionStart
 from hyperloom_multibranch.specialist.worktree import WorktreeError
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
@@ -81,19 +95,52 @@ class AgentSandboxes(Protocol):
 
 @dataclass(frozen=True)
 class LocalAgentSandboxes:
-    """Sandboxes on this host, every process joining ``processes``, with the image's installed frameworks protected
-    (:func:`~hyperloom_multibranch.specialist.agent_sandbox.framework_protection`)."""
+    """Sandboxes on this host, every process joining ``processes``. Where bubblewrap can sandbox an agent here (asked
+    once, at the first sandbox, of ``choose``), each runs in one with the lease's root, the branch's agent directory
+    and worktree writable and a home of its own in the branch's directory, where its Claude CLI keeps its transcripts,
+    the same place a hosted sandbox's are. Else each runs as before, with the image's installed frameworks protected
+    (``frameworks``, default :func:`~hyperloom_multibranch.specialist.agent_sandbox.framework_protection`).
+
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox an agent.
+    """
 
     processes: Processes
-    frameworks: FrameworkProtection = field(default_factory=framework_protection)
+    frameworks: FrameworkProtection | None = None
+    choose: Callable[[], SandboxIsolation] = sandbox_isolation
+
+    @cached_property
+    def isolation(self) -> SandboxIsolation:
+        """How every sandbox of this session runs its commands."""
+        return self.choose()
 
     def sandbox(self, branch: str, place: BranchPlace, source: Path, lease: BranchLease) -> AgentSandbox:
         base_env = {**os.environ, **lease.env}
+        if not isinstance(self.isolation, BwrapIsolation):
+            frameworks = self.frameworks if self.frameworks is not None else framework_protection()
+            return LocalAgentSandbox(
+                lease.gpu_ids, (source,), lease.root, self.processes, branch, base_env, frameworks=frameworks
+            )
+        paths = SandboxPaths(
+            writable=(place.workspace, place.worktree.path),
+            readable=place.worktree.linked,
+            home=place.workspace / SANDBOX_DIR / HOME_DIR,
+        )
         return LocalAgentSandbox(
-            lease.gpu_ids, (source,), lease.root, self.processes, branch, base_env, frameworks=self.frameworks
+            lease.gpu_ids,
+            (source,),
+            lease.root,
+            self.processes,
+            branch,
+            base_env,
+            isolation=self.isolation,
+            paths=paths,
+            forwarded=forwarded_env(os.environ),
         )
 
     def claude_config(self, place: BranchPlace) -> Path:
+        if isinstance(self.isolation, BwrapIsolation):
+            return claude_config_dir(place.workspace / SANDBOX_DIR)
         return Path(os.environ.get(CLAUDE_CONFIG_ENV) or Path.home() / DEFAULT_CLAUDE_CONFIG)
 
 

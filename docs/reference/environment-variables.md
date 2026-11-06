@@ -772,6 +772,22 @@ they can read this account's files and credentials (<reasons>)`), and `agent_iso
 report its line (`agent isolation: specialists <account|bwrap|none|refused>, sandboxes <...> (bubblewrap X.Y.Z
 PATH): <reasons>`).
 
+A multi-branch session's local agent sandboxes (autonomous branches, the dossier pass, dev leases) run every command
+of one sandbox in one bubblewrap sandbox whose user and pid namespaces all its commands share, so a server one command
+starts is seen, signalled and stopped by a later one (`pkill`, or its PID file against the sandbox's own `/proc`). They
+share the sandbox's private `/tmp` and full-size `/dev/shm`, each command has its own IPC namespace (System V IPC does
+not outlive a command; POSIX shared memory in `/dev/shm` does), and the network is the app's. A command writes the
+lease's root and, for an agent, its directory and worktree (a dev lease's worktree and what its links point at are
+read-only); the image's installed frameworks are read-only but aiter, which writes its JIT modules and tuning files
+beside itself. Its environment is not the app's: the search paths, locale, models, the image's own settings and the
+LLM gateway with its credentials (`ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_CODE_OAUTH_TOKEN`, the proxies and CA bundle),
+with `HOME`, `CLAUDE_CONFIG_DIR`, a pip user site (`PIP_USER=1`) and `AITER_JIT_DIR`, `TRITON_CACHE_DIR` and
+`FLYDSL_RUNTIME_CACHE_DIR` of the sandbox's own (an agent's home is `sandbox/home` in its branch's session directory,
+where its Claude CLI's transcripts are read from). A Claude CLI there logs in only through those variables, never the
+app's `~/.claude`. A sandbox whose paths bubblewrap cannot bind safely (before 0.12, nothing may be bound below the
+shared `/tmp`, so a session directory under `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run
+refuses it.
+
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
 framework image may carry its own); a local run uses the `bwrap` on `PATH`. The probe (`python -I -m
 hyperloom_common.bwrap probe [--bwrap PATH]`) refuses a setuid bubblewrap and one older than 0.5.0, then runs a canary

@@ -19,9 +19,9 @@ which outlives the run), and every lease when the branch stops
 (:class:`~hyperloom_multibranch.specialist.agent_session.DevLeaseHolder`); the toolbox's close releases whatever is left.
 
 Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox` on the leased cards, at a
-lower CPU priority, or, on the hosted backend, in the leased ``dev`` sandbox
-(:class:`~hyperloom_multibranch.specialist.remote_sandbox.RemoteAgentSandbox`), whose root is on the shared storage
-below the branch's directory. Either way they import the branch worktree's source, with every JIT and kernel cache in
+lower CPU priority, in bubblewrap where it can sandbox an agent here, or, on the hosted backend, in the leased ``dev``
+sandbox (:class:`~hyperloom_multibranch.specialist.remote_sandbox.RemoteAgentSandbox`), whose root is on the shared
+storage below the branch's directory. Either way they import the branch worktree's source, with every JIT and kernel cache in
 the sandbox's :attr:`DevSandbox.cache_root`: a cache beside the package it compiles for would be in the worktree, and
 its files in the next patch. A lease's sandbox lives as long as the lease asks, unless the toolbox lets it live less, which then bounds the
 lease. A lease whose sandbox is not up within :attr:`DevLimits.lease_wait_s` answers that it is starting, so the MCP
@@ -63,7 +63,15 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
 )
 from hyperloom_multibranch.specialist.agent_onboarding import AgentProcess, AgentSandbox
-from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_protection
+from hyperloom.common.agent_isolation import BwrapIsolation
+from hyperloom_multibranch.specialist.agent_sandbox import (
+    FrameworkProtection,
+    LocalAgentSandbox,
+    SandboxIsolation,
+    SandboxPaths,
+    framework_protection,
+    sandbox_isolation,
+)
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.framework_guard import FrameworksUnguarded
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -672,24 +680,48 @@ def _caches(root: Path) -> dict[str, str]:
 
 
 def local_dev_sandboxes(
-    worktrees: WorktreeFor, processes: Processes | None, limits: DevLimits = DevLimits()
+    worktrees: WorktreeFor,
+    processes: Processes | None,
+    limits: DevLimits = DevLimits(),
+    choose: Callable[[], SandboxIsolation] = sandbox_isolation,
 ) -> SandboxFor:
-    """Sandboxes on this host, importing the source of every component the branch's worktree holds, with the image's
-    installed frameworks protected."""
+    """Sandboxes on this host, importing the source of every component the branch's worktree holds. Where bubblewrap
+    can sandbox an agent here (asked once, at the first lease, of ``choose``), each runs in one that writes the
+    lease's root only: the worktree, and what its links point at, are read-only, as the specialist edits its worktree,
+    never a lease's command. Else each runs as before, with the image's installed frameworks protected.
 
-    frameworks = framework_protection()
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox an agent.
+    """
+
+    chosen: list[SandboxIsolation] = []
+    protected: list[FrameworkProtection] = []
 
     def sandbox(branch: str, lease: BranchLease) -> LocalAgentSandbox:
-        base_env = {**os.environ, **lease.env}
+        if not chosen:
+            chosen.append(choose())
+        isolation, base_env = chosen[0], {**os.environ, **lease.env}
+        sources, niceness = _sources(worktrees, branch), limits.niceness
+        if isinstance(isolation, BwrapIsolation):
+            worktree = worktrees(branch)
+            paths = SandboxPaths(readable=(worktree.path, *worktree.linked))
+            forwarded = forwarded_env(os.environ)
+            return LocalAgentSandbox(
+                lease.gpu_ids,
+                sources,
+                lease.root,
+                processes,
+                branch,
+                base_env,
+                niceness=niceness,
+                isolation=isolation,
+                paths=paths,
+                forwarded=forwarded,
+            )
+        if not protected:
+            protected.append(framework_protection())
         return LocalAgentSandbox(
-            lease.gpu_ids,
-            _sources(worktrees, branch),
-            lease.root,
-            processes,
-            branch,
-            base_env,
-            niceness=limits.niceness,
-            frameworks=frameworks,
+            lease.gpu_ids, sources, lease.root, processes, branch, base_env, niceness=niceness, frameworks=protected[0]
         )
 
     return sandbox

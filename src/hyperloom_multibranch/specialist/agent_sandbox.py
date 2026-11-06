@@ -33,17 +33,34 @@ read-only in a mount namespace of its own, or, on a host that gives a command no
 while it runs, once it and every process it started ended, and when the sandbox stops, and says what it restored in the
 logs of the commands that ran; a command whose frameworks neither can protect is refused. A command's end is its
 launcher's: a process the command left running in the background, or detached, still writes as the command.
+
+Where bubblewrap can sandbox an agent (:func:`~hyperloom.common.agent_isolation.choose_sandbox_isolation`), every
+command runs in one (:class:`~hyperloom_common.bwrap.BwrapPolicy`) that starts from an empty root: only the
+toolchain, the paths its sandbox names (:class:`SandboxPaths`) and the installed frameworks are bound, the image's
+installed sglang and vllm read-only and aiter writable, as its JIT and tuning files are written beside it; the home,
+the app's state and every credential location are not there. The sandbox holds one long-lived holder
+(:class:`~hyperloom_common.bwrap.Holder`) whose user and pid namespaces every command joins, so a server one command
+starts is seen and stopped by a later one; each command gets its own mount and IPC namespaces, a ``/proc`` of the
+sandbox's processes only, and the sandbox's one private ``/tmp`` and full-size ``/dev/shm``, so a file a command
+leaves there is the next one's to read. The launcher runs inside, its subreaper in the sandbox's pid namespace, and
+the markers are set inside only, so the kills and the watch reach the command's processes, never bubblewrap's. The
+environment is no longer the app's: only what a command needs (:func:`confined_env`), with a home, Claude config,
+user site and JIT caches of the sandbox's own. A sandbox whose paths bubblewrap cannot bind safely runs unconfined, as
+before, with a WARNING; in a hosted run it is refused. Where bubblewrap cannot sandbox an agent at all, commands run
+as before, said once at start-up.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import hashlib
 import itertools
 import logging
 import math
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -54,12 +71,23 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
+from typing import BinaryIO
 
+from hyperloom.common.agent_isolation import (
+    BwrapIsolation,
+    NoIsolation,
+    announce_agent_isolation,
+    choose_sandbox_isolation,
+)
+from hyperloom.common.confinement import Confinement, credential_paths, toolchain_paths
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.proctree import descendants, running
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_installed_package
+from hyperloom.measure.local_templates import image_env
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv
+from hyperloom_common.bwrap import BwrapPolicy, BwrapPolicyError, Holder, Scratch
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.agent_watch import (
@@ -85,6 +113,9 @@ logger = logging.getLogger(__name__)
 #: edit in place (a tool defaulting to the installed tree) breaks every branch's tests. aiter is left writable, since
 #: it builds its JIT modules beside itself unless told otherwise.
 READ_ONLY_FRAMEWORKS = ("sglang", "vllm")
+#: The frameworks a confined sandbox's commands may write in place: aiter builds its JIT modules and keeps its tuning
+#: files beside itself.
+WRITABLE_FRAMEWORKS = ("aiter",)
 #: The prefix that runs a command in a mount namespace of its own, whose mounts no other process sees; the probe of
 #: :func:`mount_namespaces` runs the same one.
 _PRIVATE_MOUNTS = ("unshare", "--mount", "--propagation", "private", "--")
@@ -95,6 +126,9 @@ _READ_ONLY_SCRIPT = (
 )
 BIN_DIR = "bin"
 LOG_DIR = "logs"
+#: Where in a sandbox's temporary directory its JIT and kernel caches go, and the same name in a confined home's tool
+#: directories.
+CACHE_DIR = "cache"
 #: Where a sandbox's temporary files go, under the host's local temporary directory: HIP unbundles its code objects
 #: there and fails on a network file system, where the branch's directory usually is.
 TMP_PREFIX = "hyperloom-agent-"
@@ -107,6 +141,30 @@ LEFT_POLL_SECONDS = 1.0
 CONFINED = ("pkill", "pgrep", "killall")
 #: The launchers this process started, by the root of their sandbox, so a kill reaps every one of them.
 _launched: dict[str, list[subprocess.Popen[bytes]]] = {}
+#: How a sandbox's commands are isolated: in bubblewrap, or unconfined as before.
+SandboxIsolation = BwrapIsolation | NoIsolation
+#: A sandbox no tier was chosen for runs its commands as before.
+UNCONFINED = NoIsolation(())
+#: Where a confined command finds its temporary directory: the sandbox's own, bound there for every command.
+CONFINED_TMP = Path("/tmp")
+#: A confined sandbox's home, below its root unless its factory names another (:attr:`SandboxPaths.home`), and where
+#: in it the Claude CLI keeps its state and transcripts, and pip its user site.
+HOME_DIR = "home"
+CLAUDE_DIR = ".claude"
+USER_BASE = ".local"
+#: The programs a confined command may run besides those of its toolchain's trees: its shell and the agent CLIs.
+AGENT_PROGRAMS = ("bash", "claude", "codex")
+#: The cards' device nodes, bound into a confined sandbox where the host has them.
+GPU_DEVICES = (Path("/dev/kfd"), Path("/dev/dri"))
+#: What a confined command takes from the app's environment by name and by prefix (:func:`confined_env`), besides the
+#: framework image's own settings and what its factory forwards: the search paths, the locale and terminal, and the
+#: models and benchmark checkout it reads.
+BASIC_NAMES = frozenset(
+    {"PATH", "PYTHONPATH", "LANG", "LANGUAGE", "TZ", "TERM", "HF_HOME", "HF_HUB_CACHE", "MODEL_PATH", "INFERENCEX_PATH"}
+)
+BASIC_PREFIXES = ("LC_",)
+#: The variable naming the app's state directory, which no bind of a sandbox may show.
+STATE_DIR_ENV = "HYPERLOOM_STATE_DIR"
 GUARDED_NOTE = (
     "the image's installed frameworks are not mounted read-only on this host: what a command, or a process it left "
     "running, writes into them is restored within seconds, and recorded with the command"
@@ -329,6 +387,38 @@ class FrameworkProtection:
 
 
 @dataclass(frozen=True)
+class SandboxPaths:
+    """What a confined sandbox's commands may write and read besides its root, its home and its toolchain:
+    ``writable`` trees (an agent's directory, a lease's root, a worktree it edits) and ``readable`` ones (a worktree it
+    only imports, the paths a worktree links); ``home``, the sandbox's home, its Claude config included (default:
+    ``home`` below the sandbox's root)."""
+
+    writable: tuple[Path, ...] = ()
+    readable: tuple[Path, ...] = ()
+    home: Path | None = None
+
+
+@dataclass
+class _Confined:
+    """A confined sandbox's bubblewrap, policy, environment, home and private ``/tmp`` and ``/dev/shm``, and the holder
+    its commands join once one started."""
+
+    isolation: BwrapIsolation
+    policy: BwrapPolicy
+    env: dict[str, str]
+    home: Path
+    scratch: Scratch
+    holder: Holder | None = None
+
+    def release(self) -> None:
+        """End the holder, and every process still in it, and delete the scratch."""
+        if self.holder is not None:
+            self.holder.stop()
+            self.holder = None
+        self.scratch.remove()
+
+
+@dataclass(frozen=True)
 class _Guarded:
     """A command ``guard`` counts as running by ``ticket``, none without a guard; ``note`` is what its log says
     first."""
@@ -355,6 +445,31 @@ async def _restore(guard: FrameworkGuard | None, log: Path | None = None) -> Non
         if log is not None:
             with log.open("a", encoding="utf-8") as out:
                 out.write(f"\n[hyperloom] {error}\n")
+
+
+@dataclass(frozen=True)
+class _Launch:
+    """One command's launcher ``argv``, started in ``cwd`` with ``env``, its output to ``out``, holding the status
+    descriptor ``status`` and ``fds``."""
+
+    argv: list[str]
+    cwd: Path
+    env: Mapping[str, str]
+    out: BinaryIO
+    status: int
+    fds: tuple[int, ...] = ()
+
+    def popen(self) -> subprocess.Popen[bytes]:
+        return subprocess.Popen(
+            self.argv,
+            cwd=self.cwd,
+            env=dict(self.env),
+            stdin=subprocess.DEVNULL,
+            stdout=self.out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            pass_fds=(self.status, *self.fds),
+        )
 
 
 @dataclass
@@ -390,10 +505,17 @@ class LocalProcess:
 
     def retire(self) -> None:
         """End the launcher of a command that ended and left nothing running, which it would otherwise wait for until
-        the sandbox stops."""
+        the sandbox stops. In a confined sandbox :attr:`popen` is bubblewrap's process, and the launcher it runs is
+        the one process of its tree left: that launcher is ended, and bubblewrap's process ends with it."""
 
-        if self.returncode is None or any(running(pid) for pid, _ in descendants(self.popen.pid)):
+        if self.returncode is None:
             return
+        left = [pid for pid, _ in descendants(self.popen.pid) if running(pid)]
+        launchers = [pid for pid in left if _runs_launcher(pid)]
+        if len(launchers) < len(left):
+            return
+        for pid in launchers:
+            _kill(pid)
         if self.popen.poll() is None:
             self.popen.send_signal(signal.SIGKILL)
             self.popen.wait()
@@ -428,7 +550,14 @@ class LocalAgentSandbox:
     ``processes`` adopts every command it starts for ``branch``; ``base_env`` is ``os.environ`` when ``None``.
     ``niceness`` lowers every command's CPU priority, for a sandbox whose host work must not slow the tests beside it.
     ``frameworks`` keeps every command from writing the image's installed frameworks (:func:`framework_protection`);
-    the default protects none."""
+    the default protects none. ``isolation`` runs every command in bubblewrap (see the module doc), with ``paths``
+    and ``forwarded`` (what its commands take from the app's environment besides :func:`confined_env`'s), or
+    unconfined, the default; a confined sandbox's frameworks are read-only by its binds, so ``frameworks`` is not
+    used.
+
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot bind the sandbox's paths safely.
+    """
 
     cards: tuple[int, ...]
     python_path: tuple[Path, ...]
@@ -440,9 +569,13 @@ class LocalAgentSandbox:
     poll_seconds: float = POLL_SECONDS
     niceness: int = 0
     frameworks: FrameworkProtection = field(default_factory=FrameworkProtection)
+    isolation: SandboxIsolation = UNCONFINED
+    paths: SandboxPaths = field(default_factory=SandboxPaths)
+    forwarded: Mapping[str, str] = field(default_factory=dict)
     _numbers: Iterator[int] = field(init=False, repr=False)
     _told: bool = field(default=False, init=False, repr=False)
     _guarding: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _confined: _Confined | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         for name in (BIN_DIR, LOG_DIR):
@@ -455,6 +588,7 @@ class LocalAgentSandbox:
             wrapper = self.root / BIN_DIR / tool
             wrapper.write_text(script, encoding="utf-8")
             wrapper.chmod(0o755)
+        self._confinement()
 
     @property
     def lifetime_s(self) -> float:
@@ -463,7 +597,10 @@ class LocalAgentSandbox:
 
     @property
     def tmp(self) -> Path:
-        """The sandbox's own temporary directory, the same for every sandbox at :attr:`root`."""
+        """The sandbox's own temporary directory as its commands see it, the same for every command: a confined
+        sandbox's private ``/tmp``; else one below this host's, the same for every sandbox at :attr:`root`."""
+        if isinstance(self.isolation, BwrapIsolation):
+            return CONFINED_TMP
         digest = hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:16]
         return Path(tempfile.gettempdir()) / f"{TMP_PREFIX}{digest}"
 
@@ -471,24 +608,28 @@ class LocalAgentSandbox:
     def cache_root(self) -> Path:
         """Where the sandbox's JIT and kernel caches go: this host's temporary disk, since a CK module's build writes
         thousands of generated sources, which crawl on the shared storage :attr:`root` is on."""
-        return self.tmp / "cache"
+        return self.tmp / CACHE_DIR
 
     def env(self, env: Mapping[str, str]) -> dict[str, str]:
         """The environment a command runs with, ``env`` added; the cards and the wrappers are not ``env``'s to
         change."""
 
+        confined = self._confinement()
         base = self._base()
         merged = {name: value for name, value in base.items() if name not in GPU_MASK_ENV_NAMES}
         merged["PYTHONPATH"] = os.pathsep.join([*map(str, self.python_path), *filter(None, [base.get("PYTHONPATH")])])
         merged["PYTHONDONTWRITEBYTECODE"] = "1"
-        self.tmp.mkdir(exist_ok=True)
+        if confined is None:
+            self.tmp.mkdir(exist_ok=True)
         merged["TMPDIR"] = str(self.tmp)
         merged.update(env)
         merged = {name: value for name, value in merged.items() if name not in GPU_MASK_ENV_NAMES}
         merged[ROCR_VISIBLE_DEVICES_ENV] = ",".join(map(str, self.cards))
         merged["HIP_VISIBLE_DEVICES"] = ",".join(map(str, range(len(self.cards))))
         merged[MARKER] = str(self.root)
-        merged["PATH"] = os.pathsep.join(filter(None, [str(self.root / BIN_DIR), merged.get("PATH")]))
+        # What a confined command installs with pip goes to its home's user site, whose scripts it runs by name.
+        user_bin = [] if confined is None else [str(confined.home / USER_BASE / BIN_DIR)]
+        merged["PATH"] = os.pathsep.join(filter(None, [str(self.root / BIN_DIR), *user_bin, merged.get("PATH")]))
         return merged
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
@@ -531,9 +672,13 @@ class LocalAgentSandbox:
 
     async def stop(self) -> None:
         """SIGTERM every process of the sandbox, every command's, SIGKILL what is left after :attr:`grace_seconds`;
-        return once none is left."""
+        return once none is left. A confined sandbox's holder ends then, and its private ``/tmp`` and ``/dev/shm`` are
+        deleted; a command started after this gets new ones."""
         await kill_marked(str(self.root), self.grace_seconds, self.poll_seconds, partial(_reap, str(self.root)))
         await _restore(self.frameworks.guard)
+        confined, self._confined = self._confined, None
+        if confined is not None:
+            await asyncio.to_thread(confined.release)
 
     async def _waited(self, process: LocalProcess, timeout: float) -> int | None:
         """``process``'s exit code, or ``None`` once it ran ``timeout`` and was killed."""
@@ -619,16 +764,14 @@ class LocalAgentSandbox:
             with log.open("ab") as out:
                 out.write(note.encode())
                 out.flush()
-                popen = subprocess.Popen(
+                launch = _Launch(
                     launcher_argv(sys.executable, write_fd, argv),
-                    cwd=cwd,
-                    env={**self.env(env), PROCESS_MARKER: process_marker},
-                    stdin=subprocess.DEVNULL,
-                    stdout=out,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    pass_fds=(write_fd,),
+                    cwd,
+                    {**self.env(env), PROCESS_MARKER: process_marker},
+                    out,
+                    write_fd,
                 )
+                popen = launch.popen() if self._confined is None else self._confined_popen(self._confined, launch)
         except BaseException:
             os.close(read_fd)
             raise
@@ -652,7 +795,90 @@ class LocalAgentSandbox:
         )
 
     def _base(self) -> Mapping[str, str]:
+        """What a command's environment starts from: a confined sandbox's own (:func:`confined_env`), else the
+        app's (``base_env``)."""
+        if self._confined is not None:
+            return self._confined.env
         return os.environ if self.base_env is None else self.base_env
+
+    def _confinement(self) -> _Confined | None:
+        """The sandbox's confinement, made again after :meth:`stop`; ``None`` for an unconfined sandbox."""
+        if self._confined is None and isinstance(self.isolation, BwrapIsolation):
+            self._confined = self._confine(self.isolation)
+        return self._confined
+
+    def _confine(self, isolation: BwrapIsolation) -> _Confined | None:
+        """The confinement of every command, or ``None`` where bubblewrap cannot bind the sandbox's paths safely
+        (:meth:`~hyperloom_common.bwrap.BwrapPolicy.problems`): the sandbox then runs unconfined, as before, with
+        its frameworks protected as an unconfined sandbox's are, and says so in a WARNING.
+
+        Raises:
+            IsolationRefused: In a hosted run, which refuses that.
+        """
+        home = self.paths.home or self.root / HOME_DIR
+        make_shared_dirs(home / CLAUDE_DIR)
+        env = confined_env(self._base(), home, self.forwarded)
+        scratch = Scratch.create()
+        try:
+            policy = self._policy(env, home, scratch)
+            refused = policy.problems(isolation.probe.version or (0, 0, 0))
+        except BwrapPolicyError as error:
+            refused = list(error.problems)
+        except BaseException:
+            scratch.remove()
+            raise
+        if not refused:
+            self.frameworks = FrameworkProtection()
+            return _Confined(isolation, policy, env, home, scratch)
+        scratch.remove()
+        failed = dataclasses.replace(isolation.probe, problems=tuple(refused))
+        self.isolation = choose_sandbox_isolation(probe=lambda _path: failed)
+        logger.warning("the agent sandbox at %s runs unconfined, as before: %s", self.root, self.isolation.why)
+        self.frameworks = framework_protection()
+        return None
+
+    def _policy(self, env: Mapping[str, str], home: Path, scratch: Scratch) -> BwrapPolicy:
+        """Every command's policy: the sandbox's root, its home, the trees it names and the image's writable
+        frameworks writable; the toolchain of :data:`AGENT_PROGRAMS`, its import path, the paths it names and the
+        image's other installed frameworks read-only, but none in a tree it writes, which shows it already; the
+        credential locations they show masked; the cards' devices; the app's state never bound. No command dies with
+        the thread that started it: the session's watch ends what is left of a sandbox, with its grace."""
+        installed = installed_frameworks()
+        writable = (self.root, home, *self.paths.writable, *installed.writable)
+        trees = (*writable, Path(scratch.tmp), Path(scratch.shm))
+        toolchain = [path for program in AGENT_PROGRAMS for path in toolchain_paths(env, program, writable=trees)]
+        named = (*toolchain, *self.python_path, *self.paths.readable, *installed.read_only)
+        readable = tuple(path for path in dict.fromkeys(named) if not _within(path, writable))
+        masked = credential_paths(env, allowed=(*readable, *writable), writable=trees)
+        state = os.environ.get(STATE_DIR_ENV, "")
+        confinement = Confinement(
+            writable=writable,
+            readable=readable,
+            masked=masked,
+            devices=GPU_DEVICES,
+            app_only=(Path(state),) if os.path.isabs(state) else (),
+        )
+        return dataclasses.replace(confinement.policy(scratch=scratch), die_with_parent=False)
+
+    def _confined_popen(self, confined: _Confined, launch: _Launch) -> subprocess.Popen[bytes]:
+        """``launch`` in the sandbox, joined to its holder: the markers are set inside only, so bubblewrap's own
+        process carries none and every kill's SIGTERM reaches the command's processes, never bubblewrap's."""
+        policy = dataclasses.replace(confined.policy, chdir=str(launch.cwd))
+        with self._holder(confined).joined(policy) as joined:
+            argv, env = confined.isolation.launch(launch.argv, joined, launch.env, marks=(MARKER, PROCESS_MARKER))
+            return dataclasses.replace(launch, argv=argv, env=env, fds=joined.join).popen()
+
+    def _holder(self, confined: _Confined) -> Holder:
+        """The holder the sandbox's commands join, started when none runs or the one that ran has ended, which ended
+        every process in it."""
+        holder = confined.holder
+        if holder is not None and holder.pidfd >= 0 and not select.select([holder.pidfd], [], [], 0)[0]:
+            return holder
+        if holder is not None:
+            holder.stop()
+        confined.holder = Holder.start(confined.isolation.probe, confined.policy)
+        watch(self.root, self.cards, holder=confined.holder.pid)
+        return confined.holder
 
 
 def read_only_argv(paths: tuple[Path, ...], argv: list[str]) -> list[str]:
@@ -699,6 +925,106 @@ def mount_namespaces() -> bool:
         return False
 
 
+def sandbox_isolation() -> SandboxIsolation:
+    """How this host's agent sandboxes run their commands
+    (:func:`~hyperloom.common.agent_isolation.choose_sandbox_isolation`); unconfined is said once, at WARNING, with
+    the reasons (:func:`~hyperloom.common.agent_isolation.announce_agent_isolation`).
+
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox an agent.
+    """
+    isolation = choose_sandbox_isolation()
+    if isinstance(isolation, NoIsolation):
+        announce_agent_isolation()
+    return isolation
+
+
+def confined_env(environ: Mapping[str, str], home: Path, forwarded: Mapping[str, str]) -> dict[str, str]:
+    """What a confined sandbox's commands start from, taken from ``environ`` (the app's, a lease's on top): the
+    search paths, locale, terminal and the models and benchmark checkout it names (:data:`BASIC_NAMES`), the framework
+    image's own settings (:func:`~hyperloom.measure.local_templates.image_env`), and ``forwarded`` (the LLM gateway,
+    its credentials and models, proxies and CA bundle); with ``home`` as the home, Claude config, cache, pip's user
+    site and the JIT caches of aiter, Triton and FlyDSL, as the installed frameworks are read-only. No other variable
+    of the app's: not its other credentials, nor its home or tools' configuration. Without a Hugging Face location of
+    its own, the hub cache is the app's, which a model id resolves in."""
+    kept = {name: value for name, value in environ.items() if name in BASIC_NAMES or name.startswith(BASIC_PREFIXES)}
+    kept.update(image_env(environ))
+    kept.update(forwarded)
+    hub = _hub_cache(environ)
+    if hub is not None:
+        kept.setdefault("HF_HUB_CACHE", str(hub))
+    kept.update(
+        {
+            "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(home / CLAUDE_DIR),
+            "XDG_CACHE_HOME": str(home / ".cache"),
+            "PIP_USER": "1",
+            "PYTHONUSERBASE": str(home / USER_BASE),
+            "AITER_JIT_DIR": str(home / ".aiter" / "jit"),
+            "TRITON_CACHE_DIR": str(home / ".triton" / CACHE_DIR),
+            "FLYDSL_RUNTIME_CACHE_DIR": str(home / ".flydsl" / CACHE_DIR),
+            # The inner user is the app's, root in a container, which the Claude CLI accepts only in a sandbox.
+            "IS_SANDBOX": "1",
+        }
+    )
+    return kept
+
+
+def _hub_cache(environ: Mapping[str, str]) -> Path | None:
+    """The app's Hugging Face hub cache where ``environ`` names no Hugging Face location and it exists, else
+    ``None``."""
+    if environ.get("HF_HOME") or environ.get("HF_HUB_CACHE") or not os.path.isabs(environ.get("HOME", "")):
+        return None
+    cache = environ.get("XDG_CACHE_HOME") or os.path.join(environ["HOME"], ".cache")
+    hub = Path(cache, "huggingface", "hub")
+    return hub if os.path.isabs(cache) and hub.is_dir() else None
+
+
+@dataclass(frozen=True)
+class InstalledFrameworks:
+    """Where the image's frameworks are installed: ``writable`` (:data:`WRITABLE_FRAMEWORKS`) and ``read_only``
+    (every other component, so the links a worktree holds to their compiled modules resolve in a sandbox)."""
+
+    read_only: tuple[Path, ...] = ()
+    writable: tuple[Path, ...] = ()
+
+
+@functools.cache
+def installed_frameworks() -> InstalledFrameworks:
+    """The image's installed frameworks (:class:`InstalledFrameworks`), found once without importing them."""
+    read_only: list[Path] = []
+    writable: list[Path] = []
+    for name, layout in COMPONENT_LAYOUTS.items():
+        try:
+            path = locate_installed_package(layout).path
+        except UnsupportedComponentError:
+            continue
+        (writable if name in WRITABLE_FRAMEWORKS else read_only).append(path)
+    return InstalledFrameworks(tuple(read_only), tuple(writable))
+
+
+def _within(path: Path, trees: tuple[Path, ...]) -> bool:
+    """Whether ``path``, as given, is one of ``trees`` or below one."""
+    given = Path(os.path.normpath(path))
+    normalized = [Path(os.path.normpath(tree)) for tree in trees]
+    return any(given == tree or tree in given.parents for tree in normalized)
+
+
+def _runs_launcher(pid: int) -> bool:
+    """Whether process ``pid`` runs a sandbox's launcher."""
+    try:
+        return LAUNCHER_SOURCE.encode() in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+
+
+def _kill(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
 def _reap(root: str) -> None:
     """Collect the launchers of the sandbox at ``root`` that ended, which would otherwise linger as zombies."""
 
@@ -720,15 +1046,24 @@ def read_tail(log: Path, size: int = TAIL_BYTES) -> str:
 
 __all__ = [
     "CONFINE_SCRIPT",
+    "CONFINED_TMP",
     "GUARDED_NOTE",
     "READ_ONLY_FRAMEWORKS",
     "TAIL_BYTES",
     "TIMED_OUT",
+    "UNCONFINED",
+    "WRITABLE_FRAMEWORKS",
     "FrameworkProtection",
+    "InstalledFrameworks",
     "LocalAgentSandbox",
     "LocalProcess",
+    "SandboxIsolation",
+    "SandboxPaths",
+    "confined_env",
     "framework_protection",
+    "installed_frameworks",
     "mount_namespaces",
     "read_only_argv",
     "read_tail",
+    "sandbox_isolation",
 ]

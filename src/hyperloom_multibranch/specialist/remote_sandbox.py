@@ -70,12 +70,13 @@ _SCRIPT_MODE = 0o755
 #: How long a start waits, in tenths of a second, for the launcher to write its pid.
 _START_TENTHS = 100
 
-#: What a command takes from this host's environment: the LLM gateway, its credentials and models, and the CA bundle,
-#: by prefix and by name.
+#: What a command takes from this host's environment: the LLM gateway, its credentials (a ``claude setup-token`` login
+#: too) and models, and the CA bundle, by prefix and by name.
 FORWARDED_PREFIXES = ("ANTHROPIC_", "OPENAI_")
 FORWARDED_NAMES = frozenset(
     {
         "CLAUDE_MODEL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_CODE_USE_BEDROCK",
         "CODEX_MODEL",
         "GEAK_CLAUDE_MODEL",

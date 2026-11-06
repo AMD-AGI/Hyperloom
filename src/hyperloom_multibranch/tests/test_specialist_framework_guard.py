@@ -20,6 +20,7 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist import agent_sandbox, framework_guard
 from hyperloom_multibranch.specialist.agent_sandbox import (
     GUARDED_NOTE,
+    UNCONFINED,
     FrameworkProtection,
     LocalAgentSandbox,
     framework_protection,
@@ -64,7 +65,9 @@ def _lease(tmp_path: Path, name: str) -> BranchLease:
 
 
 def _sandbox(tmp_path: Path, branch: str) -> LocalAgentSandbox:
-    sandbox = LocalAgentSandboxes(None).sandbox(branch, None, tmp_path, _lease(tmp_path, branch))
+    sandbox = LocalAgentSandboxes(None, choose=lambda: UNCONFINED).sandbox(
+        branch, None, tmp_path, _lease(tmp_path, branch)
+    )
     sandbox.poll_seconds = 0.02
     sandbox.grace_seconds = 1.0
     return sandbox

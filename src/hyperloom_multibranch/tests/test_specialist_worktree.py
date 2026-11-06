@@ -240,6 +240,15 @@ def test_a_worktree_links_the_installed_package_s_compiled_extensions_without_tr
     assert worktree.diff("vllm") == ""
     worktree.sync("c0", [])
     assert (worktree.path / "vllm" / "_C.abi3.so").exists(), "a sync keeps it"
+    # What a sandbox binds for the links is the base's own record, not what a worktree's links point at now.
+    assert sorted(worktree.linked) == sorted(
+        [installed.path / "_C.abi3.so", installed.path / "attn" / "_fa_C.cpython-312-x86_64-linux-gnu.so"]
+    )
+    (tmp_path / "elsewhere").write_bytes(b"chosen by whoever writes the worktree")
+    (worktree.path / "vllm" / "_C.abi3.so").unlink()
+    (worktree.path / "vllm" / "_C.abi3.so").symlink_to(tmp_path / "elsewhere")
+    again = base.worktree("s1", tmp_path / "s1").linked
+    assert installed.path / "_C.abi3.so" in again and tmp_path / "elsewhere" not in again
 
 
 def test_source_only_keeps_the_component_s_files_byte_for_byte_and_names_the_rest(tmp_path, base):
