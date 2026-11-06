@@ -49,6 +49,8 @@ def hosted_toolbox_inputs(host: HostInfo, *, session_dir: Path, tp: int) -> dict
 
     Raises :class:`ToolboxInputsError` naming every required variable that is not set.
     """
+    # The run's source is required though the toolbox does not take it: the session fetches it to build the runner
+    # cache the toolbox's runners install from.
     required = {
         Var.E2B_API_URL: host.e2b_api_url,
         Var.E2B_SANDBOX_URL: host.e2b_sandbox_url,
@@ -68,7 +70,6 @@ def hosted_toolbox_inputs(host: HostInfo, *, session_dir: Path, tp: int) -> dict
         "sandbox_url": host.e2b_sandbox_url,
         "measurement_key": host.sandbox_keys.measurement.reveal(),  # type: ignore[union-attr]
         "sandbox_templates": host.sandbox_templates,
-        "source_repo": host.source_repo,
         "source_sha": host.source_sha,
         "tp": tp,
         "dev_key": None if dev_key is None else dev_key.reveal(),
