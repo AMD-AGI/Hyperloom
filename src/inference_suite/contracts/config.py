@@ -381,9 +381,23 @@ class AgentxWorkload:
 _AGENTX_KEYS = field_names(AgentxWorkload)
 
 
+class ScriptableRunEnv(str, Enum):
+    """The env names the round sets for a scriptable script; a param naming one is refused."""
+
+    RESULT_DIR = "RESULT_DIR"
+    RESULT_FILENAME = "RESULT_FILENAME"
+    MODEL = "MODEL"
+    TP = "TP"
+    ROCR_VISIBLE_DEVICES = "ROCR_VISIBLE_DEVICES"
+    QUALITY_REFERENCE = "QUALITY_REFERENCE"
+
+
+_SCRIPTABLE_RUN_ENV = frozenset(item.value for item in ScriptableRunEnv)
+
+
 @dataclass(frozen=True)
 class ScriptableWorkload:
-    """A server-less script (xDiT); its ``params`` carry no acceptance threshold (D2)."""
+    """A server-less script (xDiT); its ``params`` are its env, so they carry no acceptance threshold (D2)."""
 
     script: str
     params: Mapping[str, object] = field(default_factory=dict)
@@ -393,7 +407,9 @@ class ScriptableWorkload:
         _FIELDS.text(self.script, "the scriptable script")
         params = dict(_FIELDS.mapping(self.params, "the scriptable params"))
         for name, value in params.items():
-            _FIELDS.text(name, "a scriptable param name")
+            _FIELDS.matching(_ENV_NAME, name, "a scriptable param name (an environment variable name)")
+            if name in _SCRIPTABLE_RUN_ENV:
+                raise ConfigError(f"the scriptable param {name} is set by the round")
             if _THRESHOLD_NAME.search(name):
                 raise ConfigError(f"the scriptable param {name} is a threshold; the caller judges the result (D2)")
             _scalar(value, f"the scriptable param {name}")
@@ -747,6 +763,7 @@ __all__ = [
     "ProfileConfig",
     "RunPaths",
     "RunnerLayer",
+    "ScriptableRunEnv",
     "ScriptableWorkload",
     "ServerConfig",
     "SuiteConfig",

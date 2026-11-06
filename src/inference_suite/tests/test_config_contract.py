@@ -275,6 +275,14 @@ def test_scriptable_params_carry_no_threshold(name):
         ScriptableWorkload(script="xdit.sh", params={name: 0.1})
 
 
+@pytest.mark.parametrize(
+    ("name", "match"), [("RESULT_DIR", "set by the round"), ("not-an-env", "environment variable name")]
+)
+def test_scriptable_params_are_env_names_the_round_does_not_set(name, match):
+    with pytest.raises(ConfigError, match=match):
+        ScriptableWorkload(script="xdit.sh", params={name: 1})
+
+
 def test_layers_refuse_contradictions():
     with pytest.raises(ConfigError, match="both sets and unsets"):
         LaunchDelta(env_set={"A": "1"}, env_unset=("A",))
