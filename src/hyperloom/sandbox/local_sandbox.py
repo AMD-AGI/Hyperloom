@@ -176,6 +176,7 @@ class LocalSandbox:
             if self._startup is not None:
                 self._startup[1].close()
             reaped_now = reap_sandbox_processes(self._procs, self.sandbox_id)
+            # Looked at only now that the last reap is done: what a command timeout's reap named may have died since.
             self._leftovers = wait_exited(self._leftovers) | reaped_now
             reaped = self._leftovers.clean
             shutil.rmtree(self.directory, ignore_errors=True)
