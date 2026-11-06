@@ -412,7 +412,8 @@ def test_under_bubblewrap_the_compile_has_no_egress_no_key_a_dev_null_and_writes
     staged = _built_with_source(tmp_path, tree, bwrap_tier)
 
     seen = dict(staged.toolchain)
-    assert {name: seen.pop(name) for name in ("net", "pid")} != {
+    namespaces = {name: seen.pop(name) for name in ("net", "pid")}
+    assert namespaces != {
         "net": os.readlink("/proc/self/ns/net"),
         "pid": os.readlink("/proc/self/ns/pid"),
     }
