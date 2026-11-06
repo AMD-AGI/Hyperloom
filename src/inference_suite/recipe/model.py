@@ -42,6 +42,11 @@ VLLM_RUNNER_OWNED = frozenset(
 )
 
 
+ATOM_ENTRYPOINT = ("python3", "-m", "atom.entrypoints.openai_server")
+#: The ATOM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
+ATOM_RUNNER_OWNED = frozenset({"model", "host", "server-port"})
+
+
 def boards_interchangeable(board: str, other: str) -> bool:
     """Whether a launch tuned on ``other`` runs as tuned on ``board``: the same architecture and HBM capacity."""
     first, second = AMD_GPU_BOARDS.get(board), AMD_GPU_BOARDS.get(other)
@@ -259,6 +264,8 @@ class SourceMiss:
 
 
 __all__ = [
+    "ATOM_ENTRYPOINT",
+    "ATOM_RUNNER_OWNED",
     "ApiResponse",
     "InferencexSelection",
     "InferencexSnapshot",

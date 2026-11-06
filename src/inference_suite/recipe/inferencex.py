@@ -32,6 +32,8 @@ from inference_suite.contracts.base_launch import (
     Workload,
 )
 from inference_suite.recipe.model import (
+    ATOM_ENTRYPOINT,
+    ATOM_RUNNER_OWNED,
     InferencexSelection,
     InferencexSnapshot,
     RecipeSourceError,
@@ -372,9 +374,9 @@ _ENGINES = {
         unported=frozenset({"connector"}),
     ),
     "atom": _EngineRules(
-        entrypoint=("python3", "-m", "atom.entrypoints.openai_server"),
+        entrypoint=ATOM_ENTRYPOINT,
         frontend="atomesh",
-        owned=frozenset({"model", "host", "server-port"}),
+        owned=ATOM_RUNNER_OWNED,
         unported=frozenset({"tp", "tensor-parallel-size", "kv-transfer-config", "extra-kv-connectors"}),
     ),
 }
