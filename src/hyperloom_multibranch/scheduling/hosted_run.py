@@ -8,17 +8,26 @@ of :class:`~hyperloom_multibranch.scheduling.settings.RunSettings` a command-lin
 the legacy entry validated, a multi-branch session needs ``multibranch.workload`` (``--workload``),
 ``workload.conc`` and ``workload.precision``; ``multibranch.max_branches`` is ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
-``--autonomous-agent``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant runs at
-once. The fields ``run`` has no option for -- ``objective``, ``launch``, ``options``, ``placement.profile`` and
-``placement.specialist_capacity`` -- are not read. Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
-they need its ``dev`` key and the session directory on the storage ``USER_DATA_PATH`` names, which the ``dev``
-template mounts at the same path (:func:`refuse_unhosted_branches`).
-Every test, PRELUDE's included, runs in a measurement sandbox, so the application's container needs no card:
-``hosted-cpu`` serves as ``hosted-gpu`` does.
+``--autonomous-agent``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
+``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
+``objective``, ``launch``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read.
 
-The grant bounds the session in time (:func:`grant_deadline`): its budget ends one CLOSE grace and a margin before the
+With ``placement.measurement`` ``hosted`` (the default), every test, PRELUDE's included, runs in a measurement sandbox
+of the grant, so the application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does. Dev
+sandboxes and agents run in ``dev`` sandboxes of the grant, so they need its ``dev`` key and the session directory on
+the storage ``USER_DATA_PATH`` names, which the ``dev`` template mounts at the same path
+(:func:`refuse_unhosted_branches`). With ``local``, which the spec allows only for ``hosted-gpu``, the tests, the dev
+sandboxes and the agents run in the application's container on its own cards, as ``run`` does on a machine's, and the
+run needs no sandbox of the grant, nor a grant: its framework is the image this container runs, so ``framework.image``
+must name the image the measurement pins name, by its digest (:func:`require_local_image`).
+
+A grant bounds the session in time (:func:`grant_deadline`): its budget ends one CLOSE grace and a margin before the
 grant does, and the process is sent SIGTERM one CLOSE grace before the grant ends, which ends FINAL and leaves CLOSE
-that grace.
+that grace. Without a grant the spec's ``budget.max_hours`` alone bounds it.
+
+A hosted run's agents must be isolated: they run with the application's credentials in reach otherwise. Its start
+marks the process so (:func:`~hyperloom.common.agent_isolation.require_agent_isolation`), with the hosting layer's
+bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names (:func:`layer_bwrap`), and no other.
 
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
@@ -37,19 +46,28 @@ import signal
 import threading
 from dataclasses import dataclass
 from datetime import datetime
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom_common.shared_storage import make_shared_dirs, ownership, setgid_warnings, writable_problems
-from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
+from hyperloom.common.agent_isolation import (
+    IsolationRefused,
+    announce_agent_isolation,
+    choose_sandbox_isolation,
+    require_agent_isolation,
+)
+from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
+from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
 
@@ -58,6 +76,10 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 #: Seconds between the session's hard stop and the grant's end, for the process to write ``exit.json`` and exit.
 GRANT_MARGIN_SECONDS = 60.0
+#: The hosting layer's directory, as the hosted start names it.
+HOST_LAYER_ENV = "HYPERLOOM_HOST_LAYER"
+#: The hosting layer's bubblewrap, below its directory.
+LAYER_BWRAP = Path("bin", "bwrap")
 #: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
 #: another account of the group, reads ``session.json`` to finish the session it names.
 _DURABLE = WriteOptions(fsync=True, shared=True)
@@ -141,6 +163,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "max-branches": section.get("max_branches"),
         "dev-leases": section.get("dev_leases"),
         "max-parallel-tests": min(spec.max_parallel_tests, parallel_tests),
+        "measurement": spec.measurement,
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     return ["run", *(f"--{option}={value}" for option, value in values.items() if value is not None), *agents]
@@ -177,12 +200,77 @@ def refuse_unhosted_branches(settings: RunSettings, host: HostInfo, env: Mapping
         )
 
 
+def require_local_image(spec: CampaignSpec, env: Mapping[str, str]) -> None:
+    """Refuse a spec measured on this container's cards whose ``framework.image`` does not name, by its digest, the
+    image ``env``'s measurement pins name: every test runs this container's own framework, so the session measures
+    the image it runs, whatever the spec asks for. Nothing in a container states the image it runs, so the pins, which
+    its deployment sets, are what the spec is held to. A spec measured in the grant's sandboxes is not looked at.
+
+    Raises:
+        PeersUnavailable: When the pins cannot be read.
+        HostedRefused: When ``framework.image`` is not that image by that digest.
+    """
+
+    if spec.measurement != MEASUREMENT_LOCAL:
+        return
+    try:
+        image = active_image(env)
+    except ImagePinError as exc:
+        raise PeersUnavailable(f"the measurement pins cannot be read: {exc}") from exc
+    if not spec.framework_image.endswith(f"@{image.digest}"):
+        raise HostedRefused(
+            f"placement.measurement 'local' measures the image this container runs, {image.ref} at {image.digest}:"
+            " framework.image must name it by that digest"
+        )
+
+
+def layer_bwrap(env: Mapping[str, str]) -> str | None:
+    """The hosting layer's bubblewrap, in the directory ``env``'s ``HYPERLOOM_HOST_LAYER`` names; ``None`` when it
+    names none. The one bubblewrap a hosted run launches agents with: the framework image may carry its own, maybe
+    setuid, ahead of the layer's on ``PATH``."""
+
+    layer = env.get(HOST_LAYER_ENV, "").strip()
+    return str(Path(layer) / LAYER_BWRAP) if layer else None
+
+
+def require_hosted_isolation(spec: CampaignSpec, env: Mapping[str, str]) -> None:
+    """Mark this process as a hosted run's, whose agents are launched isolated, with the hosting layer's bubblewrap
+    (:func:`layer_bwrap`) and no other, and refuse now a host where they cannot be: the specialists always, and the
+    agent and dev sandboxes of a spec measured on this container's cards, which then run here (in the grant's ``dev``
+    sandboxes otherwise). Says once how they are isolated.
+
+    Raises:
+        PeersUnavailable: Neither an account nor bubblewrap can isolate them here, naming why; the run ends for good.
+        TimeoutError: Bubblewrap gave no answer in time; a later start of the run may find it.
+    """
+
+    try:
+        require_agent_isolation(bwrap=layer_bwrap(env))
+        if spec.measurement == MEASUREMENT_LOCAL:
+            choose_sandbox_isolation()
+    except IsolationRefused as refused:
+        if refused.transient:
+            raise TimeoutError(str(refused)) from refused
+        raise PeersUnavailable(str(refused)) from refused
+    announce_agent_isolation()
+
+
 def _multibranch_section(section: object) -> dict[str, Any]:
     if section is None:
         return {}
     if not isinstance(section, dict):
         raise HostedRefused("multibranch must be an object")
     return section
+
+
+def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
+    """How many tests of a TP the grant ``host`` holds runs at once; raises ValueError when one does not fit, and
+    ImportError when the ``hosted`` extra is not installed."""
+
+    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
+    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
+
+    return partial(parallel_tests_for, toolbox_grant(host.grant_limits))
 
 
 def toolbox_grant(limits: HostGrantLimits | None) -> GrantLimits | None:
@@ -311,6 +399,8 @@ def reported_stop_reason(root: Path) -> str | None:
 __all__ = [
     "EXIT_FILE",
     "GRANT_MARGIN_SECONDS",
+    "HOST_LAYER_ENV",
+    "LAYER_BWRAP",
     "SESSION_FILE",
     "GrantDeadline",
     "HostedExit",
@@ -318,11 +408,15 @@ __all__ = [
     "arm_grant_stop",
     "campaign_spec",
     "grant_deadline",
+    "grant_tests_that_fit",
     "hosted_storage",
+    "layer_bwrap",
     "record_session",
     "recorded_session",
     "refuse_unhosted_branches",
     "reported_stop_reason",
+    "require_hosted_isolation",
+    "require_local_image",
     "run_argv",
     "storage_problems",
     "toolbox_grant",
