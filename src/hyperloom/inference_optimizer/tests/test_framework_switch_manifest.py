@@ -84,11 +84,35 @@ def test_a_gpu_mask_switch_is_dropped(mask):
     assert any("reserved benchmark variable" in p for p in problems)
 
 
-def test_a_credential_shaped_switch_is_dropped():
-    """A manifest is held to the same boundary as a reference recipe."""
-    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN")])
+def test_a_credential_shaped_switch_carrying_a_string_value_is_dropped():
+    """A manifest is held to the same boundary as a reference recipe: no secret is persisted under a switch."""
+    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN", value="sk-live-4f9a")])
     assert switches == []
-    assert any("credential-shaped name" in p for p in problems)
+    assert problems == ["dropped 'MY_TOKEN': credential-shaped name, not a rewrite switch"]
+
+
+def test_a_token_cache_switch_set_to_a_flag_or_a_count_is_kept():
+    """A TOKEN-named switch set to a flag or a count can hold no secret, so it is kept."""
+    switches, problems = manifest.parse_manifest(
+        [
+            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE"),
+            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", value=65536),
+            _entry("SGLANG_TOKEN_REUSE", value="off"),
+        ]
+    )
+    assert [(s["switch"], s["value"]) for s in switches] == [
+        ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE", "1"),
+        ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", "65536"),
+        ("SGLANG_TOKEN_REUSE", "off"),
+    ]
+    assert problems == []
+
+
+def test_a_zero_value_is_kept_as_zero():
+    """An integer 0 is a declared value, not a missing one."""
+    switches, problems = manifest.parse_manifest([_entry("HL_SPLIT_K", value=0)])
+    assert problems == []
+    assert switches[0]["value"] == "0"
 
 
 def test_a_switch_colliding_with_benchmark_config_is_dropped():
@@ -554,6 +578,58 @@ def test_already_attributed_levers_are_not_re_benched():
     assert framework_lever_grid(state) == []
 
 
+def test_an_attributed_enabler_still_turns_on_for_its_dependents():
+    """Attribution decides which arms are left to run, never which envs a bundle sets."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=False)
+    state.record_framework_lever_attribution("HL_X", gain_pct=0.3)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["name"], v["framework_lever_bundle"], v["extra_envs"]) for v in payload] == [
+        ("fwlever_hl_y", ["HL_X", "HL_Y"], {"HL_X": "1", "HL_Y": "1"})
+    ]
+
+
+def test_the_combination_arm_runs_until_every_one_of_its_levers_is_attributed():
+    """The full stack is offered while any dormant lever is pending, and always switches every dormant lever on."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_A"), _entry("HL_B")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=False)
+    state.record_framework_lever_attribution("HL_A", gain_pct=0.3)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["name"], v["extra_envs"]) for v in payload] == [
+        ("fwlever_hl_b", {"HL_B": "1"}),
+        ("fwlever_all", {"HL_A": "1", "HL_B": "1"}),
+    ]
+    state.record_framework_lever_attribution("HL_B", gain_pct=0.1)
+    assert framework_lever_grid(state) == []
+
+
+def test_an_attributed_lever_still_counts_toward_the_stack_a_drop_leaves():
+    """Dropping X and the Y it enables still leaves Z on, so the arm attributes X rather than restating the base."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y"), _entry("HL_Z")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=True)
+    state.record_framework_lever_attribution("HL_Y", gain_pct=1.0)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["framework_lever"], v["unset_envs"]) for v in payload] == [
+        ("HL_Z", ["HL_Z"]),
+        ("HL_X", ["HL_X", "HL_Y"]),
+    ]
+
+
 def test_no_levers_means_no_seeding():
     """The seeder is inert for every framework that has no authored rewrites."""
     from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
@@ -776,6 +852,24 @@ async def test_a_rewrite_patch_is_benched_with_its_switches_on(tmp_path, monkeyp
     """An applied rewrite patch is inert, so benching it as-is would measure nothing."""
     _, _, benched_envs, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=8.0)
     assert benched_envs == {"HL_HOIST": "1", "HL_CACHE": "1"}
+
+
+@pytest.mark.asyncio
+async def test_an_int_cast_flag_without_a_value_is_benched_on(tmp_path, monkeypatch):
+    """``bool(int(os.getenv(X, "0")))`` is the usual on/off idiom, so a cast says nothing about needing a value."""
+    patch = _REWRITE_PATCH.replace(
+        "+    return 2\n", '+    fused = bool(int(os.getenv("HL_FUSED", "0")))\n+    return 2\n'
+    ).replace("@@ -1,2 +1,2 @@", "@@ -1,2 +1,3 @@")
+    result, _, benched_envs, _ = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        patch_body=patch,
+        switches=[{"switch": "HL_HOIST"}, {"switch": "HL_FUSED"}],
+    )
+    assert result["status"] == "kept"
+    assert benched_envs == {"HL_HOIST": "1", "HL_FUSED": "1"}
+    assert [row["switch"] for row in result["framework_levers"]] == ["HL_HOIST", "HL_FUSED"]
 
 
 @pytest.mark.asyncio
