@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.sandbox import SandboxUnavailable
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import LeaseCharge
@@ -257,3 +258,20 @@ async def test_a_pass_whose_arbor_exited_is_still_killed_before_its_cards_go_bac
 
     assert outcome.map is None and killed and killed[-1] is not None
     assert toolbox.released == ["L1"]
+
+
+async def test_a_pass_whose_kill_fails_still_gives_its_cards_back_and_says_how_it_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    kill = LocalProcess.kill
+
+    async def unavailable(self: LocalProcess) -> None:
+        await kill(self)
+        raise SandboxUnavailable("the sandbox service timed out")
+
+    monkeypatch.setattr(LocalProcess, "kill", unavailable)
+    outcome, toolbox, _, _ = await _pass(tmp_path, "crash", seconds=0.6, start_seconds=0.0)
+
+    assert outcome.map is None and outcome.reason.startswith("it exited 1")
+    assert toolbox.released == ["L1"]
+    assert "the sandbox service timed out" in caplog.text
