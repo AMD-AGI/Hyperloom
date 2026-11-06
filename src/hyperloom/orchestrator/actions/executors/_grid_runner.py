@@ -77,7 +77,7 @@ from hyperloom.inference_optimizer import speculative_capability
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override, prepend_launch_path
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import seal_server_argv
-from .magpie_agentx import ServerArgvInvalidError, materialize_grid_variant
+from .magpie_agentx import ServerArgvInvalidError, materialize_grid_variant, native_config
 from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._grid_base import (
@@ -1647,10 +1647,9 @@ async def run_grid(
         magpie_python = resolve_benchmark_interpreter()
     else:
         magpie_python = _validate_magpie_python_override(magpie_python)
-    warmup_before_measure = launch.warmup_before_measure
-    if warmup_before_measure is None:
-        warmup_before_measure = _run_grid_warmup_enabled()
-    auto_warmup_requested = bool(warmup_before_measure and launch.server_lifecycle is None)
+    warmup = _run_grid_warmup_enabled() if launch.warmup_before_measure is None else launch.warmup_before_measure
+    # AgentX variants are composed without the benchmark script and server lifecycle a warmup round needs.
+    auto_warmup_requested = warmup and launch.server_lifecycle is None and not native_config(recipe.base_yaml_path)
     # This function names the working directory, so it creates it: callers and the per-variant config writer both
     # happen to create it first today, and neither is a contract.
     output_root.mkdir(parents=True, exist_ok=True)
