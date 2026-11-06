@@ -38,7 +38,6 @@ from .. import _server_lifecycle as _lifecycle
 from .._failed_step import failed_step_error_class
 from .._round_folder import is_round_folder
 from ..benchmark_result import served_complete_protocol
-from ..bypass_engine import lifecycle_meta_file, lifecycle_pid_file
 from .bringup import _classify_subprocess_error, _disable_cuda_graph_flag, _with_cuda_graph_disabled
 from .records import (
     _ACCURACY_ROUND_DIR,
@@ -598,7 +597,10 @@ class _BenchmarkRoundsMixin:
         port: int,
     ) -> None:
         """Remove the pid/json files a previous round left for this framework and port."""
-        for p in (lifecycle_pid_file(pid_dir, framework, port), lifecycle_meta_file(pid_dir, framework, port)):
+        for p in (
+            _lifecycle.lifecycle_pid_file(pid_dir, framework, port),
+            _lifecycle.lifecycle_meta_file(pid_dir, framework, port),
+        ):
             try:
                 if p.exists():
                     p.unlink()
