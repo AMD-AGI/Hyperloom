@@ -1,33 +1,22 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reference launch-recipe parsing and rendering."""
+"""Render a runnable launch script (``current_setting.sh``, the enablement replay) from a launch recipe.
+
+The operator's ``--reference-script`` is read by ``inference_suite``'s user file parser, which rejects the
+``# hyperloom-launch-controls:`` line this renderer records, so a rendered script with launch controls is an audit
+record rather than a launch file.
+"""
 
 from __future__ import annotations
 
-import logging
 import json
 import shlex
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
 from hyperloom.common.overlay import validate_overlay_pythonpath
-from inference_suite.recipe.shell_launch import entrypoint_markers, parse_shell_launch
-
-log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class ReferenceRecipe:
-    """Static facts lifted from a reference launch recipe."""
-
-    server_args: str = ""
-    envs: dict[str, str] = field(default_factory=dict)
-    model: str | None = None
-    launch_controls: dict[str, Any] = field(default_factory=dict)
-
 
 _CONTROLS_PREFIX = "# hyperloom-launch-controls: "
 
@@ -56,53 +45,14 @@ def _validate_launch_controls(controls: dict[str, Any]) -> dict[str, Any]:
     return controls
 
 
-def _read_source(source: str) -> str:
-    """Return the recipe text; raises when the source cannot be read."""
-    s = str(source or "").strip()
-    if s.startswith(("http://", "https://")):
-        from .baseline_comparison.inferencex_client import _fetch_raw
-
-        return _fetch_raw(s).decode("utf-8", errors="replace")
-    return Path(s).read_text(encoding="utf-8", errors="replace")
-
-
-# The launch command rendered per framework, keyed by the first marker the parser finds it by.
-_LAUNCH_COMMANDS = {
-    "atom.entrypoints": "python3 -m atom.entrypoints.openai_server",
-    "vllm serve": "vllm serve $MODEL",
-    "sglang.launch_server": "python3 -m sglang.launch_server --model-path=$MODEL",
-}
-
-
-def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
-    """Lift static launch settings from an untrusted local or remote recipe.
-
-    Executable overlay imports require resuming the owning session or explicitly
-    running its exported launcher; a recipe comment cannot authorize Python code.
-    """
-    text = _read_source(source)
-    controls: dict[str, Any] = {}
-    for raw in text.splitlines():
-        if raw.startswith(_CONTROLS_PREFIX):
-            if controls:
-                raise ValueError("duplicate reference launch controls")
-            controls = _validate_launch_controls(json.loads(raw[len(_CONTROLS_PREFIX) :]))
-            if controls.get("overlay_pythonpath"):
-                raise ValueError(
-                    "reference overlay_pythonpath imports executable code; resume the owning session "
-                    "or review and run the exported launcher directly"
-                )
-    lifted = parse_shell_launch(text, framework=framework)
-    envs = {name: value for name, value in lifted.env.items() if is_allowed_external_env_key(name)}
-    dropped = sorted({*lifted.unresolved_env, *(set(lifted.env) - set(envs))})
-    if dropped:
-        log.info("reference recipe: dropped %d export(s): %s", len(dropped), ", ".join(dropped))
-    if not lifted.has_entrypoint:
-        log.warning(
-            "reference-script: no %s entrypoint in %r; carrying exports only", entrypoint_markers(framework), source
-        )
-    model = Path(lifted.model).name if lifted.model else None
-    return ReferenceRecipe(server_args=" ".join(lifted.args), envs=envs, model=model, launch_controls=controls)
+def _launch_command(framework: str) -> str:
+    """The serving entrypoint the rendered script runs for ``framework``."""
+    name = str(framework or "").strip().lower()
+    if "atom" in name:
+        return "python3 -m atom.entrypoints.openai_server"
+    if "vllm" in name:
+        return "vllm serve $MODEL"
+    return "python3 -m sglang.launch_server --model-path=$MODEL"
 
 
 def _shell_ready_server_args(server_args: Any) -> str:
@@ -195,8 +145,7 @@ def render_reference_script(
     if exported_model:
         lines.append(f"export MODEL={shlex.quote(str(model))}")
     elif model:
-        # A bare basename cannot be launched; the parser records one when the operator recipe named the model without
-        # a path.
+        # A model named without a path cannot be launched, so it is recorded rather than exported.
         lines.append(f"# model: {model}")
     if setup_script:
         if not exported_model:
@@ -223,14 +172,12 @@ def render_reference_script(
 
     args = _shell_ready_server_args(launch.server_args)
     lines.append("")
-    lines.append(f"{_LAUNCH_COMMANDS[entrypoint_markers(framework)[0]]} {args}".rstrip())
+    lines.append(f"{_launch_command(framework)} {args}".rstrip())
     return "\n".join(lines) + "\n"
 
 
 __all__ = [
     "LaunchSettings",
-    "ReferenceRecipe",
     "ServingTarget",
-    "parse_reference_script",
     "render_reference_script",
 ]
