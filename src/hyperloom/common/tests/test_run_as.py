@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import pwd
+import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common import env_safety as run_as_mod
+from hyperloom.common import id_map
 from hyperloom.common.env_safety import RunAsError, resolve_run_as, specialist_run_as
 
 UNPRIVILEGED = "nobody"
@@ -382,3 +386,112 @@ def test_sharing_an_entry_that_became_a_link_changes_nothing_it_points_to(shared
     link.symlink_to(target)
     spec._share_entry(link, write=True, sticky=False)
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+# ---- a user namespace that does not map the account: a switch would fail, or under fakeroot only seem to ----
+#: The map of a host's initial user namespace, as the kernel writes it: every id is mapped.
+HOST_MAP = "         0          0 4294967295\n"
+#: A user namespace that maps one id, its root, onto the account that started the container.
+ONE_ID_MAP = "         0       1234          1\n"
+
+
+@pytest.fixture
+def id_maps(tmp_path, monkeypatch):
+    """Point the run-as check at stand-in uid and gid maps; returns the setter (gid map defaults to the uid map)."""
+
+    def use(uid_map: str | None, gid_map: str | None = None) -> tuple[Path, Path]:
+        paths = (tmp_path / "uid_map", tmp_path / "gid_map")
+        for path, text in zip(paths, (uid_map, uid_map if gid_map is None else gid_map), strict=True):
+            if text is not None:
+                path.write_text(text, encoding="ascii")
+        monkeypatch.setattr(
+            run_as_mod, "unmapped_ids", functools.partial(id_map.unmapped_ids, uid_map=paths[0], gid_map=paths[1])
+        )
+        return paths
+
+    return use
+
+
+needs_nobody = pytest.mark.skipif(not _account_exists(UNPRIVILEGED), reason=f"no {UNPRIVILEGED!r} account")
+
+
+@needs_nobody
+def test_an_account_the_host_namespace_maps_resolves(id_maps):
+    id_maps(HOST_MAP)
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None and spec.uid == pwd.getpwnam(UNPRIVILEGED).pw_uid
+
+
+@needs_nobody
+def test_an_account_a_one_id_namespace_does_not_map_is_refused_naming_its_ids_the_map_and_the_consequence(
+    id_maps, monkeypatch
+):
+    monkeypatch.setattr(os, "getgrouplist", lambda _name, gid: [gid])
+    uid_map, gid_map = id_maps(ONE_ID_MAP)
+    entry = pwd.getpwnam(UNPRIVILEGED)
+    with pytest.raises(RunAsError) as refused:
+        resolve_run_as(UNPRIVILEGED)
+    message = str(refused.value)
+    assert message.startswith(
+        f"{run_as_mod.SPECIALIST_USER_ENV}={UNPRIVILEGED!r}: uid {entry.pw_uid}, gid {entry.pw_gid} are not mapped in "
+        f"this process's user namespace ({uid_map}: '0 1234 1'; {gid_map}: '0 1234 1')"
+    ), message
+    assert "fails with EINVAL" in message and "fakeroot" in message and "would not be isolated" in message
+
+
+@needs_nobody
+def test_a_supplementary_group_the_namespace_does_not_map_is_refused_by_its_gid(id_maps, monkeypatch):
+    entry = pwd.getpwnam(UNPRIVILEGED)
+    monkeypatch.setattr(os, "getgrouplist", lambda _name, gid: [gid, 3000])
+    _, gid_map = id_maps(HOST_MAP, f"0 0 1\n{entry.pw_gid} {entry.pw_gid} 1\n")
+    with pytest.raises(RunAsError) as refused:
+        resolve_run_as(UNPRIVILEGED)
+    message = str(refused.value)
+    assert f": gid 3000 is not mapped in this process's user namespace ({gid_map}: " in message, message
+    assert f"uid {entry.pw_uid}" not in message and f"gid {entry.pw_gid}," not in message
+
+
+@needs_nobody
+@pytest.mark.parametrize(
+    ("uid_map", "says"),
+    [(None, "cannot read {path}: FileNotFoundError"), ("0 0\n", "cannot parse {path}: '0 0' is not")],
+    ids=["missing", "garbled"],
+)
+def test_a_map_that_cannot_be_read_refuses_naming_the_file(id_maps, uid_map, says):
+    path, _ = id_maps(uid_map, HOST_MAP)
+    with pytest.raises(RunAsError) as refused:
+        resolve_run_as(UNPRIVILEGED)
+    assert f"{run_as_mod.SPECIALIST_USER_ENV}={UNPRIVILEGED!r}: {says.format(path=path)}" in str(refused.value)
+
+
+_RESOLVE_IN_NAMESPACE = """
+import sys
+from hyperloom.common.env_safety import RunAsError, resolve_run_as
+try:
+    resolve_run_as(sys.argv[1])
+except RunAsError as exc:
+    print(exc)
+"""
+
+
+@needs_nobody
+@pytest.mark.skipif(shutil.which("unshare") is None, reason="no unshare")
+def test_in_a_real_one_id_user_namespace_the_kernels_map_refuses_the_account():
+    import hyperloom
+
+    source = str(Path(hyperloom.__file__).resolve().parent.parent)
+    namespace = ["unshare", "--user", "--map-root-user", "--"]
+    if subprocess.run([*namespace, "true"], capture_output=True, check=False).returncode != 0:
+        pytest.skip("this host cannot make a user namespace (unshare --user)")
+    done = subprocess.run(
+        [*namespace, sys.executable, "-c", _RESOLVE_IN_NAMESPACE, UNPRIVILEGED],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": source},
+    )
+    entry = pwd.getpwnam(UNPRIVILEGED)
+    assert done.returncode == 0, done.stderr
+    assert f"uid {entry.pw_uid}, gid {entry.pw_gid}" in done.stdout, done.stdout
+    assert "not mapped in this process's user namespace" in done.stdout
+    assert "(/proc/self/uid_map: '0 " in done.stdout and "; /proc/self/gid_map: '0 " in done.stdout

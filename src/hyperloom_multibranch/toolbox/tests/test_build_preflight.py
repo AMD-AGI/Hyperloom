@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import stat
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common import id_map
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
 from hyperloom_multibranch.toolbox import build_preflight as preflight
@@ -245,6 +247,23 @@ def test_a_tracelens_that_is_not_importable_is_named() -> None:
 # --- the whole preflight --------------------------------------------------------------------------------------------
 
 
+#: The map of a host's initial user namespace, as the kernel writes it: every id is mapped.
+HOST_MAP = "         0          0 4294967295\n"
+#: A user namespace that maps one id, its root, onto the account that started the container.
+ONE_ID_MAP = "         0       1234          1\n"
+
+
+def _use_id_maps(monkeypatch: pytest.MonkeyPatch, where: Path, uid_map: str, gid_map: str | None = None) -> Path:
+    """Point the preflight at stand-in uid and gid maps under ``where`` (the gid map is the uid map unless given)."""
+    maps = where / "id-maps"
+    maps.mkdir(exist_ok=True)
+    (maps / "uid_map").write_text(uid_map)
+    (maps / "gid_map").write_text(uid_map if gid_map is None else gid_map)
+    checked = functools.partial(id_map.unmapped_ids, uid_map=maps / "uid_map", gid_map=maps / "gid_map")
+    monkeypatch.setattr(preflight, "unmapped_ids", checked)
+    return maps
+
+
 @pytest.fixture
 def ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PreflightSite:
     """A host that is ready: root, setpriv, the image's checkout, everything open to 65534 (this interpreter and tree
@@ -264,6 +283,7 @@ def ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PreflightSite:
             Path(directory).chmod(0o755)
     monkeypatch.setattr(preflight, "geteuid", lambda: 0)
     monkeypatch.setattr(preflight, "which", lambda name: f"/usr/bin/{name}")
+    _use_id_maps(monkeypatch, tmp_path, HOST_MAP)
     monkeypatch.setattr(preflight, "tracelens_problem", lambda: None)
     monkeypatch.setattr(preflight, "stat_path", stat_open_above(tmp_path))
     return PreflightSite(
@@ -308,6 +328,37 @@ def test_each_host_item_that_is_not_ready_is_refused_by_name(
 
     assert problem.startswith("native builds are configured (HYPERLOOM_BUILD_STORE) and this host is not ready")
     assert says in problem
+
+
+@pytest.mark.parametrize(
+    ("uid_map", "gid_map", "says"),
+    [
+        (ONE_ID_MAP, ONE_ID_MAP, "uid 65534, gid 65534 are not mapped in this process's user namespace"),
+        (HOST_MAP, ONE_ID_MAP, "gid 65534 is not mapped in this process's user namespace"),
+        ("0 0 65534\n", HOST_MAP, "uid 65534 is not mapped in this process's user namespace"),
+    ],
+    ids=["one-id", "gid-only", "range-ending-below-65534"],
+)
+def test_a_user_namespace_that_does_not_map_65534_is_refused_naming_the_map(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, uid_map: str, gid_map: str, says: str
+) -> None:
+    maps = _use_id_maps(monkeypatch, tmp_path, uid_map, gid_map)
+
+    problem = _refusal(ready)
+
+    assert says in problem and str(maps) in problem, problem
+    assert "the build service cannot compile as user 65534 (setpriv fails there, or under a fakeroot preload" in problem
+
+
+def test_a_user_namespace_map_that_cannot_be_read_is_refused_naming_the_file(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    maps = _use_id_maps(monkeypatch, tmp_path, HOST_MAP)
+    (maps / "gid_map").unlink()
+
+    problem = _refusal(ready)
+
+    assert f"cannot read {maps / 'gid_map'}: FileNotFoundError" in problem, problem
 
 
 def test_sources_without_the_image_commit_are_refused_naming_what_they_have(
