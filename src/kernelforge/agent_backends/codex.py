@@ -696,7 +696,7 @@ class CodexBackend:
         sdk = _load_codex_sdk()
         model = model.strip() or self.runtime.model
         reasoning_effort = reasoning_effort.strip() or self.runtime.reasoning_effort
-        timeout_sec = timeout_sec or min(60, self.runtime.timeout_sec)
+        timeout_sec = timeout_sec or self.runtime.probe_timeout_sec
         spec = _probe_spec(cwd, model, reasoning_effort, timeout_sec)
         client = None
         turn = None
