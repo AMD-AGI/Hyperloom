@@ -41,6 +41,7 @@ __all__ = [
     "marked_pids",
     "proc_identity",
     "process_uids",
+    "reap_exited_children",
     "running",
     "signal_group",
     "signal_processes",
@@ -48,6 +49,10 @@ __all__ = [
 
 #: A process, pinned to the incarnation that was observed: ``(pid, start_time)``.
 ProcessId = tuple[int, int]
+
+#: The ``/proc/<pid>/stat`` states of a process that has exited: a zombie, and the dead one being released (``x`` on
+#: kernels before 3.14).
+_EXITED_STATES = frozenset({"Z", "X", "x"})
 
 
 def _stat_fields(pid: int) -> list[str]:
@@ -138,13 +143,17 @@ def descendants(root_pid: int) -> list[ProcessId]:
     return collected
 
 
-def signal_processes(processes: list[ProcessId], sig: int) -> None:
+def signal_processes(processes: list[ProcessId], sig: int) -> list[ProcessId]:
     """Signal each enumerated process, skipping any whose identity changed.
 
     Args:
         processes: ``(pid, start_time)`` pairs, as :func:`descendants` returns.
         sig: The signal number to send.
+
+    Returns:
+        list[ProcessId]: The processes the signal was delivered to.
     """
+    delivered: list[ProcessId] = []
     for pid, expected_start_time in processes:
         identity = proc_identity(pid)
         if identity is None or identity[1] != expected_start_time:
@@ -155,30 +164,71 @@ def signal_processes(processes: list[ProcessId], sig: int) -> None:
             # Exited between the identity read and the signal, or is not ours to
             # signal; the caller's confirm step observes the survivor.
             continue
+        delivered.append((pid, expected_start_time))
+    return delivered
 
 
 def running(pid: int) -> bool:
-    """Whether ``pid`` names a process that is not a zombie.
+    """Whether ``pid`` names a process that has not exited: a zombie, or one being released, is not running.
 
     Args:
         pid: The process to inspect.
 
     Returns:
-        bool: True when the process answers and has not been torn down.
+        bool: True when the process exists and has not been torn down.
     """
+    if not _exists(pid):
+        return False
+    try:
+        fields = _stat_fields(pid)
+    except OSError:
+        # Reaped since the signal, or hidden from this account (``hidepid``): only the signal can tell the two apart.
+        return _exists(pid)
+    return bool(fields) and fields[0] not in _EXITED_STATES
+
+
+def _exists(pid: int) -> bool:
+    """Whether a signal can find ``pid``; someone else's process exists too, whether or not it may be signalled."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        # Someone else's process: existence is the answer being asked for.
         return True
-    try:
-        fields = _stat_fields(pid)
-    except OSError:
-        # No procfs reading to refine the signal with; the signal stands.
-        return True
-    return bool(fields) and fields[0] != "Z"
+    return True
+
+
+def reap_exited_children(processes: Iterable[ProcessId]) -> int:
+    """Wait for each of ``processes`` that has exited and is now a child of this process.
+
+    A process orphaned below a child subreaper becomes the subreaper's child, and once it has exited it stays a zombie
+    until the subreaper waits for it. Pass only processes this process did not start itself, such as the descendants of
+    a child it has killed: one is waited only while its ``/proc`` entry names this process as the parent, the start time
+    it was observed with, and an exited state. Nothing else waits for such a zombie, and its pid cannot be reused until it
+    is waited, so the wait takes no exit status a ``Popen`` of this process still needs.
+
+    Args:
+        processes: ``(pid, start_time)`` pairs, as :func:`descendants` returns.
+
+    Returns:
+        int: How many were waited.
+    """
+    me = os.getpid()
+    waited = 0
+    for pid, start_time in processes:
+        try:
+            fields = _stat_fields(pid)
+            ours = fields[0] in _EXITED_STATES and int(fields[1]) == me and int(fields[19]) == start_time
+        except (OSError, ValueError, IndexError):
+            continue
+        if not ours:
+            continue
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                waited += 1
+        except ChildProcessError:
+            continue
+    return waited
 
 
 def signal_group(pgid: int, sig: int, *, what: str = "process group") -> bool | None:

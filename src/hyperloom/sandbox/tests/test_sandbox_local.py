@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import signal
@@ -289,7 +290,7 @@ def test_cards_return_when_the_timeout_reaps_the_sandbox(make) -> None:
 def test_cards_stay_leased_when_reaping_cannot_be_confirmed(make, monkeypatch) -> None:
     provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
     sb = _create(provider, "dev", "dev")
-    monkeypatch.setattr(local_sandbox, "reap_sandbox_processes", lambda *a, **k: False)
+    monkeypatch.setattr(local_sandbox, "reap_sandbox_processes", lambda *a, **k: reaper.Leftovers(unseen=True))
     with pytest.raises(SandboxUnavailable, match="its GPUs stay leased"):
         sb.kill()
     assert provider.quarantined == {0}
@@ -424,15 +425,15 @@ def test_kill_after_a_command_timeout_never_signals_the_launcher_the_timeout_rea
     assert signalled == []
 
 
-def _ends_nothing(procs, **kw) -> bool:
+def _ends_nothing(procs, **kw) -> reaper.Leftovers:
     """A timeout's reap stuck past its windows: it ends nothing and confirms nothing."""
-    return False
+    return reaper.Leftovers(unseen=True)
 
 
-def _ends_the_launcher_unconfirmed(procs, **kw) -> bool:
+def _ends_the_launcher_unconfirmed(procs, **kw) -> reaper.Leftovers:
     """A timeout's reap that waits the launcher but cannot confirm its tree, as when a descendant outlives SIGKILL."""
     reaper.kill_launchers(procs, **kw)
-    return False
+    return reaper.Leftovers(unseen=True)
 
 
 @pytest.mark.parametrize("timeout_reap", [_ends_nothing, _ends_the_launcher_unconfirmed])
@@ -460,7 +461,7 @@ def test_kill_launchers_skips_a_launcher_that_was_already_waited(monkeypatch) ->
     launcher = subprocess.Popen([sys.executable, "-c", "pass"])
     launcher.wait()
     signalled = _swallow_signals(monkeypatch)
-    assert reaper.kill_launchers([launcher], grace_sec=0.1) is True
+    assert reaper.kill_launchers([launcher], grace_sec=0.1) == reaper.Leftovers()
     assert signalled == []
 
 
@@ -473,7 +474,7 @@ def test_a_sweep_that_cannot_list_proc_is_not_clean(monkeypatch) -> None:
         return iterdir(path)
 
     monkeypatch.setattr(Path, "iterdir", _iterdir)
-    assert reaper.sweep_tagged("sandbox-that-never-ran") is False
+    assert reaper.sweep_tagged("sandbox-that-never-ran") == reaper.Leftovers(unseen=True)
 
 
 def test_a_sweep_kills_a_tagged_process_outside_any_launcher(monkeypatch) -> None:
@@ -481,11 +482,240 @@ def test_a_sweep_kills_a_tagged_process_outside_any_launcher(monkeypatch) -> Non
     tagged = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(600)"])
     try:
         _wait(lambda: proctree.marked_pids("E2B_SANDBOX_ID", "sweep-me"))
-        assert reaper.sweep_tagged("sweep-me") is True
+        assert reaper.sweep_tagged("sweep-me") == reaper.Leftovers()
         assert tagged.wait(timeout=10) == -9
     finally:
         tagged.kill()
         tagged.wait()
+
+
+# -- exited processes, survivors and zombies ------------------------------------------
+
+#: Forks a child that exits at once and is never waited, so it stays a zombie carrying the sandbox's tag.
+_LEAVES_A_ZOMBIE = (
+    "import os,time\n"
+    "child=os.fork()\n"
+    "if child==0:\n"
+    "    os._exit(0)\n"
+    "open('zombie.tmp','w').write(str(child))\n"
+    "os.rename('zombie.tmp','zombie')\n"
+    "time.sleep(600)\n"
+)
+
+#: Leaves the launcher's process group and session, so only the tree walk reaches it once it has dropped the tag.
+_DETACHES = (
+    "import os,time\n"
+    "os.setsid()\n"
+    "open('pid.tmp','w').write(str(os.getpid()))\n"
+    "os.rename('pid.tmp','pid')\n"
+    "time.sleep(600)\n"
+)
+
+#: Kills a sandbox while it is the child subreaper of everything it starts, as a session is, and prints the zombies it
+#: is left with.
+_KILL_AS_SUBREAPER = r"""
+import ctypes, json, os, sys, time
+from pathlib import Path
+from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
+
+def zombie_children():
+    me, found = os.getpid(), []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[-1].split()
+        except OSError:
+            continue
+        if fields[0] == "Z" and int(fields[1]) == me:
+            found.append(int(entry.name))
+    return found
+
+assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+family, base = sys.argv[1], Path(sys.argv[2])
+with LocalSandboxProvider([LocalTemplate("dev", "dev")], hostname="node-a", base_dir=base) as provider:
+    sandbox = provider.create("dev", role="dev", timeout_sec=120, metadata={})
+    sandbox.write_file("/work/family.py", family.encode())
+    sandbox.run(f"{sys.executable} family.py", background=True)
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            pids = [int(pid) for pid in sandbox.read_file("/work/pids.json").split()]
+            break
+        except FileNotFoundError:
+            assert time.monotonic() < deadline, "the family did not start"
+            time.sleep(0.05)
+    sandbox.kill()
+    print(json.dumps({"family": pids, "zombies": zombie_children()}))
+"""
+
+
+def _state(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()[0]
+    except OSError:
+        return ""
+
+
+def _immortal(monkeypatch, pid: int) -> None:
+    """``pid`` takes every signal and does not die, as a process does while the kernel still tears down its memory."""
+    real_kill, real_killpg = os.kill, os.killpg
+
+    def _kill(target: int, sig: int) -> None:
+        if target != pid or sig == 0:
+            real_kill(target, sig)
+
+    def _killpg(pgid: int, sig: int) -> None:
+        if pgid != pid or sig == 0:
+            real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "kill", _kill)
+    monkeypatch.setattr(os, "killpg", _killpg)
+
+
+def _detached_immortal(sb, monkeypatch) -> proctree.ProcessId:
+    """Start a process in ``sb`` that drops the sandbox's tag and leaves its session, and make it immortal."""
+    sb.write_file("/work/detach.py", _DETACHES.encode())
+    sb.run(f"env -u {SANDBOX_TAG_ENV} {sys.executable} detach.py", background=True)
+    pid = int(_read_when_present(sb, "/work/pid"))
+    identity = proctree.proc_identity(pid)
+    assert identity is not None
+    _immortal(monkeypatch, pid)
+    return pid, identity[1]
+
+
+def _end(monkeypatch, process: proctree.ProcessId) -> None:
+    """Give the real signals back and kill ``process``, the one the test made immortal."""
+    monkeypatch.setattr(os, "kill", _REAL_KILL)
+    monkeypatch.setattr(os, "killpg", _REAL_KILLPG)
+    proctree.signal_processes([process], signal.SIGKILL)
+    _wait(lambda: not proctree.running(process[0]), seconds=10)
+
+
+_REAL_KILL, _REAL_KILLPG = os.kill, os.killpg
+
+
+def test_a_zombie_with_the_sandbox_tag_does_not_keep_the_cards(make) -> None:
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0])
+    sb = _create(provider, "dev", "dev")
+    sb.write_file("/work/zombie.py", _LEAVES_A_ZOMBIE.encode())
+    sb.run(f"{sys.executable} zombie.py", background=True)
+    zombie = int(_read_when_present(sb, "/work/zombie"))
+    _wait(lambda: _state(zombie) == "Z")
+    sb.kill()
+    assert provider.quarantined == set()
+    assert provider.pool.free_cards() == (0,)
+
+
+def test_a_tagged_zombie_outside_any_launcher_is_not_waited_out(monkeypatch) -> None:
+    monkeypatch.setenv(SANDBOX_TAG_ENV, "a-zombie")
+    zombie = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        _wait(lambda: _state(zombie.pid) == "Z")
+        started = time.monotonic()
+        assert reaper.reap_sandbox_processes([], "a-zombie") == reaper.Leftovers()
+        assert time.monotonic() - started < reaper._WINDOW_SEC, "a zombie is gone, not a process to wait out"
+    finally:
+        zombie.wait()
+
+
+def test_a_live_process_that_dropped_the_tag_keeps_the_cards_and_is_named(make, monkeypatch) -> None:
+    monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    survivor = _detached_immortal(sb, monkeypatch)
+    try:
+        named = rf"outlived SIGKILL \(pid {survivor[0]} \(.*, state S\)\); its GPUs stay"
+        with pytest.raises(SandboxUnavailable, match=named):
+            sb.kill()
+        assert proctree.running(survivor[0]), "the test's survivor is still there"
+        assert provider.quarantined == {0}
+        assert provider.pool.free_cards() == (1,)
+    finally:
+        _end(monkeypatch, survivor)
+
+
+def test_a_live_tagged_process_outside_any_launcher_is_left_and_named(monkeypatch) -> None:
+    monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.3)
+    monkeypatch.setenv(SANDBOX_TAG_ENV, "a-survivor")
+    survivor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    try:
+        _wait(lambda: proctree.marked_pids(SANDBOX_TAG_ENV, "a-survivor"))
+        identity = proctree.proc_identity(survivor.pid)
+        assert identity is not None
+        _immortal(monkeypatch, survivor.pid)
+        left = reaper.reap_sandbox_processes([], "a-survivor")
+        assert left == reaper.Leftovers(((survivor.pid, identity[1]),))
+        assert reaper.wait_exited(left) == left, "a survivor still running is still left"
+        _end(monkeypatch, (survivor.pid, identity[1]))
+        assert reaper.wait_exited(left) == reaper.Leftovers()
+    finally:
+        survivor.kill()
+        survivor.wait()
+
+
+def test_a_command_timeout_survivor_that_has_exited_by_the_kill_does_not_keep_the_cards(make, monkeypatch) -> None:
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    survivor = subprocess.Popen([sys.executable, "-c", "pass"])
+    survivor.wait()
+    gone = (survivor.pid, 1)
+
+    def _left_one_behind(procs, **kw) -> reaper.Leftovers:
+        reaper.kill_launchers(procs, **kw)
+        return reaper.Leftovers((gone,))
+
+    monkeypatch.setattr(local_sandbox, "kill_launchers", _left_one_behind)
+    with pytest.raises(SandboxUnavailable, match="command timed out"):
+        sb.run("sleep 30", settings=RunSettings(timeout_sec=0.5))
+    sb.kill()
+    assert provider.quarantined == set()
+    assert provider.pool.free_cards() == (0, 1)
+
+
+def test_a_process_first_found_as_the_window_ends_is_signalled_before_it_is_named(monkeypatch) -> None:
+    """Every process a reap names was sent the signal first: after SIGKILL none of them can fork another."""
+    sent: list[proctree.ProcessId] = []
+
+    def _send(processes, sig):
+        sent.extend(processes)
+        return list(processes)
+
+    monkeypatch.setattr(proctree, "signal_processes", _send)
+    window = 0.2
+    late = time.monotonic() + window
+
+    def _find() -> list[proctree.ProcessId]:
+        return [(10, 1), (11, 1)] if time.monotonic() >= late else [(10, 1)]
+
+    left = reaper._signal_until_gone(_find, signal.SIGKILL, window)
+    assert left == reaper.Leftovers(((10, 1), (11, 1)))
+    assert (11, 1) in sent
+
+
+def test_a_tree_that_keeps_forking_past_the_window_is_unseen(monkeypatch) -> None:
+    monkeypatch.setattr(proctree, "signal_processes", lambda processes, sig: list(processes))
+    fresh = itertools.count(100)
+    left = reaper._signal_until_gone(lambda: [(next(fresh), 1)], signal.SIGKILL, 0.1)
+    assert left.unseen and not left.clean
+
+
+def test_a_kill_in_a_child_subreaper_leaves_no_zombie(tmp_path: Path) -> None:
+    script = tmp_path / "kill_as_subreaper.py"
+    script.write_text(_KILL_AS_SUBREAPER)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+    done = subprocess.run(
+        [sys.executable, str(script), _FAMILY, str(tmp_path / "sandboxes")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    report = json.loads(done.stdout.strip().splitlines()[-1])
+    assert len(report["family"]) == 4
+    assert report["zombies"] == [], "every launcher and every process the sandbox orphaned is waited"
 
 
 # -- lifecycle ---------------------------------------------------------------------

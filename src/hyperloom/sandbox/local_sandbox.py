@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import IO
 
 from hyperloom.sandbox.launcher import StatusPipe, launcher_argv
-from hyperloom.sandbox.reaper import kill_launchers, reap_sandbox_processes
+from hyperloom.sandbox.reaper import Leftovers, kill_launchers, reap_sandbox_processes, wait_exited
 from hyperloom.sandbox.socket import (
     CommandResult,
     OutputSinks,
@@ -97,9 +97,9 @@ class LocalSandbox:
         self._startup_exit: int | None = None
         self._timer: threading.Timer | None = None
         self._bg_count = 0
-        # Set when a command timeout's reap could not confirm its tree gone: a descendant that outlived it may have left
-        # the tree, so ``kill()`` cannot confirm the sandbox empty and keeps its cards leased.
-        self._unconfirmed_reap = False
+        # What a command timeout's reap could not confirm gone: a descendant that outlived it has left the tree once its
+        # launcher was waited, so ``kill()`` looks for these by name and keeps the cards leased while any of them runs.
+        self._leftovers = Leftovers()
         self.set_timeout(plan.timeout_sec)
 
     def _build_base_env(self, create_envs: Mapping[str, str], platform_envs: Mapping[str, str]) -> dict[str, str]:
@@ -170,11 +170,16 @@ class LocalSandbox:
                 self._timer.cancel()
             if self._startup is not None:
                 self._startup[1].close()
-            reaped = reap_sandbox_processes(self._procs, self.sandbox_id) and not self._unconfirmed_reap
+            reaped_now = reap_sandbox_processes(self._procs, self.sandbox_id)
+            self._leftovers = wait_exited(self._leftovers) | reaped_now
+            reaped = self._leftovers.clean
             shutil.rmtree(self.directory, ignore_errors=True)
             self._on_end(self, reaped)
         if not reaped:
-            raise SandboxUnavailable(f"sandbox {self.sandbox_id}: processes outlived SIGKILL; its GPUs stay leased")
+            raise SandboxUnavailable(
+                f"sandbox {self.sandbox_id}: processes outlived SIGKILL ({self._leftovers.describe()}); "
+                "its GPUs stay leased"
+            )
 
     # -- files -------------------------------------------------------------
 
@@ -398,8 +403,7 @@ class LocalSandbox:
             # Under the lock kill() reaps with, so one of the two reaps this launcher. Only a waited launcher leaves the
             # list a later kill() signals (its pid is free then); one still running stays for kill() to reap.
             with self._lock:
-                if not kill_launchers([proc], grace_sec=1.0):
-                    self._unconfirmed_reap = True
+                self._leftovers |= kill_launchers([proc], grace_sec=1.0)
                 if proc.returncode is not None:
                     self._procs.remove(proc)
             raise SandboxUnavailable(f"command timed out after {timeout_sec}s") from None
