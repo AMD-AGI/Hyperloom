@@ -777,6 +777,14 @@ def test_a_poll_inbox_cursor_that_is_not_one_says_how_to_get_one(rig: Rig) -> No
     }
 
 
+@pytest.mark.parametrize("count", ["\u00b2", "1\u00b9", "\u0661"])
+def test_a_page_cursor_whose_count_is_not_ascii_digits_is_refused_as_invalid_params(rig: Rig, count: str) -> None:
+    cursor = f"page:{count}:abcdef01:"
+    status, reply = rig.call(rig.token("s1"), "poll_inbox", cursor=cursor)
+    assert status == 200 and reply["error"]["code"] == -32602
+    assert reply["error"]["message"].startswith(f"not an inbox cursor: {cursor!r}")
+
+
 async def test_a_large_inbox_is_paged_with_no_item_lost_or_repeated(wait_rig: Rig, waiting: Writers) -> None:
     await _land(waiting, 3 * POLL_INBOX_MAX_ITEMS + 7)
     observer = await wait_rig.observer().poll("s1")
