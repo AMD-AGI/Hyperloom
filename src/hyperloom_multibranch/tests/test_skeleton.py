@@ -38,7 +38,6 @@ from hyperloom_common.jsonio import read_jsonl
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.common.proctree import running
-from hyperloom.common.agent_isolation import IsolationReport
 from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckFailed, ImageCheckMode, ImageCheckReport
 from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
@@ -134,6 +133,7 @@ from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
+from hyperloom_multibranch.scheduling.launch_isolation import LOCAL_SANDBOX, LOCAL_TEST, NO_ACCOUNT, LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import (
@@ -244,8 +244,8 @@ IMAGE_CHECK = ImageCheckReport(
     {"python": "/usr/bin/python3"},
     (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
 )
-#: How the session's process isolates its agents: bubblewrap, as no account is configured.
-ISOLATION = IsolationReport("bwrap", "bwrap", False, "0.9.0 /usr/bin/bwrap", ("HYPERLOOM_SPECIALIST_USER is not set",))
+#: How the session's peers launch its agents and tests: the specialists unconfined, as no account is configured.
+ISOLATION = LaunchIsolation("none", "none", "none", False, (NO_ACCOUNT, LOCAL_SANDBOX, LOCAL_TEST))
 #: The review gate pauses a session with Arbor agents for a person; these sessions open their branches without one,
 #: as ``run --no-review-gate`` does, and the review's own tests turn it on.
 SETTINGS = RunSettings(
@@ -425,7 +425,7 @@ class Stage:
     author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     learnings: LearningRecall | None = None
     image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
-    isolation: Callable[[], IsolationReport] = lambda: ISOLATION
+    isolation: LaunchIsolation = ISOLATION
     dossier_pass: DossierPass | None = None
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
@@ -497,6 +497,7 @@ class Stage:
             digest,
             self.gate,
             self.regression,
+            self.isolation,
             self.dossier_pass,
         )
 
@@ -558,12 +559,10 @@ class Stage:
         await then(branch, head)
 
     async def run(self) -> SessionOutcome:
-        """Run the session, its image check and its agents' isolation answered by ``image_check`` and ``isolation``
-        instead of this environment."""
+        """Run the session, its image check answered by ``image_check`` instead of this environment."""
 
         with self._polls_on_virtual_time() as patch:
             patch.setattr(lifecycle, "run_image_check", self.image_check)
-            patch.setattr(lifecycle, "agent_isolation_report", self.isolation)
             return await self._session().run()
 
     async def finish(self, ended: SessionStopReason) -> SessionOutcome:
