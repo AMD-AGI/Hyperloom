@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.orchestrator.actions.executors import _server_lifecycle
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors import bypass_engine
 from hyperloom.orchestrator.actions.executors import bypass_report
@@ -89,7 +90,7 @@ def test_server_reusable_classifies_boot_reuse_and_foreign(monkeypatch, tmp_path
 
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda base_url: True)
     monkeypatch.setattr(
-        bypass_engine,
+        _server_lifecycle,
         "lifecycle_files_present",
         lambda pid_dir, framework, port: True,
     )
@@ -98,7 +99,7 @@ def test_server_reusable_classifies_boot_reuse_and_foreign(monkeypatch, tmp_path
     )
 
     monkeypatch.setattr(
-        bypass_engine,
+        _server_lifecycle,
         "lifecycle_files_present",
         lambda pid_dir, framework, port: False,
     )
@@ -597,17 +598,17 @@ def test_vllm_server_command_no_profiler_when_dir_none():
 
 def test_bypass_pid_meta_helpers(tmp_path):
     pid_dir = str(tmp_path)
-    assert bypass_engine.lifecycle_files_present(pid_dir, "vllm", 8888) is False
-    bypass_engine.write_lifecycle_files(
-        pid_dir, bypass_engine.LifecycleRecord(framework="vllm", port=8888, pid=123, pgid=123, model="/m")
+    assert _server_lifecycle.lifecycle_files_present(pid_dir, "vllm", 8888) is False
+    _server_lifecycle.write_lifecycle_files(
+        pid_dir, _server_lifecycle.LifecycleRecord(framework="vllm", port=8888, pid=123, pgid=123, model="/m")
     )
-    pidf = bypass_engine.lifecycle_pid_file(pid_dir, "vllm", 8888)
-    metaf = bypass_engine.lifecycle_meta_file(pid_dir, "vllm", 8888)
+    pidf = _server_lifecycle.lifecycle_pid_file(pid_dir, "vllm", 8888)
+    metaf = _server_lifecycle.lifecycle_meta_file(pid_dir, "vllm", 8888)
     assert pidf.read_text(encoding="utf-8").split() == ["123", "123"]
     meta = json.loads(metaf.read_text(encoding="utf-8"))
     assert meta["pid"] == 123 and meta["port"] == 8888
     assert meta["base_url"] == "http://127.0.0.1:8888"
-    assert bypass_engine.lifecycle_files_present(pid_dir, "vllm", 8888) is True
+    assert _server_lifecycle.lifecycle_files_present(pid_dir, "vllm", 8888) is True
 
 
 def test_server_health_ok_probe(monkeypatch):
@@ -645,7 +646,7 @@ def test_boot_only_round_persists_the_server_without_terminating_it(tmp_path, mo
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
     assert terminated["called"] is False  # server must persist
-    pidf = bypass_engine.lifecycle_pid_file(str(pid_dir), "sglang", 8888)
+    pidf = _server_lifecycle.lifecycle_pid_file(str(pid_dir), "sglang", 8888)
     assert pidf.exists()
     assert pidf.read_text(encoding="utf-8").split()[0] == "4321"
 
@@ -658,9 +659,9 @@ def test_yaml_lifecycle_reuse_round_without_cleanup_keeps_the_server(tmp_path, m
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
     cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=False, pid_dir=pid_dir)
-    bypass_engine.write_lifecycle_files(
+    _server_lifecycle.write_lifecycle_files(
         str(pid_dir),
-        bypass_engine.LifecycleRecord(framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x"),
+        _server_lifecycle.LifecycleRecord(framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x"),
     )
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)
     monkeypatch.setattr(bypass_runner, "_launch_server", lambda *a: pytest.fail("server launched"))
@@ -765,7 +766,7 @@ def test_yaml_lifecycle_first_round_persists(tmp_path, monkeypatch, framework):
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
     assert terminated["n"] == 0  # cleanup=false -> persist
-    assert bypass_engine.lifecycle_pid_file(str(pid_dir), framework, 8888).exists()
+    assert _server_lifecycle.lifecycle_pid_file(str(pid_dir), framework, 8888).exists()
 
 
 @pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
@@ -779,9 +780,9 @@ def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch, framework):
     cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir, framework=framework)
 
     # A prior round persisted the server: pid/meta exist alongside a healthy port.
-    bypass_engine.write_lifecycle_files(
+    _server_lifecycle.write_lifecycle_files(
         str(pid_dir),
-        bypass_engine.LifecycleRecord(framework=framework, port=8888, pid=4321, pgid=4321, model="/models/x"),
+        _server_lifecycle.LifecycleRecord(framework=framework, port=8888, pid=4321, pgid=4321, model="/models/x"),
     )
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)  # server already up
     launched = {"n": 0}
@@ -818,9 +819,11 @@ class _BootRound:
         self.subprocess_tags: list[str] = []
 
         if server_up and owned:
-            bypass_engine.write_lifecycle_files(
+            _server_lifecycle.write_lifecycle_files(
                 str(self.pid_dir),
-                bypass_engine.LifecycleRecord(framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x"),
+                _server_lifecycle.LifecycleRecord(
+                    framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x"
+                ),
             )
         monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: server_up)
         monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
@@ -861,7 +864,7 @@ class _BootRound:
 
     @property
     def pid_file(self) -> Path:
-        return bypass_engine.lifecycle_pid_file(str(self.pid_dir), "sglang", 8888)
+        return _server_lifecycle.lifecycle_pid_file(str(self.pid_dir), "sglang", 8888)
 
     @property
     def workspace(self) -> Path:
@@ -1450,9 +1453,9 @@ def test_lifecycle_reuse_with_metadata_reuses(tmp_path, monkeypatch):
     cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir)
 
     # A prior round persisted the server: pid/meta exist and port is healthy.
-    bypass_engine.write_lifecycle_files(
+    _server_lifecycle.write_lifecycle_files(
         str(pid_dir),
-        bypass_engine.LifecycleRecord(framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x"),
+        _server_lifecycle.LifecycleRecord(framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x"),
     )
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)
     launched = {"n": 0}
@@ -1780,7 +1783,7 @@ def test_boot_only_round_server_not_ready_terminates_and_fails(tmp_path, monkeyp
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 1
     assert terminated["n"] == 1  # the not-ready server is torn down
-    assert not bypass_engine.lifecycle_pid_file(str(pid_dir), "sglang", 8888).exists()
+    assert not _server_lifecycle.lifecycle_pid_file(str(pid_dir), "sglang", 8888).exists()
 
 
 def test_boot_only_round_build_command_value_error_fails(tmp_path, monkeypatch):
@@ -1823,7 +1826,7 @@ def test_boot_only_round_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
-    assert bypass_engine.lifecycle_pid_file(str(pid_dir), "sglang", 8888).read_text(encoding="utf-8").split() == [
+    assert _server_lifecycle.lifecycle_pid_file(str(pid_dir), "sglang", 8888).read_text(encoding="utf-8").split() == [
         "9999",
         "9999",
     ]

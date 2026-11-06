@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
 import time
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -21,8 +23,6 @@ from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom_common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
-
-from .bypass_engine import lifecycle_meta_file, lifecycle_pid_file
 
 
 log = logging.getLogger(__name__)
@@ -65,6 +65,55 @@ REUSE_PORT_DEFAULT = 8888
 
 # Server-boot budget for the persistent server phase.
 SERVER_READY_TIMEOUT_SEC = 7200
+
+
+def lifecycle_pid_file(pid_dir: Path | str, framework: str, port: int) -> Path:
+    """Return the pid file Magpie's reuse protocol keeps for a persistent server."""
+    return Path(pid_dir) / f"{framework}_{port}.pid"
+
+
+def lifecycle_meta_file(pid_dir: Path | str, framework: str, port: int) -> Path:
+    """Return the meta file Magpie's reuse protocol keeps for a persistent server."""
+    return Path(pid_dir) / f"{framework}_{port}.json"
+
+
+def lifecycle_files_present(pid_dir: str, framework: str, port: int) -> bool:
+    """Whether both pid and meta files exist for a persistent server."""
+    return (
+        lifecycle_pid_file(pid_dir, framework, port).exists() and lifecycle_meta_file(pid_dir, framework, port).exists()
+    )
+
+
+@dataclass(frozen=True)
+class LifecycleRecord:
+    """The persistent server a lifecycle pid/meta pair records."""
+
+    framework: str
+    port: int
+    pid: int
+    pgid: int
+    model: str
+
+
+def write_lifecycle_files(pid_dir: str, record: LifecycleRecord) -> None:
+    """Persist the pid/meta pair ``teardown_lifecycle_server`` reads back for a lifecycle server."""
+    framework = record.framework
+    port = record.port
+    Path(pid_dir).mkdir(parents=True, exist_ok=True)
+    lifecycle_pid_file(pid_dir, framework, port).write_text(f"{record.pid} {record.pgid}\n", encoding="utf-8")
+    lifecycle_meta_file(pid_dir, framework, port).write_text(
+        json.dumps(
+            {
+                "pid": record.pid,
+                "pgid": record.pgid,
+                "framework": framework,
+                "port": port,
+                "model": record.model,
+                "base_url": f"http://127.0.0.1:{port}",
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _pick_free_port() -> int:

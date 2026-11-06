@@ -22,6 +22,7 @@ from hyperloom_common.coerce import to_float, to_int
 from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import build_benchmark_env
 
+from . import _server_lifecycle
 from . import bypass_engine
 from . import bypass_report
 from . import bypass_scriptable
@@ -70,7 +71,7 @@ def _server_reusable(base_url: str, pid_dir: str, framework: str, port: int) -> 
     """Classify whether a persistent lifecycle server can be reused."""
     if not bypass_engine.server_health_ok(base_url):
         return _BOOT
-    if bypass_engine.lifecycle_files_present(pid_dir, framework, port):
+    if _server_lifecycle.lifecycle_files_present(pid_dir, framework, port):
         return _REUSE
     return _FOREIGN
 
@@ -253,9 +254,9 @@ class _Round:
             pgid = os.getpgid(proc.pid)
         except OSError:
             pgid = proc.pid
-        bypass_engine.write_lifecycle_files(
+        _server_lifecycle.write_lifecycle_files(
             pid_dir,
-            bypass_engine.LifecycleRecord(
+            _server_lifecycle.LifecycleRecord(
                 framework=self.framework, port=self.port, pid=proc.pid, pgid=pgid, model=self.model
             ),
         )
@@ -362,9 +363,7 @@ def _run_client_phase(r: _Round, *, pid_dir: str, cleanup: bool) -> int:
         rc = r.run_client()
     finally:
         if cleanup:
-            from ._server_lifecycle import teardown_lifecycle_server
-
-            teardown_lifecycle_server(pid_dir=pid_dir, framework=r.framework, port=r.port)
+            _server_lifecycle.teardown_lifecycle_server(pid_dir=pid_dir, framework=r.framework, port=r.port)
     return r.finalize(start, rc)
 
 
@@ -395,9 +394,7 @@ def _run_lifecycle_all(r: _Round, *, pid_dir: str, cleanup: bool) -> int:
     rc = r.run_client()
     if cleanup:
         _terminate_server(proc)
-        from ._server_lifecycle import teardown_lifecycle_server
-
-        teardown_lifecycle_server(pid_dir=pid_dir, framework=r.framework, port=r.port)
+        _server_lifecycle.teardown_lifecycle_server(pid_dir=pid_dir, framework=r.framework, port=r.port)
     return r.finalize(start, rc)
 
 
