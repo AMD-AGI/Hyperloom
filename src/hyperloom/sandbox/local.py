@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
+from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
 from hyperloom.sandbox.node import node_name
@@ -339,7 +340,7 @@ class LocalSandboxProvider:
             meta[SAME_NODE_KEY] = "true"
         envs = {
             "NODE_NAME": self.hostname,
-            "E2B_SANDBOX_ID": sandbox_id,
+            SANDBOX_TAG_ENV: sandbox_id,
             "HYPERLOOM_SANDBOX_ROOT": str(directory / "fs"),
         }
         if tpl.gpus:

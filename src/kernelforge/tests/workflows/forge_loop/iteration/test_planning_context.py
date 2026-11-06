@@ -346,7 +346,6 @@ def test_a_round_the_critic_could_not_review_is_carried_as_unreviewed(
     critic = PlanCriticOutcome(
         verdict="NOT_REVIEWED",
         error="TimeoutError: plan critic exceeded 600s",
-        verdict_source="error",
     )
     result = SimpleNamespace(
         optimization_plans=("# Draft plan\nVectorize global loads.",),
