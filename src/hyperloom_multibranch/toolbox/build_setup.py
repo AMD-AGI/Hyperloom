@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -50,8 +49,10 @@ from types import MappingProxyType
 from hyperloom.measure import signing
 from hyperloom.measure.jit.native.config import BUILD_STORE_ENV, BUILD_TRUST_ENV, BuildStoreConfigError, trust_from_file
 from hyperloom_multibranch.toolbox.build_preflight import (
+    FULL_COMMIT,
     IMAGE_CHECKOUTS,
     IMAGE_SGLANG_CHECKOUT,
+    SGL_KERNEL,
     PreflightSite,
     git_head,
     image_upstreams,
@@ -82,8 +83,6 @@ _GIT_TIMEOUT_SEC = 1800
 _ENV_FILE = "build.env"
 #: What each step says of what it found: made now, or already in place and left as it is.
 _CREATED, _KEPT = "created", "kept"
-_SGL_KERNEL = "sgl_kernel"
-_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 _QUIET = "--quiet"
 
 
@@ -170,7 +169,7 @@ def _full_commit(ref: str, repo: str | None) -> str:
     Raises:
         SetupError: ``repo`` is not a local checkout to resolve ``ref`` in, or ``ref`` names no commit there.
     """
-    if _FULL_COMMIT.fullmatch(ref):
+    if FULL_COMMIT.fullmatch(ref):
         return ref
     if repo is None or not Path(repo).is_dir():
         raise SetupError(
@@ -181,7 +180,7 @@ def _full_commit(ref: str, repo: str | None) -> str:
         full = _git("-C", repo, "rev-parse", "--verify", _QUIET, "--end-of-options", f"{ref}^{{commit}}")
     except SetupError:
         full = ""
-    if not _FULL_COMMIT.fullmatch(full):
+    if not FULL_COMMIT.fullmatch(full):
         raise SetupError(f"--sglang-ref {ref!r} names no commit of {repo}")
     return full
 
@@ -199,16 +198,16 @@ def _clones(setup: BuildSetup) -> list[_Clone]:
     """The checkout of each upstream the image installs (``--sglang-ref`` and ``--sglang-repo`` override sglang's)."""
     own = dict(setup.image_checkouts)
     if setup.sglang_repo and Path(setup.sglang_repo).is_dir():
-        own[_SGL_KERNEL] = Path(setup.sglang_repo)
+        own[SGL_KERNEL] = Path(setup.sglang_repo)
     clones = {
         up.component: _Clone(up.component, up.ref, None if up.checkout is None else str(up.checkout))
         for up in image_upstreams(setup.image_root, own)
     }
-    found = clones.get(_SGL_KERNEL)
+    found = clones.get(SGL_KERNEL)
     repo = setup.sglang_repo or (found.repo if found else None)
     ref = _full_commit(setup.sglang_ref, repo) if setup.sglang_ref else (found.ref if found else None)
     if ref is not None:
-        clones[_SGL_KERNEL] = _Clone(_SGL_KERNEL, ref, repo)
+        clones[SGL_KERNEL] = _Clone(SGL_KERNEL, ref, repo)
     if not any(clone.repo for clone in clones.values()):
         raise SetupError(
             f"no upstream commit with a checkout to clone it from can be read from {setup.image_root} or "
@@ -251,7 +250,7 @@ def _environment(setup: BuildSetup, clones: Sequence[_Clone]) -> dict[str, str]:
     }
     if setup.builder_image:
         variables[BUILDER_IMAGE_ENV] = setup.builder_image
-    overridden = [clone.ref for clone in clones if clone.component == _SGL_KERNEL]
+    overridden = [clone.ref for clone in clones if clone.component == SGL_KERNEL]
     if overridden and (setup.sglang_ref or setup.sglang_repo):
         variables[BUILD_SGLANG_REF_ENV] = overridden[0]
     return variables
