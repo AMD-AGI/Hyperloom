@@ -85,7 +85,7 @@ async def test_a_lane_without_a_record_names_why_in_its_lesson(tmp_path, monkeyp
     queued = json.loads(loop._lane_queue_path().read_text(encoding="utf-8"))["candidates"]
     loop._lane_queue = []
     loop._restore_lane_queue()
-    lane = loop._take_lane_candidate()
+    lane = loop._take_lane_candidate(1)
     await loop._record_lesson(
         result=_lesson_result(iteration=1),
         decision="REVERT_PERF",

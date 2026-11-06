@@ -608,7 +608,7 @@ def test_a_measured_candidate_is_not_left_for_the_next_process(tmp_path, monkeyp
         ("2", "tune decode", diff_of("line_11 = 11", "line_11 = 111")),
     )
 
-    taken = loop._take_lane_candidate()
+    taken = loop._take_lane_candidate(1)
 
     later = _reopen(workspace, tmp_path, monkeypatch)
     later._restore_lane_queue()
@@ -625,7 +625,7 @@ def test_a_spent_round_leaves_no_queue_behind(tmp_path, monkeypatch):
 
     assert loop._lane_queue_path().exists()
 
-    loop._take_lane_candidate()
+    loop._take_lane_candidate(1)
     loop._git_discard_worktree()
 
     later = _reopen(workspace, tmp_path, monkeypatch)

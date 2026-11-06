@@ -15,6 +15,7 @@ import pytest
 
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import BestRecord, LoopStateStore, RoundCost, RunState
+from kernelforge.workflows.forge_loop.campaign.unmeasured_lanes import UnmeasuredLane, UnmeasuredLaneArchive
 from kernelforge.evaluation.scoring import GateScoring
 from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef, PlanCriticOutcome
 from kernelforge.workflows.forge_loop.search.search_policy import (
@@ -181,6 +182,33 @@ def test_lessons_are_orchestration_evidence_and_handoff_is_audit_only(
     assert handoff["canonical_verdict"] == "NO_CHANGES"
     assert handoff["lesson_path"].endswith("lessons/iter_001.md")
     assert handoff["search_policy"]["mode"] == "EXPLOIT"
+
+
+def test_planning_cites_lane_candidates_the_tree_moved_past_once_there_are_any(tmp_path, monkeypatch):
+    """A later round can take up what an unmeasured lane built, and is told its numbers were never canonical."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.run_state = RunState(head_commit=loop._git("rev-parse", "HEAD").splitlines()[0])
+    loop.config = SimpleNamespace(experiments_dir=workspace / "forge_experiments", gpu_target="gfx942")
+
+    assert "unmeasured_lane_candidates" not in {ref.kind for ref in loop._build_orchestration_context().evidence_refs}
+
+    UnmeasuredLaneArchive(workspace).record(
+        UnmeasuredLane(
+            round_iteration=1,
+            lane_id="2",
+            base_commit="abc123",
+            dropped_iteration=2,
+            canonical_commit="def456",
+            plan="# Lane 2 plan",
+            summary="",
+            diff="--- a/kernel.py\n+++ b/kernel.py\n",
+        )
+    )
+    evidence = {ref.kind: ref for ref in loop._build_orchestration_context().evidence_refs}
+
+    cited = evidence["unmeasured_lane_candidates"]
+    assert cited.path == str((workspace / "forge_experiments" / "unmeasured_lanes" / "index.jsonl").resolve())
+    assert "never measured" in cited.summary and "not canonical measurements" in cited.summary
 
 
 def test_implementer_receives_partial_analysis_artifact_catalog(
