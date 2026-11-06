@@ -269,8 +269,9 @@ def apply_declared_gpu_power_settings(declared: DeclaredPowerSettings, *, nodes:
     same way an operator-set one is.
 
     Raises:
-        GpuPowerSettingsError: the launch must stop. Nothing was left changed, unless the message says that putting
-            the originals back failed too; the record is then kept for the next launch.
+        AmdSmiError: the launch must stop (a refusal is its subclass :class:`GpuPowerSettingsError`). Nothing was left
+            changed, unless the message says that putting the originals back failed too; the record is then kept for
+            the next launch.
     """
     if not any(value for value in declared.as_row().values()):
         raise GpuPowerSettingsError("--apply-gpu-power-settings needs --gpu-power-cap-w and/or --gpu-perf-level")
@@ -476,8 +477,8 @@ def apply_for_session(declared: DeclaredPowerSettings, *, nodes: int, owner: str
     """Apply the declared settings, their restore held by the session's guard; the ``applied`` record to archive.
 
     Raises:
-        GpuPowerSettingsError: the settings could not be applied. Nothing was left changed, unless the message says
-            that putting the originals back failed too; the record is then kept for the next launch.
+        AmdSmiError: the settings could not be applied. Nothing was left changed, unless the message says that
+            putting the originals back failed too; the record is then kept for the next launch.
     """
     if os.geteuid() != 0:
         # amd-smi set needs root; refused before the records exist, so an unprivileged attempt leaves no file behind
