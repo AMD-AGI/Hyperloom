@@ -36,9 +36,9 @@ def usable_bwrap() -> BwrapProbe:
     """The probe of the ``bwrap`` on ``PATH``, which passed; else the test skips (no bubblewrap, or no user namespace
     for it) or fails (anything else)."""
     found = bwrap_probe()
-    if found.ok:
-        return found
-    reasons = "; ".join(found.problems)
-    if found.path is None or _NO_USER_NAMESPACE.search(reasons):
-        unavailable(f"bubblewrap cannot sandbox an agent here: {reasons}")
-    pytest.fail(f"bubblewrap is here, but its probe failed: {reasons}")
+    if not found.ok:
+        reasons = "; ".join(found.problems)
+        if found.path is None or _NO_USER_NAMESPACE.search(reasons):
+            unavailable(f"bubblewrap cannot sandbox an agent here: {reasons}")
+        pytest.fail(f"bubblewrap is here, but its probe failed: {reasons}")
+    return found

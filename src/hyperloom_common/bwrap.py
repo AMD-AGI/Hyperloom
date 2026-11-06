@@ -732,8 +732,8 @@ class Holder:
             ProcessLookupError: the holder has ended.
         """
         ended = ProcessLookupError(errno.ESRCH, "the sandbox holder has ended", str(self.pid))
-        with contextlib.ExitStack() as stack:
-            fds = []
+        fds: list[int] = []
+        try:
             for name in ("user", "pid"):
                 if self._ended():
                     raise ended
@@ -741,10 +741,12 @@ class Holder:
                     fds.append(os.open(f"/proc/{self.pid}/ns/{name}", os.O_RDONLY | os.O_CLOEXEC))
                 except FileNotFoundError:
                     raise ended from None
-                stack.callback(os.close, fds[-1])
             if self._ended():
                 raise ended
             yield dataclasses.replace(policy, join=(fds[0], fds[1]))
+        finally:
+            for fd in fds:
+                os.close(fd)
 
     def stop(self) -> str:
         """End the sandbox and every command in it (SIGKILL to its pid 1). Returns what bubblewrap printed on
