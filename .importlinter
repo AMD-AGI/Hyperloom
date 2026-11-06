@@ -31,6 +31,7 @@ root_packages =
     hyperloom_kb
     kernelforge
     hyperloom_multibranch
+    inference_suite
 include_external_packages = False
 exclude_type_checking_imports = True
 
@@ -130,6 +131,7 @@ forbidden_modules =
     hyperloom_kb
     kernelforge
     hyperloom_multibranch
+    inference_suite
 ignore_imports =
     hyperloom_common.tests.** -> **
     hyperloom_common.llm.tests.** -> **
@@ -325,6 +327,76 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:is-only-common]
+name = inference_suite builds on hyperloom_common and nothing else from the project
+type = forbidden
+source_modules = inference_suite
+forbidden_modules =
+    hyperloom
+    hyperloom_kb
+    kernelforge
+    hyperloom_multibranch
+ignore_imports =
+    inference_suite.tests.** -> **
+    inference_suite.**.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:is-public-interface]
+name = hyperloom uses inference_suite only through its public modules
+type = forbidden
+# The public surface is the package root, contracts, argv, golden and server_log; frameworks joins
+# it once Hyperloom's framework registry derives from it. Every other module can move without
+# breaking an importer. Plain names, not `.**`: a forbidden module covers its descendants, and
+# `.**` would leave the package module itself importable.
+source_modules =
+    hyperloom
+    hyperloom_multibranch
+forbidden_modules =
+    inference_suite.__main__
+    inference_suite.cli
+    inference_suite.compose
+    inference_suite.eval
+    inference_suite.framework_probe
+    inference_suite.framework_version
+    inference_suite.frameworks
+    inference_suite.load
+    inference_suite.parser_check
+    inference_suite.pins
+    inference_suite.profile
+    inference_suite.recipe
+    inference_suite.run
+    inference_suite.runtime
+    inference_suite.staging
+    inference_suite.telemetry
+allow_indirect_imports = True
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    hyperloom_multibranch.tests.** -> **
+    hyperloom_multibranch.**.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:is-layers]
+name = inference_suite modules depend downward only, and modules of one layer not on each other
+type = layers
+# Full module names rather than `containers`, so each layer is also a package unit of the
+# code-metrics design checks. A parenthesised layer is optional: it is not on main yet.
+layers =
+    (inference_suite.__main__)
+    (inference_suite.cli)
+    (inference_suite.run)
+    (inference_suite.load) | (inference_suite.eval) | (inference_suite.profile)
+    (inference_suite.runtime)
+    (inference_suite.telemetry)
+    (inference_suite.compose)
+    (inference_suite.recipe) | (inference_suite.parser_check) | (inference_suite.framework_version)
+    (inference_suite.framework_probe) | (inference_suite.staging)
+    (inference_suite.contracts)
+    (inference_suite.golden) | (inference_suite.frameworks) | (inference_suite.pins) | (inference_suite.server_log)
+    (inference_suite.argv)
+
+
 [importlinter:contract:acyclic]
 name = no cycles between sibling packages (baseline may only shrink)
 type = acyclic_siblings
@@ -333,6 +405,7 @@ ancestors =
     hyperloom_common
     kernelforge
     hyperloom_multibranch
+    inference_suite
 # Baseline: the exact imports import-linter nominates as cycle breakers on
 # main today. Removing one of these imports means deleting its line here.
 ignore_imports =
