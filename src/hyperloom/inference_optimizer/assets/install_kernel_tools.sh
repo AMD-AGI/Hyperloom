@@ -983,7 +983,7 @@ write_env_file() {
   runtime_env_remove_legacy_kernel_agent_env
   local env_file="${KERNEL_AGENT_ENV}" env_dir written
   env_dir="$(dirname "$env_file")"
-  _private_env_dir "$env_dir"
+  runtime_env_private_kernel_agent_env "$env_file" write || die "kernel-agent env file not written"
   # Written beside the file (mktemp makes it 0600) and renamed over it, so an earlier copy is replaced whoever owns
   # it, never rewritten in place or chmod-ed.
   written="$(mktemp "${env_dir}/.kernel-agent.env.XXXXXX")"
@@ -1126,18 +1126,6 @@ write_env_file() {
   [ -n "${GEAK_SKIP_PROFILE:-}" ] && upsert_dotenv_var GEAK_SKIP_PROFILE "$GEAK_SKIP_PROFILE"
   [ -n "${GEAK_MAX_BENCHMARK_SHAPES:-}" ] && upsert_dotenv_var GEAK_MAX_BENCHMARK_SHAPES "$GEAK_MAX_BENCHMARK_SHAPES"
   log "updated ${DOTENV} with kernel-agent runtime env"
-}
-
-# The directory of the kernel-agent env file: made 0700 when missing, and refused unless it is a directory of this
-# account's, not a link, that its group and others cannot write. Whoever can write there can swap the file every
-# later launch sources, and a directory the user's other pods share (USER_DATA_PATH) is one such.
-_private_env_dir() {
-  local dir="$1" owner_mode
-  [ -e "$dir" ] || [ -L "$dir" ] || mkdir -p -m 700 -- "$dir"
-  owner_mode="$(stat -c '%u %a' -- "$dir")"
-  if [ -L "$dir" ] || [ ! -d "$dir" ] || [ "${owner_mode% *}" != "$(id -u)" ] || (( 8#${owner_mode#* } & 8#022 )); then
-    die "${dir} is not a directory of this account's that no other can write; the kernel-agent env file carries credentials and is sourced. Set KERNEL_AGENT_ENV to a file in such a directory on this container's own disk."
-  fi
 }
 
 # Clone the e2e optimizer ("geak", formerly PerfSkills) for its

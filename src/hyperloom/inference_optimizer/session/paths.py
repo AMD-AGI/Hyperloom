@@ -220,7 +220,7 @@ def asset_prompt_references_dir() -> Path:
 
 # Workspace-/session-scoped artefact helpers.
 def runtime_dir() -> Path:
-    """``<workspace_root>/runtime/`` — workspace-shared writable runtime (kernel-agent env file, GEAK litellm config)."""
+    """``<workspace_root>/runtime/`` — workspace-shared writable runtime (GEAK litellm config, source mirrors)."""
     return workspace_root() / "runtime"
 
 

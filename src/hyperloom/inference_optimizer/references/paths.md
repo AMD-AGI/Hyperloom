@@ -39,7 +39,8 @@ directory is **platform isolation** (one Claw job). The optimizer then creates
 agent does not need to recreate that logic in shell. Prepare the runtime with
 `install.sh`; optimizer preflight loads `kernel-agent.env.sh` (`$KERNEL_AGENT_ENV`) in process.
 It carries credentials, so it lives on the container's own disk in a directory only this
-account can enter, never under `$USER_DATA_PATH`, and does not outlive the container.
+account can write, never under `$USER_DATA_PATH`, and does not outlive the container; every
+reader refuses a directory or file there that another account could have written.
 Read the session directory from the CLI's launch-info output.
 
 | Concept | Env / helper | Meaning |

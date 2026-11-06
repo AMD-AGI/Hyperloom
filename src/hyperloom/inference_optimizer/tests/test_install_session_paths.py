@@ -10,8 +10,9 @@ back and rewrote the first session's ``kernel-agent.env.sh`` (board #166).
 
 ``kernel-agent.env.sh`` carries credentials and is sourced, so it is kept off ``USER_DATA_PATH``,
 which every pod of the user shares and can write: it is written into a directory of this
-account's own under the container's ``TMPDIR``, one per runtime dir, and a copy an older
-install left in the runtime dir is removed.
+account's own under the container's ``TMPDIR``, one per runtime dir keyed absolute, and a copy an
+older install left in the runtime dir is removed. That name is predictable, so every reader
+refuses a directory or file there that another account could have put or changed.
 
 The runs below execute install.sh's own path setup (from the top of the script through
 the runtime-path derivation, with the shipped ``runtime_env.sh`` loader) followed by the
@@ -31,6 +32,7 @@ from unittest import mock
 
 import pytest
 
+from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import preflight_env
 
 from ._kernel_tools_harness import ASSETS, INSTALL_SH, sourceable_kernel_tools
@@ -61,12 +63,14 @@ def _installer(tmp_path: Path, *, print_env_file: bool = False) -> Path:
     return assets / ("selected_env_file.sh" if print_env_file else "install.sh")
 
 
-def _installer_run(script: Path, checkout: Path, shell: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _installer_run(
+    script: Path, checkout: Path, shell: dict[str, str], cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ}
     env.update(REPO_ROOT=str(checkout), GEAK_REF=_PINNED_GEAK_REF, ANTHROPIC_BASE_URL=_GATEWAY)
     env.update(shell)
     return subprocess.run(
-        ["bash", script.as_posix()], cwd=checkout, env=env, capture_output=True, text=True, timeout=60
+        ["bash", script.as_posix()], cwd=cwd or checkout, env=env, capture_output=True, text=True, timeout=60
     )
 
 
@@ -479,5 +483,210 @@ def test_a_directory_other_accounts_can_write_is_refused(tmp_path, sessions):
     )
 
     assert proc.returncode != 0
-    assert f"{workspace} is not a directory of this account's that no other can write" in proc.stderr
+    assert f"{workspace} can be written by its group or others (mode 2770)" in proc.stderr
     assert not target.exists()
+
+
+_PLANTED_VALUES = ("https://planted.invalid", "/planted/runner")
+_PLANTED = f"export ANTHROPIC_BASE_URL='{_PLANTED_VALUES[0]}'\nexport GEAK_E2E_RUNNER='{_PLANTED_VALUES[1]}'\n"
+_SLURM_SOURCE_LINE = next(
+    line
+    for line in (ASSETS / "slurm" / "_incontainer.sh.in").read_text(encoding="utf-8").splitlines()
+    if "runtime_env_kernel_agent_env_path" in line
+)
+_REFUSAL_ADVICE = "Set KERNEL_AGENT_ENV to a file in such a directory on this container's own disk, or TMPDIR to such"
+
+
+def _plant(env_file: Path, plant: str) -> str:
+    """Put what another account could leave at the derived place; return the refusal every reader must give."""
+    directory = env_file.parent
+    if plant.endswith("other-owner") and os.geteuid() != 0:
+        pytest.skip("only root can give an entry to another account")
+    if plant == "directory-is-a-link":
+        elsewhere = env_file.parents[1] / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        (elsewhere / env_file.name).write_text(_PLANTED, encoding="utf-8")
+        (elsewhere / env_file.name).chmod(0o600)
+        directory.symlink_to(elsewhere)
+        return f"{directory} is a symbolic link"
+    directory.mkdir(mode=0o700)
+    if plant == "file-is-a-link":
+        elsewhere = env_file.parents[1] / "elsewhere.sh"
+        elsewhere.write_text(_PLANTED, encoding="utf-8")
+        elsewhere.chmod(0o600)
+        env_file.symlink_to(elsewhere)
+        return f"{env_file} is a symbolic link"
+    env_file.write_text(_PLANTED, encoding="utf-8")
+    env_file.chmod(0o600)
+    uid = os.geteuid()
+    if plant == "directory-of-another-owner":
+        directory.chmod(0o755)
+        os.chown(directory, 65534, 65534)
+        return f"{directory} belongs to uid 65534, not to this account (uid {uid})"
+    if plant == "world-writable-directory":
+        directory.chmod(0o777)
+        return f"{directory} can be written by its group or others (mode 777)"
+    if plant == "file-of-another-owner":
+        os.chown(env_file, 65534, 65534)
+        return f"{env_file} belongs to uid 65534, not to this account (uid {uid})"
+    assert plant == "world-writable-file"
+    env_file.chmod(0o666)
+    return f"{env_file} can be written by its group or others (mode 666)"
+
+
+def _shell_reader(checkout: Path, shell: dict[str, str], script: str) -> subprocess.CompletedProcess[str]:
+    """Run ``script`` from the checkout, with the caller's environment minus any gateway it already holds."""
+    env = {key: value for key, value in _caller_env(checkout, shell).items() if not key.startswith("ANTHROPIC_")}
+    return subprocess.run(
+        ["bash", "-c", script, "bash", str(ASSETS / "runtime_env.sh")],
+        cwd=checkout,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        "directory-of-another-owner",
+        "world-writable-directory",
+        "directory-is-a-link",
+        "file-of-another-owner",
+        "world-writable-file",
+        "file-is-a-link",
+    ],
+)
+def test_a_planted_env_file_is_refused_by_every_reader(tmp_path, sessions, capsys, plant):
+    """Another account that works out the predictable path cannot get its file sourced: the documented source line,
+    the slurm job and preflight all refuse it, name the entry and why, and never show what it holds; install.sh
+    refuses to write into a planted directory."""
+    checkout, workspace, _ = sessions
+    shell = {"USER_DATA_PATH": str(workspace)}
+    refusal = _plant(_kernel_env(workspace), plant)
+    assets = checkout / "src" / "hyperloom" / "inference_optimizer"
+    assets.mkdir(parents=True)
+    (assets / "assets").symlink_to(ASSETS)
+
+    documented = _shell_reader(
+        checkout,
+        shell,
+        '. "$(. "$1"; runtime_env_kernel_agent_env_path)" && printf "sourced %s\\n" "$ANTHROPIC_BASE_URL"',
+    )
+    slurm = _shell_reader(checkout, shell, f'set -euo pipefail\n{_SLURM_SOURCE_LINE}\nprintf "sourced\\n"\n')
+    caller = {key: value for key, value in _caller_env(checkout, shell).items() if not key.startswith("ANTHROPIC_")}
+    with mock.patch.dict(os.environ, caller, clear=True):
+        preflight_env._load_dotenv_fallback()
+        with pytest.raises(SystemExit) as preflight:
+            preflight_env._load_kernel_agent_env_fallback()
+        preflight_loaded = os.environ.get("ANTHROPIC_BASE_URL"), os.environ.get("GEAK_E2E_RUNNER")
+    preflight_err = capsys.readouterr().err
+
+    for proc in (documented, slurm):
+        assert proc.returncode != 0
+        assert "sourced" not in proc.stdout
+        assert f"refusing the kernel-agent env file {_kernel_env(workspace)}: {refusal}; " in proc.stderr
+        assert _REFUSAL_ADVICE in proc.stderr
+        assert not any(value in proc.stdout + proc.stderr for value in _PLANTED_VALUES)
+    assert preflight.value.code == 2
+    assert f"refusing the kernel-agent env file {_kernel_env(workspace)}: {refusal}; " in preflight_err
+    assert _REFUSAL_ADVICE in preflight_err
+    assert not any(value in preflight_err for value in _PLANTED_VALUES)
+    assert preflight_loaded == (None, None)
+    if plant.startswith("directory") or plant.endswith("directory"):
+        installed = _installer_run(_installer(tmp_path), checkout, shell)
+        assert installed.returncode != 0
+        assert f"refusing the kernel-agent env file {_kernel_env(workspace)}: {refusal}; " in installed.stderr
+
+
+class _Parsed(Exception):
+    pass
+
+
+def _hyperloom_candidate(cwd: Path, env: dict[str, str]) -> tuple[str | None, str | None]:
+    """Preflight's env file for this shell as is, and after ``hyperloom``'s own entry point made it absolute."""
+    with mock.patch.dict(os.environ, env, clear=True):
+        os.chdir(cwd)
+        preflight_env._load_dotenv_fallback()
+        as_exported = preflight_env._kernel_agent_env_candidate()
+        with mock.patch.object(cli, "_build_parser", side_effect=_Parsed), pytest.raises(_Parsed):
+            cli.main([])
+        return as_exported, preflight_env._kernel_agent_env_candidate()
+
+
+# (USER_DATA_PATH, HYPERLOOM_RUNTIME_DIR or None, run from the link to the base dir rather than the base dir itself,
+# HOME a link, the runtime dir the file is keyed on); {base} is the run's directory, {home} is HOME.
+_ABSOLUTE_CASES = {
+    "relative": ("ud", None, False, False, "{base}/ud/runtime"),
+    "relative-with-dot-and-trailing-slashes": ("./ud//", None, False, False, "{base}/ud/runtime"),
+    "tilde": ("~", None, False, False, "{home}/runtime"),
+    "tilde-slash": ("~/ud/", None, False, False, "{home}/ud/runtime"),
+    "relative-from-a-working-directory-entered-through-a-link": ("ud", None, True, False, "{base}/ud/runtime"),
+    "tilde-with-home-a-link": ("~/ud", None, False, True, "{home}/ud/runtime"),
+    "relative-runtime-dir": ("{base}/ud", "rt/", False, False, "{base}/rt"),
+}
+
+
+@pytest.mark.parametrize(
+    ("user_data", "runtime_dir", "via_link", "home_link", "keyed_on"), _ABSOLUTE_CASES.values(), ids=_ABSOLUTE_CASES
+)
+def test_install_preflight_and_the_documented_source_line_key_the_same_absolute_runtime_dir(
+    tmp_path, sessions, monkeypatch, user_data, runtime_dir, via_link, home_link, keyed_on
+):
+    """A relative or ``~`` workspace is keyed absolute on every side, as ``hyperloom`` makes USER_DATA_PATH absolute
+    before preflight: install.sh, the documented source line, and preflight before and after that step agree."""
+    checkout, _, _ = sessions
+    base = tmp_path / "base"
+    base.mkdir()
+    (tmp_path / "base-link").symlink_to(base)
+    home = tmp_path / "home"
+    home.mkdir()
+    if home_link:
+        (tmp_path / "home-link").symlink_to(home)
+        home = tmp_path / "home-link"
+    cwd = tmp_path / "base-link" if via_link else base
+    names = {"base": str(base), "home": str(home)}
+    shell = {"USER_DATA_PATH": user_data.format(**names), "HOME": str(home), "PWD": str(cwd)}
+    if runtime_dir is not None:
+        shell["HYPERLOOM_RUNTIME_DIR"] = runtime_dir
+    expected = str(_private_env_file(keyed_on.format(**names)))
+    monkeypatch.chdir(tmp_path)
+
+    installed = _installer_run(_installer(tmp_path, print_env_file=True), checkout, shell, cwd=cwd)
+    documented = subprocess.run(
+        ["bash", "-c", '. "$1" && runtime_env_kernel_agent_env_path', "bash", str(ASSETS / "runtime_env.sh")],
+        cwd=cwd,
+        env=_caller_env(checkout, shell),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert installed.returncode == 0, installed.stderr
+    assert documented.returncode == 0, documented.stderr
+    assert installed.stdout.splitlines()[-1] == expected
+    assert documented.stdout.strip() == expected
+    assert _hyperloom_candidate(cwd, _caller_env(checkout, shell)) == (expected, expected)
+
+
+def test_preflight_loads_the_file_install_wrote_for_a_relative_workspace(tmp_path, sessions, monkeypatch):
+    """The review's probe: USER_DATA_PATH=ud exported, install.sh, then `hyperloom optimize` from the same directory."""
+    checkout, _, _ = sessions
+    base = tmp_path / "base"
+    base.mkdir()
+    shell = {"USER_DATA_PATH": "ud"}
+    monkeypatch.chdir(tmp_path)
+
+    proc = _installer_run(_installer(tmp_path), checkout, shell, cwd=base)
+    assert proc.returncode == 0, proc.stderr
+    env = {key: value for key, value in _caller_env(checkout, shell).items() if not key.startswith("ANTHROPIC_")}
+    with mock.patch.dict(os.environ, env, clear=True):
+        os.chdir(base)
+        with mock.patch.object(cli, "_build_parser", side_effect=_Parsed), pytest.raises(_Parsed):
+            cli.main([])
+        outcome = preflight_env._load_kernel_agent_env_fallback()
+        loaded = os.environ.get("ANTHROPIC_BASE_URL")
+
+    assert outcome["detail"]["env_file"] == str(_private_env_file(f"{base}/ud/runtime"))
+    assert loaded == _GATEWAY
