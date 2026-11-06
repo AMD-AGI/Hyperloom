@@ -622,6 +622,21 @@ def test_a_keep_s_patch_is_read_byte_for_byte_with_a_lone_carriage_return_in_an_
     assert _read(tmp_path, ()).source_patch == patch
 
 
+async def test_a_source_only_snapshot_keeps_the_evaluation_settings_the_recipe_sets(tmp_path: Path) -> None:
+    # MB starts Arbor with the recipe's GSM8K_MIN in its config; the snapshot runs with it too.
+    launch = LaunchConfig(ROOT.launch.server_args, {**ROOT.launch.envs, "GSM8K_MIN": "0.8"})
+    recipe = replace(ROOT, launch=launch)
+    _arbor_keep(tmp_path, "", {})
+    config = {"server_flags": launch.server_args, "server_env": dict(launch.envs)}
+    (tmp_path / "0001" / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    (tmp_path / "0001" / "change.patch").write_text("diff\n", encoding="utf-8")
+
+    kept = read_snapshot(tmp_path, 1, ROOT_COMMIT, "".join, ComponentStart(launch, config, ()))
+    delta = await import_delta(kept, root=recipe, head=recipe, component="sglang", stores=_stores(Store()))
+
+    assert delta is not None and delta.config.unset_envs == () and delta.config.envs == {}
+
+
 @dataclass(frozen=True)
 class Keep:
     """One snapshot of :func:`_outbox`: the files its change sets (to :data:`GONE` to delete one), its launch, the
