@@ -268,9 +268,7 @@ lists earlier branches on it, start from where they ended rather than verify wha
 fails, profile and dig \
 deeper in it rather than switching to settings. Settings are a small space the settings branch sweeps; the larger \
 ceilings are in source: a patch, a fused or tuned kernel, or a port of an aiter or framework PR, on the operators the \
-profile ranks highest. That every setting near your direction was tried never means your direction is done. A \
-lesson, a learning or another branch's flat result closes nothing on a different head: what was flat on another \
-parent can gain on yours, so retest it on your current head before you call it closed. Never \
+profile ranks highest. That every setting near your direction was tried never means your direction is done. Never \
 end a turn to wait for a brief: one comes only when the session moves, and a branch that keeps finding nothing to \
 test is stopped. That no candidate clears the bar is a missing measurement, not a stop: profile your head unless a \
 profile analysis already failed on its execution path, add a \
