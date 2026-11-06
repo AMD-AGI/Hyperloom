@@ -1206,99 +1206,21 @@ async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatc
     assert all(row == [expected_args, expected_env] for row in observed)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("with_overlay", [False, True])
-async def test_exported_reference_controls_reimport_requires_static_settings(tmp_path, monkeypatch, with_overlay):
-
+def test_an_exported_setting_with_an_overlay_cannot_be_reimported(tmp_path):
     from hyperloom.inference_optimizer.reference_script import parse_reference_script
-    from hyperloom.inference_optimizer.session.session_binding import session_scope
-    from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     overlay = tmp_path / "overlay ' literal"
     overlay.mkdir()
-    (overlay / "sitecustomize.py").write_text("import os; os.environ['OVERLAY_OBSERVED'] = 'loaded'\n")
+    (overlay / "sitecustomize.py").write_text("")
     session = tmp_path / "session"
     session.mkdir()
     state = SharedState(framework="sglang", reference_model="/models/test")
-    state.current_best = {
-        "extra_server_args": "--max-running-requests 4",
-        "extra_envs": {"SGLANG_REASSIGN": "accepted"},
-        "unset_envs": ["SGLANG_REMOVE_ME", "SGLANG_REASSIGN"],
-        "remove_args": ["--disable-radix-cache"],
-        "args_mode": "replace",
-    }
-    if with_overlay:
-        state.current_best["final_overlay"] = str(overlay)
+    state.current_best = {"extra_server_args": "--max-running-requests 4", "final_overlay": str(overlay)}
     state.save(session)
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-    if with_overlay:
-        with pytest.raises(ValueError, match="overlay_pythonpath"):
-            parse_reference_script(str(session / "current_setting.sh"), framework="sglang")
-        return
-    recipe = parse_reference_script(str(session / "current_setting.sh"), framework="sglang")
-    args, envs, model, controls = recipe.server_args, recipe.envs, recipe.model or "", recipe.launch_controls
-    assert "PYTHONPATH" not in envs
-    assert "overlay_pythonpath" not in controls
-    imported = SharedState(
-        framework="sglang",
-        reference_server_args=args,
-        reference_envs=envs,
-        reference_model=model,
-        reference_launch_controls=controls,
-    )
-    imported.save(session)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml_overrides(base)
-    cfg = yaml.safe_load(base.read_text())
-    cfg["benchmark"]["envs"].update(
-        EXTRA_SGLANG_ARGS="--disable-radix-cache --mem-fraction-static 0.7",
-        SGLANG_REMOVE_ME="recipe",
-        SGLANG_REASSIGN="recipe",
-    )
-    base.write_text(yaml.safe_dump(cfg))
-    monkeypatch.setenv("SGLANG_REMOVE_ME", "ambient")
-    monkeypatch.setenv("SGLANG_REASSIGN", "ambient")
-    observed = []
-    managed_run = gr.run_with_session_kill
 
-    def launch_observer(cmd, **kwargs):
-        config_path = Path(cmd[cmd.index("--benchmark-config") + 1])
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        probe = (
-            "import json,os; print(json.dumps({k:os.environ.get(k) for k in "
-            "['EXTRA_SGLANG_ARGS','SGLANG_REMOVE_ME','SGLANG_REASSIGN','OVERLAY_OBSERVED']}))"
-        )
-        observer = (
-            "import os,subprocess,sys,yaml; from pathlib import Path; env=os.environ.copy(); "
-            "env.update({k:str(v) for k,v in yaml.safe_load(Path(sys.argv[1]).read_text())['benchmark']['envs'].items()}); "
-            "subprocess.run([sys.executable,'-c',sys.argv[2]],env=env,check=True)"
-        )
-        result = managed_run([sys.executable, "-c", observer, str(config_path), probe], **kwargs)
-        assert result.returncode == 0, result.stderr
-        observed.append(json.loads(result.stdout))
-        _fake_workspace(slot)
-        return result
-
-    monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
-    with session_scope(session):
-        materialized = materialize_config_with_envs(
-            base, tmp_path / "materialized", target=BenchmarkTarget(model_path="/models/test")
-        )
-        await run_grid(
-            grid=[GridVariant("reference")],
-            output_root=tmp_path / "out",
-            recipe=GridRecipe(base_yaml_path=materialized),
-        )
-    assert observed
-    for child in observed:
-        assert "--max-running-requests 4" in child["EXTRA_SGLANG_ARGS"]
-        assert "--disable-radix-cache" not in child["EXTRA_SGLANG_ARGS"]
-        assert "--mem-fraction-static 0.7" not in child["EXTRA_SGLANG_ARGS"]
-        assert child["SGLANG_REMOVE_ME"] is None
-        assert child["SGLANG_REASSIGN"] == "accepted"
-        assert child["OVERLAY_OBSERVED"] is None
+    with pytest.raises(ValueError, match="overlay_pythonpath"):
+        parse_reference_script(str(session / "current_setting.sh"), framework="sglang")
 
 
 # Section: dedup_vllm_server_args  — vLLM/atom single-value flag collapse

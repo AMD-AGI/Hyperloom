@@ -536,24 +536,25 @@ def test_the_environment_is_put_back_when_the_test_raises(grid, tmp_path, monkey
     assert "HL_TEST_FLAG" not in os.environ
 
 
-def test_the_reference_launch_the_old_flow_keeps_reads_empty_in_the_test_session(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors._workload_envs import resolve_reference_launch
+def test_the_session_base_the_old_flow_keeps_reads_empty_in_the_test_session(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.state.base_launch import ServerBase, session_server_base
+    from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
     real = tmp_path / "real"
-    (real).mkdir()
-    (real / "state.json").write_text('{"reference_server_args": "--from-the-old-flow"}', encoding="utf-8")
+    real.mkdir()
+    freeze_session_base(real, args=("--from-the-old-flow",))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(real))
-    seen: list[tuple] = []
+    seen: list[ServerBase] = []
 
     async def probe(**kwargs):
-        seen.append(resolve_reference_launch())
+        seen.append(session_server_base())
         return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
 
     monkeypatch.setattr(local, "run_grid", probe)
 
     _run(_call(tmp_path))
 
-    assert seen == [("", {}, {})]
+    assert seen == [ServerBase()]
 
 
 def test_the_per_round_cap_and_the_leak_scope_come_from_the_call(grid, tmp_path, monkeypatch):

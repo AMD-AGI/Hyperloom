@@ -25,6 +25,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
 )
@@ -340,8 +341,11 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
     }
-    state.reference_server_args = "--disable-cuda-graph --max-running-requests 64"
-    state.reference_envs = {"REFERENCE_DROP": "1", "REFERENCE_KEEP": "1"}
+    state.base_launch_digest = freeze_session_base(
+        session_dir,
+        args=("--disable-cuda-graph", "--max-running-requests", "64"),
+        env={"REFERENCE_DROP": "1", "REFERENCE_KEEP": "1"},
+    ).digest()
     state.current_best = {
         "action": "integrate",
         "tput": 100.0,

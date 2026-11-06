@@ -438,10 +438,7 @@ def _magpie_process_env(unset_envs: list[str] | None) -> dict[str, str]:
     """The scrubbed process environment a Magpie round starts from, before per-round pins."""
     env = scrub_benchmark_process_env(os.environ.copy())
     env["PYTHONUNBUFFERED"] = "1"
-    from ._workload_envs import resolve_reference_launch
-
-    _args, _envs, reference_controls = resolve_reference_launch()
-    for name in [*(reference_controls.get("unset_envs") or []), *(unset_envs or [])]:
+    for name in unset_envs or []:
         if name.strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES:
             env.pop(name, None)
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
@@ -546,12 +543,12 @@ def _num_gpus_for_config(config_path: Path) -> float:
 
 
 def _mn_restart_env(
-    reference_envs: dict[str, str],
+    base_envs: dict[str, str],
     variant: Any,
     unset_envs: list[str],
 ) -> dict[str, str]:
-    """Merge the reference server envs under one variant's own overrides."""
-    merged = {k: v for k, v in reference_envs.items() if k not in unset_envs}
+    """Merge the session base's server envs under one variant's own overrides."""
+    merged = {k: v for k, v in base_envs.items() if k not in unset_envs}
     merged.update({str(k): str(v) for k, v in (variant.extra_envs or {}).items()})
     return merged
 
@@ -720,7 +717,7 @@ class _GridRun(NamedTuple):
     silence_timeout_sec: float
     rounds_per_variant: int
     mn_warmup_rounds: int
-    mn_reference_envs: dict[str, str]
+    mn_base_envs: dict[str, str]
     auto_warmup_requested: bool
 
 
@@ -930,16 +927,15 @@ def _sweep_stale_aiter_locks() -> None:
         log.debug("grid_runner: aiter lock sweep swallowed: %r", exc)
 
 
-def _multi_node_reference_envs() -> dict[str, str]:
-    """The reference recipe's server envs, which ``restart_server_for_round`` never reads itself."""
+def _multi_node_base_envs() -> dict[str, str]:
+    """The session base's server envs, which ``restart_server_for_round`` never reads itself."""
     from ._multi_node_env import is_multi_node
 
     if not is_multi_node():
         return {}
-    from ._workload_envs import resolve_reference_launch
+    from hyperloom.orchestrator.state.base_launch import session_server_base
 
-    _, reference_envs, _ = resolve_reference_launch()
-    return reference_envs
+    return dict(session_server_base().env)
 
 
 def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
@@ -1195,7 +1191,7 @@ async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _V
             # Reference recipe envs under this variant's own overrides (e.g. MORI_* MoE-dispatch tuning) so
             # server-side env knobs proposed by specialists take effect on the restarted sglang without dropping
             # the envs the baseline was measured with.
-            extra_env=_mn_restart_env(run.mn_reference_envs, at.variant, unset_envs),
+            extra_env=_mn_restart_env(run.mn_base_envs, at.variant, unset_envs),
             unset_env=unset_envs,
         )
     except ServerRestartFailed as exc:
@@ -1642,7 +1638,7 @@ async def run_grid(
         silence_timeout_sec=silence_timeout_sec,
         rounds_per_variant=1 + (1 if auto_warmup_requested else 0) + mn_warmup_rounds,
         mn_warmup_rounds=mn_warmup_rounds,
-        mn_reference_envs=_multi_node_reference_envs(),
+        mn_base_envs=_multi_node_base_envs(),
         auto_warmup_requested=auto_warmup_requested,
     )
     results: list[VariantResult] = []

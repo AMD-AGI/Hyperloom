@@ -1127,14 +1127,9 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         """Skip a replay whose launch would be the baseline's own; True when it did.
 
         Patches and kernel items change the code, which no launch comparison sees,
-        so a replay carrying any of them always runs. So does one under reference
-        launch controls: materialization rebuilds the args from the reference, so
-        the replay's launch is not the baseline config plus the request.
+        so a replay carrying any of them always runs.
         """
-        from ..actions.executors._workload_envs import resolve_reference_launch
-
-        _, _, reference_controls = resolve_reference_launch()
-        if code_changes or reference_controls:
+        if code_changes:
             return False
         if not restates_the_baseline_launch(self.shared_state, args, envs):
             return False
