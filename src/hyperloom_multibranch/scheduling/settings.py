@@ -107,6 +107,14 @@ class Workload:
         return self.inferencex is not None
 
     @property
+    def bundles_merges(self) -> bool:
+        """Whether a merge round tests the commits it is offered together, in one merge test, before it tests them one
+        by one. An AgentX merge test holds one of a few large slots for its whole trace window, so one test per commit
+        is the integration branch's bottleneck; an InferenceX one is short, and attributes its gain to one commit."""
+
+        return self.inferencex is None
+
+    @property
     def final_concs(self) -> tuple[int, ...]:
         """The concs FINAL measures a candidate at: the sweep around ``conc`` for InferenceX, and ``conc`` alone for
         AgentX, which defines no other operating point."""
