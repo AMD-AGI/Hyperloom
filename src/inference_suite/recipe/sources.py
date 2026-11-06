@@ -64,6 +64,7 @@ SRT_SLURM = f"{PROJECT}/utils/srt-slurm"
 _FRAMEWORK_REPOS = {"sglang": SGLANG_REPO, "vllm": VLLM_REPO, "atom": ATOM_REPO}
 _INFERENCEX_SOURCE = "InferenceX"
 _RECIPES_EXTRA = "recipes"
+_QUIET = "--quiet"
 _OK = 200
 # HF answers 401, not 404, for a repository it does not know when asked anonymously.
 _NO_MODEL_CARD = frozenset({401, 404})
@@ -191,7 +192,7 @@ class Checkout:
 def checkout_main(repo: str, directories: Sequence[str], into: Path) -> Checkout:
     """The head of ``repo``'s ``main`` checked out in ``into``, with only ``directories`` (and the root's files)."""
     _git(
-        *("clone", "--quiet", "--no-tags", "--depth=1", "--filter=blob:none", "--sparse"),
+        *("clone", _QUIET, "--no-tags", "--depth=1", "--filter=blob:none", "--sparse"),
         *("--single-branch", "--branch", MAIN, repo, str(into)),
     )
     _git("sparse-checkout", "set", *directories, cwd=into)
@@ -227,7 +228,7 @@ def inferencex_python(project: Path, into: Path) -> Path:
             "-m",
             "pip",
             "install",
-            "--quiet",
+            _QUIET,
             "--disable-pip-version-check",
             f"{project}[{_RECIPES_EXTRA}]",
         )
@@ -268,7 +269,7 @@ def inferencex_answers(
 
 def _inferencex(into: Path) -> tuple[Checkout, InferencexSnapshot]:
     checkout = checkout_main(INFERENCEX_REPO, (PROJECT,), into)
-    _git("submodule", "update", "--quiet", "--init", "--depth=1", "--", SRT_SLURM, cwd=into)
+    _git("submodule", "update", _QUIET, "--init", "--depth=1", "--", SRT_SLURM, cwd=into)
     bundle = checkout.bundle((MASTER, RUNNERS, *checkout.paths(GOLDEN_DIR, ".yaml", nested=False)))
     return checkout, InferencexSnapshot(bundle, _git("rev-parse", f"HEAD:{SRT_SLURM}", cwd=into))
 
