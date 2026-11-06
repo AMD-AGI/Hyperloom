@@ -195,6 +195,10 @@ class AgentLaunchSpec:
     readable: tuple[Path, ...] = ()
     """Paths the CLI reads besides its toolchain (references, a model, a lease area): bound read-only when it runs in
     a bubblewrap sandbox; nothing changes in another tier."""
+    git_admin: Path | None = None
+    """The admin directory of ``cwd`` when that is a linked worktree, as the repository it was added from records it
+    (:func:`~hyperloom_common.git_safety.recorded_admin_dir`): a bubblewrap sandbox shows that repository read-only,
+    and no git metadata without it."""
 
 
 @dataclass(frozen=True)
@@ -544,7 +548,7 @@ class LocalAgentRunner:
         )
         private = (spec.workspace / PROMPT_FILE, spec.workspace / PROCESS_LOG_NAME)
         # The child works in ``cwd``, so that is the tree it must be able to write.
-        place = LaunchPlace(spec.workspace, spec.cwd, private, spec.readable, spec.gpus > 0)
+        place = LaunchPlace(spec.workspace, spec.cwd, private, spec.readable, spec.gpus > 0, git_admin=spec.git_admin)
         try:
             prepared = await asyncio.to_thread(prepare_launch, isolation, place, argv, env)
         except RunAsError as exc:
