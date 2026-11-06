@@ -17,6 +17,13 @@ from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, Grading
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
+from ...knowledge.kb_writeback import (
+    OUTCOME_INTEGRATED,
+    OUTCOME_KEPT_INERT,
+    OUTCOME_REVERTED_PARITY_INCONCLUSIVE,
+    OUTCOME_REVERTED_SMOKE_FAIL,
+    OUTCOME_REVERTED_SWITCH_OFF_PARITY,
+)
 from ...state.failure_evidence import FAILURE_ATTRIBUTION_ENVIRONMENT, classify_failure_attribution
 from ...state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ..stop_attribution import stopped_by_the_run_class
@@ -118,7 +125,7 @@ class PerfGateMixin:
         if switch_manifest and attempt.applied:
             return await self._keep_inert_switches(attempt, measured, params=params, parity=parity)
         await self._maybe_write_framework_kb_record(
-            measured.lesson("reverted_smoke_fail"), attempt=attempt, params=params
+            measured.lesson(OUTCOME_REVERTED_SMOKE_FAIL), attempt=attempt, params=params
         )
         fix_refusals = verdict.fix_refusals
         reasons = _gate_failure_reasons(
@@ -154,7 +161,7 @@ class PerfGateMixin:
         measured = verdict.measured
         delta_pct = measured.delta_pct
         fix_finding = verdict.fix_finding
-        await self._maybe_write_framework_kb_record(measured.lesson("integrated"), attempt=attempt, params=params)
+        await self._maybe_write_framework_kb_record(measured.lesson(OUTCOME_INTEGRATED), attempt=attempt, params=params)
         commit_failure, keep_committed = self._commit_accepted_work(
             attempt, f"hyperloom KEEP {attempt.specialist_task_id} ({delta_pct:+.2f}%)"
         )
@@ -215,8 +222,6 @@ class PerfGateMixin:
         # An unmeasurable parity leg reverts under its own verdict: the patch was
         # never shown to break, so neither the log line nor the KB lesson may say
         # that it did.
-        from ...knowledge import kb_writeback as _kb
-
         inconclusive = bool(parity.get("inconclusive"))
         log.warning(
             "integrate_patch: switch-off parity %s task=%s: %s",
@@ -226,7 +231,7 @@ class PerfGateMixin:
         )
         await self._maybe_write_framework_kb_record(
             measured.lesson(
-                _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
+                OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else OUTCOME_REVERTED_SWITCH_OFF_PARITY
             ),
             attempt=attempt,
             params=params,
@@ -443,9 +448,7 @@ class PerfGateMixin:
                 bench_result=measured.bench_result,
             )
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
-        await self._maybe_write_framework_kb_record(
-            measured.lesson("kept_inert_levers_registered"), attempt=attempt, params=params
-        )
+        await self._maybe_write_framework_kb_record(measured.lesson(OUTCOME_KEPT_INERT), attempt=attempt, params=params)
         log.info(
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
             attempt.specialist_task_id,
