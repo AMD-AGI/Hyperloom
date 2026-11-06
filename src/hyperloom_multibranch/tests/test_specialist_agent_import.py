@@ -625,13 +625,15 @@ def test_a_keep_s_patch_is_read_byte_for_byte_with_a_lone_carriage_return_in_an_
 @dataclass(frozen=True)
 class Keep:
     """One snapshot of :func:`_outbox`: the files its change sets (to :data:`GONE` to delete one), its launch, the
-    tables it lists and what its ``keep.json`` says it retracts (``None``: no ``retracts``)."""
+    tables it lists and what its ``keep.json`` says it retracts (``None``: no ``retracts``); a ``served`` one was made
+    on the root after the commit of the keep before it was gone, its ``files`` the whole tree."""
 
     files: dict[str, str] = field(default_factory=dict)
     envs: dict[str, str] = field(default_factory=dict)
     flags: str = ""
     tables: dict[str, object] = field(default_factory=dict)
     retracts: object = None
+    served: bool = False
 
 
 GONE = "<deleted>"
@@ -645,13 +647,15 @@ def _outbox(tmp_path: Path, *keeps: Keep) -> Path:
         directory = outbox / f"{number:04d}"
         directory.mkdir(parents=True)
         keep = {"number": number, "previous": number - 1 or None, "root": ROOT_COMMIT,
-                "parent": ROOT_COMMIT if number == 1 else f"{number - 1}" * 40, "commit": f"{number}" * 40,
-                "change": f"keep {number}", "tables": kept.tables}  # fmt: skip
+                "parent": ROOT_COMMIT if number == 1 or kept.served else f"{number - 1}" * 40,
+                "commit": f"{number}" * 40, "change": f"keep {number}", "tables": kept.tables}  # fmt: skip
+        if kept.served:
+            keep["notes"] = f"the commit of keep {number - 1} is gone; this change is against the root"
         if kept.retracts is not None:
             keep["retracts"] = kept.retracts
         (directory / "keep.json").write_text(json.dumps(keep), encoding="utf-8")
         patch = "".join(f"diff --git a/{name} b/{name}\n{text}\n" for name, text in kept.files.items())
-        (directory / "change.patch").write_text(patch, encoding="utf-8")
+        (directory / ("served.patch" if kept.served else "change.patch")).write_text(patch, encoding="utf-8")
         launch = {"server_flags": kept.flags, "server_env": kept.envs}
         (directory / "config.json").write_text(json.dumps(launch), encoding="utf-8")
     return outbox
@@ -726,3 +730,17 @@ def test_a_malformed_retraction_of_an_earlier_snapshot_does_not_refuse_the_keeps
     outbox = _outbox(tmp_path, Keep({"vllm/topk.py": "v1"}, retracts=7), Keep({"vllm/b.py": "v1"}))
 
     assert _read_newest(outbox).retracts is None
+
+
+def test_a_retraction_of_a_keep_made_on_the_root_counts_only_what_that_keep_changed_not_its_whole_tree(
+    tmp_path: Path,
+) -> None:
+    rebased = Keep({"vllm/a.py": "v1", "vllm/topk.py": "v1"}, {"TOPK": "1"}, served=True)
+    undone = Keep({"vllm/topk.py": GONE}, retracts=FINDING)
+    also = Keep({"vllm/topk.py": GONE, "vllm/a.py": "v2"}, retracts=FINDING)
+
+    clean = _read_newest(_outbox(tmp_path / "clean", Keep({"vllm/a.py": "v1"}), rebased, undone)).retracts
+    more = _read_newest(_outbox(tmp_path / "more", Keep({"vllm/a.py": "v1"}), rebased, also)).retracts
+
+    assert clean is not None and clean.beyond == ""
+    assert more is not None and more.beyond == "vllm/a.py"
