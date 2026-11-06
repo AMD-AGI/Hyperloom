@@ -37,7 +37,7 @@ from hyperloom.common.agent_isolation import (
 )
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs, RunAsError
 
-ACCOUNT = RunAs(user="hl-specialist", uid=2000, gid=2000, groups=(2000,), home="/home/hl", drop_tool="/usr/bin/setpriv")
+ACCOUNT = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="/home/hl", drop_tool="/usr/bin/setpriv")
 LAYER = "/opt/hyperloom-host/bin/bwrap"
 ON_PATH = BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ())
 IN_LAYER = BwrapProbe(LAYER, (0, 13, 1), ())
@@ -283,9 +283,11 @@ def test_the_report_records_a_refusal_instead_of_raising(account):
     assert (report.specialists, report.sandboxes, report.required) == ("refused", "none", True)
 
 
-def test_an_account_and_a_bubblewrap_sandbox_report_both():
+def test_an_account_for_specialists_and_a_bubblewrap_sandbox_report_both(account):
     report = agent_isolation_report(probe=Probes(ON_PATH))
-    assert report.reasons == (NOT_SET, f"running them as an account: {SANDBOX_ACCOUNT}")
+    assert (report.specialists, report.sandboxes, report.required) == ("account", "bwrap", True)
+    assert report.bwrap == "0.13.1 /usr/bin/bwrap"
+    assert report.reasons == (f"running them as an account: {SANDBOX_ACCOUNT}",)
 
 
 def test_start_up_says_once_with_a_warning_that_agents_run_unconfined(caplog):
@@ -311,11 +313,25 @@ def test_start_up_says_one_info_line_when_every_agent_is_confined(caplog):
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.INFO, report.line())]
 
 
-def test_start_up_warns_when_specialists_would_be_refused(account, caplog):
+def test_start_up_warns_once_naming_specialists_that_would_be_refused(account, caplog):
     account(["CAP_KILL"])
     with caplog.at_level(logging.WARNING, logger=agent_isolation.__name__):
-        announce_agent_isolation(probe=Probes(DENIED))
-    assert caplog.records[0].getMessage().startswith("agent sandboxes run unconfined")
+        report = announce_agent_isolation(probe=Probes(DENIED))
+    assert [r.getMessage() for r in caplog.records] == [
+        "agent sandboxes run unconfined on this host, as before: they can read this account's files and credentials; "
+        f"specialists will be refused: they must be isolated here, and no tier can ({'; '.join(report.reasons)})"
+    ]
+
+
+def test_start_up_of_a_hosted_run_that_cannot_isolate_warns_that_every_agent_would_be_refused(caplog):
+    with pytest.raises(IsolationRefused):
+        require_agent_isolation(bwrap=LAYER, probe=Probes(LAYER_DENIED))
+    with caplog.at_level(logging.WARNING, logger=agent_isolation.__name__):
+        report = announce_agent_isolation(probe=Probes(LAYER_DENIED))
+    assert (report.specialists, report.sandboxes, report.required) == ("refused", "refused", True)
+    assert [r.getMessage().split(" (")[0] for r in caplog.records] == [
+        "specialists and agent sandboxes will be refused: they must be isolated here, and no tier can"
+    ]
 
 
 # ---- the launch command line ----
