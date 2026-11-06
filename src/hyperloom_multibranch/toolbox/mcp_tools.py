@@ -38,7 +38,7 @@ import json
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from hyperloom.common.outside_facts import (
     TUNABLEOP_ENABLED_ENV,
@@ -79,6 +79,8 @@ from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_L
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.blackboard.learning_search import LearningFinder
+
+T = TypeVar("T")
 
 SPECIALIST_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
 _OBJECT = "object"
@@ -377,13 +379,10 @@ def jsonable(value: Any) -> Any:
     return value
 
 
-async def _on(home: asyncio.AbstractEventLoop | None, call: Awaitable[Any]) -> Any:
-    """Await a toolbox call on the loop the toolbox lives on.
-
-    The service answers every request on a loop of its own that ends with the request. The toolbox starts its tests as
-    tasks of the loop it was started on, so a call made on the request's loop would leave the test running on a loop
-    that is about to stop: it would be cancelled the moment the reply went out.
-    """
+async def on_home_loop(home: asyncio.AbstractEventLoop | None, call: Awaitable[T]) -> T:
+    """Await ``call`` on the home loop, or hop there with ``run_coroutine_threadsafe`` and ``wrap_future``."""
+    # The service answers each request on a loop that ends with it, while the toolbox runs its tests as tasks of the
+    # loop it was started on: a call made on the request's loop would be cancelled the moment the reply went out.
     if home is None or asyncio.get_running_loop() is home:
         return await call
     return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(call, home))  # type: ignore[arg-type]
@@ -417,7 +416,7 @@ def _submit_test(
         except ValueError as exc:  # MeasurementError and RecipeError both are
             raise InvalidParamsError(str(exc)) from exc
         try:
-            return {"request_id": await _on(home, toolbox.submit_test(request))}
+            return {"request_id": await on_home_loop(home, toolbox.submit_test(request))}
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
         except Backpressure as exc:
@@ -437,7 +436,7 @@ def _put_kernel_artifact(
         kind, rows_only = KernelKind(arguments["kind"]), arguments.get("rows_only", False)
         call = toolbox.put_kernel_artifact(kind, arguments.get("target"), arguments["env"], data, rows_only)
         try:
-            artifact = await _on(home, call)
+            artifact = await on_home_loop(home, call)
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
         return artifact.to_document()
@@ -479,7 +478,7 @@ def _start_analysis(
             str(arguments.get("profile_request_id") or ""),
         )
         try:
-            return {"job_id": await _on(home, call)}
+            return {"job_id": await on_home_loop(home, call)}
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
 
@@ -558,7 +557,7 @@ def _wait_test(
             record = await _own_record(blackboards, ctx, request_id, profiles_shared=True)
         if _is_over(record):
             return _result_document(request_id, record)
-        progress = await _on(home, toolbox.progress(request_id))
+        progress = await on_home_loop(home, toolbox.progress(request_id))
         return _waiting_document(request_id, time.monotonic() - started, progress)
 
     return handle
@@ -570,7 +569,7 @@ def _cancel_test(
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
         await _own_record(blackboards, ctx, arguments["request_id"])
         try:
-            return {"outcome": (await _on(home, toolbox.cancel(arguments["request_id"]))).value}
+            return {"outcome": (await on_home_loop(home, toolbox.cancel(arguments["request_id"]))).value}
         except ToolboxError as exc:
             raise ToolError(f"{type(exc).__name__}: {exc}") from exc
 
@@ -581,7 +580,7 @@ def _queue_state(
     toolbox: Toolbox, home: asyncio.AbstractEventLoop | None
 ) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        state = await _on(home, toolbox.queue_state())
+        state = await on_home_loop(home, toolbox.queue_state())
         return {**jsonable(state), "queued": state.queued, "running": state.running}
 
     return handle
@@ -892,6 +891,7 @@ __all__ = [
     "WAIT_POLL_SECONDS",
     "WAIT_TEST_MAX_SECONDS",
     "jsonable",
+    "on_home_loop",
     "register_specialist_tools",
     "reply_inbox",
     "wait_budget",
