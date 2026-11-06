@@ -166,14 +166,13 @@ class _Deliverable:
 
 def _inert_keep_reason(
     delta_pct: float | None,
-    keep_threshold_pct: float,
     patch_count: int,
     switch_manifest: list[dict[str, Any]],
     enablers: list[str],
 ) -> str:
     """Why a bundle was kept inert rather than kept or reverted."""
     bits = [
-        f"bundle throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%"
+        f"bundle delta {delta_pct:+.2f}% did not clear the KEEP gate"
         if delta_pct is not None
         else "bundle throughput not measurable",
         f"code kept inert ({patch_count} patch(es), all switches default-off) and "
@@ -314,15 +313,14 @@ def _pending_sentinel(
 
 
 def _revert_status(
-    measured: _PatchMeasurement,
     *,
+    perf_kept: bool,
     accuracy_blocks: bool,
     accuracy_verdict: bool | None,
     fix_refusals: list[str],
 ) -> str:
     """Whether the patch was rejected on its merits or only because its accuracy could not be read."""
-    tput_ok = measured.delta_pct is not None and measured.delta_pct >= measured.keep_threshold_pct
-    unreadable = accuracy_blocks and accuracy_verdict is None and tput_ok
+    unreadable = accuracy_blocks and accuracy_verdict is None and perf_kept
     return "accuracy_unavailable_reject" if unreadable or fix_refusals == [_FIX_ACCURACY_UNAVAILABLE] else "reverted"
 
 

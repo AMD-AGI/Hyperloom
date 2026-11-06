@@ -13,7 +13,7 @@ from typing import Any
 
 from hyperloom_common.coerce import first_text
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
-from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
@@ -133,7 +133,7 @@ class PerfGateMixin:
             attempt,
             measured,
             status=_revert_status(
-                measured,
+                perf_kept=verdict.perf_kept,
                 accuracy_blocks=verdict.accuracy_block,
                 accuracy_verdict=measured.accuracy_pass,
                 fix_refusals=fix_refusals,
@@ -472,9 +472,7 @@ class PerfGateMixin:
             "extra_server_args_applied": "",
             "extra_envs_applied": {},
             **measured.envelope(),
-            "reason": _inert_keep_reason(
-                delta_pct, measured.keep_threshold_pct, len(attempt.applied), switch_manifest, enablers
-            ),
+            "reason": _inert_keep_reason(delta_pct, len(attempt.applied), switch_manifest, enablers),
             "workspace": str(attempt.output_root),
             "framework_root": str(attempt.framework_root or ""),
             "framework_levers": switch_manifest,
@@ -498,6 +496,7 @@ class _GateVerdict:
     measured: _PatchMeasurement
     graded: GradedComparison
     passed: bool
+    perf_kept: bool
     accuracy_block: bool
     accuracy_reason: str
     fix_finding: str
@@ -515,35 +514,30 @@ def _weigh_gate(
     """Grade the bench against the base and weigh the accuracy gate and any correctness-fix claim."""
     shared_state = attempt.shared_state
     base_tput, keep_threshold_pct = basis.base_tput, basis.keep_threshold_pct
-    graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
-    delta_pct = _graded_delta_pct(graded, bench_result, base_tput)
+    graded = resolve_graded_comparison(
+        shared_state, bench_result, keep_threshold_pct=keep_threshold_pct, anchor=GradingAnchor(tput=base_tput)
+    )
+    delta_pct = _graded_delta_pct(graded)
 
     accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
     acc_block, acc_reason = _accuracy_block(params, accuracy_pass, attempt.specialist_task_id)
     acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
 
-    gate_pass = (
-        graded.comparable
-        and delta_pct is not None
-        and delta_pct >= keep_threshold_pct
-        and not graded.veto_reason
-        and not acc_block
-    )
+    perf_kept = graded.comparable and graded.verdict == VERDICT_KEEP
+    gate_pass = perf_kept and not acc_block
     fix_finding = first_text(_done_field(attempt.done_payload, "resolves_finding"))
     fix_refusals: list[str] = []
     correctness_fix = False
     if not gate_pass and fix_finding:
-        fix_delta_pct = gain_pct(graded.candidate, graded.reference) if graded.graded_on_intvty else delta_pct
         fix_refusals = _correctness_fix_refusals(
             fix_finding,
             shared_state=shared_state,
             bench_result=bench_result,
             graded=graded,
-            delta_pct=fix_delta_pct,
+            delta_pct=delta_pct,
         ) + _fix_accuracy_refusals(accuracy_pass)
         if not fix_refusals:
             gate_pass = correctness_fix = True
-            delta_pct = fix_delta_pct
     measured = _PatchMeasurement(
         bench_result=bench_result,
         new_tput=bench_result.get("output_throughput"),
@@ -559,6 +553,7 @@ def _weigh_gate(
         measured=measured,
         graded=graded,
         passed=gate_pass,
+        perf_kept=perf_kept,
         accuracy_block=acc_block,
         accuracy_reason=acc_reason,
         fix_finding=fix_finding,
@@ -661,23 +656,20 @@ def _parity_verdict(
     }
 
 
-def _graded_delta_pct(graded: GradedComparison, bench_result: dict[str, Any], base_tput: float) -> float | None:
-    """The delta the KEEP gate weighs; ``None`` when graded on interactivity and that did not clear the gate."""
+def _graded_delta_pct(graded: GradedComparison) -> float | None:
+    """The measured change on the graded axis, whatever the verdict; ``None`` when nothing was measured."""
     if not graded.comparable:
         log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
-    if not graded.graded_on_intvty:
-        return gain_pct(bench_result.get("output_throughput"), base_tput)
-    if graded.verdict == VERDICT_KEEP:
-        return gain_pct(graded.candidate, graded.reference)
-    log.info(
-        "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
-        graded.verdict,
-        graded.reference,
-        graded.candidate,
-        graded.tput_reference,
-        graded.tput_candidate,
-    )
-    return None
+    elif graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
+        log.info(
+            "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
+            graded.verdict,
+            graded.reference,
+            graded.candidate,
+            graded.tput_reference,
+            graded.tput_candidate,
+        )
+    return gain_pct(graded.candidate, graded.reference)
 
 
 def _live_base_tput(params: dict[str, Any], shared_state: SharedState | None) -> float:
