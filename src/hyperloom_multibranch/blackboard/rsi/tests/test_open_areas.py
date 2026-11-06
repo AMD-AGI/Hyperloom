@@ -168,3 +168,15 @@ def test_without_archived_sessions_only_the_playbook_s_last_open_minutes_says_it
     assert unknown.first_commit_minutes is None and not unknown.too_late
     assert unknown.render().startswith("Open areas for a new branch, from the profile of i1:")
     assert capped.too_late and capped.render().endswith("open no new branch.")
+
+
+def test_shares_inherited_from_a_commit_of_another_recipe_name_both_commits(snapshot: BlackboardSnapshot) -> None:
+    inherited = dataclasses.replace(snapshot, op_shares={"c0": OpShares("c0", "job-1", "p1", SHARES)})
+
+    found = open_areas(inherited, seconds_left=4 * HOUR, first_commit_minutes=None)
+
+    assert found.profiled == "c0"
+    assert found.render().splitlines()[0] == (
+        "Open areas for a new branch, from the profile of c0, which the integration head i1 builds on: the head's own "
+        "recipe has no profile, so its shares may differ:"
+    )

@@ -24,8 +24,8 @@ Both wait for the measurement to end, so the tick only starts the task and looks
 one of the integration branch's K slots; when the workload's profile would hold that slot as long as a test, the moved
 head is profiled only once a branch opens on it (:attr:`~.settings.Workload.profiles_moved_head_on_merge`). A head whose
 recipe a profile already measured, maybe a branch's of its own commit, is not profiled again: it reads that profile's
-shares. A backend that cannot profile, by refusing the PROFILE, failing it or running
-no analysis, is not asked again in this session: on a backend that refuses after its sandbox is built, every try costs
+shares. A backend that cannot profile, by refusing the PROFILE, failing it, running
+no analysis or leaving a trace no analysis can read, is not asked again in this session: on a backend that refuses after its sandbox is built, every try costs
 a cold start and holds the integration branch's slot. The toolbox's own names are imported where the profile uses
 them: the toolbox loads the main flow's runtime, which importing the session must not.
 """
@@ -73,6 +73,12 @@ PROFILED = "integration head profiled"
 #: The PROFILE test ran, and its analysis left no op shares of that commit behind: nothing a refill can be focused on
 #: and nothing to compare a bottleneck against, so it is not a profile the head has.
 PROFILE_NOT_ANALYSED = "integration head profiled, its trace not analysed"
+#: The PROFILE test ran, and its trace holds nothing any analysis can read: a property of the profiled configuration,
+#: which every later head inherits, so no head is profiled again in this session.
+TRACE_UNUSABLE = "integration head profiled, its trace holds nothing to analyse"
+#: The TraceLens analysis's error classes for such a trace (``toolbox.tools.tracelens_report``): no GPU kernel in it, or
+#: nothing but CUDA-graph capture sidecars.
+UNUSABLE_TRACE_CLASSES = frozenset({"trace_without_gpu_kernels", "trace_without_serving_steps"})
 PROFILE_EXISTS = "integration head already profiled"
 #: The toolbox's refusal of a test kind its backend does not run, a PROFILE on a backend that cannot profile.
 UNSUPPORTED_KIND = "unsupported_kind"
@@ -355,6 +361,10 @@ class IntegrationProfiler:
         shares = await self._profile_shares(request_id)
         detail.update(job_id=job, analysis=self._toolbox.tool_status(job).value)
         if shares is None:
+            error_class = str(self._toolbox.tool_result(job).get("error_class") or "")
+            detail.update(error_class=error_class)
+            if error_class in UNUSABLE_TRACE_CLASSES:
+                return ProfileOutcome(TRACE_UNUSABLE, detail, available=False)
             return ProfileOutcome(PROFILE_NOT_ANALYSED, detail)
         self._shares = shares
         detail.update(largest_op=dict(shares.largest(1)))
@@ -504,7 +514,9 @@ __all__ = [
     "PROFILE_EXISTS",
     "PROFILE_EXISTS_CODE",
     "PROFILE_UNAVAILABLE",
+    "TRACE_UNUSABLE",
     "UNSUPPORTED_KIND",
+    "UNUSABLE_TRACE_CLASSES",
     "EventKind",
     "IntegrationProfiler",
     "ProfileOutcome",
