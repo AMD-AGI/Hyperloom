@@ -6,8 +6,9 @@
 The specialist proposes and the toolbox measures; this code compares each measurement through the rule gate, retests a
 gain on another node, checks a declared correctness fix (``fix_check``) and lands it or asks for its fork, and tells the
 specialist in its branch log what landed and what the gate could not land. A retest that fails as a candidate settles
-the candidate as regressed; one whose measurement failed leaves it unjudged. Every step is read back from the blackboard,
-so a restarted runtime takes each step once; a fix check interrupted by a restart runs its repro tests again.
+the candidate as regressed; one whose measurement failed leaves it unjudged, and a notice that leaves a candidate
+unjudged closes it for good. Every step is read back from the blackboard, so a restarted runtime takes each step once
+and announces what landed from the recorded judgement; a fix check interrupted by a restart runs its repro tests again.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from hyperloom.contracts.measurement import Purpose, Validity
+from hyperloom.contracts.measurement import Purpose, TestRequest, Validity
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
 from hyperloom_multibranch.contracts.gate import ResultUnverified
@@ -30,12 +31,19 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import (
     SnapshotQuery,
 )
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver, InboxKind
+from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver, Conclusion, InboxKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, Toolbox
 from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
-from hyperloom_multibranch.rulegate.rules import Rule, lands_as_retraction, repeats, retest_request, retracts
+from hyperloom_multibranch.rulegate.rules import (
+    Rule,
+    landed_retraction,
+    lands_as_retraction,
+    repeats,
+    retest_request,
+    retracts,
+)
 from hyperloom_multibranch.specialist.fix_check import FixCheck, FixChecking, check_fix, declares_fix
 
 #: Opens every branch log entry the runtime writes, so the specialist tells them from its own.
@@ -102,13 +110,25 @@ class BranchJudge:
         )
         records = [record for record in snapshot.records if record.request.branch_id == self._branch]
         logged = {record.entry for record in snapshot.branch_logs.get(self._branch, ())}
+        closed = {
+            request_id
+            for entry in logged
+            if entry.content.startswith(NOTICE) and left_unjudged(entry.content)
+            for request_id in entry.request_ids
+        }
+        guarded = {case.fix_commit for case in snapshot.regressions}
         retests: dict[str, list[TestRecord]] = {}
         for record in records:
             if record.request.retest_of is not None:
                 retests.setdefault(record.request.retest_of, []).append(record)
         for record in records:
-            if _awaits_judgement(record):
+            if _awaits_judgement(record) and record.request_id not in closed:
                 await self._judge(record, retests.get(record.request_id, []), logged)
+            elif record.judgement is not None:
+                # A stop or a failure between the gate's step and its notice must not leave a landing untold.
+                announced = _announced(record, record.judgement, record.commit_id in guarded)
+                if announced:
+                    await self._notice(logged, announced, *record.judgement.request_ids)
         if finishing and not self._submitted and not any(record.in_flight for record in records):
             self._finished = True
 
@@ -159,15 +179,12 @@ class BranchJudge:
             if action is Action.REQUEST_FORK:
                 reason = f"correctness fix of {first.request_id}"
                 admission = await self._gate.fork(first.request, judgement, reason, fix=fix)
-                await self._notice(logged, _forked(first, admission), *judgement.request_ids)
+                await self._notice(logged, _forked(first.request, admission), *judgement.request_ids)
         except ResultUnverified as error:
             await self._unverified(logged, first, judgement, error)
             return
         if action is Action.COMMIT:
-            landed = f"{first.request_id} landed on your branch at {judgement.gain_pct:+.2f}% over {first.request.parent_commit}"
-            if fix is not None:
-                landed = f"{landed} with its repro case, which now guards every later commit"
-            await self._notice(logged, f"{landed}; your next candidates go on the new head", *judgement.request_ids)
+            await self._notice(logged, _landed(first.request, judgement, fix is not None), *judgement.request_ids)
         elif action is Action.RETEST:
             try:
                 await self._toolbox.submit_test(retest_request(first, self._rule))
@@ -187,8 +204,7 @@ class BranchJudge:
             await self._unverified(logged, first, judgement, error)
             return
         if landed:
-            retraction = f"{first.request_id} landed on your branch as a retraction at {judgement.gain_pct:+.2f}%"
-            content = f"{retraction} over {first.request.parent_commit}, held to the rule's errors, guards, accuracy and, where its tests run them, consistency checks, not its speed"
+            content = _retracted(first.request, judgement)
         else:
             content = f"{first.request_id} retracts a change, but the branch has moved on; it is recorded only"
         await self._notice(logged, content, *judgement.request_ids)
@@ -249,13 +265,47 @@ def _failed_retest(first: Judgement, retest: TestRecord) -> Judgement:
     )
 
 
-def _forked(first: TestRecord, admission: ForkAdmission) -> str:
-    fix = f"{first.request_id} fixes a defect of {first.request.parent_commit}"
-    if admission.status is AdmissionStatus.ACCEPTED:
-        return f"{fix}: it goes to a new branch, {admission.branch}, cut at that commit; you go on on yours"
-    if admission.status is AdmissionStatus.PENDING:
-        return f"{fix}: it waits for a branch slot as {admission.branch}; if the fork is dropped it is recorded only"
-    return f"{fix}, but its fork was refused ({admission.reason}); it is recorded only"
+def _announced(record: TestRecord, judgement: Judgement, guarded: bool) -> str:
+    """The notice of a commit or fork the gate recorded for a judged candidate, "" for any other conclusion; the same
+    text :meth:`BranchJudge._settle` writes after the step, so the one written there is not written twice."""
+    if landed_retraction(record):
+        return _retracted(record.request, judgement)
+    if record.conclusion in (Conclusion.COMMITTED, Conclusion.COMMITTED_WITH_REPRO):
+        return _landed(record.request, judgement, guarded)
+    if record.conclusion in (Conclusion.SPLIT_REQUESTED, Conclusion.SPLIT_COMMITTED):
+        return _forked_to(record.request, pending=False)
+    if record.conclusion is Conclusion.SPLIT_PENDING:
+        return _forked_to(record.request, pending=True)
+    return ""
+
+
+def _landed(request: TestRequest, judgement: Judgement, guarded: bool) -> str:
+    landed = f"{request.request_id} landed on your branch at {judgement.gain_pct:+.2f}% over {request.parent_commit}"
+    if guarded:
+        landed = f"{landed} with its repro case, which now guards every later commit"
+    return f"{landed}; your next candidates go on the new head"
+
+
+def _retracted(request: TestRequest, judgement: Judgement) -> str:
+    retraction = f"{request.request_id} landed on your branch as a retraction at {judgement.gain_pct:+.2f}%"
+    return (
+        f"{retraction} over {request.parent_commit}, held to the rule's errors, guards, accuracy and, where its tests "
+        "run them, consistency checks, not its speed"
+    )
+
+
+def _forked(request: TestRequest, admission: ForkAdmission) -> str:
+    if admission.status is AdmissionStatus.REJECTED:
+        fix = f"{request.request_id} fixes a defect of {request.parent_commit}"
+        return f"{fix}, but its fork was refused ({admission.reason}); it is recorded only"
+    return _forked_to(request, pending=admission.status is AdmissionStatus.PENDING)
+
+
+def _forked_to(request: TestRequest, *, pending: bool) -> str:
+    fix = f"{request.request_id} fixes a defect of {request.parent_commit}"
+    if pending:
+        return f"{fix}: it waits for a branch slot; if the fork is dropped it is recorded only"
+    return f"{fix}: it goes to a new branch cut at that commit; you go on on yours"
 
 
 def _ended(record: TestRecord) -> str:
