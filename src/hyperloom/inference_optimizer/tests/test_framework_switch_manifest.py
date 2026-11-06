@@ -979,6 +979,57 @@ async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     assert not state.current_best
 
 
+@pytest.mark.asyncio
+async def test_a_dormant_patch_is_reinstalled_on_a_fresh_tree_at_resume(tmp_path, monkeypatch):
+    """A resumed session on a fresh tree reinstalls its dormant patches before their switches are benched."""
+    import subprocess
+
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+    from hyperloom.orchestrator.loop.resume_source_layers import install_kept_source_layers
+
+    from .conftest import make_coordinator
+
+    result, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    assert result["status"] == "kept_inert"
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    await coord.writeback._promote_integrate_patch(result, None, _PromoteOutcome(verdict=Verdict.RECORDED))
+    subprocess.run(["git", "-C", str(repo), "reset", "-q", "--hard", "HEAD~1"], check=True)
+    assert (repo / "src.py").read_text() == "def f():\n    return 1\n"
+
+    report: dict[str, Any] = {"warnings": [], "fixes": []}
+    assert install_kept_source_layers(coord.shared_state, tmp_path, report) is None
+
+    assert (repo / "src.py").read_text() == "def f():\n    return 2\n"
+
+
+def test_dormant_layers_install_where_they_were_committed_among_the_kept_ones():
+    """A dormant layer goes after the stack entries that preceded its commit and before the ones that followed."""
+    from hyperloom.orchestrator.loop.resume_source_layers import layers_in_commit_order
+
+    state = _state()
+    state.optimization_stack = [{"name": "keep-0"}, {"name": "keep-1"}]
+    state.authored_framework_levers = [
+        {"switch": "HL_LATE", "source_layer": {"name": "dormant-late", "stack_position": 2, "source_snapshot": "b"}},
+        {"switch": "HL_EARLY", "source_layer": {"name": "dormant-early", "stack_position": 1, "source_snapshot": "a"}},
+        {
+            "switch": "HL_EARLY_2",
+            "source_layer": {"name": "dormant-early", "stack_position": 1, "source_snapshot": "a"},
+        },
+        {"switch": "HL_NONE"},
+    ]
+
+    assert [layer["name"] for layer in layers_in_commit_order(state)] == [
+        "keep-0",
+        "dormant-early",
+        "keep-1",
+        "dormant-late",
+    ]
+
+
 # switch-off parity
 
 
