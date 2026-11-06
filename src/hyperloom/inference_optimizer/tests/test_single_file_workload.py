@@ -879,6 +879,77 @@ def test_first_export_is_stacked_although_slower_than_the_baseline(tmp_path):
     assert [entry["variant_name"] for entry in coord.shared_state.optimization_stack] == ["aoti-export"]
 
 
+def _snapshot(root, name, content):
+    import json
+
+    snapshot = root / name
+    (snapshot / "files").mkdir(parents=True)
+    (snapshot / "files" / "hook.py").write_text(content)
+    (snapshot / "manifest.json").write_text(
+        json.dumps({"complete": True, "files": [{"rel": "hook.py", "op": "upsert"}]})
+    )
+    return str(snapshot)
+
+
+def _inert_result(snapshot):
+    return {
+        "status": "kept_inert",
+        "specialist_task_id": "spec",
+        "workspace": "/w",
+        "source_snapshot": snapshot,
+        "source_manifest": snapshot + "/manifest.json",
+        "source_snapshot_complete": True,
+        "target_files": ["hook.py"],
+    }
+
+
+def test_an_inert_keep_is_stacked_without_lifting_current_best(tmp_path):
+    coord = _lift_coordinator(tmp_path)
+    assert coord.writeback.lift_to_current_best(
+        "integrate_patch",
+        1100.0,
+        {
+            "name": "kept",
+            "extra_server_args": "",
+            "output_throughput": 1100.0,
+            "source_snapshot": _snapshot(tmp_path, "keep", "v1\n"),
+        },
+    )
+    before = dict(coord.shared_state.current_best)
+
+    assert coord.writeback._record_inert_source_layer(_inert_result(_snapshot(tmp_path, "inert", "v2\n")))
+
+    stack = coord.shared_state.optimization_stack
+    assert [entry["variant_name"] for entry in stack] == ["kept", "spec:inert"]
+    assert stack[-1]["source_snapshot"].endswith("inert") and stack[-1]["attribution_eligible"] is False
+    assert coord.shared_state.current_best["tput"] == before["tput"] == stack[-1]["tput"]
+    assert coord.shared_state.current_best["extra_envs"] == before["extra_envs"]
+    assert len(coord.shared_state.gain_per_stack_entry) == len(stack)
+
+
+def test_an_inert_keep_without_a_snapshot_adds_nothing(tmp_path):
+    coord = _lift_coordinator(tmp_path)
+
+    assert not coord.writeback._record_inert_source_layer({"status": "kept_inert", "source_snapshot": ""})
+    assert not coord.shared_state.optimization_stack
+
+
+def test_export_accepts_a_tree_the_inert_keep_changed_only_once_it_is_stacked(tmp_path):
+    """A KEEP, then an inert KEEP that rewrites the same file: the tree matches the later snapshot only."""
+    from hyperloom.orchestrator.deployment.export import _verify_accepted_source
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "hook.py").write_text("v2\n")
+    keep = {"source_snapshot": _snapshot(tmp_path, "keep", "v1\n")}
+
+    with pytest.raises(ValueError, match="differs from the accepted stack"):
+        _verify_accepted_source({"optimization_stack": [keep]}, tree)
+
+    inert = {"source_snapshot": _snapshot(tmp_path, "inert", "v2\n")}
+    assert _verify_accepted_source({"optimization_stack": [keep, inert]}, tree) == {"hook.py"}
+
+
 def test_a_slower_winner_without_the_export_reason_is_still_held(tmp_path):
     coord = _lift_coordinator(tmp_path)
 

@@ -3040,6 +3040,57 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
         return evidence.exported
 
+    def _record_inert_source_layer(self, result: Mapping[str, Any]) -> bool:
+        """Stack the source an inert KEEP committed, leaving the running configuration alone.
+
+        The code stays in the tree and later explore entries switch it on, so a
+        stack that never saw it cannot reproduce or export that tree: the export
+        compares the tree with the snapshots on the stack and refuses a mismatch.
+        The entry repeats the current configuration and is not eligible for gain
+        attribution; ``current_best`` is not lifted.
+
+        Args:
+            result: A ``kept_inert`` integrate_patch result.
+
+        Returns:
+            Whether an entry was appended.
+        """
+        if not result.get("source_snapshot"):
+            return False
+        best = self.shared_state.current_best or {}
+        tput = float(best.get("tput") or self.shared_state.baseline_tput or 0.0)
+        specialist = str(result.get("specialist_task_id") or "")
+        entry: dict[str, Any] = {
+            "stack_entry_id": uuid.uuid4().hex,
+            "action": "integrate_patch",
+            "variant_name": f"{specialist}:inert" if specialist else "inert",
+            "candidate_extra_server_args": "",
+            "candidate_extra_envs": {},
+            "extra_server_args": str(best.get("extra_server_args") or ""),
+            "extra_envs": dict(best.get("extra_envs") or {}),
+            "accuracy": None,
+            "tput": tput,
+            "workspace": result.get("workspace"),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "operation_kind": operation_kind_for("integrate_patch", classify_change_kind("integrate_patch", {})),
+            "scope": "source_patch",
+            "attribution_eligible": False,
+            "source_only": True,
+            **_source_layer_handles(result),
+        }
+        if specialist:
+            entry["task_id"] = specialist
+        self.shared_state.optimization_stack.append(entry)
+        self.shared_state.append_stack_gain_entry(
+            action="integrate_patch",
+            variant_name=entry["variant_name"],
+            new_tput=tput,
+            extra_server_args=entry["extra_server_args"],
+        )
+        if self.shared_state.current_best:
+            self.shared_state.current_best["optimization_stack"] = list(self.shared_state.optimization_stack)
+        return True
+
     async def _promote_integrate_patch(
         self,
         result: dict,
@@ -3183,6 +3234,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # Applied but every switch off: nothing was adopted, yet the patch
             # stays on disk as registered levers, so it is not a failure either.
             outcome.verdict = Verdict.RECORDED
+            changed = self._record_inert_source_layer(result) or changed
         else:
             outcome.verdict = Verdict.FAILED
         # A measured integrate counts either way; KEEP/REVERT is a later judgement.
