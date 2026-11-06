@@ -20,6 +20,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     GATEWAY_PAUSE_SECONDS,
     RETRY_SECONDS,
     AgentSpec,
+    AttemptFailed,
     CommandResult,
     ModelRefused,
     OnboardingSetup,
@@ -435,6 +436,40 @@ async def test_no_program_the_agent_writes_into_its_checkout_s_config_runs_as_th
         assert done.returncode == 0, done.output
 
     assert not ran.exists(), ran.read_text()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a checkout of another owner needs root to chown")
+async def test_a_checkout_another_account_of_the_group_made_is_read_with_no_program_of_its_config_run(
+    tmp_path: Path,
+) -> None:
+    checkout, source = tmp_path / "agent" / "src", str(_agent_repo(tmp_path))
+    commit = await fetch_source(source, checkout)
+    ran = tmp_path / "ran"
+    program = tmp_path / "recording-filter"
+    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
+    program.chmod(0o755)
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n')
+    (checkout / ".gitattributes").write_text("* filter=own\n")
+    (checkout / "README.md").unlink()
+    # An earlier attempt, or the run's earlier leg, was another account of the group.
+    for path in (checkout, *checkout.rglob("*")):
+        os.lchown(path, 65534, 65534)
+
+    again = await fetch_source(source, checkout)
+    checked = await agent_onboarding._checkout_git(["git", "checkout", "--", "README.md"], checkout)
+
+    assert again == commit
+    assert checked.returncode == 0, checked.output
+    assert not ran.exists(), ran.read_text()
+
+
+async def test_a_checkout_whose_commit_cannot_be_read_fails_the_attempt_naming_it(tmp_path: Path) -> None:
+    checkout = tmp_path / "agent" / "src"
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)  # an attempt cut short before its clone fetched
+
+    with pytest.raises(AttemptFailed, match=f"reading the commit of {checkout}"):
+        await fetch_source(str(_agent_repo(tmp_path)), checkout)
 
 
 async def test_a_checkout_its_agent_made_a_partial_clone_fetches_nothing_behind_this_host_s_git(tmp_path: Path) -> None:

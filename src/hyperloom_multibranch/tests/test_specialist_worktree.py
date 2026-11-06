@@ -414,6 +414,30 @@ def test_a_repository_trusted_by_the_command_s_own_safe_directory_has_its_filter
     assert not ran.exists()
 
 
+def _as_another_accounts(*trees: Path) -> None:
+    for path in (path for tree in trees for path in (tree, *tree.rglob("*"))):
+        os.lchown(path, 65534, 65534)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_no_program_of_it_run(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    _plant_programs(base.path / ".git", worktree.path, ran)
+    # The run's earlier leg, another account of the group, made the base and the worktree.
+    _as_another_accounts(base.path, worktree.path)
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    patch = worktree.diff("vllm")
+    worktree.sync("c1", [patch.encode()])
+
+    assert "+max_num_seqs = 256" in patch
+    assert worktree.head() == "c1"
+    assert base.worktree("s2", tmp_path / "s2").head() is None
+    assert not ran.exists(), ran.read_text()
+
+
 def test_a_filter_driver_git_cannot_be_told_to_blank_refuses_the_command(tmp_path, base):
     worktree = base.worktree("s1", tmp_path / "s1")
     with (base.path / ".git" / "config").open("a") as config:
