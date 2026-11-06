@@ -620,7 +620,8 @@ async def _read_feed(blackboard: Blackboard, branch: str, cursor: str) -> _Feed:
     base, skipped, anchor = cursor, 0, ""
     if cursor.startswith(_PAGE_CURSOR):
         parts = cursor[len(_PAGE_CURSOR) :].split(":", 2)
-        if len(parts) != 3 or not parts[0].isdigit() or len(parts[1]) != _FINGERPRINT_CHARS:
+        count_ok = parts[0].isascii() and parts[0].isdigit()  # int() reads no superscript, which isdigit() admits
+        if len(parts) != 3 or not count_ok or len(parts[1]) != _FINGERPRINT_CHARS:
             raise InvalidParamsError(f"not an inbox cursor: {cursor!r}")
         skipped, anchor, base = int(parts[0]), parts[1], parts[2]
     try:
