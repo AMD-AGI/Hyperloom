@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,8 @@ SOURCE_FETCH_TIMEOUT_SEC = 1800
 #: ``HYPERLOOM_SOURCE_REPO`` as ``OWNER/NAME``, a repository on GitHub; any other value is a git URL or path.
 _GITHUB_NAME = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 _QUIET = "--quiet"
+#: The clone's top directory once whole: the next leg's account reads it, and no account but this one writes it.
+_SOURCE_MODE = 0o755
 
 
 @dataclass(frozen=True)
@@ -111,22 +114,32 @@ def runner_source(destination: Path, repo: str, sha: str) -> Path:
     ``destination``: fetched there once, and found there by a restart, as it is moved there only once it holds the
     commit.
 
+    The session directory is the group's to write, the run's sandboxes included, so the clone is made in a new
+    directory only this account can enter, whose name no one can guess, so no one can put a config or a hook in it
+    first; it is then made readable, never writable, by the next leg's account, which only reads it, and renamed into
+    place. A clone found there is used whoever made it, and only through a repository of this account's that borrows
+    its objects (:func:`borrowing_repository`): what is built from it is the commit's own, named by its hash.
+
     Raises:
         CacheBuildError: When the commit cannot be fetched; nothing is left at ``destination``.
     """
 
     if destination.is_dir():
         return destination
-    staging = destination.with_name(f"{destination.name}.partial")
-    shutil.rmtree(staging, ignore_errors=True)
-    url = f"https://github.com/{repo}.git" if _GITHUB_NAME.fullmatch(repo) else repo
-    _git(["init", _QUIET, str(staging)], f"creating {staging}")
+    staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent))
     try:
-        _git(["-C", str(staging), "fetch", _QUIET, "--depth", "1", url, sha], f"fetching {sha} from {repo}")
-    except CacheBuildError:
-        _git(["-C", str(staging), "fetch", _QUIET, url], f"fetching {repo}")
-    _git(["-C", str(staging), "cat-file", "-e", f"{sha}^{{commit}}"], f"finding {sha} in {repo}")
-    staging.rename(destination)
+        url = f"https://github.com/{repo}.git" if _GITHUB_NAME.fullmatch(repo) else repo
+        _git(["init", _QUIET, str(staging)], f"creating {staging}")
+        try:
+            _git(["-C", str(staging), "fetch", _QUIET, "--depth", "1", url, sha], f"fetching {sha} from {repo}")
+        except CacheBuildError:
+            _git(["-C", str(staging), "fetch", _QUIET, url], f"fetching {repo}")
+        _git(["-C", str(staging), "cat-file", "-e", f"{sha}^{{commit}}"], f"finding {sha} in {repo}")
+        staging.chmod(_SOURCE_MODE)
+        staging.rename(destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return destination
 
 
@@ -159,8 +172,36 @@ class PinnedToolboxInputs:
         given["run_id"] = self.host.run_id or layout.session_id
         sha = str(given["source_sha"])
         source = runner_source(layout.runner_source, str(self.host.source_repo), sha)
-        pin = runner_cache_pin(source, sha, self.cache_root, runner_wheel_target(os.environ))
+        with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as private:
+            borrower = borrowing_repository(source, Path(private), sha)
+            pin = runner_cache_pin(borrower, sha, self.cache_root, runner_wheel_target(os.environ))
         return HostedToolboxInputs(**given, runner_cache_manifest_sha256=pin)  # type: ignore[arg-type]
+
+
+def borrowing_repository(source: Path, private: Path, sha: str) -> Path:
+    """A new bare repository in ``private``, a directory of this account's own, that borrows the objects of the clone
+    ``source`` and nothing else of it; what the runner cache is built from.
+
+    The clone lies in the session directory, which the group's other accounts can write: they could put in its place
+    a repository whose config git would obey as the application -- one made a partial clone whose promisor remote's
+    transport is a program, run on the first missing object -- or whose replace refs show another commit. The
+    borrower has no config, refs or hooks but its own; the objects are named by their hash, so what is read from them
+    is the commit's whoever wrote them.
+
+    Raises:
+        CacheBuildError: When ``source`` has no object directory where a clone keeps it.
+    """
+
+    objects = source / ".git" / "objects"
+    if not objects.is_dir():
+        raise CacheBuildError(f"{source} holds no git object directory at {objects}")
+    borrower = private / "source.git"
+    object_format = ["--object-format=sha256"] if len(sha) == 64 else []
+    _git(["init", _QUIET, "--bare", "--template=", *object_format, str(borrower)], f"creating {borrower}")
+    alternates = borrower / "objects" / "info" / "alternates"
+    alternates.parent.mkdir(parents=True, exist_ok=True)
+    alternates.write_text(f"{objects.resolve()}\n", encoding="utf-8")
+    return borrower
 
 
 __all__ = [
@@ -169,6 +210,7 @@ __all__ = [
     "HostedSandboxes",
     "PinnedToolboxInputs",
     "ToolboxInputsFor",
+    "borrowing_repository",
     "load_hosted_peers",
     "runner_cache_pin",
     "runner_source",

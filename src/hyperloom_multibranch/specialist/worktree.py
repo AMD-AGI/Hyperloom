@@ -38,7 +38,8 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
-from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
+from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, SHARED_DIR_MODE, make_shared_dirs, share_new_directory
+from hyperloom_multibranch.repo.isolated_git import INIT, blank_filter_drivers, git_argv, git_env
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,8 @@ _GIT_DIR = ".git"
 _QUIET = "--quiet"
 _DIFF = "diff"
 _CACHED = "--cached"
-#: A diff as the toolbox applies it, whatever colour or external diff driver the user's git config asks for.
-_PLAIN = ("--no-color", "--no-ext-diff")
+#: A diff as the toolbox applies it, whatever colour, external diff driver or text conversion a git config asks for.
+_PLAIN = ("--no-color", "--no-ext-diff", "--no-textconv")
 
 
 class WorktreeError(RuntimeError):
@@ -206,11 +207,22 @@ def source_unkept(component: str, recipe: Recipe) -> str:
 
 
 def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
+    """``git <args>`` in ``cwd``, a tree the run's sandboxes write: every filter driver its config defines is blanked
+    (:func:`~hyperloom_multibranch.repo.isolated_git.blank_filter_drivers`), as the add, diff, apply and reset here
+    would run one on the tree's files. git runs under umask ``002``: what it makes -- a worktree, its files, the
+    repository's objects and refs -- is the group's, as the dev sandboxes and the run's next leg write it."""
     pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
+    env = git_env(**pinned)
+    try:
+        # The command's own options (a safe.directory) decide which repository's config git reads, so the list does too.
+        blanked = blank_filter_drivers(cwd, env, *_leading_options(args))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise WorktreeError(f"git config in {cwd} cannot be read to blank its filter drivers: {error}") from error
     done = subprocess.run(
-        git_argv(*_FIXED_CONFIG, *args),
+        git_argv(*_FIXED_CONFIG, *blanked, *args),
         cwd=cwd,
-        env=git_env(**pinned),
+        env=env,
+        umask=SHARED_CHILD_UMASK,
         input=stdin,
         capture_output=True,
         timeout=GIT_TIMEOUT_S,
@@ -219,6 +231,14 @@ def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None =
     if done.returncode != 0:
         raise WorktreeError(f"git {args[0]} in {cwd} exited {done.returncode}: {done.stderr.decode(errors='replace')}")
     return done.stdout.decode()
+
+
+def _leading_options(args: Sequence[str]) -> list[str]:
+    """The ``-c <setting>`` pairs ``args`` starts with, before its subcommand."""
+    count = 0
+    while count + 1 < len(args) and args[count] == "-c":
+        count += 2
+    return list(args[:count])
 
 
 def _commit_all(cwd: Path, message: str) -> None:
@@ -250,7 +270,9 @@ class SourceBase:
             UnsupportedComponentError: For a component with meta trees installed without a checkout that holds the
                 commit its version names (aiter from a wheel).
         """
-        self.path.mkdir(parents=True)
+        make_shared_dirs(self.path.parent)
+        self.path.mkdir(SHARED_DIR_MODE)
+        share_new_directory(self.path)
         _git(self.path, *INIT, f"--initial-branch={BASE_BRANCH}")
         excluded = list(SKIPPED)
         links: list[tuple[str, str]] = []
@@ -290,7 +312,7 @@ class SourceBase:
             _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
         for prefix, target in linked_paths(path):
             if not (path / prefix).exists():
-                (path / prefix).parent.mkdir(parents=True, exist_ok=True)
+                make_shared_dirs((path / prefix).parent)
                 (path / prefix).symlink_to(target)
         return self._worktrees.setdefault(path, BranchWorktree(path, self._native))
 

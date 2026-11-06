@@ -3,9 +3,11 @@
 
 """Whole-file writes for files every participant of a session reads.
 
-The files are owner-only, as ``tempfile.mkstemp`` creates them and as ``hyperloom_common.io`` writes its own: every
-participant of a session runs as the session's user. Segments (:mod:`.segments`) are created owner-only too, and the
-directories follow the umask.
+The participants may be different accounts of one group: each leg of a hosted run may be another account, and the
+RSI archive is read by every session of a deployment. So a published file is readable by them (``644``, set by
+``fchmod`` whatever the umask) and written by none once it is there, and the directories it goes in are the group's
+(``2775``, :func:`~hyperloom_common.shared_storage.make_shared_dirs`). Segments (:mod:`.segments`) are created ``664``,
+as each is appended to by whichever leg runs.
 A reader never sees a partial file, and a host crash leaves no empty one: a file's bytes reach the disk before its name
 appears.
 """
@@ -18,6 +20,11 @@ import tempfile
 from contextlib import suppress
 from pathlib import Path
 
+from hyperloom_common.shared_storage import make_shared_dirs
+
+#: A published file: read by every account of the group, written by none once it is in place.
+PUBLISHED_MODE = 0o644
+
 
 def encode_json(value: object) -> bytes:
     """Canonical JSON bytes: sorted keys, ASCII only, trailing newline."""
@@ -26,10 +33,11 @@ def encode_json(value: object) -> bytes:
 
 
 def _staged(path: Path, data: bytes) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    make_shared_dirs(path.parent)
     fd, staged = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
+        os.fchmod(handle.fileno(), PUBLISHED_MODE)
         handle.flush()
         os.fsync(handle.fileno())
     return Path(staged)
@@ -53,4 +61,4 @@ def publish_once(path: Path, data: bytes) -> bool:
     return True
 
 
-__all__ = ["encode_json", "publish_once"]
+__all__ = ["PUBLISHED_MODE", "encode_json", "publish_once"]

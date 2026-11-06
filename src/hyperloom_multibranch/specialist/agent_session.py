@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Protocol
 
 from hyperloom_common.fs_utils import read_text_nofollow, write_text_nofollow
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom.orchestrator.specialists.agent_runner import (
@@ -540,7 +541,7 @@ class AgentSession:
     def _write_cli(self, cli: _CliState) -> None:
         """Replace the conversation record whole, readable by its owner only: it names a conversation to resume."""
         workspace = self._place.workspace
-        workspace.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(workspace)
         partial = write_text_nofollow(workspace, (f".{CLI_SESSION_FILE}.partial",), json.dumps(asdict(cli)))
         partial.replace(workspace / CLI_SESSION_FILE)
 
@@ -779,7 +780,7 @@ class AgentSession:
 
     def _spec(self, grant: SpecialistGrant, launch: _Launch) -> AgentLaunchSpec:
         setup, workspace, worktree = self._setup, self._place.workspace, self._place.worktree.path
-        workspace.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(workspace)
         done = workspace / DONE_FILE
         done.unlink(missing_ok=True)
         _keep_process_log(workspace)

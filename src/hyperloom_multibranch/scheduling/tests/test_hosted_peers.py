@@ -24,6 +24,7 @@ from hyperloom.measure.runner.cache_build import RUNNER_TARGET_ENV, CacheBuildEr
 from hyperloom.measure.runner.cache_layout import manifest_from_json
 from hyperloom.measure.runner.cache_layout import MANIFEST_NAME
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
+from hyperloom_multibranch.scheduling import hosted_peers
 from hyperloom_multibranch.scheduling.hosted_peers import (
     PinnedToolboxInputs,
     load_hosted_peers,
@@ -147,7 +148,33 @@ def test_a_commit_the_source_lacks_fails_the_run_and_leaves_no_clone(tmp_path: P
     with pytest.raises(CacheBuildError, match="f" * 40):
         runner_source(destination, str(origin), "f" * 40)
 
-    assert not destination.exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["origin"], "no clone and no staging left"
+
+
+def test_the_clone_is_made_where_no_other_account_can_plant_a_config_and_is_left_readable_not_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    origin = tmp_path / "origin"
+    sha = _origin(origin)
+    session = tmp_path / "session"
+    session.mkdir()
+    ran = tmp_path / "ran"
+    # A repository another account of the group put where the clone used to be staged, under a name anyone could know,
+    # after any cleanup of it (no cleanup removes it here): its config sends the fetch of the source to a program.
+    planted = session / "MB-runner-source.partial"
+    subprocess.run(["git", "init", "--quiet", str(planted)], check=True)
+    with (planted / ".git" / "config").open("a") as config:
+        config.write(
+            f'[protocol "ext"]\n\tallow = always\n[url "ext::sh -c echo% ran>>{ran}"]\n\tinsteadOf = {origin}\n'
+        )
+    monkeypatch.setattr(hosted_peers.shutil, "rmtree", lambda *_args, **_kwargs: None)
+
+    destination = runner_source(session / "MB-runner-source", str(origin), sha)
+
+    assert not ran.exists()
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o755
+    found = subprocess.run(["git", "-C", str(destination), "cat-file", "-t", sha], capture_output=True, text=True)
+    assert found.stdout.strip() == "commit"
 
 
 def _host(tmp_path: Path, repo: Path, sha: str) -> HostInfo:
@@ -216,6 +243,31 @@ def test_a_runner_cache_without_the_commit_fails_the_session_before_it_measures(
     assert not (tmp_path / "runner-cache" / ("f" * 40)).exists()
 
 
+def test_a_clone_put_in_place_by_another_account_starts_no_program_of_its_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
+    layout = SessionLayout(tmp_path / "MB-session")
+    layout.root.mkdir()
+    sha = _origin(layout.runner_source)
+    ran, transport = tmp_path / "ran", tmp_path / "transport"
+    transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
+    transport.chmod(0o755)
+    # A partial clone whose promisor remote's transport is a program, missing the commit, so the first read fetches.
+    with (layout.runner_source / ".git" / "config").open("a") as config:
+        config.write(
+            f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = {transport}\n"
+            '[extensions]\n\tpartialClone = promisor\n[remote "promisor"]\n\turl = ssh://example.invalid/r\n'
+            "\tpromisor = true\n"
+        )
+    (layout.runner_source / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
+
+    with pytest.raises(CacheBuildError, match=sha):
+        PinnedToolboxInputs(_host(tmp_path, tmp_path / "origin", sha), tmp_path / "runner-cache")(layout, 2)
+
+    assert not ran.exists()
+
+
 @pytest.mark.parametrize(("run_id", "named"), [("run-1", "run-1"), (None, "MB-session")])
 def test_a_grant_without_a_run_id_names_its_sandboxes_by_the_session(
     run_id: str | None, named: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -223,6 +275,7 @@ def test_a_grant_without_a_run_id_names_its_sandboxes_by_the_session(
     from hyperloom_multibranch.scheduling import hosted_peers
 
     monkeypatch.setattr(hosted_peers, "runner_source", lambda destination, repo, sha: destination)
+    monkeypatch.setattr(hosted_peers, "borrowing_repository", lambda source, private, sha: source)
     monkeypatch.setattr(hosted_peers, "runner_cache_pin", lambda source, sha, cache_root, target: "e" * 64)
     monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
     host = _host(tmp_path, tmp_path / "repo", "c" * 40)
