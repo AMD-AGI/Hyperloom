@@ -818,7 +818,9 @@ in time leaves only that launch's test unconfined: the next sandbox is chosen fo
 cannot swap a link to the app's files in between a check and the open.
 
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
-framework image may carry its own); a local run uses the `bwrap` on `PATH`. The probe (`python -I -m
+framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom-multibranch hosted run` names
+`bin/bwrap` in the directory `HYPERLOOM_HOST_LAYER` names; with the variable unset or relative, no launch of the run
+uses bubblewrap. The probe (`python -I -m
 hyperloom_common.bwrap probe [--bwrap PATH]`) refuses a setuid bubblewrap and one older than 0.5.0, then runs a canary
 sandbox and checks from inside that its masks, read-only binds, pid namespace, capabilities and `no_new_privs` hold. It
 runs once per process for each binary, interpreter, ids, namespaces and user-namespace sysctls; one that gives no
@@ -831,6 +833,16 @@ bubblewrap's own line; the usual causes:
 | `bwrap: Creating new namespace failed: ...` | `user.max_user_namespaces` is 0 or used up, or a seccomp or AppArmor profile denies `unshare`. |
 | `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | The container's `/proc` has entries mounted over it (masked paths). |
 | `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`. |
+
+A multi-branch session records in its manifest and `MB-report.json` (`agent_isolation`) how the paths that launch its
+agents and tests start them (`hyperloom_multibranch.scheduling.launch_isolation`), not how the chooser would: its
+specialists as the account the agent runner starts them as (`account`), else `none` (or `refused`, when that account
+cannot be used); its agent and dev sandboxes and its tests `none` on this host, where they run as the app's own
+account, or `hosted` when the grant's sandboxes run them. `MB-report.md` has the same as one line (`agent isolation:
+specialists <...>, sandboxes <...>, tests <...>: <reasons>`), and the session logs one WARNING at its start naming
+what runs unconfined. A multi-branch `hosted run` starts only when nothing it launches in the app container would run
+unconfined: a spec measured there (`placement.measurement: local`) ends before anything starts while its sandboxes and
+tests would.
 
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
@@ -1170,7 +1182,10 @@ values), so a bad input stops the run before it starts. Which variables are requ
 and input variables are always required except for a session started by hand on a grant handed to it
 (`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
 `HYPERLOOM_GRANT_LIMITS`, `HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
-required.
+required. A multi-branch `hosted run` whose spec says `placement.measurement: local` measures on the app container's own cards:
+it needs no sandbox variable, key or source pair, and `HYPERLOOM_GRANT_LIMITS` is optional (its `max_runtime_sec`, when given,
+bounds the session together with the spec's `budget.max_hours`; see
+[Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md)).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
