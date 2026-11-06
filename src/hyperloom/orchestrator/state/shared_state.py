@@ -980,11 +980,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     @classmethod
     def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
         """Reject damaged crash evidence, and a pre-base-launch session whose server base lived in state."""
-        stale = [key for key in _RETIRED_REFERENCE_FIELDS if raw.get(key)]
-        if stale and not raw.get("base_launch_digest"):
+        if any(raw.get(key) for key in _RETIRED_REFERENCE_FIELDS) and not raw.get("base_launch_digest"):
             raise ValueError(
-                f"state.json carries {', '.join(stale)} but no base_launch_digest: this session predates "
-                "base_launch.json and cannot be resumed; start a new session"
+                f"state.json carries a server base in {'/'.join(_RETIRED_REFERENCE_FIELDS)} but no base_launch_digest: "
+                "this session predates base_launch.json and cannot be resumed; start a new session"
             )
         if "crash_count" in raw:
             count = raw["crash_count"]
@@ -1085,7 +1084,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         """The complete server args the current best was launched with, as a serving recipe.
 
         Read from the promoted measurement's launch evidence: what the launch path composed from every layer --
-        reference recipe, operator ``--server-args``, the optimizer's delta -- where ``extra_server_args`` holds the
+        session base, operator ``--server-args``, the optimizer's delta -- where ``extra_server_args`` holds the
         delta alone. ``None`` when that launch was not recorded.
         """
         evidence = ((self.current_best or {}).get("measurement") or {}).get("launch_evidence") or {}
@@ -1116,8 +1115,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
 
         instrument.snapshot_state_sections(session_dir, self)
         _progress.emit_budget(self)
-        # Derived artifact: re-render current_setting.sh from the current best route so the operator can audit /
-        # re-feed it via --reference-script.
+        # Derived artifact: the current best route as a current_setting.sh that --reference-script takes back.
         try:
             cb = self.current_best or {}
             if cb:
@@ -1141,10 +1139,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
                         gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
                     ),
                 )
-                (Path(session_dir) / "current_setting.sh").write_text(
-                    text,
-                    encoding="utf-8",
-                )
+                (Path(session_dir) / "current_setting.sh").write_text(text, encoding="utf-8")
         except (OSError, ValueError):
             # Never leave a stale launcher or export a subset of the retained
             # configuration. The complete settings remain in durable state.
