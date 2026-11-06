@@ -46,7 +46,7 @@ from .llm_failure import LlmUnavailableError
 from .locate import FrameworkInstall, _framework_repo_root
 from .loop import FusionAbort, LoopConfig, LoopResult, RecipePatch, run_fusion_loop
 from .models import CompilePassOutcome, FusionArtifacts, Recipe, ValidationResult
-from .shadow_repo import ensure_git_workspace
+from .shadow_repo import SHADOW_GIT_DIRNAME, ensure_git_workspace
 from .request import FuseAgentOptions, FuseRequest
 from .report import (
     ANCHOR_RESOLVED_VERDICT,
@@ -862,7 +862,7 @@ def _open_shadow_workspace(repo_root: str, loop_recipes: list, out: Path, campai
     shadow = ensure_git_workspace(
         repo_root,
         loop_recipes[0].source_file,
-        git_dir=str(out / "shadow.git"),
+        git_dir=str(out / SHADOW_GIT_DIRNAME),
         extra_paths=tuple(fused_module_path(r) for r in loop_recipes),
         # A fusion whose call sites span packages is keepable only if every one of
         # those packages is in the index.
