@@ -4,8 +4,9 @@
 """``base_launch.json`` (``hyperloom-base-launch/1``): the launch a session resolved once and every round builds on.
 
 :meth:`BaseLaunch.digest` is the base's identity. It covers what decides how the server and the client run --
-framework, entrypoint, model, topology, argv, environment, the golden layer and the client -- and leaves out where
-the launch came from and which image it was read from. Argv keeps its order: of two aliases of one flag, or a switch
+framework, entrypoint, the model's id, topology, argv, environment, the golden layer and the client -- and leaves out
+where the launch came from, which image it was read from, and what the runner places on each host: the model's local
+path and the runner-owned flags and environment. Argv keeps its order: of two aliases of one flag, or a switch
 and its negation, the engine applies the last, so reordering may change the launch.
 """
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -239,6 +241,26 @@ class LaunchSource:
             files=fields.get("files", {}),
             tools=fields.get("tools", {}),
         )
+
+
+@dataclass(frozen=True)
+class LaunchModel:
+    """The checkpoint the base serves: its id, and the local path the runner serves it from on this host."""
+
+    id: str
+    path: str | None = None
+
+    def __post_init__(self) -> None:
+        _FIELDS.text(self.id, "the model id")
+        _FIELDS.optional_text(self.path, "the model path")
+
+    def to_document(self) -> dict[str, object]:
+        return {"id": self.id, "path": self.path}
+
+    @classmethod
+    def from_document(cls, document: object) -> LaunchModel:
+        fields = _FIELDS.known(document, ("id", "path"), "the model")
+        return cls(fields.get("id"), fields.get("path"))
 
 
 @dataclass(frozen=True)
@@ -485,7 +507,10 @@ class GoldenAcceptance:
 
 @dataclass(frozen=True)
 class ClientLaunch:
-    """The load generator the base is measured with, pinned by commit."""
+    """The load generator the base is measured with, pinned by commit.
+
+    :attr:`command` renders it as one shell line, the form Arbor runs a client from.
+    """
 
     tool: str
     commit: str
@@ -498,18 +523,30 @@ class ClientLaunch:
         object.__setattr__(self, "args", _argv(self.args, "the client args"))
         _env_names(list(_FIELDS.string_map(self.env, "the client env")), "the client env")
 
-    def to_document(self) -> dict[str, object]:
+    @property
+    def command(self) -> str:
+        return shlex.join((self.tool, *self.args))
+
+    def identity(self) -> dict[str, object]:
         return {"tool": self.tool, "commit": self.commit, "args": list(self.args), "env": _sorted_strings(self.env)}
+
+    def to_document(self) -> dict[str, object]:
+        return {**self.identity(), "command": self.command}
 
     @classmethod
     def from_document(cls, document: object) -> ClientLaunch:
-        fields = _FIELDS.known(document, ("tool", "commit", "args", "env"), "a client launch")
-        return cls(
+        """The client a document records; a ``command`` other than the one its tool and args render is refused."""
+        fields = _FIELDS.known(document, ("tool", "commit", "args", "env", "command"), "a client launch")
+        client = cls(
             tool=fields.get("tool"),
             commit=fields.get("commit"),
             args=_FIELDS.strings(fields.get("args", ()), "the client args"),
             env=fields.get("env", {}),
         )
+        command = fields.get("command")
+        if command != client.command:
+            raise BaseLaunchError(f"the client command {command!r} is not what its tool and args run: {client.command}")
+        return client
 
 
 @dataclass(frozen=True)
@@ -548,7 +585,7 @@ _DOCUMENT_KEYS = (
     "image",
     "framework",
     "entrypoint",
-    "model_id",
+    "model",
     "topology",
     "args",
     "env",
@@ -560,7 +597,7 @@ _DOCUMENT_KEYS = (
     "resolved_unix",
     "digest",
 )
-_DIGEST_KEYS = ("schema", "framework", "entrypoint", "model_id", "topology", "args", "env", "golden_al", "client")
+_DIGEST_KEYS = ("schema", "framework", "entrypoint", "model", "topology", "args", "env", "golden_al", "client")
 
 
 @dataclass(frozen=True)
@@ -577,7 +614,7 @@ class BaseLaunch:
     image: ImageFacts
     framework: str
     entrypoint: tuple[str, ...]
-    model_id: str
+    model: LaunchModel
     topology: Topology
     args: tuple[str, ...]
     env: Mapping[str, EnvValue]
@@ -590,7 +627,6 @@ class BaseLaunch:
 
     def __post_init__(self) -> None:
         _FIELDS.text(self.framework, "the framework")
-        _FIELDS.text(self.model_id, "the model id")
         if not _FIELDS.string_tuple(self.entrypoint, "the entrypoint") or not all(self.entrypoint):
             raise BaseLaunchError(f"the entrypoint must be non-empty words, got {self.entrypoint!r}")
         object.__setattr__(self, "args", _argv(self.args, "the args"))
@@ -636,7 +672,8 @@ class BaseLaunch:
                 raise BaseLaunchError(f"{what} set runner-owned {', '.join(clash)}")
 
     def _identity(self) -> dict[str, object]:
-        return {key: value for key, value in self._body().items() if key in _DIGEST_KEYS}
+        identity = {key: value for key, value in self._body().items() if key in _DIGEST_KEYS}
+        return {**identity, "model": {"id": self.model.id}, "client": self.client.identity()}
 
     def digest(self) -> str:
         return DIGEST_PREFIX + hashlib.sha256(_canonical(self._identity()).encode()).hexdigest()
@@ -650,7 +687,7 @@ class BaseLaunch:
             "image": self.image.to_document(),
             "framework": self.framework,
             "entrypoint": list(self.entrypoint),
-            "model_id": self.model_id,
+            "model": self.model.to_document(),
             "topology": self.topology.to_document(),
             "args": list(self.args),
             "env": _env_document(self.env),
@@ -680,7 +717,7 @@ class BaseLaunch:
             image=ImageFacts.from_document(fields.get("image")),
             framework=fields.get("framework"),
             entrypoint=_FIELDS.strings(fields.get("entrypoint"), "the entrypoint"),
-            model_id=fields.get("model_id"),
+            model=LaunchModel.from_document(fields.get("model")),
             topology=Topology.from_document(fields.get("topology")),
             args=_FIELDS.strings(fields.get("args"), "the args"),
             env=_env_from_document(fields.get("env"), "the env"),
@@ -712,6 +749,7 @@ __all__ = [
     "GoldenCurve",
     "ImageFacts",
     "LaunchPoint",
+    "LaunchModel",
     "LaunchQuery",
     "LaunchSource",
     "PointAlternative",

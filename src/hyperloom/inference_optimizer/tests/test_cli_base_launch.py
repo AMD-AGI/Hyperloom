@@ -116,6 +116,7 @@ def test_a_fresh_session_freezes_the_recipe_base_it_resolves(tmp_path, fetched, 
     query = fetched[0][0]
     assert (query.board, query.tp, query.ep, query.concurrencies, fetched[0][1]) == ("mi355x", 8, 1, (4, 64), None)
     assert read_base_launch(tmp_path) == base
+    assert (base.model.id, base.model.path) == (_DSR1, _DSR1)
     assert "Base launch     : inferencex" in capsys.readouterr().out
     assert shared_state_fields(base) == {
         "base_launch_digest": base.digest(),
@@ -196,6 +197,7 @@ def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_froze
     assert base.args == ("--tp", "4", "--mem-fraction-static", "0.7")
     assert isinstance(base.env["HF_TOKEN"], Redacted)
     assert "hunter2" not in (session / BASE_LAUNCH_FILE).read_text()
+    assert base.model.path == _DSR1
     assert shared_state_fields(base)["reference_envs"] == {"SGLANG_USE_AITER": "1"}
 
 

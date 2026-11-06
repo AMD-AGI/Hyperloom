@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from dataclasses import replace
 
@@ -19,6 +20,7 @@ from inference_suite.contracts import (
     GoldenAcceptance,
     GoldenCurve,
     ImageFacts,
+    LaunchModel,
     LaunchPoint,
     LaunchQuery,
     LaunchSource,
@@ -84,7 +86,7 @@ def _base(**changes) -> BaseLaunch:
         ),
         framework="sglang",
         entrypoint=("python3", "-m", "sglang.launch_server"),
-        model_id="zai-org/GLM-5.3",
+        model=LaunchModel("zai-org/GLM-5.3", "/data/models/GLM-5.3"),
         topology=Topology(tp=8),
         args=("--tp", "8", '--json-model-override-args={"a": 1}', "--disable-radix-cache"),
         env={"SGLANG_USE_AITER": "1", "HF_TOKEN": Redacted(_SHA)},
@@ -117,6 +119,115 @@ def test_round_trip_without_golden_or_image():
         golden_al=None,
     )
     assert BaseLaunch.from_document(base.to_document()) == base
+
+
+def test_arbors_fields_are_written_where_it_reads_them_and_round_trip():
+    document = json.loads(json.dumps(_base().to_document()))
+
+    assert document["model"] == {"id": "zai-org/GLM-5.3", "path": "/data/models/GLM-5.3"}
+    assert document["client"]["command"] == "aiperf --seed 7"
+    assert (document["client"]["tool"], document["client"]["commit"]) == ("aiperf", _COMMIT)
+    assert document["runner_owned"] == {"args": ["--host", "--port"], "env": ["HIP_VISIBLE_DEVICES"]}
+    read = BaseLaunch.from_document(document)
+    assert (read.model, read.client.command, read.runner_owned) == (
+        LaunchModel("zai-org/GLM-5.3", "/data/models/GLM-5.3"),
+        "aiperf --seed 7",
+        RunnerOwned(args=("--host", "--port"), env=("HIP_VISIBLE_DEVICES",)),
+    )
+
+
+def test_the_client_command_quotes_each_argument():
+    client = ClientLaunch(tool="aiperf", commit=_COMMIT, args=("--extra-inputs", '{"a": 1}'))
+    assert client.command == "aiperf --extra-inputs '{\"a\":1}'"
+
+
+@pytest.mark.parametrize("command", ["aiperf --seed 8", None])
+def test_a_client_command_its_tool_and_args_do_not_render_is_refused(command):
+    document = _base().to_document()
+    document["client"]["command"] = command
+    with pytest.raises(BaseLaunchError, match="client command"):
+        BaseLaunch.from_document(document)
+
+
+def _documented_digest(document: dict) -> str:
+    """The digest by its written rule: what runs, the model by its id, the client without its rendered command."""
+    keys = ("schema", "framework", "entrypoint", "topology", "args", "env", "golden_al")
+    identity = {key: document[key] for key in keys}
+    identity["model"] = {"id": document["model"]["id"]}
+    identity["client"] = {key: value for key, value in document["client"].items() if key != "command"}
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def test_the_c6254_p1_example_reads_with_the_fields_recorded_beside_it():
+    p1 = {
+        "schema": "hyperloom-base-launch/1",
+        "source": {
+            "kind": "inferencex",
+            "repo": "https://github.com/SemiAnalysisAI/InferenceX",
+            "commit": _COMMIT,
+            "entry": "qwen3.8next-fp4-mi355x-sglang-agentic-mtp",
+            "files": {"benchmarks/qwen3.8.yaml": _SHA},
+        },
+        "image": {"run": "sha256:" + _SHA, "recipe": "lmsysorg/sglang:nightly"},
+        "framework": "sglang",
+        "entrypoint": ["python3", "-m", "sglang.launch_server"],
+        "model": {"id": "amd/Qwen3.8-Next-MXFP4", "path": "/data/models/Qwen3.8-Next-MXFP4"},
+        "args": ["--tensor-parallel-size", "1", "--mem-fraction-static", "0.8"],
+        "env": {"SGLANG_USE_AITER": "1"},
+        "golden_al": {"value": 2.32, "method": "match-expected", "token_mode": "real-draft-token"},
+        "client": {"command": "inferencex --seed 7"},
+        "runner_owned": {
+            "args": ["--host", "--port", "--model-path", "--served-model-name", "--watchdog-timeout"],
+            "env": ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "PORT", "HF_HOME"],
+        },
+    }
+    curve = {"repo": "https://github.com/SemiAnalysisAI/InferenceX", "commit": _COMMIT, "path": "al.json"}
+    beside = {
+        "query": {
+            "model_id": "amd/Qwen3.8-Next-MXFP4",
+            "framework": "sglang",
+            "board": "mi355x",
+            "workload": "agentx",
+            "concurrencies": [12],
+            "tp": None,
+            "ep": None,
+            "isl": None,
+            "osl": None,
+        },
+        "source": {**p1["source"], "api": None, "path": None, "locator": None, "strategy": None, "tools": {}},
+        "point": {"conc": 12, "exact": True, "alternatives": []},
+        "image": {
+            **p1["image"],
+            "framework_version": "0.5.23",
+            "version_basis": "assumed_latest",
+            "assumed_release": "v0.5.23",
+        },
+        "topology": {"tp": 1, "ep": 1},
+        "golden_al": {
+            **p1["golden_al"],
+            "thinking_mode": "thinking_on",
+            "spec_method": "EAGLE",
+            "draft_model": None,
+            "draft_length": 3,
+            "curve": {**curve, "sha256": _SHA},
+            "args": [],
+            "env": {},
+        },
+        "client": {"tool": "inferencex", "commit": _COMMIT, "args": ["--seed", "7"], "env": {}, **p1["client"]},
+        "stripped": [],
+        "warnings": [],
+        "resolved_unix": 1_762_380_274,
+    }
+    document = {**p1, **beside}
+    document["digest"] = _documented_digest(document)
+
+    base = BaseLaunch.from_document(document)
+
+    assert base.model == LaunchModel("amd/Qwen3.8-Next-MXFP4", "/data/models/Qwen3.8-Next-MXFP4")
+    assert base.client.command == "inferencex --seed 7"
+    assert base.runner_owned.env == tuple(p1["runner_owned"]["env"])
+    assert base.to_document() == document
 
 
 def test_a_document_whose_digest_does_not_match_is_refused():
@@ -162,6 +273,7 @@ def test_digest_leaves_out_provenance_and_covers_what_runs():
         point=replace(base.point, conc=128, exact=False),
         image=replace(base.image, run="rocm/other:latest"),
         query=replace(base.query, concurrencies=(128,)),
+        model=LaunchModel(base.model.id, "/elsewhere/GLM-5.3"),
         runner_owned=RunnerOwned(args=("--host",)),
         stripped=(),
         warnings=(),
@@ -170,7 +282,7 @@ def test_digest_leaves_out_provenance_and_covers_what_runs():
     assert provenance.digest() == base.digest()
     for changed in (
         _base(entrypoint=("sglang", "serve")),
-        _base(model_id="zai-org/GLM-5.3-FP8"),
+        _base(model=LaunchModel("zai-org/GLM-5.3-FP8", base.model.path)),
         _base(golden_al=_golden(value=3.5)),
         _base(client=replace(base.client, args=("--seed", "8"))),
         _base(env={"SGLANG_USE_AITER": "0", "HF_TOKEN": Redacted(_SHA)}),
