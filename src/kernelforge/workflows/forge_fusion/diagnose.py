@@ -44,7 +44,13 @@ DEFAULT_MAX_BUSY_WALL = 0.45
 
 # Ordered (first-match-wins) kernel-name -> category rules.
 _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
-    # MoE first: its kernels are GEMMs too, and the table reports them separately.
+    # Collectives before reduce/copy/rmsnorm, which their names also match; a rank's collective time includes its wait.
+    (
+        "collective",
+        r"all_?reduce|reduce_?scatter|all_?gather|all_?to_?all|cross_device_reduce|quick_?reduce|\bcustom_ar\b"
+        r"|nccl|rccl|local_device_load_rmsnorm",
+    ),
+    # MoE first among compute: its kernels are GEMMs too, and the table reports them separately.
     ("moe", r"fused_moe|mfma_moe|moe_align|moe_sum|moe_reduction|_routing|expert|grouped_topk"),
     # Norms before the bare ``gemm`` substring, as in TraceLens: CamelCase ``GemmaRMSNorm`` still spells it.
     ("rmsnorm", r"rmsnorm|rms_norm|_rms_"),
