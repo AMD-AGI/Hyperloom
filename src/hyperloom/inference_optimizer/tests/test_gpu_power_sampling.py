@@ -16,6 +16,7 @@ import pytest
 from hyperloom_common import gpu_telemetry
 from hyperloom_common.gpu_telemetry import GpuPowerRecorder, _read_node_power, parse_power_sample
 from hyperloom.orchestrator.actions.executors import _subprocess_kill
+from inference_suite.server_log import LogCursor
 from hyperloom.orchestrator.actions.executors._gpu_power import (
     GPU_POWER_ARTIFACT_NAME,
     build_gpu_power_recorder,
@@ -272,7 +273,7 @@ def test_native_power_uses_client_boundaries_and_waits_for_responses(tmp_path, m
     monkeypatch.setenv("HYPERLOOM_GPU_POWER_INTERVAL_S", "0.01")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KV_METRICS", "0")
     recorders = _subprocess_kill._build_round_recorders(str(server), {BENCHMARK_CONFIG_ENV: str(config)})
-    cursor = _subprocess_kill._LogCursor()
+    cursor = LogCursor()
 
     def advance(line):
         with client.open("a") as stream:
@@ -440,9 +441,9 @@ class _PhaseLog:
 
 
 def _ready_line() -> str:
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import _SERVER_READY_MARKERS
+    from inference_suite.server_log import READY_MARKERS
 
-    return _SERVER_READY_MARKERS[0] + "\n"
+    return READY_MARKERS[0] + "\n"
 
 
 def test_replay_logs_drive_boot_and_measured_per_replica(tmp_path):
@@ -451,9 +452,7 @@ def test_replay_logs_drive_boot_and_measured_per_replica(tmp_path):
     from hyperloom.orchestrator.actions.executors._geak_sweep import _replay_server_logs
 
     phases = _PhaseLog()
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import _LogCursor
-
-    driver = ServerLogPhaseDriver(phases, lambda: _replay_server_logs(tmp_path), cursor=_LogCursor())
+    driver = ServerLogPhaseDriver(phases, lambda: _replay_server_logs(tmp_path), cursor=LogCursor())
     first = tmp_path / "replica_0" / "attempt_0" / "server.log"
     first.parent.mkdir(parents=True)
     first.write_text("loading weights\n")
@@ -528,7 +527,7 @@ def _unlistable_logs() -> list[str]:
 def test_an_unreadable_replay_log_is_warned_once_and_polling_continues(caplog):
     from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
 
-    driver = ServerLogPhaseDriver(_PhaseLog(), _unlistable_logs, cursor=_subprocess_kill._LogCursor())
+    driver = ServerLogPhaseDriver(_PhaseLog(), _unlistable_logs, cursor=LogCursor())
     with caplog.at_level("DEBUG", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
         driver._poll_logs()
         driver._poll_logs()
@@ -539,7 +538,7 @@ def test_an_unreadable_replay_log_is_warned_once_and_polling_continues(caplog):
 def test_a_phase_driver_bug_is_not_swallowed():
     from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
 
-    class _BrokenCursor(_subprocess_kill._LogCursor):
+    class _BrokenCursor(LogCursor):
         def advance(self, server_log_path):
             raise KeyError("scan bug")
 
