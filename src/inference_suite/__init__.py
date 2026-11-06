@@ -10,6 +10,8 @@ A host resolves a session's base in two steps: :func:`fetch_sources` reads every
 reaches the network or runs a source's own code, and :func:`resolve_base` reads that :class:`SourceSnapshot` alone.
 The operator's own launch file enters both as the :class:`UserFile` :func:`parse_user_file` reads from its bytes;
 :func:`fetch_response` reads one at a URL.
+
+A runner runs one round with :func:`run_round`, and reaps a server a round left running with :func:`stop`.
 """
 
 from __future__ import annotations
@@ -18,10 +20,14 @@ from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import SourceFetchError, fetch_response, fetch_sources
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
+from inference_suite.run import RoundResult, RunDirError, run_round
+from inference_suite.runtime.server import stop
 
 __all__ = [
     "LaunchQuery",
     "Miss",
+    "RoundResult",
+    "RunDirError",
     "SourceFetchError",
     "SourceSnapshot",
     "UserFile",
@@ -30,4 +36,6 @@ __all__ = [
     "fetch_sources",
     "parse_user_file",
     "resolve_base",
+    "run_round",
+    "stop",
 ]
