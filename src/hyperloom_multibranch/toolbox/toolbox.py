@@ -519,9 +519,12 @@ class RealToolbox:
         self._pump()
 
     async def tick(self) -> None:
-        """One round of housekeeping: renew the claims of live tests and retry outcomes the blackboard refused."""
+        """One round of housekeeping: renew the claims of live tests and retry outcomes the blackboard refused.
 
-        await self.renew_claims()
+        A claim whose renewal fails is logged by :meth:`_renew_each` and holds up nothing after it in the round.
+        """
+
+        await self._renew_each()
         await self._housekeeping()
         for entry in self._log.entries():
             if entry.unwritten:
@@ -537,16 +540,40 @@ class RealToolbox:
         return None
 
     async def renew_claims(self) -> None:
+        """Renew the claim of every queued and running test, each on its own (see :meth:`_renew_each`).
+
+        Once every claim had its turn, the first renewal that failed for a reason not the blackboard's is raised.
+        """
+
+        errors = await self._renew_each()
+        if errors:
+            raise errors[0]
+
+    async def _renew_each(self) -> list[Exception]:
+        """Renew the claim of every queued and running test; the errors not the blackboard's, in claim order.
+
+        A renewal the blackboard refused, or that did not reach it, is logged as a warning. One that failed for any other
+        reason is logged with its traceback, naming the claim. Either way the round goes on to the claims after it, which
+        would otherwise lapse at their TTL, round after round, behind the one that keeps failing.
+        """
+
         if self._claims is None:
-            return
+            return []
+        errors: list[Exception] = []
         for item in self._queue.items():
             if item.request.intent_fingerprint is None:
                 continue
+            key = self._key(item.request)
             try:
-                await self._claims.renew(self._key(item.request), ttl_seconds=self._ttl)
+                await self._claims.renew(key, ttl_seconds=self._ttl)
             except (BlackboardError, OSError):  # the blackboard refused or was not reached: the next tick retries
                 message = "could not renew the claim of %s; it lapses at its TTL unless a later renewal lands"
                 logger.warning(message, item.request_id, exc_info=True)
+            except Exception as error:
+                message = "renewing the claim of %s (intent %s on %s) failed; the other claims are renewed"
+                logger.exception(message, item.request_id, key.intent_fingerprint, key.parent_commit)
+                errors.append(error)
+        return errors
 
     # --- accepting and recovering --------------------------------------------------------------------------------
 
@@ -650,7 +677,10 @@ class RealToolbox:
             entry = self._log.get(item.request_id)
             if entry is not None:
                 await self._record_and_write(entry, {"result": result.to_document()})
-            await self._housekeeping()
+            try:
+                await self._housekeeping()
+            except Exception:  # the result is logged and written already, so it stands; every tick runs this again
+                logger.exception("housekeeping after test %s ended failed; its result stands", item.request_id)
         finally:
             self._queue.remove(item.request_id)
             self._builds.forget(item.request_id)
