@@ -101,7 +101,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
 )
 from hyperloom_multibranch.tests.fakes import quick_polls  # noqa: F401
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, TestJob
-from hyperloom_multibranch.toolbox.fake_model import Fate
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate
 
 COMPONENT = "vllm"
 UPSTREAM_REF = "a" * 40

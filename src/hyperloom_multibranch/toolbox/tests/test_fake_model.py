@@ -18,7 +18,7 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom_multibranch.toolbox.fake_model import (
+from hyperloom_multibranch.toolbox.tests.fake_model import (
     DEFAULT_BASELINE,
     TPOT_P50,
     TTFT_P50,

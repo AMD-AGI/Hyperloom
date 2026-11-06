@@ -19,8 +19,8 @@ from hyperloom.contracts.measurement import Purpose, RequestClasses, TestKind, T
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, Fate, FakeToolboxConfig
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests.fake_model import DEFAULT_BASELINE, Fate, FakeToolboxConfig
 
 DELTA = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
 ROUND_REQUESTS = 1000

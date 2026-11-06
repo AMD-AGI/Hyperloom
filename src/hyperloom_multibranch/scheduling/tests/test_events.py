@@ -51,8 +51,8 @@ from hyperloom_multibranch.scheduling.integrator import MergeReport
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, CODE_PROFILE_UNVERIFIED
-from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 
 METRIC = "output_throughput"

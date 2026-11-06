@@ -80,8 +80,8 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
-from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.fake_builds import FakeBuildDriver
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests.fake_builds import FakeBuildDriver
 
 METRIC = "output_throughput"
 NOW = 1000.0

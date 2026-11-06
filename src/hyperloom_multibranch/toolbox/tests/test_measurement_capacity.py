@@ -18,8 +18,8 @@ from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, WorkloadKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
-from hyperloom_multibranch.toolbox.fake import FakeToolbox
-from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom_multibranch.toolbox.local_hosted import (
     FREED_CARDS_REASON,

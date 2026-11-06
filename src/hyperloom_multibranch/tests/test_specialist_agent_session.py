@@ -43,8 +43,8 @@ from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart, restart_notice
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.following_rig import diverged
-from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.fake_builds import FakeBuild, FakeBuildDriver, FakeBuildEnd
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests.fake_builds import FakeBuild, FakeBuildDriver, FakeBuildEnd
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER, reply_inbox
 
 BRANCH, TOKEN_ENV, FIRST_PID = "s1", "HYPERLOOM_SPECIALIST_MCP_TOKEN", 4000
