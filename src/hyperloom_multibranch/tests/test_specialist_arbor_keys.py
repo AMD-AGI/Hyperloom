@@ -64,7 +64,7 @@ def test_a_dossier_pass_on_an_arbor_without_stop_at_is_refused_naming_the_commit
     checkout = _checkout(tmp_path, BEFORE_PROFILE)
     config = arbor_config(_spec(tmp_path), checkout, DOSSIER_PASS)
 
-    said = [reason for reason in refusals(config, {}, declared_keys(checkout)) if PINNED in reason]
+    said = [reason for reason in refusals(config, declared_keys(checkout)) if PINNED in reason]
 
     assert said == [f"{PINNED} has no component.stop_at: pin Arbor {KEY_SINCE['stop_at']} or later"]
 
@@ -74,8 +74,8 @@ def test_a_branch_on_an_arbor_that_has_its_keys_is_not_refused_for_them(tmp_path
     plan = _write(tmp_path / "shares", {"share-1.json": json.dumps(MAP)}) / "share-1.json"
     config = arbor_config(_spec(tmp_path, plan=str(plan)), checkout, BRANCH_RUN)
 
-    assert not [reason for reason in refusals(config, {}, declared_keys(checkout)) if PINNED in reason]
-    assert not [reason for reason in refusals(config, {}, None) if PINNED in reason]
+    assert not [reason for reason in refusals(config, declared_keys(checkout)) if PINNED in reason]
+    assert not [reason for reason in refusals(config, None) if PINNED in reason]
 
 
 def test_the_root_s_profile_is_left_out_with_a_note_for_an_arbor_without_it(tmp_path: Path) -> None:
