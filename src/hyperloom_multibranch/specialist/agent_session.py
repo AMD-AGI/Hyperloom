@@ -11,8 +11,8 @@ sends it to the CLI as the next message, so the model goes on with its whole con
 a test of the branch, another branch's profile of its head or its long dev lease's process, the CLI is woken every
 ``WAIT_WAKE_S``: the reaper reads only the CLI's own output, so a CLI silent longer is taken for a hung one. A turn
 that ends with no test of the branch in flight (one waiting on its native builds is) and no process running in its
-long dev lease waits a patience for something to arrive, and is nudged when nothing did;
-``IDLE_TURNS`` such turns in a row end the session with :class:`SessionIdle`, which is no crash. A turn that called
+long dev lease waits a patience for something to arrive, and is nudged when nothing did; as many such turns in a
+row as there are patiences end the session with :class:`SessionIdle`, which is no crash. A turn that called
 tools counts half: a model reading, writing a patch or having a claim refused is working, yet one that never submits
 still ends.
 A session that ends as a session should, its CLI exiting or its deadline reached, is followed by a fresh one: a
@@ -132,9 +132,6 @@ SPECIALIST_SESSION_S = 14 * 24 * 3600.0
 #: How long a turn that ended with no test of its branch running waits for something to arrive before it counts as
 #: idle, one patience per idle turn in a row: a result or a notice often lands minutes after a model stops.
 NUDGE_WAITS_S = (60.0, 180.0, 300.0)
-#: Idle turns in a row that end a session, all but the last nudged: a model that keeps stopping must not be woken
-#: forever.
-IDLE_TURNS = len(NUDGE_WAITS_S)
 #: What an idle turn adds to a session's strain: a silent one twice what one that called tools does.
 _SILENT, _WORKED = 2, 1
 #: A session silent this long, with no log growth, CPU work or tool call in flight, is hung: a test takes about eight
@@ -1017,7 +1014,6 @@ def _describe(status: AgentStatus, seconds: float) -> str:
 __all__ = [
     "CLI_SESSION_FILE",
     "IDLE_RESUME_WAIT_S",
-    "IDLE_TURNS",
     "RESUME_CONTEXT_MAX",
     "NUDGE_WAITS_S",
     "SPECIALIST_SESSION_S",

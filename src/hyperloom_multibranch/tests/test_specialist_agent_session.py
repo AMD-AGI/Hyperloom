@@ -28,7 +28,6 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.specialist.agent_session import (
     CLI_SESSION_FILE,
-    IDLE_TURNS,
     NUDGE_WAITS_S,
     RESUME_CONTEXT_MAX,
     SPECIALIST_SESSION_S,
@@ -54,6 +53,7 @@ ROOT = Recipe(
     components=(ComponentPatches("vllm", "https://github.com/vllm-project/vllm", "1" * 40),),
 )
 EXITED_WELL = AgentStatus("exited", 0, None)
+IDLE_TURNS = len(NUDGE_WAITS_S)
 NO_WAITS = (0.0,) * IDLE_TURNS
 LOST = AgentStatus("lost", None, None, error="no heartbeat for more than 300s")
 
@@ -365,7 +365,7 @@ async def test_idle_turns_in_a_row_with_nothing_running_end_the_session_idle_wit
 
     with pytest.raises(SessionIdle, match=f"{IDLE_TURNS} turns in a row"):
         await asyncio.wait_for(running, 1)
-    assert IDLE_TURNS == len(NUDGE_WAITS_S) and len(rig.runner.sent) == IDLE_TURNS - 1
+    assert len(rig.runner.sent) == IDLE_TURNS - 1
     assert all("nothing new for your branch" in text for text in rig.runner.sent)
     assert (rig.runner.cancelled, rig.runner.collected) == ([1], [1])
 
