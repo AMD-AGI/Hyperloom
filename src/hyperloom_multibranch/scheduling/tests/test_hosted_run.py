@@ -20,6 +20,7 @@ import pytest
 
 from hyperloom_common import bwrap
 from hyperloom_common.bwrap import BwrapProbe
+from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom.common import agent_isolation
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
@@ -284,3 +285,59 @@ def test_a_bubblewrap_that_gives_no_answer_in_time_leaves_the_run_to_be_started_
 
     with pytest.raises(TimeoutError, match="no answer in 10 s"):
         require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
+
+
+def _layer(tmp_path: Path, bwrap_target: str | None) -> Path:
+    """A hosting layer directory whose ``bin/bwrap`` links to ``bwrap_target`` (none when ``None``), and ``PATH`` a
+    directory whose ``bwrap`` cannot run a sandbox, as a framework image's own might be."""
+
+    layer = tmp_path / "layer"
+    (layer / "bin").mkdir(parents=True)
+    if bwrap_target is not None:
+        (layer / "bin" / "bwrap").symlink_to(bwrap_target)
+    return layer
+
+
+@pytest.fixture
+def unmarked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A process no hosted run has marked, with no account configured, whose ``PATH`` holds only a ``bwrap`` that
+    fails every probe."""
+
+    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
+    monkeypatch.setattr(bwrap, "_PROBES", {})
+    monkeypatch.delenv(SPECIALIST_USER_ENV, raising=False)
+    image_bin = tmp_path / "image-bin"
+    image_bin.mkdir()
+    (image_bin / "bwrap").write_text("#!/bin/sh\necho 'not the layer bubblewrap' >&2\nexit 1\n")
+    (image_bin / "bwrap").chmod(0o755)
+
+
+@pytest.mark.agent_isolation
+@pytest.mark.usefixtures("unmarked")
+def test_a_hosted_run_isolates_its_agents_with_a_real_layer_bubblewrap_and_never_the_one_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = usable_bwrap()
+    layer = _layer(tmp_path, str(real.path))
+    monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
+
+    require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(layer)})
+
+    report = agent_isolation.agent_isolation_report()
+    assert (report.specialists, report.sandboxes, report.required) == ("bwrap", "bwrap", True)
+    version = ".".join(map(str, real.version or ()))
+    assert report.bwrap == f"{version} {layer / 'bin' / 'bwrap'}"
+
+
+@pytest.mark.usefixtures("unmarked")
+def test_a_hosted_run_whose_layer_has_no_bubblewrap_is_refused_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layer = _layer(tmp_path, None)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
+
+    with pytest.raises(PeersUnavailable) as refused:
+        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(layer)})
+
+    assert f"bubblewrap at {layer / 'bin' / 'bwrap'}: No such file or directory" in str(refused.value)
+    assert "not the layer bubblewrap" not in str(refused.value)
