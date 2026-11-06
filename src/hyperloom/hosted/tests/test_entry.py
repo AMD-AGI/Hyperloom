@@ -10,6 +10,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -48,8 +49,11 @@ def run(tmp_path, monkeypatch):
         "ANTHROPIC_BASE_URL": "https://gateway.example.test",
         **_SECRETS,
     }
-    for name in (*(v for k, v in vars(Var).items() if not k.startswith("_")), entry.ENV_IMAGE):
+    for name in (*(v for k, v in vars(Var).items() if not k.startswith("_")), entry.ENV_IMAGE, entry.ENV_RUNTIME_DIR):
         monkeypatch.delenv(name, raising=False)
+    container_tmp = tmp_path / "container-tmp"
+    container_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(container_tmp))  # the container's own disk
 
     def inject():
         """What the host does at every (re)start of the application: the same environment again."""
@@ -63,7 +67,16 @@ def run(tmp_path, monkeypatch):
     monkeypatch.setattr(entry, "INSTALL_SCRIPT", installer)  # the real installer is never run by a unit test
     inject()
     yield type(
-        "Run", (), {"state": state, "work": work, "spec": spec, "restart": staticmethod(inject), "installer": installer}
+        "Run",
+        (),
+        {
+            "state": state,
+            "work": work,
+            "spec": spec,
+            "restart": staticmethod(inject),
+            "installer": installer,
+            "container_tmp": container_tmp,
+        },
     )
     set_hosted_plug_inputs(None)
 
@@ -106,7 +119,7 @@ def _session_json(run):
 
 
 # -- a fresh run -------------------------------------------------------------------------------------------------
-def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_private_archive(run, monkeypatch):
+def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_group_shared_archive(run, monkeypatch):
     fake = FakeOptimize(monkeypatch, stop_reason="target_reached")
     assert entry.main(["run"]) == 0
     (argv,) = fake.calls
@@ -116,7 +129,8 @@ def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_private_archive
     assert not [a for a in argv if a.startswith("--resume-from")]
     assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "target_reached"}
     archive = Path(session) / "archive"
-    assert stat.S_IMODE(archive.stat().st_mode) == 0o700 and archive.stat().st_uid == os.getuid()
+    assert stat.S_IMODE(archive.stat().st_mode) == 0o2770 and archive.stat().st_uid == os.getuid()
+    assert [stat.S_IMODE(path.stat().st_mode) for path in (Path(session).parent, Path(session))] == [0o2775, 0o2775]
 
 
 def test_session_json_is_written_before_optimize_starts(run, monkeypatch):
@@ -330,6 +344,79 @@ def test_a_refusal_the_state_directory_cannot_hold_is_still_return_code_2(run, m
     assert Var.STATE_DIR in capsys.readouterr().err
 
 
+# -- the shared storage, which each leg may write as another account ---------------------------------------------
+def test_a_user_data_path_this_account_cannot_write_ends_the_run_finally_naming_it(run, monkeypatch):
+    fake = FakeOptimize(monkeypatch)
+    run.work.rmdir()
+    run.work.write_text("")  # what no account can create a file in
+    assert entry.main(["run"]) == 2
+    error = _exit(run)["error"]
+    assert f"cannot write the shared storage: USER_DATA_PATH {run.work}: ENOTDIR" in error
+    assert fake.calls == [] and not (run.state / "session.json").exists()
+
+
+def test_a_state_dir_this_account_cannot_write_is_said_on_stderr_only(run, monkeypatch, capsys):
+    FakeOptimize(monkeypatch)
+    probe = entry.writable_problems
+    monkeypatch.setattr(
+        entry,
+        "writable_problems",
+        lambda dirs: [f"{name} {path}: EACCES" for name, path in dirs.items() if name == Var.STATE_DIR] or probe(dirs),
+    )
+    assert entry.main(["run"]) == 2
+    assert f"{Var.STATE_DIR} {run.state}: EACCES" in capsys.readouterr().err
+    assert list(run.state.iterdir()) == []
+
+
+def test_a_session_directory_this_account_cannot_write_ends_the_run_finally_naming_it(run, monkeypatch):
+    fake = FakeOptimize(monkeypatch)
+    (run.work / "m").write_text("")  # where the model's directory of sessions goes
+    assert entry.main(["run"]) == 2
+    assert "cannot write the session directory " + str(run.work / "m") in _exit(run)["error"]
+    assert fake.calls == []
+
+
+def test_an_archive_an_earlier_leg_left_unusable_ends_the_run_finally_naming_it(run, monkeypatch):
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    archive = Path(_session_json(run)) / "archive"
+    archive.rmdir()
+    archive.symlink_to(run.work)
+    run.restart()
+    assert entry.main(["run"]) == 2
+    assert _exit(run) == {
+        "final": True,
+        "returncode": 2,
+        "error": f"the archive {archive} is not a directory (a link to one is refused too)",
+    }
+    assert len(fake.calls) == 1
+
+
+def test_a_key_directory_without_setgid_is_warned_about_and_one_with_it_is_not(run, monkeypatch, capsys):
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    err = capsys.readouterr().err
+    assert f"WARNING: USER_DATA_PATH {run.work} is not setgid" in err and f"chmod g+s {run.state}" in err
+    for key in (run.work, run.state):
+        key.chmod(0o2775)
+    run.restart()
+    entry.main(["run"])
+    assert "is not setgid" not in capsys.readouterr().err
+
+
+def test_the_runtime_dir_is_one_of_the_legs_own_on_the_container_disk_unless_the_host_names_one(run, monkeypatch):
+    run.installer.write_text(f'#!/bin/bash\necho "$HYPERLOOM_RUNTIME_DIR" >> {run.work}/seen\n')
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    runtime = Path(fake.environments[0][entry.ENV_RUNTIME_DIR])
+    assert runtime.parent == run.container_tmp and stat.S_IMODE(runtime.stat().st_mode) == 0o700
+    assert (run.work / "seen").read_text().split() == [str(runtime)]
+    run.restart()
+    monkeypatch.setenv(entry.ENV_RUNTIME_DIR, "/host/chose/this")
+    entry.main(["run"])
+    assert fake.environments[1][entry.ENV_RUNTIME_DIR] == "/host/chose/this"
+
+
 def test_anything_but_run_is_a_usage_error_that_writes_nothing(run, capsys):
     assert entry.main(["walk"]) == 2 and entry.main([]) == 2
     assert not (run.state / "exit.json").exists()
@@ -406,6 +493,7 @@ def test_multibranch_execs_into_its_entry_with_the_environment_unchanged_but_for
     path = calls[0][2].pop("PATH")
     assert path.split(os.pathsep)[0] == bin_dir  # the installer's interpreter resolves the command
     before.pop("PATH", None)
+    assert Path(calls[0][2].pop(entry.ENV_RUNTIME_DIR)).parent == run.container_tmp
     assert calls[0][2] == before and Var.RUN_ID in before
     assert fake.calls == [] and not (run.state / "session.json").exists() and not (run.state / "exit.json").exists()
     assert os.environ.get(entry.ENV_IMAGE) is None

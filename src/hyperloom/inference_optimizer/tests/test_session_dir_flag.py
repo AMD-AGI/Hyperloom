@@ -6,16 +6,24 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import stat
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
+from hyperloom_common.tests.shared_accounts import other_accounts
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.breakdown import session_package
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.inference_optimizer.session import paths
+
+
+_SRC = str(Path(paths.__file__).parents[3])
 
 
 @pytest.fixture
@@ -117,23 +125,76 @@ def test_the_hosted_session_dir_reads_the_creation_time_in_utc(workspace):
 
 
 # -- the archive directory ---------------------------------------------------------------------------------------
-def test_the_archive_root_is_private_and_owned_by_this_user(tmp_path):
+def _mode(path):
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+def test_the_archive_root_is_shared_by_the_runs_group_and_closed_to_everyone_else(tmp_path):
     root = paths.ensure_archive_root(tmp_path / "session")
     assert root == paths.archive_root(tmp_path / "session") == tmp_path / "session" / "archive"
-    assert stat.S_IMODE(root.stat().st_mode) == 0o700 and root.stat().st_uid == os.getuid()
+    assert (_mode(root), _mode(tmp_path / "session")) == (0o2770, 0o2775)
 
 
-def test_an_archive_root_that_is_too_open_is_tightened(tmp_path):
+def test_an_archive_root_an_earlier_leg_made_is_taken_as_it_is(tmp_path):
+    (tmp_path / "archive").mkdir()
+    (tmp_path / "archive").chmod(0o750)
+    assert _mode(paths.ensure_archive_root(tmp_path)) == 0o750, "never chmodded"
+
+
+def test_an_archive_root_any_account_can_write_is_refused_and_left_as_it_was(tmp_path):
     (tmp_path / "archive").mkdir()
     (tmp_path / "archive").chmod(0o777)
-    assert stat.S_IMODE(paths.ensure_archive_root(tmp_path).stat().st_mode) == 0o700
-
-
-def test_an_archive_root_owned_by_someone_else_is_refused(tmp_path, monkeypatch):
-    (tmp_path / "archive").mkdir()
-    monkeypatch.setattr(os, "getuid", lambda: os.stat(tmp_path).st_uid + 1)
-    with pytest.raises(PermissionError, match="not by this user"):
+    with pytest.raises(PermissionError, match="can be written by any account"):
         paths.ensure_archive_root(tmp_path)
+    assert _mode(tmp_path / "archive") == 0o777
+
+
+@pytest.mark.parametrize("planted", ["link", "file"])
+def test_an_archive_root_that_is_not_a_directory_is_refused(tmp_path, planted):
+    (tmp_path / "elsewhere").mkdir()
+    archive = tmp_path / "archive"
+    archive.symlink_to(tmp_path / "elsewhere") if planted == "link" else archive.write_text("")
+    with pytest.raises(PermissionError, match="is not a directory"):
+        paths.ensure_archive_root(tmp_path)
+
+
+_LEG = """
+import json, sys
+import session_paths
+try:
+    print(json.dumps(str(session_paths.ensure_archive_root(session_paths.Path(sys.argv[1])))))
+except PermissionError as exc:
+    print(json.dumps({"refused": str(exc)}))
+"""
+
+
+def test_another_accounts_archive_root_is_taken_when_this_account_can_write_it_and_refused_naming_it_when_not():
+    with other_accounts() as accounts:
+        accounts.add_module(Path(paths.__file__), "session_paths")
+        session = accounts.shared_dir("user-data") / "session"
+        root = json.loads(accounts.run(accounts.first, f"import sys\nsys.argv[1:] = [{str(session)!r}]\n{_LEG}"))
+        assert (os.stat(root).st_uid, os.stat(root).st_gid, _mode(root)) == (accounts.first, accounts.group, 0o2770)
+
+        assert (
+            json.loads(accounts.run(accounts.second, f"import sys\nsys.argv[1:] = [{str(session)!r}]\n{_LEG}")) == root
+        )
+        refused = json.loads(accounts.run(accounts.outsider, f"import sys\nsys.argv[1:] = [{str(session)!r}]\n{_LEG}"))
+        assert refused == {
+            "refused": f"this account cannot write the archive {root}: EACCES (owner {accounts.first}:{accounts.group} 2770)"
+        }
+
+
+def test_the_session_skeleton_is_group_shared_whatever_the_umask(workspace):
+    code = (
+        "import os, sys\nos.umask(0o077)\nsys.path.insert(0, sys.argv[1])\n"
+        "from hyperloom.inference_optimizer.session import paths\n"
+        "paths.ensure_session_skeleton(paths.Path(sys.argv[2]))"
+    )
+    session = workspace / "m" / "s1"
+    subprocess.run([sys.executable, "-I", "-c", code, _SRC, str(session)], check=True, timeout=120)
+    made = [session.parent, session, *session.rglob("*")]
+    assert all((session / sub).is_dir() for sub in paths._SESSION_SKELETON)
+    assert {path: _mode(path) for path in made} == dict.fromkeys(made, 0o2775)
 
 
 def test_the_session_package_never_walks_into_private_subdirectories(tmp_path):
