@@ -10,7 +10,10 @@
 #
 # It runs as the container's root and
 #   1. refuses, naming the tool, when the image has no git or setpriv (nothing is installed here),
-#   2. makes sure the account HYPERLOOM_SPECIALIST_USER names exists with uid/gid 2000,
+#   2. makes sure the account HYPERLOOM_SPECIALIST_USER names exists with uid/gid 2000, refusing when this container's
+#      user namespace does not map uid or gid 2000 (one that maps only its root): no process can become that account
+#      there (setuid fails with EINVAL, or under a fakeroot preload seems to succeed while the specialist stays root),
+#      so the specialists could not be kept from the application's credentials,
 #   3. puts the layer's claude CLI on PATH,
 #   4. trusts the layer's extra CA certificate (if any) through a bundle written to ${TMPDIR:-/tmp}/hyperloom-host
 #      (local to the container: not the layer, not the state dir, not /etc),
@@ -28,11 +31,62 @@ die() {
   exit 1
 }
 
+# Whether $1 is a decimal number as the kernel writes one (no sign, no leading zero).
+decimal() {
+  case "$1" in
+    "" | *[!0-9]* | 0?*) return 1 ;;
+  esac
+}
+
+# Whether the id $1 is in the user namespace map $2 ("inside outside count" per line: the ids inside to
+# inside+count-1): 0 when it is, 1 when it is not, 2 when the map cannot be read or a line is not three decimal ids.
+# Sets map_text to the map in short, or map_error to why it cannot be read.
+in_id_map() {
+  map_text="" map_error="" map_found=1
+  if [ ! -r "$2" ]; then
+    map_error="it cannot be read"
+    return 2
+  fi
+  while read -r inside outside count extra || [ -n "${inside:-}" ]; do
+    if ! decimal "$inside" || ! decimal "$outside" || ! decimal "$count" || [ -n "$extra" ]; then
+      map_error="the line '$inside${outside:+ $outside}${count:+ $count}${extra:+ $extra}' is not 'inside outside count'"
+      return 2
+    fi
+    map_text="${map_text:+$map_text; }$inside $outside $count"
+    if [ "$inside" -le "$1" ] && [ "$1" -lt $((inside + count)) ]; then
+      map_found=0
+    fi
+    inside=""
+  done <"$2"
+  return "$map_found"
+}
+
+# Refuses (exit 1, naming the map) unless the user namespace maps the id $1 as a uid (in the uid map $2) and as a gid
+# (in the gid map $3). A map that cannot be read, or has a line that is not three decimal ids, never counts as mapped.
+require_mapped() {
+  wanted="$1"
+  shift
+  for kind in uid gid; do
+    rc=0
+    in_id_map "$wanted" "$1" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) die "$kind $wanted is not mapped in this container's user namespace ($1: '${map_text:-empty}'): no process here can become the specialist account (setuid fails with EINVAL, or under a fakeroot preload seems to succeed while the specialist stays root and can read the application's credentials); run on a node whose user namespace maps uid and gid $wanted" ;;
+      *) die "cannot read $1 as a user namespace map ($map_error), so whether the specialist account can be switched to is unknown" ;;
+    esac
+    shift
+  done
+}
+
 for tool in git setpriv bash; do
   command -v "$tool" >/dev/null 2>&1 || die "the image has no $tool; use a framework image that has git, setpriv (util-linux) and bash"
 done
 [ "$(id -u)" = 0 ] || die "must run as root (uid 0) to create the specialist account"
 [ -x "$layer/app_bootstrap.sh" ] || die "$layer has no app_bootstrap.sh"
+
+# The account must be one a process here can become: its uid and gid mapped in this container's user namespace. The
+# maps are kernel files; a fakeroot preload, which makes setuid seem to succeed, does not change what they say.
+require_mapped "$uid" /proc/self/uid_map /proc/self/gid_map
 
 # The account: its own uid and primary group, no supplementary group, a home it can write.
 by_uid="$(getent passwd "$uid" | cut -d: -f1 || true)"

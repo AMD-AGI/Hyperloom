@@ -42,8 +42,10 @@ def env(tmp_path):
         Var.ARCHIVE_REGION: "us-east-1",
         Var.SOURCE_REPO: "AMD-AGI/Hyperloom",
         Var.SOURCE_SHA: "0123456789abcdef0123456789abcdef01234567",
+        Var.GRANT_LIMITS: json.dumps({"max_sandboxes": 2, "max_gpus": 8, "gpu_hours": 4, "max_runtime_sec": 3600}),
         Var.NODE_NAME: "node-3",
         Var.CLAW_SESSION_ID: "sess-9",
+        Var.SANDBOX_WORKSPACE: "workspace-a",
         **_SECRETS,
     }
 
@@ -74,7 +76,7 @@ def test_every_missing_required_input_is_named_in_one_error():
     with pytest.raises(HostInfoError) as raised:
         read_host_info({}, require=_ALL_GROUPS)
 
-    expected = set(host_info._ALWAYS_REQUIRED)
+    expected = set(host_info._RUN_INPUTS)
     for group in _ALL_GROUPS:
         expected.update(host_info._GROUP_VARS[group])
     assert set(raised.value.missing) == expected
@@ -208,6 +210,7 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.SOURCE_SHA, "0123abc", "40-hex"),
         (Var.SOURCE_SHA, "0123456789ABCDEF0123456789abcdef01234567", "40-hex"),
         (Var.SOURCE_REPO, "two words", "whitespace or control"),
+        (Var.SANDBOX_WORKSPACE, "top models", "whitespace or control"),
     ],
 )
 def test_a_malformed_input_is_refused_with_its_reason(env, name, value, reason):
@@ -275,6 +278,36 @@ def test_take_leaves_the_environment_alone_when_the_read_fails(env):
         take_host_info(env)
 
     assert env == before
+
+
+# -- a grant handed to a run no host started --------------------------------------------------------------------
+_HANDED_GRANT = (HostGroup.SANDBOX, HostGroup.MEASUREMENT_KEY, HostGroup.GRANT, HostGroup.SOURCE)
+_RUN_ONLY = (Var.INPUT_FILE, Var.RUN_ID, Var.STATE_DIR, Var.MCP_PORT, Var.MCP_TOKEN)
+
+
+def test_a_run_no_host_started_reads_its_grant_without_the_run_state_or_input(env):
+    for name in _RUN_ONLY:
+        del env[name]
+
+    info = take_host_info(env, require=_HANDED_GRANT, require_run=False)
+
+    assert (info.run_id, info.input_file, info.state_dir, info.events_dir) == (None, None, None, None)
+    assert info.run_created_at == datetime(2026, 10, 1, 12, 30, tzinfo=timezone.utc)
+    assert info.grant_limits.max_gpus == 8
+    assert info.sandbox_keys.measurement.reveal() == _SECRETS[Var.SANDBOX_KEY_MEASUREMENT]
+    assert not [name for name in host_info.SECRET_VARS if name in env], "no child inherits a key"
+
+
+def test_a_grant_missing_its_limits_start_or_source_names_each_and_no_value(env):
+    for name in (*_RUN_ONLY, Var.GRANT_LIMITS, Var.RUN_CREATED_AT, Var.SOURCE_SHA, Var.SANDBOX_TEMPLATES):
+        del env[name]
+
+    with pytest.raises(HostInfoError) as raised:
+        read_host_info(env, require=_HANDED_GRANT, require_run=False)
+
+    expected = {Var.GRANT_LIMITS, Var.RUN_CREATED_AT, Var.SOURCE_SHA, Var.SANDBOX_TEMPLATES}
+    assert set(raised.value.missing) == expected
+    assert not [value for value in _SECRETS.values() if value in str(raised.value)]
 
 
 # ---- secrets never print -------------------------------------------------------------------------------------
@@ -357,11 +390,24 @@ def test_the_archive_region_is_optional_read_when_set_and_removed_from_the_envir
     assert Var.ARCHIVE_REGION not in env
 
 
+def test_the_sandbox_workspace_is_optional_read_when_set_and_removed_from_the_environment(env):
+    """A SaFE key used directly names the workspace its sandboxes are created in; a Claw host sets none."""
+    unset = {name: value for name, value in env.items() if name != Var.SANDBOX_WORKSPACE}
+    assert read_host_info(unset).sandbox_workspace is None
+    assert Var.SANDBOX_WORKSPACE in host_info.HOST_ONLY_VARS
+
+    for name in _RUN_ONLY:
+        del env[name]
+    assert take_host_info(env, require=_HANDED_GRANT, require_run=False).sandbox_workspace == "workspace-a"
+    assert Var.SANDBOX_WORKSPACE not in env
+
+
 # -- the granted totals ------------------------------------------------------------------------------------------
 _GRANT = {"max_sandboxes": 9, "max_gpus": 16, "gpu_hours": 12.5, "max_runtime_sec": 36000}
 
 
 def test_the_grant_limits_are_optional_and_read_when_set(env):
+    del env[Var.GRANT_LIMITS]
     assert read_host_info(env).grant_limits is None
 
     env[Var.GRANT_LIMITS] = json.dumps(_GRANT)

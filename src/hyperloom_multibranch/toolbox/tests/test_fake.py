@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import io
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -27,15 +29,17 @@ from hyperloom_multibranch.contracts.toolbox import (
     CancelOutcome,
     RequestRejected,
     TestProgress,
+    TestWithdrawn,
     Toolbox,
     UnknownTestRequest,
 )
-from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import ClaimKey, ClaimLost, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, intent
-from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.fake_model import Fate, FailureRatios, FakeToolboxConfig, NoiseModel
+from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FailureRatios, FakeToolboxConfig, NoiseModel
 
 DELTA = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
 QUIET = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
@@ -509,6 +513,346 @@ async def test_cancel_of_a_finished_test_changes_nothing_and_unknown_ids_raise()
     assert book.of("withdrawal") == []
     with pytest.raises(UnknownTestRequest):
         await box.cancel("nope")
+
+
+class HeldWithdrawals(Blackboard):
+    """Holds each withdrawal write until ``release`` is set; ``holding`` is set once one waits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.holding, self.release = asyncio.Event(), asyncio.Event()
+
+    async def write_withdrawal(self, withdrawal: Withdrawal) -> None:
+        self.holding.set()
+        await self.release.wait()
+        await super().write_withdrawal(withdrawal)
+
+
+async def _until(done: Callable[[], bool]) -> None:
+    async def poll() -> None:
+        while not done():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout=5)
+
+
+async def test_a_result_that_lands_while_its_branch_is_withdrawn_is_kept_not_withdrawn() -> None:
+    book = HeldWithdrawals()
+    box = _toolbox(blackboard=book, noise=QUIET)
+    box.script(lambda r: True, [Fate.OK])
+    first, second = await box.submit_test(_request()), await box.submit_test(_request())
+    assert (await box.queue_state()).running == 2
+
+    stopping = asyncio.create_task(box.withdraw_branch("b1"))
+    await asyncio.wait_for(book.holding.wait(), timeout=5)  # the first one's withdrawal is being written
+    box.executor.gate.set()  # and meanwhile the second one is measured
+    await _until(lambda: second in box.results)
+    book.release.set()
+
+    assert await stopping == (first,)
+    assert (await box.outcome(second)).validity is Validity.SUCCEEDED
+    assert box.withdrawn == {first: "branch stopped"}
+    assert [w.request_id for w in book.of("withdrawal")] == [first]
+    assert [r.request_id for r in book.of("result")] == [second]
+
+
+async def test_a_test_cancelled_while_its_branch_is_withdrawn_is_withdrawn_once() -> None:
+    book = Blackboard()
+    box = _toolbox(blackboard=book)
+    request_id = await box.submit_test(_request())
+    assert (await box.queue_state()).running == 1
+
+    cancelled, stopped = await asyncio.gather(box.cancel(request_id), box.withdraw_branch("b1"))
+
+    assert (cancelled, stopped) == (CancelOutcome.WITHDRAWN, (request_id,))
+    assert box.withdrawn == {request_id: "branch stopped"}
+    assert [w.request_id for w in book.of("withdrawal")] == [request_id]
+
+
+class HeldResults(Blackboard):
+    """Holds each result write until ``release`` is set; ``holding`` is set once one waits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.holding, self.release = asyncio.Event(), asyncio.Event()
+
+    async def write_result(self, result: TestResult) -> None:
+        self.holding.set()
+        await self.release.wait()
+        await super().write_result(result)
+
+
+async def test_cancel_of_a_test_whose_result_is_being_written_lets_the_write_finish() -> None:
+    """The result is logged, its blackboard write is under way: the cancel leaves that write to land now, not at a
+    later tick after the write was cut off."""
+    book = HeldResults()
+    box = _toolbox(blackboard=book)
+    request_id = await box.submit_test(_request())
+    box.executor.gate.set()
+    await asyncio.wait_for(book.holding.wait(), timeout=5)
+
+    assert await box.cancel(request_id) is CancelOutcome.FINISHED
+    book.release.set()
+
+    await _until(lambda: bool(book.of("result")))
+    assert [r.request_id for r in book.of("result")] == [request_id] and book.of("withdrawal") == []
+    assert box.withdrawn == {}
+
+
+class LostClaims:
+    """Claims taken by another branch by the time the toolbox hands them to a test."""
+
+    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
+        raise ClaimLost(f"the claim on {key.parent_commit} is another branch's")
+
+
+class UnwritableWithdrawals(Blackboard):
+    """Withdrawal writes fail until ``reachable`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reachable = False
+
+    async def write_withdrawal(self, withdrawal: Withdrawal) -> None:
+        if not self.reachable:
+            raise ConnectionError("the blackboard cannot be reached")
+        await super().write_withdrawal(withdrawal)
+
+
+class RenewalsRefusedFor:
+    """Claims handed to tests as asked; renewing the one of the intent ``refused`` raises ``error``."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error, self.renewed = error, []
+
+    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
+        return None
+
+    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> None:
+        if key.intent_fingerprint == "refused":
+            raise self.error
+        self.renewed.append(key.intent_fingerprint)
+
+
+@pytest.mark.parametrize("error", [OSError("the blackboard cannot be reached"), ClaimLost("another branch's")])
+async def test_a_claim_the_blackboard_does_not_renew_is_logged_and_the_others_are_renewed(
+    error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    claims = RenewalsRefusedFor(error)
+    box = FakeToolbox(autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
+    refused = await box.submit_test(_request(intent_fingerprint="refused"))
+    await box.submit_test(_request(intent_fingerprint="kept"))
+
+    await box.renew_claims()
+
+    assert claims.renewed == ["kept"]
+    assert f"could not renew the claim of {refused}; it lapses at its TTL" in caplog.text
+
+
+async def test_a_renewal_that_fails_for_a_reason_not_the_blackboards_is_raised_once_the_others_are_renewed() -> None:
+    claims = RenewalsRefusedFor(TypeError("renew() got an unexpected keyword argument"))
+    box = FakeToolbox(autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
+    for fingerprint in ("first", "refused", "third"):
+        await box.submit_test(_request(intent_fingerprint=fingerprint))
+
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        await box.renew_claims()
+
+    assert claims.renewed == ["first", "third"]
+
+
+class RenewalsCounted(RenewalsRefusedFor):
+    """:class:`RenewalsRefusedFor` that, once ``counting``, records every renewal asked for in order, the refused ones
+    too; ``thrice`` is set when the refused claim was asked for the third time."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(error)
+        self.counting, self.asked, self.thrice = False, [], asyncio.Event()
+
+    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> None:
+        if self.counting:
+            self.asked.append(key.intent_fingerprint)
+            if self.asked.count("refused") == 3:
+                self.thrice.set()
+        await super().renew(key, ttl_seconds=ttl_seconds)
+
+
+async def test_a_claim_whose_renewal_always_fails_unexpectedly_holds_up_no_other_claims_renewal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every round goes on past it to the claims after it, which would otherwise lapse at their TTL round after round."""
+    claims = RenewalsCounted(TypeError("renew() got an unexpected keyword argument"))
+    config = FakeToolboxConfig(claim_ttl_seconds=0.03)  # a round every 10 ms
+    box = FakeToolbox(config, autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
+    try:
+        await box.submit_test(_request(intent_fingerprint="first"))
+        refused = await box.submit_test(_request(intent_fingerprint="refused"))
+        await box.submit_test(_request(intent_fingerprint="third"))
+        claims.counting = True  # between two rounds: a round renews without giving way to this test
+        await asyncio.wait_for(claims.thrice.wait(), timeout=5)
+    finally:
+        await box.close()
+
+    assert claims.asked[:9] == ["first", "refused", "third"] * 3
+    logged = [record for record in caplog.records if record.exc_info and record.exc_info[0] is TypeError]
+    assert len(logged) == claims.asked.count("refused"), "each round logs the refused claim's error, once"
+    assert all(record.levelname == "ERROR" and refused in record.getMessage() for record in logged)
+
+
+class Housekeeping(FakeToolbox):
+    """A fake toolbox whose backend's housekeeping counts its rounds and raises ``failure`` when one is set."""
+
+    rounds = 0
+    failure: Exception | None = None
+
+    async def _housekeeping(self) -> None:
+        self.rounds += 1
+        if self.failure is not None:
+            raise self.failure
+
+
+async def test_a_tick_goes_on_to_its_housekeeping_past_a_renewal_that_failed_unexpectedly() -> None:
+    claims = RenewalsRefusedFor(TypeError("renew() got an unexpected keyword argument"))
+    box = Housekeeping(autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
+    await box.submit_test(_request(intent_fingerprint="refused"))
+
+    await box.tick()
+
+    assert box.rounds == 1
+
+
+async def test_housekeeping_that_fails_after_a_test_ended_is_logged_and_the_result_stands(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The result is logged and written before the backend's housekeeping runs, so it stands; the error, which ended the
+    test's task with nothing said, is logged."""
+    book = Blackboard()
+    box = Housekeeping(blackboard=book)
+    box.failure = RuntimeError("the provider's lost cards could not be read")
+    box.script(lambda request: True, [Fate.OK])
+    request_id = await box.submit_test(_request())
+
+    await box.drain()
+
+    assert (await box.outcome(request_id)).validity is Validity.SUCCEEDED
+    assert [result.request_id for result in book.of("result")] == [request_id] and book.of("withdrawal") == []
+    (logged,) = [record for record in caplog.records if record.exc_info and record.exc_info[0] is RuntimeError]
+    assert logged.levelname == "ERROR" and request_id in logged.getMessage()
+
+
+class RenewalFailsOnce:
+    """Claims handed to tests as asked; the first renewal raises an error that is not the blackboard's."""
+
+    def __init__(self) -> None:
+        self.calls, self.renewed = 0, asyncio.Event()
+
+    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
+        return None
+
+    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            raise TypeError("renew() got an unexpected keyword argument")
+        self.renewed.set()
+
+
+async def test_the_renewal_loop_logs_an_unexpected_error_and_renews_again_at_the_next_round(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ending the loop at the first such error would let every live test's claim lapse at its TTL, with nothing said."""
+    claims = RenewalFailsOnce()
+    config = FakeToolboxConfig(claim_ttl_seconds=0.03)  # a round every 10 ms
+    box = FakeToolbox(config, autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
+    try:
+        await box.submit_test(_request(intent_fingerprint="intent-1"))
+        await asyncio.wait_for(claims.renewed.wait(), timeout=5)
+    finally:
+        await box.close()
+
+    (logged,) = [record for record in caplog.records if record.exc_info and record.exc_info[0] is TypeError]
+    assert logged.levelname == "ERROR" and "unexpected keyword" in str(logged.exc_info[1])  # type: ignore[index]
+
+
+async def test_a_lost_claim_whose_withdrawal_cannot_be_written_leaves_no_request_waiting() -> None:
+    book = UnwritableWithdrawals()
+    box = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(claims=LostClaims()))  # type: ignore[arg-type]
+
+    with pytest.raises(RequestRejected, match="the claim of this request is not held"):
+        await box.submit_test(_request(intent_fingerprint="intent-1"))
+
+    (written,) = book.of("request")
+    assert (await box.queue_state()).queued == 0 and book.of("withdrawal") == []
+    with pytest.raises(TestWithdrawn, match="claim lost"):
+        await asyncio.wait_for(box.outcome(written.request_id), timeout=5)
+
+
+async def test_a_lost_claims_withdrawal_the_blackboard_refused_is_written_by_the_next_tick() -> None:
+    """The request row is on the blackboard already: without its withdrawal it would read as in flight for good."""
+    book = UnwritableWithdrawals()
+    box = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(claims=LostClaims()))  # type: ignore[arg-type]
+    with pytest.raises(RequestRejected):
+        await box.submit_test(_request(intent_fingerprint="intent-1"))
+    (written,) = book.of("request")
+
+    book.reachable = True
+    await box.tick()
+
+    assert [(w.request_id, w.reason.startswith("claim lost")) for w in book.of("withdrawal")] == [
+        (written.request_id, True)
+    ]
+
+
+async def test_a_lost_claims_withdrawal_the_blackboard_refused_is_written_by_the_next_start(tmp_path: Path) -> None:
+    log_path = tmp_path / "submissions.jsonl"
+    book = UnwritableWithdrawals()
+    wiring = FakeWiring(claims=LostClaims(), log_path=log_path)  # type: ignore[arg-type]
+    first = FakeToolbox(blackboard=book, autorun=False, wiring=wiring)
+    with pytest.raises(RequestRejected):
+        await first.submit_test(_request(intent_fingerprint="intent-1"))
+    await first.close()
+    (written,) = book.of("request")
+
+    book.reachable = True
+    restarted = FakeToolbox(blackboard=book, autorun=False, wiring=wiring)
+    try:
+        await restarted.drain()  # the toolbox starts on first use: recovery writes what the log holds unwritten
+    finally:
+        await restarted.close()
+
+    assert [(w.request_id, w.reason.startswith("claim lost")) for w in book.of("withdrawal")] == [
+        (written.request_id, True)
+    ]
+
+
+class HeldClaims:
+    """Claims handed to tests as asked."""
+
+    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
+        return None
+
+
+async def test_a_test_whose_claim_recovery_finds_lost_is_withdrawn_once_as_a_lost_claim(tmp_path: Path) -> None:
+    """Recovery hands the claim over again and the claim is gone: the withdrawal that records the lost claim is the
+    outcome. Another one, "not recoverable", logged and written over it, would make the log and the blackboard say
+    the test was withdrawn twice, for two reasons."""
+    log_path = tmp_path / "submissions.jsonl"
+    book = Blackboard()
+    first = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(claims=HeldClaims(), log_path=log_path))  # type: ignore[arg-type]
+    request_id = await first.submit_test(_request(intent_fingerprint="intent-1"))
+    await first.close()  # the process dies with the test unfinished
+
+    restarted = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(claims=LostClaims(), log_path=log_path))  # type: ignore[arg-type]
+    try:
+        await restarted.drain()  # the toolbox starts on first use: recovery hands the claim over again and loses it
+        with pytest.raises(TestWithdrawn, match="claim lost"):
+            await asyncio.wait_for(restarted.outcome(request_id), timeout=5)
+    finally:
+        await restarted.close()
+
+    assert [(w.request_id, w.reason.startswith("claim lost")) for w in book.of("withdrawal")] == [(request_id, True)]
+    replayed = SubmissionLog(log_path, str(restarted.config.campaign_id)).get(request_id)
+    assert replayed is not None and replayed.outcome is not None
+    assert str(replayed.outcome["withdrawal"]).startswith("claim lost")
 
 
 # --- the whole thing ---------------------------------------------------------------------------------------------
