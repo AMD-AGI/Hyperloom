@@ -243,16 +243,15 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
     """Build explore variants that attribute each registered rewrite lever."""
     if shared_state is None:
         return []
-    rows = list(getattr(shared_state, "authored_framework_levers", None) or [])
-    pending = [row for row in rows if isinstance(row, dict) and row.get("attributed_gain_pct") is None]
-    dormant = [row for row in pending if not row.get("default_on")]
-    active = [row for row in pending if row.get("default_on")]
+    rows = [row for row in getattr(shared_state, "authored_framework_levers", None) or [] if isinstance(row, dict)]
+    # Arms are built over every registered lever, so attribution only picks which run, never which envs they set.
+    pending = {row["switch"] for row in rows if row.get("attributed_gain_pct") is None}
     payload: list[dict[str, Any]] = []
-    for variant in _switch_manifest.additive_variants(dormant):
+    for variant in _switch_manifest.additive_variants([row for row in rows if not row.get("default_on")]):
         payload.append({**variant, "framework_lever_source": "additive"})
-    for variant in _switch_manifest.leave_one_out_variants(active):
+    for variant in _switch_manifest.leave_one_out_variants([row for row in rows if row.get("default_on")]):
         payload.append({**variant, "framework_lever_source": _LEAVE_ONE_OUT})
-    return payload
+    return [variant for variant in payload if variant["framework_lever"] in pending]
 
 
 def _framework_lever_attributions(

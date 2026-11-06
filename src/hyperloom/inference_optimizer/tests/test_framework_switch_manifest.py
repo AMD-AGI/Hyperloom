@@ -578,6 +578,39 @@ def test_already_attributed_levers_are_not_re_benched():
     assert framework_lever_grid(state) == []
 
 
+def test_an_attributed_enabler_still_turns_on_for_its_dependents():
+    """Attribution decides which arms are left to run, never which envs a bundle sets."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=False)
+    state.record_framework_lever_attribution("HL_X", gain_pct=0.3)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["name"], v["framework_lever_bundle"], v["extra_envs"]) for v in payload] == [
+        ("fwlever_hl_y", ["HL_X", "HL_Y"], {"HL_X": "1", "HL_Y": "1"})
+    ]
+
+
+def test_an_attributed_lever_still_counts_toward_the_stack_a_drop_leaves():
+    """Dropping X and the Y it enables still leaves Z on, so the arm attributes X rather than restating the base."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y"), _entry("HL_Z")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=True)
+    state.record_framework_lever_attribution("HL_Y", gain_pct=1.0)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["framework_lever"], v["unset_envs"]) for v in payload] == [
+        ("HL_Z", ["HL_Z"]),
+        ("HL_X", ["HL_X", "HL_Y"]),
+    ]
+
+
 def test_no_levers_means_no_seeding():
     """The seeder is inert for every framework that has no authored rewrites."""
     from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
