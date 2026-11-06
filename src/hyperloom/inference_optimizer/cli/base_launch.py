@@ -23,7 +23,6 @@ from typing import NoReturn
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.common.model_paths import hf_repo_id
 from hyperloom.common.perf_metric import is_agentx_mode
-from hyperloom.common.visible_devices import detect_gpu_count
 from inference_suite import (
     LaunchQuery,
     Miss,
@@ -95,20 +94,11 @@ def _query(args: argparse.Namespace, *, framework: str, concurrencies: Sequence[
 
 
 def _session_gpus(args: argparse.Namespace) -> int:
-    """The GPUs the base launch may span: every node's on a multi-node session, else the ones this host sees.
+    """The GPUs the base launch may span: the declared shape, eight per node unless ``--gpus-per-node`` says otherwise.
 
-    A multi-node head need not hold a GPU itself, so its count comes from the declared shape, not from a probe.
+    The session may be planned on a host that holds no GPU, so the count never comes from a probe of this one.
     """
-    nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2:
-        return nodes * _resolve_gpus_per_node(args)
-    gpus = detect_gpu_count()
-    if gpus < 1:
-        _refuse(
-            "the base launch is chosen for the GPUs this host sees, and none is visible; "
-            "check ROCR_VISIBLE_DEVICES and rocm-smi"
-        )
-    return gpus
+    return int(args.nodes) * _resolve_gpus_per_node(args)
 
 
 def _run_at_base_topology(args: argparse.Namespace, base: BaseLaunch) -> None:
@@ -148,8 +138,7 @@ def resolve_base_launch(
 
     The session then runs at the base's TP and EP, so this runs before anything records them. ``None`` when the
     session resolves no base. Exits 2 when the operator's launch file cannot serve as the base, the query is
-    malformed, a single-node host sees no GPU, InferenceX cannot be read, or no source and no default serves the
-    session.
+    malformed, InferenceX cannot be read, or no source and no default serves the session.
     """
     location = (getattr(args, "reference_script", None) or "").strip()
     if is_scriptable(framework):

@@ -148,8 +148,8 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
         "--gpus-per-node",
         type=int,
         default=None,
-        help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
-        "head+workers). Defaults to 8 when omitted.",
+        help="GPUs per node: sizes each multi-node pod (Infera worker/prefill/decode or RayJob "
+        "head+workers) and, with --nodes, the GPUs the base launch is chosen for. Defaults to 8 when omitted.",
     )
     # Platform-owned, inert here.
     opt.add_argument("--mn-image", default=None, help=argparse.SUPPRESS)

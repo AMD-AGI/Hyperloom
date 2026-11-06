@@ -66,17 +66,23 @@ def _no_io(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def visible_gpus(monkeypatch) -> list[int]:
-    """The GPU count this host reports; a test sets ``[0]`` to change it."""
-    count = [8]
-    monkeypatch.setattr(bl, "detect_gpu_count", lambda: count[0])
-    return count
-
-
-@pytest.fixture(autouse=True)
 def _session_topology_env(monkeypatch) -> None:
     monkeypatch.setenv("TP", "1")
     monkeypatch.setenv("EP", "1")
+
+
+@pytest.fixture
+def spans(monkeypatch) -> list[int]:
+    """The GPU count every resolve was asked to fit."""
+    seen: list[int] = []
+    resolve = bl.resolve_base
+
+    def spy(query, snapshot, *, gpus):
+        seen.append(gpus)
+        return resolve(query, snapshot, gpus=gpus)
+
+    monkeypatch.setattr(bl, "resolve_base", spy)
+    return seen
 
 
 @pytest.fixture
@@ -93,7 +99,17 @@ def fetched(monkeypatch) -> list:
 
 
 def _args(**overrides) -> argparse.Namespace:
-    values = dict(model=_DSR1, gpu_type="mi355x", operator_tp=8, operator_ep=1, isl=8192, osl=1024, reference_script="")
+    values = dict(
+        model=_DSR1,
+        gpu_type="mi355x",
+        operator_tp=8,
+        operator_ep=1,
+        isl=8192,
+        osl=1024,
+        reference_script="",
+        nodes=1,
+        gpus_per_node=None,
+    )
     values.update(overrides)
     return argparse.Namespace(**values)
 
@@ -273,7 +289,7 @@ def test_a_local_checkpoint_is_queried_by_the_hub_id_it_records(tmp_path, fetche
     assert fetched[0][0].model_id == expected
 
 
-def test_an_open_topology_is_chosen_by_the_recipe_for_the_visible_gpus_and_the_session_runs_it(tmp_path, fetched):
+def test_an_open_topology_is_chosen_by_the_recipe_for_eight_gpus_and_the_session_runs_it(tmp_path, fetched):
     args = _args(tp=1, ep=1, operator_tp=None, operator_ep=None)
     base = _resolve(tmp_path, args)
 
@@ -285,23 +301,36 @@ def test_an_open_topology_is_chosen_by_the_recipe_for_the_visible_gpus_and_the_s
     assert (os.environ["TP"], os.environ["EP"]) == (str(base.topology.tp), str(base.topology.ep))
 
 
-def test_an_open_topology_takes_the_largest_recipe_that_fits_the_visible_gpus(tmp_path, fetched, visible_gpus):
+def test_an_open_topology_takes_the_largest_recipe_that_fits_the_gpus_per_node(tmp_path, fetched):
     (tmp_path / "wide").mkdir()
     (tmp_path / "full").mkdir()
-    visible_gpus[0] = 4
-    wide = _resolve(tmp_path / "wide", _args(operator_tp=None, operator_ep=None))
-    visible_gpus[0] = 8
+    wide = _resolve(tmp_path / "wide", _args(operator_tp=None, operator_ep=None, gpus_per_node=4))
     full = _resolve(tmp_path / "full", _args(operator_tp=None, operator_ep=None))
 
     assert wide is not None and full is not None
     assert wide.topology.tp <= 4 < full.topology.tp
 
 
-def test_a_host_with_no_visible_gpu_exits_2(tmp_path, fetched, visible_gpus, capsys):
-    visible_gpus[0] = 0
+def test_a_single_node_session_is_resolved_for_eight_gpus_without_probing_the_host(
+    tmp_path, fetched, spans, monkeypatch
+):
+    from hyperloom.common import visible_devices
 
-    assert "none is visible" in _refused(tmp_path, _args(), capsys)
-    assert fetched == []
+    def probe():
+        raise AssertionError("the base launch probed this host's GPUs")
+
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", probe)
+
+    base = _resolve(tmp_path, _args(operator_tp=None, operator_ep=None))
+
+    assert spans == [8]
+    assert base is not None and base.topology.tp == 8
+
+
+def test_an_explicit_gpus_per_node_sizes_the_span(tmp_path, fetched, spans):
+    _resolve(tmp_path, _args(operator_tp=None, operator_ep=None, gpus_per_node=4))
+
+    assert spans == [4]
 
 
 def test_an_operator_file_sets_the_topology_the_command_line_left_open(tmp_path, fetched):
@@ -318,19 +347,9 @@ def test_an_operator_file_sets_the_topology_the_command_line_left_open(tmp_path,
     assert args.tp == 8 and os.environ["TP"] == "8"
 
 
-def test_a_multi_node_session_fits_the_base_to_every_node_and_needs_no_gpu_on_the_head(
-    tmp_path, fetched, visible_gpus, monkeypatch
-):
-    visible_gpus[0] = 0
-    spans: list[int] = []
-    resolve = bl.resolve_base
-
-    def spy(query, snapshot, *, gpus):
-        spans.append(gpus)
-        return resolve(query, snapshot, gpus=gpus)
-
-    monkeypatch.setattr(bl, "resolve_base", spy)
-    args = _args(nodes=2, gpus_per_node=8, tp=16, operator_tp=16, operator_ep=None)
+def test_a_multi_node_session_fits_the_base_to_eight_gpus_on_every_node(tmp_path, fetched, spans, monkeypatch):
+    monkeypatch.delenv("TOPOLOGY_HANDOFF_FILE", raising=False)
+    args = _args(nodes=2, tp=16, operator_tp=16, operator_ep=None)
 
     base = _resolve(tmp_path, args)
 
