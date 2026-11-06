@@ -8,18 +8,22 @@ one commit, an :class:`ApiResponse` one HTTP response of a site that has no comm
 to compute (InferenceX's variant selection and golden acceptance) is recorded beside them as data, so resolving runs
 no external code. A source answers a query with the launches it holds
 for it (:class:`SourceLaunch`), or with why it holds none (:class:`SourceMiss`).
+
+The per-framework facts every source and the resolver share live here as well: the serving entrypoint, the flags the
+runner owns, and how the framework spells its topology (:class:`TopologySpelling`), read and written in one place.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom_common.contract_fields import ContractFields
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.contracts.base_launch import GoldenCurve, LaunchSource, SourceApi, SourceKind, Topology
 
 
@@ -29,10 +33,57 @@ class RecipeSourceError(ValueError):
 
 _FIELDS = ContractFields(RecipeSourceError)
 
+
+def _size(value: str | None, what: str) -> int:
+    try:
+        return int(value or 1)
+    except ValueError as error:
+        raise RecipeSourceError(f"its {what} {value!r} is not a size") from error
+
+
+@dataclass(frozen=True)
+class TopologySpelling:
+    """How a framework spells its topology: ``tp`` and a sized ``ep`` flag, or an ``ep_switch`` that spreads the
+    experts over every rank (``tp`` times the ``dp`` replicas). The first spelling of each is the one written."""
+
+    tp: tuple[str, ...]
+    ep: tuple[str, ...] = ()
+    ep_switch: tuple[str, ...] = ()
+    dp: tuple[str, ...] = ()
+
+    def read(self, args: Sequence[str]) -> Topology:
+        """The topology ``args`` run, an unset size being 1."""
+        occurrences = argv_flag_occurrences(args)
+
+        def value(spellings: tuple[str, ...]) -> str | None:
+            return last_alias_value(occurrences, frozenset(map(canonical_flag_name, spellings)))
+
+        tp = _size(value(self.tp), "tp")
+        if self.ep:
+            return Topology(tp=tp, ep=_size(value(self.ep), "ep"))
+        if value(self.ep_switch) is None:
+            return Topology(tp=tp)
+        return Topology(tp=tp, ep=tp * _size(value(self.dp), "dp"))
+
+    def argv(self, topology: Topology) -> tuple[str, ...] | str:
+        """The flags that run ``topology`` on one replica, or why the framework cannot."""
+        args = (self.tp[0], str(topology.tp))
+        if topology.ep == 1:
+            return args
+        if self.ep:
+            return (*args, self.ep[0], str(topology.ep))
+        if topology.ep != topology.tp:
+            return f"its experts span all {topology.tp} TP ranks, so it runs no ep {topology.ep}"
+        return (*args, self.ep_switch[0])
+
+
 SGLANG_ENTRYPOINT = ("python3", "-m", "sglang.launch_server")
 #: The sglang server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
 SGLANG_RUNNER_OWNED = frozenset(
     {"model-path", "served-model-name", "host", "port", "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port"}
+)
+SGLANG_TOPOLOGY = TopologySpelling(
+    tp=("--tensor-parallel-size", "--tp-size", "--tp"), ep=("--ep-size", "--expert-parallel-size", "--ep")
 )
 
 VLLM_ENTRYPOINT = ("vllm", "serve")
@@ -40,11 +91,17 @@ VLLM_ENTRYPOINT = ("vllm", "serve")
 VLLM_RUNNER_OWNED = frozenset(
     {"model", "served-model-name", "host", "port", "headless", "master-addr", "nnodes", "node-rank"}
 )
+VLLM_TOPOLOGY = TopologySpelling(
+    tp=("--tensor-parallel-size", "-tp"),
+    ep_switch=("--enable-expert-parallel", "-ep"),
+    dp=("--data-parallel-size", "-dp"),
+)
 
 
 ATOM_ENTRYPOINT = ("python3", "-m", "atom.entrypoints.openai_server")
 #: The ATOM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
 ATOM_RUNNER_OWNED = frozenset({"model", "host", "server-port"})
+ATOM_TOPOLOGY = TopologySpelling(tp=("-tp", "--tensor-parallel-size"), ep_switch=("--enable-expert-parallel",))
 
 
 def boards_interchangeable(board: str, other: str) -> bool:
@@ -276,6 +333,7 @@ def adaptive_verification_reason(spec: Mapping[str, Any]) -> str | None:
 __all__ = [
     "ATOM_ENTRYPOINT",
     "ATOM_RUNNER_OWNED",
+    "ATOM_TOPOLOGY",
     "ApiResponse",
     "InferencexSelection",
     "InferencexSnapshot",
@@ -283,11 +341,14 @@ __all__ = [
     "RepoBundle",
     "SGLANG_ENTRYPOINT",
     "SGLANG_RUNNER_OWNED",
+    "SGLANG_TOPOLOGY",
     "SourceGolden",
     "SourceLaunch",
     "SourceMiss",
+    "TopologySpelling",
     "VLLM_ENTRYPOINT",
     "VLLM_RUNNER_OWNED",
+    "VLLM_TOPOLOGY",
     "adaptive_verification_reason",
     "boards_interchangeable",
 ]
