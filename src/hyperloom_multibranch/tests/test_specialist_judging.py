@@ -403,6 +403,18 @@ async def test_a_retraction_slower_than_its_parent_lands_held_to_its_errors_and_
     assert notice.startswith(f"{NOTICE} {first} landed on your branch as a retraction at -")
 
 
+async def test_a_landed_retraction_is_announced_once_as_a_retraction_and_never_as_a_gain(tmp_path):
+    session = await _retraction_session(tmp_path)
+    first = await session.toolbox.submit_test(_retraction(SLOW))
+    await session.step()
+
+    await session.step()
+    await session.new_judge().reconcile()
+
+    (notice,) = await session.notices()
+    assert notice.startswith(f"{NOTICE} {first} landed on your branch as a retraction at -")
+
+
 @pytest.mark.parametrize(
     ("driver", "request_of"),
     [
