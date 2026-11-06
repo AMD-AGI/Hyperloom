@@ -16,6 +16,7 @@ from pathlib import Path
 
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, redact
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json
 
 log = logging.getLogger(__name__)
 
@@ -442,11 +443,6 @@ def check_server_argv(
         # one the composer can trigger again every round, which is a loop, not
         # a repair.
         return _invalid(REPAIR_SPENT, detail, dropped=flags)
-
-    from hyperloom.inference_optimizer.grid_server_args import (
-        remove_server_args,
-        tokenize_server_args_preserving_json,
-    )
 
     split = tokenize_server_args_preserving_json(remove_server_args(text, list(flags)))
     if split is None:
