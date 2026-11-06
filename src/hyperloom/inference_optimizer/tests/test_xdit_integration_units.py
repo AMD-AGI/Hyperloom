@@ -324,11 +324,11 @@ def _default_config(kind: str):
 def _per_framework_tables() -> dict[str, dict]:
     from hyperloom.orchestrator.actions.executors.benchmark_run import bringup
     from hyperloom.orchestrator.enablement.runtime import adapters
-    from hyperloom.orchestrator.framework import adapter_parsers
+    from inference_suite.frameworks import Framework, framework_facts
 
     return {
         "_ADAPTERS": adapters._ADAPTERS,
-        "_PARSER_SOURCES": adapter_parsers._PARSER_SOURCES,
+        "parser_source": {item.value: item for item in Framework if framework_facts(item).parser_source is not None},
         "_DISABLE_CUDA_GRAPH_FLAGS": bringup._DISABLE_CUDA_GRAPH_FLAGS,
     }
 

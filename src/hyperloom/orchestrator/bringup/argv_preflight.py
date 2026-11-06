@@ -15,6 +15,8 @@ from pathlib import Path
 
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, redact
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+from inference_suite import parser_check
+from inference_suite.frameworks import Framework
 
 #: Names this module's observations in downstream artifacts.
 PRODUCER = "preflight.argv"
@@ -23,8 +25,8 @@ PRODUCER = "preflight.argv"
 #: from a server log.
 STREAM = "argv_preflight"
 
-OK = "ok"
-INVALID = "invalid"
+OK = parser_check.ParseStatus.ACCEPTED.value
+INVALID = parser_check.ParseStatus.REJECTED.value
 UNAVAILABLE = "unavailable"
 
 #: The YAML env that pins the interpreter the server is launched with; when set
@@ -39,6 +41,8 @@ NO_PARSER = "no_parser"
 PROBE_FAILED = "probe_failed"
 INTERPRETER_UNPROVEN = "interpreter_unproven"
 INTERPRETER_MISMATCH = "interpreter_mismatch"
+
+_FRAMEWORK_NAMES = frozenset(item.value for item in Framework)
 
 #: Identity is four ``sys``/``importlib`` lookups; the parse probe imports the
 #: framework's entry point, so it is given longer.
@@ -70,46 +74,6 @@ _IDENTITY_PROGRAM = (
     "    'origin': os.path.realpath(origin) if origin else '',\n"
     "    'dist': dist,\n"
     "}))\n"
-)
-
-# ``parse_args``, not ``parse_known_args``: vLLM's FlexibleArgumentParser expands
-# ``--<group>-config.<field> <value>`` into the group's JSON inside ``parse_args``
-# only, so the ``parse_known_args`` entry point reports every dotted flag as
-# unrecognised. The leftover tokens are recovered from the intercepted
-# ``unrecognized arguments`` message instead, which keeps a genuinely unknown flag
-# nameable. Required-ness is cleared first: the string under test is
-# the tail the harness appends, not the whole invocation.
-_PARSE_PROGRAM = (
-    "import json, re, sys\n"
-    "\n"
-    "\n"
-    "def _emit(status, message='', unknown=()):\n"
-    "    print(json.dumps({'status': status, 'message': str(message)[-4000:], 'unknown': list(unknown)}))\n"
-    "    raise SystemExit(0)\n"
-    "\n"
-    "\n"
-    "class _Rejected(Exception):\n"
-    "    pass\n"
-    "\n"
-    "\n"
-    "def _reject(message, *_a, **_k):\n"
-    "    raise _Rejected(str(message))\n"
-    "\n"
-    "\n"
-    "argv = json.loads(sys.argv[1])\n"
-    "parser = _build_parser()\n"
-    "for action in getattr(parser, '_actions', ()):\n"
-    "    action.required = False\n"
-    "for group in getattr(parser, '_mutually_exclusive_groups', ()):\n"
-    "    group.required = False\n"
-    "parser.error = _reject\n"
-    "parser.exit = _reject\n"
-    "try:\n"
-    "    parser.parse_args(argv)\n"
-    "except _Rejected as exc:\n"
-    "    leftover = re.search(r'unrecognized arguments:\\s*(.*)', str(exc), re.S)\n"
-    "    _emit('invalid', exc, leftover.group(1).split() if leftover else ())\n"
-    "_emit('ok')\n"
 )
 
 
@@ -268,42 +232,21 @@ def _same_install(left: Mapping[str, object], right: Mapping[str, object]) -> bo
     )
 
 
-def _offending_flags(unknown: Sequence[object]) -> tuple[str, ...]:
-    """Return the flag names among a parser's leftover tokens, de-duplicated."""
-    out: list[str] = []
-    for token in unknown:
-        text = str(token).strip()
-        if not text.startswith("-"):
-            continue
-        name = text.split("=", 1)[0]
-        if name not in out:
-            out.append(name)
-    return tuple(out)
-
-
-def _parse(parser_source: str, argv: Sequence[str], target: ProbeTarget) -> tuple[str, str, tuple[str, ...]]:
-    """Run the framework's parser over ``argv``.
+def _parse(probe: parser_check.ParserProbe, target: ProbeTarget) -> tuple[str, str, tuple[str, ...]]:
+    """Run the framework's parser probe.
 
     Returns:
         tuple: ``(status, detail, offending_flags)`` where status is one of
         :data:`OK`, :data:`INVALID`, :data:`UNAVAILABLE`.
     """
-    result = run_probe_json(
-        target,
-        parser_source + "\n" + _PARSE_PROGRAM,
-        [json.dumps(list(argv))],
-        timeout_sec=_PARSE_TIMEOUT_SEC,
-    )
+    result = run_probe_json(target, probe.program, probe.args, timeout_sec=_PARSE_TIMEOUT_SEC)
     if not result.ok or result.payload is None:
         return UNAVAILABLE, result.detail or "parser probe produced no answer", ()
-    payload = result.payload
-    status = str(payload.get("status", ""))
-    detail = _clip(str(payload.get("message", "")))
-    unknown = payload.get("unknown")
-    flags = _offending_flags(unknown if isinstance(unknown, list) else ())
-    if status not in (OK, INVALID, UNAVAILABLE):
-        return UNAVAILABLE, detail or f"parser probe reported {status!r}", ()
-    return status, detail, flags
+    try:
+        answer = parser_check.read_answer(result.payload)
+    except parser_check.ParserCheckError as error:
+        return UNAVAILABLE, str(error), ()
+    return answer.status.value, answer.detail, answer.unknown_flags
 
 
 @dataclass(frozen=True)
@@ -357,12 +300,10 @@ def check_server_argv(
     Returns:
         ArgvVerdict: The verdict over ``argv``.
     """
-    from hyperloom.orchestrator.framework.adapter_parsers import parser_source_for
-
     name = framework.strip().lower()
     judged = tuple(argv)
-    parser_source = parser_source_for(name)
-    if not parser_source:
+    probe = parser_check.parser_probe(Framework(name), judged) if name in _FRAMEWORK_NAMES else None
+    if probe is None:
         return ArgvVerdict(
             status=UNAVAILABLE,
             reason=NO_PARSER,
@@ -372,7 +313,7 @@ def check_server_argv(
     proven = _prove_probe_target(name, launch_env)
     if proven.target is None:
         return ArgvVerdict(status=UNAVAILABLE, reason=proven.reason, detail=proven.detail, argv=judged)
-    status, detail, flags = _parse(parser_source, judged, proven.target)
+    status, detail, flags = _parse(probe, proven.target)
     if status == UNAVAILABLE:
         return ArgvVerdict(status=UNAVAILABLE, reason=PROBE_FAILED, detail=detail, argv=judged)
     if status == OK:
