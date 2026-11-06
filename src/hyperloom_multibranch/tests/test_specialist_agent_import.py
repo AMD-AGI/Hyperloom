@@ -635,3 +635,23 @@ async def test_a_source_only_snapshot_keeps_the_evaluation_settings_the_recipe_s
 
     assert delta is not None and delta.config.unset_envs == () and delta.config.envs == {}
 
+
+def test_a_snapshot_whose_json_nests_too_deep_to_parse_is_refused(tmp_path: Path) -> None:
+    _arbor_keep(tmp_path, "", {})
+    (tmp_path / "0001" / "config.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+
+    with pytest.raises(KeptChangeError, match="config.json"):
+        _read(tmp_path, ())
+
+
+def test_a_snapshot_listing_a_table_file_whose_path_is_no_string_is_refused(tmp_path: Path) -> None:
+    defaults, start, own = _start_files(tmp_path)
+    value = ":".join(map(str, (*defaults, own)))
+    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, own)})
+    keep_file = tmp_path / "outbox" / "0001" / "keep.json"
+    keep = json.loads(keep_file.read_text(encoding="utf-8"))
+    keep["tables"][TABLE_ENV]["files"][-1]["path"] = [str(own)]
+    keep_file.write_text(json.dumps(keep), encoding="utf-8")
+
+    with pytest.raises(KeptChangeError, match=TABLE_ENV):
+        _read(tmp_path / "outbox", tuple(map(str, defaults)))
