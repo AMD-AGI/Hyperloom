@@ -23,7 +23,9 @@ import pytest
 
 import inference_suite
 from hyperloom.inference_optimizer.cli import base_launch as bl
+from hyperloom.inference_optimizer.cli.lineup_banners import print_lineup_banners
 from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE, read_base_launch, shared_state_fields
+from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite import SourceFetchError, SourceSnapshot
 from inference_suite.contracts import BaseLaunch, BaseLaunchError, Redacted, SourceKind, Topology
@@ -33,6 +35,7 @@ from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot
 
 _FIXTURES = Path(inference_suite.__file__).parent / "tests" / "fixtures"
 _DSR1 = "deepseek-ai/DeepSeek-R1-0528"
+_REFERENCE_FIELDS = ("reference_server_args", "reference_envs", "reference_launch_controls", "reference_model")
 
 
 def _load(*parts: str) -> dict:
@@ -118,12 +121,22 @@ def test_a_fresh_session_freezes_the_recipe_base_it_resolves(tmp_path, fetched, 
     assert read_base_launch(tmp_path) == base
     assert (base.model.id, base.model.path) == (_DSR1, _DSR1)
     assert "Base launch     : inferencex" in capsys.readouterr().out
-    assert shared_state_fields(base) == {
-        "base_launch_digest": base.digest(),
-        "reference_server_args": " ".join(base.args),
-        "reference_envs": dict(base.env),
-        "reference_model": "",
+    assert shared_state_fields(base) == {"base_launch_digest": base.digest()}
+
+
+def test_a_new_session_state_carries_no_reference_launch(tmp_path, fetched):
+    base = _resolve(tmp_path, _args())
+
+    state = SharedState(session_id="s", **shared_state_fields(base))
+    state.save(tmp_path)
+    saved = json.loads((tmp_path / "state.json").read_text())
+
+    assert saved["base_launch_digest"] == base.digest()
+    assert {name: saved.get(name) for name in _REFERENCE_FIELDS} == {
+        "reference_server_args": "",
+        "reference_envs": {},
         "reference_launch_controls": {},
+        "reference_model": "",
     }
 
 
@@ -144,12 +157,26 @@ def test_a_session_that_froze_no_base_seeds_no_base_fields():
     assert shared_state_fields(None) == {}
 
 
-def test_a_model_no_recipe_serves_runs_the_default_table_and_says_so(tmp_path, fetched, capsys):
+def _banner_err(session_dir: Path, monkeypatch, capsys) -> str:
+    monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, str(session_dir))
+    capsys.readouterr()
+    print_lineup_banners(argparse.Namespace(), no_kernel=False, no_framework_agent=False)
+    return capsys.readouterr().err
+
+
+def test_a_model_no_recipe_serves_runs_the_default_table_and_the_banner_says_so(tmp_path, fetched, monkeypatch, capsys):
     base = _resolve(tmp_path, _args(model="Kimi-K2.6", gpu_type="mi300x", operator_tp=1))
 
     assert base is not None and base.source.kind is SourceKind.DEFAULT_TABLE
     assert base.topology == Topology(1)
-    assert "no recipe serves Kimi-K2.6; the default sglang launch for gfx942 runs it" in capsys.readouterr().err
+    assert "WARNING: base launch" not in capsys.readouterr().err
+    assert "no recipe serves Kimi-K2.6; the default sglang launch for gfx942 runs it" in _banner_err(
+        tmp_path, monkeypatch, capsys
+    )
+
+
+def test_a_session_that_froze_no_base_has_no_base_launch_warnings_in_its_banner(tmp_path, monkeypatch, capsys):
+    assert "base launch" not in _banner_err(tmp_path, monkeypatch, capsys)
 
 
 def test_a_fixed_session_whose_recipe_source_cannot_be_read_freezes_the_default_table_and_says_why(
@@ -169,7 +196,7 @@ def test_a_fixed_session_whose_recipe_source_cannot_be_read_freezes_the_default_
         "the sglang cookbook could not be read" in warning and unread.reason in warning
         for warning in frozen["warnings"]
     )
-    assert "WARNING: base launch: the sglang cookbook could not be read" in capsys.readouterr().err
+    assert "WARNING: base launch: the sglang cookbook could not be read" in _banner_err(tmp_path, monkeypatch, capsys)
 
 
 def test_a_session_whose_inferencex_cannot_be_read_exits_2_naming_it(tmp_path, monkeypatch, capsys):
@@ -198,7 +225,7 @@ def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_froze
     assert isinstance(base.env["HF_TOKEN"], Redacted)
     assert "hunter2" not in (session / BASE_LAUNCH_FILE).read_text()
     assert base.model.path == _DSR1
-    assert shared_state_fields(base)["reference_envs"] == {"SGLANG_USE_AITER": "1"}
+    assert base.env["SGLANG_USE_AITER"] == "1"
 
 
 @pytest.mark.parametrize(
