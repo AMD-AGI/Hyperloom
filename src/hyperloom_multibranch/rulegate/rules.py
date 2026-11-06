@@ -20,7 +20,6 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, Test
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
 from hyperloom_multibranch.rulegate import agentx, inferencex
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok, inferencex_accuracy_ok
 from hyperloom_multibranch.rulegate.baseline import (
@@ -167,12 +166,6 @@ def retracts(record: TestRecord, rule: Rule) -> bool:
     return checked and long is not None and long.status == LONG_CONTEXT_COMPLETE
 
 
-def landed_retraction(record: TestRecord) -> bool:
-    """Whether the test is a retraction the gate landed: marked, and committed on a verdict no gain commits on."""
-    slower = record.judgement is not None and record.judgement.verdict in (Verdict.FLAT, Verdict.REGRESSED)
-    return _marked(record.request) and record.conclusion is Conclusion.COMMITTED and slower
-
-
 def _marked(request: TestRequest) -> bool:
     return any(attachment.id == RETRACTION_ID for attachment in request.attachments)
 
@@ -231,7 +224,6 @@ __all__ = [
     "AgentXRule",
     "InferenceXRule",
     "Rule",
-    "landed_retraction",
     "lands_as_retraction",
     "ran_accuracy",
     "repeats",

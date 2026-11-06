@@ -3,7 +3,9 @@
 
 import asyncio
 import functools
-from dataclasses import replace
+import hashlib
+import json
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -23,7 +25,7 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVerdict, Verdict
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, RetractionRef
 from hyperloom_multibranch.contracts.blackboard.vocab import (
     INTEGRATION_BRANCH,
     BranchDriver,
@@ -124,11 +126,13 @@ class _Session:
             self.gate_blackboard, self.repo, RecordingScheduler(AdmissionStatus.ACCEPTED), self.verifier
         )
         self.fixes: FixChecking | None = None
+        self.blobs = LocalBlobStore(root.parent / "judge-blobs")
+        self.blobs.put(RETRACTION_DOCUMENT)
         self.judge = self.new_judge()
 
     def new_judge(self) -> BranchJudge:
         rule = InferenceXRule(self.runtime, CONC)
-        return BranchJudge(BRANCH, self.runtime, Judging(self.gate, self.toolbox, rule, self.fixes))
+        return BranchJudge(BRANCH, self.runtime, Judging(self.gate, self.toolbox, rule, self.blobs, self.fixes))
 
     def check_fixes(self, root, critic: "_Critic", *, parent_reproduces: bool = True) -> AttachmentRef:
         """Check declared fixes with a repro toolbox whose case reproduces on an unchanged commit (when
@@ -368,7 +372,9 @@ async def test_a_gain_that_drops_requests_on_both_measurements_is_held_for_the_s
     assert f"{first} held its gain on the retest and is held back by {DROPPED_REQUESTS};" in notice
 
 
-RETRACTION = AttachmentRef(RETRACTION_ID, "file", "b" * 64)
+RETRACTS = RetractionRef(iteration=7, keep=2, finding="findings/f7.md", retracted_commit="c-retracted")
+RETRACTION_DOCUMENT = json.dumps(asdict(RETRACTS), sort_keys=True).encode()
+RETRACTION = AttachmentRef(RETRACTION_ID, "file", hashlib.sha256(RETRACTION_DOCUMENT).hexdigest())
 
 
 def _retraction(change: RecipeDelta) -> TestRequest:
@@ -391,6 +397,7 @@ async def test_a_retraction_slower_than_its_parent_lands_held_to_its_errors_and_
     record = await session.runtime.record(first)
     assert (record.judgement.verdict, record.judgement.accuracy) == (Verdict.REGRESSED, AccuracyVerdict.PASSED)
     assert (record.conclusion, record.commit_id) == (Conclusion.COMMITTED, await session.repo.head(BRANCH))
+    assert (record.retracts, record.landed_retraction) == (RETRACTS, True)
     assert session.retests() == [] and session.verifier.asked == [first]
     (notice,) = await session.notices()
     assert notice.startswith(f"{NOTICE} {first} landed on your branch as a retraction at -")
