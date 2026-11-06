@@ -20,6 +20,7 @@ import yaml
 from hyperloom_common.coerce import first_text
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom_common.jsonio import read_json
+from inference_suite.server_log import LogCursor
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
 from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
@@ -37,7 +38,6 @@ from ._gpu_power import (
     read_measured_gpu_power,
     read_measured_gpu_power_by_gpu,
 )
-from ._subprocess_kill import _LogCursor
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 from ._workload_envs import GEAK_METRIC_OUTPUT
 
@@ -104,7 +104,7 @@ def _run_sampled(
     recorder = build_gpu_power_recorder(str(out_dir / "server.log"), dict(env))
     if recorder is None:
         return run()
-    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir), cursor=_LogCursor())
+    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir), cursor=LogCursor())
     driver.start()
     try:
         return run()
