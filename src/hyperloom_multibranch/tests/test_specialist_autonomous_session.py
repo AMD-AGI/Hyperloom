@@ -40,7 +40,6 @@ from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
     MANIFEST_FILE,
-    STALL_SECONDS,
     AutonomousSession,
     AutonomousSetup,
     collection_margin,
@@ -226,6 +225,15 @@ def _component_manifest(workspace: str, agent: Component) -> str:
     )
 
 
+@pytest.fixture(autouse=True)
+def fast_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The session's waits, short enough for a test to see an agent through."""
+
+    waits = {"POLL_SECONDS": 0.05, "SETTLE_SECONDS": 0.3, "CUTOFF_SECONDS": 0.5, "LEASE_POLL_SECONDS": 0.05}
+    for name, seconds in waits.items():
+        monkeypatch.setattr(autonomous_session, name, seconds)
+
+
 @dataclass
 class Rig:
     session: AutonomousSession
@@ -249,11 +257,9 @@ async def _rig(
     tmp_path: Path,
     agent: Agent | Component = Agent(),
     *,
-    poll: float = 0.05,
     clock=time.time,
     start: Recipe | None = None,
     deadline: float = 0.0,
-    stall: float = STALL_SECONDS,
     spend: type[AgentSpend] = AgentSpend,
     start_seconds: float = 5.0,
     aiter: Path | None = None,
@@ -296,13 +302,8 @@ async def _rig(
         rig.repo,
         "vllm",
         spend_of,
-        poll_seconds=poll,
-        settle_seconds=0.3,
-        cutoff_seconds=0.5,
-        stall_seconds=stall,
         clock=clock,
         least_run_seconds=least_run,
-        lease_poll_seconds=0.05,
     )
     if aiter is not None:
         setup = replace(setup, aiter_configs=aiter)
@@ -397,9 +398,10 @@ async def test_an_agent_that_exits_non_zero_is_a_crash_with_its_last_output(tmp_
 
 
 async def test_an_agent_that_goes_silent_is_a_lost_session_once_it_wrote_nothing_for_the_stall_bound(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    rig = await _rig(tmp_path, Agent(keeps=(256, 512, 768), gap=0.5, tail=30.0), stall=1.0)
+    monkeypatch.setattr(autonomous_session, "STALL_SECONDS", 1.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512, 768), gap=0.5, tail=30.0))
     await rig.session.preflight()
     started = time.monotonic()
 
@@ -411,8 +413,11 @@ async def test_an_agent_that_goes_silent_is_a_lost_session_once_it_wrote_nothing
     assert time.monotonic() - started > 2.0
 
 
-async def test_an_agent_silent_on_its_console_while_it_writes_its_workspace_is_not_lost(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.1, tail=30.0, busy=True), stall=1.0)
+async def test_an_agent_silent_on_its_console_while_it_writes_its_workspace_is_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(autonomous_session, "STALL_SECONDS", 1.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.1, tail=30.0, busy=True))
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())
 
@@ -429,8 +434,11 @@ class _HungSpend(AgentSpend):
         await asyncio.Event().wait()
 
 
-async def test_a_run_stuck_in_one_of_its_steps_is_a_lost_session_while_the_agent_still_writes(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path, Agent(keeps=tuple(range(1, 30)), gap=0.1), stall=0.5, spend=_HungSpend)
+async def test_a_run_stuck_in_one_of_its_steps_is_a_lost_session_while_the_agent_still_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(autonomous_session, "STALL_SECONDS", 0.5)
+    rig = await _rig(tmp_path, Agent(keeps=tuple(range(1, 30)), gap=0.1), spend=_HungSpend)
     await rig.session.preflight()
 
     with pytest.raises(SessionCrashed, match="polled") as crashed:
@@ -546,8 +554,11 @@ async def test_a_keep_that_cannot_be_imported_is_noted_once_and_the_run_goes_on(
     assert len([note for note in await rig.notices() if f"keep 1 {why}" in note]) == 1
 
 
-async def test_a_keep_made_just_before_the_agent_exits_is_imported(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.2, tail=0.0), poll=1.0)
+async def test_a_keep_made_just_before_the_agent_exits_is_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(autonomous_session, "POLL_SECONDS", 1.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.2, tail=0.0))
 
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())
