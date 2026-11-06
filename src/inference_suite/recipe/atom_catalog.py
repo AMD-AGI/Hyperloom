@@ -29,6 +29,7 @@ from inference_suite.contracts.base_launch import LaunchQuery, LaunchSource, Sou
 from inference_suite.recipe.model import (
     ATOM_ENTRYPOINT,
     ATOM_RUNNER_OWNED,
+    ATOM_TOPOLOGY,
     RecipeSourceError,
     RepoBundle,
     SourceLaunch,
@@ -46,8 +47,6 @@ _FRAMEWORK = "atom"
 _DEFAULT_CONC_MIN = 0
 _DEFAULT_CONC_MAX = 256
 _BASE_VARIANT: Mapping[str, Any] = {"label": "", "suffix": ""}
-_TP = frozenset({"tp", "tensor-parallel-size"})
-_EXPERT_PARALLEL = frozenset({"enable-expert-parallel"})
 _MODEL = frozenset({"model"})
 _SPECULATIVE = frozenset({"method", "num-speculative-tokens", "draft-model"})
 # Ranks beside tensor parallelism, under every alias atom/model_engine/arg_utils.py takes; a topology of tp and ep
@@ -173,17 +172,6 @@ class _Candidate:
     warnings: tuple[str, ...] = ()
 
 
-def _topology(args: Sequence[str]) -> Topology:
-    occurrences = argv_flag_occurrences(args)
-    tp = last_alias_value(occurrences, _TP)
-    try:
-        size = int(tp or 1)
-    except ValueError as error:
-        raise RecipeSourceError(f"its tp {tp!r} is not a size") from error
-    expert_parallel = last_alias_value(occurrences, _EXPERT_PARALLEL) is not None
-    return Topology(tp=size, ep=size if expert_parallel else 1)
-
-
 def _misfit(args: Sequence[str], topology: Topology, query: LaunchQuery) -> str | None:
     occurrences = argv_flag_occurrences(args)
     if last_alias_value(occurrences, _SPECULATIVE) is not None:
@@ -203,7 +191,7 @@ def _launch(candidate: _Candidate, query: LaunchQuery) -> SourceLaunch | str:
     if not boards_interchangeable(query.board, candidate.board):
         return f"{where}: it is tuned on {candidate.board}, not {query.board}"
     args, stripped = _server_args(candidate.command.argv)
-    topology = _topology(args)
+    topology = ATOM_TOPOLOGY.read(args)
     misfit = _misfit(args, topology, query)
     if misfit is not None:
         return f"{where}: {misfit}"

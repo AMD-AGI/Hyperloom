@@ -22,11 +22,12 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from hyperloom_common.contract_fields import ContractFields
-from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value, speculative_config
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, speculative_config
 from inference_suite.contracts.base_launch import LaunchQuery, LaunchSource, SourceKind, Topology, Workload
 from inference_suite.recipe.model import (
     VLLM_ENTRYPOINT,
     VLLM_RUNNER_OWNED,
+    VLLM_TOPOLOGY,
     ApiResponse,
     RecipeSourceError,
     SourceLaunch,
@@ -41,9 +42,6 @@ _FIELDS = ContractFields(RecipeSourceError)
 _FRAMEWORK = "vllm"
 _OK = 200
 _AGENTIC = re.compile(r"^agentic\b", re.IGNORECASE)
-_TP = frozenset({"tensor-parallel-size", "tp"})
-_DP = frozenset({"data-parallel-size", "dp"})
-_EXPERT_PARALLEL = frozenset({"enable-expert-parallel"})
 _NO_OFFLOAD = frozenset({"off", "none"})
 
 
@@ -222,17 +220,6 @@ def _server_args(argv: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]
     return tuple(args), tuple(stripped)
 
 
-def _topology(args: Sequence[str]) -> Topology:
-    occurrences = argv_flag_occurrences(args)
-    tp, dp = last_alias_value(occurrences, _TP), last_alias_value(occurrences, _DP)
-    try:
-        tp_size, dp_size = int(tp or 1), int(dp or 1)
-    except ValueError as error:
-        raise RecipeSourceError(f"its tp {tp!r} or dp {dp!r} is not a size") from error
-    expert_parallel = last_alias_value(occurrences, _EXPERT_PARALLEL) is not None
-    return Topology(tp=tp_size, ep=tp_size * dp_size if expert_parallel else 1)
-
-
 def _misfit(args: Sequence[str], topology: Topology, query: LaunchQuery) -> str | None:
     if query.workload is Workload.FIXED and speculative_config(argv_flag_occurrences(args)):
         return "it drafts tokens, and a fixed workload runs no speculative decoding"
@@ -252,7 +239,7 @@ def _launch(rendering: _Rendering, response: ApiResponse, query: LaunchQuery) ->
     if mismatch is not None:
         return f"{response.url}: {mismatch}"
     args, stripped = _server_args(_FIELDS.strings(rendered.get("argv"), "the rendering's argv"))
-    topology = _topology(args)
+    topology = VLLM_TOPOLOGY.read(args)
     misfit = _misfit(args, topology, query)
     if misfit is not None:
         return f"{response.url}: {misfit}"
