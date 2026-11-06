@@ -116,13 +116,18 @@ class MachinePhase(CoordinatorCollaborator):
             log.exception("Coordinator: save after phase init failed")
 
     def _reopen_a_session_that_was_left_closed(self) -> None:
-        """Put a session persisted in CLOSE back at the phase machine's entrance."""
+        """Put a session persisted in CLOSE back at the phase machine's entrance, as the next macro-cycle.
+
+        The closed cycle's records -- the Forge controller's terminal result above all -- describe a pass that has
+        ended; kept as the reopened pass's own, they would end its KERNEL on the first tick.
+        """
         state = self.shared_state
         log.info(
             "Coordinator: session resumed in CLOSE, a phase with no way out; "
             "reopening at PRELUDE so the new budget can be spent on the work "
             "the earlier leg stopped short of."
         )
+        self._open_next_macro_cycle(state.no_gain_cycle_streak, trigger="reopen")
         _phase_state.record_phase_transition(
             state,
             to_phase=_phase_state.PHASE_PRELUDE,
@@ -241,13 +246,15 @@ class MachinePhase(CoordinatorCollaborator):
         ):
             state.no_gain_cycle_streak = int(move.evidence.get("no_gain_cycle_streak_effective", 0) or 0)
 
-    def _open_looped_back_cycle(self, move: Transition, prior_cycle: int) -> None:
-        """Open the macro-cycle a loopback transition has just entered."""
+    def _open_next_macro_cycle(self, no_gain_cycle_streak: int, *, trigger: str) -> None:
+        """Open the next macro-cycle and record the strategy it starts on."""
         state = self.shared_state
-        state.open_macro_cycle(no_gain_cycle_streak=int(move.evidence.get("no_gain_cycle_streak_effective") or 0))
+        prior_cycle = state.macro_cycle
+        state.open_macro_cycle(no_gain_cycle_streak=no_gain_cycle_streak)
         self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
-            "Coordinator: macro-cycle reloop %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
+            "Coordinator: macro-cycle %s %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
+            trigger,
             prior_cycle,
             state.macro_cycle,
             state.no_gain_cycle_streak,
@@ -307,7 +314,7 @@ class MachinePhase(CoordinatorCollaborator):
             evidence=move.evidence,
         )
         if is_loopback:
-            self._open_looped_back_cycle(move, prior_cycle)
+            self._open_next_macro_cycle(int(move.evidence.get("no_gain_cycle_streak_effective") or 0), trigger="reloop")
         # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
         # marker, not a START/END interval).
         _phase_state.record_lifecycle_event(
