@@ -15,7 +15,9 @@ given, so the compile can read neither the signing key nor any credential of thi
 own (no egress) where the host lets this process make one (``unshare --net`` needs a capability many pods do not have).
 Which of the two a build got is the ``isolation`` entry of its record's toolchain (:data:`ISOLATION_UID_NETNS` or
 :data:`ISOLATION_UID`), written by this process, never by the child. A host that cannot even change the user builds
-nothing: the build fails as the machine's (``BuildInfraError``). A remote build pool is another
+nothing: the build fails as the machine's (``BuildInfraError``), naming why (:func:`isolation_problem`). That includes a
+host whose user namespace does not map 65534 (one that maps only its root): there ``setpriv`` cannot become 65534, and
+under a fakeroot preload it would seem to while the compile ran as root. A remote build pool is another
 :class:`~hyperloom.measure.runner.native.service.Build` behind the same ``runner(inputs)`` seam.
 
 The child imports the builder from the tree this process runs from (``source``), not from whatever ``hyperloom`` the
@@ -40,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 import hyperloom
+from hyperloom.common.id_map import unmapped_ids
 from hyperloom.measure import fsafe
 from hyperloom.measure.compile import BlobStore
 from hyperloom.measure.docs import DocumentError, Reader, parse_json_object, string_map
@@ -62,6 +65,7 @@ __all__ = [
     "STAGED_FILE",
     "IsolatedBuilds",
     "Isolation",
+    "isolation_problem",
     "job_document",
     "local_isolation",
     "staged_record",
@@ -121,11 +125,30 @@ def private_network(unshare: str) -> bool:
     return done.returncode == 0
 
 
+def isolation_problem() -> str | None:
+    """Why this host cannot run a compile as user 65534: this process is not root, has no ``setpriv``, or its user
+    namespace does not map 65534 (``setpriv`` would fail there, or under a fakeroot preload seem to succeed and leave the
+    compile running as root); ``None`` when it can."""
+    euid = os.geteuid()
+    if euid != 0:
+        return f"it runs as uid {euid}, not root, and only root can compile as user {NOBODY}"
+    if shutil.which("setpriv") is None:
+        return f"setpriv (util-linux) is not on PATH, and the compile runs as user {NOBODY} through it"
+    unmapped = unmapped_ids((NOBODY,), (NOBODY,))
+    if unmapped is not None:
+        return (
+            f"{unmapped}: setpriv cannot become user {NOBODY} there, and under a fakeroot preload it would seem to "
+            "while the compile ran as root"
+        )
+    return None
+
+
 def local_isolation(network_probe: Callable[[str], bool] = private_network) -> Isolation | None:
     """User 65534 (``setpriv``), in a network namespace of its own (``unshare --net``) where ``network_probe`` finds the
-    host lets this process make one; ``None`` when this host cannot change the user (not root, or no ``setpriv``)."""
+    host lets this process make one; ``None`` when this host cannot change the user (:func:`isolation_problem` says
+    why)."""
     setpriv = shutil.which("setpriv")
-    if os.geteuid() != 0 or setpriv is None:
+    if setpriv is None or isolation_problem() is not None:
         return None
     drop = (setpriv, f"--reuid={NOBODY}", f"--regid={NOBODY}", "--clear-groups", "--no-new-privs", "--")
     unshare = shutil.which("unshare")
@@ -187,10 +210,8 @@ class IsolatedBuilds:
     def _build(self, planned: PlannedBuild, scratch: Path) -> Staged:
         isolation = self._isolation
         if isolation is None:
-            raise BuildInfraError(
-                "this host cannot isolate a native build (it needs root and setpriv to compile as an unprivileged "
-                "user); nothing was compiled"
-            )
+            why = isolation_problem() or "the build runner was given no isolation"
+            raise BuildInfraError(f"this host cannot isolate a native build: {why}; nothing was compiled")
         work = Path(scratch) / _WORK
         work.mkdir()
         laid = planned.lay(self._blobs, work)
