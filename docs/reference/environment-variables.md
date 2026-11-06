@@ -861,7 +861,10 @@ deployments.
    credential-shaped name points at, Hugging Face's login files, and the files the app registers); it has its own
    user, pid and IPC namespaces, its own `/proc`, no capability and `no_new_privs`, and shares the app's network
    (loopback MCP). A program's own directory is bound, and its parent only away from those credential locations, so
-   a native install under `~/.local/bin` does not make the rest of `~/.local` readable. Everything under the readable
+   a native install under `~/.local/bin` does not make the rest of `~/.local` readable. Nothing is bound, run or
+   read for the confinement through a tree the agent writes (its work trees and scratch): a symlink it leaves there
+   never becomes a bind of its target at the next launch, and a read-only path inside such a tree refuses the launch.
+   The masks come from the app's own environment and home as well as the child's. Everything under the readable
    system roots (`/etc`, `/opt`, `/usr`) is readable: an image must not keep a credential there.
 
 Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch in a hosted

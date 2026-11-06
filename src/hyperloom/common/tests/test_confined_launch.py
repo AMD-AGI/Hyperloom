@@ -3,7 +3,7 @@
 
 """A confinement derived from configuration, launched for real through :meth:`BwrapIsolation.launch`: the program
 runs, the home's logins do not exist inside, a credential inside a bound tree is masked at every path that shows it,
-and the mark is set inside only."""
+the mark is set inside only, and links an agent leaves in its tree reach nothing at the next launch."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from hyperloom.common.confinement import Confinement, credential_paths, toolchai
 pytestmark = pytest.mark.agent_isolation
 
 MARK = "HYPERLOOM_REAP_MARK"
-#: Run inside: each named path's read (``ok:<text>`` or the errno name), the tool's output, a write, the mark.
+#: Run inside: each named path's read (``ok:<text>`` or the errno name), the tool's output, each named write, the mark.
 CHECK = r"""
 import errno, json, os, shutil, subprocess, sys
 def outcome(action):
@@ -31,15 +31,23 @@ def outcome(action):
     except OSError as exc:
         return errno.errorcode.get(exc.errno, str(exc.errno))
 def write(path):
-    with open(path, "w") as handle:
+    with open(path, "a") as handle:
         handle.write("from inside")
     return "written"
-paths, work = json.loads(sys.argv[1]), sys.argv[2]
+paths, writes = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 seen = {name: outcome(lambda path=path: open(path).read()) for name, path in paths.items()}
 seen["tool"] = shutil.which("tool") and subprocess.run(["tool"], capture_output=True, text=True).stdout.strip()
-seen["write"] = outcome(lambda: write(os.path.join(work, "out")))
+seen.update({name: outcome(lambda path=path: write(path)) for name, path in writes.items()})
 seen["mark"] = os.environ.get(sys.argv[3], "")
 print(json.dumps(seen))
+"""
+#: Run inside by an agent: turn each named directory of its tree into a link to the path given with it.
+PLANT = r"""
+import json, os, shutil, sys
+for directory, target in json.loads(sys.argv[1]).items():
+    shutil.rmtree(directory)
+    os.symlink(target, directory)
+print("planted")
 """
 
 
@@ -49,18 +57,34 @@ def _write(path: Path, text: str) -> Path:
     return path
 
 
-def _run(isolation: BwrapIsolation, confinement: Confinement, env: dict[str, str], paths: dict[str, Path], work: Path):
-    argv, child_env = isolation.launch(
-        [sys.executable, "-I", "-S", "-c", CHECK, json.dumps({k: str(v) for k, v in paths.items()}), str(work), MARK],
+def _named(paths: dict[str, Path]) -> str:
+    return json.dumps({name: str(path) for name, path in paths.items()})
+
+
+def _launch(isolation: BwrapIsolation, confinement: Confinement, env: dict[str, str], argv: list[str], work: Path):
+    command, child_env = isolation.launch(
+        [sys.executable, "-I", "-S", "-c", *argv],
         confinement.policy(chdir=work),
         {**env, MARK: "mark-1"},
         marks=(MARK,),
     )
     assert MARK not in child_env
-    done = subprocess.run(argv, env=child_env, capture_output=True, text=True, timeout=60, check=False)
+    done = subprocess.run(command, env=child_env, capture_output=True, text=True, timeout=60, check=False)
     assert done.returncode == 0, done.stderr
     assert "SECRET" not in done.stdout + done.stderr
-    return json.loads(done.stdout)
+    return done.stdout
+
+
+def _run(
+    isolation: BwrapIsolation,
+    confinement: Confinement,
+    env: dict[str, str],
+    paths: dict[str, Path],
+    work: Path,
+    writes: dict[str, Path] | None = None,
+):
+    writes = {"write": work / "out"} if writes is None else writes
+    return json.loads(_launch(isolation, confinement, env, [CHECK, _named(paths), _named(writes), MARK], work))
 
 
 def test_a_derived_confinement_runs_the_program_and_shows_no_login_of_the_home(tmp_path):
@@ -79,7 +103,7 @@ def test_a_derived_confinement_runs_the_program_and_shows_no_login_of_the_home(t
     }
     env = {"HOME": str(home), "PATH": f"{home / '.local/bin'}:/usr/bin:/bin", "HF_HOME": str(hf)}
     readable = toolchain_paths(env, "tool", writable=(work,))
-    masked = credential_paths(env, app_home=home, allowed=(*readable, work))
+    masked = credential_paths(env, allowed=(*readable, work))
 
     seen = _run(isolation, Confinement(writable=(work,), readable=readable, masked=masked), env, paths, work)
 
@@ -118,3 +142,47 @@ def test_a_credential_reached_through_a_linked_directory_is_masked_at_both_paths
         "link_secret": "EACCES",
         "link_visible": "ok:shown",
     }
+
+
+def test_links_an_agent_leaves_in_its_tree_reach_nothing_at_the_next_launch(tmp_path):
+    """The first launch's agent makes its ``PATH`` entry and its re-pointed config directory links to the app's
+    ``~/.ssh``; the next launch's confinement, derived the same way, neither reads the key nor writes beside it."""
+    isolation = BwrapIsolation(usable_bwrap())
+    home, work = tmp_path / "home", tmp_path / "work"
+    key = _write(home / ".ssh/id_rsa", "SECRET-SSH-KEY")
+    keys = _write(home / ".ssh/authorized_keys", "app-key\n")
+    for directory in (work / "bin", work / ".claude"):
+        directory.mkdir(parents=True)
+    env = {"HOME": str(home), "PATH": f"{work / 'bin'}:/usr/bin:/bin"}
+    writable = (work, work / ".claude")
+
+    def confinement() -> Confinement:
+        readable = toolchain_paths(env, sys.executable, writable=writable)
+        allowed = (*readable, *writable)
+        masked = credential_paths(env, allowed=allowed, writable=writable)
+        return Confinement(writable=writable, readable=readable, masked=masked)
+
+    planted = {str(work / "bin"): str(home / ".ssh"), str(work / ".claude"): str(home / ".ssh")}
+    assert _launch(isolation, confinement(), env, [PLANT, json.dumps(planted)], work).strip() == "planted"
+    assert (work / "bin").is_symlink() and (work / ".claude").is_symlink()
+
+    seen = _run(
+        isolation,
+        confinement(),
+        env,
+        {"key": key, "via_path": work / "bin/id_rsa", "via_config": work / ".claude/id_rsa"},
+        work,
+        {"keys": keys, "keys_via_config": work / ".claude/authorized_keys", "write": work / "out"},
+    )
+
+    assert seen == {
+        "key": "ENOENT",
+        "via_path": "ENOENT",
+        "via_config": "ENOENT",
+        "tool": None,
+        "keys": "ENOENT",
+        "keys_via_config": "ENOENT",
+        "write": "ok:written",
+        "mark": "mark-1",
+    }
+    assert keys.read_text(encoding="ascii") == "app-key\n"
