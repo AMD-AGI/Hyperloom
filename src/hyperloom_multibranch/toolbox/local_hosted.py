@@ -71,6 +71,7 @@ from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
@@ -194,7 +195,7 @@ class LocalHostedToolbox(LeasedToolbox):
             return
         try:
             await self._quarantine.add_cards(self.provider.hostname, new, LEAKED_CARDS_REASON)
-        except Exception:
+        except (BlackboardError, OSError):  # the blackboard refused or was not reached: the next poll retries
             logger.warning("could not record leaked cards in the blackboard", exc_info=True)
             return
         self._reported_cards |= new
