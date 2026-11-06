@@ -197,7 +197,7 @@ def test_a_vllm_server_names_its_tp_so_a_plain_baseline_root_is_not_refused(
 def test_empty_server_flags_are_refused_with_why(tmp_path: Path) -> None:
     config = {**arbor_config(_spec(tmp_path), tmp_path / "checkout", BRANCH_RUN), "server_flags": " "}
 
-    assert any(reason.startswith("no server_flags:") for reason in refusals(config, {}))
+    assert any(reason.startswith("no server_flags:") for reason in refusals(config))
 
 
 def test_the_gate_s_client_is_arbor_s_bench_command_with_only_its_port_and_result_dir_left_to_fill() -> None:
@@ -256,7 +256,7 @@ def test_a_client_arbor_could_not_fill_is_refused_with_why(client: str, said: st
 def test_arbor_s_session_is_the_directory_its_manifest_s_snapshots_name(tmp_path: Path) -> None:
     spec, checkout = _spec(tmp_path), _write(tmp_path / "checkout", CHECKOUT_FILES)
 
-    manifest = arbor_manifest(spec, ArborCheckout("git@host:org/arbor", "abc123", checkout, {}), BRANCH_RUN)
+    manifest = arbor_manifest(spec, ArborCheckout("git@host:org/arbor", "abc123", checkout), BRANCH_RUN)
 
     assert manifest.snapshots is not None
     session = checkout / manifest.snapshots.session
@@ -286,7 +286,7 @@ def test_the_workspace_is_given_the_installed_framework_s_built_files_and_keeps_
     (workspace / ".git" / "info" / "exclude").write_text("".join(f"{pattern}\n" for pattern in SKIPPED))
     monkeypatch.setattr(arbor_adapter, "locate_installed_package", _located(installed))
 
-    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN)
+    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
 
     assert (workspace / "vllm" / "_C.abi3.so").resolve() == (installed / "_C.abi3.so").resolve()
     assert (workspace / "vllm" / "attention" / "_moe_C.abi3.so").is_symlink()
@@ -303,9 +303,9 @@ def test_a_branch_given_the_session_s_dossier_finds_it_in_its_checkout_where_arb
     spec, checkout = _spec(tmp_path, dossier=str(dossier)), _write(tmp_path / "checkout", CHECKOUT_FILES)
     monkeypatch.setattr(arbor_adapter, "locate_installed_package", _located(tmp_path / "none"))
 
-    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN)
+    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
     (dossier / "README.md").write_text("# edited after\n")
-    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN)
+    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
 
     assert (checkout / DOSSIER_DIR / "qwen3-8b" / "README.md").read_text() == "# the pass's\n"  # a copy there stays
 
@@ -382,9 +382,7 @@ def test_the_branch_s_share_of_the_directions_is_arbor_s_plan_carried_into_its_c
     _write(plan.parent, {plan.name: json.dumps({"directions": [{"id": "m-attn", "kind": "increment", "title": "a"}]})})
     checkout = _write(tmp_path / "checkout", CHECKOUT_FILES)
 
-    manifest = arbor_manifest(
-        _spec(tmp_path, plan=str(plan)), ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN
-    )
+    manifest = arbor_manifest(_spec(tmp_path, plan=str(plan)), ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
 
     carried = checkout.absolute() / PLAN_FILE
     assert manifest.config["component"]["plan"] == str(carried)
@@ -406,8 +404,8 @@ def test_arbor_runs_the_pack_the_spec_names_and_one_its_checkout_lacks_is_refuse
 
     assert config["pack"] == "agentx-qwen38-1"
     assert config["bench_script"] == str(checkout / "packs" / "agentx-qwen38-1" / "validator" / "bench.sh")
-    assert not [reason for reason in refusals(config, {}) if "pack" in reason or "script" in reason]
-    assert any("agentx-gone" in reason and "pack.yaml" in reason for reason in refusals(missing, {}))
+    assert not [reason for reason in refusals(config) if "pack" in reason or "script" in reason]
+    assert any("agentx-gone" in reason and "pack.yaml" in reason for reason in refusals(missing))
     assert arbor_config(spec, checkout, BRANCH_RUN)["pack"] == "serving"
 
 
@@ -509,9 +507,9 @@ def test_an_agentx_branch_is_refused_before_arbor_starts_unless_it_is_given_the_
     spec = _spec(tmp_path, framework="sglang", server_args="", workload=AGENTX_WORKLOAD)
 
     with pytest.raises(ArborRefused, match="--agent-launch"):
-        arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN)
+        arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
     launched = replace(spec, launch=_launch_file(tmp_path, RESOLVED))
-    manifest = arbor_manifest(launched, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN)
+    manifest = arbor_manifest(launched, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
 
     assert manifest.config["server_flags"] == f"{RESOLVED['server_flags']} --tp-size 2"
 
@@ -553,14 +551,14 @@ def test_the_repository_s_launch_template_is_a_launch_file_the_adapter_reads() -
 def test_a_plan_arbor_could_not_read_is_refused(tmp_path: Path, plan: str, said: str) -> None:
     config = arbor_config(_spec(tmp_path, plan=plan), tmp_path / "checkout", BRANCH_RUN)
 
-    assert any(said in reason for reason in refusals(config, {}))
+    assert any(said in reason for reason in refusals(config))
 
 
 def test_the_dossier_pass_stops_at_the_map_in_a_session_of_its_own_and_takes_no_plan(tmp_path: Path) -> None:
     spec = _spec(tmp_path, plan="/shares/share-1.json")
     checkout = _write(tmp_path / "checkout", CHECKOUT_FILES)
 
-    manifest = arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), DOSSIER_PASS)
+    manifest = arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), DOSSIER_PASS)
 
     component = manifest.config["component"]
     assert component["stop_at"] == "map" and "plan" not in component and "profile" not in component
@@ -569,12 +567,15 @@ def test_the_dossier_pass_stops_at_the_map_in_a_session_of_its_own_and_takes_no_
     assert manifest.snapshots.session == DOSSIER_PASS.session_dir != SESSION_DIR
 
 
-def test_what_arbor_refuses_at_its_start_is_refused_before_it_starts(tmp_path: Path) -> None:
+def test_what_arbor_refuses_at_its_start_is_refused_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     spec = _spec(tmp_path, deadline=0.0, root="f" * 40)
     config = arbor_config(spec, tmp_path / "empty-checkout", BRANCH_RUN)
     config = {**config, "docker_container": "arbor-c", "component": {**config["component"], "x": 1}}
 
-    reasons = refusals(config, {"ARBOR_ROLL": "1"})
+    monkeypatch.setenv("ARBOR_ROLL", "1")
+    reasons = refusals(config)
 
     expected = [
         "the component block has keys Arbor does not: x",
@@ -616,14 +617,14 @@ def test_the_review_gate_is_handed_over_only_to_an_arbor_that_has_one(
 
     assert arbor_adapter.has_review_gate(checkout) == ("review" in component)
     assert config["component"].get("review") == block and config.get("review_gate") == top
-    assert not [reason for reason in refusals(config, {}) if "component" in reason and "review" in reason]
+    assert not [reason for reason in refusals(config) if "component" in reason and "review" in reason]
 
 
 def test_a_review_by_anyone_but_the_host_is_refused(tmp_path: Path) -> None:
     config = arbor_config(_spec(tmp_path), tmp_path / "checkout", BRANCH_RUN)
     config = {**config, "component": {**config["component"], "review": "operator"}}
 
-    assert "component.review is 'operator', not 'host'" in refusals(config, {})
+    assert "component.review is 'operator', not 'host'" in refusals(config)
 
 
 async def test_an_arbor_checkout_is_made_ready_by_the_adapter_without_the_onboarding_model(tmp_path: Path) -> None:
