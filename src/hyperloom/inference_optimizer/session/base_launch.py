@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env_safety import is_allowed_external_env_key
 from hyperloom_common.io import atomic_write_json
 from inference_suite.contracts import BaseLaunch
 
@@ -41,24 +40,10 @@ def read_base_launch(session_dir: Path) -> BaseLaunch | None:
 
 
 def shared_state_fields(base: BaseLaunch | None) -> dict[str, Any]:
-    """The ``SharedState`` fields a fresh session seeds from its frozen ``base``; none when it froze none.
-
-    ``base_launch_digest`` names the frozen file. The ``reference_*`` fields carry the base to readers that still read
-    them (units 1.14, 1.15): the runner places the model path and the base carries no launch controls.
-    """
+    """The ``SharedState`` fields a fresh session seeds from its frozen ``base``: the digest naming the frozen file."""
     if base is None:
         return {}
-    return {
-        "base_launch_digest": base.digest(),
-        "reference_server_args": " ".join(base.args),
-        "reference_envs": {
-            name: value
-            for name, value in base.env.items()
-            if isinstance(value, str) and is_allowed_external_env_key(name)
-        },
-        "reference_model": "",
-        "reference_launch_controls": {},
-    }
+    return {"base_launch_digest": base.digest()}
 
 
 __all__ = ["BASE_LAUNCH_FILE", "base_launch_path", "read_base_launch", "shared_state_fields", "write_base_launch"]

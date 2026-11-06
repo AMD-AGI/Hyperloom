@@ -96,7 +96,7 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     monkeypatch.setattr(
         cb,
         "shared_state_fields",
-        lambda frozen: {"reference_server_args": "--block-size 64"} if frozen is base else {},
+        lambda frozen: {"base_launch_digest": "d" * 64} if frozen is base else {},
     )
 
     from hyperloom.common import visible_devices
@@ -137,7 +137,7 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.framework_agent_phase_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
-    assert state.reference_server_args == "--block-size 64"
+    assert state.base_launch_digest == "d" * 64
     # The base is resolved for the graded concurrency and every rung of the enabled sweep.
     assert resolved == {
         "session_dir": tmp_path,

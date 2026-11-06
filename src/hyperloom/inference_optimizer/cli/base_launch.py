@@ -134,8 +134,6 @@ def _redacted(base: BaseLaunch) -> BaseLaunch:
 def _announce(base: BaseLaunch) -> None:
     where = base.source.locator or base.source.path or base.source.entry or base.source.repo or ""
     print(f"Base launch     : {base.source.kind.value} {where} ({len(base.args)} arg tokens, {len(base.env)} env(s))")
-    for warning in base.warnings:
-        print(f"WARNING: base launch: {warning}", file=sys.stderr)
 
 
 def resolve_base_launch(

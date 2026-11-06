@@ -67,12 +67,11 @@ def test_no_module_but_the_state_reads_the_reference_fields():
     assert offenders == []
 
 
-def test_only_the_state_reader_reads_the_frozen_file():
-    assert _users("read_base_launch") == {Path("hyperloom/orchestrator/state/base_launch.py")}
-
-
-def test_the_tuple_shaped_accessor_is_left_to_its_last_caller():
-    assert _users("resolve_reference_launch") == {Path("hyperloom/orchestrator/kernel/_forge_gemm_probe.py")}
+def test_only_the_state_reader_reads_the_frozen_file_besides_the_banner_printing_its_warnings():
+    assert _users("read_base_launch") == {
+        Path("hyperloom/orchestrator/state/base_launch.py"),
+        Path("hyperloom/inference_optimizer/cli/lineup_banners.py"),
+    }
 
 
 @pytest.fixture

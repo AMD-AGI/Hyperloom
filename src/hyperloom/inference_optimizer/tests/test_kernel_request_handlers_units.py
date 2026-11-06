@@ -169,11 +169,11 @@ class TestForgeGemmHelperCoverage:
 
         assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp4", "fp4")
 
-    def test_resolve_forge_precision_per_token_from_reference_env(self, tmp_path, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _workload_envs
+    def test_resolve_forge_precision_per_token_from_the_base_env(self, tmp_path, monkeypatch):
+        from hyperloom.orchestrator.state import base_launch
 
-        reference = ("", {"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"}, {})
-        monkeypatch.setattr(_workload_envs, "resolve_reference_launch", lambda: reference)
+        base = base_launch.ServerBase(env={"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"})
+        monkeypatch.setattr(base_launch, "session_server_base", lambda: base)
         state = SharedState(precision="bf16")
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
 

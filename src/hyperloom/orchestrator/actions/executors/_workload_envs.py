@@ -604,12 +604,6 @@ def _operator_extra_env() -> dict[str, str]:
     return {key: value for key, value in operator_extra_env().items() if key.strip().upper() != "RUN_EVAL"}
 
 
-def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
-    """The session's server base as the tuple ``kernel/_forge_gemm_probe.py`` reads, until it calls the state reader."""
-    base = session_server_base()
-    return base.args, dict(base.env), {}
-
-
 def apply_scriptable_runtime_defaults(
     bench: dict[str, Any],
     envs: dict[str, Any],
