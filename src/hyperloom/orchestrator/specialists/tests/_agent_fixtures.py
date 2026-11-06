@@ -85,11 +85,12 @@ def read_all_files(root: Path) -> dict[str, bytes]:
 
 
 #: A stand-in claude CLI that runs as the app's uid (unconfined, or in a bubblewrap sandbox) and, from its worktree,
-#: edits ``mod.py`` and points the worktree's ``.git`` at an admin dir it made in a repository it wrote: the real
+#: notes the commit its own git sees (``git_seen`` in the workspace), edits ``mod.py`` and points the worktree's ``.git`` at an admin dir it made in a repository it wrote: the real
 #: objects and commit, its own config (diffs without the ``a/`` and ``b/`` prefixes) and a back pointer, so every
 #: ownership check passes. Format with ``workspace``, ``worktree``, ``objects`` (the real object store) and ``head``.
 FORGES_ITS_GIT = """#!/bin/sh
 cat > /dev/null
+git rev-parse HEAD > {workspace}/git_seen 2>&1
 echo "new = 2" > mod.py
 forged={workspace}/forged.git
 git init -q --bare "$forged"
