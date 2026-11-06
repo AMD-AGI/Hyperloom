@@ -197,13 +197,16 @@ def test_on_magpie_the_boot_and_the_rounds_that_measure_have_one_server_identity
     LocalMeasurementBackend().run_test(_sweep(tmp_path, accuracy=accuracy))
 
     boot, *measured = rounds.rounds
-    assert boot["boot"] and [r["name"] for r in measured] == ["c64", "c16", "c4"]
+    evaluation = ["eval"] if accuracy else []
+    assert boot["boot"] and [r["name"] for r in measured] == ["c64", "c16", "c4", *evaluation]
     assert not any(r["boot"] for r in measured)
     stored = magpie_server_env(boot["envs"])
     for round_ in measured:
         assert magpie_server_env(round_["envs"]) == stored, f"the round at {round_['name']}"
     assert "MAGPIE_RUN_PHASE" not in boot["envs"], "Magpie sets the phase itself"
     assert (boot["envs"]["RUN_EVAL"], boot["envs"]["NUM_PROMPTS"]) == ("false", "1"), "a boot is still small"
+    assert [r["envs"]["RUN_EVAL"] for r in measured] == ["false"] * 3 + ["true"] * accuracy, "one evaluation, last"
+    assert [r["envs"].get("EVAL_ONLY") for r in measured] == [None] * 3 + ["true"] * accuracy, "and no bench in it"
 
 
 def test_on_magpie_the_warmup_the_measured_and_the_evaluation_round_of_a_graded_test_have_one_server_identity(

@@ -277,6 +277,19 @@ def test_a_sweep_answers_on_its_arms_server_after_its_last_level(monkeypatch, tm
     assert grid.servers.started == ["c4"] and list(read_outputs(tmp_path / "out").completed) == [0]
 
 
+def test_a_graded_sweep_answers_on_its_arms_server_after_its_one_evaluation(monkeypatch, tmp_path, cache):
+    grid = _grid(monkeypatch, tmp_path)
+    points = (_point(tmp_path, "c4", conc=4, run_eval="true"), _point(tmp_path, "c2", conc=2, run_eval="true"))
+    call = _call(tmp_path, *points, prep="conc_sweep", accuracy=True, short_prompts=staged_plan(cache))
+
+    outcome = LocalMeasurementBackend().run_test(call)
+
+    assert _names(grid) == ["c4", "c4", "c2", "eval"]
+    assert [c["launch"].server_lifecycle["cleanup"] for c in grid.calls] == [False] * 4, "the check follows them all"
+    assert grid.servers.started == ["c4"] and list(read_outputs(tmp_path / "out").completed) == [0]
+    assert [(r.point, r.phase) for r in outcome.rounds] == [(0, "measure"), (1, "measure"), (0, "accuracy")]
+
+
 def test_a_call_naming_a_prompt_set_that_is_not_staged_is_refused_before_any_server_starts(
     monkeypatch, tmp_path, cache
 ):

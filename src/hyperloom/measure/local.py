@@ -4,12 +4,12 @@
 """The local measurement backend: one complete test on this machine, through the existing ``run_grid``.
 
 * a single-point test runs on one server the lifecycle holds up, one ``run_grid`` call per round, in one order whatever
-  the test: the warmup bench, the measured bench, then, for a graded test (accuracy asked for), the evaluation in a round
-  of its own that runs no bench, which the accuracy is read from. No bench evaluates;
+  the test: the warmup bench, the measured bench, then, for a graded test (accuracy asked for), the evaluation in a
+  round of its own that runs no bench, which the accuracy is read from. No bench evaluates, in a sweep arm either;
 * a single-point test whose server the lifecycle cannot hold (a profile, a framework it cannot hold) is ``run_grid``
   with one variant: measured round, the evaluation after its bench when the point asks for one, teardown;
-* one arm of a concurrency sweep boots the inference server once and measures the levels from high to low on it, the
-  way ``conc_sweep`` does, stepping down a level when the boot fails;
+* one arm of a concurrency sweep boots the inference server once and benches the levels from high to low on it, the
+  way ``conc_sweep`` does, stepping down a level when the boot fails; a graded arm then evaluates once on that server;
 * accuracy is the ``RUN_EVAL`` switch in the point's own YAML, which must say what the caller asked for.
 
 Nothing in the old flow changes: this file only calls what ``orchestrator.actions.executors`` exports.
@@ -206,7 +206,7 @@ class _Run:
     unset_envs: list[str]
     results: list[tuple[int, VariantResult]] = field(default_factory=list)
     stopped_rc: int | None = None
-    #: The warmup and evaluation rounds of a test on a held server, which evaluates apart from its measured round.
+    #: The warmup and evaluation rounds of a test on a held server, which evaluates apart from its benches.
     warmup: VariantResult | None = None
     evaluation: VariantResult | None = None
     evaluates_apart: bool = False
@@ -705,15 +705,12 @@ def _checks_held(call: TestCall) -> bool:
 
 
 async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
-    """The warmup bench, the measured bench and, for a graded test, the evaluation, on one server; then the accuracy
-    checks on it. Nothing but the warmup bench precedes the measured bench, in an explore as in a graded test: a bench
-    that followed the evaluation started on the KV pool it left full, and read lower. The warmup draws prompts of its own
-    (``_grid``); when it failed, was stopped or its logs name a cause that settles the test (a crashed server, a refused
-    request), nothing is measured. A failed evaluation fails the test's accuracy, never the measured round's reading.
-    """
+    """The warmup bench, the measured bench and, for a graded test, the evaluation (``_evaluate``), on one server; then
+    the accuracy checks on it. A bench that followed the evaluation started on the KV pool it left full, and read lower.
+    The warmup draws prompts of its own (``_grid``); when it failed, was stopped or its logs name a cause that settles
+    the test (a crashed server, a refused request), nothing is measured."""
     run.evaluates_apart = True
-    graded, checked = run.call.accuracy, _checks_held(run.call)
-    bench_envs = _BENCH_ENVS if graded else None  # an explore's point does not evaluate
+    bench_envs = _BENCH_ENVS if run.call.accuracy else None  # an explore's point does not evaluate
     try:
         if warm and not await _warmup_round(run, lifecycle, bench_envs):
             return
@@ -721,25 +718,13 @@ async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
             run,
             0,
             _TEST,
-            server_lifecycle=lifecycle.settings(cleanup=not (graded or checked)),
+            server_lifecycle=lifecycle.settings(cleanup=not (run.call.accuracy or _checks_held(run.call))),
             server_already_ready=warm,
             base_extra_envs=bench_envs,
             warmup_before_measure=False,
         )
-        if not run.add(0, measured) or _test_failed(run):
-            return
-        if graded:
-            run.evaluation = await _grid(
-                run,
-                0,
-                _EVAL,
-                server_lifecycle=lifecycle.settings(cleanup=not checked),
-                server_already_ready=True,
-                base_extra_envs=_EVAL_ENVS,
-                warmup_before_measure=False,
-                evaluation_only=True,
-            )
-            run.add(0, run.evaluation)
+        run.add(0, measured)
+        await _evaluate(run, lifecycle, 0)
         await _held_checks(run, lifecycle)
     finally:
         lifecycle.teardown()
@@ -751,6 +736,16 @@ async def _warmup_round(run: _Run, lifecycle: _Lifecycle, envs: dict[str, str] |
     warmup = await _grid(run, 0, _WARMUP, server_lifecycle=held, base_extra_envs=envs, warmup_before_measure=False)
     run.warmup = warmup
     return run.add(0, warmup) and not _is_failure(warmup) and not decides_test(_ended(run).verdict)
+
+
+async def _evaluate(run: _Run, lifecycle: _Lifecycle, point: int) -> None:
+    """A graded test's evaluation from the point at index ``point``, after its last bench, on the server it left up;
+    none after a failed bench or a stop. One that fails fails the test's accuracy, never a bench's reading."""
+    if run.call.accuracy and run.stopped_rc is None and not _test_failed(run):
+        held = lifecycle.settings(cleanup=not _checks_held(run.call))
+        launch = {"server_already_ready": True, "warmup_before_measure": False, "evaluation_only": True}
+        run.evaluation = await _grid(run, point, _EVAL, server_lifecycle=held, base_extra_envs=_EVAL_ENVS, **launch)
+        run.add(point, run.evaluation)
 
 
 async def _held_checks(run: _Run, lifecycle: _Lifecycle) -> None:
@@ -827,7 +822,8 @@ class _Lifecycle:
 
 
 async def _sweep(run: _Run) -> None:
-    """One arm: boot once on the highest level that boots, measure every level on that server, tear it down."""
+    """One arm: boot once on the highest level that boots, bench every level on that server, evaluate a graded arm once
+    after the last bench from the level it booted on (the highest, the quickest to evaluate), tear the server down."""
     order = sorted(range(len(run.call.points)), key=lambda i: -_levels(run.call.points)[i])
     lifecycle = _Lifecycle(run)
     if not lifecycle.eligible:
@@ -842,7 +838,9 @@ async def _sweep(run: _Run) -> None:
             run.notes.append("every boot attempt failed; server restarted per level")
             await _sweep_by_restart(run, order)
             return
+        run.evaluates_apart = True
         await _reuse(run, lifecycle, order[booted:])
+        await _evaluate(run, lifecycle, order[booted])
         await _held_checks(run, lifecycle)
     finally:
         lifecycle.teardown()
@@ -888,14 +886,16 @@ async def _boot(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> int | Non
 
 
 async def _reuse(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> None:
-    """Measure each level of ``order`` on the running server; the last one tears it down."""
+    """Bench each level of ``order`` on the running server; the last one tears it down unless a round follows it."""
+    graded, stays_up = run.call.accuracy, run.call.accuracy or _checks_held(run.call)
     for position, point in enumerate(order):
         result = await _grid(
             run,
             point,
             f"c{_levels(run.call.points)[point]}",
-            server_lifecycle=lifecycle.settings(cleanup=position == len(order) - 1 and not _checks_held(run.call)),
+            server_lifecycle=lifecycle.settings(cleanup=position == len(order) - 1 and not stays_up),
             server_already_ready=True,
+            base_extra_envs=_BENCH_ENVS if graded else None,  # an explore's point does not evaluate
             warmup_before_measure=False,
         )
         if not run.add(point, result):

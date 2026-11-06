@@ -12,6 +12,7 @@ then turns the outcome into the rounds and accuracy of its result.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +31,7 @@ from hyperloom_multibranch.toolbox.hosted_executor import _measured_values
 from hyperloom_multibranch.toolbox.tests.helpers import req
 
 FLEXIBLE = "exact_match,flexible-extract"
+_BOOT_ONLY = "server_lifecycle_boot_only"
 
 
 class _Grid:
@@ -40,14 +42,18 @@ class _Grid:
         self.root, self.score, self.throughputs = root, score, throughputs
         self.evaluated: list[str] = []
         self.reseeded: dict[str, bool] = {}
+        self.called: list[str] = []
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         name = kwargs["grid"][0].name
+        self.called.append(name)
         self.reseeded[name] = kwargs["launch"].warmup_round
         config = yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text())
         envs = {**config["benchmark"]["envs"], **(kwargs["recipe"].base.extra_envs or {})}
-        workspace = self.root / f"variant_00_{name}" / "benchmark_fake_1"
+        workspace = self.root / f"variant_00_{name}" / f"benchmark_fake_{len(self.called)}"
         workspace.mkdir(parents=True)
+        if kwargs["launch"].lifecycle_boot_only:  # a sweep's boot: run_grid says no round was measured
+            return [VariantResult(name, "", {}, "succeeded", returncode=0, workspace=str(workspace), note=_BOOT_ONLY)]
         if not is_truthy(envs.get("EVAL_ONLY"), default=False):
             report = {
                 "success": True,
@@ -124,3 +130,33 @@ def test_a_graded_test_without_a_warmup_still_evaluates_after_its_measured_bench
     assert grid.evaluated == ["eval"]
     assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
     assert [(r.phase, r.metrics["output_throughput"]) for r in rounds] == [("measure", 3333.0)]
+
+
+def test_a_graded_sweep_benches_every_level_and_its_one_evaluation_after_the_last_is_the_results_accuracy(
+    tmp_path, monkeypatch
+):
+    """A FINAL sweep is graded: each level used to evaluate after its bench, so the next level benched on the KV pool
+    that evaluation left full, and the primary concurrency (the middle level) was read after one."""
+    _, call, _ = _graded(tmp_path, monkeypatch)
+    points = []
+    for level in (16, 8, 4):
+        point = tmp_path / f"c{level}.yaml"
+        envs = {"TP": 1, "CONC": level, "RUN_EVAL": "true"}
+        point.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": envs}}), encoding="utf-8")
+        points.append(point)
+    grid = _Grid(tmp_path / "out", 0.64, {"c16": 1600.0, "c8": 800.0, "c4": 400.0})
+    monkeypatch.setattr(local, "run_grid", grid)
+    sweep = replace(call, points=tuple(points), kind="test", prep="conc_sweep", rounds=RoundPlan())
+    request = req(kind=TestKind.SWEEP, purpose=Purpose.FINAL, accuracy=True, concurrency=(4, 8, 16))
+
+    outcome = LocalMeasurementBackend().run_test(sweep)
+    rounds, accuracy = _measured_values(request, SimpleNamespace(points=tuple(points)), outcome)  # type: ignore[arg-type]
+
+    assert grid.called == ["c16", "c16", "c8", "c4", "eval"], "a boot round, a bench at every level, an evaluation"
+    assert grid.evaluated == ["eval"], "one evaluation, after the last bench, none between two of them"
+    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
+    assert [(r.phase, r.concurrency, r.metrics["output_throughput"]) for r in rounds] == [
+        ("measure", 16, 1600.0),
+        ("measure", 8, 800.0),
+        ("measure", 4, 400.0),
+    ]
