@@ -3,7 +3,7 @@
 
 """Phase-tagged KV-cache recording for one benchmark round, written to ``kv_metrics.json``.
 
-Samples come from :mod:`._kv_poll`, which also states the two rules this module keeps: never raise, and never coerce a
+Samples come from :mod:`.kv_poll`, which also states the two rules this module keeps: never raise, and never coerce a
 missing reading to zero.
 
 There are two collectors, and the artifact says which one produced its rows in ``sample_source``. On an AgentX round
@@ -20,7 +20,7 @@ under the fallback the samples either side of it are systematically credited to 
 authoritative stamps are available the rows are re-labelled and the counter windows re-bracketed from them at close --
 which is why every row carries its raw per-series counters, and not just a phase-level first/last pair.
 
-Below the phase, the workload timeline comes from aiperf's per-request export; see :mod:`._agentx_timeline`. That gives
+Below the phase, the workload timeline comes from aiperf's per-request export; see :mod:`.agentx_timeline`. That gives
 each row the trajectories, turns and requests in flight during its scrape window, and writes the event stream beside
 this artifact.
 
@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._kv_poll import (
+from .kv_poll import (
     AIPERF_PHASE_NAMES,
     AiperfProgressPoller,
     KvMetricsPoller,
@@ -568,7 +568,7 @@ class KvMetricsRecorder:
         """
         if self._workspace is None:
             return None
-        from ._agentx_timeline import (
+        from .agentx_timeline import (
             TIMELINE_ARTIFACT_NAME,
             build_events,
             correlate_rows,
