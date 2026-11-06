@@ -723,7 +723,9 @@ class Holder:
 
     The holder has no ``--die-with-parent`` (the thread that starts it may end first) and no marks. Its pid 1 does
     not end with bubblewrap's own process, so the holder is held by a pidfd of that pid 1 (``pidfd``), and
-    :meth:`stop` kills through it, which ends the namespace and every command in it.
+    :meth:`stop` kills through it, which ends the namespace and every command in it. It starts with an empty
+    environment: every command joined to it can read the environment of its processes, which would otherwise be the
+    app's own.
     """
 
     process: subprocess.Popen[bytes]
@@ -749,6 +751,7 @@ class Holder:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    env={},
                     pass_fds=(write,),
                     start_new_session=True,
                 )

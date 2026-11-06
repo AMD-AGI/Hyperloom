@@ -550,6 +550,32 @@ def _remove_sysv_segment(key: int) -> None:
         libc.shmctl(segment, 0, None)  # IPC_RMID
 
 
+def test_a_joined_command_reads_nothing_of_the_apps_environment_from_the_holder(
+    probe: BwrapProbe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = f"holder-environ-{os.getpid()}-{time.monotonic_ns()}"
+    monkeypatch.setenv("HYPERLOOM_TEST_APP_VALUE", token)
+    sandbox = policy()
+    read_all = """
+seen = {}
+for pid in sorted(int(entry) for entry in os.listdir("/proc") if entry.isdigit() and int(entry) != os.getpid()):
+    try:
+        seen[pid] = open(f"/proc/{pid}/environ", "rb").read().decode(errors="replace")
+    except OSError as exc:
+        seen[pid] = errno.errorcode.get(exc.errno, str(exc.errno))
+print(json.dumps(seen))
+"""
+    holder = Holder.start(probe, sandbox)
+    try:
+        with holder.joined(sandbox) as joined:
+            seen = report(run(probe, joined, python(read_all), pass_fds=joined.join, env={"PATH": "/usr/bin:/bin"}))
+    finally:
+        holder.stop()
+
+    assert sorted(seen) == ["1", "2"], seen  # the holder's pid 1 and its process, both read
+    assert all(token not in environ for environ in seen.values()), seen
+
+
 def test_a_holder_whose_setup_fails_says_why(probe: BwrapProbe, tmp_path: Path) -> None:
     with pytest.raises(BwrapSetupError, match="Can't find source path"):
         Holder.start(probe, policy(writable=(str(tmp_path / "missing"),)))
