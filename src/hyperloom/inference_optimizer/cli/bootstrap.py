@@ -43,7 +43,8 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
 )
 from ..session.paths import _SESSION_SKELETON
-from .base_launch import reference_launch_fields, resolve_base_launch
+from ..session.base_launch import shared_state_fields
+from .base_launch import resolve_base_launch
 from .executors import _build_specialist_executor, _register_executors
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
@@ -866,7 +867,7 @@ def _seed_shared_state(
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,
-        **reference_launch_fields(base),
+        **shared_state_fields(base),
         # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
         # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),

@@ -463,6 +463,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     current_best: dict[str, Any] = field(default_factory=dict)
     # Immutable measurement evidence captured with the current-best promotion.
     current_best_measurement: dict[str, Any] = field(default_factory=dict)
+    # Digest of the session's frozen ``base_launch.json``; empty when the session froze none.
+    base_launch_digest: str = ""
     # Reference launch recipe from the operator's --reference-script: lowest-priority base server args/envs seeding
     # every baseline.
     reference_server_args: str = ""

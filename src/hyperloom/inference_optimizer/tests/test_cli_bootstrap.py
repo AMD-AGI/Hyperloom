@@ -95,7 +95,7 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     monkeypatch.setattr(cb, "resolve_base_launch", _resolve)
     monkeypatch.setattr(
         cb,
-        "reference_launch_fields",
+        "shared_state_fields",
         lambda frozen: {"reference_server_args": "--block-size 64"} if frozen is base else {},
     )
 
