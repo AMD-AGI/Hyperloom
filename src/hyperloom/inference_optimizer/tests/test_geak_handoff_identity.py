@@ -195,6 +195,21 @@ def test_default_launch_controls_preserve_legacy_handoff_identity(tmp_path: Path
     assert writer._handoff_launch_identity(env_spec) == identity
 
 
+def test_the_same_current_best_delta_over_another_base_launch_has_another_identity(tmp_path: Path) -> None:
+    identities = []
+    for digest in ("sha256:" + "1" * 64, "sha256:" + "2" * 64):
+        state = SharedState(
+            base_launch_digest=digest,
+            current_best={"tput": 100.0, "extra_server_args": "--block-size 32", "optimization_stack": []},
+        )
+        writer = _writeback(tmp_path, state)
+        writer._stamp_current_best_measurement()
+        assert writer.build_env_spec()["base_launch_digest"] == digest
+        identities.append(state.current_best_measurement["declared_launch_identity"])
+
+    assert identities[0] != identities[1]
+
+
 def test_measurement_identity_invalidates_when_recipe_content_changes(tmp_path: Path) -> None:
     recipe = tmp_path / "baseline.yaml"
     recipe.write_text("benchmark: {model: /models/a}\n", encoding="utf-8")
