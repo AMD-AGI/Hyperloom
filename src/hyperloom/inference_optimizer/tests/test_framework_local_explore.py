@@ -423,6 +423,21 @@ def test_a_discovery_proposal_naming_an_unregistered_framework_is_dropped(tmp_pa
     ]
 
 
+def test_the_discovery_contract_names_every_framework_the_phase_keeps():
+    """The phase drops any other spelling, so the agent has to be handed the closed vocabulary."""
+    import re
+
+    from hyperloom.inference_optimizer import framework_registry
+    from hyperloom.orchestrator.prompts.proposal_schemas import (
+        UPSTREAM_CANDIDATE_CONTRACT,
+        UPSTREAM_CANDIDATE_EXAMPLE,
+    )
+
+    told = " ".join(UPSTREAM_CANDIDATE_CONTRACT) + " " + UPSTREAM_CANDIDATE_EXAMPLE["framework"]
+    for name in framework_registry.names():
+        assert re.search(rf"\b{re.escape(name)}\b", told), name
+
+
 def test_a_registry_that_cannot_answer_is_not_an_idle_one(tmp_path: Path):
     """The pump must not read a failed task query as \"nothing in flight\"."""
     stub = _stub(tmp_path, local_explore=True)

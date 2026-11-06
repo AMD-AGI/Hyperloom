@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.coerce import to_str_list
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,
@@ -92,6 +93,7 @@ class VariantResult:
     tpot_p90_ms: float | None = None
     intvty_p90: float | None = None
     intvty_p50: float | None = None
+    intvty_p50_checkpoint: float | None = None
     request_error_rate: float | None = None
     workspace: str | None = None
     report_path: str | None = None
@@ -142,6 +144,7 @@ class VariantResult:
             "tpot_p90_ms": self.tpot_p90_ms,
             "e2e_norm_intvty_p90": self.intvty_p90,
             "e2e_norm_intvty_p50": self.intvty_p50,
+            GRADED_INTVTY_P50_CHECKPOINT: self.intvty_p50_checkpoint,
             "request_error_rate": self.request_error_rate,
             "workspace": self.workspace,
             "report_path": self.report_path,

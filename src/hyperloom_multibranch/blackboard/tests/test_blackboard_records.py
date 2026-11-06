@@ -107,7 +107,7 @@ def test_a_record_is_judged_once_the_gate_judged_a_test_it_measured(
 def test_the_local_blackboard_implements_every_interface_method() -> None:
     names = [name for name, member in inspect.getmembers(interfaces.Blackboard) if inspect.iscoroutinefunction(member)]
 
-    assert len(names) == 46
+    assert len(names) == 47
     assert all(getattr(LocalBlackboard, name) is not getattr(interfaces.Blackboard, name) for name in names)
 
 

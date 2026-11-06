@@ -120,3 +120,21 @@ def test_discovery_module_has_no_direct_sdk_fallback() -> None:
     assert "default_llm_fn" not in source
     assert "from openai import" not in source
     assert "from anthropic import" not in source
+
+
+def test_hot_kernels_leave_out_collectives(tmp_path):
+    """A collective's time is its rank's wait on the others, which no single-GPU fusion removes."""
+    events = [
+        {"cat": "kernel", "name": "_fused_rms_fp8_group_quant_kernel", "ts": 10, "dur": 30},
+        {
+            "cat": "kernel",
+            "name": "void aiter::reduce_scatter_cross_device_store<__hip_bfloat16, 4>",
+            "ts": 50,
+            "dur": 40,
+        },
+        {"cat": "kernel", "name": "void aiter::cross_device_reduce_2stage<__hip_bfloat16, 4>", "ts": 90, "dur": 20},
+    ]
+    path = tmp_path / "d.trace.json"
+    path.write_text(json.dumps({"traceEvents": events}))
+
+    assert [row["name"] for row in hot_kernels_from_trace(path)] == ["_fused_rms_fp8_group_quant_kernel"]

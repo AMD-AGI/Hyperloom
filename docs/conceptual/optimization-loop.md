@@ -126,7 +126,10 @@ metadata at boot. There is no separate live `classify` action.
 
 ENABLEMENT is entered when a baseline fails and enablement is admitted
 (`--enablement` is not `off` and the run is not multi-node). It is skipped
-entirely on runs where the baseline boots on the first attempt.
+entirely on runs where the baseline boots on the first attempt. A baseline the
+harness refused to launch because the host lacked the idle GPUs it needs never
+enters it: no server started, so the run stops on the first refusal with
+`stop_reason='host_gpus_unavailable'`.
 
 Admission is controlled by `--enablement {off,launch,eval,all}`,
 defaulting to `all`. `launch` admits the boot-failure lane, `eval` the
