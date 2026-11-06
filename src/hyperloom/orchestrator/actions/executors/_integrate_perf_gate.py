@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.coerce import first_text
-from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
+from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero, graded_gate_row
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
@@ -555,6 +555,11 @@ def _weigh_gate(
         acc_delta_pct=acc_delta_pct,
         cfg_fingerprint=content_fingerprint(params),
         measured_against=_measured_against(params, base_tput=base_tput),
+        gates=(
+            (graded_gate_row(graded, keep_threshold_pct, graded.veto_reason or graded.refused_by),)
+            if bench_result.get("status") == "succeeded"
+            else ()
+        ),
     )
     return _GateVerdict(
         measured=measured,

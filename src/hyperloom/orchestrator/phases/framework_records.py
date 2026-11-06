@@ -350,26 +350,14 @@ def _attempt_outcome_fields(
     }
 
 
-def _record_attempt_gates(recorder: Any, task_id: str, *, result: Mapping[str, Any], params: Mapping[str, Any]) -> None:
-    """Record the gate verdicts an attempt's measurement settled: keep threshold, accuracy, switch-off parity."""
+def _record_attempt_gates(recorder: Any, task_id: str, *, result: Mapping[str, Any]) -> None:
+    """Record the gate verdicts an attempt's measurement settled: the graded one, accuracy, switch-off parity."""
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import GateVerdict
 
-    delta_pct = result.get("delta_pct")
-    keep_threshold = result.get("keep_threshold_pct")
-    if keep_threshold is None:
-        keep_threshold = params.get("keep_threshold_pct")
     accuracy_pass = result.get("accuracy_pass")
     parity = to_mapping(result.get("switch_off_parity"))
-    verdicts: list[Any] = []
-    if isinstance(delta_pct, (int, float)) and isinstance(keep_threshold, (int, float)):
-        verdicts.append(
-            GateVerdict(
-                gate="keep_threshold",
-                passed=float(delta_pct) >= float(keep_threshold),
-                observed=delta_pct,
-                threshold=keep_threshold,
-            )
-        )
+    # The graded verdict's own row, built as explore builds it: the veto, the graded axes or the output threshold.
+    verdicts: list[Any] = [GateVerdict(**gate) for gate in dict_rows(result.get("gates"))]
     if accuracy_pass is not None:
         verdicts.append(
             GateVerdict(
@@ -454,7 +442,7 @@ def _record_source_attempt(
         **config_delta,
     )
     _record_kb_exposure(recorder, attempt.candidate_id, params)
-    _record_attempt_gates(recorder, task_id, result=result, params=params)
+    _record_attempt_gates(recorder, task_id, result=result)
     _record_step(
         coord,
         attempt.candidate_id,

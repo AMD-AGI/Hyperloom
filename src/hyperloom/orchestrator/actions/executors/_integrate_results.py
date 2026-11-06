@@ -86,6 +86,8 @@ class _PatchMeasurement:
     acc_delta_pct: float | None
     cfg_fingerprint: str
     measured_against: dict[str, Any]
+    #: The graded verdict as the gate row an attempt records; empty when the bench produced no measurement.
+    gates: tuple[dict[str, Any], ...] = ()
 
     def lesson(self, outcome: str) -> _KbLesson:
         """The KB record of this measurement under ``outcome``."""
@@ -100,6 +102,7 @@ class _PatchMeasurement:
             "base_tput": self.base_tput,
             "measured_against": self.measured_against,
             "keep_threshold_pct": self.keep_threshold_pct,
+            "gates": list(self.gates),
             "bench_result": self.bench_result,
         }
 
