@@ -40,6 +40,8 @@ class IntegrateAttempt:
     applied_artifacts: list[dict[str, Any]] = field(default_factory=list)
     extra_envs_applied: dict[str, str] = field(default_factory=dict)
     extra_server_args_applied: str = ""
+    #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``, applied over the base at the bench.
+    launch_controls: dict[str, Any] = field(default_factory=dict)
     dropped_env_overrides: list[str] = field(default_factory=list)
     setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)

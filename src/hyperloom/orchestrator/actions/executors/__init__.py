@@ -3,6 +3,7 @@
 
 """Concrete ActionRunner implementations."""
 
+from ._proposal_identity import content_fingerprint, controls_of, normalize_proposal
 from .baseline import baseline_executor
 from .explore import explore_executor
 from .conc_sweep import conc_sweep_executor
@@ -81,6 +82,8 @@ __all__ = [
     "benchmark_serving_path_in",
     "build_launch_evidence",
     "conc_sweep_executor",
+    "content_fingerprint",
+    "controls_of",
     "context_copy_refusal",
     "default_baseline_config",
     "ensure_benchmark_lib_patched",
@@ -88,6 +91,7 @@ __all__ = [
     "explore_executor",
     "harvest_leaked_artifacts",
     "materialize_benchmark_config",
+    "normalize_proposal",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",

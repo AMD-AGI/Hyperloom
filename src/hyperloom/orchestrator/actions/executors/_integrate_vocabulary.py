@@ -21,6 +21,9 @@ KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
 #: that attempt reached the bench, and no result an earlier stage returned did.
 RESULT_BENCHED = "benched"
 
+#: Error class of a bench the environment kept from measuring: no verdict on the patch.
+BENCH_UNMEASURED_CLASS = "bench_unmeasured"
+
 #: Where the patches this action applies came from. Every source lands through
 #: the same apply / vet / bench / KEEP-REVERT pipeline below; they differ only
 #: in how the diff is obtained and, for ``upstream_pr``, in which gate admitted
