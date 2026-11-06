@@ -18,7 +18,7 @@ from ..policy.gate import SPECIALIST_ACTION_NAME
 from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..specialists.domains import gap_backfilled_domain
 from ..state.shared_state import inject_stack_base_params
-from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
+from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec, create_on_free_key
 from ..collaborator import CoordinatorCollaborator
 from ._explore_grid import explore_grid_denial
 
@@ -28,8 +28,6 @@ if TYPE_CHECKING:
 import logging as _logging
 
 log = _logging.getLogger(__name__)
-
-_MAX_IDEMPOTENCY_ATTEMPTS: int = 6
 
 
 @dataclass
@@ -371,33 +369,25 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         # content-addressed idempotency key above so two proposals for identical grids still collapse to one task.
         if pending.action_name == "explore" and pending.proposal_msg_id:
             params["proposal_msg_id"] = str(pending.proposal_msg_id)
-        task = None
-        was_existing = False
-        for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):
-            idempotency_key = raw_key if attempt == 0 else f"{raw_key}-retry{attempt}"
-            task, was_existing = await self.tasks.create_or_return_existing(
-                TaskSpec(
-                    kind=pending.action_name,
-                    params=params,
-                    idempotency_key=idempotency_key,
-                    requires_lanes=lanes,
-                    lease_ttl_sec=ttl,
-                    dispatch_class="llm",
-                )
-            )
-            if not was_existing:
-                break
-            if task.state not in TERMINAL_STATES:
-                await self._record_materialize_skipped(
-                    pending, "duplicate_proposal_content", task_id=task.task_id, task_state=task.state
-                )
-                return
-        else:
+        created = await create_on_free_key(
+            self.tasks,
+            TaskSpec(
+                kind=pending.action_name,
+                params=params,
+                idempotency_key=raw_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="llm",
+            ),
+            spent=lambda twin: twin.state in TERMINAL_STATES,
+        )
+        if created is None:
+            await self._record_materialize_skipped(pending, "idempotency_key_exhausted", idempotency_key=raw_key)
+            return
+        task, was_existing = created
+        if was_existing:
             await self._record_materialize_skipped(
-                pending,
-                "idempotency_key_exhausted",
-                task_id=task.task_id if task is not None else "",
-                task_state=task.state if task is not None else "",
+                pending, "duplicate_proposal_content", task_id=task.task_id, task_state=task.state
             )
             return
         # The round the authoring specialist opened runs on under this task id.

@@ -412,11 +412,24 @@ class MachinePhase(CoordinatorCollaborator):
         the writeback that settles the phase's hold, so the hold would run to its allowance.
         """
         phase = str(self.shared_state.phase or "").upper()
+        if phase == _phase_state.PHASE_PRELUDE:
+            await self._ask_again_for_a_cancelled_initial_analysis()
         if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
             # Both phases hold their exit for this marker.
             await self._coord.phase_kernel.release_finished_roofline_gate()
         # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
         await self._coord.phase_sweep.resume_unsettled_sweep()
+
+    async def _ask_again_for_a_cancelled_initial_analysis(self) -> None:
+        """Request PRELUDE's initial analysis again when the task its hold names was cancelled before it analyzed."""
+        state = self.shared_state
+        prelude = self._coord.phase_prelude
+        named = (state.auto_roofline_pending_task_id or "").strip()
+        task = await self.tasks.find(named, kind=prelude.internal_analysis_kind()) if named else None
+        if task is None or task.state != "cancelled":
+            return
+        state.auto_roofline_pending_task_id = ""
+        await prelude.maybe_enqueue_prelude_initial_analysis_after_baseline()
 
     async def _drain_for_transition(self, *, prior: str, target: str, reason: str, evidence: Any) -> bool:
         """Clear the way to ``target`` and return whether the transition may commit on this tick.
