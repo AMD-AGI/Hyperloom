@@ -46,8 +46,9 @@ done
 
 # Single artefact root: everything writable defaults to $USER_DATA_PATH so
 # operators can monitor a run end-to-end by tailing one directory. Magpie
-# clone, source mirrors, and generated env / GEAK config all derive from
-# $HYPERLOOM_RUNTIME_DIR.
+# clone, source mirrors and GEAK config derive from $HYPERLOOM_RUNTIME_DIR;
+# the kernel-agent env file, which carries credentials, does not (see
+# runtime_env_derive_runtime_paths).
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -875,8 +876,7 @@ log "INFERENCEX_DEFAULT_DIR=${INFERENCEX_DEFAULT_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 # Pre-create the writable runtime root so ensure_magpie / install_kernel_agent_tools
 # never race on missing parents (Magpie's pip install -e writes egg-info
-# under MAGPIE_PATH; the kernel-agent steps write kernel-agent.env.sh into
-# HYPERLOOM_RUNTIME_DIR).
+# under MAGPIE_PATH).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
   mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
 fi
@@ -2108,6 +2108,6 @@ fi
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log ""
-log "next step: launch python3 -m hyperloom optimize. Its preflight loads"
-log "  \$KERNEL_AGENT_ENV (or \$USER_DATA_PATH/runtime/kernel-agent.env.sh)"
-log "  and stops before the optimisation loop if that file is missing or stale."
+log "next step: launch python3 -m hyperloom optimize in this container. Its preflight"
+log "  loads \$KERNEL_AGENT_ENV (the file above) and stops before the optimisation loop"
+log "  if that file is missing or stale."
