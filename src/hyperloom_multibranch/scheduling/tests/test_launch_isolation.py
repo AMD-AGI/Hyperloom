@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -35,7 +36,7 @@ from hyperloom_multibranch.scheduling.launch_isolation import (
     launch_isolation,
 )
 from hyperloom_multibranch.scheduling.local_peers import LocalCards, branch_sandboxes
-from hyperloom_multibranch.specialist import dev_sandbox
+from hyperloom_multibranch.specialist import agent_watch, dev_sandbox
 from hyperloom_multibranch.specialist.agent_sandbox import FrameworkProtection
 
 ACCOUNT_RUN_AS = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="/home/hl", drop_tool="setpriv")
@@ -189,8 +190,12 @@ async def test_the_record_of_the_sandboxes_is_what_a_dev_command_on_this_host_re
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The dev sandbox the local backend builds runs one command: unconfined, it reads this process's environment,
-    and the record must say so; confined, it cannot, and the record must not."""
+    and the record must say so; confined, it cannot, and the record must not. The watch the sandbox starts for this
+    process is ended with the test: left running, it is a child every later test of this process counts."""
 
+    watches: dict[int, tuple[subprocess.Popen[bytes], Path]] = {}
+    monkeypatch.setattr(agent_watch, "_watches", watches)
+    monkeypatch.setattr(agent_watch, "_sandboxes", {})
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "local-tmp"))
     (tmp_path / "local-tmp").mkdir()
     monkeypatch.setattr(dev_sandbox, "framework_protection", FrameworkProtection)
@@ -203,6 +208,9 @@ async def test_the_record_of_the_sandboxes_is_what_a_dev_command_on_this_host_re
         ran = await sandbox.run(REACHES.format(pid=os.getpid()), tmp_path, {}, 60)
     finally:
         await sandbox.stop()
+        for process, _registry in watches.values():
+            process.terminate()
+            process.wait(timeout=30)
 
     assert ran.returncode == 0, ran.output
     reached = ran.output.split()[-1] == "reached"
