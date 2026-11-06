@@ -261,11 +261,9 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
     from hyperloom.orchestrator.actions.executors._workload_envs import (
         apply_scriptable_runtime_defaults,
     )
-    from hyperloom.orchestrator.actions.executors.bypass_scriptable import (
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers import (
         DeclaredLeversError,
         load_declared_levers,
-        resolve_scriptable_script,
-        scriptable_script_candidates,
     )
 
     try:  # a malformed declaration must fail here, not surface later as empty_grid
@@ -275,25 +273,14 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
         sys.exit(2)
 
     bench: dict[str, Any] = {"framework": "custom"}
-    envs: dict[str, Any] = {}
-    apply_scriptable_runtime_defaults(
-        bench,
-        envs,
-        gpu_type=gpu_type,
-        explicit_benchmark_script=False,
-    )
-    runner_type = str(bench.get("runner_type") or "mi355x")
-    inferencex_root = (
-        os.environ.get("INFERENCEX_PATH", "").strip() or os.environ.get("MAGPIE_INFERENCEX_PATH", "").strip()
-    )
-    script = resolve_scriptable_script("custom", runner_type, inferencex_root, bench)
-    if script is not None:
+    apply_scriptable_runtime_defaults(bench, {}, gpu_type=gpu_type, explicit_benchmark_script=False)
+    if bench.get("benchmark_script"):
         return
-    name = f"custom_{runner_type}.sh"
-    candidates = scriptable_script_candidates("custom", runner_type, inferencex_root, bench)
-    tried = "\n".join(f"  - {path}" for path in candidates) or "  (none)"
+    scripts_dir = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    expected = Path(scripts_dir) / f"custom_{bench['runner_type']}.sh"
     print(
-        f"ERROR: --framework custom could not resolve a benchmark entrypoint ({name}). Tried:\n{tried}",
+        f"ERROR: --framework custom could not resolve a benchmark entrypoint: there is no {expected}, "
+        f"and {scripts_dir or 'the scripts dir'} does not hold exactly one .sh script.",
         file=sys.stderr,
     )
     sys.exit(2)
