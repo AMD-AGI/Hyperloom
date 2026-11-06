@@ -52,7 +52,7 @@ class OneCardEach:
         self.released: list[str] = []
 
     def check(self, cards: int) -> None:
-        del cards
+        """Refuses no lease: every job has a card of its own."""
 
     async def lease(self, holder: str, cards: int, root: Path, *, charge: LeaseCharge) -> BranchLease:
         del holder, cards

@@ -17,7 +17,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.coerce import to_float, to_int, to_str_list
-from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.gain_math import accuracy_passed, gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
@@ -25,6 +25,7 @@ from hyperloom.common.perf_metric import (
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
+    GRADED_INTVTY_P50_CHECKPOINT,
     GRADED_OUTPUT,
     VERDICT_REVERT,
     GradingAnchor,
@@ -57,17 +58,18 @@ from ..stop_attribution import (
     stopped_by_the_run_class,
     variant_budget_stop,
 )
-from ._accuracy_gate import (
-    accuracy_passed,
-    parse_eval_results,
-)
+from ._accuracy_gate import parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
 from .bypass_scriptable import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
-from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
+from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
+from ._agentx_checkpoint import round_checkpoint
+from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
 from .benchmark_result import double_run_requested
+from .explore_prefilter._prefilter import prefilter_round, record_decision_round
+from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, _is_config_replay_variant, is_stack_revalidation
 from ._grid_runner import (
     GridLaunch,
     GridRecipe,
@@ -118,8 +120,6 @@ log = logging.getLogger(__name__)
 
 _now_iso = functools.partial(now_iso, "auto")
 
-STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
-
 # ``skipped_dup`` reason for a variant whose launch the session already measured on the same stack.
 ALREADY_MEASURED: str = "already_measured"
 # ... for one that starts the stack's own server, or a server this round already launched.
@@ -128,10 +128,6 @@ ROUND_DUP: str = "round_dup"
 
 #: The provenance of a grid row that names none: the model proposed it directly.
 _DIRECT_PROVENANCE = "llm_direct"
-
-
-def is_stack_revalidation(params: dict | None) -> bool:
-    return str((params or {}).get("source") or "") == STACK_REVALIDATE_SOURCE
 
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
@@ -300,14 +296,6 @@ def _framework_lever_attributions(
             }
         )
     return out
-
-
-_CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
-
-
-def _is_config_replay_variant(variant: Any) -> bool:
-    """Whether a variant replays an already-validated config verbatim."""
-    return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
 def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
@@ -717,6 +705,9 @@ def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None
 class _ExploreRound:
     """One explore round: the stack it accumulates, the variants it measures, and the ledgers it writes."""
 
+    projection: dict[str, Any] | None = None
+    prefilter_dropped = 0
+
     def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path) -> None:
         extra = getattr(ctx, "extra", None) or {}
         self.ctx = ctx
@@ -797,10 +788,11 @@ class _ExploreRound:
         self.untested = 0
         self.lease: Any = None
 
-    async def run(self) -> dict[str, Any]:
+    async def run(self, session_dir: Path | None = None) -> dict[str, Any]:
         self._resolve_grid()
         self._shape_runnable()
         self._open_schedule()
+        round_ctx = await prefilter_round(self, session_dir)
         # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
         self.lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(self.config_path)) if self.runnable else None
         try:
@@ -817,7 +809,8 @@ class _ExploreRound:
                     if self.run_stop is not None:
                         break
                     if measurement is not None:
-                        self._settle(gv, run_gv, measurement, slot)
+                        row = self._settle(gv, run_gv, measurement, slot)
+                        await record_decision_round(round_ctx, gv, measurement, row)
                 finally:
                     # Reap THIS variant's persistent server on every exit path (idempotent + no-op when reuse was
                     # ineligible).
@@ -1214,7 +1207,9 @@ class _ExploreRound:
                 ready_server_log=warmup.server_log_path if warmup is not None else None,
             ),
             stop=GridStop(
-                session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.decision_expected_sec
+                session_deadline_sec=self.session_deadline_sec,
+                variant_expected_sec=self.decision_expected_sec,
+                checkpoint=round_checkpoint(self.running_perf),
             ),
         )
         return None if self._stopped_by_the_run(results[0], gv, idx, "decision") else results[0]
@@ -1281,7 +1276,7 @@ class _ExploreRound:
 
     # ----- the verdict -----------------------------------------------------
 
-    def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> None:
+    def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> dict[str, Any]:
         # Rule on this variant's measurement and fold a KEEP onto the round's stack.
         #
         # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the threshold floor
@@ -1293,6 +1288,7 @@ class _ExploreRound:
             GRADED_INTVTY: r.intvty_p90,
             "tpot_p90_ms": r.tpot_p90_ms,
             GRADED_INTVTY_P50: r.intvty_p50,
+            GRADED_INTVTY_P50_CHECKPOINT: r.intvty_p50_checkpoint,
             GRADED_DURATION: r.duration_seconds,
             GRADED_ERROR_RATE: r.request_error_rate,
             **constraint_fields(r),
@@ -1325,6 +1321,7 @@ class _ExploreRound:
         self._record(gv, row)
         if row["outcome"] == "KEEP":
             self.winners.append(self._keep(gv, run_gv, r, row, variant_meas))
+        return row
 
     def _variant_facts(self, gv: GridVariant) -> dict[str, Any]:
         return {
@@ -1358,7 +1355,9 @@ class _ExploreRound:
         graded_gain: float | None = None
         outcome = TS_FAILED
         reason = ""
-        if r.status != "succeeded":
+        if r.error_class == AGENTX_EARLY_STOP_ERROR_CLASS:
+            outcome, reason = "REVERT", f"{AGENTX_EARLY_STOP_ERROR_CLASS} ({r.error})"
+        elif r.status != "succeeded":
             reason = (r.error or "")[-1200:] or "no_measurement"
         elif graded.degrade_reason:
             # Same fail-closed rule as ``lift_to_current_best``: an AgentX session that could not grade on
@@ -1577,9 +1576,10 @@ class _ExploreRound:
             )
         best = max(self.winners, key=lambda w: to_float(w.get("gain_pct"), 0.0) or 0.0, default=None)
         best_gain_pct = (to_float(best.get("gain_pct"), 0.0) or 0.0) if best else 0.0
-        # A round whose every variant already had its verdict, or only restated the stack, is answered, as if
-        # measured again.
-        answered = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
+        # A round whose every variant a pre-filter dropped, already had its verdict, or only restated the stack is
+        # answered, as if measured again.
+        offered = len(self.runnable) + self.prefilter_dropped
+        answered = bool(offered) and self.judged_without_measuring + self.prefilter_dropped == offered
         measured = any(t.get("outcome") in ("KEEP", "REVERT") for t in self.tested.values())
         status = "succeeded" if measured or self.winners or answered else "failed"
         return {
@@ -1609,7 +1609,8 @@ class _ExploreRound:
             "framework": self.framework,
             # gain_pct for the audit trail (best gain of the batch).
             "gain_pct": best_gain_pct,
-            "explore_grid_exhausted": not self.runnable,
+            "explore_grid_exhausted": not self.runnable and not self.prefilter_dropped,
+            "projection": self.projection,
         }
 
     def _budget_error(self, status: str) -> dict[str, Any]:
@@ -1665,7 +1666,7 @@ class ExploreExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
         try:
-            return await _ExploreRound(ctx, params, output_root).run()
+            return await _ExploreRound(ctx, params, output_root).run(self.session_dir)
         except _RoundRefused as refusal:
             return refusal.result
 

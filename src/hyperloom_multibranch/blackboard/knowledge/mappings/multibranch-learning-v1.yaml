@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# multi-branch blackboard learnings (multibranch.notebook.learnings.v1) -> multibranch-learning-v1 Experiences.
+#
+# One Experience per learning a specialist wrote and did not later supersede. The blackboard export gives each the
+# session's conditions, whether cited tests back it, and how each came out; this mapping projects them.
+format: hyperloom-kb.collect.v2
+description: multi-branch specialists' learnings
+declaration: ../declarations/multibranch-learning-v1.yaml
+producer:
+  name: hyperloom-multibranch
+  version: learnings-export-v1
+  snapshot_version: multibranch.notebook.learnings.v1
+
+skip:
+  - reason: unsupported_learnings_export_format
+    when: {ne: [{text: $doc.format}, multibranch.notebook.learnings.v1]}
+
+units:
+  - each: $doc.learnings
+    as: learning
+
+unit_id: {first: [{text: $learning.entry_id}, unknown-learning]}
+
+let:
+  run_id: {token: $doc.metadata.session_id}
+  entry_id: {text: $learning.entry_id}
+  content: {squash: $learning.content}
+  evidence:
+    each: $learning.evidence
+    as: line
+    value: {squash: $line}
+
+require:
+  - reason: learning id is missing
+    check: {present: $entry_id}
+  - reason: metadata.session_id is missing
+    check: {present: $run_id}
+  - reason: learning is missing or too short to use
+    check: {min_length: [$content, 20]}
+
+experience:
+  run_id: $run_id
+  seq: {hash48: [learning, $entry_id]}
+  created_at: $learning.created_at
+  completed_at: $learning.created_at
+  identity: $learning.identity
+  objective: specialist_learning@v1
+  provenance:
+    source_ref: "multibranch:{$run_id}:{$entry_id}"
+    extra:
+      object:
+        entry_id: $entry_id
+        branch: {text: $learning.branch}
+        request_ids: $learning.request_ids
+  change:
+    summary: $content
+    learning_fingerprint: {sha256: {lower: $content}}
+    kind: {text: $learning.kind}
+    target: {text: $learning.target}
+    mechanism: {text: $learning.mechanism}
+  outcome:
+    decision:
+      if: {eq: [$learning.measured, true]}
+      then: measured
+      else: unmeasured
+    evidence: $evidence

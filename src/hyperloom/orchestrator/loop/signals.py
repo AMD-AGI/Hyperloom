@@ -20,6 +20,12 @@ __all__ = ["SignalDrain"]
 #: Signals that ask the coordinator to stop.
 STOP_SIGNALS: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
+#: How often the loop puts back a handler that native code replaced behind the interpreter's back. Ray's core worker
+#: installs abseil's failure handler over SIGTERM when it connects, which aborts the process 3 s after a SIGTERM, and
+#: resets SIGTERM to SIG_DFL when it disconnects -- both from threads where Python cannot install a handler; only the
+#: main thread, the loop's, can.
+_RECLAIM_INTERVAL_SEC = 1.0
+
 
 class SignalDrain:
     """Capture stop signals into a pipe and fan them out to loop and tick."""
@@ -50,6 +56,7 @@ class SignalDrain:
         self._previous: dict[int, Any] = {}
         self._previous_wakeup: int = -1
         self._thread: threading.Thread | None = None
+        self._reclaim_timer: asyncio.TimerHandle | None = None
         self.armed = False
         """bool: Whether handlers were installed."""
 
@@ -75,11 +82,19 @@ class SignalDrain:
             daemon=True,
         )
         self._thread.start()
+        self._reclaim_timer = self._loop.call_later(_RECLAIM_INTERVAL_SEC, self._reclaim)
         self.armed = True
 
     @staticmethod
     def _noop_handler(_signum: int, _frame: FrameType | None) -> None:
         """Accept the signal so the interpreter writes its wakeup byte."""
+
+    def _reclaim(self) -> None:
+        """Reinstall every handler the interpreter still records as the drain's, then come back for the next one."""
+        for sig in self._previous:
+            if signal.getsignal(sig) is self._noop_handler:
+                signal.signal(sig, self._noop_handler)
+        self._reclaim_timer = self._loop.call_later(_RECLAIM_INTERVAL_SEC, self._reclaim)
 
     def _drain(self) -> None:
         """Block on the wakeup pipe, publishing every arrival until it closes."""
@@ -117,6 +132,9 @@ class SignalDrain:
 
     def close(self) -> frozenset[int]:
         """Stop the drain and return every signal captured before closure."""
+        timer, self._reclaim_timer = self._reclaim_timer, None
+        if timer is not None:
+            timer.cancel()
         restore_wakeup = self._previous_wakeup != -1 or bool(self._previous)
         for sig, handler in list(self._previous.items()):
             try:

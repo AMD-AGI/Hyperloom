@@ -1,12 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The user-turn requests the orchestration planner sends: dispatch, single-plan synthesis, partition and revision."""
+"""The user-turn requests the orchestration planner sends -- dispatch, single-plan synthesis, partition and revision --
+and the answers dispatch and partition are held to."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Literal
 
+from pydantic import Field, create_model
+
+from kernelforge.agent_backends.structured_output import AgentAnswer
 from kernelforge.workflows.forge_loop.roles.contracts import (
     OrchestrationContext,
     PlanCriticOutcome,
@@ -16,27 +21,58 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
 )
 from kernelforge.workflows.forge_loop.roles.plan_prompts import REVISION_SYSTEM_PROMPT
 
-PARTITION_OUTPUT_SCHEMA = {
-    "lanes": [
-        {
-            "ground": ("The files, functions and mechanisms this lane owns and may edit"),
-            "reason": "Why this is one session's worth of work",
-            "joint": (
-                "true when this lane owns a change together with "
-                "the launch configuration that serves it, or a "
-                "move no single region contains"
-            ),
-            "fallback": (
-                "For a joint lane: the smaller change inside the same ground to land if the main step is abandoned"
-            ),
-        }
-    ],
-    "cross_cutting_move": {
-        "move": ("The largest move the evidence supports that no single region contains"),
-        "lane_id": ("The 1-based lane that owns it, or 0 if no lane does"),
-        "unassigned_reason": ("Why no lane owns it, when no lane does"),
-    },
-}
+
+class LaneGroundAnswer(AgentAnswer):
+    """One lane of a round partition: the ground it owns and may edit."""
+
+    ground: str = Field(description="The files, functions and mechanisms this lane owns and may edit.")
+    reason: str = Field(description="Why this is one session's worth of work.")
+    joint: bool = Field(
+        description=(
+            "True when this lane owns a change together with the launch configuration that serves it, or a move no "
+            "single region contains."
+        )
+    )
+    fallback: str = Field(
+        description=(
+            "For a joint lane: the smaller change inside the same ground to land if the main step is abandoned. "
+            "Empty for any other lane."
+        )
+    )
+
+
+class CrossCuttingMoveAnswer(AgentAnswer):
+    """The largest move the evidence supports that no single region contains, and who owns it."""
+
+    move: str = Field(description="The move, or empty when the evidence supports none.")
+    lane_id: int = Field(description="The 1-based lane that owns the move, or 0 when no lane does.")
+    unassigned_reason: str = Field(description="Why no lane owns the move, when no lane does; empty otherwise.")
+
+
+class PartitionAnswer(AgentAnswer):
+    """How one round is divided into lanes that do not edit the same code."""
+
+    lanes: list[LaneGroundAnswer]
+    cross_cutting_move: CrossCuttingMoveAnswer
+
+
+def dispatch_answer_model(role_ids: tuple[str, ...], case_ids: tuple[str, ...]) -> type[AgentAnswer]:
+    """The specialist assignments one round's dispatch asks for, naming only the roles registered and the cases scored."""
+    assignment = create_model(
+        "DispatchAssignment",
+        __base__=AgentAnswer,
+        role_id=(Literal[role_ids], Field(description="A registered specialist role.")),
+        target_case_ids=(
+            list[Literal[case_ids]],
+            Field(description="The scored cases this specialist analyses; empty for every scored case."),
+        ),
+        reason=(str, Field(description="Why this specialist is required.")),
+    )
+    return create_model(
+        "DispatchAnswer",
+        __base__=AgentAnswer,
+        assignments=(list[assignment], Field(description="One entry per specialist the round needs.")),
+    )
 
 
 def dispatch_payload(context: OrchestrationContext, definitions: Mapping[str, SpecialistDefinition]) -> dict:
@@ -68,15 +104,6 @@ def dispatch_payload(context: OrchestrationContext, definitions: Mapping[str, Sp
         ),
         "context": context.to_prompt_dict(),
         "available_specialists": [definitions[role_id].to_dict() for role_id in sorted(definitions)],
-        "output_schema": {
-            "assignments": [
-                {
-                    "role_id": "registered-role-id",
-                    "target_case_ids": ["case-id"],
-                    "reason": "Why this specialist is required",
-                }
-            ],
-        },
     }
 
 
