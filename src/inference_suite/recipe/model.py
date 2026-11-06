@@ -4,21 +4,23 @@
 """What recipe resolution reads and what each source answers with.
 
 A source is read from a snapshot taken once at PRELUDE: a :class:`RepoBundle` holds the files of one repository at
-one commit, and whatever needed upstream code to compute (InferenceX's variant selection and golden acceptance) is
-recorded beside it as data, so resolving runs no external code. A source answers a query with the launches it holds
+one commit, an :class:`ApiResponse` one HTTP response of a site that has no commit, and whatever needed upstream code
+to compute (InferenceX's variant selection and golden acceptance) is recorded beside them as data, so resolving runs
+no external code. A source answers a query with the launches it holds
 for it (:class:`SourceLaunch`), or with why it holds none (:class:`SourceMiss`).
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom_common.contract_fields import ContractFields
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from inference_suite.contracts.base_launch import GoldenCurve, LaunchSource, SourceKind, Topology
+from inference_suite.contracts.base_launch import GoldenCurve, LaunchSource, SourceApi, SourceKind, Topology
 
 
 class RecipeSourceError(ValueError):
@@ -31,6 +33,12 @@ SGLANG_ENTRYPOINT = ("python3", "-m", "sglang.launch_server")
 #: The sglang server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
 SGLANG_RUNNER_OWNED = frozenset(
     {"model-path", "served-model-name", "host", "port", "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port"}
+)
+
+VLLM_ENTRYPOINT = ("vllm", "serve")
+#: The vLLM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
+VLLM_RUNNER_OWNED = frozenset(
+    {"model", "served-model-name", "host", "port", "headless", "master-addr", "nnodes", "node-rank"}
 )
 
 
@@ -70,6 +78,42 @@ class RepoBundle:
     def from_document(cls, document: object) -> RepoBundle:
         fields = _FIELDS.known(document, ("repo", "commit", "files"), "a repository bundle")
         return cls(fields.get("repo"), fields.get("commit"), fields.get("files"))
+
+
+@dataclass(frozen=True)
+class ApiResponse:
+    """One HTTP response a source reads: its status and body as fetched from ``url`` at ``fetched_unix``."""
+
+    url: str
+    status: int
+    body: str
+    fetched_unix: int
+
+    def __post_init__(self) -> None:
+        _FIELDS.text(self.url, "a response's url")
+        _FIELDS.integer(self.status, "a response's status", minimum=100)
+        if not isinstance(self.body, str):
+            raise RecipeSourceError(f"a response's body must be text, got {type(self.body).__name__}")
+        _FIELDS.integer(self.fetched_unix, "a response's fetch time", minimum=0)
+
+    def provenance(self) -> SourceApi:
+        return SourceApi(self.url, hashlib.sha256(self.body.encode()).hexdigest(), self.fetched_unix)
+
+    def json(self) -> Mapping[str, Any]:
+        """The body as a JSON object."""
+        try:
+            document = json.loads(self.body)
+        except ValueError as error:
+            raise RecipeSourceError(f"{self.url} answered with no JSON: {error}") from error
+        return _FIELDS.mapping(document, f"the response of {self.url}")
+
+    def to_document(self) -> dict[str, object]:
+        return {"url": self.url, "status": self.status, "body": self.body, "fetched_unix": self.fetched_unix}
+
+    @classmethod
+    def from_document(cls, document: object) -> ApiResponse:
+        fields = _FIELDS.known(document, ("url", "status", "body", "fetched_unix"), "an API response")
+        return cls(fields.get("url"), fields.get("status"), fields.get("body"), fields.get("fetched_unix"))
 
 
 @dataclass(frozen=True)
@@ -215,6 +259,7 @@ class SourceMiss:
 
 
 __all__ = [
+    "ApiResponse",
     "InferencexSelection",
     "InferencexSnapshot",
     "RecipeSourceError",
@@ -224,5 +269,7 @@ __all__ = [
     "SourceGolden",
     "SourceLaunch",
     "SourceMiss",
+    "VLLM_ENTRYPOINT",
+    "VLLM_RUNNER_OWNED",
     "boards_interchangeable",
 ]
