@@ -30,9 +30,11 @@ export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 
 # install.sh (IR-2) regenerates kernel-agent.env.sh in a directory private to this account on
 # the container's own disk ($KERNEL_AGENT_ENV; never under $USER_DATA_PATH). Run install, then
-# source the generated file (both idempotent).
+# source the generated file (both idempotent). runtime_env.sh prints the file only when install.sh
+# wrote it in this container and no other account could have changed it; otherwise it says why and
+# nothing is sourced.
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "$(. "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)"
+kernel_agent_env_file="$(. "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)" && . "$kernel_agent_env_file"
 
 # --- workload (override per run) ---
 export MODEL_PATH="${MODEL_PATH:?set MODEL_PATH before sourcing}"

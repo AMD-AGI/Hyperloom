@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -35,7 +37,7 @@ import pytest
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import preflight_env
 
-from ._kernel_tools_harness import ASSETS, INSTALL_SH, sourceable_kernel_tools
+from ._kernel_tools_harness import ASSETS, INSTALL_SH, RUNTIME_ENV_SH, sourceable_kernel_tools
 
 _DERIVATION_END = "\nruntime_env_derive_runtime_paths\n"
 _DERIVED_KEYS = ("HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV", "HYPERLOOM_ROOT")
@@ -96,6 +98,13 @@ def _private_env_file(runtime_dir: str) -> Path:
 
 def _kernel_env(workspace: Path) -> Path:
     return _private_env_file(f"{workspace}/runtime")
+
+
+def _stand_in_installed_file(env_file: Path) -> None:
+    """Leave a private file where install.sh writes one: the documented line prints only a file that is there."""
+    env_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    env_file.write_text(f"export ANTHROPIC_BASE_URL='{_GATEWAY}'\n", encoding="utf-8")
+    env_file.chmod(0o600)
 
 
 def _legacy_env(workspace: Path) -> Path:
@@ -350,6 +359,7 @@ def test_install_preflight_and_the_documented_source_line_select_the_same_env_fi
     expected = str(_private_env_file(runtime_dir.format(**names))) if runtime_dir else shell["KERNEL_AGENT_ENV"]
 
     installed = _run_installer(_installer(tmp_path, print_env_file=True), checkout, shell).stdout.splitlines()[-1]
+    _stand_in_installed_file(Path(expected))
     documented = subprocess.run(
         ["bash", "-c", '. "$1" && runtime_env_kernel_agent_env_path', "bash", str(ASSETS / "runtime_env.sh")],
         cwd=checkout,
@@ -390,27 +400,15 @@ def test_the_env_file_is_written_0600_into_a_0700_directory_of_its_own_off_the_w
     assert not _legacy_env(workspace).exists()
 
 
-def test_preflight_and_the_documented_source_line_read_the_file_install_wrote(tmp_path, sessions):
+def test_preflight_and_the_documented_source_lines_read_the_file_install_wrote(tmp_path, sessions):
     checkout, workspace, _ = sessions
     shell = {"USER_DATA_PATH": str(workspace)}
     _install(tmp_path, checkout, workspace)
+    _link_assets(checkout)
 
-    sourced = subprocess.run(
-        [
-            "bash",
-            "-c",
-            '. "$(. "$1"; runtime_env_kernel_agent_env_path)" && printf "%s\\n" "$KERNEL_AGENT_ENV" "$ANTHROPIC_BASE_URL"',
-            "bash",
-            str(ASSETS / "runtime_env.sh"),
-        ],
-        cwd=checkout,
-        env={key: value for key, value in _caller_env(checkout, shell).items() if not key.startswith("ANTHROPIC_")},
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.splitlines()
+    sourced = [_source_documented(checkout, shell, where, line) for where, line in _documented_lines()]
 
-    assert sourced == [str(_kernel_env(workspace)), _GATEWAY]
+    assert all(run[:3] == (0, _GATEWAY, str(_kernel_env(workspace))) for run in sourced), sourced
     assert _preflight_loads(checkout, shell) == (str(_kernel_env(workspace)), _GATEWAY)
 
 
@@ -489,12 +487,72 @@ def test_a_directory_other_accounts_can_write_is_refused(tmp_path, sessions):
 
 _PLANTED_VALUES = ("https://planted.invalid", "/planted/runner")
 _PLANTED = f"export ANTHROPIC_BASE_URL='{_PLANTED_VALUES[0]}'\nexport GEAK_E2E_RUNNER='{_PLANTED_VALUES[1]}'\n"
-_SLURM_SOURCE_LINE = next(
-    line
-    for line in (ASSETS / "slurm" / "_incontainer.sh.in").read_text(encoding="utf-8").splitlines()
-    if "runtime_env_kernel_agent_env_path" in line
-)
 _REFUSAL_ADVICE = "Set KERNEL_AGENT_ENV to a file in such a directory on this container's own disk, or TMPDIR to such"
+_REPO = ASSETS.parents[3]
+_DOC_SUFFIXES = frozenset({".md", ".rst", ".sh", ".in", ".example", ".sbatch", ".template"})
+# Where the line is documented today; the scan below must at least find these, so it cannot pass by finding nothing.
+_DOCUMENTED_IN = frozenset(
+    {
+        "src/hyperloom/inference_optimizer/assets/setup_env.sh.example",
+        "src/hyperloom/inference_optimizer/assets/slurm/_incontainer.sh.in",
+        "docs/reference/upgrade.md",
+    }
+)
+
+
+def _documented_lines() -> list[tuple[str, str]]:
+    """Every line the docs and the shipped assets give for loading the file, as (file, the line a shell runs).
+
+    Scanned rather than listed, so a line documented later is held to the same tests; a diff's leading ``+`` is dropped.
+    """
+    found: list[tuple[str, str]] = []
+    candidates = {*(_REPO / "docs").rglob("*"), *(_REPO / "src" / "hyperloom").rglob("*"), *_REPO.glob("*")}
+    for path in sorted(candidates):
+        where = path.relative_to(_REPO)
+        if path.suffix not in _DOC_SUFFIXES or path == RUNTIME_ENV_SH or "tests" in where.parts or not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            text = line.strip().removeprefix("+ ").strip()
+            if "runtime_env_kernel_agent_env_path" in text and not text.startswith("#"):
+                found.append((where.as_posix(), text))
+    assert {where for where, _ in found} >= _DOCUMENTED_IN, found
+    return found
+
+
+def _link_assets(checkout: Path, assets: Path = ASSETS) -> None:
+    """Put ``assets`` where the documented lines look from the checkout: the src layout, and the docs' older one."""
+    for package in (checkout / "src" / "hyperloom", checkout / "hyperloom"):
+        (package / "inference_optimizer").mkdir(parents=True)
+        (package / "inference_optimizer" / "assets").symlink_to(assets)
+
+
+def _source_documented(
+    checkout: Path, shell: dict[str, str], where: str, line: str
+) -> tuple[int, str | None, str | None, str]:
+    """Run one documented line from the checkout as its file runs it, the slurm job under ``set -euo pipefail``.
+
+    Returns the line's status, the ``ANTHROPIC_BASE_URL`` and ``KERNEL_AGENT_ENV`` it left (None when the job stopped
+    at the line), and stderr.
+    """
+    prelude = "set -euo pipefail\n" if where.endswith(".sh.in") else ""
+    report = 'printf "status %s loaded %s from %s\\n" "$?" "${ANTHROPIC_BASE_URL-}" "${KERNEL_AGENT_ENV-}"'
+    proc = _shell_reader(checkout, shell, f"{prelude}{line}\n{report}\n")
+    ran_on = re.fullmatch(r"status (\d+) loaded (.*) from (.*)\n", proc.stdout)
+    if ran_on is None:
+        assert proc.returncode != 0 and not proc.stdout, (where, proc)
+        return proc.returncode, None, None, proc.stderr
+    return int(ran_on[1]), ran_on[2], ran_on[3], proc.stderr
+
+
+def _assert_every_documented_line_stops(checkout: Path, shell: dict[str, str], *said: str) -> None:
+    """Every documented line fails with the helper's message as its only output and loads nothing; the job stops."""
+    for where, line in _documented_lines():
+        status, loaded, _, err = _source_documented(checkout, shell, where, line)
+        assert not loaded, (where, loaded)
+        assert status != 0, where
+        assert len(err.splitlines()) == 1, (where, err)
+        assert all(part in err for part in said), (where, err)
+        assert not any(value in err for value in _PLANTED_VALUES), where
 
 
 def _plant(env_file: Path, plant: str) -> str:
@@ -559,22 +617,17 @@ def _shell_reader(checkout: Path, shell: dict[str, str], script: str) -> subproc
     ],
 )
 def test_a_planted_env_file_is_refused_by_every_reader(tmp_path, sessions, capsys, plant):
-    """Another account that works out the predictable path cannot get its file sourced: the documented source line,
+    """Another account that works out the predictable path cannot get its file sourced: the documented source lines,
     the slurm job and preflight all refuse it, name the entry and why, and never show what it holds; install.sh
     refuses to write into a planted directory."""
     checkout, workspace, _ = sessions
     shell = {"USER_DATA_PATH": str(workspace)}
     refusal = _plant(_kernel_env(workspace), plant)
-    assets = checkout / "src" / "hyperloom" / "inference_optimizer"
-    assets.mkdir(parents=True)
-    (assets / "assets").symlink_to(ASSETS)
+    _link_assets(checkout)
 
-    documented = _shell_reader(
-        checkout,
-        shell,
-        '. "$(. "$1"; runtime_env_kernel_agent_env_path)" && printf "sourced %s\\n" "$ANTHROPIC_BASE_URL"',
+    _assert_every_documented_line_stops(
+        checkout, shell, f"refusing the kernel-agent env file {_kernel_env(workspace)}: {refusal}; ", _REFUSAL_ADVICE
     )
-    slurm = _shell_reader(checkout, shell, f'set -euo pipefail\n{_SLURM_SOURCE_LINE}\nprintf "sourced\\n"\n')
     caller = {key: value for key, value in _caller_env(checkout, shell).items() if not key.startswith("ANTHROPIC_")}
     with mock.patch.dict(os.environ, caller, clear=True):
         preflight_env._load_dotenv_fallback()
@@ -583,12 +636,6 @@ def test_a_planted_env_file_is_refused_by_every_reader(tmp_path, sessions, capsy
         preflight_loaded = os.environ.get("ANTHROPIC_BASE_URL"), os.environ.get("GEAK_E2E_RUNNER")
     preflight_err = capsys.readouterr().err
 
-    for proc in (documented, slurm):
-        assert proc.returncode != 0
-        assert "sourced" not in proc.stdout
-        assert f"refusing the kernel-agent env file {_kernel_env(workspace)}: {refusal}; " in proc.stderr
-        assert _REFUSAL_ADVICE in proc.stderr
-        assert not any(value in proc.stdout + proc.stderr for value in _PLANTED_VALUES)
     assert preflight.value.code == 2
     assert f"refusing the kernel-agent env file {_kernel_env(workspace)}: {refusal}; " in preflight_err
     assert _REFUSAL_ADVICE in preflight_err
@@ -598,6 +645,71 @@ def test_a_planted_env_file_is_refused_by_every_reader(tmp_path, sessions, capsy
         installed = _installer_run(_installer(tmp_path), checkout, shell)
         assert installed.returncode != 0
         assert f"refusing the kernel-agent env file {_kernel_env(workspace)}: {refusal}; " in installed.stderr
+
+
+@pytest.mark.parametrize("missing", ["workspace", "directory", "file"])
+def test_a_reader_refuses_an_env_file_install_has_not_written(sessions, missing):
+    """A path printed for a name that does not exist yet would be sourced after another account created it there, so
+    the helper prints nothing and fails, saying to run install.sh in this container first; every documented line then
+    stops with that message alone rather than sourcing an empty name."""
+    checkout, workspace, _ = sessions
+    env_file = _kernel_env(workspace)
+    shell = {} if missing == "workspace" else {"USER_DATA_PATH": str(workspace)}
+    if missing == "file":
+        env_file.parent.mkdir(mode=0o700)
+    _link_assets(checkout)
+    if missing == "workspace":
+        said = (
+            "no kernel-agent env file to load: none of KERNEL_AGENT_ENV, HYPERLOOM_RUNTIME_DIR, USER_DATA_PATH is set"
+        )
+    else:
+        said = f"no kernel-agent env file at {env_file}: {env_file.parent if missing == 'directory' else env_file} does"
+
+    helper = _shell_reader(checkout, shell, '. "$1" && runtime_env_kernel_agent_env_path')
+
+    assert (helper.returncode, helper.stdout) == (1, "")
+    assert said in helper.stderr
+    assert "run install.sh in this container first" in helper.stderr
+    _assert_every_documented_line_stops(checkout, shell, said, "run install.sh in this container first")
+    assert not env_file.exists()
+
+
+# runtime_env.sh as shipped, with another account creating the file's directory and the file the moment the helper has
+# answered, before the caller's `.` runs: the window a path printed for a missing name leaves open.
+_RACE_RUNTIME_ENV = """. {shipped}
+eval "_answered_$(declare -f runtime_env_kernel_agent_env_path)"
+runtime_env_kernel_agent_env_path() {{
+  local status=0
+  _answered_runtime_env_kernel_agent_env_path "$@" || status=$?
+  mkdir -p -m 700 -- "${{RACE_FILE%/*}}" && printf '%s' "$RACE_PLANT" > "$RACE_FILE" && chmod 600 -- "$RACE_FILE"
+  [ "$(id -u)" != 0 ] || chown -R 65534:65534 -- "${{RACE_FILE%/*}}"
+  return "$status"
+}}
+"""
+
+
+def test_a_file_planted_after_the_helper_answered_is_never_sourced(tmp_path, sessions):
+    """The race: the helper runs while the directory does not exist, then another account (uid 65534 when the test
+    runs as root) creates it and the file before the caller sources what the helper printed. The helper has already
+    failed and printed nothing, so no documented line loads what was planted."""
+    checkout, workspace, _ = sessions
+    env_file = _kernel_env(workspace)
+    shell = {"USER_DATA_PATH": str(workspace), "RACE_FILE": str(env_file), "RACE_PLANT": _PLANTED}
+    racing = tmp_path / "racing-assets"
+    racing.mkdir()
+    (racing / "runtime_env.sh").write_text(
+        _RACE_RUNTIME_ENV.format(shipped=shlex.quote(RUNTIME_ENV_SH.as_posix())), encoding="utf-8"
+    )
+    _link_assets(checkout, racing)
+
+    for where, line in _documented_lines():
+        shutil.rmtree(env_file.parent, ignore_errors=True)
+        status, loaded, _, err = _source_documented(checkout, shell, where, line)
+        assert env_file.is_file(), f"{where}: the plant never landed, so the window was not exercised"
+        assert not loaded, (where, loaded)
+        assert status != 0, where
+        assert f"no kernel-agent env file at {env_file}: {env_file.parent} does not exist" in err, (where, err)
+        assert not any(value in err for value in _PLANTED_VALUES), where
 
 
 class _Parsed(Exception):
@@ -654,6 +766,7 @@ def test_install_preflight_and_the_documented_source_line_key_the_same_absolute_
     monkeypatch.chdir(tmp_path)
 
     installed = _installer_run(_installer(tmp_path, print_env_file=True), checkout, shell, cwd=cwd)
+    _stand_in_installed_file(Path(expected))
     documented = subprocess.run(
         ["bash", "-c", '. "$1" && runtime_env_kernel_agent_env_path', "bash", str(ASSETS / "runtime_env.sh")],
         cwd=cwd,
