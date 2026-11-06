@@ -135,11 +135,11 @@ class TestUntunedCsv:
         assert [ln.split(",")[0] for ln in lines[1:]] == ["512", "1024"]
         assert lines[1].split(",")[1:5] == ["6144", "384", "128", "4"]
 
-    def test_it_falls_back_to_every_token_seen_when_none_missed(self):
+    def test_a_key_whose_lookups_all_hit_renders_no_rows(self):
+        """Its tokens are served by tuned rows already; tuning them again spends the budget on nothing."""
         rep = _log(_DISPATCH.format(tok=1), _DISPATCH.format(tok=32))
         (key,) = ev.moe_dispatch_keys(rep)
-        rows = ev.moe_untuned_csv_text(key).strip().splitlines()[1:]
-        assert [r.split(",")[0] for r in rows] == ["1", "32"]
+        assert ev.moe_untuned_csv_text(key).strip().splitlines()[1:] == []
 
     def test_the_rendered_csv_passes_the_tuners_own_validator(self, tmp_path):
         from kernelforge.workflows.gemm_tune.tuners.fmoe_ck import _validate_fmoe_csv

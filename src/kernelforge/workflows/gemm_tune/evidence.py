@@ -724,9 +724,9 @@ def moe_untuned_csv_text(
     *,
     tokens: list[int] | None = None,
 ) -> str:
-    """Render one observed MoE key as an aiter untuned-fmoe CSV."""
+    """Render one observed MoE key as an aiter untuned-fmoe CSV, at ``tokens`` or else the tokens it missed."""
     header = list(MOE_KEY_FIELDS)
-    want = tokens or key.get("untuned_tokens") or key.get("tokens") or []
+    want = tokens or key.get("untuned_tokens") or []
     lines = [",".join(header)]
     for token in sorted({int(t) for t in want}):
         row = [str(token)] + [str(key.get(f, "")) for f in header[1:]]
