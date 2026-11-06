@@ -7,8 +7,11 @@ servers never build into the image moves aside.
 :func:`~._aiter_jit.prepare_serving_so_for_csvs` moves a serving module aside when the tables a boot loads name kernels
 the module lacks for this card, so that the next server builds it. :func:`prepare_serving_so_once` runs it under a lock
 in this host's ``/tmp``, never on a shared mount, so a second session's preflight, or the GEMM tuning lane
-(:func:`under_host_lock`), waits for it with no bound (and says for whom); when that directory cannot be used the
-preflight runs unlocked. The launch of a boot builds nothing here: its servers build what was moved aside, as before.
+(:func:`under_host_lock`), waits for it with no bound (and says for whom). Every account on the host shares ``/tmp``: the
+lock is taken only in a directory of this account's that only it can write, and neither the lock nor the record of
+attempts beside it is opened through a link; when that directory cannot be used, or another account made it or can
+write it, the preflight runs unlocked and says so. The launch of a boot builds nothing here: its servers build what was
+moved aside, as before.
 
 A caller whose servers each build into a directory of their own (the measure runner gives each test one, with links to
 the image's modules) would have every test build a moved-aside module again, as no server's build reaches the image.
@@ -26,6 +29,7 @@ then build the modules themselves.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import logging
@@ -36,6 +40,8 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
+
+from hyperloom_common.fs_utils import is_private_dir, read_text_nofollow, write_text_nofollow
 
 from . import _aiter_jit
 from ._aiter_jit import AITER_ENV_TO_SERVING_MODULES, prepare_serving_so_for_csvs, tuned_tables_sha256
@@ -55,6 +61,7 @@ log = logging.getLogger(__name__)
 #: This host's own disk: the lock and the record of attempts must never sit on a mount other hosts share.
 HOST_DIR = Path("/tmp/hyperloom-aiter-serving")
 _LOCK, _ATTEMPTS = "preflight.lock", "attempts.json"
+_LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _HOLDER_BYTES = 4096
 _UTF8 = "utf-8"
 _T = TypeVar("_T")
@@ -199,8 +206,7 @@ def _host_lock(doing: str) -> Iterator[_HostLock | None]:
 def _acquire(doing: str) -> _HostLock | None:
     path = HOST_DIR / _LOCK
     try:
-        HOST_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        descriptor = _open_lock(path)
     except OSError as exc:
         log.warning(
             "aiter serving preflight: this host's lock %s cannot be used (%s); %s runs unlocked", path, exc, doing
@@ -220,6 +226,18 @@ def _acquire(doing: str) -> _HostLock | None:
         os.close(descriptor)
         raise
     return lock
+
+
+def _open_lock(path: Path) -> int:
+    """Open the lock at ``path``, never through a link, in a directory of this account's that only it can write.
+
+    Raises:
+        OSError: The directory cannot be made, another account made it or can write it, or the lock cannot be opened.
+    """
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not is_private_dir(path.parent):
+        raise PermissionError(errno.EPERM, "not a directory of this account's that only it can write", str(path.parent))
+    return os.open(path, _LOCK_FLAGS, 0o600)
 
 
 def _wait_for(descriptor: int, path: Path, doing: str) -> None:
@@ -319,13 +337,14 @@ def _rebuild_of(report: Mapping[str, Any], moved: Sequence[str]) -> Rebuild:
 
 def _read_attempts() -> list[dict[str, Any]]:
     try:
-        document = json.loads((HOST_DIR / _ATTEMPTS).read_text(encoding=_UTF8))
+        document = json.loads(read_text_nofollow(HOST_DIR / _ATTEMPTS))
     except (OSError, ValueError):
         return []
     return [entry for entry in document if isinstance(entry, dict)] if isinstance(document, list) else []
 
 
 def _write_attempts(attempts: list[dict[str, Any]]) -> None:
-    pending = HOST_DIR / f".{_ATTEMPTS}.{os.getpid()}"
-    pending.write_text(json.dumps(attempts, indent=2, sort_keys=True), encoding=_UTF8)
+    pending = write_text_nofollow(
+        HOST_DIR, (f".{_ATTEMPTS}.{os.getpid()}",), json.dumps(attempts, indent=2, sort_keys=True)
+    )
     os.replace(pending, HOST_DIR / _ATTEMPTS)

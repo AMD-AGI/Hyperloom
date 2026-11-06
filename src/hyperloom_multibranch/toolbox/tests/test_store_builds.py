@@ -88,6 +88,7 @@ def test_without_a_ready_build_on_the_image_the_estimate_is_the_recipe_budget(st
 def test_a_record_that_fails_its_signature_says_nothing_of_the_estimate(store: BuildStore, key) -> None:
     _publish(store, key, _inputs("1"), 20.0)
     manifest = store.entry_dir(_inputs("1")) / RECORD_FILES[READY][0]
+    manifest.chmod(0o600)  # a tamperer first makes it writable: the store may leave it read-only
     manifest.write_bytes(manifest.read_bytes().replace(b'"wall_seconds":20.0', b'"wall_seconds":21.0'))
     assert _driver(store, key, Runner()).eta_seconds(_inputs("9")) == RECIPE.budget_sec
 
@@ -126,6 +127,7 @@ def test_needs_key_each_changed_component_by_the_site_and_its_recipe_version(sto
 def test_lookup_of_an_entry_that_fails_a_check_is_none_and_ensure_refuses_it(store: BuildStore, key) -> None:
     _publish(store, key, _inputs("1"), 20.0)
     manifest = store.entry_dir(_inputs("1")) / RECORD_FILES[READY][0]
+    manifest.chmod(0o600)
     manifest.write_bytes(manifest.read_bytes() + b" ")
     driver = _driver(store, key, Runner())
     assert driver.lookup(_inputs("1")) is None

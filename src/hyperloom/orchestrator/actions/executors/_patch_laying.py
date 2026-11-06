@@ -25,13 +25,13 @@ import logging
 import os
 import re
 import shutil
-import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Callable, Sequence
 
+from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_common.unified_diff import parse_unified_diff, strip_path_components
 
 from ._file_lock import best_effort_file_lock
@@ -138,7 +138,7 @@ def _own_copies() -> Path | None:
     what stands under its name is not a directory of this account's that only it can write."""
     copies = Path(tempfile.gettempdir()) / f"{_COPIES_DIR}-{os.getuid()}"
     copies.mkdir(mode=0o755, exist_ok=True)
-    if _owned(copies):
+    if is_private_dir(copies):
         return copies
     log.warning("_server_patcher: %s is not this account's own directory that only it can write; skip", copies)
     return None
@@ -147,18 +147,7 @@ def _own_copies() -> Path | None:
 def _is_published(plan: _PatchPlan, done: Path) -> bool:
     """Whether ``done`` is a complete copy this account published that no one else can write: its sentinels say so
     only of what it holds."""
-    return _owned(done) and _is_patched(_in_copy(plan, done / _SITE_DIR))
-
-
-def _owned(directory: Path) -> bool:
-    """Whether ``directory`` is a directory of this user's, not a link, that its group and others cannot write."""
-    try:
-        info = directory.lstat()
-    except OSError:
-        return False
-    return (
-        stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    )
+    return is_private_dir(done) and _is_patched(_in_copy(plan, done / _SITE_DIR))
 
 
 def _copy_key(plan: _PatchPlan) -> str:
