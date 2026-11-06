@@ -354,8 +354,12 @@ class _PhaseStateMixin:
             return ""
         return self.specialist_patch_verdicts.get(sid, "") or ""
 
-    def apply_explore_search_update(self, update: dict[str, Any]) -> None:
-        """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket."""
+    def apply_explore_search_update(self, update: dict[str, Any], *, advance_round: bool = True) -> None:
+        """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket.
+
+        ``advance_round=False`` merges verdicts landed while their round still runs, leaving the round ordinal and
+        ``last_round`` to the round's settlement; rows merge by fingerprint, so settling a landed row rewrites nothing.
+        """
         if not isinstance(update, dict):
             return
         prior = self.explore_search if isinstance(self.explore_search, dict) else {}
@@ -371,9 +375,11 @@ class _PhaseStateMixin:
         _stamp_cycle(rejected, cur_cycle)
         merged["rejected"] = rejected
         # The round ordinal, not the ledger's size: consumers key idempotency and
-        # round ids on it, so it has to advance once per benched round.
-        merged["cursor"] = int(prior.get("cursor") or 0) + 1
-        merged["last_round"] = dict(update.get("last_round") or {})
+        # round ids on it, so it has to advance once per benched round. It is always
+        # written, since a load without one derives it from the ledger's size.
+        merged["cursor"] = int(prior.get("cursor") or 0) + int(advance_round)
+        if advance_round:
+            merged["last_round"] = dict(update.get("last_round") or {})
         # Append-only history fields — merge instead of overwrite.
         merged["winners_history"] = _merge_winners_history(
             prior.get("winners_history"),

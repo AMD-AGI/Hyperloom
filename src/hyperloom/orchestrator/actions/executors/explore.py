@@ -38,6 +38,7 @@ from hyperloom.common.perf_metric import (
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ...state.explore_ledger import land_verdict, ledger_view, variant_knobs
 from ...state.failure_evidence import (
     UNMEASURED_OUTCOMES,
     FAILURE_STAGE_DECISION,
@@ -639,25 +640,6 @@ _REJECTED_FIELDS: tuple[str, ...] = (
 )
 
 
-def _ledger_view(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
-    return {key: row[key] for key in fields if key in row}
-
-
-def _variant_knobs(te: dict[str, Any]) -> dict[str, Any]:
-    # Carry the variant knobs so the journal's ``classify_change_kind`` can classify the change kind.
-    return {
-        "name": str(te.get("name") or ""),
-        "extra_server_args": str(te.get("extra_server_args") or ""),
-        "extra_envs": dict(te.get("extra_envs") or {}),
-        "remove_args": list(te.get("remove_args") or []),
-        "unset_envs": list(te.get("unset_envs") or []),
-        "args_mode": str(te.get("args_mode") or "append"),
-        "note": str(te.get("note") or ""),
-        "reasoning_origin": str(te.get("reasoning_origin") or ""),
-        "experience_citations": list(te.get("experience_citations") or []),
-    }
-
-
 def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str) -> dict[str, Any]:
     name = str(te.get("name") or "")
     outcome = str(te.get("outcome") or "")
@@ -683,7 +665,7 @@ def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str
         "server_log_path": te.get("server_log_path"),
         "workspace": te.get("workspace"),
         "raw_result_path": te.get("raw_result_path"),
-        "variant": _variant_knobs(te),
+        "variant": variant_knobs(te),
         # The verdicts and the stack behind them, as the round ruled. Absent keys mean the variant never got that
         # far: no gate ruled on a warmup failure, and nothing validated one that was killed before it was graded.
         "measured_against": te.get("measured_against") or {},
@@ -786,6 +768,7 @@ class _ExploreRound:
         self.lease: Any = None
 
     async def run(self, session_dir: Path | None = None) -> dict[str, Any]:
+        self.session_dir = session_dir
         self._resolve_grid()
         self._shape_runnable()
         self._open_schedule()
@@ -1436,8 +1419,21 @@ class _ExploreRound:
     def _record(self, gv: GridVariant, row: dict[str, Any]) -> None:
         self.tested[row["fingerprint"]] = row
         if row["outcome"] != "KEEP":
-            self.rejected.append({**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)})
-            self.losers.append(_ledger_view(row, _LOSER_FIELDS))
+            rejected = {**ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)}
+            self.rejected.append(rejected)
+            self.losers.append(ledger_view(row, _LOSER_FIELDS))
+            if self.ss is not None and self.session_dir is not None:
+                # A preempted round keeps the verdicts it judged; a KEEP lands at settlement.
+                outcome = _outcome_row(
+                    row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id)
+                )
+                attributions = _framework_lever_attributions([outcome], self.lever_payload)
+                land_verdict(
+                    self.ss,
+                    self.session_dir,
+                    {"tested": {row["fingerprint"]: row}, "rejected": [rejected]},
+                    attributions,
+                )
             return
         self.winners_history.append(
             {
