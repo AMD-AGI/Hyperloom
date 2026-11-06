@@ -1,0 +1,8 @@
+{
+  "server_flags": "<the InferenceX recipe's server arguments, with its override_c<CONC> applied>",
+  "server_env": {
+    "<NAME>": "<the recipe's environment, its golden SGLANG_SIMULATE_ACC_* variables among them>"
+  },
+  "model_name": "<the name the server answers to, which the client requests>",
+  "client": ""
+}

@@ -127,4 +127,15 @@ def direction_name(direction: str) -> str:
     return direction.split(":", 1)[0]
 
 
-__all__ = ["DIRECTIONS", "direction_name"]
+def session_direction(named: str) -> str | None:
+    """The session direction an exhausted record's ``direction`` names: its name alone, or followed by a qualifier."""
+
+    named = named.strip().lower()
+    for direction in sorted(DIRECTIONS, key=lambda d: -len(direction_name(d))):
+        name = direction_name(direction).lower()
+        if named == name or (named.startswith(name) and not named[len(name)].isalnum()):
+            return direction
+    return None
+
+
+__all__ = ["DIRECTIONS", "direction_name", "session_direction"]
