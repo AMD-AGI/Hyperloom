@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     ComponentLayout,
@@ -110,6 +111,26 @@ def installed_upstream(package: PackageBase) -> Upstream | None:
     except WorktreeError:
         return None
     return Upstream(repo, commit) if commit and repo else None
+
+
+def source_unkept(component: str, recipe: Recipe) -> str:
+    """Why no change to ``component``'s source can land on ``recipe``, ``""`` when one can: a component new on the
+    recipe lands with the upstream commit its installed package was built from, which the rule gate requires."""
+
+    if any(item.component == component for item in recipe.components):
+        return ""
+    try:
+        package = locate_installed_package(COMPONENT_LAYOUTS[component])
+    except UnsupportedComponentError as error:
+        return f"the recipe does not carry {component}, and its upstream commit cannot be read: {error}"
+    if installed_upstream(package) is not None:
+        return ""
+    version = package.dist_version or "(no version)"
+    return (
+        f"the recipe does not carry {component}, and the image's {component} {version} names no upstream commit a"
+        " checkout holds (a wheel's version names only an abbreviated one), so the rule gate refuses a source change"
+        " for lacking its upstream repository and commit"
+    )
 
 
 def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
@@ -479,5 +500,6 @@ __all__ = [
     "Upstream",
     "WorktreeError",
     "installed_upstream",
+    "source_unkept",
     "linked_paths",
 ]

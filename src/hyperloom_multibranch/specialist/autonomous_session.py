@@ -114,7 +114,7 @@ from hyperloom_multibranch.specialist.start_tables import (
     save_start_tables,
 )
 from hyperloom_multibranch.specialist.tools import sync_to_head
-from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream
+from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream, source_unkept
 from hyperloom.measure.framework.base import image_configs
 
 if TYPE_CHECKING:
@@ -279,6 +279,7 @@ class AutonomousSession:
         root = self._place.worktree.commit()
         recipe = await self._setup.repo.read_recipe(self._start.start_commit)
         tables = await self._lay_start_tables(recipe.kernels)
+        unkept = await asyncio.to_thread(source_unkept, self._setup.component, recipe)
         lease = await self._lease(self._setup.spec.tp)
         self._hold(lease)
         await self._notes.refresh()
@@ -297,6 +298,7 @@ class AutonomousSession:
             deadline=self._setup.clock() + (seconds or NO_DEADLINE_SECONDS),
             root=root,
             root_shares=None if baseline is None else snapshot.op_shares.get(baseline.root_commit),
+            source_unkept=unkept,
         )
         spec = replace(spec, cards=lease.gpu_ids)
         self._sandbox = self._setup.sandbox(lease)
@@ -310,6 +312,11 @@ class AutonomousSession:
         mark = None if ready.manifest.snapshots is not None else self._mark(ready.manifest)
         KeepWatch(root, mark=mark).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
+        if unkept:
+            component = self._setup.component
+            await self._note(
+                f"no change to {component}'s source can be kept: {unkept}; only launch and env changes can"
+            )
         for note in ready.notes:
             await self._note(note)
 
