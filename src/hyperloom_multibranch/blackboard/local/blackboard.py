@@ -82,6 +82,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     LlmUsage,
     LlmUsageRecord,
     ManifestFingerprint,
+    MapDirection,
     MergeAttempt,
     BlackboardSnapshot,
     OpShares,
@@ -131,7 +132,7 @@ from hyperloom_multibranch.blackboard.local.segments import (
     make_writer_id,
     require_token,
 )
-from hyperloom_multibranch.blackboard.local.state import ClaimDecision, JudgementWrite, BlackboardState
+from hyperloom_multibranch.blackboard.local.state import AgentMapWrite, ClaimDecision, JudgementWrite, BlackboardState
 from hyperloom_multibranch.blackboard.local.unfinished import refused_replays, unfinished_leads
 
 SEGMENTS_DIR = "segments"
@@ -1039,6 +1040,16 @@ class LocalBlackboard(
 
     async def manifest_fingerprints(self) -> tuple[ManifestFingerprint, ...]:
         return tuple(self._state().fingerprints)
+
+    async def write_agent_map(self, directions: Sequence[MapDirection]) -> None:
+        self._require(Role.SCHEDULER)
+        written = AgentMapWrite(tuple(directions))
+        ids = [item.id for item in written.directions]
+        if "" in ids or len(set(ids)) < len(ids):
+            raise ValueError(f"each direction of Arbor's map has an id, and one no other direction has: {ids}")
+        opened = sum(1 for item in written.directions if item.open)
+        summary = f"Arbor's map: {len(ids)} directions, {opened} open"
+        self._append(EntryKind.AGENT_MAP, written, branch="", parent="", summary=summary)
 
     async def snapshot(self) -> BlackboardSnapshot:
         now = self._clock()

@@ -501,6 +501,7 @@ def snapshot(state: BlackboardState, claims: tuple[Claim, ...], taken_at: float)
         resolved_patches=tuple(patch for attempt in state.merge_attempts for patch in attempt.resolved_patches),
         agent_manifests=dict(state.agent_manifests),
         card_holds=card_holds(state),
+        agent_map=state.agent_map,
     )
 
 
