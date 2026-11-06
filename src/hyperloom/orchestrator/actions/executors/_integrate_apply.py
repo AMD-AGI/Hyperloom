@@ -19,7 +19,13 @@ from ._apply_feedback import ApplyFeedback, PatchApplyResult
 from ._enablement_config import _established_enablement_config, _merge_established_server_args
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._integrate_refusals import UNSWITCHED_BRIDGE_ADVISORY, _preflight_missing_targets, _unswitched_bridge_refusal
+from ._integrate_refusals import (
+    UNSWITCHED_BRIDGE_ADVISORY,
+    UNTUNABLE_VALUE_ADVISORY,
+    _preflight_missing_targets,
+    _unswitched_bridge_refusal,
+    _untunable_value_refusal,
+)
 from ._integrate_results import (
     _Deliverable,
     _KbLesson,
@@ -190,7 +196,7 @@ class ApplyStageMixin:
                 return setup_refusal
 
         deliverable = _Deliverable.resolve(attempt, params)
-        attempt.switch_manifest = deliverable.switch_manifest
+        attempt.switch_manifest, attempt.tunable_settings = deliverable.switch_manifest, deliverable.tunable_settings
         refusal = await self._refuse_deliverable(attempt, params, deliverable)
         if refusal is not None:
             return refusal
@@ -319,14 +325,25 @@ class ApplyStageMixin:
             patch_paths=deliverable.patch_paths,
             switch_manifest=deliverable.switch_manifest,
         )
-        if not bridge:
+        if bridge:
+            return await self._refuse_apply(
+                attempt,
+                params,
+                "bridge_not_switch_gated",
+                f"bridge patch declares no framework_switches although {bridge}",
+                **_reauthor_fields(params, deliverable.patch_paths, advisory=UNSWITCHED_BRIDGE_ADVISORY),
+            )
+        untunable = _untunable_value_refusal(
+            params, patch_paths=deliverable.patch_paths, tunable_settings=deliverable.tunable_settings
+        )
+        if not untunable:
             return None
         return await self._refuse_apply(
             attempt,
             params,
-            "bridge_not_switch_gated",
-            f"bridge patch declares no framework_switches although {bridge}",
-            **_reauthor_fields(params, deliverable.patch_paths, advisory=UNSWITCHED_BRIDGE_ADVISORY),
+            "tuning_value_hardcoded",
+            f"patch fixes tuning value(s) explore cannot change: {untunable}",
+            **_reauthor_fields(params, deliverable.patch_paths, advisory=UNTUNABLE_VALUE_ADVISORY),
         )
 
     async def _resolve_apply_root(

@@ -481,6 +481,7 @@ class PerfGateMixin:
             "workspace": str(attempt.output_root),
             "framework_root": str(attempt.framework_root or ""),
             "framework_levers": switch_manifest,
+            "tunable_settings": attempt.tunable_settings,
             "framework_lever_outcome": "registered_off",
             "switch_off_parity": parity,
             # The dormant code is replayed onto a fresh tree at resume like a KEEP's.
