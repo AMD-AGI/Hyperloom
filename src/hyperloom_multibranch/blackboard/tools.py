@@ -115,7 +115,6 @@ MAP_TITLE = (
 )
 _UNFINISHED = {
     UnfinishedReason.NOT_STACKABLE: "committed, merge not stackable",
-    UnfinishedReason.NEAR_BAR: "kept accuracy, just short of its bar",
     UnfinishedReason.REPAIR_UNFINISHED: "blocked, its repair never finished",
     UnfinishedReason.WITHDRAWN: "withdrawn before its result",
 }
