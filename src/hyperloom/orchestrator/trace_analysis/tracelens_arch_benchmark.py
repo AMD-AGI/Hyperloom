@@ -115,13 +115,18 @@ def single_physical_gpu_env(physical_id: int, *, base_env: dict[str, str] | None
 
 
 def resolve_arch_json_path(platform: str) -> Path | None:
-    """Resolve the bundled arch JSON path for a platform."""
+    """Resolve the bundled arch JSON path for a platform.
+
+    A checkout can hold the vendor-peak spec an older Hyperloom wrote into its arch dir as the fallback. That file is
+    not bundled, and no measurement produces its bytes, so it resolves to ``None`` and the board is measured again.
+    """
     canonical = normalize_platform(platform)
     if not canonical:
         return None
     for name, path in _collect_arch_jsons().items():
         if name.upper() == canonical:
-            return Path(path)
+            found = Path(path)
+            return None if _holds_vendor_peaks(found, canonical) else found
     return None
 
 
@@ -166,13 +171,28 @@ def build_hyperloom_arch_spec(platform: str) -> dict | None:
     return out
 
 
+def _arch_spec_text(spec: dict) -> str:
+    """``spec`` as Hyperloom writes an arch JSON.
+
+    :func:`_holds_vendor_peaks` recognises the vendor-peak files older versions left in TraceLens checkouts by these
+    bytes, so changing the format stops it recognising them.
+    """
+    return json.dumps(spec, indent=4) + "\n"
+
+
+def _holds_vendor_peaks(path: Path, platform: str) -> bool:
+    """Whether ``path`` holds the board's vendor-peak arch spec, byte for byte."""
+    spec = build_hyperloom_arch_spec(platform)
+    return spec is not None and path.read_bytes() == _arch_spec_text(spec).encode("utf-8")
+
+
 def write_vendor_peak_arch_spec(out_path: Path, platform: str, log: Callable[[str], None]) -> bool:
     """Write the board's vendor-peak arch spec to ``out_path``; ``False`` when Hyperloom has no peaks for it."""
     spec = build_hyperloom_arch_spec(platform)
     if spec is None:
         return False
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(spec, indent=4) + "\n", encoding="utf-8")
+    out_path.write_text(_arch_spec_text(spec), encoding="utf-8")
     log(
         f"gpu_arch_json: wrote vendor-peak spec for {spec['name']} "
         f"-> {out_path} (mem_bw={spec['mem_bw_gbps']} GB/s, "
@@ -310,7 +330,7 @@ def _measure_arch_spec(
         _sanitize_measured_arch_spec(payload, platform=platform, out_path=measured, log=log)
     out_path = default_arch_output_path(tracelens_root, platform)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+    out_path.write_text(_arch_spec_text(payload), encoding="utf-8")
     log(f"gpu_arch_json: measured spec ready at {out_path}")
     return out_path
 

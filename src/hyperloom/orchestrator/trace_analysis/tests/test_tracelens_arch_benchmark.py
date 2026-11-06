@@ -309,6 +309,37 @@ def test_a_rejected_measurement_never_reaches_the_checkout(tmp_path: Path) -> No
     assert not checkout.exists()
 
 
+def test_a_vendor_peak_spec_left_in_the_checkout_is_measured_over(tmp_path: Path) -> None:
+    """The vendor-peak spec older versions wrote into the arch dir is not bundled: the board is measured, and the
+    measurement replaces it."""
+    checkout = tmp_path / "TraceLens"
+    planted = tab.default_arch_output_path(checkout, "MI355X")
+    planted.parent.mkdir(parents=True)
+    planted.write_text(json.dumps(tab.build_hyperloom_arch_spec("MI355X"), indent=4) + "\n", encoding="utf-8")
+    measured = {"name": "MI355X", "mem_bw_gbps": 6000.0, "max_achievable_tflops": {"matrix_bf16": 1500.0}}
+
+    def _run_command(cmd, *, cwd, env=None):
+        Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(measured), encoding="utf-8")
+        return 0
+
+    with (
+        patch.object(tab, "_collect_arch_jsons", return_value={"MI355X": str(planted)}),
+        patch.object(tab, "list_candidate_physical_gpus", return_value=[0]),
+    ):
+        assert tab.resolve_arch_json_path("MI355X") is None
+        spec = tab.populate_gpu_arch_json(
+            tracelens_root=checkout,
+            platform="MI355X",
+            fallback_dir=tmp_path / "session",
+            log=lambda _msg: None,
+            run_command=_run_command,
+        )
+        assert tab.resolve_arch_json_path("MI355X") == planted
+
+    assert spec == tab.ArchSpec(planted, tab.ArchSpecSource.MEASURED)
+    assert json.loads(planted.read_text(encoding="utf-8")) == measured
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
