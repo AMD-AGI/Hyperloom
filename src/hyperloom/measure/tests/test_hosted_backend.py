@@ -33,7 +33,18 @@ from hyperloom.measure.tests.hosted_fixtures import (
     point_yaml,
     runner_template,
 )
-from hyperloom.sandbox.socket import SandboxCreateFailed, SandboxGone
+from hyperloom.sandbox.e2b import E2BSandboxProvider
+from hyperloom.sandbox.socket import IDEMPOTENCY_KEY, SandboxCreateFailed, SandboxGone
+from hyperloom.sandbox.tests.test_sandbox_e2b import (
+    FAST,
+    GATEWAY_CUTS,
+    KEY_MEASUREMENT,
+    PENDING_TIMEOUT_MESSAGE,
+    SAFE_CREATE_FAILED_MESSAGE,
+    _Service,
+    key_spent_body,
+    service,  # noqa: F401 (the canned service the platform cases run against)
+)
 
 
 @pytest.fixture
@@ -418,6 +429,33 @@ def test_a_sandbox_that_failed_before_it_ran_is_an_infrastructure_failure_with_t
     assert (line.attempt, line.state, line.sandbox_id) == (1, "finished", None), "no sandbox ran"
     assert line.extra["detail"] == outcome.stderr, "the platform's message outlives the process"
     assert r.backend.journal.next_attempt("req-1") == 2, "the toolbox's one retry is a new attempt with a new key"
+
+
+@pytest.mark.parametrize(
+    ("reason", "returncode", "label"),
+    [
+        (PENDING_TIMEOUT_MESSAGE, HOSTED_RUNNER_UNAVAILABLE_RC, "runner_start_timeout"),
+        (SAFE_CREATE_FAILED_MESSAGE, HOSTED_INFRA_FAILURE_RC, "sandbox_create_failed"),
+    ],
+    ids=["pending_timeout", "sandbox_create_failed"],
+)
+def test_a_create_whose_replay_finds_its_key_spent_is_labelled_by_the_reason_the_platform_stored(
+    rig, tmp_path, monkeypatch, service: _Service, reason: str, returncode: int, label: str
+) -> None:
+    """The gateway cuts the create and the replay is told the key is spent, with how its sandbox ended: a pending
+    timeout is a runner that did not start in time, as its 503 would have been; a failed create is the platform's."""
+    r = rig(gpus=1)
+    platform = E2BSandboxProvider(
+        {"measurement": KEY_MEASUREMENT}, api_url=service.url, sandbox_url=service.url, retry=FAST
+    )
+    service.reply("POST", "/v2/sandboxes", GATEWAY_CUTS[0], (410, key_spent_body(reason)))
+    monkeypatch.setattr(r.provider, "create", platform.create)
+    _, outcome = _run(r, tmp_path)
+    assert (outcome.returncode, outcome.failure_class.value, outcome.failure_reason) == (returncode, "infra", label)
+    assert reason in outcome.stderr, "the stored reason reaches the outcome"
+    keys = [call.body["metadata"][IDEMPOTENCY_KEY] for call in service.calls("POST", "/v2/sandboxes")]
+    assert keys == ["run-1:req-1:1", "run-1:req-1:1"], "the cut create is replayed once, its key not replaced"
+    assert r.backend._pool.active == 0
 
 
 def test_a_card_count_without_a_runner_template_is_a_refused_sheet(rig, tmp_path) -> None:
