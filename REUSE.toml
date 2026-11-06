@@ -90,3 +90,11 @@ path = "src/inference_suite/tests/fixtures/inferencex/**"
 precedence = "override"
 SPDX-FileCopyrightText = "2025 SemiAnalysis LLC, Advanced Micro Devices, NVIDIA CORPORATION"
 SPDX-License-Identifier = "Apache-2.0"
+
+# A snapshot of the sglang cookbook (deployment configs, AgentX launches and pages), which the sglang cookbook recipe
+# source is tested against.
+[[annotations]]
+path = "src/inference_suite/tests/fixtures/sglang/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2023-2026 SGLang Team"
+SPDX-License-Identifier = "Apache-2.0"
