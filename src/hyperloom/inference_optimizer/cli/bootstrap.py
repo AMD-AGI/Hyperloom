@@ -50,6 +50,7 @@ from ..model_config_utils import summarize_model_config
 
 if TYPE_CHECKING:
     from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from inference_suite.contracts import BaseLaunch
 
 log = logging.getLogger(__name__)
 
@@ -797,6 +798,24 @@ def _phase_toggle_fields(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _conc_sweep_enabled(args: argparse.Namespace, benchmark_mode: str) -> bool:
+    # Off under AgentX by default: each rung is a 3600s window and the session grades at a fixed CONC.
+    return not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
+
+
+def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framework: str) -> BaseLaunch | None:
+    """Resolve a fresh session's base launch; it settles the TP and EP the manifest and the seeded state record."""
+    benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    sweep = _parse_conc_sweep_concs(args, benchmark_mode) if _conc_sweep_enabled(args, benchmark_mode) else []
+    return resolve_base_launch(
+        args,
+        session_dir,
+        framework=framework,
+        benchmark_mode=benchmark_mode,
+        concurrencies=(int(args.conc), *sweep),
+    )
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -804,6 +823,7 @@ def _seed_shared_state(
     session_id: str,
     framework: str,
     platform: LaunchPlatform,
+    base: BaseLaunch | None,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
     plateau_overrides = _plateau_overrides_from_args(args)
@@ -826,19 +846,8 @@ def _seed_shared_state(
         agentx_backend = agentic_backend()
         agentx_epoch = AGENTX_MEASUREMENT_EPOCH
     workload = _workload_fields(args)
-    # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each rung is a 3600s window and the session
-    # grades at a fixed CONC. Pass --enable-conc-sweep explicitly to override.
-    conc_sweep_enabled = (
-        not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
-    )
+    conc_sweep_enabled = _conc_sweep_enabled(args, benchmark_mode)
     conc_sweep_concs = _parse_conc_sweep_concs(args, benchmark_mode)
-    base = resolve_base_launch(
-        args,
-        session_dir,
-        framework=framework,
-        benchmark_mode=benchmark_mode,
-        concurrencies=(workload["conc"], *(conc_sweep_concs if conc_sweep_enabled else ())),
-    )
     state = SharedState(
         session_id=session_id,
         claw_session_id=os.environ.get("CLAW_SESSION_ID", "").strip(),

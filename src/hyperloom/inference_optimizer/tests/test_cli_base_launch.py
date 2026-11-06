@@ -13,6 +13,7 @@ import argparse
 import dataclasses
 import gzip
 import json
+import os
 import socket
 import subprocess
 from functools import cache
@@ -59,6 +60,20 @@ def _no_io(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", refuse)
 
 
+@pytest.fixture(autouse=True)
+def visible_gpus(monkeypatch) -> list[int]:
+    """The GPU count this host reports; a test sets ``[0]`` to change it."""
+    count = [8]
+    monkeypatch.setattr(bl, "detect_gpu_count", lambda: count[0])
+    return count
+
+
+@pytest.fixture(autouse=True)
+def _session_topology_env(monkeypatch) -> None:
+    monkeypatch.setenv("TP", "1")
+    monkeypatch.setenv("EP", "1")
+
+
 @pytest.fixture
 def fetched(monkeypatch) -> list:
     """Every ``(query, user_file)`` the sources were read for."""
@@ -73,7 +88,7 @@ def fetched(monkeypatch) -> list:
 
 
 def _args(**overrides) -> argparse.Namespace:
-    values = dict(model=_DSR1, gpu_type="mi355x", tp=8, ep=1, isl=8192, osl=1024, reference_script="")
+    values = dict(model=_DSR1, gpu_type="mi355x", operator_tp=8, operator_ep=1, isl=8192, osl=1024, reference_script="")
     values.update(overrides)
     return argparse.Namespace(**values)
 
@@ -107,7 +122,7 @@ def test_a_fresh_session_freezes_the_recipe_base_it_resolves(tmp_path, fetched, 
 
 
 def test_a_model_no_recipe_serves_runs_the_default_table_and_says_so(tmp_path, fetched, capsys):
-    base = _resolve(tmp_path, _args(model="Kimi-K2.6", gpu_type="mi300x", tp=1))
+    base = _resolve(tmp_path, _args(model="Kimi-K2.6", gpu_type="mi300x", operator_tp=1))
 
     assert base is not None and base.source.kind is SourceKind.DEFAULT_TABLE
     assert base.topology == Topology(1)
@@ -123,7 +138,7 @@ def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_froze
     session = tmp_path / "session"
     session.mkdir()
 
-    base = _resolve(session, _args(tp=4, reference_script=str(script)))
+    base = _resolve(session, _args(operator_tp=4, reference_script=str(script)))
 
     assert base is not None and base.source.kind is SourceKind.USER_FILE
     assert fetched[0][1].location == str(script)
@@ -148,7 +163,7 @@ def test_an_operator_file_that_cannot_be_the_base_exits_2(tmp_path, fetched, cap
     session = tmp_path / "session"
     session.mkdir()
 
-    assert reason in _refused(session, _args(tp=tp, reference_script=str(path)), capsys)
+    assert reason in _refused(session, _args(operator_tp=tp, reference_script=str(path)), capsys)
 
 
 def test_an_unreadable_operator_file_exits_2_before_any_source_is_read(tmp_path, fetched, capsys):
@@ -157,7 +172,7 @@ def test_an_unreadable_operator_file_exits_2_before_any_source_is_read(tmp_path,
 
 
 def test_a_session_no_source_serves_exits_2_naming_every_miss(tmp_path, fetched, capsys):
-    err = _refused(tmp_path, _args(model="Kimi-K2.6", gpu_type="r9700", tp=1), capsys)
+    err = _refused(tmp_path, _args(model="Kimi-K2.6", gpu_type="r9700", operator_tp=1), capsys)
 
     assert "no source serves" in err
     assert "default_table: it has no sglang row for r9700 (gfx1201)" in err
@@ -178,13 +193,85 @@ def test_a_local_checkpoint_is_queried_by_the_hub_id_it_records(tmp_path, fetche
     if config is not None:
         (model / "config.json").write_text(json.dumps(config))
 
-    _resolve(tmp_path, _args(model=str(model), tp=1))
+    _resolve(tmp_path, _args(model=str(model), operator_tp=1))
 
     assert fetched[0][0].model_id == expected
 
 
+def test_an_open_topology_is_chosen_by_the_recipe_for_the_visible_gpus_and_the_session_runs_it(tmp_path, fetched):
+    args = _args(tp=1, ep=1, operator_tp=None, operator_ep=None)
+    base = _resolve(tmp_path, args)
+
+    query = fetched[0][0]
+    assert (query.tp, query.ep) == (None, None)
+    assert base is not None and base.source.kind is SourceKind.INFERENCEX
+    assert base.topology.tp == 8
+    assert (args.tp, args.ep) == (base.topology.tp, base.topology.ep)
+    assert (os.environ["TP"], os.environ["EP"]) == (str(base.topology.tp), str(base.topology.ep))
+
+
+def test_an_open_topology_takes_the_largest_recipe_that_fits_the_visible_gpus(tmp_path, fetched, visible_gpus):
+    (tmp_path / "wide").mkdir()
+    (tmp_path / "full").mkdir()
+    visible_gpus[0] = 4
+    wide = _resolve(tmp_path / "wide", _args(operator_tp=None, operator_ep=None))
+    visible_gpus[0] = 8
+    full = _resolve(tmp_path / "full", _args(operator_tp=None, operator_ep=None))
+
+    assert wide is not None and full is not None
+    assert wide.topology.tp <= 4 < full.topology.tp
+
+
+def test_a_host_with_no_visible_gpu_exits_2(tmp_path, fetched, visible_gpus, capsys):
+    visible_gpus[0] = 0
+
+    assert "none is visible" in _refused(tmp_path, _args(), capsys)
+    assert fetched == []
+
+
+def test_an_operator_file_sets_the_topology_the_command_line_left_open(tmp_path, fetched):
+    script = tmp_path / "launch.sh"
+    script.write_text("python3 -m sglang.launch_server --model-path /models/r1 --tp 8\n")
+    session = tmp_path / "session"
+    session.mkdir()
+
+    args = _args(tp=1, ep=1, operator_tp=None, operator_ep=None, reference_script=str(script))
+    base = _resolve(session, args)
+
+    assert base is not None and base.source.kind is SourceKind.USER_FILE
+    assert base.topology.tp == 8 and base.query.tp is None
+    assert args.tp == 8 and os.environ["TP"] == "8"
+
+
+def test_a_multi_node_session_fits_the_base_to_every_node_and_needs_no_gpu_on_the_head(
+    tmp_path, fetched, visible_gpus, monkeypatch
+):
+    visible_gpus[0] = 0
+    spans: list[int] = []
+    resolve = bl.resolve_base
+
+    def spy(query, snapshot, *, gpus):
+        spans.append(gpus)
+        return resolve(query, snapshot, gpus=gpus)
+
+    monkeypatch.setattr(bl, "resolve_base", spy)
+    args = _args(nodes=2, gpus_per_node=8, tp=16, operator_tp=16, operator_ep=None)
+
+    base = _resolve(tmp_path, args)
+
+    assert spans == [16]
+    assert base is not None and base.topology.tp == 16
+    assert args.tp == 16 and os.environ["TP"] == "16"
+
+
+def test_a_hub_id_is_queried_with_its_org_and_case(tmp_path, fetched):
+    _resolve(tmp_path, _args(model="deepseek-ai/DeepSeek-R1-0528/"))
+
+    assert fetched[0][0].model_id == _DSR1
+
+
 def test_a_display_name_is_the_query_model(tmp_path, fetched):
-    _resolve(tmp_path, _args(model_display_name="DeepSeek-R1-0528-quantized", tp=1))
+    _resolve(tmp_path, _args(model_display_name="DeepSeek-R1-0528-quantized", operator_tp=1))
 
     assert fetched[0][0].model_id == "DeepSeek-R1-0528-quantized"
 

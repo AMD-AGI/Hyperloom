@@ -27,6 +27,7 @@ def test_seed_uses_explicit_workload_flags_over_defaults(
         session_id="s-explicit",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=None,
     )
 
     assert state.isl == 512
@@ -58,6 +59,7 @@ def test_seed_applies_new_workload_defaults_when_unset(
         session_id="s-default",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=None,
     )
 
     assert state.isl == 1024
@@ -80,7 +82,6 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
 
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", _spy)
-    monkeypatch.setattr(cb, "resolve_base_launch", lambda *_a, **_k: None)
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
@@ -97,6 +98,7 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
         session_id="s-raw",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=None,
     )
 
     assert captured["args"][2] == raw

@@ -66,6 +66,7 @@ from .bootstrap import (
     warn_without_target_gpu,
     running_plug_host,
     _seed_shared_state,
+    resolve_session_base,
     _snapshot_system_prompts,
     agentx_state_is_stale,
     resume_gpu_power_settings,
@@ -1293,7 +1294,7 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
 
 
 def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_resolved: int) -> _SessionStart:
-    """Create and lock the session directory, then write its manifest, launch info and seeded state."""
+    """Create and lock the session directory, resolve its base launch, then write its manifest, launch info and state."""
     session_dir = make_session_dir(
         model_name=resolve_model_display_name(args), target=getattr(args, "session_dir", None)
     )
@@ -1303,6 +1304,7 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
     from .benchmark_config import bind_benchmark
 
     bind_benchmark(session_dir, args)
+    base = resolve_session_base(session_dir, args, framework=framework)
     manifest = write_manifest(session_dir, args=args)
     _persist_install_event(args, session_dir)
     # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.
@@ -1343,6 +1345,7 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
         session_id=manifest["session_id"],
         framework=framework,
         platform=LaunchPlatform(compute_partition=compute_partition, gpu_power_settings=gpu_power),
+        base=base,
     )
     return _SessionStart(session_dir=session_dir, session_lock=session_lock, manifest=manifest)
 

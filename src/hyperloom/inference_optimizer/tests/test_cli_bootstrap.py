@@ -105,12 +105,14 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
+    args = _args()
     state = cb._seed_shared_state(
         tmp_path,
-        _args(),
+        args,
         session_id="session-1",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=cb.resolve_session_base(tmp_path, args, framework="vllm"),
     )
 
     assert state.session_id == "session-1"
@@ -156,7 +158,6 @@ def test_seed_shared_state_records_custom_workload_paths(
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "resolve_base_launch", lambda *_a, **_k: None)
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
@@ -169,6 +170,7 @@ def test_seed_shared_state_records_custom_workload_paths(
         session_id="s-custom",
         framework="custom",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=None,
     )
     assert state.bypass_scripts_dir == "/scripts"
     assert state.framework_repo_path == "/fw"
@@ -181,7 +183,6 @@ def _neutralize_seed_io(monkeypatch, *, gpu_count: int = 1, lane_ceiling: int = 
     """Stub the model/recipe reads so a seed can be asserted on one field."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "resolve_base_launch", lambda *_a, **_k: None)
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
@@ -202,6 +203,7 @@ def test_seed_records_an_explicit_zero_research_lane_capacity(
         session_id="s-zero",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=None,
     )
 
     assert state.research_lane_capacity == 0
@@ -222,6 +224,7 @@ def test_seed_records_the_launch_verdict_for_the_partition_shape(
         session_id="s-shape",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition=verdict, gpu_power_settings={}),
+        base=None,
     )
 
     assert state.compute_partition == verdict
@@ -234,7 +237,6 @@ def test_seed_shared_state_exact_forge_records_the_forge_kernel_optimizer(
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "resolve_base_launch", lambda *_a, **_k: None)
 
     state = cb._seed_shared_state(
         tmp_path,
@@ -242,6 +244,7 @@ def test_seed_shared_state_exact_forge_records_the_forge_kernel_optimizer(
         session_id="session-forge",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=None,
     )
 
     assert state.kernel_optimizer == "forge"
@@ -266,7 +269,6 @@ def test_seed_shared_state_loads_model_arch_from_session_dir(
         return {"source": "session-local"}
 
     monkeypatch.setattr(cb, "_load_model_arch", _load_arch)
-    monkeypatch.setattr(cb, "resolve_base_launch", lambda *_a, **_k: None)
 
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
@@ -280,6 +282,7 @@ def test_seed_shared_state_loads_model_arch_from_session_dir(
         session_id="session-arch",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=None,
     )
 
     assert captured["root"] == session_dir
@@ -295,7 +298,6 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     """
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "resolve_base_launch", lambda *_a, **_k: None)
 
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
@@ -315,6 +317,7 @@ def test_seed_shared_state_preserves_quantized_model_identity(
         session_id="s-q",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=None,
     )
 
     assert state.model_name == "google-gemma-4-26B-A4B-it-quantized"
@@ -334,6 +337,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
         session_id="s-plain",
         framework="vllm",
         platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        base=None,
     )
     assert state.model_name == "Qwen3-32B"
 

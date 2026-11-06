@@ -14,14 +14,16 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import hashlib
-import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
 from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
+from hyperloom.common.model_paths import hf_repo_id
 from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.visible_devices import detect_gpu_count
 from inference_suite import (
     LaunchQuery,
     Miss,
@@ -37,6 +39,7 @@ from inference_suite.contracts import BaseLaunch, BaseLaunchError, Redacted, Wor
 
 from ..framework_registry import is_scriptable
 from ..session.base_launch import write_base_launch
+from .multi_node import _resolve_gpus_per_node
 
 _HTTP_OK = 200
 
@@ -57,55 +60,60 @@ def _read_user_file(location: str, framework: str) -> UserFile:
     return parse_user_file(location, content, framework=framework)
 
 
-def _is_hub_id(text: str) -> bool:
-    return text.count("/") == 1 and not text.startswith((".", "/", "~")) and not Path(text).exists()
-
-
-def _config_hub_id(model_dir: Path) -> str | None:
-    try:
-        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    name = config.get("_name_or_path") if isinstance(config, dict) else None
-    return name if isinstance(name, str) and _is_hub_id(name) else None
-
-
 def _model_id(args: argparse.Namespace) -> str:
-    """The Hugging Face id every recipe source names the session's model by.
+    """The name every recipe source is asked for the session's model by: its Hugging Face id when it names one.
 
-    A ``--model`` that is no local directory is that id already; a local checkpoint names it in its HF cache path or
-    its ``config.json``. A display name the session was given (a quantized export's) names a model no recipe serves.
+    A display name the session was given (a quantized export's) names a model no recipe serves; so does a local
+    checkpoint that records no HF id, which is asked for by its directory name.
     """
     display = (getattr(args, "model_display_name", "") or "").strip()
     if display:
         return display
     model = str(getattr(args, "model", "") or "").strip().rstrip("/")
-    path = Path(model).expanduser()
-    if not path.is_dir():
-        return model
-    cached = next((part.removeprefix("models--") for part in path.parts if part.startswith("models--")), None)
-    if cached:
-        return cached.replace("--", "/", 1)
-    return _config_hub_id(path) or path.name
+    return hf_repo_id(model) or Path(model).name or model
 
 
 def _query(args: argparse.Namespace, *, framework: str, concurrencies: Sequence[int]) -> LaunchQuery:
     board = (getattr(args, "gpu_type", None) or "").strip()
     if not board:
         _refuse("the base launch is resolved for the target GPU board, and none was detected; pass --gpu-type")
-    # The workload knobs are settled, and the session's TP and EP exported, before the session is seeded; the base
-    # has to run that topology.
     return LaunchQuery(
         model_id=_model_id(args),
         framework=framework,
         board=board,
         workload=Workload.FIXED,
         concurrencies=tuple(sorted(set(concurrencies))),
-        tp=int(args.tp),
-        ep=int(args.ep),
+        tp=args.operator_tp,
+        ep=args.operator_ep,
         isl=int(args.isl),
         osl=int(args.osl),
     )
+
+
+def _session_gpus(args: argparse.Namespace) -> int:
+    """The GPUs the base launch may span: every node's on a multi-node session, else the ones this host sees.
+
+    A multi-node head need not hold a GPU itself, so its count comes from the declared shape, not from a probe.
+    """
+    nodes = int(getattr(args, "nodes", 1) or 1)
+    if nodes >= 2:
+        return nodes * _resolve_gpus_per_node(args)
+    gpus = detect_gpu_count()
+    if gpus < 1:
+        _refuse(
+            "the base launch is chosen for the GPUs this host sees, and none is visible; "
+            "check ROCR_VISIBLE_DEVICES and rocm-smi"
+        )
+    return gpus
+
+
+def _run_at_base_topology(args: argparse.Namespace, base: BaseLaunch) -> None:
+    """Settle the session's TP and EP on ``base``, which chose them wherever the operator left them open.
+
+    The executors size their GPU masks and launches from ``$TP`` and ``$EP``, and the manifest and state record them.
+    """
+    args.tp, args.ep = base.topology.tp, base.topology.ep
+    os.environ["TP"], os.environ["EP"] = str(base.topology.tp), str(base.topology.ep)
 
 
 def _redacted(base: BaseLaunch) -> BaseLaunch:
@@ -136,8 +144,10 @@ def resolve_base_launch(
 ) -> BaseLaunch | None:
     """Resolve the base of a fresh ``framework`` session and freeze it in ``session_dir``.
 
-    ``None`` when the session resolves no base. Exits 2 when the operator's launch file cannot serve as the base,
-    the query is malformed, a source cannot be read, or no source and no default serves the session.
+    The session then runs at the base's TP and EP, so this runs before anything records them. ``None`` when the
+    session resolves no base. Exits 2 when the operator's launch file cannot serve as the base, the query is
+    malformed, a single-node host sees no GPU, a source cannot be read, or no source and no default serves the
+    session.
     """
     location = (getattr(args, "reference_script", None) or "").strip()
     if is_scriptable(framework):
@@ -148,14 +158,16 @@ def resolve_base_launch(
         return None
     try:
         query = _query(args, framework=framework, concurrencies=concurrencies)
+        gpus = _session_gpus(args)
         user_file = _read_user_file(location, framework) if location else None
-        found = resolve_base(query, fetch_sources(query, user_file=user_file), gpus=int(args.tp))
+        found = resolve_base(query, fetch_sources(query, user_file=user_file), gpus=gpus)
     except (OSError, SourceFetchError, UserFileError, BaseLaunchError) as exc:
         _refuse(f"the base launch could not be resolved: {exc}")
     if isinstance(found, Miss):
         _refuse("no source serves this session's base launch:\n  " + "\n  ".join(found.reasons()))
     base = _redacted(found)
     write_base_launch(session_dir, base)
+    _run_at_base_topology(args, base)
     _announce(base)
     return base
 
