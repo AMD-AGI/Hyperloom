@@ -264,14 +264,25 @@ class TestWriteFmoeUntunedCsvFromLog:
         assert report["dropped_unsupported"] == []
 
     def test_a_problem_whose_lookups_all_hit_yields_no_csv(self, tmp_path):
-        """Its tokens are served by tuned rows already; the dense M sweep is not its demand."""
+        """Every dispatch named its tuned kernels; the dense M sweep is not its demand."""
         path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(
-            _log(tmp_path, REAL_2STAGE_DEFAULT), tmp_path / "ws"
+            _log(tmp_path, REAL_2STAGE_WITH_KERNEL_NAMES), tmp_path / "ws"
         )
 
         assert path == ""
         assert report["observed"] == 1
         assert report["tunable"] == 0
+
+    def test_a_ck_problem_logged_only_as_default_dispatches_is_tuned_at_those_tokens(self, tmp_path):
+        """aiter prints ``default`` exactly when the lookup found no tuned row; no FlyDSL line need follow."""
+        dispatches = [REAL_2STAGE_DEFAULT.replace(", 256, 256, ", f", 256, {token}, ") for token in (1, 8, 64, 512)]
+        path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(
+            _log(tmp_path, "\n".join(dispatches)), tmp_path / "ws"
+        )
+
+        rows = [line for line in open(path, encoding="utf-8").read().splitlines() if line][1:]
+        assert sorted(int(row.split(",")[0]) for row in rows) == [1, 8, 64, 512]
+        assert report["tunable"] == 1
 
     def test_drops_pairs_the_tuner_would_reject(self, tmp_path):
         """One unsupported row aborts the whole aiter tuner run, so filter first."""

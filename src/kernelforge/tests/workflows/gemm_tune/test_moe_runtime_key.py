@@ -17,7 +17,13 @@ _TUPLE = (
     "'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', "
     "'QuantType.per_1x32', True, False)"
 )
-_DISPATCH = "[aiter] [fused_moe] using 2stage default for " + _TUPLE
+# A dispatch that found its tuned row names the row's kernels; one that found none prints ``default``.
+_DISPATCH = (
+    "[aiter] [fused_moe] using 2stage "
+    "(kernelName1='flydsl_moe1_afp4_wfp4_bf16_t128x128x256_bnt0_fp4', "
+    "kernelName2='flydsl_moe2_layout_afp4_wfp4_bf16_t128x128x128_atomic_sbm128') for " + _TUPLE
+)
+_UNTUNED_DISPATCH = "[aiter] [fused_moe] using 2stage default for " + _TUPLE
 _MISS = (
     "[aiter] [fused_moe] no tuned FlyDSL config for "
     + _TUPLE
@@ -57,12 +63,7 @@ class TestTupleLayout:
         assert key["dtype"] == "torch.bfloat16"  # quotes stripped
 
     def test_a_dispatch_that_names_its_kernels_is_read(self):
-        named = _DISPATCH.replace(
-            "2stage default",
-            "2stage (kernelName1='flydsl_moe1_afp4_wfp4_bf16_t128x128x256_bnt0_fp4', "
-            "kernelName2='flydsl_moe2_layout_afp4_wfp4_bf16_t128x128x128_atomic_sbm128')",
-        )
-        rep = _log(named.format(tok=16))
+        rep = _log(_DISPATCH.format(tok=16))
         (key,) = ev.moe_dispatch_keys(rep)
         assert key["tokens"] == [16]
         assert key["miss_count"] == 0
@@ -75,7 +76,9 @@ class TestTupleLayout:
         assert stages["2stage/default"]["tokens"] == [32]
 
     def test_short_tuples_record_no_key_and_warn_once_per_log(self, caplog):
-        short_dispatch = "[aiter] [fused_moe] using 2stage default for (304, 32, 4096, 1536, 8, 2)"
+        short_dispatch = (
+            "[aiter] [fused_moe] using 2stage (kernelName1='k1', kernelName2='k2') for (304, 32, 4096, 1536, 8, 2)"
+        )
         short_miss = (
             "[aiter] [fused_moe] no tuned FlyDSL config for "
             "(304, 32, 4096, 1536, 8, 2), using heuristic FlyDSL fallback"
@@ -92,10 +95,9 @@ class TestTupleLayout:
 
 
 class TestMissSignal:
-    def test_the_miss_line_is_what_marks_a_token_as_needing_tuning(self):
-        # The dispatch line prints identically whether or not a tuned row was found, so it cannot be the miss signal
-        # on its own.
-        rep = _log(_DISPATCH.format(tok=1), _DISPATCH.format(tok=512), _MISS.format(tok=512))
+    def test_a_default_dispatch_marks_its_token_as_needing_tuning(self):
+        # aiter prints ``default`` in place of the kernel names exactly when the lookup found no tuned row.
+        rep = _log(_DISPATCH.format(tok=1), _UNTUNED_DISPATCH.format(tok=512))
         (key,) = ev.moe_dispatch_keys(rep)
         assert key["tokens"] == [1, 512]
         assert key["untuned_tokens"] == [512]
@@ -155,10 +157,17 @@ class TestUntunedCsv:
         ]
 
     def test_a_key_whose_lookups_all_hit_renders_no_rows(self):
-        """Its tokens are served by tuned rows already; tuning them again spends the budget on nothing."""
+        """Every dispatch named its tuned kernels; tuning those tokens again spends the budget on nothing."""
         rep = _log(_DISPATCH.format(tok=1), _DISPATCH.format(tok=32))
         (key,) = ev.moe_dispatch_keys(rep)
         assert ev.moe_untuned_csv_text(key).strip().splitlines()[1:] == []
+
+    def test_default_dispatches_alone_are_tuning_demand_at_their_tokens(self):
+        """A CK 2-stage key whose only evidence is ``default`` dispatches still gets its rows."""
+        rep = _log(*[_UNTUNED_DISPATCH.format(tok=tok) for tok in (1, 8, 64, 512)])
+        (key,) = ev.moe_ck_missed_keys(rep)
+        rows = ev.moe_untuned_csv_text(key).strip().splitlines()[1:]
+        assert sorted(int(r.split(",")[0]) for r in rows) == [1, 8, 64, 512]
 
     def test_the_rendered_csv_passes_the_tuners_own_validator(self, tmp_path):
         from kernelforge.workflows.gemm_tune.tuners.fmoe_ck import _validate_fmoe_csv
@@ -233,8 +242,8 @@ class TestFmoeCkAcceptsIt:
         assert self._tuner(tmp_path, out)._demand_key() is None
 
     def test_misses_outside_ck_two_stage_tokens_are_not_ck_demand(self, tmp_path):
-        ck_dispatch = _DISPATCH.replace("default", "ck").format(tok=16)
-        asm_dispatch = _DISPATCH.replace("2stage default", "1stage asm").format(tok=4096)
+        ck_dispatch = _UNTUNED_DISPATCH.replace("default", "ck").format(tok=16)
+        asm_dispatch = _UNTUNED_DISPATCH.replace("2stage default", "1stage asm").format(tok=4096)
         rep = _log(ck_dispatch, asm_dispatch, _MISS.format(tok=4096))
         out = ev.write_demand(rep, tmp_path / "demand.json")
 
@@ -242,8 +251,8 @@ class TestFmoeCkAcceptsIt:
         assert self._tuner(tmp_path, out)._demand_key() is None
 
     def test_ck_demand_contains_only_misses_in_the_two_stage_token_range(self, tmp_path):
-        ck_dispatch = _DISPATCH.replace("default", "ck").format(tok=16)
-        asm_dispatch = _DISPATCH.replace("2stage default", "1stage asm").format(tok=4096)
+        ck_dispatch = _UNTUNED_DISPATCH.replace("default", "ck").format(tok=16)
+        asm_dispatch = _UNTUNED_DISPATCH.replace("2stage default", "1stage asm").format(tok=4096)
         rep = _log(
             ck_dispatch,
             asm_dispatch,

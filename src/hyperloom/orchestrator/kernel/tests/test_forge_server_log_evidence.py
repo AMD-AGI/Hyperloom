@@ -203,6 +203,7 @@ _MOE_KEY = (
     "'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
 )
 MOE_DISPATCH = "[aiter] [fused_moe] using 2stage default for " + _MOE_KEY + "\n"
+MOE_TUNED_DISPATCH = "[aiter] [fused_moe] using 2stage (kernelName1='k1', kernelName2='k2') for " + _MOE_KEY + "\n"
 MOE_MISS = "[aiter] [fused_moe] no tuned FlyDSL config for " + _MOE_KEY + ", using heuristic FlyDSL fallback\n"
 
 
@@ -214,7 +215,7 @@ class TestTheMoeCsvTunesOnlyWhatItsLookupsMissed:
         model_dir = tmp_path / "model"
         model_dir.mkdir()
         dense = "".join(HIT.format(m=m) * 4 for m in (1, 64, 2048, 16384))
-        moe = MOE_DISPATCH.format(tok=1) + MOE_DISPATCH.format(tok=512) + MOE_MISS.format(tok=512)
+        moe = MOE_TUNED_DISPATCH.format(tok=1) + MOE_DISPATCH.format(tok=512) + MOE_MISS.format(tok=512)
         log_path = _log(tmp_path / "server.log", dense + moe)
 
         seen: dict[str, list[str]] = {}

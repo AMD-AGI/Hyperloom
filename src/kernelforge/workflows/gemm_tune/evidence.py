@@ -43,7 +43,10 @@ FUSED_MOE = re.compile(
     r"\[aiter\]\s+\[fused_moe\]\s+using\s+(?P<stage>\S+)\s+(?P<tag>\([^)]*\)|\S+)\s+for\s+\((?P<tuple>[^)]*)\)"
 )
 
-# The same tuple, on the line that says the lookup MISSED.
+# The dispatch tag aiter prints when the lookup found no tuned row.
+_UNTUNED_DISPATCH_TAG = "default"
+
+# The same tuple, on the line that names the fallback a missed lookup took.
 FUSED_MOE_MISS = re.compile(r"\[aiter\]\s+\[fused_moe\]\s+no tuned (?P<flavour>\S+) config for\s+\((?P<tuple>[^)]*)\)")
 
 # Field order of the aiter fused-MoE dispatch tuple, read off a production log:
@@ -360,27 +363,24 @@ def _record_dense_lookup(scan: _LogScan, match: re.Match, line: str, *, max_keys
 
 
 def _record_moe_dispatch(scan: _LogScan, match: re.Match) -> None:
-    """Record the stage a fused-MoE dispatch ran, and the token count it ran it for.
+    """Record the stage a fused-MoE dispatch ran, the token count it ran it for, and whether its lookup missed.
 
     One model dispatches DIFFERENT stages at different token counts, so a single
     "saw 1stage" boolean collapses the decode range away and suppresses tuning
-    that 2stage would have covered.
+    that 2stage would have covered. aiter prints ``default`` in place of the
+    kernel names exactly when no tuned row was found.
     """
     parts = moe_tuple(match.group("tuple"))
     moe = _moe_dispatch_record(scan)
     stage_key = f"{match.group('stage')}/{match.group('tag')}"
     record = moe["by_stage"].setdefault(stage_key, {"tokens": set(), "tuple": parts})
-    token = _record_moe_key(moe, parts, miss=False)
+    token = _record_moe_key(moe, parts, miss=match.group("tag") == _UNTUNED_DISPATCH_TAG)
     if token is not None:
         record["tokens"].add(token)
 
 
 def _record_moe_miss(scan: _LogScan, match: re.Match) -> None:
-    """Record a fused-MoE lookup that found no tuned row.
-
-    The dispatch line says which stage ran, not whether a tuned row was found --
-    it prints identically either way.
-    """
+    """Record a fused-MoE lookup that found no tuned row, and the fallback it took."""
     moe = _moe_dispatch_record(scan)
     moe["fallback_flavour"] = match.group("flavour")
     _record_moe_key(moe, moe_tuple(match.group("tuple")), miss=True)

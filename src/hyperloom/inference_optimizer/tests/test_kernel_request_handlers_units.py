@@ -1734,7 +1734,9 @@ class TestForgeGemmHelperCoverage:
     def test_the_token_column_is_the_tokens_the_key_missed(self, tmp_path):
         """A token the lookup hit is already served; only the missed ones are worth a tuning row."""
         log = tmp_path / "server.log"
-        hit = self._REAL_MOE_DISPATCH.replace(", 256, 256, ", ", 256, 32, ")
+        hit = self._REAL_MOE_DISPATCH.replace(", 256, 256, ", ", 256, 32, ").replace(
+            "2stage default", "2stage (kernelName1='k1', kernelName2='k2')"
+        )
         log.write_text("\n".join([hit, self._REAL_MOE_DISPATCH, self._REAL_MOE_MISS]) + "\n", encoding="utf-8")
 
         csv_path, _report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(str(log), tmp_path / "ws")
