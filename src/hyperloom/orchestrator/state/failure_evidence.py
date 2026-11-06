@@ -16,6 +16,7 @@ import re
 from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 FAILURE_STAGE_WARMUP: str = "warmup"
 FAILURE_STAGE_DECISION: str = "decision"
@@ -48,6 +49,7 @@ MAGPIE_NONZERO_INVALID_MEASUREMENT: str = "magpie_nonzero_invalid_measurement"
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")
 _CANDIDATE_ERROR_CLASSES = frozenset(
     {
+        ARGV_INVALID,
         "capability_unsupported",
         "invalid_argument",
         "unsupported_config",
