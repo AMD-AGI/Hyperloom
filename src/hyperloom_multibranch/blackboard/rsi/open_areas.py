@@ -4,10 +4,11 @@
 """The open areas the judge reads every round: where a new branch could open, and whether one should open at all.
 
 :func:`open_areas` lists the ops of the integration head's profile, or of the nearest commit it builds on that was
-profiled, with the largest Amdahl ceilings, leaving out the ops a running branch works on (its focus, or an op of the
-family of a claim it holds or of its last explore test, which is all a branch opened without a focus shows) and the
-spent ones: those the playbook's ``failed_op_limit`` branches opened on the integration head as it stands were focused
-on and stopped without a commit. A spent op opens again once the integration head moves. With too little of EXPLORE
+profiled, with the largest Amdahl ceilings, leaving out the ops a running branch works on (its focus, an op a direction
+of Arbor's map it holds names, or an op of the family of a claim it holds or of its last explore test, which is all a
+branch opened without a focus shows) and the spent ones: those the playbook's ``failed_op_limit`` branches opened on
+the integration head as it stands were focused on and stopped without a commit. A spent op opens again once the
+integration head moves, and an op of a direction of the map once its Arbor branch stops. With too little of EXPLORE
 left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a new branch took to
 it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
 the head's. The direction families' odds are the specialists' menu (:mod:`rsi.menu`), not the judge's: a family has
@@ -20,9 +21,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, BranchNode, amdahl_ceiling_pct
+from hyperloom_multibranch.contracts.blackboard.records import (
+    BlackboardSnapshot,
+    BranchNode,
+    MapDirection,
+    amdahl_ceiling_pct,
+)
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
-from hyperloom_multibranch.blackboard.families import family_of, op_family
+from hyperloom_multibranch.blackboard.families import direction_names_op, family_of, op_family
 from hyperloom_multibranch.blackboard.rsi.menu import profiled_commit, record_family
 from hyperloom_multibranch.blackboard.rsi.playbook import H0, Playbook
 
@@ -62,10 +68,10 @@ class FocusHistory:
 @dataclass(frozen=True)
 class OpenAreas:
     """Where a new branch could open: the ``ops`` of the profile of ``profiled`` left open, the ops left out because
-    running branches work on them (``covered``, by op, the branches) or they are spent (``spent``, by op, the
-    history of the branches focused on it), the minutes left of EXPLORE and those a new branch takes to its first
-    commit. ``head`` is the integration head; a ``profiled`` commit other than it is one it builds on, because no
-    commit of the head's recipe was profiled."""
+    running branches work on them (``covered``, by op, the branches, an Arbor branch with the ids of the directions of
+    its map that name the op) or they are spent (``spent``, by op, the history of the branches focused on it), the
+    minutes left of EXPLORE and those a new branch takes to its first commit. ``head`` is the integration head; a
+    ``profiled`` commit other than it is one it builds on, because no commit of the head's recipe was profiled."""
 
     profiled: str = ""
     ops: tuple[OpenOp, ...] = ()
@@ -140,6 +146,29 @@ def _working(snapshot: BlackboardSnapshot) -> dict[str, set[str]]:
     return working
 
 
+def _held(snapshot: BlackboardSnapshot) -> dict[str, list[MapDirection]]:
+    """The directions of Arbor's map each running Arbor branch holds, by the branch."""
+
+    holders = snapshot.map_holders()
+    held: dict[str, list[MapDirection]] = {}
+    for item in snapshot.agent_map:
+        if item.id in holders:
+            held.setdefault(holders[item.id], []).append(item)
+    return held
+
+
+def _covering(op: str, running: set[str], held: Mapping[str, Sequence[MapDirection]]) -> tuple[str, ...]:
+    """The ``running`` branches that work on ``op``, and each Arbor branch that holds a direction naming it, named
+    with the ids of those directions."""
+
+    shown = {branch: branch for branch in running}
+    for branch, directions in held.items():
+        ids = [item.id for item in directions if direction_names_op(item, op)]
+        if ids:
+            shown[branch] = f"{branch} (Arbor, {', '.join(ids)})"
+    return tuple(shown[branch] for branch in sorted(shown))
+
+
 def _focused(snapshot: BlackboardSnapshot) -> dict[str, list[BranchNode]]:
     """The specialist branches this session opened with a focus, by the op they focus on."""
 
@@ -182,13 +211,14 @@ def open_areas(
     ops = [OpenOp(op, op_family(op), share) for op, share in shares if share > 0]
     focused = _focused(snapshot)
     working = _working(snapshot)
+    held = _held(snapshot)
     covered: dict[str, tuple[str, ...]] = {}
     spent: dict[str, FocusHistory] = {}
     for item in ops:
         nodes = focused.get(item.op, [])
         running = {node.branch for node in nodes if node.stopped_at is None} | working.get(item.family or "", set())
-        if running:
-            covered[item.op] = tuple(sorted(running))
+        if covering := _covering(item.op, running, held):
+            covered[item.op] = covering
         elif (history := _spent(snapshot, nodes, head, numbers.failed_op_limit)) is not None:
             spent[item.op] = history
     left = max(0.0, seconds_left) / _MINUTE
