@@ -38,7 +38,7 @@ import json
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from hyperloom.common.outside_facts import (
     TUNABLEOP_ENABLED_ENV,
@@ -46,7 +46,7 @@ from hyperloom.common.outside_facts import (
     TUNABLEOP_TUNING_ENV,
     UPSTREAM_PR_REPOS,
 )
-from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.measurement import TestRequest as MeasuredRequest
 from hyperloom.contracts.recipe import KernelKind
 from hyperloom.hosted.mcp_server import (
@@ -79,6 +79,8 @@ from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_L
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.blackboard.learning_search import LearningFinder
+
+T = TypeVar("T")
 
 SPECIALIST_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
 _OBJECT = "object"
@@ -128,12 +130,25 @@ _WAIT_TEST: dict[str, Any] = {
     "required": ["request_id"],
     "additionalProperties": False,
 }
-# The caller's branch is the token's; a request that names a branch or an id is refused by the schema.
+#: What a specialist tests: a change of its own (``explore``) or the profile of its head (``profile``). The other
+#: purposes and kinds are the session's (a baseline, a health check, a final candidate, an integration, the confirm
+#: retest of a measured gain, a regression's reproduction, a final sweep): the queue exempts most of them from the
+#: branch's K and its backpressure, so a specialist that could send them would take the session's capacity.
+SPECIALIST_KINDS = (TestKind.TEST, TestKind.PROFILE)
+SPECIALIST_PURPOSES = (Purpose.EXPLORE, Purpose.PROFILE)
+# The caller's branch is the token's; a request that names a branch or an id, a priority (the purpose's default is the
+# queue's to give) or a purpose or kind that is not the specialist's is refused by the schema.
 _SUBMIT_TEST: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
-        "kind": {"enum": [kind.value for kind in TestKind]},
-        "purpose": {"enum": [purpose.value for purpose in Purpose]},
+        "kind": {"enum": [kind.value for kind in SPECIALIST_KINDS]},
+        "purpose": {
+            "enum": [purpose.value for purpose in SPECIALIST_PURPOSES],
+            "description": (
+                "explore for a change of yours, profile for the profile of your head. The runtime retests a measured "
+                "gain itself (confirm) and the session runs its own baselines, finals and integrations."
+            ),
+        },
         "parent_commit": {"type": _STRING, "minLength": 1},
         "delta": {
             "type": _OBJECT,
@@ -143,8 +158,6 @@ _SUBMIT_TEST: dict[str, Any] = {
             ),
         },
         "intent_fingerprint": {"type": [_STRING, _NULL]},
-        "priority": {"type": [_INTEGER, _NULL], "minimum": PRIORITY_HIGHEST, "maximum": PRIORITY_LOWEST},
-        "retest_of": {"type": [_STRING, _NULL]},
         "avoid_nodes": {"type": _ARRAY, "items": {"type": _STRING}},
         "accuracy": {"type": _BOOLEAN},
         "concurrency": {"type": _ARRAY, "items": {"type": _INTEGER, "minimum": 1}},
@@ -319,13 +332,6 @@ _POLL_INBOX: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-# The specialist runtime submits the confirm retest of a measured win itself, through the toolbox interface.
-_CONFIRM_REFUSED_CODE = "confirm_not_for_specialists"
-_CONFIRM_REFUSED_REASON = (
-    "a specialist does not submit purpose=confirm: the runtime retests a measured win itself, "
-    "and a confirm of your own would be measured and never used; submit purpose=explore instead"
-)
-
 BlackboardFor = Callable[[str], Blackboard]
 BriefingFor = Callable[[str], StartupBriefProvider]
 
@@ -373,13 +379,10 @@ def jsonable(value: Any) -> Any:
     return value
 
 
-async def _on(home: asyncio.AbstractEventLoop | None, call: Awaitable[Any]) -> Any:
-    """Await a toolbox call on the loop the toolbox lives on.
-
-    The service answers every request on a loop of its own that ends with the request. The toolbox starts its tests as
-    tasks of the loop it was started on, so a call made on the request's loop would leave the test running on a loop
-    that is about to stop: it would be cancelled the moment the reply went out.
-    """
+async def on_home_loop(home: asyncio.AbstractEventLoop | None, call: Awaitable[T]) -> T:
+    """Await ``call`` on the home loop, or hop there with ``run_coroutine_threadsafe`` and ``wrap_future``."""
+    # The service answers each request on a loop that ends with it, while the toolbox runs its tests as tasks of the
+    # loop it was started on: a call made on the request's loop would be cancelled the moment the reply went out.
     if home is None or asyncio.get_running_loop() is home:
         return await call
     return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(call, home))  # type: ignore[arg-type]
@@ -412,10 +415,8 @@ def _submit_test(
             request = MeasuredRequest.from_document({**arguments, "branch_id": ctx.principal.branch})
         except ValueError as exc:  # MeasurementError and RecipeError both are
             raise InvalidParamsError(str(exc)) from exc
-        if request.purpose is Purpose.CONFIRM:
-            raise ToolError(f"rejected ({_CONFIRM_REFUSED_CODE}): {_CONFIRM_REFUSED_REASON}")
         try:
-            return {"request_id": await _on(home, toolbox.submit_test(request))}
+            return {"request_id": await on_home_loop(home, toolbox.submit_test(request))}
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
         except Backpressure as exc:
@@ -435,7 +436,7 @@ def _put_kernel_artifact(
         kind, rows_only = KernelKind(arguments["kind"]), arguments.get("rows_only", False)
         call = toolbox.put_kernel_artifact(kind, arguments.get("target"), arguments["env"], data, rows_only)
         try:
-            artifact = await _on(home, call)
+            artifact = await on_home_loop(home, call)
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
         return artifact.to_document()
@@ -477,7 +478,7 @@ def _start_analysis(
             str(arguments.get("profile_request_id") or ""),
         )
         try:
-            return {"job_id": await _on(home, call)}
+            return {"job_id": await on_home_loop(home, call)}
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
 
@@ -556,7 +557,7 @@ def _wait_test(
             record = await _own_record(blackboards, ctx, request_id, profiles_shared=True)
         if _is_over(record):
             return _result_document(request_id, record)
-        progress = await _on(home, toolbox.progress(request_id))
+        progress = await on_home_loop(home, toolbox.progress(request_id))
         return _waiting_document(request_id, time.monotonic() - started, progress)
 
     return handle
@@ -568,7 +569,7 @@ def _cancel_test(
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
         await _own_record(blackboards, ctx, arguments["request_id"])
         try:
-            return {"outcome": (await _on(home, toolbox.cancel(arguments["request_id"]))).value}
+            return {"outcome": (await on_home_loop(home, toolbox.cancel(arguments["request_id"]))).value}
         except ToolboxError as exc:
             raise ToolError(f"{type(exc).__name__}: {exc}") from exc
 
@@ -579,7 +580,7 @@ def _queue_state(
     toolbox: Toolbox, home: asyncio.AbstractEventLoop | None
 ) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        state = await _on(home, toolbox.queue_state())
+        state = await on_home_loop(home, toolbox.queue_state())
         return {**jsonable(state), "queued": state.queued, "running": state.running}
 
     return handle
@@ -618,7 +619,8 @@ async def _read_feed(blackboard: Blackboard, branch: str, cursor: str) -> _Feed:
     base, skipped, anchor = cursor, 0, ""
     if cursor.startswith(_PAGE_CURSOR):
         parts = cursor[len(_PAGE_CURSOR) :].split(":", 2)
-        if len(parts) != 3 or not parts[0].isdigit() or len(parts[1]) != _FINGERPRINT_CHARS:
+        count_ok = parts[0].isascii() and parts[0].isdigit()  # int() reads no superscript, which isdigit() admits
+        if len(parts) != 3 or not count_ok or len(parts[1]) != _FINGERPRINT_CHARS:
             raise InvalidParamsError(f"not an inbox cursor: {cursor!r}")
         skipped, anchor, base = int(parts[0]), parts[1], parts[2]
     try:
@@ -879,6 +881,8 @@ __all__ = [
     "POLL_INBOX_MAX_ITEMS",
     "REPLY_INBOX_HEADER",
     "REPLY_INBOX_LINES",
+    "SPECIALIST_KINDS",
+    "SPECIALIST_PURPOSES",
     "SPECIALIST_TOKEN_ENV",
     "BriefingFor",
     "BlackboardFor",
@@ -887,6 +891,7 @@ __all__ = [
     "WAIT_POLL_SECONDS",
     "WAIT_TEST_MAX_SECONDS",
     "jsonable",
+    "on_home_loop",
     "register_specialist_tools",
     "reply_inbox",
     "wait_budget",
