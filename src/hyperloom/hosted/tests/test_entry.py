@@ -50,7 +50,9 @@ def run(tmp_path, monkeypatch):
         **_SECRETS,
     }
     for name in (*(v for k, v in vars(Var).items() if not k.startswith("_")), entry.ENV_IMAGE, entry.ENV_RUNTIME_DIR):
-        monkeypatch.delenv(name, raising=False)
+        # Set first so that monkeypatch restores it: what the entry sets in os.environ must not outlive the test.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
     container_tmp = tmp_path / "container-tmp"
     container_tmp.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(container_tmp))  # the container's own disk
@@ -493,7 +495,8 @@ def test_multibranch_execs_into_its_entry_with_the_environment_unchanged_but_for
     path = calls[0][2].pop("PATH")
     assert path.split(os.pathsep)[0] == bin_dir  # the installer's interpreter resolves the command
     before.pop("PATH", None)
-    assert Path(calls[0][2].pop(entry.ENV_RUNTIME_DIR)).parent == run.container_tmp
+    runtime = calls[0][2].pop(entry.ENV_RUNTIME_DIR)
+    assert Path(runtime).parent == run.container_tmp
     assert calls[0][2] == before and Var.RUN_ID in before
     assert fake.calls == [] and not (run.state / "session.json").exists() and not (run.state / "exit.json").exists()
     assert os.environ.get(entry.ENV_IMAGE) is None

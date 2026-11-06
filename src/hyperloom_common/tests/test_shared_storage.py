@@ -19,12 +19,11 @@ from pathlib import Path
 
 import pytest
 
-import hyperloom_common
 from hyperloom_common import shared_storage
 from hyperloom_common.shared_storage import make_shared_dirs, setgid_warnings, writable_problems
 from hyperloom_common.tests.shared_accounts import other_accounts
 
-_SRC = str(Path(hyperloom_common.__file__).parents[1])
+_SRC = str(Path(shared_storage.__file__).parents[1])
 
 
 def _here(code: str, *, umask: int) -> str:
@@ -193,9 +192,8 @@ def test_two_accounts_of_one_group_continue_each_others_tree_and_nothing_else(tm
 
         seen = json.loads(accounts.run(accounts.second, _NEXT_LEG.format(shared=str(shared)), umask=0o022))
 
-        assert seen.pop("probe") == [
-            f"PLAIN {shared / 'plain-dir'}: EACCES (owner {accounts.first}:{accounts.group} 2755)"
-        ]
+        probe = seen.pop("probe")
+        assert probe == [f"PLAIN {shared / 'plain-dir'}: EACCES (owner {accounts.first}:{accounts.group} 2755)"]
         assert seen == {
             "append to its file": "ok",
             "new file in its directory": "ok",
