@@ -150,14 +150,16 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     "are not supported for now",
 )
 
-#: Engine deaths that happen *after* the server reported ready and began
-#: serving. These are read only when building a diagnostic excerpt.
+#: Fatal engine/runtime errors, including deaths after the server reported ready.
+#: These are read only when building a diagnostic excerpt.
 _FATAL_ENGINE_MARKERS: tuple[str, ...] = (
     "EngineCore encountered a fatal error",
     "EngineCore encountered an issue",
     "EngineDeadError",
     "Engine core proc died",
     "died with exit code",
+    "HSA_STATUS_ERROR_MEMORY_FAULT",
+    "Memory Fault Error [host:",
 )
 
 #: A framework line's exception, named anywhere in it: these logs prefix every

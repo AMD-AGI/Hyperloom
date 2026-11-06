@@ -960,6 +960,29 @@ def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
     assert "Engine core initialization failed" in excerpt
 
 
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT",
+        ":0:rocdevice.cpp :3905: Memory Fault Error [host: test-host, GPU index: 0, kernel: example_kernel]",
+    ),
+)
+@pytest.mark.parametrize("nested", (False, True))
+@pytest.mark.parametrize("ready", (False, True))
+def test_rocm_memory_fault_remains_in_excerpt_after_downstream_output(tmp_path, fault, nested, ready):
+    watched = tmp_path / "server.log"
+    actual = tmp_path / "benchmark_sglang_test" / "server.log" if nested else watched
+    actual.parent.mkdir(parents=True, exist_ok=True)
+    prefix = "Application startup complete\n" if ready else "loading weights\n"
+    actual.write_text(prefix + fault + "\n" + "request rejected\n" * 5000, encoding="utf-8")
+
+    excerpt = server_log_death_excerpt(str(watched))
+
+    assert excerpt is not None
+    assert excerpt.splitlines()[0] == fault
+    assert len(excerpt) <= 1200
+
+
 def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
     """The excerpt helper returns the engine/worker-init root-cause line (with a
     little context) for the failure classifier; a healthy / missing log returns ``None``."""
@@ -1482,10 +1505,20 @@ def test_the_cause_outranks_the_consequence_it_triggered(tmp_path):
     assert oom < dead, "the cause must reach the classifier ahead of the consequence"
 
 
-def test_a_log_with_no_fatal_marker_still_yields_nothing(tmp_path):
+@pytest.mark.parametrize(
+    "text",
+    (
+        "(APIServer pid=1) INFO:     Application startup complete.",
+        "Successfully allocated memory; compilation completed",
+        "Warning: memory usage is high",
+        "Memory Fault Error rate: 0",
+        "HSA_STATUS_SUCCESS",
+    ),
+)
+def test_a_log_with_no_fatal_marker_still_yields_nothing(tmp_path, text):
     """Unchanged: a healthy log must not produce a death excerpt."""
     log = tmp_path / "server.log"
-    log.write_text("(APIServer pid=1) INFO:     Application startup complete.\n" * 50, encoding="utf-8")
+    log.write_text((text + "\n") * 50, encoding="utf-8")
 
     assert server_log_death_excerpt(str(log)) is None
 
