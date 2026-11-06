@@ -135,6 +135,25 @@ class TestUntunedCsv:
         assert [ln.split(",")[0] for ln in lines[1:]] == ["512", "1024"]
         assert lines[1].split(",")[1:5] == ["6144", "384", "128", "4"]
 
+    def test_rows_lead_with_the_lookups_missed_most(self):
+        """Rows are tuned in file order until the deadline, so the most-missed (key, token) rows come first."""
+        rep = _log(
+            *[_MISS.format(tok=1)] * 2,
+            *[_MISS.format(tok=8)] * 9,
+            *[_MISS.replace("6144", "8192").format(tok=1)] * 5,
+            *[_MISS.replace("6144", "8192").format(tok=8)] * 2,
+        )
+        narrow, wide = sorted(ev.moe_dispatch_keys(rep), key=lambda key: key["model_dim"])
+
+        rows = ev.moe_untuned_csv_text(narrow, wide).strip().splitlines()[1:]
+
+        assert [(r.split(",")[1], r.split(",")[0]) for r in rows] == [
+            ("6144", "8"),
+            ("8192", "1"),
+            ("6144", "1"),
+            ("8192", "8"),
+        ]
+
     def test_a_key_whose_lookups_all_hit_renders_no_rows(self):
         """Its tokens are served by tuned rows already; tuning them again spends the budget on nothing."""
         rep = _log(_DISPATCH.format(tok=1), _DISPATCH.format(tok=32))

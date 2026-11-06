@@ -173,6 +173,21 @@ def test_rows_share_the_timeout_and_a_failed_row_costs_only_itself(tmp_path, mon
     assert _column(Path(result.artifact_path), "token") == ["512"]
 
 
+def test_demand_rows_are_written_most_missed_first(tmp_path):
+    """Rows are tuned in file order until the timeout, so the file leads with the lookups the server missed most."""
+    tail = "4096,512,256,6,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fn,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0"
+    fields = dict(zip(fm._FMOE_CSV_COLUMNS[1:], tail.split(","), strict=True))
+    counts = {"1": 3, "8": 40, "32": 3, "256": 7}
+    tokens = sorted(int(t) for t in counts)
+    key = {**fields, "tokens": tokens, "untuned_tokens": tokens, "untuned_token_counts": counts, "miss_count": 53}
+    demand = tmp_path / "demand.json"
+    demand.write_text(json.dumps({"demands": [], "dispatch": {"moe": {"keys": [key]}}}), encoding="utf-8")
+
+    resolved, _ = fm.FmoeCKTuner(_moe_ctx(tmp_path, demand_json=demand, tokens=[]))._resolve_untuned_csv()
+
+    assert _column(resolved, "token") == ["8", "256", "1", "32"]
+
+
 def test_no_runtime_key_is_refused_rather_than_derived_from_the_config(tmp_path):
     with pytest.raises(ValueError, match="no runtime-observed MoE miss"):
         fm.FmoeCKTuner(_moe_ctx(tmp_path))._resolve_untuned_csv()

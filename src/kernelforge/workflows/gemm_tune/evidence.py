@@ -720,18 +720,23 @@ def moe_ck_missed_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def moe_untuned_csv_text(
-    key: dict[str, Any],
-    *,
+    *keys: dict[str, Any],
     tokens: list[int] | None = None,
 ) -> str:
-    """Render one observed MoE key as an aiter untuned-fmoe CSV, at ``tokens`` or else the tokens it missed."""
+    """Render observed MoE keys as one aiter untuned-fmoe CSV, at ``tokens`` or else each key's missed tokens.
+
+    Rows are tuned in file order until the deadline, so the (key, token) rows missed most often come first.
+    """
     header = list(MOE_KEY_FIELDS)
-    want = tokens or key.get("untuned_tokens") or []
-    lines = [",".join(header)]
-    for token in sorted({int(t) for t in want}):
-        row = [str(token)] + [str(key.get(f, "")) for f in header[1:]]
-        lines.append(",".join(row))
-    return "\n".join(lines) + "\n"
+    rows: list[tuple[int, str]] = []
+    for key in keys:
+        want = tokens or key.get("untuned_tokens") or []
+        counts = key.get("untuned_token_counts") or {}
+        for token in sorted({int(t) for t in want}):
+            row = [str(token)] + [str(key.get(f, "")) for f in header[1:]]
+            rows.append((to_int(counts.get(str(token))) or 0, ",".join(row)))
+    rows.sort(key=lambda row: -row[0])
+    return "\n".join([",".join(header), *(line for _, line in rows)]) + "\n"
 
 
 def write_demand(report: dict[str, Any], path: Path) -> Path:
