@@ -37,11 +37,7 @@ from ..policy.gate import (
     PRUNE_BRANCH_SCOPE_QUEUED,
 )
 from ..specialists.wall_budget import grant_wall_budget_extension
-from ..state.shared_state import (
-    ESCALATE_HINT_SKIP_TO_KERNEL,
-    inject_stack_base_params,
-    is_valid_escalate_hint,
-)
+from ..state.shared_state import inject_stack_base_params
 from ..state.analysis_failures import remember_trace_failure
 from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
 from ..state.task_registry import IllegalTransition, TaskNotFound, TaskSpec
@@ -62,6 +58,7 @@ from .kernel_request import (
     remembered_outcome,
     run_kernel_handler,
 )
+from ._escalate_hint import escalate_hint_denial
 from .message_delivery import publish_send_message
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
@@ -1242,7 +1239,7 @@ class IntentRouter(CoordinatorCollaborator):
         )
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Broadcast strategy_change, then defer a closed-vocab hint; drop or deny the rest."""
+        """Broadcast strategy_change, then defer a hint the current phase reads; deny the rest to the sender."""
         payload = dict(intent.payload or {})
         # Always emit the broadcast first.
         await self.bus.append_and_seq(
@@ -1256,20 +1253,9 @@ class IntentRouter(CoordinatorCollaborator):
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint:
             return
-        if not is_valid_escalate_hint(hint):
-            denied = PolicyDenied(
-                f"escalate_strategy_change hint {hint!r} is not accepted",
-                rule="escalate_hint_not_in_vocab",
-                hint="Request a phase advance such as skip_to_kernel; the run closes itself.",
-            )
+        denied = escalate_hint_denial(hint, str(self.shared_state.phase or "").strip().upper())
+        if denied is not None:
             await self.record_policy_denied(source, intent, denied)
-            return
-        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT
-
-        phase = str(self.shared_state.phase or "").strip().upper()
-        if hint == ESCALATE_HINT_SKIP_TO_KERNEL and phase != PHASE_FRAMEWORK_AGENT:
-            # Only the FRAMEWORK_AGENT exit reads it; left pending, it would end that phase on arrival.
-            log.info("escalate_strategy_change: dropped %r emitted in phase %s", hint, phase or "<none>")
             return
         # Deferred: the next compute_next_phase acts on the hint.
         self.shared_state.set_pending_escalate_hint(hint)
