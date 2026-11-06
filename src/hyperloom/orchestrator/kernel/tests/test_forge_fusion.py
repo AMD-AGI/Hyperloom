@@ -1261,9 +1261,11 @@ def test_salvage_reads_the_published_best_when_the_campaign_never_returned(tmp_p
     assert result["kernel_repo"] == str(repo_root)
     outcome = parse_outcome(result)
     assert outcome.schema_error == ""
-    assert [p.patch_path for p in outcome.patches] == [
-        str(repo_root / "forge_experiments" / "best" / "iter_001" / "forge.patch")
-    ]
+    exported = output_dir / "fusion_llm_qkvgate_split_qknorm_rope.patch"
+    assert [p.patch_path for p in outcome.patches] == [str(exported)]
+    assert exported.read_text(encoding="utf-8") == (
+        repo_root / "forge_experiments" / "best" / "iter_001" / "forge.patch"
+    ).read_text(encoding="utf-8")
     assert [p.target_file for p in outcome.patches] == ["python/sglang/srt/models/qwen3_next.py"]
 
 
