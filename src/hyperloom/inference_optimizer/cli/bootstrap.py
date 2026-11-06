@@ -55,6 +55,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+_AGENTX_MODE = "agentx"
+_SYNTHETIC_MODE = "synthetic"
+
 
 @dataclass(frozen=True)
 class HostedPlugInputs:
@@ -223,7 +226,7 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
 
 def agentx_state_is_stale(state: Any) -> str:
     """Return why a resumed session's AgentX state is unusable, or ``\"\"``."""
-    want_mode = "agentx" if _agentx_enabled() else "synthetic"
+    want_mode = _benchmark_mode()
     had_mode = str(getattr(state, "benchmark_mode", "") or "")
     if had_mode and had_mode != want_mode:
         return (
@@ -231,7 +234,7 @@ def agentx_state_is_stale(state: Any) -> str:
             f"{want_mode!r}; the KEEP ledger keys on server args only, so the two "
             "sets of measurements would overwrite each other"
         )
-    if want_mode == "agentx":
+    if is_agentx_mode(want_mode):
         had_epoch = int(getattr(state, "agentx_epoch", 0) or 0)
         if had_epoch != AGENTX_MEASUREMENT_EPOCH:
             return (
@@ -699,11 +702,12 @@ def _install_executors(
 
 
 @dataclass(frozen=True)
-class LaunchPlatform:
-    """What a fresh launch settled about the platform before seeding: the partition verdict and GPU power record."""
+class SettledLaunch:
+    """What a fresh launch settled before seeding: the partition verdict, the GPU power record and the base launch."""
 
     compute_partition: dict[str, Any]
     gpu_power_settings: dict[str, Any]
+    base: BaseLaunch | None
 
 
 def _plateau_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -804,9 +808,13 @@ def _conc_sweep_enabled(args: argparse.Namespace, benchmark_mode: str) -> bool:
     return not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
 
 
+def _benchmark_mode() -> str:
+    return _AGENTX_MODE if _agentx_enabled() else _SYNTHETIC_MODE
+
+
 def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framework: str) -> BaseLaunch | None:
     """Resolve a fresh session's base launch; it settles the TP and EP the manifest and the seeded state record."""
-    benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    benchmark_mode = _benchmark_mode()
     sweep = _parse_conc_sweep_concs(args, benchmark_mode) if _conc_sweep_enabled(args, benchmark_mode) else []
     return resolve_base_launch(
         args,
@@ -823,8 +831,7 @@ def _seed_shared_state(
     *,
     session_id: str,
     framework: str,
-    platform: LaunchPlatform,
-    base: BaseLaunch | None,
+    settled: SettledLaunch,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
     plateau_overrides = _plateau_overrides_from_args(args)
@@ -837,13 +844,12 @@ def _seed_shared_state(
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
-    benchmark_mode = "synthetic"
+    benchmark_mode = _benchmark_mode()
     agentx_backend = ""
     agentx_epoch = 0
-    if _agentx_enabled():
+    if is_agentx_mode(benchmark_mode):
         from hyperloom.common.agentx_workload import agentic_backend
 
-        benchmark_mode = "agentx"
         agentx_backend = agentic_backend()
         agentx_epoch = AGENTX_MEASUREMENT_EPOCH
     workload = _workload_fields(args)
@@ -858,16 +864,16 @@ def _seed_shared_state(
         # The only copy of the budgets. Validated at the CLI, so anything that reaches here is usable, and archived
         # with the session so a resume restores them without a second source to reconcile.
         **constraint_budgets_from_args(args),
-        gpu_power_settings=dict(platform.gpu_power_settings),
+        gpu_power_settings=dict(settled.gpu_power_settings),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         **workload,
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
         # AgentX corpus shape: seeded from canonical constants if AgentX is on.
-        agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
+        agentx_corpus_shape=_build_agentx_corpus_shape_seed() if is_agentx_mode(benchmark_mode) else {},
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,
-        **shared_state_fields(base),
+        **shared_state_fields(settled.base),
         # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
         # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
@@ -877,7 +883,7 @@ def _seed_shared_state(
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         xdit_model_name=os.environ.get("XDIT_MODEL_NAME", "").strip(),
-        compute_partition=dict(platform.compute_partition),
+        compute_partition=dict(settled.compute_partition),
         nodes=max(1, int(getattr(args, _NODES, 1) or 1)),
         **_warm_replay_fields(args),
         max_minutes=int((args.max_hours or 0) * 60),

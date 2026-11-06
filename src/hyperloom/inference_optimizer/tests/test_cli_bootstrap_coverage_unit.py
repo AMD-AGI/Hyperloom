@@ -26,8 +26,7 @@ def test_seed_uses_explicit_workload_flags_over_defaults(
         _args(model="/models/Qwen2.5-7B", isl=512, osl=512, conc=64, tp=1, ep=1),
         session_id="s-explicit",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
-        base=None,
+        settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert state.isl == 512
@@ -58,8 +57,7 @@ def test_seed_applies_new_workload_defaults_when_unset(
         ),
         session_id="s-default",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
-        base=None,
+        settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert state.isl == 1024
@@ -97,8 +95,7 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
         _args(model=raw),
         session_id="s-raw",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
-        base=None,
+        settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert captured["args"][2] == raw

@@ -10,12 +10,15 @@ import os
 from pathlib import Path
 from typing import Any
 
+#: The directory prefix the Hugging Face cache gives a repo: ``models--org--repo``.
+_HF_CACHE_PREFIX = "models--"
+
 
 def _identity_leaf(seg: str) -> str:
     """Reduce one identity segment to its ``org/repo`` (or bare ``repo``) form."""
     s = seg.strip().strip("/").split("/")[-1]
-    if s.startswith("models--"):
-        s = s[len("models--") :]
+    if s.startswith(_HF_CACHE_PREFIX):
+        s = s[len(_HF_CACHE_PREFIX) :]
     return s.replace("--", "/")
 
 
@@ -53,7 +56,7 @@ def hf_repo_id(model: str | Path | None) -> str | None:
     path = Path(raw).expanduser()
     if not path.is_dir():
         return raw if _is_hf_repo_id(raw) and not raw.startswith("~") else None
-    cached = next((_identity_leaf(part) for part in path.parts if part.startswith("models--")), None)
+    cached = next((_identity_leaf(part) for part in path.parts if part.startswith(_HF_CACHE_PREFIX)), None)
     if cached is not None:
         return cached if _is_hf_repo_id(cached) else None
     return _config_repo_id(path)
@@ -71,7 +74,7 @@ def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[s
         bare = {_identity_bare(raw)}
         return {f.casefold() for f in full}, {b.casefold() for b in bare}
 
-    cache_segs = [part for part in p.parts if part.startswith("models--")]
+    cache_segs = [part for part in p.parts if part.startswith(_HF_CACHE_PREFIX)]
     segments: list[str] = cache_segs if cache_segs else [p.name]
 
     full = {_identity_leaf(s) for s in segments if s}

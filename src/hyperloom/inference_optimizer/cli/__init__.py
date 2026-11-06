@@ -49,9 +49,10 @@ from ..gpu_types import (
     warn_family_runner,
 )
 from ..model_config_utils import summarize_model_config
+from .benchmark_config import bind_benchmark, configure_benchmark
 from .bootstrap import (
     LaunchInfo,
-    LaunchPlatform,
+    SettledLaunch,
     _emit_launch_info,
     constraint_budget_resume_conflict,
     resolve_launch_gpu_power,
@@ -1301,8 +1302,6 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)
-    from .benchmark_config import bind_benchmark
-
     bind_benchmark(session_dir, args)
     base = resolve_session_base(session_dir, args, framework=framework)
     manifest = write_manifest(session_dir, args=args)
@@ -1344,8 +1343,7 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
         args,
         session_id=manifest["session_id"],
         framework=framework,
-        platform=LaunchPlatform(compute_partition=compute_partition, gpu_power_settings=gpu_power),
-        base=base,
+        settled=SettledLaunch(compute_partition=compute_partition, gpu_power_settings=gpu_power, base=base),
     )
     return _SessionStart(session_dir=session_dir, session_lock=session_lock, manifest=manifest)
 
@@ -1847,8 +1845,6 @@ def main(argv: list[str] | None = None) -> int:
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
-        from .benchmark_config import configure_benchmark
-
         try:
             configure_benchmark(args)
             _load_custom_specialist_args(args)

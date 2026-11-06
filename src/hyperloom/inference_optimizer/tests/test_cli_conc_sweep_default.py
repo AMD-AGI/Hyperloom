@@ -147,8 +147,7 @@ class TestTheSweepSwitchFallsBackToTheWorkload:
             args,
             session_id="s",
             framework="sglang",
-            platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
-            base=None,
+            settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
         )
 
     def test_synthetic_sweeps_by_default(self, native_benchmark, tmp_path, monkeypatch):
