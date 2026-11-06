@@ -6,19 +6,15 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import shutil
 import subprocess  # nosec B404 - the probe is an interpreter this module resolves
-from collections.abc import Callable, Container, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, redact
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
-from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json
-
-log = logging.getLogger(__name__)
 
 #: Names this module's observations in downstream artifacts.
 PRODUCER = "preflight.argv"
@@ -37,12 +33,8 @@ SERVING_PYTHON_ENV = "HYPERLOOM_FRAMEWORK_PYTHON"
 
 #: Reasons, in the vocabulary the report and the terminal use.
 PARSED = "parsed"
-PARSED_AFTER_DROP = "parsed_after_drop"
 VALUE_REJECTED = "value_rejected"
-#: The argv's one drop-only repair is not available -- already used, or there
-#: is no digest to record a new one under.
-REPAIR_SPENT = "repair_spent"
-REPAIR_FAILED = "repair_failed"
+UNKNOWN_FLAG = "unknown_flag"
 NO_PARSER = "no_parser"
 PROBE_FAILED = "probe_failed"
 INTERPRETER_UNPROVEN = "interpreter_unproven"
@@ -85,7 +77,7 @@ _IDENTITY_PROGRAM = (
 # only, so the ``parse_known_args`` entry point reports every dotted flag as
 # unrecognised. The leftover tokens are recovered from the intercepted
 # ``unrecognized arguments`` message instead, which keeps a genuinely unknown flag
-# nameable and droppable. Required-ness is cleared first: the string under test is
+# nameable. Required-ness is cleared first: the string under test is
 # the tail the harness appends, not the whole invocation.
 _PARSE_PROGRAM = (
     "import json, re, sys\n"
@@ -129,34 +121,15 @@ class ArgvVerdict:
         status: :data:`OK`, :data:`INVALID` or :data:`UNAVAILABLE`.
         reason: Which of this module's named outcomes was reached.
         detail: Parser or probe output, clipped.
-        argv: The argv that should now launch -- the input, or the repaired one
-            when a drop repair applied.
-        text: ``argv`` as the argument string to write back.
-        dropped: Flags removed by the one allowed repair.
-        repaired_digest: The original argv's digest when a repair applied, so
-            the caller can record that this argv has spent its one repair.
+        argv: The argv that was judged; it is never rewritten.
+        unknown_flags: Flags the parser does not have, when that is why it refused.
     """
 
     status: str
     reason: str
     detail: str = ""
     argv: tuple[str, ...] = ()
-    text: str = ""
-    dropped: tuple[str, ...] = ()
-    repaired_digest: str = ""
-
-
-@dataclass(frozen=True)
-class ArgvRepair:
-    """One argv's claim on its single drop-only repair.
-
-    Attributes:
-        digest: This argv's digest, the key a repair is recorded under.
-        spent: Digests of argvs that have already used their one repair.
-    """
-
-    digest: str = ""
-    spent: Container[str] = ()
+    unknown_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -369,103 +342,49 @@ def check_server_argv(
     *,
     framework: str,
     argv: Sequence[str],
-    text: str,
     launch_env: Mapping[str, str],
-    repair: ArgvRepair = ArgvRepair(),
 ) -> ArgvVerdict:
     """Decide whether the installed framework will accept ``argv``.
+
+    An unknown flag is refused, never dropped, so the launch that runs is the
+    launch that was recorded.
 
     Args:
         framework: Framework the config serves.
         argv: The sealed argv the server would receive.
-        text: That argv as the argument string, for the drop repair.
         launch_env: The environment the benchmark subprocess is launched with.
-        repair: This argv's repair key and the keys already spent.
 
     Returns:
-        ArgvVerdict: The verdict, and the argv that should now launch.
+        ArgvVerdict: The verdict over ``argv``.
     """
     from hyperloom.orchestrator.framework.adapter_parsers import parser_source_for
 
     name = framework.strip().lower()
+    judged = tuple(argv)
     parser_source = parser_source_for(name)
     if not parser_source:
         return ArgvVerdict(
             status=UNAVAILABLE,
             reason=NO_PARSER,
             detail=f"no adapter reaches {name or 'this framework'}'s parser",
-            argv=tuple(argv),
-            text=text,
+            argv=judged,
         )
-
     proven = _prove_probe_target(name, launch_env)
-
-    def _unavailable(reason: str, detail: str) -> ArgvVerdict:
-        return ArgvVerdict(
-            status=UNAVAILABLE,
-            reason=reason,
-            detail=detail,
-            argv=tuple(argv),
-            text=text,
-        )
-
     if proven.target is None:
-        return _unavailable(proven.reason, proven.detail)
-    probe_target = proven.target
-
-    status, detail, flags = _parse(parser_source, argv, probe_target)
+        return ArgvVerdict(status=UNAVAILABLE, reason=proven.reason, detail=proven.detail, argv=judged)
+    status, detail, flags = _parse(parser_source, judged, proven.target)
     if status == UNAVAILABLE:
-        return _unavailable(PROBE_FAILED, detail)
+        return ArgvVerdict(status=UNAVAILABLE, reason=PROBE_FAILED, detail=detail, argv=judged)
     if status == OK:
-        return ArgvVerdict(
-            status=OK,
-            reason=PARSED,
-            argv=tuple(argv),
-            text=text,
-        )
-
-    def _invalid(reason: str, why: str, *, dropped: tuple[str, ...] = ()) -> ArgvVerdict:
-        return ArgvVerdict(
-            status=INVALID,
-            reason=reason,
-            detail=why,
-            argv=tuple(argv),
-            text=text,
-            dropped=dropped,
-        )
-
+        return ArgvVerdict(status=OK, reason=PARSED, argv=judged)
     if not flags:
-        # The parser rejected a value, not a name. Choosing a replacement would
-        # be the harness guessing what the framework meant.
-        return _invalid(VALUE_REJECTED, detail)
-    if not repair.digest or repair.digest in repair.spent:
-        # No repair without a key to record it under: an unrecordable repair is
-        # one the composer can trigger again every round, which is a loop, not
-        # a repair.
-        return _invalid(REPAIR_SPENT, detail, dropped=flags)
-
-    split = tokenize_server_args_preserving_json(remove_server_args(text, list(flags)))
-    if split is None:
-        return _invalid(REPAIR_FAILED, f"{detail}\ndropping {' '.join(flags)} left an argv that cannot be tokenised")
-    repaired_text, tokens = split
-    retry_status, retry_detail, _retry_flags = _parse(parser_source, tokens, probe_target)
-    if retry_status == UNAVAILABLE:
-        return _unavailable(PROBE_FAILED, retry_detail)
-    if retry_status != OK:
-        return _invalid(REPAIR_FAILED, f"{detail}\nafter dropping {' '.join(flags)}: {retry_detail}", dropped=flags)
-    log.warning(
-        "argv preflight: %s rejected %s; dropped and re-validated once",
-        name or "the framework",
-        " ".join(flags),
-    )
+        return ArgvVerdict(status=INVALID, reason=VALUE_REJECTED, detail=detail, argv=judged)
     return ArgvVerdict(
-        status=OK,
-        reason=PARSED_AFTER_DROP,
-        detail=detail,
-        argv=tuple(tokens),
-        text=repaired_text,
-        dropped=flags,
-        repaired_digest=repair.digest,
+        status=INVALID,
+        reason=UNKNOWN_FLAG,
+        detail=f"unknown flag(s): {' '.join(flags)}\n{detail}".rstrip(),
+        argv=judged,
+        unknown_flags=flags,
     )
 
 
@@ -517,7 +436,7 @@ __all__ = [
     "PRODUCER",
     "SERVING_PYTHON_ENV",
     "UNAVAILABLE",
-    "ArgvRepair",
+    "UNKNOWN_FLAG",
     "ArgvVerdict",
     "Probe",
     "ProbeTarget",

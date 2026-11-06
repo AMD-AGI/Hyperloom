@@ -30,8 +30,8 @@ _SCENARIO = {"name": "never-launched", "attempts": [{"name": "would-boot", "outc
 _BAD_ARGS = "--tp 8 --attention-backend fa4"
 
 #: A flag the installed parser does not have, in the spelling an older version
-#: accepted. This one is droppable, exactly once.
-_STALE_FLAG_ARGS = "--tp 8 --moe-backend triton"
+#: accepted.
+_STALE_FLAG = "--moe-backend"
 
 _PROBE_PYTHON = "/opt/probe/bin/python"
 
@@ -62,7 +62,6 @@ def refusing_probe(monkeypatch):
 
 async def _attempt(session: Path, slot: Path, *, task_id: str, server_args: str) -> dict:
     """Run one baseline round whose config carries ``server_args``."""
-    executor = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
     config = slot / f"{task_id}.yaml"
     config.write_text(
         yaml.safe_dump(
@@ -79,6 +78,12 @@ async def _attempt(session: Path, slot: Path, *, task_id: str, server_args: str)
         ),
         encoding="utf-8",
     )
+    return await _run(session, slot, config, task_id=task_id)
+
+
+async def _run(session: Path, slot: Path, config: Path, *, task_id: str) -> dict:
+    """Run one baseline round over an already materialised ``config``."""
+    executor = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
     return await executor._run_single_benchmark(
         BenchmarkAttempt(
             timeout_sec=1800,
@@ -171,28 +176,41 @@ async def test_an_argv_the_parser_accepts_still_reaches_the_launch(
     assert launches.served == 1
 
 
+@pytest.mark.parametrize("source", ("recipe", "user", "candidate"))
 @pytest.mark.asyncio
-async def test_the_one_allowed_drop_is_written_back_before_the_launch(
+async def test_an_unknown_flag_from_any_source_is_refused_by_name_and_never_dropped(
     round_slot,
     launch_backend,
     monkeypatch,
+    source,
 ):
-    """A repair the config does not carry is a repair the server never receives."""
+    """Whichever layer brought the flag, the round fails naming it and the config still carries it."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
+    from hyperloom.orchestrator.actions.executors import _workload_envs as we
     from hyperloom.orchestrator.actions.executors._server_argv import config_server_argv
+    from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, MaterializeOptions
+
+    from ._workload_envs_helpers import clear_env, write_config
 
     monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
+    clear_env(monkeypatch)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_SERVER_ARGS", raising=False)
+    stale = f"{_STALE_FLAG} triton"
+    recipe_args = f"--tp 8 {stale}" if source == "recipe" else "--tp 8"
+    monkeypatch.setattr(we, "resolve_reference_launch", lambda: (recipe_args, {}, {}))
+    if source == "user":
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", stale)
+    candidate = LaunchLayer(extra_server_args=stale if source == "candidate" else "--context-length 4096")
+
     identity = '{"executable": "/opt/probe/bin/python", "python": "3.12.1", "origin": "/site/sglang/__init__.py", "dist": "0.5.1"}'
 
     def _probe(argv, env, timeout_sec):
         program = argv[2] if len(argv) > 2 else ""
         if "_build_parser" not in program:
             return subprocess.CompletedProcess(argv, 0, stdout=identity + "\n", stderr="")
-        refused = "--moe-backend" in argv[3]
         body = (
-            '{"status": "invalid", "message": "unrecognized arguments: --moe-backend triton",'
-            ' "unknown": ["--moe-backend", "triton"]}'
-            if refused
+            f'{{"status": "invalid", "message": "unrecognized arguments: {stale}", "unknown": ["{_STALE_FLAG}", "triton"]}}'
+            if _STALE_FLAG in argv[3]
             else '{"status": "ok", "message": "", "unknown": []}'
         )
         return subprocess.CompletedProcess(argv, 0, stdout=body + "\n", stderr="")
@@ -203,13 +221,21 @@ async def test_the_one_allowed_drop_is_written_back_before_the_launch(
     )
 
     session, slot = round_slot
+    src = write_config(slot / "base.yaml", envs={pf.SERVING_PYTHON_ENV: _PROBE_PYTHON})
+    config = we.materialize_config_with_envs(
+        src, slot, launch=candidate, options=MaterializeOptions(out_name="baseline-0.yaml", agentx_mode=False)
+    )
+    assert _STALE_FLAG in config_server_argv(config).argv
+
     launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))
     launch_backend(launches)
+    result = await _run(session, slot, config, task_id="baseline-0")
 
-    await _attempt(session, slot, task_id="baseline-0", server_args=_STALE_FLAG_ARGS)
-
-    assert launches.served == 1
-    assert config_server_argv(slot / "baseline-0.yaml").argv == ("--tp", "8")
+    assert launches.served == 0
+    assert result["error_class"] == pf.ARGV_INVALID
+    assert _STALE_FLAG in result["error"]
+    assert result["server_argv_unknown_flags"] == [_STALE_FLAG]
+    assert _STALE_FLAG in config_server_argv(config).argv
 
 
 @pytest.mark.asyncio
@@ -230,3 +256,12 @@ async def test_an_unavailable_probe_does_not_stop_the_round(
 
     await _attempt(session, slot, task_id="baseline-0", server_args=_BAD_ARGS)
     assert launches.served == 1
+
+
+def test_a_state_recorded_with_argv_repairs_still_loads():
+    """Sessions written before the drop repair was removed carry its ledger; it is ignored."""
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+    loaded = EnablementRound.from_dict({"argv_repairs": ["0" * 64], "launch_log": "boot failed"})
+    assert loaded.launch_log == "boot failed"
+    assert not hasattr(loaded, "argv_repairs")
