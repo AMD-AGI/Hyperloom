@@ -26,6 +26,7 @@ from hyperloom_multibranch.contracts.blackboard.records import ClaimKey, Blackbo
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST
 from hyperloom_multibranch.rulegate.gate import RuleGate
+from hyperloom_multibranch.toolbox.mcp_tools import on_home_loop
 
 T = TypeVar("T")
 
@@ -209,9 +210,7 @@ def _conclusion(record: TestRecord) -> str:
 async def _at_home(home: asyncio.AbstractEventLoop | None, call: Coroutine[Any, Any, T]) -> T:
     """Await ``call`` on ``home``, turning a refusal into the error the specialist reads."""
     try:
-        if home is None or asyncio.get_running_loop() is home:
-            return await call
-        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(call, home))
+        return await on_home_loop(home, call)
     except NotYours as error:
         raise ToolForbidden(str(error)) from error
     except Refused as error:
