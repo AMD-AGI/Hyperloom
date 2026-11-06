@@ -14,6 +14,7 @@ from pathlib import Path
 
 from kernelforge.utils.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
+from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceRef, OrchestrationContext
 from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 from hyperloom_common.io import DURABLE, atomic_write_text
@@ -22,6 +23,12 @@ from hyperloom_common.io import DURABLE, atomic_write_text
 log = logging.getLogger(__name__)
 
 ANALYSIS_DIFF_TIMEOUT_SEC = 60.0
+UNMEASURED_LANE_EVIDENCE = "unmeasured_lane_candidates"
+_UNMEASURED_LANES = (
+    "Lane candidates that were implemented but never measured: the canonical tree moved before their turn. Each "
+    "directory holds the diff against the commit its round was built on, the plan and the lane session's own record; "
+    "any numbers in that record are the lane's own, not canonical measurements."
+)
 
 
 @dataclass(frozen=True)
@@ -220,6 +227,7 @@ class AnalysisEvidenceMixin:
                 ("source_map", source_map_path, "Current source map or anchor source."),
                 ("candidate_archive", experiments / "candidates" / "index.jsonl", "Current index evidence."),
                 ("run_state", experiments / "run_state.json", "Current run state evidence."),
+                (UNMEASURED_LANE_EVIDENCE, ExperimentsLayout.of(workspace).unmeasured_lane_index, _UNMEASURED_LANES),
             )
             if path.is_file()
         ]
@@ -438,6 +446,7 @@ class AnalysisEvidenceMixin:
             "lesson_directory",
             "run_state",
             "supervisor_guidance",
+            UNMEASURED_LANE_EVIDENCE,
         }
         refs.update((ref.path, ref) for ref in previous.evidence_refs if ref.kind not in superseded_kinds)
         if stale:
