@@ -19,6 +19,7 @@ from hyperloom_common.coerce import first_float, first_int, to_float, to_int
 from hyperloom_common.jsonio import read_json
 
 from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
+from ._round_folder import RoundFolder, is_round_folder
 
 log = logging.getLogger(__name__)
 
@@ -647,7 +648,9 @@ def extract_benchmark_measurement(
     subprocess_started_unix: float | None = None,
     config_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Extract a normalized measurement from Magpie and InferenceX outputs.
+    """Extract a normalized measurement from an inference_suite run_dir, or from Magpie and InferenceX outputs.
+
+    A ``workspace`` that is an inference_suite run_dir is measured from its own report alone; ``report`` is unused.
 
     ``subprocess_started_unix`` enables an opt-in salvage pass over the
     Magpie leak destinations (see :func:`_rescue_candidate_paths`) when the
@@ -665,6 +668,8 @@ def extract_benchmark_measurement(
         ``nonfatal_warnings``, and the ``ttft_e2el_source`` / ``tpot_source``
         provenance labels).
     """
+    if workspace is not None and is_round_folder(workspace):
+        return _round_folder_measurement(workspace, subprocess_started_unix)
     report = report or {}
     from hyperloom.inference_optimizer.agentx.report import agentx_measurement
 
@@ -706,6 +711,14 @@ def extract_benchmark_measurement(
     # computed rather than measured, and a derived value must not be read as
     # one the benchmark reported.
     measurement["tpot_source"] = origins.get("tpot_mean_ms") or LATENCY_UNAVAILABLE
+    return measurement
+
+
+def _round_folder_measurement(run_dir: Path, subprocess_started_unix: float | None) -> dict[str, Any]:
+    """An inference_suite round's measurement, with the measured-phase power its ``gpu_power.json`` recorded."""
+    folder = RoundFolder.read(run_dir)
+    measurement = folder.measurement()
+    measurement.update(_round_gpu_power(folder.report.to_document(), run_dir, subprocess_started_unix))
     return measurement
 
 

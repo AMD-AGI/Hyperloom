@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+from inference_suite.contracts import FailedStep, RunLayout
 
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import incremental_gain_pct
@@ -34,6 +35,8 @@ from ....state.failure_evidence import (
 )
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from .. import _server_lifecycle as _lifecycle
+from .._failed_step import failed_step_error_class
+from .._round_folder import is_round_folder
 from ..benchmark_result import served_complete_protocol
 from ..bypass_engine import lifecycle_meta_file, lifecycle_pid_file
 from .bringup import _classify_subprocess_error, _disable_cuda_graph_flag, _with_cuda_graph_disabled
@@ -706,6 +709,8 @@ class _BenchmarkRoundsMixin:
         """Name a round that left no usable measurement, from the strongest evidence it has."""
         if boot is not None:
             return boot
+        if step := measurement.get("failed_step"):
+            return failed_step_error_class(FailedStep(step)), measurement.get("failure_detail") or tail
         if finished.returncode != 0:
             error_class = _classify_subprocess_error(finished.runtime_sec, tail)
             if error_class == SUBPROCESS_NONZERO and served_complete_protocol(measurement):
@@ -716,7 +721,7 @@ class _BenchmarkRoundsMixin:
                 error_class = MAGPIE_NONZERO_INVALID_MEASUREMENT
             return error_class, tail
         if not report_path.exists():
-            return "no_report", f"{_BENCHMARK_REPORT_NAME} missing under {report_path.parent}"
+            return "no_report", f"{report_path.name} missing under {report_path.parent}"
         return "invalid_measurement", "benchmark report did not contain positive throughput and completed requests"
 
     def _failed_round_result(
@@ -728,7 +733,7 @@ class _BenchmarkRoundsMixin:
         warnings: list[str],
     ) -> dict[str, Any] | None:
         workspace = round_.output_dir if finished.workspace is None else finished.workspace
-        report_path = workspace / _BENCHMARK_REPORT_NAME
+        report_path = RunLayout(workspace).report if is_round_folder(workspace) else workspace / _BENCHMARK_REPORT_NAME
         tail = (finished.stderr or finished.stdout)[-2000:]
         failed = {
             "status": "failed",

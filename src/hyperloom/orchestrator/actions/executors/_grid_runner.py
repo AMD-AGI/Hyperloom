@@ -64,6 +64,7 @@ from .benchmark_result import (
     snapshot_workspaces,
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
+from ._round_folder import RoundFolder, is_round_folder
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import apply_benchmark_round_seed, composed_benchmark_timeout_sec, prepare_benchmark_runtime
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
@@ -322,7 +323,10 @@ async def _settled_measurement(
     settle_seconds: float = REPORT_SETTLE_SECONDS,
     poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Read the benchmark report, re-reading briefly while it is still settling."""
+    """Read the benchmark report, re-reading briefly while it is still settling; a finished run_dir never settles."""
+    if is_round_folder(workspace):
+        RoundFolder.read(workspace).write_gpu_metrics(workspace.parent)
+        settle_seconds = 0.0
     deadline = time.monotonic() + max(0.0, float(settle_seconds))
     attempts = 0
     while True:
