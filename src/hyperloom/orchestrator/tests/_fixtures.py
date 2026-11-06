@@ -47,7 +47,22 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     aiter_jit = sys.modules.get("hyperloom.orchestrator.actions.executors._aiter_jit")
     if aiter_jit is not None:
         monkeypatch.setattr(aiter_jit, "AITER_JIT_PROBE_PATHS", ())
+    _isolate_ray_head(monkeypatch)
     _isolate_framework_trees(monkeypatch)
+
+
+def _isolate_ray_head(monkeypatch) -> None:
+    """Start every test with a Ray head that answered its driver connect probe, so none probes a real one.
+
+    The verdict is process-wide, so one test's probe would otherwise decide the Ray route of every later test in the
+    worker. Tests of the probe start from a fresh verdict themselves.
+    """
+    ray_runtime = sys.modules.get("hyperloom.orchestrator.actions.executors._ray_runtime")
+    if ray_runtime is None:
+        return
+    verdict = ray_runtime._HeadVerdict()
+    verdict.probe = ray_runtime.RayConnectProbe(answered=True, outcome="connected (test isolation)")
+    monkeypatch.setattr(ray_runtime, "_HEAD_VERDICT", verdict)
 
 
 def _isolate_framework_trees(monkeypatch) -> None:

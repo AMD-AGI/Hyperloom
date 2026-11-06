@@ -59,15 +59,12 @@ class PassHost(Protocol):
         Raises:
             PassFailed: There is no server to ask.
         """
-        ...
 
     async def stop(self) -> None:
         """Release what ``start`` gave; called after every start, also one that raised."""
-        ...
 
     def should_stop(self) -> bool:
         """Whether the run is being stopped, so the check is to end."""
-        ...
 
 
 @dataclass(frozen=True)

@@ -24,7 +24,7 @@ from hyperloom.measure.runner.native import aiter_modules, prewarm
 from hyperloom.measure.runner.native.aiter_modules import MODULES_FILE
 from hyperloom.measure.runner.native.builder import BuildMachine, tree_dir
 from hyperloom.measure.runner.native.isolated import JOB_FILE, Isolation
-from hyperloom.measure.runner.native.prewarm import PrewarmError, isolated_builder, missing_prebuilt_modules
+from hyperloom.measure.runner.native.prewarm import PrewarmError, isolated_builder
 from hyperloom.measure.runner.native.tests import _aiter_standin as standin
 from hyperloom.orchestrator.actions.executors._aiter_jit import (
     AITER_PREWARM_MANIFEST,
@@ -78,22 +78,61 @@ def jit_listing(package: Path) -> dict[str, bytes]:
     return {path.name: path.read_bytes() for path in sorted(jit.iterdir()) if path.is_file()}
 
 
-def test_the_table_modules_the_image_lacks_are_missing_and_the_rest_are_not(tmp_path: Path) -> None:
+def test_the_module_exports_the_prewarm_its_builders_and_its_command() -> None:
+    """The prewarm names the modules it builds and leaves in its report: no export names them for a test alone."""
+    assert sorted(prewarm.__all__) == [
+        "ModuleBuilder",
+        "PrewarmError",
+        "PrewarmReport",
+        "build_environment",
+        "isolated_builder",
+        "main",
+        "preflight_build",
+        "prewarm",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tables", "built", "left"),
+    [
+        (None, (standin.MODULE, BLOCKSCALE), (FETCHING,)),
+        ([standin.TABLE_VARIABLE], (standin.MODULE,), (FETCHING,)),
+        ([BLOCKSCALE_VARIABLE], (BLOCKSCALE,), ()),
+    ],
+    ids=["every-table", "one-table", "another-table"],
+)
+def test_the_table_modules_the_image_lacks_are_built_or_left_and_no_other_module_is(
+    tmp_path: Path, tables: list[str] | None, built: tuple[str, ...], left: tuple[str, ...]
+) -> None:
     package = image(tmp_path / "image")
     (package / "jit" / f"{standin.OTHER}.so").unlink()
+    builder = StandIn()
 
-    assert missing_prebuilt_modules(package) == [standin.MODULE, BLOCKSCALE, FETCHING]
-    assert missing_prebuilt_modules(package, tables=[standin.TABLE_VARIABLE]) == [standin.MODULE, FETCHING]
-    assert missing_prebuilt_modules(package, tables=[BLOCKSCALE_VARIABLE]) == [BLOCKSCALE]
-    assert missing_prebuilt_modules(image(tmp_path / "full", missing=())) == []
+    report = prewarm.prewarm(package, builder, gfx=GFX, tables=tables)
+
+    assert builder.calls == [frozenset(built)], "only the tables' modules the image lacks that aiter builds by name"
+    assert report.built == built and report.left == left and report.present == () and not report.failure
+    assert not (package / "jit" / f"{standin.OTHER}.so").exists(), "a module no tuned table generates is not built"
+
+
+def test_an_image_that_lacks_no_table_module_has_nothing_built(tmp_path: Path) -> None:
+    builder = StandIn()
+
+    report = prewarm.prewarm(image(tmp_path / "full", missing=()), builder, gfx=GFX)
+
+    assert builder.calls == [] and report.built == () and report.left == ()
+    assert report.present == (standin.MODULE, BLOCKSCALE, FETCHING)
 
 
 def test_an_image_whose_module_config_cannot_be_read_says_so_rather_than_nothing_missing(tmp_path: Path) -> None:
     package = image(tmp_path / "image")
     (package / "jit" / "optCompilerConfig.json").unlink()
+    builder = StandIn()
 
-    with pytest.raises(FileNotFoundError):
-        missing_prebuilt_modules(package)
+    report = prewarm.prewarm(package, builder, gfx=GFX)
+
+    assert report.failure.startswith("the module config cannot be read: [Errno 2]") and builder.calls == []
+    assert report.built == () and report.present == () and report.left == ()
 
 
 def test_prewarm_builds_what_is_missing_installs_it_with_a_manifest_and_a_rerun_does_nothing(tmp_path: Path) -> None:

@@ -15,7 +15,7 @@ import pytest
 
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
-from hyperloom_multibranch.toolbox.fake import FakeToolbox
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLeases
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolbox
 from hyperloom_multibranch.toolbox.leased_toolbox import LeasedToolbox, LeaseBook

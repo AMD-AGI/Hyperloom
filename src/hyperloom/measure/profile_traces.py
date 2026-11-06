@@ -67,16 +67,58 @@ def collect_traces(workspace: Path, destination: Path) -> int:
     """Move the trace directories of the round at ``workspace`` below ``destination``; return how many it moved.
 
     A directory that holds no trace file is left where it is. A stale directory of the same name in ``destination``
-    (an earlier attempt of the same test) is replaced, never merged.
+    (an earlier attempt of the same test) is replaced, never merged. The round's two ``capture_traces`` directories, in
+    the workspace and beside it, both land in ``destination/capture_traces``: the second's files join the first's, each
+    under its own name unless the first holds that name, when it takes a numbered one (a directory both hold is merged
+    the same way); no trace is overwritten.
     """
+    destination = Path(destination)
     moved = 0
+    placed: set[str] = set()
     for source in _candidates(Path(workspace)):
         if not has_traces(source):
             continue
-        target = Path(destination) / source.name
-        if target.exists():
-            shutil.rmtree(target)
-        Path(destination).mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(target))
+        target = destination / source.name
+        if source.name in placed:
+            _merge(source, target)
+        else:
+            if target.exists():
+                shutil.rmtree(target)
+            destination.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+            placed.add(source.name)
         moved += 1
     return moved
+
+
+def _merge(source: Path, target: Path) -> None:
+    """Move what ``source`` holds to the same place below ``target``, then remove ``source``.
+
+    A directory both hold is merged the same way; any other entry whose name ``target`` already holds (a file, or a file
+    on one side and a directory on the other) is moved whole under a free name, so both are kept.
+    """
+    pending = [(source, target)]
+    while pending:
+        here, there = pending.pop()
+        for entry in sorted(here.iterdir()):
+            landing = there / entry.name
+            if _real_dir(entry) and _real_dir(landing):
+                pending.append((entry, landing))
+            else:
+                shutil.move(str(entry), str(_free(landing)))
+    shutil.rmtree(source)
+
+
+def _real_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
+
+
+def _free(path: Path) -> Path:
+    """``path``, or when it is taken the first ``<stem>.<n><suffixes>`` that is not: the name keeps its leading part
+    (what a capture sidecar is recognised by) and its suffixes (what a trace is)."""
+    stem, dot, suffixes = path.name.partition(".")
+    candidate, number = path, 0
+    while candidate.exists() or candidate.is_symlink():
+        number += 1
+        candidate = path.with_name(f"{stem}.{number}{dot}{suffixes}")
+    return candidate

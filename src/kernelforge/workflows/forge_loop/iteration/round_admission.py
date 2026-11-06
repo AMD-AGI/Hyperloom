@@ -287,6 +287,21 @@ class RoundAdmissionMixin:
             print(f"  [search-policy] {decision.mode}: " + ", ".join(decision.reason_codes))
         return decision
 
+    def _with_search_policy(self, context: OrchestrationContext) -> OrchestrationContext:
+        """``context`` carrying the search policy this iteration decided.
+
+        The Analysis context is resolved before the Supervisor runs and the policy is decided after it, since the
+        policy reads what the Supervisor resolved, so a context taken from Analysis still carries the previous
+        iteration's mode.
+        """
+        return replace(
+            context,
+            search_mode=self.run_state.search_mode,
+            search_reason_codes=tuple(self.run_state.search_reason_codes),
+            search_objective=self.run_state.search_objective,
+            search_mode_residence_remaining=self.run_state.search_mode_residence_remaining,
+        )
+
     def _previous_round_kept(self) -> bool | None:
         """Whether the last round that planned kept a candidate of its own, or ``None`` before any round planned.
 

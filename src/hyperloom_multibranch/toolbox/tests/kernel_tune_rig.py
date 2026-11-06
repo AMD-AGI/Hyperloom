@@ -54,6 +54,13 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import kernel_tune
 
 SECRET_ENV = "HF_TOKEN"
+#: The line that says the blockscale table missed the (N, K) of the stand-in tuner's rows (``tuned_rows``), added to the
+#: server log a test lands by default so that the demand asks for them: the tool refuses a row of an N and K it did not
+#: ask for.
+TUNED_ROWS_LOG = (
+    "[aiter] shape is M:16, N:512, K:7168, not found tuned config in "
+    "/tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, will use default config!\n"
+)
 
 
 async def record_test(
@@ -141,6 +148,8 @@ class Rig:
     forge: FakeForge
 
     def landed(self, **kw: Any) -> Path:
+        """The landed test; without a ``log``, :data:`SERVER_LOG` with :data:`TUNED_ROWS_LOG`."""
+        kw.setdefault("log", SERVER_LOG + TUNED_ROWS_LOG)
         return landed_test(self.session, self.model, **kw)
 
     async def submit(self, branch: str = "b1", **params: Any) -> str:
@@ -214,6 +223,7 @@ __all__ = [
     "SERVER_LOG",
     "TABLE",
     "TEST_ID",
+    "TUNED_ROWS_LOG",
     "TUNER",
     "FakeForge",
     "Rig",

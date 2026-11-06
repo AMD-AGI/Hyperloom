@@ -23,6 +23,7 @@ from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
     _QueuedBackend,
     _StaticBackend,
     _context,
+    _critic_answer,
     _definitions,
     _dispatch_payload,
     _lane,
@@ -65,7 +66,7 @@ async def test_plan_critic_accepts_draft_without_revision() -> None:
     plan_markdown = "# Optimization plan\nImplement vector loads."
     orchestration_backend = _QueuedBackend([_dispatch_payload(), plan_markdown])
     specialist_backend = _StaticBackend("# Analysis\nVector loads are feasible.")
-    critic_backend = _StaticBackend("VERDICT: ACCEPT\n\nThe plan is worth executing.")
+    critic_backend = _StaticBackend(_critic_answer("ACCEPT", "The plan is worth executing."))
     service = _reviewed_memory_service(orchestration_backend, specialist_backend, critic_backend)
 
     result = await service.run(_context())
@@ -85,7 +86,7 @@ async def test_a_round_the_loop_does_not_send_for_review_publishes_its_draft_unr
     plan_markdown = "# Optimization plan\nImplement vector loads."
     orchestration_backend = _QueuedBackend([_dispatch_payload(), plan_markdown])
     specialist_backend = _StaticBackend("# Analysis\nVector loads are feasible.")
-    critic_backend = _StaticBackend("VERDICT: REVISE\n\nRework the plan.")
+    critic_backend = _StaticBackend(_critic_answer("REVISE", "Rework the plan."))
     service = _reviewed_memory_service(orchestration_backend, specialist_backend, critic_backend)
 
     result = await service.run(replace(_context(), review_plan=False))
@@ -98,11 +99,6 @@ async def test_a_round_the_loop_does_not_send_for_review_publishes_its_draft_unr
     assert "plan_critic" not in result.structured_output_diagnostics["phase_durations_sec"]
     assert critic_backend.calls == 0
     assert len(orchestration_backend.specs) == 2
-
-
-def _width_block(*drops: dict) -> str:
-    """The trailing JSON block the round contract asks every review to end with."""
-    return json.dumps({"lane_narrowing": list(drops)})
 
 
 @pytest.mark.asyncio
@@ -118,7 +114,7 @@ async def test_plan_critic_reviews_a_multi_lane_round_once() -> None:
             "# Lane plan\nCompute route, revised.",
         ]
     )
-    critic_backend = _StaticBackend("VERDICT: REVISE\n\nLane 2 repeats lane 1's change.\n" + _width_block())
+    critic_backend = _StaticBackend(_critic_answer("REVISE", "Lane 2 repeats lane 1's change."))
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -213,7 +209,7 @@ async def test_the_round_reports_how_it_was_divided() -> None:
     )
     service = _two_lane_critic_service(
         orchestration_backend,
-        _StaticBackend("VERDICT: ACCEPT\n\nBoth lanes are worth a session.\n" + _width_block()),
+        _StaticBackend(_critic_answer("ACCEPT", "Both lanes are worth a session.")),
     )
 
     result = await service.run(_context(), lanes=2)
@@ -251,12 +247,13 @@ def _two_lane_round(critic_review: str, *, revisions: list[str] | None = None):
 async def test_a_lane_the_review_will_not_pay_for_is_not_published() -> None:
     """The round's width is the one thing the verdict could not say."""
     _backend, service = _two_lane_round(
-        "VERDICT: ACCEPT\n\n"
-        + _width_block(
+        _critic_answer(
+            "ACCEPT",
+            "Lane 2 repeats lane 1.",
             {
                 "lane_id": 2,
                 "reason": "it is lane 1's epilogue rewrite in different words",
-            }
+            },
         )
     )
 
@@ -266,7 +263,6 @@ async def test_a_lane_the_review_will_not_pay_for_is_not_published() -> None:
     assert result.optimization_plan_draft == "# Lane 1 draft"
     narrowing = result.structured_output_diagnostics["lane_narrowing"]
     assert narrowing["status"] == "narrowed"
-    assert narrowing["block"] == "answered"
     assert narrowing["planned"] == 2
     assert narrowing["kept"] == 1
     assert narrowing["dropped"] == [
@@ -286,7 +282,7 @@ async def test_a_lane_the_review_will_not_pay_for_is_not_published() -> None:
 async def test_a_dropped_lane_is_not_revised_first() -> None:
     """A revision turn spent on a lane that will not run is the whole cost."""
     backend, service = _two_lane_round(
-        "VERDICT: REVISE\n\n" + _width_block({"lane_id": 1, "reason": "no profile supports its ground"}),
+        _critic_answer("REVISE", "Lane 1 is unsupported.", {"lane_id": 1, "reason": "no profile supports its ground"}),
         revisions=["# Lane 2 revised"],
     )
 
@@ -304,8 +300,9 @@ async def test_a_dropped_lane_is_not_revised_first() -> None:
 async def test_a_round_narrowed_to_nothing_keeps_every_lane() -> None:
     """A round that publishes nothing spent its planning window for no score."""
     _backend, service = _two_lane_round(
-        "VERDICT: ACCEPT\n\n"
-        + _width_block(
+        _critic_answer(
+            "ACCEPT",
+            "Neither lane is supported.",
             {"lane_id": 1, "reason": "unsupported"},
             {"lane_id": 2, "reason": "also unsupported"},
         )
@@ -334,7 +331,9 @@ async def test_a_round_collapsed_to_one_lane_cannot_be_narrowed() -> None:
     )
     service = _two_lane_critic_service(
         orchestration_backend,
-        _StaticBackend("VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 1, "reason": "not worth a session"})),
+        _StaticBackend(
+            _critic_answer("ACCEPT", "One lane is enough.", {"lane_id": 1, "reason": "not worth a session"})
+        ),
     )
 
     result = await service.run(_context(), lanes=2)
@@ -351,7 +350,7 @@ async def test_a_round_collapsed_to_one_lane_cannot_be_narrowed() -> None:
 async def test_a_challenged_round_refuses_narrowing_it_cannot_aim() -> None:
     """One of these lanes is the challenger, and nothing records which."""
     _backend, service = _two_lane_round(
-        "VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 2, "reason": "it duplicates lane 1"})
+        _critic_answer("ACCEPT", "Lane 2 repeats lane 1.", {"lane_id": 2, "reason": "it duplicates lane 1"})
     )
     context = replace(
         _context(),
@@ -403,7 +402,7 @@ def _joint_lane_round(critic_review: str):
 @pytest.mark.asyncio
 async def test_the_review_is_told_which_lane_the_partition_widened() -> None:
     """A ruling on width made blind to the width is not the ruling asked for."""
-    _backend, service = _joint_lane_round("VERDICT: ACCEPT\n\n" + _width_block())
+    _backend, service = _joint_lane_round(_critic_answer("ACCEPT", "Both lanes earn it."))
 
     await service.run(_context(), lanes=2)
 
@@ -421,7 +420,9 @@ async def test_the_review_is_told_which_lane_the_partition_widened() -> None:
 async def test_a_drop_aimed_at_the_joint_lane_is_carried_out_and_recorded() -> None:
     """The width is sunk; refusing the drop spends a session instead of saving one."""
     _backend, service = _joint_lane_round(
-        "VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 1, "reason": "the tile rewrite is too large a bet"})
+        _critic_answer(
+            "ACCEPT", "Lane 1 is too large.", {"lane_id": 1, "reason": "the tile rewrite is too large a bet"}
+        )
     )
 
     result = await service.run(_context(), lanes=2)
@@ -441,7 +442,9 @@ async def test_a_drop_aimed_at_the_joint_lane_is_carried_out_and_recorded() -> N
 async def test_a_drop_aimed_past_the_joint_lane_leaves_the_widened_lane() -> None:
     """A round that carries a joint lane narrows around it like any other."""
     _backend, service = _joint_lane_round(
-        "VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 2, "reason": "it is lane 1's staging in other words"})
+        _critic_answer(
+            "ACCEPT", "Lane 2 repeats lane 1.", {"lane_id": 2, "reason": "it is lane 1's staging in other words"}
+        )
     )
 
     result = await service.run(_context(), lanes=2)
@@ -469,12 +472,11 @@ def _drafts(*joint: bool) -> list:
 
 
 def _ruling(*drops: tuple[int, str]) -> PlanCriticOutcome:
-    """A review that answered its width block and named these lanes."""
+    """A review that named these lanes."""
     return PlanCriticOutcome(
         verdict="ACCEPT",
-        review="VERDICT: ACCEPT",
+        review="The round is too wide.",
         lane_drops=tuple(LaneDrop(lane_id=lane_id, reason=reason) for lane_id, reason in drops),
-        narrowing_status="answered",
     )
 
 
@@ -521,14 +523,10 @@ def test_a_round_of_only_joint_lanes_still_narrows() -> None:
 
 
 @pytest.mark.asyncio
-async def test_narrowing_the_round_cannot_read_names_what_it_kept() -> None:
-    """ "The review wanted every lane" and "nobody could read it" differ."""
+async def test_a_drop_naming_a_lane_the_round_lacks_names_what_it_kept() -> None:
+    """ "The review wanted every lane" and "the review named a lane that is not there" differ."""
     _backend, service = _two_lane_round(
-        "VERDICT: ACCEPT\n\n"
-        + _width_block(
-            {"lane_id": "two", "reason": "it duplicates lane 1"},
-            {"lane_id": 5, "reason": "there is no lane 5"},
-        )
+        _critic_answer("ACCEPT", "Drop the fifth lane.", {"lane_id": 5, "reason": "there is no lane 5"})
     )
 
     result = await service.run(_context(), lanes=2)
@@ -536,23 +534,20 @@ async def test_narrowing_the_round_cannot_read_names_what_it_kept() -> None:
     assert result.optimization_plans == ("# Lane 1 draft", "# Lane 2 draft")
     narrowing = result.structured_output_diagnostics["lane_narrowing"]
     assert narrowing["status"] == "not_applied"
-    assert narrowing["block"] == "answered"
     assert narrowing["kept"] == 2
-    assert any("lane drop names no lane" in note for note in narrowing["notes"])
     assert any("does not have" in note for note in narrowing["notes"])
 
 
 @pytest.mark.asyncio
 async def test_a_review_that_asks_for_nothing_leaves_the_round_alone() -> None:
-    """The empty block is an answer; only it means "run every lane"."""
-    _backend, service = _two_lane_round("VERDICT: ACCEPT\n\nBoth lanes earn it.\n" + _width_block())
+    """The empty list is an answer; only it means "run every lane"."""
+    _backend, service = _two_lane_round(_critic_answer("ACCEPT", "Both lanes earn it."))
 
     result = await service.run(_context(), lanes=2)
 
     assert result.optimization_plans == ("# Lane 1 draft", "# Lane 2 draft")
     assert result.structured_output_diagnostics["lane_narrowing"] == {
         "status": "not_requested",
-        "block": "answered",
         "planned": 2,
         "kept": 2,
         "dropped": [],
@@ -563,8 +558,8 @@ async def test_a_review_that_asks_for_nothing_leaves_the_round_alone() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_round_whose_review_never_answered_on_width_says_so() -> None:
-    """The case the DROP LANE regex passed over in silence."""
+async def test_a_review_given_only_in_prose_is_no_review_of_the_round() -> None:
+    """A width decision written only in prose is not one the round can act on, and neither is its verdict."""
     _backend, service = _two_lane_round(
         "VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n",
         revisions=["# Lane 1 revised", "# Lane 2 revised"],
@@ -572,51 +567,13 @@ async def test_a_round_whose_review_never_answered_on_width_says_so() -> None:
 
     result = await service.run(_context(), lanes=2)
 
-    assert result.optimization_plans == ("# Lane 1 revised", "# Lane 2 revised")
+    assert result.optimization_plans == ("# Lane 1 draft", "# Lane 2 draft")
+    assert result.plan_critic.verdict == "NOT_REVIEWED"
+    assert result.plan_revised is False
     narrowing = result.structured_output_diagnostics["lane_narrowing"]
-    assert narrowing["status"] == "not_applied"
-    assert narrowing["block"] == "absent"
+    assert narrowing["status"] == "not_requested"
     assert narrowing["kept"] == 2
-    assert narrowing["dropped"] == []
-    assert narrowing["notes"] != []
-    assert any("no lane_narrowing block" in note for note in narrowing["notes"])
-    assert any("repair pass" in note for note in narrowing["notes"])
-    assert result.structured_output_diagnostics["plan_critic"]["narrowing_status"] == "absent"
-
-
-@pytest.mark.asyncio
-async def test_a_round_narrows_on_a_ruling_its_review_was_asked_twice_for() -> None:
-    """One repair call buys back an Implementer session the round would run."""
-    orchestration_backend = _QueuedBackend(
-        [
-            _dispatch_payload(both_roles=True),
-            _partition(GROUND_A, GROUND_B),
-            "# Lane 1 draft",
-            "# Lane 2 draft",
-        ]
-    )
-    critic_backend = _QueuedBackend(
-        [
-            "VERDICT: ACCEPT\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n",
-            _width_block(
-                {
-                    "lane_id": 2,
-                    "reason": "it re-derives lane 1's autotune lever",
-                }
-            ),
-        ]
-    )
-    service = _two_lane_critic_service(orchestration_backend, critic_backend)
-
-    result = await service.run(_context(), lanes=2)
-
-    assert result.optimization_plans == ("# Lane 1 draft",)
-    narrowing = result.structured_output_diagnostics["lane_narrowing"]
-    assert narrowing["status"] == "narrowed"
-    assert narrowing["block"] == "repaired"
-    assert narrowing["dropped"] == [{"lane_id": 2, "reason": "it re-derives lane 1's autotune lever"}]
-    assert result.structured_output_diagnostics["lanes"]["published"] == 1
-    assert len(critic_backend.specs) == 2
+    assert result.structured_output_diagnostics["plan_critic"]["status"] == "CRITIC_ERROR"
 
 
 @pytest.mark.asyncio
@@ -624,26 +581,13 @@ async def test_a_narrowed_round_never_records_that_it_kept_every_lane(
     caplog,
 ) -> None:
     """The record of a narrowed round has to agree with itself."""
-    orchestration_backend = _QueuedBackend(
-        [
-            _dispatch_payload(both_roles=True),
-            _partition(GROUND_A, GROUND_B),
-            "# Lane 1 draft",
-            "# Lane 2 draft",
-        ]
+    _backend, service = _two_lane_round(
+        _critic_answer(
+            "ACCEPT",
+            "Lane 2 re-derives lane 1's lever.",
+            {"lane_id": 2, "reason": "it re-derives lane 1's autotune lever"},
+        )
     )
-    critic_backend = _QueuedBackend(
-        [
-            "VERDICT: ACCEPT\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n",
-            _width_block(
-                {
-                    "lane_id": 2,
-                    "reason": "it re-derives lane 1's autotune lever",
-                }
-            ),
-        ]
-    )
-    service = _two_lane_critic_service(orchestration_backend, critic_backend)
 
     with caplog.at_level(logging.INFO):
         result = await service.run(_context(), lanes=2)
@@ -652,12 +596,8 @@ async def test_a_narrowed_round_never_records_that_it_kept_every_lane(
     assert narrowing["status"] == "narrowed"
     assert narrowing["kept"] == 1
     assert narrowing["dropped"] == [{"lane_id": 2, "reason": "it re-derives lane 1's autotune lever"}]
-    # Each note says what reading the block found and leaves the outcome to `status` and `dropped`, which is the only
-    # way the three can agree.
-    assert narrowing["notes"] == [
-        "the review ended with no lane_narrowing block",
-        "the review did not end with a readable width block; one repair pass restated it",
-    ]
+    assert narrowing["notes"] == []
+    assert len(service._plan_critic.backend.specs) == 1
     warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
     assert not [line for line in warnings if "not applied" in line]
     assert not [line for line in warnings if "keeps every lane" in line]
@@ -670,8 +610,9 @@ async def test_a_narrowing_the_round_refused_is_still_reported_as_one(
 ) -> None:
     """The warning has to survive where it is true."""
     _backend, service = _two_lane_round(
-        "VERDICT: ACCEPT\n\n"
-        + _width_block(
+        _critic_answer(
+            "ACCEPT",
+            "Neither lane is supported.",
             {"lane_id": 1, "reason": "unsupported"},
             {"lane_id": 2, "reason": "also unsupported"},
         )
@@ -689,8 +630,8 @@ async def test_a_narrowing_the_round_refused_is_still_reported_as_one(
 async def test_a_review_that_asked_for_nothing_is_not_reported_as_a_failure(
     caplog,
 ) -> None:
-    """The empty block is an answer, and answering costs the round nothing."""
-    _backend, service = _two_lane_round("VERDICT: ACCEPT\n\nBoth lanes earn it.\n" + _width_block())
+    """The empty list is an answer, and answering costs the round nothing."""
+    _backend, service = _two_lane_round(_critic_answer("ACCEPT", "Both lanes earn it."))
 
     with caplog.at_level(logging.INFO):
         result = await service.run(_context(), lanes=2)
@@ -706,7 +647,7 @@ async def test_a_review_that_asked_for_nothing_is_not_reported_as_a_failure(
 async def test_the_round_records_what_each_planning_phase_cost() -> None:
     """A quarter of an eleven-hour budget went on planning, a third unseen."""
     _backend, service = _two_lane_round(
-        "VERDICT: REVISE\n\nBoth lanes need a stop condition.",
+        _critic_answer("REVISE", "Both lanes need a stop condition."),
         revisions=["# Lane 1 revised", "# Lane 2 revised"],
     )
 
@@ -758,7 +699,7 @@ async def test_a_lane_that_cannot_be_revised_keeps_its_draft() -> None:
     )
     service = _two_lane_critic_service(
         orchestration_backend,
-        _StaticBackend("VERDICT: REVISE\n\nBoth lanes need a stop condition."),
+        _StaticBackend(_critic_answer("REVISE", "Both lanes need a stop condition.")),
     )
 
     result = await service.run(_context(), lanes=2)
