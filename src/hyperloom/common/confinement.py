@@ -14,9 +14,13 @@ location, Hugging Face's login files, and the files the app registers in :data:`
 nothing broad under a credential location is bound because a program lives there: :func:`toolchain_paths` binds a
 program's own directory, and its parent only away from those locations.
 
-Deriving the toolchain runs nothing an agent could have written: the child's interpreter is asked where it imports
-from only when it lies outside the agent's writable trees, and with no site processing, ``PYTHON*`` variable or
-startup file; its ``.pth`` files and editable finders are read as data (:func:`interpreter_search_path`).
+Nothing is resolved through what an agent writes. A name in a tree the agent writes may be a symlink it left there, to
+any host path, or become one before the next launch; so a path reached through such a tree (looked up in a directory
+at or below one, at any step of its resolution) is never bound at its target, never run, and never read for what to
+bind (:func:`toolchain_paths`, :meth:`Confinement.policy`). Deriving the toolchain runs nothing an agent could have
+written: the child's interpreter is asked where it imports from only when it lies outside those trees and is not
+reached through one, and with no site processing, ``PYTHON*`` variable or startup file; its ``.pth`` files and
+editable finders are read as data (:func:`interpreter_search_path`).
 """
 
 from __future__ import annotations
@@ -28,12 +32,13 @@ import pwd
 import shutil
 import subprocess
 import threading
+from collections import deque
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from hyperloom_common.bwrap import SYSTEM_ROOTS, BwrapPolicy, Scratch, interpreter_roots
+from hyperloom_common.bwrap import SYSTEM_ROOTS, BwrapPolicy, BwrapPolicyError, Scratch, interpreter_roots
 
 from hyperloom.common.env_safety import SENSITIVE_ENV_NAME_MARKERS, is_secret_shaped_env_name
 
@@ -83,6 +88,8 @@ HOME_DEPTH = 4
 RESOLV_CONF = Path("/etc/resolv.conf")
 _ETC = Path("/etc")
 _ROOT = Path("/")
+#: How many symlinks resolving one path may follow, as the kernel allows (``ELOOP`` past it, so nothing is bound).
+_MAX_LINKS = 40
 
 
 def _real(path: str | os.PathLike[str]) -> Path:
@@ -91,6 +98,69 @@ def _real(path: str | os.PathLike[str]) -> Path:
 
 def _at_or_under(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
+
+
+def _searches(path: str, roots: tuple[Path, ...]) -> bool:
+    """Whether resolving the absolute ``path`` as the kernel does (each symlink followed where it is met, ``..`` the
+    parent of where the walk is) looks a name up in a directory at or below one of ``roots``. A directory is checked
+    before any name in it is followed, so no link in those trees is ever followed; the walk stops where the kernel's
+    does, past :data:`_MAX_LINKS` links."""
+    pending, current, links = deque(path.split(os.sep)), _ROOT, 0
+    while pending:
+        name = pending.popleft()
+        if name in ("", os.curdir):
+            continue
+        if name == os.pardir:
+            current = current.parent
+            continue
+        if any(_at_or_under(current, root) for root in roots):
+            return True
+        step = current / name
+        try:
+            target = os.readlink(step)
+        except OSError:  # not a link, or nothing there: the walk goes on as realpath's does
+            current = step
+            continue
+        links += 1
+        if links > _MAX_LINKS:
+            return False
+        current = _ROOT if os.path.isabs(target) else current
+        pending.extendleft(reversed(target.split(os.sep)))
+    return False
+
+
+def _reached(path: str | os.PathLike[str], roots: tuple[Path, ...]) -> bool:
+    """Whether resolving ``path`` (as given, and normalized as a bind names it) looks a name up in one of the trees
+    ``roots`` (resolved): there the agent decides what the name is, a symlink to any host path included, and can change
+    it before the next launch. A relative path is not resolved here (:meth:`BwrapPolicy.problems` names it)."""
+    text = os.fspath(path)
+    if not roots or not os.path.isabs(text):
+        return False
+    return any(_searches(variant, roots) for variant in dict.fromkeys((text, os.path.normpath(text))))
+
+
+def _agents(path: str | os.PathLike[str], roots: tuple[Path, ...]) -> bool:
+    """Whether the agent writing ``roots`` (resolved) decides what ``path`` is: it is reached through one of them
+    (:func:`_reached`), or resolves to one or below one."""
+    return _reached(path, roots) or any(_at_or_under(_real(path), root) for root in roots)
+
+
+def _agent_trees(writable: Iterable[Path], scratch: Scratch | None) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """The writable paths to bind, and the trees the agent writes (resolved). A writable path below another as given
+    is left out (the one above shows it, writable; resolving it would follow what the agent left there); the trees
+    are the rest and ``scratch``; and a writable path reached through one of them (a link into it) is left out too."""
+    given = list(
+        dict.fromkeys(Path(os.path.normpath(path)) if os.path.isabs(path) else Path(path) for path in writable)
+    )
+    top = [path for path in given if not any(other in path.parents for other in given if other.is_absolute())]
+    scratches = (scratch.tmp, scratch.shm) if scratch else ()
+    trees = tuple(dict.fromkeys(_real(path) for path in (*top, *scratches) if os.path.isabs(path)))
+    return tuple(path for path in top if not _reached(path, trees)), trees
+
+
+def _trees(writable: Iterable[Path]) -> tuple[Path, ...]:
+    """The trees an agent writing ``writable`` writes, resolved (:func:`_agent_trees`)."""
+    return _agent_trees(writable, None)[1]
 
 
 @dataclass(frozen=True)
@@ -164,8 +234,22 @@ class Confinement:
         too where that differs (a link becomes the same link inside, ``/bin -> usr/bin``); a readable path that is
         also writable bound once, writable; a read-only path a read-only bind above already shows left out; the
         masks at every bound path that shows them. ``scratch`` is bound at ``/tmp`` and ``/dev/shm`` (else each is
-        a fresh tmpfs); ``chdir`` is the working directory inside."""
-        writable = list(dict.fromkeys(_binds(self.writable, True)))
+        a fresh tmpfs); ``chdir`` is the working directory inside.
+
+        Nothing is resolved through the trees the agent writes (the writable paths and ``scratch``): a writable path
+        below another, or reached through one, is left out (the one above shows it, writable), and a readable one is
+        refused, since its target would be the agent's choice and its read-only bind could not hold.
+
+        Raises:
+            BwrapPolicyError: A readable path is reached through a tree the agent writes.
+        """
+        own, trees = _agent_trees(self.writable, scratch)
+        reached = [path for path in self.readable if _reached(path, trees)]
+        if reached:
+            raise BwrapPolicyError(
+                [f"{path} is reached through a tree the agent writes, which decides what it is" for path in reached]
+            )
+        writable = list(dict.fromkeys(_binds(own, True)))
         taken = {bind.inside for bind in writable}
         readable = [bind for bind in dict.fromkeys(_binds(self.readable, False)) if bind.inside not in taken]
         candidates = [*writable, *readable]
@@ -288,24 +372,30 @@ def _masks_for(path: Path, visible: tuple[Path, ...]) -> list[Path]:
 def credential_paths(
     environ: Mapping[str, str],
     *,
-    app_home: Path | None = None,
-    registered: Iterable[Path] = (),
+    app_environ: Mapping[str, str] | None = None,
     given: Iterable[Path] = (),
     allowed: Iterable[Path] = (),
+    writable: Iterable[Path] = (),
 ) -> tuple[Path, ...]:
-    """The paths to mask in a child of this process: its home (``app_home``, else ``HOME``, else its passwd entry), the
-    XDG directories, the value of every variable of ``environ`` that names a credential location (``:``-separated
-    entries split, only absolute existing paths), Hugging Face's login files, and ``registered``.
+    """The paths to mask in a child of this process, from this process's configuration and the child's: the home
+    (``HOME``, else the passwd entry's; and this process's passwd entry's either way), the XDG directories, the value
+    of every variable that names a credential location (``:``-separated entries split, only absolute existing paths)
+    and Hugging Face's login files, each read from ``app_environ`` (default: this process's environment) and from
+    ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`. A location of the child's in a tree
+    it writes (``writable``: a home or tool directory re-pointed there) is its own, and is not masked.
 
     A source that holds an ``allowed`` path (the policy's writable and readable paths) or a ``given`` one (handed to
     the child on purpose, so it stays readable) is not masked whole: its other entries are, down to :data:`HOME_DEPTH`
     levels. ``given`` paths themselves are never masked, nor is ``/``. :meth:`Confinement.policy` keeps only the masks
     a bind shows.
     """
-    home = app_home if app_home is not None else _app_home(environ)
+    app = os.environ if app_environ is None else app_environ
+    agent = _trees(writable)
+    sources = [*_sources(app, _app_home(app), PRIVATE_PATHS.paths()), _passwd_home()]
+    sources += [path for path in _sources(environ, _app_home(environ), ()) if not _agents(path, agent)]
     shown = tuple(dict.fromkeys(_real(path) for path in (*allowed, *given)))
     masks: dict[Path, None] = {}
-    for source in _sources(environ, home, registered):
+    for source in dict.fromkeys(source for source in sources if source is not None):
         masks.update(dict.fromkeys(_masks_for(source, shown)))
     return tuple(masks)
 
@@ -388,44 +478,40 @@ def _editable_sources(site_dir: Path) -> Iterator[Path]:
                 yield from (Path(path) for path in mapping.values() if isinstance(path, str) and os.path.isabs(path))
 
 
-def _within(path: str | os.PathLike[str], roots: tuple[Path, ...]) -> bool:
-    """Whether ``path``, resolved, is at or below one of ``roots`` (resolved paths)."""
-    real = _real(path)
-    return any(_at_or_under(real, root) for root in roots)
-
-
 def interpreter_search_path(environ: Mapping[str, str], *, writable: Iterable[Path]) -> tuple[Path, ...]:
     """Where the child's ``python3`` imports from: its import path and site directories, the directories their
     ``.pth`` files add, and the source trees of setuptools-style editable installs, which no import path entry names.
     Not ``PYTHONPATH`` (:func:`toolchain_paths` adds it) nor the user site directory (an agent's home is its own).
 
     Nothing an agent could have written runs here, as the app: ``writable`` names the trees the agent writes, and
-    the interpreter is the first ``python3`` on the child's ``PATH`` outside them, run with no site processing,
-    ``PYTHON*`` variable or startup file and with only the ``LD_LIBRARY_PATH`` entries outside them; a site directory
-    inside them is not read. The interpreter is asked once per path and library path; empty when there is no such
-    interpreter or it does not answer."""
-    agent = tuple(dict.fromkeys(_real(path) for path in writable))
+    the interpreter is the first ``python3`` on the child's ``PATH`` that neither lies in them nor is reached through
+    them (an interpreter run by such a path reads the agent's ``pyvenv.cfg``, and through it imports the agent's
+    standard library), run with no site processing, ``PYTHON*`` variable or startup file and with only the
+    ``LD_LIBRARY_PATH`` entries the agent does not decide; a site directory it decides is not read. The interpreter is
+    asked once per path and library path; empty when there is no such interpreter or it does not answer."""
+    agent = _trees(writable)
     python = _which("python3", environ, outside=agent)
     if python is None:
         return ()
     libraries = [
-        str(entry) for entry in _absolute_entries(environ.get("LD_LIBRARY_PATH", "")) if not _within(entry, agent)
+        str(entry) for entry in _absolute_entries(environ.get("LD_LIBRARY_PATH", "")) if not _agents(entry, agent)
     ]
     path, sites = _search_path(python, os.pathsep.join(libraries) or None)
     found: dict[Path, None] = dict.fromkeys(Path(entry) for entry in (*path, *sites))
     for site_dir in map(Path, sites):
-        if site_dir.is_dir() and not _within(site_dir, agent):
+        if site_dir.is_dir() and not _agents(site_dir, agent):
             found.update(dict.fromkeys(_pth_entries(site_dir)))
             found.update(dict.fromkeys(_editable_sources(site_dir)))
     return tuple(found)
 
 
 def _which(program: str, environ: Mapping[str, str], *, outside: tuple[Path, ...] = ()) -> str | None:
-    """``program`` on the child's ``PATH`` (never the working directory): the first that does not resolve into one of
-    ``outside`` (resolved paths); ``None`` when there is none."""
+    """``program`` on the child's ``PATH`` (never the working directory): the first that neither resolves into one of
+    ``outside`` (resolved paths) nor is reached through one, by the path that was checked; ``None`` when there is
+    none."""
     for entry in environ.get("PATH", "").split(os.pathsep):
         found = shutil.which(program, path=entry) if os.path.isabs(entry) else None
-        if found is not None and not _within(found, outside):
+        if found is not None and not _agents(found, outside):
             return found
     return None
 
@@ -438,13 +524,15 @@ def _credential_roots(environ: Mapping[str, str]) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(_real(path) for path in found if path != _ROOT))
 
 
-def _program_dirs(argv0: str, environ: Mapping[str, str]) -> Iterator[Path]:
+def _program_dirs(argv0: str, environ: Mapping[str, str], agent: tuple[Path, ...]) -> Iterator[Path]:
     """What running ``argv0`` needs, through the link and resolved: the program's directory (the program alone when
     that directory is or holds a credential location), and its parent unless that is ``/`` or is, holds or lies
     below one. A native installer's ``~/.local/bin/claude`` so binds ``~/.local/bin`` and the version's directory,
-    never all of ``~/.local``, where other tools keep their logins."""
+    never all of ``~/.local``, where other tools keep their logins. Nothing when the program the child runs is one
+    the agent decides (in or reached through ``agent``, the trees it writes, resolved): the tree shows it, and where
+    it points is the agent's choice."""
     found = argv0 if os.sep in argv0 else _which(argv0, environ)
-    if found is None:
+    if found is None or _agents(found, agent):
         return
     roots = _credential_roots(environ)
     for program in dict.fromkeys((Path(os.path.normpath(found)), _real(found))):
@@ -471,14 +559,15 @@ def toolchain_paths(environ: Mapping[str, str], argv0: str, *, writable: Iterabl
     the child's interpreter's import path (:func:`interpreter_search_path`), every entry of its search-path variables,
     the program's directory (and parent, away from credential locations), its CA bundles, the model and benchmark
     trees it names, and the resolver configuration. Not ``/proc`` (the sandbox mounts its own), ``/sys``
-    (:attr:`Confinement.sys_paths`), nor what lies in the trees the child writes (``writable``): those show it already,
-    and a read-only bind there would take the child's own files from it."""
-    agent = tuple(dict.fromkeys(_real(path) for path in writable))
+    (:attr:`Confinement.sys_paths`), nor what lies in the trees the child writes (``writable``; its scratch too, when
+    that is on the host) or is reached through them: those show it already, a read-only bind there would take the
+    child's own files from it, and where a link there points is the agent's choice."""
+    agent = _trees(writable)
     found: list[Path] = [Path(root) for root in SYSTEM_ROOTS]
     found.extend(Path(root) for root in interpreter_roots())
     found.extend(interpreter_search_path(environ, writable=agent))
     for name in (*SEARCH_PATH_VARIABLES, *CA_VARIABLES, *DATA_VARIABLES):
         found.extend(_absolute_entries(environ.get(name, "")))
-    found.extend(_program_dirs(argv0, environ))
+    found.extend(_program_dirs(argv0, environ, agent))
     found.extend(_resolver())
-    return tuple(dict.fromkeys(path for path in found if path != _ROOT and not _within(path, agent)))
+    return tuple(dict.fromkeys(path for path in found if path != _ROOT and not _agents(path, agent)))
