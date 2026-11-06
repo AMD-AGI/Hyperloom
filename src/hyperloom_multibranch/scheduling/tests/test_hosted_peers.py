@@ -14,6 +14,7 @@ import os
 import shutil
 import stat
 import subprocess
+import zlib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -268,6 +269,36 @@ def test_a_clone_put_in_place_by_another_account_starts_no_program_of_its_config
     assert not ran.exists()
 
 
+@pytest.mark.usefixtures("wheelhouse_index")
+def test_an_object_planted_in_the_clone_under_the_id_of_one_of_the_commits_fails_the_run_and_builds_nothing(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
+    layout = SessionLayout(tmp_path / "MB-session")
+    layout.root.mkdir()
+    sha = rig.cache.sha
+    runner_source(layout.runner_source, str(rig.repo), sha)
+    # Another account of the group rewrites the runner's entry point in the clone under the id git named it by.
+    shown = subprocess.run(
+        ["git", "-C", str(layout.runner_source), "rev-parse", f"{sha}:src/hyperloom/measure/runner/__main__.py"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    blob = shown.stdout.strip()
+    loose = layout.runner_source / ".git" / "objects" / blob[:2] / blob[2:]
+    assert loose.is_file(), "the clone keeps the commit's objects loose"
+    planted = b"import os\nos.system('echo planted')\n"
+    loose.chmod(0o644)
+    loose.write_bytes(zlib.compress(b"blob %d\0" % len(planted) + planted))
+    cache = tmp_path / "runner-cache"
+
+    with pytest.raises(CacheBuildError, match=f"copying {sha}"):
+        PinnedToolboxInputs(_host(tmp_path, rig.repo, sha), cache)(layout, 2)
+
+    assert not (cache / sha).exists()
+
+
 @pytest.mark.parametrize(("run_id", "named"), [("run-1", "run-1"), (None, "MB-session")])
 def test_a_grant_without_a_run_id_names_its_sandboxes_by_the_session(
     run_id: str | None, named: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -275,7 +306,7 @@ def test_a_grant_without_a_run_id_names_its_sandboxes_by_the_session(
     from hyperloom_multibranch.scheduling import hosted_peers
 
     monkeypatch.setattr(hosted_peers, "runner_source", lambda destination, repo, sha: destination)
-    monkeypatch.setattr(hosted_peers, "borrowing_repository", lambda source, private, sha: source)
+    monkeypatch.setattr(hosted_peers, "private_copy", lambda source, private, sha: source)
     monkeypatch.setattr(hosted_peers, "runner_cache_pin", lambda source, sha, cache_root, target: "e" * 64)
     monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
     host = _host(tmp_path, tmp_path / "repo", "c" * 40)

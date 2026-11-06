@@ -10,8 +10,8 @@ repository, the specialists and the MCP service run in the application's contain
 runner sandbox of the service (:func:`~hyperloom_multibranch.toolbox.hosted_toolbox.build_hosted_toolbox`), and the
 toolbox keeps its journal, archive and landed output under ``MB-toolbox``. A runner sandbox has no network, so
 :class:`PinnedToolboxInputs` clones the run's source into ``MB-runner-source`` and has the commit's runner cache entry
-built from it (:func:`runner_cache_pin`), or finds it built, before anything is measured, and pins every runner sandbox
-to that entry's manifest through the toolbox's inputs.
+built from a private copy of the commit (:func:`private_copy`, :func:`runner_cache_pin`), or finds it built, before
+anything is measured, and pins every runner sandbox to that entry's manifest through the toolbox's inputs.
 
 The dev sandboxes a hosted session lends its specialists and its autonomous agents run in ``dev`` sandboxes of the grant
 (:func:`~hyperloom_multibranch.scheduling.local_peers.branch_sandboxes`): only their processes run there, and their
@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 from hyperloom.measure.runner.cache_build import CacheBuildError, WheelTarget, runner_wheel_target
+from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.local_peers import attempt_timeout_sec, measurement_host, peers_on
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
@@ -58,6 +59,8 @@ SOURCE_FETCH_TIMEOUT_SEC = 1800
 #: ``HYPERLOOM_SOURCE_REPO`` as ``OWNER/NAME``, a repository on GitHub; any other value is a git URL or path.
 _GITHUB_NAME = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 _QUIET = "--quiet"
+_GIT = "git"
+_FETCH = "fetch"
 #: The clone's top directory once whole: the next leg's account reads it, and no account but this one writes it.
 _SOURCE_MODE = 0o755
 
@@ -117,8 +120,8 @@ def runner_source(destination: Path, repo: str, sha: str) -> Path:
     The session directory is the group's to write, the run's sandboxes included, so the clone is made in a new
     directory only this account can enter, whose name no one can guess, so no one can put a config or a hook in it
     first; it is then made readable, never writable, by the next leg's account, which only reads it, and renamed into
-    place. A clone found there is used whoever made it, and only through a repository of this account's that borrows
-    its objects (:func:`borrowing_repository`): what is built from it is the commit's own, named by its hash.
+    place. A clone found there is used whoever made it, and only through a copy of the commit in a repository of this
+    account's (:func:`private_copy`): what is built from it is the commit's own, whose ids git computed.
 
     Raises:
         CacheBuildError: When the commit cannot be fetched; nothing is left at ``destination``.
@@ -129,12 +132,12 @@ def runner_source(destination: Path, repo: str, sha: str) -> Path:
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent))
     try:
         url = f"https://github.com/{repo}.git" if _GITHUB_NAME.fullmatch(repo) else repo
-        _git(["init", _QUIET, str(staging)], f"creating {staging}")
+        _git([_GIT, "init", _QUIET, str(staging)], f"creating {staging}")
         try:
-            _git(["-C", str(staging), "fetch", _QUIET, "--depth", "1", url, sha], f"fetching {sha} from {repo}")
+            _git([_GIT, "-C", str(staging), _FETCH, _QUIET, "--depth", "1", url, sha], f"fetching {sha} from {repo}")
         except CacheBuildError:
-            _git(["-C", str(staging), "fetch", _QUIET, url], f"fetching {repo}")
-        _git(["-C", str(staging), "cat-file", "-e", f"{sha}^{{commit}}"], f"finding {sha} in {repo}")
+            _git([_GIT, "-C", str(staging), _FETCH, _QUIET, url], f"fetching {repo}")
+        _git([_GIT, "-C", str(staging), "cat-file", "-e", f"{sha}^{{commit}}"], f"finding {sha} in {repo}")
         staging.chmod(_SOURCE_MODE)
         staging.rename(destination)
     except BaseException:
@@ -143,9 +146,9 @@ def runner_source(destination: Path, repo: str, sha: str) -> Path:
     return destination
 
 
-def _git(args: list[str], doing: str) -> None:
+def _git(argv: list[str], doing: str, env: dict[str, str] | None = None) -> None:
     try:
-        subprocess.run(["git", *args], check=True, capture_output=True, text=True, timeout=SOURCE_FETCH_TIMEOUT_SEC)
+        subprocess.run(argv, check=True, capture_output=True, text=True, timeout=SOURCE_FETCH_TIMEOUT_SEC, env=env)
     except subprocess.CalledProcessError as exc:
         raise CacheBuildError(f"{doing} failed: {(exc.stderr or '').strip()[-500:]}") from exc
     except subprocess.TimeoutExpired as exc:
@@ -173,35 +176,33 @@ class PinnedToolboxInputs:
         sha = str(given["source_sha"])
         source = runner_source(layout.runner_source, str(self.host.source_repo), sha)
         with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as private:
-            borrower = borrowing_repository(source, Path(private), sha)
-            pin = runner_cache_pin(borrower, sha, self.cache_root, runner_wheel_target(os.environ))
+            copy = private_copy(source, Path(private), sha)
+            pin = runner_cache_pin(copy, sha, self.cache_root, runner_wheel_target(os.environ))
         return HostedToolboxInputs(**given, runner_cache_manifest_sha256=pin)  # type: ignore[arg-type]
 
 
-def borrowing_repository(source: Path, private: Path, sha: str) -> Path:
-    """A new bare repository in ``private``, a directory of this account's own, that borrows the objects of the clone
-    ``source`` and nothing else of it; what the runner cache is built from.
+def private_copy(source: Path, private: Path, sha: str) -> Path:
+    """A new bare repository in ``private``, a directory of this account's own, holding commit ``sha`` fetched from the
+    clone ``source``; what the runner cache is built from.
 
     The clone lies in the session directory, which the group's other accounts can write: they could put in its place
-    a repository whose config git would obey as the application -- one made a partial clone whose promisor remote's
-    transport is a program, run on the first missing object -- or whose replace refs show another commit. The
-    borrower has no config, refs or hooks but its own; the objects are named by their hash, so what is read from them
-    is the commit's whoever wrote them.
+    a repository whose config git would obey as the application, or plant an object under the id of one of the
+    commit's own, which git does not check as it reads one. The fetch sends the commit's objects through a pack whose
+    ids this side computes from their content, so a planted object fails it; it runs with no system or global config
+    and starts no program a config could name (:mod:`~hyperloom_multibranch.repo.isolated_git`), and the clone's config
+    is read only by git's serving side, which starts none.
 
     Raises:
-        CacheBuildError: When ``source`` has no object directory where a clone keeps it.
+        CacheBuildError: When the clone does not hold the commit whole as its ids name it.
     """
 
-    objects = source / ".git" / "objects"
-    if not objects.is_dir():
-        raise CacheBuildError(f"{source} holds no git object directory at {objects}")
-    borrower = private / "source.git"
+    copy = private / "source.git"
     object_format = ["--object-format=sha256"] if len(sha) == 64 else []
-    _git(["init", _QUIET, "--bare", "--template=", *object_format, str(borrower)], f"creating {borrower}")
-    alternates = borrower / "objects" / "info" / "alternates"
-    alternates.parent.mkdir(parents=True, exist_ok=True)
-    alternates.write_text(f"{objects.resolve()}\n", encoding="utf-8")
-    return borrower
+    env = git_env()
+    _git(git_argv(*INIT, _QUIET, "--bare", *object_format, str(copy)), f"creating {copy}", env)
+    fetch = ["--git-dir", str(copy), "-c", "protocol.version=2", _FETCH, _QUIET, "--no-tags", "--depth", "1"]
+    _git(git_argv(*fetch, str(source), sha), f"copying {sha} from {source}", env)
+    return copy
 
 
 __all__ = [
@@ -210,8 +211,8 @@ __all__ = [
     "HostedSandboxes",
     "PinnedToolboxInputs",
     "ToolboxInputsFor",
-    "borrowing_repository",
     "load_hosted_peers",
+    "private_copy",
     "runner_cache_pin",
     "runner_source",
 ]
