@@ -616,6 +616,147 @@ def serving_lease_on_a_ray_double(monkeypatch):
         lease.close()
 
 
+#: A ``ray`` package whose ``init`` answers as ``FAKE_RAY_HEAD`` says, logging each call with its pid.
+_FAKE_RAY_PACKAGE = """
+import ctypes, os, subprocess, sys, time
+
+from . import exceptions
+
+
+def _note(line):
+    with open(os.environ["FAKE_RAY_LOG"], "a", encoding="utf-8") as log:
+        log.write(line + "\\n")
+
+
+def init(address=None, **_kwargs):
+    _note(f"init {os.getpid()} {address}")
+    mode = os.environ["FAKE_RAY_HEAD"]
+    if mode in ("silent", "gilhold"):
+        # A raylet that never replies, after the driver started a process of its own.
+        daemon = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
+        _note(f"daemon {daemon.pid}")
+    if mode == "gilhold":
+        # Waiting the way Ray's registration does: in native code with the GIL held, so no other thread of the
+        # process runs until it returns. Bounded, so a test that connects to it in-process fails instead of hanging.
+        ctypes.PyDLL(None).sleep(int(os.environ.get("FAKE_RAY_GIL_HOLD_SEC", "3600")))
+        return
+    while mode == "silent":
+        time.sleep(3600)
+    if mode == "raises":
+        raise ConnectionError("the raylet refused the driver")
+    if mode == "mismatch":
+        raise RuntimeError("Version mismatch: The cluster was started with: Ray: 2.44.1")
+
+
+def shutdown():
+    _note(f"shutdown {os.getpid()}")
+"""
+
+#: The ``ray.exceptions`` of :data:`_FAKE_RAY_PACKAGE`.
+_FAKE_RAY_EXCEPTIONS = """
+class RayError(Exception):
+    pass
+"""
+
+#: A ``ray`` CLI whose every command succeeds, logging its arguments.
+_FAKE_RAY_CLI = """#!/bin/sh
+echo "$*" >> "$FAKE_RAY_CLI_LOG"
+"""
+
+
+class FakeRayHead:
+    """A Ray head as a driver sees it: a stand-in ``ray`` package on the child ``PYTHONPATH``, and a ``ray`` CLI.
+
+    The routing decision sees a running head (``ray status`` answers) and starts from no verdict, so the first
+    question about the Ray route runs the real connect probe against this package. ``ray start`` and ``ray stop``
+    succeed, so a head this process (re)starts is this one again.
+    """
+
+    def __init__(self, root: Path, monkeypatch) -> None:
+        import os
+
+        from hyperloom.orchestrator.actions.executors import _ray_runtime
+
+        package = root / "ray"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(_FAKE_RAY_PACKAGE, encoding="utf-8")
+        (package / "exceptions.py").write_text(_FAKE_RAY_EXCEPTIONS, encoding="utf-8")
+        self._package = package
+        cli = root / "bin" / "ray"
+        cli.parent.mkdir()
+        cli.write_text(_FAKE_RAY_CLI, encoding="utf-8")
+        cli.chmod(0o755)
+        self._log = root / "ray_calls.log"
+        self._log.touch()
+        self._cli_log = root / "ray_cli.log"
+        self._cli_log.touch()
+        self._monkeypatch = monkeypatch
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")])))
+        monkeypatch.setenv("PATH", os.pathsep.join(filter(None, [str(cli.parent), os.environ.get("PATH")])))
+        monkeypatch.setenv("FAKE_RAY_LOG", str(self._log))
+        monkeypatch.setenv("FAKE_RAY_CLI_LOG", str(self._cli_log))
+        monkeypatch.setenv("FAKE_RAY_HEAD", "answers")
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+        monkeypatch.setattr(_ray_runtime, "_HEAD_VERDICT", _ray_runtime._HeadVerdict())
+        monkeypatch.setattr(_ray_runtime, "ray_status_ok", lambda: True)
+
+    def answers(self, mode: str) -> None:
+        """Answer every later driver connect as ``mode``.
+
+        ``answers``, ``raises`` or ``mismatch``; ``silent`` never returns, and ``gilhold`` holds the GIL for
+        ``FAKE_RAY_GIL_HOLD_SEC`` and then connects.
+        """
+        self._monkeypatch.setenv("FAKE_RAY_HEAD", mode)
+
+    def import_in_process(self) -> Any:
+        """Make this package the ``ray`` this process imports, for the in-process connect."""
+        import importlib.util
+        import sys
+
+        # The submodule first, so the package's ``from . import exceptions`` finds it registered.
+        modules = {}
+        for name, path, search in (
+            ("ray.exceptions", self._package / "exceptions.py", None),
+            ("ray", self._package / "__init__.py", [str(self._package)]),
+        ):
+            spec = importlib.util.spec_from_file_location(name, path, submodule_search_locations=search)
+            modules[name] = importlib.util.module_from_spec(spec)
+            self._monkeypatch.setitem(sys.modules, name, modules[name])
+            spec.loader.exec_module(modules[name])
+        return modules["ray"]
+
+    def calls(self) -> list[tuple[str, int]]:
+        """Every ``init``, ``daemon`` and ``shutdown`` so far, with the pid it names."""
+        return [(kind, int(pid)) for kind, pid, *_ in (line.split() for line in self._log.read_text().splitlines())]
+
+    def connects(self) -> list[int]:
+        """The pid of every driver that called ``init``."""
+        return [pid for kind, pid in self.calls() if kind == "init"]
+
+    def cli_calls(self) -> list[str]:
+        """The arguments of every ``ray`` CLI command so far."""
+        return self._cli_log.read_text(encoding="utf-8").splitlines()
+
+    def kill_daemons(self) -> None:
+        """SIGKILL every process a driver started that still runs: a probe that worked leaves none."""
+        import contextlib
+        import os
+        import signal
+
+        for kind, pid in self.calls():
+            with contextlib.suppress(OSError):
+                if kind == "daemon" and b"time.sleep(3600)" in Path(f"/proc/{pid}/cmdline").read_bytes():
+                    os.kill(pid, signal.SIGKILL)
+
+
+@pytest.fixture
+def fake_ray_head(tmp_path: Path, monkeypatch):
+    """A running Ray head that answers a driver connect; tests switch it with :meth:`FakeRayHead.answers`."""
+    head = FakeRayHead(tmp_path / "fake_ray_head", monkeypatch)
+    yield head
+    head.kill_daemons()
+
+
 def cli_call_sequence(entry: str) -> list[str]:
     """Every call ``entry`` makes, in source order, descending into the CLI package's own functions.
 
