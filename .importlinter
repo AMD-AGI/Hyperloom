@@ -374,6 +374,9 @@ ignore_imports =
     hyperloom.**.tests.** -> **
     hyperloom_multibranch.tests.** -> **
     hyperloom_multibranch.**.tests.** -> **
+    # reference_script parses --reference-script through the shell lifter until bootstrap reads the user file
+    # through the package root (dev plan unit 1.13) and unit 1.15 deletes the parser.
+    hyperloom.inference_optimizer.reference_script -> inference_suite.recipe.shell_launch
 unmatched_ignore_imports_alerting = none
 
 
