@@ -97,6 +97,12 @@ class AgentCapabilities:
     shared_prompt_cache: bool = False
 
 
+#: How long a launch probe waits for its one-word reply. It asks under the campaign's own model and effort, which a
+#: busy gateway can take most of a minute to answer, and a probe that times out sends the whole campaign to the
+#: fallback provider -- so this bounds a hung route, not a slow one.
+_PROBE_TIMEOUT_SEC = 300
+
+
 @dataclass(frozen=True)
 class AgentRuntimeConfig:
     """Hold provider-neutral runtime configuration for one selected Agent CLI."""
@@ -119,6 +125,11 @@ class AgentRuntimeConfig:
             raise ValueError("model must not be empty")
         if self.timeout_sec <= 0:
             raise ValueError("timeout_sec must be greater than zero")
+
+    @property
+    def probe_timeout_sec(self) -> int:
+        """How long a launch probe waits for its reply; never longer than one session may run."""
+        return min(_PROBE_TIMEOUT_SEC, self.timeout_sec)
 
 
 @dataclass(frozen=True)
