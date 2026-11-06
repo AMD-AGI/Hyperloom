@@ -42,6 +42,13 @@ PATCH_FIELD_LINES: tuple[str, ...] = (
     "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
     "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
     "  list the artifact in ``artifacts_written``.",
+    "- ``tunable_settings``: a tuning value you introduce — a threshold, a tile / block / chunk size, a split or head",
+    "  count — must be a setting, not a literal. Read it from a new environment variable whose unset default is the",
+    "  value you chose, and list it as ``{setting, values, depends_on, target, evidence}`` with up to six alternative",
+    "  ``values`` (``depends_on``: the switches that must be on for it to matter). Your pick was right for the shapes",
+    "  you measured; explore benches each value on the target workload. Integration refuses a patch that hardcodes",
+    "  one, or defines a numeric setting it does not list. Keep TOKEN, KEY, SECRET, PASSWORD and CREDENTIAL out of",
+    "  the name (``_MIN_SEQS``, not ``_MIN_TOKENS``): a credential-shaped name is dropped and never set.",
 )
 
 

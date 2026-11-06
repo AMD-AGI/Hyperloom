@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Parse and reason about a framework-rewrite switch manifest."""
+"""Parse and reason about a framework-rewrite switch manifest and the tunable settings a patch exposes."""
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator, Mapping
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import (
@@ -34,6 +36,15 @@ KNOWN_CATEGORIES: frozenset[str] = frozenset(_CATEGORY_TAXONOMY) | {"swap_vendor
 
 # Cap on manifest entries.
 MAX_SWITCHES = 24
+
+
+def reserved_env(params: Mapping[str, Any]) -> set[str]:
+    """Env the benchmark already defines: a lever named like one would be moved by unrelated configuration."""
+    reserved: set[str] = set()
+    for source in (params.get("base_extra_envs"), params.get("extra_envs")):
+        if isinstance(source, dict):
+            reserved.update(str(k).strip().upper() for k in source)
+    return reserved
 
 
 def _clean_list(raw: Any) -> list[str]:
@@ -318,6 +329,10 @@ def unarmed_env_reads(patch_texts: list[str], *, armed: "set[str] | frozenset[st
     return sorted(name for name in unarmed if _could_be_a_round_switch(name))
 
 
+#: The ``transitive_closure`` edge to what a switch needs.
+_DEPENDS_ON = "depends_on"
+
+
 def transitive_closure(name: str, switches: list[dict[str, Any]], edge: str) -> set[str]:
     """Return every switch reachable from ``name`` along the ``edge`` lists, plus ``name``.
 
@@ -345,7 +360,7 @@ def additive_variants(
     seen: set[frozenset[str]] = set()
     variants: list[dict[str, Any]] = []
     for entry in switches:
-        bundle = transitive_closure(entry["switch"], switches, "depends_on")
+        bundle = transitive_closure(entry["switch"], switches, _DEPENDS_ON)
         key = frozenset(bundle)
         if key in seen:
             continue
@@ -456,17 +471,141 @@ def summarize(switches: list[dict[str, Any]], problems: list[str]) -> str:
     return "\n".join(lines)
 
 
+# Tunable settings: a tuning value a patch exposes, which explore sweeps instead of turning on or off. Key on the
+# specialist's done payload / the integrate_patch params.
+SETTINGS_KEY = "tunable_settings"
+# ``framework_lever_source`` of the explore variants that sweep a setting.
+SETTING_SOURCE = "setting"
+# Values explore tries per setting; each one is a benchmark run.
+MAX_SETTING_VALUES = 6
+
+_NUMBER = r"-?\d[\d_]*(?:\.\d*)?(?:[eE][-+]?\d+)?"
+# A module-level ``NAME = 1024`` / ``NAME: int = 1024`` / ``NAME = (16, 32)`` on an added line.
+_NUMERIC_CONSTANT = re.compile(
+    rf"^(_?[A-Z][A-Z0-9_]*)\s*(?::\s*[\w\[\], .]+)?=\s*(?:{_NUMBER}|\(\s*{_NUMBER}(?:\s*,\s*{_NUMBER})*\s*,?\s*\))"
+    r"\s*(?:#.*)?$"
+)
+# Name words that mark a constant as a performance choice rather than a fact such as ``LOG2E``.
+_TUNING_WORD = re.compile(
+    r"(?:^|_)(?:MIN|MAX|THRESHOLD|THRESH|LIMIT|CUTOFF|TILE|BLOCK|BLOCKS|CHUNK|SPLIT|SPLITS|HEADS|WARPS|STAGES"
+    r"|TOKENS|BATCH|BUCKET|SIZE)(?:_|$)"
+)
+# A numeric env setting the patch defines: SGLang ``NAME = EnvInt(...)``, or a read with a numeric default other
+# than the ``"0"`` / ``"1"`` of an on/off gate.
+_NUMERIC_SETTING = (
+    re.compile(r"^\s+([A-Z][A-Z0-9_]*)\s*(?::\s*\w+)?\s*=\s*Env(?:Int|Float)\("),
+    re.compile(r"""os\.(?:environ\.get|getenv)\(\s*["']([A-Z][A-Z0-9_]*)["']\s*,\s*["']?-?(?![01]["')\s,])\d"""),
+)
+
+
+def parse_settings(raw: Any, *, reserved: set[str]) -> list[dict[str, Any]]:
+    """The usable ``{switch, values, depends_on, target, evidence}`` settings in ``raw``; the rest are logged."""
+    accepted: dict[str, dict[str, Any]] = {}
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("setting") or entry.get("switch") or "").strip().upper()
+        values = list(dict.fromkeys(_clean_list(entry.get("values"))))[:MAX_SETTING_VALUES]
+        unusable = not (values and valid_env_key(name)) or is_secret_shaped_env_name(name)
+        if unusable or name in accepted or name in reserved or name in BLOCKED_EXTERNAL_ENV_NAMES:
+            log.warning("integrate_patch: dropped tunable setting %r (values %s)", name, values)
+            continue
+        accepted[name] = {
+            "switch": name,
+            "values": values,
+            "depends_on": [dep.upper() for dep in _clean_list(entry.get("depends_on"))],
+            "target": str(entry.get("target") or "").strip(),
+            "evidence": str(entry.get("evidence") or "").strip(),
+        }
+    return list(accepted.values())
+
+
+def _is_runtime_source(target: str) -> bool:
+    """Whether a diff target is Python the server runs, not a test."""
+    return target.endswith(".py") and "/tests/" not in target and not Path(target).name.startswith("test_")
+
+
+def _added_source_lines(patch_paths: list[Path]) -> Iterator[str]:
+    """Lines the patches add to non-test Python source."""
+    for path in patch_paths:
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            log.warning("tunable settings: cannot read %s: %s", path, exc)
+            continue
+        target = ""
+        for line in text.splitlines():
+            if line.startswith("+++ "):
+                target = line[4:].strip()
+            elif line.startswith("+") and _is_runtime_source(target):
+                yield line[1:]
+
+
+def untunable_values(patch_paths: list[Path], *, declared: set[str]) -> list[str]:
+    """Tuning values the patches fix that explore cannot change: threshold constants and undeclared settings."""
+    found: set[str] = set()
+    for line in _added_source_lines(patch_paths):
+        constant = _NUMERIC_CONSTANT.match(line)
+        if constant and _TUNING_WORD.search(constant.group(1).lstrip("_")):
+            found.add(constant.group(1))
+        for pattern in _NUMERIC_SETTING:
+            found.update(name for name in pattern.findall(line) if name not in declared)
+    return sorted(found)
+
+
+def setting_variants(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One explore variant per value of each setting among ``levers``, with the switches it depends on turned on."""
+    switches = [entry for entry in levers if not entry.get("values")]
+    variants: list[dict[str, Any]] = []
+    for entry in (entry for entry in levers if entry.get("values")):
+        gates = set().union(*(transitive_closure(dep, switches, _DEPENDS_ON) for dep in entry.get("depends_on") or []))
+        envs = switch_env(switches, only=gates)
+        for value in entry["values"]:
+            note = f"tunable setting {entry['switch']}={value}"
+            variants.append(
+                {
+                    "name": f"fwsetting_{entry['switch'].lower()}_{re.sub(r'[^0-9a-z]+', '_', value.lower())}",
+                    "extra_envs": {**envs, entry["switch"]: value},
+                    "note": note + (f" with {', '.join(sorted(gates))} on" if gates else ""),
+                    "provenance": "framework_rewrite_lever",
+                    "framework_lever": entry["switch"],
+                    "framework_lever_value": value,
+                    "framework_lever_source": SETTING_SOURCE,
+                }
+            )
+    return variants
+
+
+def best_per_setting(attributions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One attribution per setting, its best-gaining value; switch attributions pass through unchanged."""
+    best: dict[str, dict[str, Any]] = {}
+    for row in attributions:
+        if row["source"] == SETTING_SOURCE and row["gain_pct"] > best.get(row["switch"], {}).get(
+            "gain_pct", float("-inf")
+        ):
+            best[row["switch"]] = row
+    return [row for row in attributions if row["source"] != SETTING_SOURCE] + list(best.values())
+
+
 __all__ = [
     "DEFAULT_SWITCH_VALUE",
     "KNOWN_CATEGORIES",
     "MANIFEST_KEY",
+    "MAX_SETTING_VALUES",
     "MAX_SWITCHES",
+    "SETTINGS_KEY",
+    "SETTING_SOURCE",
     "additive_variants",
+    "best_per_setting",
     "leave_one_out_variants",
     "parse_manifest",
+    "parse_settings",
+    "reserved_env",
+    "setting_variants",
     "summarize",
     "switch_env",
     "transitive_closure",
     "unarmed_env_reads",
     "unattributed_arms",
+    "untunable_values",
 ]
