@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import json
-import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,22 +14,9 @@ from typing import Any
 
 from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
 from hyperloom.common.overlay import validate_overlay_pythonpath
+from inference_suite.recipe.shell_launch import entrypoint_markers, parse_shell_launch
 
 log = logging.getLogger(__name__)
-
-# Flags that never belong in the lifted base: the optimizer's env seeding owns the workload + I/O, so drop these even
-# when fully resolved.
-_DROP_FLAGS = frozenset(
-    {
-        "--port",
-        "--host",
-        "--served-model-name",
-        "--result-dir",
-        "--result-filename",
-    }
-)
-# Flags dropped by prefix (result-*, served-model-* variants, log redirection).
-_DROP_PREFIXES = ("--result-", "--served-model")
 
 
 @dataclass(frozen=True)
@@ -80,84 +66,12 @@ def _read_source(source: str) -> str:
     return Path(s).read_text(encoding="utf-8", errors="replace")
 
 
-def _entrypoint_markers(framework: str) -> tuple[str, ...]:
-    fw = str(framework or "").strip().lower()
-    if "atom" in fw:
-        return ("atom.entrypoints",)
-    if "vllm" in fw:
-        return ("vllm serve",)
-    return ("sglang.launch_server", "sglang serve")
-
-
 # The launch command rendered per framework, keyed by the first marker the parser finds it by.
 _LAUNCH_COMMANDS = {
     "atom.entrypoints": "python3 -m atom.entrypoints.openai_server",
     "vllm serve": "vllm serve $MODEL",
     "sglang.launch_server": "python3 -m sglang.launch_server --model-path=$MODEL",
 }
-
-
-def _join_continuations(text: str) -> list[str]:
-    """Collapse backslash line-continuations into single logical lines."""
-    logical: list[str] = []
-    buf = ""
-    for raw in text.splitlines():
-        line = raw.rstrip("\n")
-        if line.rstrip().endswith("\\"):
-            buf += line.rstrip()[:-1] + " "
-        else:
-            buf += line
-            logical.append(buf)
-            buf = ""
-    if buf:
-        logical.append(buf)
-    return logical
-
-
-def _find_entrypoint_line(text: str, framework: str) -> str | None:
-    markers = _entrypoint_markers(framework)
-    for line in _join_continuations(text):
-        if any(m in line for m in markers):
-            return line
-    return None
-
-
-def _strip_redirection(tokens: list[str]) -> list[str]:
-    """Drop shell redirection / backgrounding tail (``> log 2>&1 &``)."""
-    out: list[str] = []
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t in ("&", ";"):
-            break
-        if t.startswith((">", "<", "2>")) or "2>&1" in t:
-            # redirection target may be the next token
-            if t in (">", "<", "2>") and i + 1 < len(tokens):
-                i += 2
-                continue
-            i += 1
-            continue
-        out.append(t)
-        i += 1
-    return out
-
-
-def _has_var(s: str) -> bool:
-    return "$" in s
-
-
-def _is_flag(tok: str) -> bool:
-    return tok.startswith("--")
-
-
-def _flag_name(tok: str) -> str:
-    return tok.split("=", 1)[0]
-
-
-def _should_drop_flag(name: str) -> bool:
-    if name in _DROP_FLAGS:
-        return True
-    return any(name.startswith(p) for p in _DROP_PREFIXES)
 
 
 def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
@@ -178,151 +92,17 @@ def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
                     "reference overlay_pythonpath imports executable code; resume the owning session "
                     "or review and run the exported launcher directly"
                 )
-    envs = _extract_envs(text)
-    line = _find_entrypoint_line(text, framework)
-    if not line:
-        log.warning(
-            "reference-script: no %s entrypoint in %r; carrying exports only", _entrypoint_markers(framework), source
-        )
-        return ReferenceRecipe(server_args="", envs=envs, model=None, launch_controls=controls)
-
-    server_args, model = _extract_server_args(shlex.split(line))
-    return ReferenceRecipe(server_args=server_args, envs=envs, model=model, launch_controls=controls)
-
-
-def _extract_envs(text: str) -> dict[str, str]:
-    """Pull literal exports the denylist allows, resolving self-referential defaults."""
-    envs: dict[str, str] = {}
-    dropped: list[str] = []
-    pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
-    lines = iter(text.splitlines(keepends=True))
-    for line in lines:
-        m = pat.match(line)
-        if not m:
-            continue
-        key, val = m.group(1), m.group(2)
-        if not is_allowed_external_env_key(key):
-            dropped.append(key)
-            continue
-        while True:
-            try:
-                tokens = shlex.split(val)
-                break
-            except ValueError:
-                continuation = next(lines, None)
-                if continuation is None:
-                    tokens = []
-                    break
-                val += continuation
-        if len(tokens) != 1 and val.strip():
-            dropped.append(key)
-            continue
-        literal = tokens[0] if tokens else ""
-        if _has_shell_expansion(val):
-            resolved = _resolve_self_default(key, literal)
-            if resolved is None:
-                dropped.append(key)
-                continue
-            literal = resolved
-        envs[key] = literal
+    lifted = parse_shell_launch(text, framework=framework)
+    envs = {name: value for name, value in lifted.env.items() if is_allowed_external_env_key(name)}
+    dropped = sorted({*lifted.unresolved_env, *(set(lifted.env) - set(envs))})
     if dropped:
-        log.info("reference recipe: dropped %d export(s): %s", len(dropped), ", ".join(sorted(set(dropped))))
-    return envs
-
-
-def _has_shell_expansion(value: str) -> bool:
-    """Recognize dynamic shell syntax while preserving quoted literal values."""
-    quote = ""
-    escaped = False
-    for char in value.strip():
-        if escaped:
-            escaped = False
-        elif quote == "'":
-            if char == "'":
-                quote = ""
-        elif char == "\\":
-            escaped = True
-        elif char == quote:
-            quote = ""
-        elif not quote and char in ("'", '"'):
-            quote = char
-        elif char in ("$", "`") or (not quote and char in ";&|<>()"):
-            return True
-    return False
-
-
-# ``${FOO:-1}`` / ``${FOO-1}``, capturing the name and the default.
-_SELF_DEFAULT_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?-(.*)\}$")
-
-
-def _resolve_self_default(key: str, val: str) -> str | None:
-    """Return the literal default of ``${key:-default}``, else ``None``."""
-    m = _SELF_DEFAULT_RE.match(val)
-    if not m or m.group(1) != key:
-        return None
-    default = m.group(2)
-    return None if _has_shell_expansion(default) else default
-
-
-_SERVE_CLIS = frozenset({"vllm", "sglang"})
-
-
-def _flags_start(tokens: list[str]) -> int:
-    """Index of the first token after the entrypoint: ``python3 -m <module>`` or ``<vllm|sglang> serve``."""
-    for i, t in enumerate(tokens):
-        if t == "-m" and i + 1 < len(tokens):
-            return i + 2
-        if t == "serve" and i > 0 and Path(tokens[i - 1]).name in _SERVE_CLIS:
-            return i + 1
-    return 0
-
-
-def _extract_server_args(tokens: list[str]) -> tuple[str, str | None]:
-    """Walk entrypoint tokens as (flag, value) pairs; keep static flags only."""
-    tokens = _strip_redirection(tokens)
-    start = _flags_start(tokens)
-
-    model: str | None = None
-    kept: list[str] = []
-    i = start
-    n = len(tokens)
-    while i < n:
-        tok = tokens[i]
-        if not _is_flag(tok):
-            # positional (the model for ``vllm serve $MODEL``); capture, drop.
-            if model is None and tok not in ("serve",):
-                model = None if _has_var(tok) else Path(tok).name
-            i += 1
-            continue
-        name = _flag_name(tok)
-        value, span = _flag_value(tokens, i)
-        pair = tokens[i : i + span]
-        i += span
-        if value is None:
-            # bare store-true flag
-            if not _should_drop_flag(name):
-                kept.append(tok)
-            continue
-        # capture model from --model / --model-path even though we drop it.
-        if name in ("--model", "--model-path"):
-            if not _has_var(value):
-                model = Path(value).name
-            continue
-        # a dropped valued flag takes its value with it (no orphan flag)
-        if not (_has_var(value) or _should_drop_flag(name)):
-            kept.extend(pair)
-
-    return " ".join(kept), model
-
-
-def _flag_value(tokens: list[str], i: int) -> tuple[str | None, int]:
-    """Return the value of the flag at ``tokens[i]`` (None when bare) and how many tokens the flag spans."""
-    tok = tokens[i]
-    if "=" in tok:
-        return tok.split("=", 1)[1], 1
-    if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
-        return tokens[i + 1], 2
-    return None, 1
+        log.info("reference recipe: dropped %d export(s): %s", len(dropped), ", ".join(dropped))
+    if not lifted.has_entrypoint:
+        log.warning(
+            "reference-script: no %s entrypoint in %r; carrying exports only", entrypoint_markers(framework), source
+        )
+    model = Path(lifted.model).name if lifted.model else None
+    return ReferenceRecipe(server_args=" ".join(lifted.args), envs=envs, model=model, launch_controls=controls)
 
 
 def _shell_ready_server_args(server_args: Any) -> str:
@@ -443,7 +223,7 @@ def render_reference_script(
 
     args = _shell_ready_server_args(launch.server_args)
     lines.append("")
-    lines.append(f"{_LAUNCH_COMMANDS[_entrypoint_markers(framework)[0]]} {args}".rstrip())
+    lines.append(f"{_LAUNCH_COMMANDS[entrypoint_markers(framework)[0]]} {args}".rstrip())
     return "\n".join(lines) + "\n"
 
 

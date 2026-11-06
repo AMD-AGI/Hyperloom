@@ -54,38 +54,20 @@ def _write(tmp_path: Path, text: str, name: str = "recipe.sh") -> str:
     return str(p)
 
 
-def test_parse_lifts_static_flags(tmp_path):
-    src = _write(tmp_path, _M3_RECIPE)
-    r = parse_reference_script(src, framework="vllm")
-    assert "--block-size 128" in r.server_args
-    assert "--attention-backend TRITON_ATTN" in r.server_args
-    assert "--no-enable-prefix-caching" in r.server_args
-    assert "--language-model-only" in r.server_args
-    assert "--trust-remote-code" in r.server_args
+def test_parse_keeps_static_flags_and_drops_variable_and_runner_owned_ones(tmp_path):
+    r = parse_reference_script(_write(tmp_path, _M3_RECIPE), framework="vllm")
+    assert r.server_args == (
+        "--block-size 128 --attention-backend TRITON_ATTN --no-enable-prefix-caching "
+        "--language-model-only --trust-remote-code"
+    )
+    assert r.model is None
 
 
-def test_parse_drops_var_tokens(tmp_path):
-    src = _write(tmp_path, _M3_RECIPE)
-    r = parse_reference_script(src, framework="vllm")
-    assert "$" not in r.server_args
-    assert "--port" not in r.server_args
-    assert "--tensor-parallel-size" not in r.server_args
-    assert "--max-model-len" not in r.server_args
-
-
-def test_parse_orphan_flag_dropped_with_value(tmp_path):
-    """R1: --served-model-name $NAME drops BOTH tokens, no orphan flag."""
-    src = _write(tmp_path, _M3_RECIPE)
-    r = parse_reference_script(src, framework="vllm")
-    assert "--served-model-name" not in r.server_args
-
-
-def test_parse_flag_equals_var_dropped_whole(tmp_path):
-    text = "vllm serve $MODEL --tensor-parallel-size=$TP --block-size=32\n"
-    src = _write(tmp_path, text)
-    r = parse_reference_script(src, framework="vllm")
-    assert "--tensor-parallel-size" not in r.server_args
-    assert "--block-size=32" in r.server_args
+def test_parse_records_the_model_basename(tmp_path):
+    r = parse_reference_script(
+        _write(tmp_path, "sglang serve --model-path /models/GLM-5.2 --tp 4\n"), framework="sglang"
+    )
+    assert (r.model, r.server_args) == ("GLM-5.2", "--tp 4")
 
 
 def test_parse_env_denylist(tmp_path):
@@ -202,73 +184,9 @@ vllm serve $MODEL
     assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
 
 
-def test_parse_env_self_defaults(tmp_path):
-    text = """\
-export VLLM_USE_BREAKABLE_CUDAGRAPH=${VLLM_USE_BREAKABLE_CUDAGRAPH:-0}
-export NCCL_DMABUF_ENABLE="${NCCL_DMABUF_ENABLE-1}"
-export VLLM_ROCM_USE_AITER=${OTHER:-1}
-export VLLM_USE_RUST_FRONTEND=${VLLM_USE_RUST_FRONTEND:-$DEFAULT}
-"""
-    r = parse_reference_script(_write(tmp_path, text), framework="vllm")
-    assert r.envs["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0"
-    assert r.envs["NCCL_DMABUF_ENABLE"] == "1"
-    assert "VLLM_ROCM_USE_AITER" not in r.envs
-    assert "VLLM_USE_RUST_FRONTEND" not in r.envs
-
-
-def test_parse_continuation_parity(tmp_path):
-    """A \\-continuation recipe parses identically to its single-line form."""
-    multi = _write(tmp_path, _M3_RECIPE, "multi.sh")
-    single_line = (
-        "vllm serve $MODEL --block-size 128 "
-        "--attention-backend TRITON_ATTN --no-enable-prefix-caching "
-        "--language-model-only --trust-remote-code\n"
-    )
-    single = _write(tmp_path, single_line, "single.sh")
-    rm = parse_reference_script(multi, framework="vllm")
-    rs = parse_reference_script(single, framework="vllm")
-    assert rm.server_args == rs.server_args
-
-
 def test_parse_missing_file_raises():
     with pytest.raises(OSError):
         parse_reference_script("/nonexistent/recipe.sh", framework="vllm")
-
-
-def test_parse_sglang_entrypoint(tmp_path):
-    text = (
-        "export SGLANG_USE_AITER=1\n"
-        "python3 -m sglang.launch_server --model-path=$MODEL "
-        "--port $PORT --tp $TP --chunked-prefill-size 8192\n"
-    )
-    src = _write(tmp_path, text)
-    r = parse_reference_script(src, framework="sglang")
-    assert "--chunked-prefill-size 8192" in r.server_args
-    assert "$" not in r.server_args
-    assert r.envs.get("SGLANG_USE_AITER") == "1"
-
-
-def test_parse_sglang_serve_entrypoint_as_the_cookbook_writes_it(tmp_path):
-    text = (
-        "export SGLANG_OPT_USE_TOPK_V2=1\n"
-        "sglang serve \\\n"
-        "  --trust-remote-code \\\n"
-        "  --model-path amd/GLM-5.2-MXFP4 \\\n"
-        "  --tp 4 \\\n"
-        "  --kv-cache-dtype fp8_e4m3 \\\n"
-        "  --host 0.0.0.0 \\\n"
-        "  --port 30000\n"
-    )
-    r = parse_reference_script(_write(tmp_path, text), framework="sglang")
-    assert r.server_args == "--trust-remote-code --tp 4 --kv-cache-dtype fp8_e4m3"
-    assert r.model == "GLM-5.2-MXFP4"
-    assert r.envs == {"SGLANG_OPT_USE_TOPK_V2": "1"}
-
-
-def test_parse_serve_entrypoint_does_not_take_the_cli_name_for_the_model(tmp_path):
-    r = parse_reference_script(_write(tmp_path, "sglang serve --model-path=$MODEL --tp 8\n"), framework="sglang")
-    assert r.server_args == "--tp 8"
-    assert r.model is None
 
 
 def test_render_round_trip(tmp_path):
@@ -353,21 +271,6 @@ def test_literal_environment_survives_export_child_and_reference_import(tmp_path
     wrapper.write_text("python3() { " + shlex.join([sys.executable, "-S", str(observer)]) + "; }\n" + text)
     child = subprocess.run(["bash", str(wrapper)], text=True, capture_output=True, check=True)
     assert json.loads(child.stdout) == value
-
-
-def test_reference_import_keeps_literal_dollars_and_skips_dynamic_commands(tmp_path):
-    recipe = _write(
-        tmp_path,
-        """export AITER_CONFIG_GEMM_BF16='/tables/$literal file.csv'
-export DYNAMIC=$HOME
-export COMMAND=`printf surprise`
-export DEFAULT=${DEFAULT:-`printf surprise`}
-export CHAIN=value;true
-""",
-    )
-    assert parse_reference_script(recipe, framework="sglang").envs == {
-        "AITER_CONFIG_GEMM_BF16": "/tables/$literal file.csv",
-    }
 
 
 def test_render_redacts_secret_shaped_envs():
