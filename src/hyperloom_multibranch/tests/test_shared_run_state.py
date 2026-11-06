@@ -138,6 +138,8 @@ def test_the_logs_a_later_leg_appends_to_are_the_group_s(tmp_path: Path) -> None
 def test_a_published_file_is_readable_by_the_group_and_written_by_none_and_its_folder_is_the_group_s(
     tmp_path: Path,
 ) -> None:
-    assert publish_once(tmp_path / "claims" / "a.json", b"{}\n")
+    published = publish_once(tmp_path / "claims" / "a.json", b"{}\n")
+
+    assert published
 
     assert _mode(tmp_path / "claims" / "a.json") == 0o644 and _mode(tmp_path / "claims") == 0o2775
