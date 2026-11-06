@@ -1620,7 +1620,7 @@ download_rocm_profiler_hotfix_libs() {
     warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}"
     return 1
   fi
-  if ! tar -xzf "$archive" -C "$tmp_dir"; then
+  if ! tar --no-same-owner -xzf "$archive" -C "$tmp_dir"; then
     rm -rf "$tmp_dir"
     warn "failed to extract ${ROCM_PROFILER_HOTFIX_ASSET}"
     return 1
