@@ -11,8 +11,10 @@ Recipe KB columns, so a final recipe is written back without translation:
 * ``components``: per component, an ordered patch stack against a fixed upstream commit (the ``patch`` column);
 * ``kernels``: the kernel artifacts it loads (the ``kernel`` column).
 
-``base_image_digest`` names the image everything starts from. ``runtime_snapshot``, when set, names the image the
-enablement flow built on it, with its setup commands and component builds done, so a recipe never replays them.
+``base_image_digest`` names the image everything starts from; ``base``, when set, names the frozen base launch
+(``base_launch.json``) that ``launch`` is a change of, so the same change over two bases makes two recipes.
+``runtime_snapshot``, when set, names the image the enablement flow built on it, with its setup commands and component
+builds done, so a recipe never replays them.
 ``unexpressed`` names what the measured environment had that the recipe cannot say (a kept patch outside a component
 checkout, setup commands, ...); a recipe that names anything there does not rebuild what was measured.
 
@@ -38,6 +40,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from hyperloom_common.contract_fields import ContractFields
 from inference_suite.argv import removal_option_names, tokenize_server_args_preserving_json
+from inference_suite.contracts import SourceKind
 
 RECIPE_SCHEMA_VERSION = 1
 PATCH_ROOT = "patch"
@@ -45,6 +48,7 @@ KERNEL_ROOT = "kernel"
 DIGEST_PREFIX = "sha256:"
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_BASE_DIGEST = re.compile(rf"{DIGEST_PREFIX}[0-9a-f]{{64}}")
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _IMAGE = re.compile(r"(?:[a-z0-9][a-z0-9._/:-]*@)?sha256:[0-9a-f]{64}")
 _COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -327,8 +331,29 @@ class KernelArtifact:
 
 
 @dataclass(frozen=True)
+class RecipeBase:
+    """The frozen base launch a recipe's launch is a change of: its ``base_launch.json`` digest and source kind."""
+
+    digest: str
+    source: SourceKind
+
+    def __post_init__(self) -> None:
+        _matching(_BASE_DIGEST, self.digest, "the base launch digest")
+        object.__setattr__(self, "source", _FIELDS.enum(SourceKind, self.source, "the base launch source"))
+
+    def to_document(self) -> dict[str, object]:
+        return {"digest": self.digest, "source": self.source.value}
+
+    @classmethod
+    def from_document(cls, document: object) -> RecipeBase:
+        fields = _known(document, ("digest", "source"), "a recipe base")
+        return cls(digest=fields.get("digest"), source=fields.get("source"))
+
+
+@dataclass(frozen=True)
 class Recipe:
-    """Everything one serving environment is rebuilt from; :meth:`digest` is its identity."""
+    """Everything one serving environment is rebuilt from; :meth:`digest` is its identity. A recipe without a
+    ``base`` predates the frozen base launch; its document carries ``base`` only when set, so it keeps its digest."""
 
     base_image_digest: str
     launch: LaunchConfig = field(default_factory=LaunchConfig)
@@ -337,6 +362,7 @@ class Recipe:
     runtime_snapshot: str | None = None
     schema_version: int = RECIPE_SCHEMA_VERSION
     unexpressed: tuple[str, ...] = ()
+    base: RecipeBase | None = None
 
     def __post_init__(self) -> None:
         _matching(_IMAGE, self.base_image_digest, "the base image digest")
@@ -369,6 +395,8 @@ class Recipe:
         }
         if self.unexpressed:
             document["unexpressed"] = list(self.unexpressed)
+        if self.base is not None:
+            document["base"] = self.base.to_document()
         return document
 
     @classmethod
@@ -382,6 +410,7 @@ class Recipe:
             components=tuple(map(ComponentPatches.from_document, _items(fields.get(_COMPONENTS, ()), _COMPONENTS))),
             kernels=tuple(map(KernelArtifact.from_document, _items(fields.get("kernels", ()), "kernels"))),
             unexpressed=_strings(fields.get("unexpressed", ()), "unexpressed"),
+            base=None if fields.get("base") is None else RecipeBase.from_document(fields["base"]),
         )
 
     def digest(self) -> str:
@@ -722,6 +751,7 @@ class RecipeDiff:
     kernels_only_in_first: frozenset[str]
     kernels_only_in_second: frozenset[str]
     base_image_changed: bool
+    base_launch_changed: bool = False
     unexpressed_only_in_first: frozenset[str] = frozenset()
     unexpressed_only_in_second: frozenset[str] = frozenset()
 
@@ -747,6 +777,7 @@ class RecipeDiff:
             or self.kernels_only_in_first
             or self.kernels_only_in_second
             or self.base_image_changed
+            or self.base_launch_changed
             or self.unexpressed_only_in_first
             or self.unexpressed_only_in_second
         )
@@ -769,6 +800,7 @@ def diff(first: Recipe, second: Recipe) -> RecipeDiff:
         kernels_only_in_second=frozenset(second_kernels - first_kernels),
         base_image_changed=(first.base_image_digest, first.runtime_snapshot)
         != (second.base_image_digest, second.runtime_snapshot),
+        base_launch_changed=first.base != second.base,
         unexpressed_only_in_first=frozenset(first.unexpressed) - frozenset(second.unexpressed),
         unexpressed_only_in_second=frozenset(second.unexpressed) - frozenset(first.unexpressed),
     )

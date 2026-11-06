@@ -41,13 +41,15 @@ class LaunchIdentityMixin:
             "overlay_pythonpath": str(env_spec.get("overlay_pythonpath") or ""),
             "overlay_digest": str(env_spec.get("overlay_digest") or ""),
         }
-        # Keep legacy identities unchanged for launches with default controls.
+        # Keep legacy identities unchanged for launches with default controls and no frozen base.
         for key in ("remove_args", "unset_envs"):
             values = sorted(set(to_str_list(config.get(key))))
             if values:
                 payload[key] = values
         if str(config.get("args_mode") or "").strip().lower() == "replace":
             payload["args_mode"] = "replace"
+        if base_launch_digest := str(env_spec.get("base_launch_digest") or ""):
+            payload["base_launch_digest"] = base_launch_digest
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
@@ -303,6 +305,8 @@ class LaunchIdentityMixin:
             tree independent of the mutable live checkout.
           * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
           * ``base_launch_recipe`` — the baseline Magpie recipe to launch from.
+          * ``base_launch_digest`` — the digest of the session's frozen ``base_launch.json``, which the
+            ``config`` delta applies to.
 
         This is the single source of truth the GEAK handoff forwards so the
         baseline ref is materialized from the SAME layers as ``current_best``
@@ -341,6 +345,7 @@ class LaunchIdentityMixin:
             "overlay_digest": _geak_overlay_digest(str(materialized.get("final_overlay") or "")),
             "base_launch_recipe": recipe_path,
             "base_launch_recipe_digest": self._launch_recipe_digest(recipe_path),
+            "base_launch_digest": self.shared_state.base_launch_digest,
             # Backward-compatible alias for existing GEAK v2 consumers.
             "launch_recipe": recipe_path,
             # Additive evidence record. Consumers can distinguish a captured
