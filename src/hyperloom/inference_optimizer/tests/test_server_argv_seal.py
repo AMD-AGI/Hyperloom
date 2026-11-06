@@ -46,7 +46,7 @@ _COMPOSERS = (
 #: the env itself, the seal, and the re-seal a repair is written back through.
 _WRITERS = frozenset(
     {
-        "_seed_reference_launch",
+        "_seed_base_launch",
         "_merge_caller_overrides",
         "_settle_merged_server_args",
         "_apply_caller_removals",

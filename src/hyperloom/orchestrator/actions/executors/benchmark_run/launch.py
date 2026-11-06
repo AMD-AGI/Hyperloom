@@ -386,20 +386,20 @@ class _BenchmarkLaunchMixin:
         if round_.ctx_extra.get("mn_round_restarted"):
             return None
         try:
-            # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
-            # carries the same reference flags the single-node materialized YAML does.
+            # Merge the session base UNDER the per-task args (last-wins) so a multi-node per-round restart
+            # carries the same base flags the single-node materialized YAML does.
             from hyperloom.inference_optimizer.grid_server_args import merge_server_args
-            from .._workload_envs import resolve_reference_launch
+            from hyperloom.orchestrator.state.base_launch import session_server_base
 
-            ref_args, ref_envs, _ = resolve_reference_launch()
+            server_base = session_server_base()
             # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
             operator_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
-            base = ref_args
+            base = server_base.args
             if operator_args:
                 base = merge_server_args(base, operator_args) if base else operator_args
             # Base on ``server_args`` (carries the one-shot cuda-graph eager-fallback flag when armed) so the MN
             # per-round restart keeps that fallback too.
-            env = {str(key): str(value) for key, value in ref_envs.items()}
+            env = dict(server_base.env)
             # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
             await restart_server_for_round(
                 RoundServer.from_env(

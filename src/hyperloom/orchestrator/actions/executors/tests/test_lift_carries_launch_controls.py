@@ -205,7 +205,7 @@ def test_a_task_seeded_from_current_best_launches_the_env_value_it_measured(tmp_
     inject_stack_base_params(params, coord.shared_state)
     _merge_profile_params(params)
     envs = dict(params.get("extra_envs") or {})
-    _apply_caller_removals(envs, "EXTRA_SGLANG_ARGS", params.get("remove_args"), params.get("unset_envs"), [])
+    _apply_caller_removals(envs, "EXTRA_SGLANG_ARGS", params.get("remove_args"), params.get("unset_envs"))
 
     # The relaunch applies the carried unsets over the envs it just laid down, so a stale one wipes the winner's value.
     assert envs["SGLANG_HICACHE_RATIO"] == "1.6"

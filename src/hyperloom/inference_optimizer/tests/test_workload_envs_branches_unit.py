@@ -13,18 +13,17 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
 from ._workload_envs_helpers import clear_env, materialize, write_config
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 
 
-def _seed_reference_envs(tmp_path, monkeypatch, envs):
-    """Pin a session whose SharedState carries ``reference_envs``."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
+def _seed_base_envs(tmp_path, monkeypatch, envs):
+    """Pin a session whose frozen base launch carries ``envs``."""
     sd = tmp_path / "session"
     sd.mkdir(parents=True, exist_ok=True)
-    SharedState(session_id="ref-test", reference_envs=dict(envs)).save(sd)
+    freeze_session_base(sd, env=envs)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sd))
 
 
@@ -83,7 +82,7 @@ def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path
     _stub_server_arg_injectors(monkeypatch)
     src = tmp_path / "base.yaml"
     write_config(src)
-    _seed_reference_envs(
+    _seed_base_envs(
         tmp_path,
         monkeypatch,
         {
@@ -91,7 +90,6 @@ def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path
             "PYTHONPATH": "/tmp/evil",
             "REFERENCE_ONLY_KNOB": "1",
             "VLLM_ROCM_USE_AITER": "1",
-            "bad key": "dropped",
         },
     )
     bench = materialize(
@@ -118,7 +116,6 @@ def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path
     assert "LD_PRELOAD" not in envs
     assert "PYTHONSTARTUP" not in envs
     assert "BAD-NAME" not in envs
-    assert "bad key" not in envs
     assert envs["REFERENCE_ONLY_KNOB"] == "1"
     assert envs["SGLANG_USE_AITER"] == "1"
     assert envs["UNKNOWN_VALID_TUNING_KNOB"] == "enabled"
@@ -269,27 +266,6 @@ def test_profile_shape_tool_prepends_to_the_config_pythonpath(monkeypatch, tmp_p
     src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1", "PYTHONPATH": "/c"})
     bench = materialize(src, tmp_path / "out")
     assert bench["envs"]["PYTHONPATH"] == os.pathsep.join([str(tool_dir), "/c"])
-
-
-@pytest.mark.parametrize(
-    ("config_envs", "tail"),
-    [({}, ["/a", "/b"]), ({"PYTHONPATH": "/c"}, ["/c"])],
-    ids=["inherited", "config-authoritative"],
-)
-def test_reference_overlay_builds_on_the_launch_pythonpath(monkeypatch, tmp_path, config_envs, tail):
-    # The reference overlay is prepended like every launch path entry: on the inherited value when the config has
-    # no PYTHONPATH, on the config's otherwise. The overlay is relative so it carries no drive colon on any host.
-    import os
-
-    clear_env(monkeypatch)
-    (tmp_path / "overlay").mkdir()
-    (tmp_path / "overlay" / "sitecustomize.py").write_text("", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(we, "resolve_reference_launch", lambda: ("", {}, {"overlay_pythonpath": "overlay"}))
-    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
-    src = write_config(tmp_path / "cfg.yaml", envs=config_envs)
-    bench = materialize(src, tmp_path / "out")
-    assert bench["envs"]["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
 
 
 def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():

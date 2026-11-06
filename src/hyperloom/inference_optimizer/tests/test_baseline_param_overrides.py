@@ -725,16 +725,12 @@ def _fw_args(materialized: Path, env_name: str = "EXTRA_VLLM_ARGS") -> str:
 
 
 def _seed_reference(tmp_path, monkeypatch, *, server_args: str = "", envs: dict | None = None) -> None:
-    """Pin a session whose SharedState carries the reference recipe."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
+    """Pin a session whose frozen base launch carries the reference recipe."""
+    from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
     sd = tmp_path / "session"
     sd.mkdir(parents=True, exist_ok=True)
-    SharedState(
-        session_id="ref-test",
-        reference_server_args=server_args,
-        reference_envs=dict(envs or {}),
-    ).save(sd)
+    freeze_session_base(sd, args=server_args.split(), env=envs)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sd))
 
 

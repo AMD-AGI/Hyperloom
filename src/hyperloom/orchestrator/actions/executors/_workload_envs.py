@@ -71,6 +71,7 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from inference_suite.argv import compact_json_server_args, remove_server_args
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.orchestrator.state.base_launch import session_server_base
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -604,16 +605,9 @@ def _operator_extra_env() -> dict[str, str]:
 
 
 def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
-    """The session's reference launch: its server args, envs and launch controls.
-
-    The one reader of ``SharedState.reference_*``: every other module asks this function, never the state.
-    """
-    from hyperloom.inference_optimizer.session.paths import session_dir
-
-    from ...state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir())
-    return state.reference_server_args.strip(), dict(state.reference_envs), dict(state.reference_launch_controls)
+    """The session's server base as the tuple ``kernel/_forge_gemm_probe.py`` reads, until it calls the state reader."""
+    base = session_server_base()
+    return base.args, dict(base.env), {}
 
 
 def apply_scriptable_runtime_defaults(
@@ -1090,37 +1084,23 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     )
 
 
-def _seed_reference_launch(bench: dict[str, Any], framework_env: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _seed_base_launch(bench: dict[str, Any], framework_env: str) -> None:
+    """Put the session's server base below the YAML and any per-task args (leftmost, so later merges win)."""
     envs = bench["envs"]
-    # Seed the framework server-args env + envs from a reference recipe below
-    # the YAML base and any per-task extra_server_args (reference flags leftmost,
-    # so last-wins lets later merges override them).
-    ref_args, reference_envs, reference_controls = resolve_reference_launch()
-    for name in reference_controls.get("unset_envs", []):
-        envs.pop(name, None)
-    if ref_args or reference_controls.get("remove_args") or reference_controls.get("args_mode") == "replace":
+    base = session_server_base()
+    if base.args:
         from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
         envs[framework_env] = compose_server_args(
-            base_extra_args=ref_args,
-            variant_extra_args=""
-            if reference_controls.get("args_mode") == "replace"
-            else str(envs.get(framework_env, "")),
-            remove_args=reference_controls.get("remove_args"),
-            args_mode="replace",
+            base_extra_args=base.args, variant_extra_args=str(envs.get(framework_env, "")), args_mode="replace"
         )
-    for _rk, _rv in reference_envs.items():
-        envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
-    if reference_controls.get("overlay_pythonpath"):
-        from hyperloom.common.overlay import validate_overlay_pythonpath
-
-        prepend_launch_path(envs, "PYTHONPATH", validate_overlay_pythonpath(reference_controls["overlay_pythonpath"]))
-    return reference_envs, reference_controls
+    for name, value in base.env.items():
+        envs.setdefault(name, value)  # never clobber YAML/CLI envs
 
 
 def _merge_caller_overrides(
     bench: dict[str, Any], framework_env: str, server_args: str, replace_args: bool, extra_envs: dict[str, Any] | None
-) -> dict[str, Any]:
+) -> None:
     envs = bench["envs"]
     recipe_overwritten = launcher_overwritten_envs(bench)
     if server_args:
@@ -1172,7 +1152,6 @@ def _merge_caller_overrides(
     envs.setdefault("AITER_LOG_TUNED_CONFIG", "1")
     prefer_dir = "CUSTOM_DIR" in safe_extra_envs and "CUSTOM_REPO_PATH" not in safe_extra_envs
     _sync_repo_aliases(bench, envs, framework="custom", prefer_dir=prefer_dir)
-    return safe_extra_envs
 
 
 def _settle_merged_server_args(bench: dict[str, Any], framework_env: str) -> None:
@@ -1396,13 +1375,9 @@ def _pin_runtime_build_envs(
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
 
 
-def _apply_caller_removals(
-    envs: dict[str, Any], framework_env: str, remove_args: Any, unset_envs: Any, stale: list[str]
-) -> None:
+def _apply_caller_removals(envs: dict[str, Any], framework_env: str, remove_args: Any, unset_envs: Any) -> None:
     remove_list = to_str_list(remove_args)
     unset_list = to_str_list(unset_envs)
-    for key in stale:
-        envs.pop(key, None)
     if remove_list:
         envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
     for key in unset_list:
@@ -1629,8 +1604,8 @@ def materialize_config_with_envs(
     _pin_workload_shape_envs(envs)
     framework_env = server_args_env_name(bench.get("framework"))
     window = _shape_request_window(bench)
-    reference_envs, reference_controls = _seed_reference_launch(bench, framework_env)
-    safe_extra_envs = _merge_caller_overrides(bench, framework_env, server_args, replace_args, launch.extra_envs)
+    _seed_base_launch(bench, framework_env)
+    _merge_caller_overrides(bench, framework_env, server_args, replace_args, launch.extra_envs)
     _settle_merged_server_args(bench, framework_env)
     _publish_scriptable_wiring(bench, window, options.establish_quality_ref)
     model_basename = _pin_model_launch_workarounds(bench, target.model_path)
@@ -1638,9 +1613,7 @@ def materialize_config_with_envs(
     _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
     _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)
-    unset_by_reference = reference_controls.get("unset_envs", [])
-    stale = [k for k in unset_by_reference if k not in reference_envs and k not in safe_extra_envs]
-    _apply_caller_removals(envs, framework_env, launch.remove_args, launch.unset_envs, stale)
+    _apply_caller_removals(envs, framework_env, launch.remove_args, launch.unset_envs)
     _restate_profile_capture(envs, framework_env, window, replace_args)
     _apply_vllm_source_runtime(bench, envs)
     if window.patched_copy is not None:
