@@ -254,6 +254,7 @@ async def test_native_handoff_keeps_supported_schema_and_seeds_geaks_own_launche
         "corpus": _ROUND_CORPUS,
         "canonical_corpus": _ROUND_CORPUS,
         "num_entries": 512,
+        "canonical_num_entries": 512,
         "observed_isl": 180000,
         "observed_osl": 720,
         "observed_requests": 600,
@@ -327,7 +328,15 @@ async def test_native_handoff_without_the_rounds_report_still_declares_agentx_an
     spec = handoff["workload_spec"]
     assert spec["kind"] == "agentx_trace_replay"
     assert (spec["concurrency"], spec["metric_basis"]) == (6, "e2e_norm_intvty_p50")
-    assert not {"corpus", "canonical_corpus", "num_entries", "observed_isl", "observed_osl"} & spec.keys()
+    replayed_trace_keys = {
+        "corpus",
+        "canonical_corpus",
+        "num_entries",
+        "canonical_num_entries",
+        "observed_isl",
+        "observed_osl",
+    }
+    assert not replayed_trace_keys & spec.keys()
     assert "GEAK replays its canonical corpus" in caplog.text
 
 

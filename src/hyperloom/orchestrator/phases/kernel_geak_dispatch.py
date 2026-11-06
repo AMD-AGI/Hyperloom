@@ -556,6 +556,7 @@ class _GeakDispatchMixin:
                 "corpus": trace.corpus,
                 "canonical_corpus": trace.corpus,
                 "num_entries": trace.entries,
+                "canonical_num_entries": trace.entries,
                 "observed_isl": trace.mean_isl,
                 "observed_osl": trace.mean_osl,
                 "observed_requests": trace.requests,
