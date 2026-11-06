@@ -36,6 +36,8 @@ from inference_suite.recipe.model import (
     InferencexSnapshot,
     RecipeSourceError,
     RepoBundle,
+    SGLANG_ENTRYPOINT,
+    SGLANG_RUNNER_OWNED,
     SourceGolden,
     SourceLaunch,
     SourceMiss,
@@ -357,12 +359,9 @@ class _EngineRules:
 
 _ENGINES = {
     "sglang": _EngineRules(
-        entrypoint=("python3", "-m", "sglang.launch_server"),
+        entrypoint=SGLANG_ENTRYPOINT,
         frontend="sglang",
-        owned=frozenset(
-            {"model-path", "served-model-name", "host", "port", "nccl-port"}
-            | {"grpc-http-sidecar-port", "smg-http-sidecar-port"}
-        ),
+        owned=SGLANG_RUNNER_OWNED,
     ),
     "vllm": _EngineRules(
         entrypoint=("vllm", "serve"),

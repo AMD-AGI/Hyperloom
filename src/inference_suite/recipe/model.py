@@ -27,6 +27,12 @@ class RecipeSourceError(ValueError):
 
 _FIELDS = ContractFields(RecipeSourceError)
 
+SGLANG_ENTRYPOINT = ("python3", "-m", "sglang.launch_server")
+#: The sglang server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
+SGLANG_RUNNER_OWNED = frozenset(
+    {"model-path", "served-model-name", "host", "port", "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port"}
+)
+
 
 def boards_interchangeable(board: str, other: str) -> bool:
     """Whether a launch tuned on ``other`` runs as tuned on ``board``: the same architecture and HBM capacity."""
@@ -213,6 +219,8 @@ __all__ = [
     "InferencexSnapshot",
     "RecipeSourceError",
     "RepoBundle",
+    "SGLANG_ENTRYPOINT",
+    "SGLANG_RUNNER_OWNED",
     "SourceGolden",
     "SourceLaunch",
     "SourceMiss",
