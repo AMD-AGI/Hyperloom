@@ -190,6 +190,43 @@ async def test_a_store_its_group_or_others_can_write_is_refused(tmp_path: Path, 
     assert stat.S_IMODE(store.stat().st_mode) == mode, "and it is left as it is"
 
 
+@pytest.mark.parametrize("mode", [0o777, 0o775])
+async def test_a_store_below_a_directory_its_group_or_others_can_write_is_refused(tmp_path: Path, mode: int) -> None:
+    """Whoever can write a directory above the store can move the store aside and put one of their own in its place."""
+    above = tmp_path / "shared"
+    above.mkdir()
+    above.chmod(mode)
+    store = above / "store"
+    store.mkdir(mode=0o700)
+
+    refused = _refused_build(tmp_path, jit_store=store)
+    assert f"could change the compiled-code cache {store}: {above} (mode {mode:04o}" in refused
+    assert "can be written by its group or others" in refused
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="handing a directory to another account takes root")
+async def test_a_store_below_a_directory_another_account_owns_is_refused(tmp_path: Path) -> None:
+    above = tmp_path / "theirs"
+    above.mkdir(mode=0o755)
+    store = above / "store"
+    store.mkdir(mode=0o700)
+    os.chown(above, _NOBODY, _NOBODY)
+
+    assert f"{above} (mode 0755, owner uid {_NOBODY}" in _refused_build(tmp_path, jit_store=store)
+
+
+async def test_a_store_below_a_sticky_directory_anyone_can_write_is_accepted(tmp_path: Path) -> None:
+    """A host's shared temporary directory is sticky: others can add entries to it but not move this account's."""
+    above = tmp_path / "host-tmp"
+    above.mkdir()
+    above.chmod(0o1777)
+    store = above / "store"
+
+    toolbox, _ = await _closing_build(tmp_path, jit_store=store)
+
+    assert _runner_env(toolbox)[JIT_CACHE_ENV] == str(store)
+
+
 async def test_a_default_store_planted_before_the_toolbox_made_it_is_refused_not_used(
     tmp_path: Path, host_temp_dir: Path
 ) -> None:
