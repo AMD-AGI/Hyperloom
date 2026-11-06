@@ -369,6 +369,9 @@ hyperloom_multibranch = [
     "blackboard/knowledge/declarations/*.yaml",
     "blackboard/knowledge/mappings/*.yaml",
 ]
+"inference_suite.recipe" = [
+    "defaults/*.yaml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
