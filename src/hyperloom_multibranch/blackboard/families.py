@@ -13,6 +13,9 @@ mechanism; the intent contract and its fingerprint stay as they are. A test whos
 whatever op the specialist named as its target.
 
 What the families of past sessions came to is :mod:`rsi.family_stats`'s.
+
+:func:`names_op` says whether words name a profile op, by the rule the scheduler reads a judge's focus with, and
+:func:`direction_names_op` whether a direction of Arbor's map acts on one.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from typing import TypeVar
 
 from hyperloom.contracts.recipe import KernelKind, RecipeDelta
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
-from hyperloom_multibranch.contracts.blackboard.records import REPLAY_TARGET
+from hyperloom_multibranch.contracts.blackboard.records import REPLAY_TARGET, MapDirection
 
 #: The op families a target names, each with what its words or op names look like, the more specific first. A short
 #: name counts where no letter adjoins it, as op names join their words with ``_``; ``ck`` only standing alone, as CK
@@ -125,6 +128,8 @@ _FLAG = re.compile(r"--[a-z0-9][a-z0-9-]*")
 _ENV = re.compile(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b")
 #: A profile's op name that carries the modules that launched it, outermost first: ``kernel [Module.Layer]``.
 _LAUNCHED = re.compile(r"(?P<kernel>.+?) \[(?P<launcher>[^\[\]]+)\]")
+#: The suffix of a compiled kernel's op name, which words may name it with or without.
+_KERNEL_SUFFIX = ".kd"
 _Named = TypeVar("_Named")
 
 
@@ -246,6 +251,22 @@ def note_family(target: str, mechanism: str, layer: IntentLayer | None, content:
     return None
 
 
+def names_op(text: str, op: str) -> bool:
+    """Whether ``text`` names the profile op ``op`` as a whole word, with or without its ``.kd`` suffix."""
+
+    name = op.removesuffix(_KERNEL_SUFFIX)
+    return bool(name) and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text) is not None
+
+
+def direction_names_op(direction: MapDirection, op: str) -> bool:
+    """Whether the direction of Arbor's map acts on the profile op ``op``: one of its ``ops``, with or without the
+    ``.kd`` suffix, when it lists them; else an op its id, title or why names (:func:`names_op`)."""
+
+    if direction.ops:
+        return op.removesuffix(_KERNEL_SUFFIX) in {item.removesuffix(_KERNEL_SUFFIX) for item in direction.ops}
+    return names_op(f"{direction.id} {direction.title} {direction.why}", op)
+
+
 __all__ = [
     "ANY_LAYER",
     "COMPONENTS",
@@ -255,7 +276,9 @@ __all__ = [
     "Component",
     "Family",
     "Mechanism",
+    "direction_names_op",
     "family_of",
+    "names_op",
     "note_family",
     "op_family",
 ]
