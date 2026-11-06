@@ -8,10 +8,12 @@ measured on cards leased from the card pool, and is accepted only as a signed bu
 that sandbox. At most ``8 / TP`` tests run at once on one node.
 
 The shared compiled-code cache is in ``LocalOptions.jit_store``, else in the directory the
-``HYPERLOOM_JIT_STORE`` environment variable of the host process names, else in :data:`DEFAULT_JIT_STORE` below this
-host's temporary directory (``TMPDIR`` honoured), not beside the session root: that lies on the session's shared storage,
-where a CK module build crawls. Tests read the directory's verified snapshots before their server starts, and what an
-accepted test compiled is published to it by this host.
+``HYPERLOOM_JIT_STORE`` environment variable of the host process names, else in :data:`DEFAULT_JIT_STORE` and this
+account's uid below this host's temporary directory (``TMPDIR`` honoured), not beside the session root: that lies on the
+session's shared storage, where a CK module build crawls. Tests read the directory's verified snapshots before their
+server starts, and what an accepted test compiled is published to it by this host. The runners load what it holds as
+compiled code, so the build refuses a directory that is not this account's own or that its group or others can write:
+another account could otherwise put snapshots of its own there.
 
 The short-prompt consistency check is on by default: ``LocalOptions.short_prompts``, or the key named by
 ``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given (``off`` turns it off), else the set
@@ -67,6 +69,7 @@ from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.templates import LocalTemplate
+from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
@@ -98,12 +101,14 @@ __all__ = [
     "DEFAULT_JIT_STORE",
     "HOST_TOOL_REPO_ENVS",
     "JIT_STORE_ENV",
+    "JitStoreNotPrivate",
     "LocalHostedToolbox",
     "LocalOptions",
     "LocalSession",
     "MAX_CARDS_PER_NODE",
     "build_local_toolbox",
     "host_tool_repos",
+    "private_jit_store",
 ]
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once.
@@ -111,7 +116,7 @@ MAX_CARDS_PER_NODE = 8
 #: The host environment variable that names the shared compiled-code cache when ``LocalOptions.jit_store`` is not given.
 JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
 #: The shared compiled-code cache below this host's temporary directory when neither the options nor the environment
-#: name one.
+#: name one, followed by ``-<uid>``: each account on the host keeps its own.
 DEFAULT_JIT_STORE = "hyperloom-jit-store"
 #: The variables that name where a runner clones the tools its tests run (InferenceX, Magpie) from. A local runner starts
 #: from an emptied environment, so :func:`host_tool_repos` carries them from this host's.
@@ -262,8 +267,9 @@ class LocalOptions:
     none (the tests then share the tables). ``jit_store`` is the directory of the shared compiled-code cache: the
     runners read it (``HYPERLOOM_JIT_CACHE`` in their template, which therefore wins over the same name in
     ``runner_envs``) and this host publishes into it; ``None`` takes ``HYPERLOOM_JIT_STORE`` of the host environment,
-    and without either :data:`DEFAULT_JIT_STORE` below this host's temporary directory. ``card_guard`` is what is done
-    about a process that holds a card of a test or of a lease: observed
+    and without either :data:`DEFAULT_JIT_STORE` and this account's uid below this host's temporary directory; the
+    build refuses one that is not this account's own or that its group or others can write. ``card_guard`` is what is
+    done about a process that holds a card of a test or of a lease: observed
     (kept and recorded) or enforced (the test refused and retried, the card not handed out); ``None`` takes
     ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard enforces. The runners get the same
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
@@ -307,15 +313,36 @@ def card_guard_of(options: LocalOptions, environ: Mapping[str, str] | None = Non
     return options.card_guard or card_guard(os.environ if environ is None else environ)
 
 
+class JitStoreNotPrivate(ValueError):
+    """The compiled-code cache is not a directory of this account's that only it can write."""
+
+
 def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = None) -> Path:
     """The absolute directory of the shared compiled-code cache: the one ``options`` (or ``HYPERLOOM_JIT_STORE``) names,
-    else :data:`DEFAULT_JIT_STORE` below this host's temporary directory.
+    else :data:`DEFAULT_JIT_STORE` and this account's uid below this host's temporary directory.
 
     The runner starts in a directory of its own, so a relative path is made absolute here, once.
     """
     source = os.environ if environ is None else environ
-    named = options.jit_store or source.get(JIT_STORE_ENV, "").strip() or Path(tempfile.gettempdir(), DEFAULT_JIT_STORE)
+    default = Path(tempfile.gettempdir(), f"{DEFAULT_JIT_STORE}-{os.getuid()}")
+    named = options.jit_store or source.get(JIT_STORE_ENV, "").strip() or default
     return Path(named).expanduser().resolve()
+
+
+def private_jit_store(root: Path) -> Path:
+    """``root``, made (mode 0700) when it is missing.
+
+    Raises:
+        JitStoreNotPrivate: ``root`` is not a directory of this account's, or its group or others can write it: the
+            runners load what it holds as compiled code, and the snapshots prove only their own content.
+    """
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not is_private_dir(root):
+        raise JitStoreNotPrivate(
+            f"the compiled-code cache {root} is not a directory of this account's that only it can write; "
+            f"name one that is with {JIT_STORE_ENV}"
+        )
+    return root
 
 
 def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
@@ -438,6 +465,8 @@ def build_local_toolbox(
         options: Everything else, see :class:`LocalOptions`.
 
     Raises:
+        JitStoreNotPrivate: The compiled-code cache is not this account's own directory that only it can write; nothing
+            has been started.
         ShortPromptsNotStaged: The short-prompt check is asked for (the option or ``HYPERLOOM_SHORT_PROMPTS``) and its
             set is not staged in this host's runner cache; nothing has been started.
         LongContextNotStaged: The same for the long-context check (the option or ``HYPERLOOM_LONG_CONTEXT``).
@@ -446,7 +475,7 @@ def build_local_toolbox(
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
     parallel = max_parallel_tests(len(cards), tp)
-    jit_root = jit_store_root(options)
+    jit_root = private_jit_store(jit_store_root(options))
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
     acceptance = with_native_plan(acceptance, native)
