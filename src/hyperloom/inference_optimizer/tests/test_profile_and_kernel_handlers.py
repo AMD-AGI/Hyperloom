@@ -105,8 +105,7 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         args,
         session_id="mi325x-session",
         framework="sglang",
-        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
-        base=None,
+        settled=cli_bootstrap.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert manifest["gpu_type"] == "mi325x"
@@ -130,8 +129,7 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         args,
         session_id="mi308x-session",
         framework="sglang",
-        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
-        base=None,
+        settled=cli_bootstrap.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert manifest["gpu_type"] == "mi308x"
