@@ -256,12 +256,24 @@ def _group_gone_within(pgid: int, window_sec: float) -> bool:
 
 
 def _pid_cmdline(pid: int) -> str:
-    """Return ``/proc/<pid>/cmdline`` as a space-joined string, or ``\"\"``."""
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return ""
-    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+    """Return ``pid``'s command line as a space-joined string, or ``\"\"``.
+
+    An exited leader's ``/proc/<pid>/cmdline`` reads empty while another thread of its process may still run. Every
+    thread of a process shares its memory, so such a thread's ``task/<tid>/cmdline`` reads the same command line.
+    """
+    proc = Path(f"/proc/{pid}")
+    sources = [proc / "cmdline"]
+    if leader_exited(pid):
+        with suppress(OSError):
+            sources = [task / "cmdline" for task in (proc / "task").iterdir()]
+    for source in sources:
+        try:
+            raw = source.read_bytes()
+        except OSError:
+            continue
+        if raw:
+            return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+    return ""
 
 
 def _looks_like_server_process(pid: int) -> bool:
@@ -324,9 +336,9 @@ def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> Serv
             continue
         server_pid, recorded_pgid = recorded
 
-        # Only a running leader can be told by its own cmdline. A leader that has exited reads an empty cmdline, both
-        # as a zombie nobody waited on and while ``running`` still counts its process by another thread, so such a
-        # pid is judged like a gone one: by the live members of its recorded group, where its ranks may still be.
+        # Only a running leader is told by its own cmdline. A leader that has exited, as a zombie nobody waited on or
+        # while ``running`` still counts its process by another thread, is judged like a gone one: by the live members
+        # of its recorded group. Those are its ranks, and its own process while a thread of it runs (``_pid_cmdline``).
         leader_alive = running(server_pid) and not leader_exited(server_pid)
         server_pgid = recorded_pgid
         if leader_alive:
