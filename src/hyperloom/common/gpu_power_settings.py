@@ -21,9 +21,17 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
-from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, metric_value, read_amd_smi_json
+from hyperloom_common.amd_smi import (
+    NPM_STATES,
+    AmdSmiError,
+    gfx_clock_limits,
+    gpu_rows,
+    metric_value,
+    read_amd_smi_json,
+    single_clock_limit,
+)
 from hyperloom_common.env import env_flag
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
@@ -34,8 +42,6 @@ __all__ = [
     "DeclaredPowerSettings",
     "NODE_POWER_LIMIT_W",
     "NPM",
-    "NPM_ENABLED",
-    "NPM_STATES",
     "PERF_LEVEL",
     "PERF_LEVELS",
     "PERF_LEVEL_MANUAL",
@@ -43,11 +49,9 @@ __all__ = [
     "SCLK_MAX_MHZ",
     "declared_node_problems",
     "declared_setting_problems",
-    "gfx_clock_limits",
     "gpu_power_sampling_unavailable",
     "gpus_outside_session",
     "reading_matches",
-    "single_clock_limit",
     "socket_power_cap_w",
     "normalize_perf_level",
     "read_gpu_power_settings",
@@ -77,9 +81,6 @@ PERF_LEVEL_MANUAL = "manual"
 #: The node-wide setting keys a node's reading, a declaration and a record share.
 NPM = "npm"
 NODE_POWER_LIMIT_W = "node_power_limit_w"
-#: The NPM states ``amd-smi node -p`` reports, lowercased.
-NPM_ENABLED = "enabled"
-NPM_STATES = (NPM_ENABLED, "disabled")
 _UNREADABLE = "unreadable"
 _WATTS = (POWER_CAP_W, NODE_POWER_LIMIT_W)
 #: How far a numeric reading may sit from the declared value and still match it.
@@ -236,32 +237,6 @@ class DeclaredPowerSettings:
         """Only the settings declared, watts as floats: what the session stores and resumes from."""
         row = {**self.card_row(), **self.node_row()}
         return {key: float(value) if key in _WATTS else value for key, value in row.items() if value}
-
-
-def gfx_clock_limits(clock: Any) -> frozenset[float]:
-    """The graphics clock's maximum limits in one card's ``amd-smi metric --clock`` block.
-
-    amd-smi prints all eight ``gfx_<n>`` slots, fills only those with an XCD behind them (a partitioned card has fewer)
-    and copies the card's one limit into each, so the limits are those the filled slots report: empty when none is
-    filled. ``max_clk`` there is the limit in force: an ``amd-smi set -L sclk max`` shows in ``metric --clock``, not in
-    ``static --clock``.
-    """
-    if not isinstance(clock, dict):
-        return frozenset()
-    return frozenset(
-        limit
-        for name, block in clock.items()
-        if str(name).startswith("gfx_")
-        and isinstance(block, dict)
-        and metric_value(block.get("clk")) is not None
-        and (limit := metric_value(block.get("max_clk"))) is not None
-    )
-
-
-def single_clock_limit(limits: Iterable[float]) -> float | None:
-    """The one graphics-clock limit the readings agree on; ``None`` when there is none, or more than one."""
-    distinct = set(limits)
-    return next(iter(distinct)) if len(distinct) == 1 else None
 
 
 def reading_matches(got: Any, want: float) -> bool:

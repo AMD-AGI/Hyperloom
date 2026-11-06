@@ -7,11 +7,24 @@ from __future__ import annotations
 
 import json
 import subprocess  # nosec B404 - fixed amd-smi invocations.
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
-__all__ = ["AmdSmiError", "gpu_rows", "metric_value", "read_amd_smi_json", "run_amd_smi"]
+__all__ = [
+    "NPM_ENABLED",
+    "NPM_STATES",
+    "AmdSmiError",
+    "gfx_clock_limits",
+    "gpu_rows",
+    "metric_value",
+    "read_amd_smi_json",
+    "run_amd_smi",
+    "single_clock_limit",
+]
 
 _READ_TIMEOUT_SEC = 30.0
+#: The NPM states ``amd-smi node -p`` reports, lowercased.
+NPM_ENABLED = "enabled"
+NPM_STATES = (NPM_ENABLED, "disabled")
 
 
 class AmdSmiError(RuntimeError):
@@ -29,6 +42,32 @@ def metric_value(block: Any) -> float | None:
     if isinstance(block, dict):
         block = block.get("value")
     return float(block) if isinstance(block, (int, float)) and not isinstance(block, bool) else None
+
+
+def gfx_clock_limits(clock: Any) -> frozenset[float]:
+    """The graphics clock's maximum limits in one card's ``amd-smi metric --clock`` block.
+
+    amd-smi prints all eight ``gfx_<n>`` slots, fills only those with an XCD behind them (a partitioned card has fewer)
+    and copies the card's one limit into each, so the limits are those the filled slots report: empty when none is
+    filled. ``max_clk`` there is the limit in force: an ``amd-smi set -L sclk max`` shows in ``metric --clock``, not in
+    ``static --clock``.
+    """
+    if not isinstance(clock, dict):
+        return frozenset()
+    return frozenset(
+        limit
+        for name, block in clock.items()
+        if str(name).startswith("gfx_")
+        and isinstance(block, dict)
+        and metric_value(block.get("clk")) is not None
+        and (limit := metric_value(block.get("max_clk"))) is not None
+    )
+
+
+def single_clock_limit(limits: Iterable[float]) -> float | None:
+    """The one graphics-clock limit the readings agree on; ``None`` when there is none, or more than one."""
+    distinct = set(limits)
+    return next(iter(distinct)) if len(distinct) == 1 else None
 
 
 def run_amd_smi(args: Sequence[str], timeout: float = _READ_TIMEOUT_SEC) -> str:
