@@ -723,6 +723,21 @@ class Holder:
     def _ended(self) -> bool:
         return self.pidfd < 0 or select.select([self.pidfd], [], [], 0)[0] != []
 
+    def _gone(self) -> ProcessLookupError:
+        return ProcessLookupError(errno.ESRCH, "the sandbox holder has ended", str(self.pid))
+
+    @contextlib.contextmanager
+    def _namespace(self, name: str) -> Iterator[int]:
+        """A descriptor of the holder's namespace ``name``, closed when the block ends."""
+        try:
+            fd = os.open(f"/proc/{self.pid}/ns/{name}", os.O_RDONLY | os.O_CLOEXEC)
+        except FileNotFoundError:
+            raise self._gone() from None
+        try:
+            yield fd
+        finally:
+            os.close(fd)
+
     @contextlib.contextmanager
     def joined(self, policy: BwrapPolicy) -> Iterator[BwrapPolicy]:
         """``policy`` joining this holder's namespaces, for launches started inside the ``with``: give the Popen
@@ -731,22 +746,12 @@ class Holder:
         Raises:
             ProcessLookupError: the holder has ended.
         """
-        ended = ProcessLookupError(errno.ESRCH, "the sandbox holder has ended", str(self.pid))
-        fds: list[int] = []
-        try:
-            for name in ("user", "pid"):
-                if self._ended():
-                    raise ended
-                try:
-                    fds.append(os.open(f"/proc/{self.pid}/ns/{name}", os.O_RDONLY | os.O_CLOEXEC))
-                except FileNotFoundError:
-                    raise ended from None
+        with self._namespace("user") as user, self._namespace("pid") as pid:
+            # Checked after opening: the pidfd still pins the holder's pid 1, so the pid was not reused by another
+            # process whose namespaces were opened instead.
             if self._ended():
-                raise ended
-            yield dataclasses.replace(policy, join=(fds[0], fds[1]))
-        finally:
-            for fd in fds:
-                os.close(fd)
+                raise self._gone()
+            yield dataclasses.replace(policy, join=(user, pid))
 
     def stop(self) -> str:
         """End the sandbox and every command in it (SIGKILL to its pid 1). Returns what bubblewrap printed on
