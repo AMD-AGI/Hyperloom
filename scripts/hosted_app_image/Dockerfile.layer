@@ -8,6 +8,11 @@
 #   scripts/hosted_app_image/build_layer.sh --out /tmp/layers          # prints /tmp/layers/<short sha>-claude<version>
 #   docker build -f scripts/hosted_app_image/Dockerfile.layer -t <registry>/hyperloom-host-layer:<short sha>-claude<version> /tmp/layers/<...>
 #
+# The image adds /layer/bin/bwrap to the directory: bubblewrap, built here from a pinned, checksummed source
+# tarball and linked statically (musl), so it runs on any framework image whatever its libc, and fakeroot (which
+# only wraps dynamically linked programs) cannot interpose on it. It is not setuid: it needs unprivileged user
+# namespaces, which the container's root has in its own user namespace.
+#
 # An application pod copies /layer into a volume with an init container, and the main container (any framework
 # image with git, setpriv and bash) runs it as root:
 #
@@ -16,6 +21,30 @@
 #   containers:     [{image: <framework image>, command: [sh, /opt/hyperloom-host/start.sh],
 #                     volumeMounts: [{name: hyperloom-host, mountPath: /opt/hyperloom-host}]}]
 #   volumes:        [{name: hyperloom-host, emptyDir: {}}]
+ARG BWRAP_BUILD_IMAGE=alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4
 ARG BASE_IMAGE=busybox:1.37
+
+FROM ${BWRAP_BUILD_IMAGE} AS bwrap
+# Upgrading means changing both: the build stops when the tarball does not match the checksum.
+ARG BWRAP_VERSION=0.13.1
+ARG BWRAP_SHA256=0e85c8702248b8dd64144f594147553650cdd0e4c951690345faace79c217c4d
+RUN set -eux; \
+    apk add --no-cache build-base meson ninja libcap-dev libcap-static linux-headers file xz ca-certificates; \
+    mkdir /src /out; \
+    wget -q -O /src/bwrap.tar.xz "https://github.com/containers/bubblewrap/releases/download/v${BWRAP_VERSION}/bubblewrap-${BWRAP_VERSION}.tar.xz"; \
+    echo "${BWRAP_SHA256}  /src/bwrap.tar.xz" | sha256sum -c -; \
+    tar -C /src -xJf /src/bwrap.tar.xz; \
+    cd "/src/bubblewrap-${BWRAP_VERSION}"; \
+    meson setup /src/build --buildtype=release \
+        -Dselinux=disabled -Dman=disabled -Dtests=false \
+        -Dbash_completion=disabled -Dzsh_completion=disabled \
+        -Dprefer_static=true -Dc_link_args=-static; \
+    ninja -C /src/build bwrap; \
+    install -m 0755 -s /src/build/bwrap /out/bwrap; \
+    file /out/bwrap; \
+    file /out/bwrap | grep -Eq 'statically linked|static-pie linked'; \
+    /out/bwrap --version
+
 FROM ${BASE_IMAGE}
 COPY . /layer
+COPY --from=bwrap /out/bwrap /layer/bin/bwrap
