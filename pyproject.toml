@@ -372,6 +372,9 @@ hyperloom_multibranch = [
 "inference_suite.recipe" = [
     "defaults/*.yaml",
 ]
+"inference_suite.load" = [
+    "scripts/*.sh",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
