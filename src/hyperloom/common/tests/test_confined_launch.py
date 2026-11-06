@@ -41,12 +41,12 @@ seen.update({name: outcome(lambda path=path: write(path)) for name, path in writ
 seen["mark"] = os.environ.get(sys.argv[3], "")
 print(json.dumps(seen))
 """
-#: Run inside by an agent: turn each named directory of its tree into a link to the path given with it.
+#: Run inside by an agent: turn each named directory or file of its tree into a link to the path given with it.
 PLANT = r"""
 import json, os, shutil, sys
-for directory, target in json.loads(sys.argv[1]).items():
-    shutil.rmtree(directory)
-    os.symlink(target, directory)
+for name, target in json.loads(sys.argv[1]).items():
+    shutil.rmtree(name) if os.path.isdir(name) and not os.path.islink(name) else os.remove(name)
+    os.symlink(target, name)
 print("planted")
 """
 
@@ -186,3 +186,38 @@ def test_links_an_agent_leaves_in_its_tree_reach_nothing_at_the_next_launch(tmp_
         "mark": "mark-1",
     }
     assert keys.read_text(encoding="ascii") == "app-key\n"
+
+
+@pytest.mark.parametrize("through", ["writable", "given"])
+def test_a_credential_an_agent_links_to_from_its_tree_stays_masked_at_the_next_launch(tmp_path, through):
+    """The first launch's agent turns its re-pointed config directory (a writable path below its tree) or the prompt
+    it was handed (a given path) into a link to Hugging Face's token, in the model cache it reads; the next launch's
+    confinement, derived the same way, still masks the token, at its own path and through the link."""
+    isolation = BwrapIsolation(usable_bwrap())
+    hf, work = tmp_path / "hf", tmp_path / "work"
+    token = _write(hf / "token", "SECRET-HF")
+    model = _write(hf / "hub/model.txt", "weights")
+    (work / ".claude").mkdir(parents=True)
+    prompt = _write(work / "prompt", "the task")
+    env = {"PATH": "/usr/bin:/bin", "HF_HOME": str(hf)}
+    writable = (work, work / ".claude")
+
+    def confinement() -> Confinement:
+        readable = toolchain_paths(env, sys.executable, writable=writable)
+        allowed = (*readable, *writable)
+        masked = credential_paths(env, given=(prompt,), allowed=allowed, writable=writable)
+        return Confinement(writable=writable, readable=readable, masked=masked)
+
+    planted = work / ".claude" if through == "writable" else prompt
+    paths = {"token": token, "via_link": planted, "model": model}
+    assert {name: _run(isolation, confinement(), env, paths, work)[name] for name in paths} == {
+        "token": "EACCES",
+        "via_link": "EISDIR" if through == "writable" else "ok:the task",
+        "model": "ok:weights",
+    }
+    assert _launch(isolation, confinement(), env, [PLANT, _named({str(planted): token})], work).strip() == "planted"
+    assert planted.is_symlink()
+
+    seen = _run(isolation, confinement(), env, paths, work)
+
+    assert {name: seen[name] for name in paths} == {"token": "EACCES", "via_link": "EACCES", "model": "ok:weights"}
