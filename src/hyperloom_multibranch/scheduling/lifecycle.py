@@ -36,7 +36,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from hyperloom.common.agent_isolation import IsolationReport, agent_isolation_report
 from hyperloom.common.outside_facts.image_check import ImageCheckReport, run_image_check
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
@@ -96,6 +95,7 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.llm import recorded
@@ -300,7 +300,7 @@ class Session:
         self._signals = StopSignals()
         self._in_final = False
         self._image_check: ImageCheckReport | None = None
-        self._agent_isolation: IsolationReport | None = None
+        self._agent_isolation: LaunchIsolation | None = peers.isolation
         # The budget and hard stop the session's deadline is read from, which a person's review moves by its length
         # (_extend); while the review is pending the deadline does not pass.
         self._budget: SessionBudget | None = None
@@ -399,8 +399,8 @@ class Session:
         start and a recovery over it is refused while it is. The image check then compares the rule pack's outside
         facts with this environment, off the event loop; its summary goes into the manifest and CLOSE attaches the
         whole report. Under ``HYPERLOOM_IMAGE_CHECK=strict`` a failing fact raises :class:`ImageCheckFailed` here,
-        before the manifest is written and before any phase or CLOSE runs. How this process isolates the agents it
-        launches goes into the manifest and the report. The reference material the run was given is copied in before
+        before the manifest is written and before any phase or CLOSE runs. How the peers isolate the agents and tests
+        they launch goes into the manifest and the report. The reference material the run was given is copied in before
         the manifest, so the manifest the session writes describes a directory that already holds it.
         """
 
@@ -408,7 +408,6 @@ class Session:
         self._processes.record_scheduler()
         image_check = await asyncio.to_thread(run_image_check)
         self._image_check = image_check
-        self._agent_isolation = await asyncio.to_thread(agent_isolation_report)
         await asyncio.to_thread(copy_references, self._settings.references, self._layout.reference)
         self._write_manifest(budget, await asyncio.to_thread(code_version), image_check)
         hard_stop = HardStop(budget, self._clock)
