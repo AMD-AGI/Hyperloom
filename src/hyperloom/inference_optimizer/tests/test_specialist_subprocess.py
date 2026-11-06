@@ -36,7 +36,12 @@ from hyperloom.orchestrator.specialists.runner import (
 )
 from hyperloom.orchestrator.specialists import subprocess_, wall_budget
 from hyperloom.orchestrator.specialists import launch_env
-from hyperloom.orchestrator.specialists.launch_env import prepare_demote
+from hyperloom.common import agent_isolation
+from hyperloom_common.bwrap import BwrapProbe
+from hyperloom.common.agent_isolation import AccountIsolation, BwrapIsolation, NoIsolation
+from hyperloom.common.env_safety import RunAs
+from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, prepare_launch
 from hyperloom.orchestrator.specialists.agent_cli_config import _build_specialist_env
 from hyperloom.orchestrator.specialists.leaf import build_leaf_agents_json
 from hyperloom.orchestrator.specialists.subprocess_ import (
@@ -1490,7 +1495,7 @@ async def _run_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **spawn_kw
         raise OSError("spawn refused by test")
 
     monkeypatch.setattr(subprocess_.subprocess, "Popen", _popen)
-    monkeypatch.setattr(launch_env, "missing_launch_capabilities", list)
+    monkeypatch.setattr(agent_isolation, "missing_launch_capabilities", list)
     disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
     spawn = SpecialistSpawn(
         task_id="t-user",
@@ -1504,6 +1509,78 @@ async def _run_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **spawn_kw
         **spawn_kwargs,
     )
     return await disp.run(spawn), popen_kwargs
+
+
+def _tier(name: str) -> Any:
+    gid = os.getgid()
+    run_as = RunAs(user="specialist", uid=os.getuid() + 1, gid=gid, groups=(gid,), home="/home/specialist")
+    tiers = {
+        "none": NoIsolation(("no tier here",)),
+        "account": AccountIsolation(run_as),
+        "bwrap": BwrapIsolation(BwrapProbe("/opt/fake/bwrap", (0, 13, 1), ())),
+    }
+    return tiers[name]
+
+
+@pytest.mark.parametrize("tier", ["none", "account", "bwrap"])
+async def test_each_tier_spawns_the_specialist_its_own_way(tmp_path, monkeypatch, tier):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier(tier))
+    argvs: list[list[str]] = []
+    real_local = launch_env.PreparedLaunch.local
+    monkeypatch.setattr(
+        launch_env.PreparedLaunch, "local", lambda self, cmd, env: argvs.append(list(cmd)) or real_local(self, cmd, env)
+    )
+    model = tmp_path / "model"
+    model.mkdir()
+
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch, readable=(model,), gpu_ids=(0,))
+
+    assert "spawn refused by test" in (result.error or "")
+    # Patching Popen reaches every subprocess here: the specialist's spawn is the one in a session of its own.
+    [kwargs] = [kwargs for kwargs in popen_kwargs if kwargs.get("start_new_session")]
+    [cli] = argvs
+    assert cli[0] == "claude" and "--print" in cli
+    if tier == "bwrap":
+        assert set(kwargs) >= {"pass_fds"} and not {"user", "group"} & kwargs.keys()
+        assert REAP_MARK_ENV not in kwargs["env"]
+        assert kwargs["env"]["HOME"] == str(tmp_path / "ws" / ".home")
+    elif tier == "account":
+        assert {"user", "group", "extra_groups", "umask"} <= kwargs.keys() and "pass_fds" not in kwargs
+        assert kwargs["env"]["HOME"] == "/home/specialist" and kwargs["env"][REAP_MARK_ENV]
+    else:
+        assert not {"user", "group", "pass_fds"} & kwargs.keys() and kwargs["env"][REAP_MARK_ENV]
+    assert kwargs["env"]["HIP_VISIBLE_DEVICES"] == "0"
+
+
+async def test_a_sandbox_shows_the_model_and_gives_a_gpu_task_its_devices(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier("bwrap"))
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    monkeypatch.setattr(launch_env, "GPU_DEVICES", (kfd,))
+    seen: list[launch_env.PreparedLaunch] = []
+    real = launch_env.prepare_launch
+    monkeypatch.setattr(subprocess_, "prepare_launch", lambda *args: seen.append(real(*args)) or seen[-1])
+    model = tmp_path / "model"
+    model.mkdir()
+
+    await _run_spawn(tmp_path, monkeypatch, readable=(model, tmp_path / "ws" / "inside"), gpu_ids=(0,))
+
+    [prepared] = seen
+    assert str(model) in prepared.policy.read_only and prepared.policy.devices == (str(kfd),)
+    assert prepared.scratch is None  # released once the launch ended
+
+
+async def test_a_sandboxed_claude_without_a_login_it_can_read_fails_the_task_without_spawning(tmp_path, monkeypatch):
+    for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier("bwrap"))
+
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
+
+    assert popen_kwargs == []
+    assert "specialist agent runtime unavailable" in result.error and "claude setup-token" in result.error
 
 
 async def test_specialist_user_unset_spawns_exactly_as_before(tmp_path, monkeypatch):
@@ -1522,7 +1599,7 @@ async def test_specialist_user_that_cannot_be_used_fails_the_task_without_spawni
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", user)
     result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
     assert popen_kwargs == []
-    assert "specialist user refused" in (result.error or "")
+    assert "specialist isolation refused" in (result.error or "")
     assert needle in (result.error or "")
 
 
@@ -1534,6 +1611,12 @@ async def test_specialist_user_is_refused_on_the_ray_gpu_actor_path(tmp_path, mo
 
 
 _DEMOTE_USER = "nobody"
+
+
+def prepare_demote(run_as, workspace, worktree, env, private_files):
+    """The account tier's share of one launch, as the dispatcher prepares it; returns its ``Popen`` kwargs."""
+    place = LaunchPlace(workspace, worktree, tuple(private_files))
+    return prepare_launch(AccountIsolation(run_as), place, ["specialist"], env).popen_kwargs
 
 
 @pytest.fixture
@@ -1739,7 +1822,7 @@ def test_the_codex_config_is_not_written_through_a_planted_link(tmp_path: Path):
 # ---- review fixes: a demoted child needs the capability to be stopped, its MCP config and its git ----------
 async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_path, monkeypatch, restore_umask):
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-    monkeypatch.setattr(launch_env, "missing_launch_capabilities", lambda: ["CAP_KILL"])
+    monkeypatch.setattr(agent_isolation, "missing_launch_capabilities", lambda: ["CAP_KILL"])
     disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
     spawn = SpecialistSpawn(
         task_id="t-nocap",
@@ -1752,7 +1835,7 @@ async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_
         deadline=Deadline.after(5.0),
     )
     refused = await disp.run(spawn)
-    assert "specialist user refused" in (refused.error or "")
+    assert "specialist isolation refused" in (refused.error or "")
     assert "CAP_KILL" in (refused.error or "")
     assert os.umask(0o022) == 0o022
 
@@ -1776,16 +1859,18 @@ def test_the_mcp_config_is_staged_in_the_workspace_for_a_demoted_child(tmp_path:
     workspace = tmp_path / "ws"
     workspace.mkdir()
     cmd = ["claude", "--mcp-config", str(source), "--print"]
-    launch_env.stage_mcp_config(run_as, workspace, cmd)
+    launch_env.stage_mcp_config(AccountIsolation(run_as), workspace, cmd)
     staged = workspace / "specialist_mcp.json"
     assert cmd == ["claude", "--mcp-config", str(staged), "--print"]
     assert staged.read_text(encoding="utf-8") == '{"mcpServers": {}}'
     untouched = ["claude", "--mcp-config", str(source)]
-    launch_env.stage_mcp_config(None, workspace, untouched)
-    launch_env.stage_mcp_config(run_as, workspace, ["claude"])
+    launch_env.stage_mcp_config(NoIsolation(()), workspace, untouched)
+    launch_env.stage_mcp_config(AccountIsolation(run_as), workspace, ["claude"])
     assert untouched == ["claude", "--mcp-config", str(source)]
     with pytest.raises(subprocess_.SpecialistAgentUnavailableError):
-        launch_env.stage_mcp_config(run_as, workspace, ["claude", "--mcp-config", str(tmp_path / "missing.json")])
+        launch_env.stage_mcp_config(
+            AccountIsolation(run_as), workspace, ["claude", "--mcp-config", str(tmp_path / "missing.json")]
+        )
 
 
 def test_a_forged_gitfile_is_refused_not_shared(tmp_path: Path):
@@ -1832,7 +1917,7 @@ async def test_every_demoted_specialist_gets_git_and_its_mcp_config_with_the_app
         os.umask(0o007)  # what the first launch leaves behind: every later worktree is made under it
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
         monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-        monkeypatch.setattr(launch_env, "missing_launch_capabilities", list)
+        monkeypatch.setattr(agent_isolation, "missing_launch_capabilities", list)
         role = base / "bin" / "claude"
         role.parent.mkdir()
         role.parent.chmod(0o755)
