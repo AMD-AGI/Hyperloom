@@ -60,7 +60,7 @@ from hyperloom_common.fs_utils import (
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAs, RunAsError
-from hyperloom.common.proctree import REAP_MARK_ENV, collect_tree, kill_tree, marked_pids, process_uids
+from hyperloom_common.proctree import REAP_MARK_ENV, collect_tree, kill_tree, marked_pids, process_uids
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,

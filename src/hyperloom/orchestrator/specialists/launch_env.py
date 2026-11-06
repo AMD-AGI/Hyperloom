@@ -17,7 +17,7 @@ from hyperloom.common.env_safety import (
     missing_launch_capabilities,
     specialist_run_as,
 )
-from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom_common.llm.llm_attribution import inject_env as inject_attribution_env
 
