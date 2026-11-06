@@ -16,12 +16,14 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.jit.native.config import trust_from_file
 from hyperloom.measure.jit.native.trust import Signer
 from hyperloom_multibranch.toolbox import build_preflight as preflight
 from hyperloom_multibranch.toolbox import build_setup
-from hyperloom_multibranch.toolbox.build_preflight import git_head, unreachable
+from hyperloom_multibranch.toolbox.build_preflight import IMAGE_CHECKOUTS, git_head, unreachable
 from hyperloom_multibranch.toolbox.build_setup import BuildSetup, SetupError, main, set_up
+from hyperloom_multibranch.toolbox.native_builds import native_builds
 from hyperloom_multibranch.toolbox.tests.test_build_preflight import git_repo, sglang_dist, stat_open_above
 
 _KERNEL = "python/sglang/kernels/aot/csrc/elementwise/activation.cu"
@@ -229,3 +231,92 @@ def test_an_upstream_the_image_keeps_no_checkout_of_is_said_to_be_not_made(
     assert f"sgl_kernel checkout of {ref}: created" in done
     assert f"vllm checkout of {'4' * 40}: not made: the image keeps no checkout to clone it from" in done
     assert not (tmp_path / "root" / "sources" / "vllm").exists()
+
+
+def _open_to_nobody(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *tops: Path) -> None:
+    """``tops`` readable by user 65534, and what lies above this test's directory taken as open (pytest's is 0700)."""
+    tmp_path.chmod(0o755)
+    for top in tops:
+        for directory, _, files in os.walk(top):
+            Path(directory).chmod(0o755)
+            for name in files:
+                (Path(directory) / name).chmod(0o644)
+    monkeypatch.setattr(preflight, "unreachable", partial(unreachable, stat_fn=stat_open_above(tmp_path)))
+
+
+@pytest.fixture
+def bare_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An image that names no sglang commit: no metadata, and no checkout where the framework image keeps one."""
+    monkeypatch.setitem(IMAGE_CHECKOUTS, "sgl_kernel", tmp_path / "no-image-checkout")
+    (tmp_path / "bare-image").mkdir()
+    return tmp_path / "bare-image"
+
+
+def test_a_short_ref_is_set_up_at_its_full_commit_the_toolbox_accepts_and_setting_up_again_changes_nothing(
+    tmp_path: Path, bare_image: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    full = git_repo(tmp_path / "upstream", {_KERNEL: "// upstream\n"})
+    _open_to_nobody(tmp_path, monkeypatch, tmp_path / "upstream", bare_image)
+    root = tmp_path / "root"
+    argv = [str(root), "--image-root", str(bare_image), "--gfx", "gfx950", "--python", "python3"]
+    argv += ["--sglang-ref", full[:12], "--sglang-repo", str(tmp_path / "upstream")]
+
+    assert (main(argv), capsys.readouterr().err) == (0, "")
+
+    environ = _sourced(root / "build.env")
+    assert environ["HYPERLOOM_BUILD_SGLANG_REF"] == full
+    assert git_head(root / "sources" / "sgl_kernel" / full) == full
+    # The toolbox's start: what the launcher sources configures its native builds, host check included.
+    monkeypatch.setattr(preflight, "geteuid", lambda: 0)
+    monkeypatch.setattr(preflight, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(preflight, "tracelens_problem", lambda: None)
+    native = native_builds(environ, LocalBlobStore(tmp_path / "blobs"), "sha256:" + "a" * 64, isolation=lambda: None)
+    assert native is not None
+
+    written = (root / "build.env").read_bytes()
+    assert main(argv) == 0
+    assert f"sgl_kernel checkout of {full}: kept" in capsys.readouterr().out
+    assert (root / "build.env").read_bytes() == written
+    assert os.listdir(root / "sources" / "sgl_kernel") == [full]
+
+
+@pytest.mark.parametrize("ref", ["no-such-tag", "0123abc"])
+def test_a_ref_the_checkout_does_not_resolve_is_refused_before_anything_is_made(
+    tmp_path: Path, bare_image: Path, ref: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    git_repo(tmp_path / "upstream")
+    argv = [str(tmp_path / "root"), "--image-root", str(bare_image), "--gfx", "gfx950"]
+
+    code = main([*argv, "--sglang-ref", ref, "--sglang-repo", str(tmp_path / "upstream")])
+
+    assert code == 1
+    assert f"build_setup: --sglang-ref {ref!r} names no commit of {tmp_path / 'upstream'}" in capsys.readouterr().err
+    assert not (tmp_path / "root").exists()
+
+
+def test_a_short_ref_of_a_repository_that_is_not_a_local_checkout_is_refused(
+    tmp_path: Path, bare_image: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    full = git_repo(tmp_path / "upstream")
+    url = (tmp_path / "upstream").as_uri()
+    argv = [str(tmp_path / "root"), "--image-root", str(bare_image), "--gfx", "gfx950"]
+
+    assert main([*argv, "--sglang-ref", full[:12], "--sglang-repo", url]) == 1
+
+    assert "is not a local checkout to resolve it in: pass the full commit id" in capsys.readouterr().err
+    assert not (tmp_path / "root").exists()
+
+
+def test_a_ref_other_than_the_commit_the_image_names_is_reported(
+    tmp_path: Path, image: tuple[Path, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    image_root, ref = image
+    other = git_repo(tmp_path / "other", {_KERNEL: "// other\n"})
+    argv = [str(tmp_path / "root"), "--image-root", str(image_root), "--gfx", "gfx950"]
+
+    assert main([*argv, "--sglang-ref", other, "--sglang-repo", str(tmp_path / "other")]) == 1
+
+    wanted = tmp_path / "root" / "sources" / "sgl_kernel" / ref
+    assert f"build_setup: HYPERLOOM_BUILD_SOURCES has no checkout of the image's sgl_kernel commit {ref}: {wanted}" in (
+        capsys.readouterr().err
+    )
