@@ -175,6 +175,26 @@ async def test_a_refused_write_is_retried_and_the_cards_are_not_marked_reported(
         await toolbox.close()
 
 
+async def test_a_failure_to_record_leaked_cards_that_is_not_the_blackboards_is_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _local_toolbox(tmp_path, blackboard)
+    try:
+        await toolbox.start()
+        toolbox.provider.quarantined.add(4)
+
+        async def broken(*args: Any, **kwargs: Any) -> None:
+            raise TypeError("add_cards() takes 3 positional arguments")
+
+        monkeypatch.setattr(toolbox._quarantine, "add_cards", broken)
+        with pytest.raises(TypeError, match="positional arguments"):
+            await toolbox.tick()
+        monkeypatch.undo()
+    finally:
+        await toolbox.close()
+
+
 async def test_cards_leaked_during_a_test_are_reported_when_it_settles(tmp_path: Path) -> None:
     blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     toolbox = _local_toolbox(tmp_path, blackboard)

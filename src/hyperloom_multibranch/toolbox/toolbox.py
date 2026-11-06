@@ -29,6 +29,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
+    BlackboardError,
     ClaimLost,
     ClaimService,
     ConflictingWrite,
@@ -543,8 +544,9 @@ class RealToolbox:
                 continue
             try:
                 await self._claims.renew(self._key(item.request), ttl_seconds=self._ttl)
-            except Exception:
-                logger.warning("could not renew the claim of %s", item.request_id, exc_info=True)
+            except (BlackboardError, OSError):  # the blackboard refused or was not reached: the next tick retries
+                message = "could not renew the claim of %s; it lapses at its TTL unless a later renewal lands"
+                logger.warning(message, item.request_id, exc_info=True)
 
     # --- accepting and recovering --------------------------------------------------------------------------------
 
