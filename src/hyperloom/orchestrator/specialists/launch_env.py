@@ -132,7 +132,8 @@ LIST_MARKED_SCRIPT = (
 
 @dataclass(frozen=True)
 class SpecialistLaunch:
-    """A resolved launch: argv, child env, how it is isolated, backend, and the task's prompt and log files."""
+    """A resolved launch: argv, child env, how it is isolated, backend, the task's prompt and log files, the launch as
+    its tier prepared it, and the reap mark its environment carries."""
 
     cmd: list[str]
     env: dict[str, str]
@@ -140,6 +141,8 @@ class SpecialistLaunch:
     backend: str
     prompt_file: Path
     process_log: Path
+    prepared: PreparedLaunch
+    reap_mark: str
 
 
 def stamp_reap_mark(env: dict[str, str]) -> str:

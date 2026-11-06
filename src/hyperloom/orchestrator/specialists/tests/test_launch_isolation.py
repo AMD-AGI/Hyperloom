@@ -107,9 +107,11 @@ def test_a_sandboxed_launch_sets_its_mark_inside_only_and_passes_its_status_desc
         ]
         assert spawn.env["HOME"] == str(place.workspace / ".home") and spawn.env["TMPDIR"] == "/tmp"
         assert (place.workspace / ".home").is_dir()
+        scratch = prepared.scratch
+        assert scratch is not None and os.path.isdir(scratch.tmp) and os.path.isdir(scratch.shm)
     finally:
         prepared.release()
-    assert prepared.scratch is None
+    assert not os.path.exists(scratch.tmp) and not os.path.exists(scratch.shm)
 
 
 def test_a_sandbox_points_cli_state_and_caches_named_elsewhere_into_its_workspace(tmp_path):

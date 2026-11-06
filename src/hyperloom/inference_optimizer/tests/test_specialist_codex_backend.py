@@ -1059,9 +1059,11 @@ async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 1])
 async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off_in_a_single_node_ray_actor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
 ) -> None:
     """bubblewrap is the sandbox: codex's own is off whatever is configured, and never probed; the actor's command is
     bubblewrap's, opened by a shell that hands it the status file."""
@@ -1076,6 +1078,7 @@ async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off_in_a_single_node_
     monkeypatch.setattr(sp, "resolve_launch_isolation", lambda lease: bwrap)
     workspace = tmp_path / "workspace"
     lease = _RecordingGpuLease(workspace)
+    monkeypatch.setattr(lease, "exit_code", lambda: exit_code)
     result = await SpecialistSubprocessDispatcher(
         SpecialistSubprocessConfig(
             agent_backend=AGENT_BACKEND_CODEX,
@@ -1099,7 +1102,11 @@ async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off_in_a_single_node_
 
     cmd = lease.started["cmd"]
     codex = cmd[cmd.index("--") + 1 :]
-    assert result.exit_code == 0 and result.error == ""
+    if exit_code:  # bubblewrap failed and wrote no exit-code to the status file the actor's shell opened
+        assert result.exit_code is None
+        assert result.error == "specialist sandbox could not be set up: bubblewrap exited 1 before the agent started"
+    else:
+        assert result.exit_code == 0 and result.error == ""
     assert cmd[:2] == ["/bin/sh", "-c"] and cmd[4] == "/opt/fake/bwrap"
     assert cmd[cmd.index("--json-status-fd") + 1] == "3" and "--die-with-parent" not in cmd
     assert codex[0] == "/usr/bin/codex" and "--dangerously-bypass-approvals-and-sandbox" in codex
