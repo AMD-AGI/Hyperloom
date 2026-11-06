@@ -41,14 +41,14 @@ _FIX_CASE: dict[str, Any] = {
 }
 
 
-class AttachmentWriter(Protocol):
+class _AttachmentWriter(Protocol):
     """Stores ``data`` in the session's blob store and returns the reference a test request carries it by; raises
     :class:`RequestRejected` and stores nothing when it refuses the data."""
 
     async def put_attachment(self, attachment_id: str, kind: Literal["file", "dir"], data: bytes) -> AttachmentRef: ...
 
 
-def register_fix_tools(server: McpServer, *, attachments: AttachmentWriter) -> None:
+def register_fix_tools(server: McpServer, *, attachments: _AttachmentWriter) -> None:
     """Register ``fix_case``."""
     server.register(
         "fix_case",
@@ -62,7 +62,7 @@ def register_fix_tools(server: McpServer, *, attachments: AttachmentWriter) -> N
     )
 
 
-def _fix_case(attachments: AttachmentWriter) -> Callable[[dict[str, Any], CallContext], Any]:
+def _fix_case(attachments: _AttachmentWriter) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], _ctx: CallContext) -> dict[str, object]:
         try:
             data = pack_case(arguments["repro_sh"], arguments["diagnosis"])
@@ -78,4 +78,4 @@ def _fix_case(attachments: AttachmentWriter) -> Callable[[dict[str, Any], CallCo
     return handle
 
 
-__all__ = ["AttachmentWriter", "register_fix_tools"]
+__all__ = ["register_fix_tools"]
