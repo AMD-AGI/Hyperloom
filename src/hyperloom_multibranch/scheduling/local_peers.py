@@ -109,6 +109,8 @@ POINTS_DIR = "points"
 BENCHMARK_FILE = "benchmark.yaml"
 #: A claim's lease on the specialist tools: the runtime renews it every 10 minutes.
 CLAIM_TTL_SECONDS = 1800.0
+#: Where a machine's render nodes are, one ``renderD*`` for every card a process there can open.
+RENDER_NODE_DIR = "/dev/dri"
 #: The switch the main flow and the measurement renderer read an AgentX workload from
 #: (``hyperloom.common.perf_metric.agentx_enabled``).
 AGENTX_ENV = "HYPERLOOM_AGENTX"
@@ -504,9 +506,24 @@ def _lend_dev_sandboxes(
     return leases
 
 
+def render_nodes() -> int:
+    """How many render nodes, ``renderD*`` in :data:`RENDER_NODE_DIR`, this machine holds: one for every card a
+    process here can open, so a container a device plugin gave some of a node's cards holds theirs alone."""
+
+    from pathlib import Path
+
+    try:
+        return sum(1 for node in Path(RENDER_NODE_DIR).iterdir() if node.name.startswith("renderD"))
+    except OSError:
+        return 0
+
+
 def machine_cards() -> tuple[int, ...]:
     """The cards of this machine the session may use: the absolute ids the first visible-device mask set names, or,
-    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any.
+    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any. Raises
+    :class:`PeersUnavailable` when ``rocm-smi`` shows more cards than this machine holds render nodes
+    (:func:`render_nodes`): in a container given some of a node's cards it shows them all, and a test leased one it
+    was not given could not open it.
 
     The ids are absolute because every sandbox's ``ROCR_VISIBLE_DEVICES`` is set to its leased cards in place of the
     mask this process runs under; a mask of device UUIDs names no id, so it leaves no card. The main flow resolves its
@@ -519,7 +536,13 @@ def machine_cards() -> tuple[int, ...]:
         mask = os.environ.get(name)
         if mask is not None:
             return tuple(parse_device_list(mask))
-    return tuple(range(detect_gpu_count()))
+    shown, nodes = detect_gpu_count(), render_nodes()
+    if shown > nodes:
+        raise PeersUnavailable(
+            f"rocm-smi shows {shown} cards, more than the {nodes} this machine can open (its render nodes,"
+            f" {RENDER_NODE_DIR}/renderD*): name the cards it was given in ROCR_VISIBLE_DEVICES"
+        )
+    return tuple(range(shown))
 
 
 def measurement_host(env: Mapping[str, str], backend: ToolboxBackend) -> MeasurementHost:
@@ -554,11 +577,15 @@ def staged_client() -> InferenceXCheckout:
 
 def machine_parallel_tests(tp: int) -> int:
     """How many tests of ``tp`` cards the local toolbox runs at once on this machine's cards; raises ``ValueError``
-    when a test of ``tp`` cards does not fit on them."""
+    when a test of ``tp`` cards does not fit on them, or its cards cannot be told (:func:`machine_cards`)."""
 
     from hyperloom_multibranch.toolbox.local_hosted import max_parallel_tests
 
-    return max_parallel_tests(len(machine_cards()), tp)
+    try:
+        cards = machine_cards()
+    except PeersUnavailable as exc:
+        raise ValueError(str(exc)) from exc
+    return max_parallel_tests(len(cards), tp)
 
 
 def specialist_model(env: Mapping[str, str]) -> str:
@@ -837,6 +864,7 @@ __all__ = [
     "InferenceXCheckout",
     "LocalCards",
     "MeasurementHost",
+    "RENDER_NODE_DIR",
     "SessionWiring",
     "SpecialistSessions",
     "ToolboxBackend",
@@ -848,6 +876,7 @@ __all__ = [
     "measurement_host",
     "model_backed_sessions",
     "peers_on",
+    "render_nodes",
     "require_framework_package",
     "specialist_command",
     "specialist_model",

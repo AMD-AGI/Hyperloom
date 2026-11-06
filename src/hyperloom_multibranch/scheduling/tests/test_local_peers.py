@@ -35,6 +35,7 @@ from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common import visible_devices
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
@@ -86,6 +87,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     measurement_host,
     model_backed_sessions,
     native_trees,
+    render_nodes,
     require_framework_package,
     specialist_command,
     specialist_recall,
@@ -377,6 +379,61 @@ def test_the_cards_are_the_ids_the_visible_device_mask_names(mask: str, monkeypa
     monkeypatch.setenv(mask, "6,2")
 
     assert machine_cards() == (6, 2)
+
+
+def _shown_and_held(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shown: int, held: int) -> None:
+    """No visible-device mask; ``rocm-smi`` shows ``shown`` cards and the machine holds ``held`` render nodes, beside a
+    node that is not one."""
+
+    for name in COUNTING_VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(visible_devices, "rocm_smi_gpu_count", lambda: shown)
+    nodes = tmp_path / "dri"
+    nodes.mkdir()
+    (nodes / "card1").touch()
+    for number in range(held):
+        (nodes / f"renderD{128 + number}").touch()
+    monkeypatch.setattr(local_peers_module, "RENDER_NODE_DIR", str(nodes))
+
+
+@pytest.mark.parametrize(("shown", "held"), [(8, 8), (2, 3), (0, 0)])
+def test_without_a_mask_the_cards_are_as_many_as_rocm_smi_shows_when_the_machine_can_open_them(
+    shown: int, held: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown_and_held(monkeypatch, tmp_path, shown, held)
+
+    assert machine_cards() == tuple(range(shown))
+
+
+def test_a_container_given_fewer_cards_than_rocm_smi_shows_names_both_counts_and_the_mask_to_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown_and_held(monkeypatch, tmp_path, 8, 2)
+
+    with pytest.raises(PeersUnavailable) as refused:
+        machine_cards()
+
+    assert str(refused.value) == (
+        f"rocm-smi shows 8 cards, more than the 2 this machine can open (its render nodes, {tmp_path / 'dri'}/renderD*):"
+        " name the cards it was given in ROCR_VISIBLE_DEVICES"
+    )
+    with pytest.raises(ValueError, match="rocm-smi shows 8 cards, more than the 2 this machine can open"):
+        machine_parallel_tests(1)
+
+
+def test_a_mask_names_the_cards_whatever_render_nodes_the_machine_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown_and_held(monkeypatch, tmp_path, 8, 0)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+
+    assert machine_cards() == (4, 5)
+
+
+def test_a_machine_without_render_nodes_holds_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local_peers_module, "RENDER_NODE_DIR", str(tmp_path / "missing"))
+
+    assert render_nodes() == 0
 
 
 @pytest.mark.parametrize("framework", ["tensorrt-llm", "sglang"])
