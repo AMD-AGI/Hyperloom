@@ -424,6 +424,15 @@ def leave_one_out_variants(
     return variants
 
 
+def unattributed_arms(variants: list[dict[str, Any]], pending: set[str]) -> list[dict[str, Any]]:
+    """Keep the lever arms whose lever is in ``pending``, and the combination arm while any of its levers is."""
+    return [
+        v
+        for v in variants
+        if pending.intersection([v["framework_lever"]] if v["framework_lever"] else v["framework_lever_bundle"])
+    ]
+
+
 def summarize(switches: list[dict[str, Any]], problems: list[str]) -> str:
     """Render a one-block summary of a parsed manifest for a log or a result."""
     if not switches and not problems:
@@ -459,4 +468,5 @@ __all__ = [
     "switch_env",
     "transitive_closure",
     "unarmed_env_reads",
+    "unattributed_arms",
 ]

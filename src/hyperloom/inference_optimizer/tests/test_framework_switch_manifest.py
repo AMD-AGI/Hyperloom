@@ -594,6 +594,25 @@ def test_an_attributed_enabler_still_turns_on_for_its_dependents():
     ]
 
 
+def test_the_combination_arm_runs_until_every_one_of_its_levers_is_attributed():
+    """The full stack is offered while any dormant lever is pending, and always switches every dormant lever on."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_A"), _entry("HL_B")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=False)
+    state.record_framework_lever_attribution("HL_A", gain_pct=0.3)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["name"], v["extra_envs"]) for v in payload] == [
+        ("fwlever_hl_b", {"HL_B": "1"}),
+        ("fwlever_all", {"HL_A": "1", "HL_B": "1"}),
+    ]
+    state.record_framework_lever_attribution("HL_B", gain_pct=0.1)
+    assert framework_lever_grid(state) == []
+
+
 def test_an_attributed_lever_still_counts_toward_the_stack_a_drop_leaves():
     """Dropping X and the Y it enables still leaves Z on, so the arm attributes X rather than restating the base."""
     from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid

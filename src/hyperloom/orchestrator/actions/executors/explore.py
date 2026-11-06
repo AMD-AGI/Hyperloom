@@ -251,7 +251,7 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
         payload.append({**variant, "framework_lever_source": "additive"})
     for variant in _switch_manifest.leave_one_out_variants([row for row in rows if row.get("default_on")]):
         payload.append({**variant, "framework_lever_source": _LEAVE_ONE_OUT})
-    return [variant for variant in payload if variant["framework_lever"] in pending]
+    return _switch_manifest.unattributed_arms(payload, pending)
 
 
 def _framework_lever_attributions(
