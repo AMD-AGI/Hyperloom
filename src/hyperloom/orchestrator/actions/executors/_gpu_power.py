@@ -34,13 +34,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from hyperloom_common.amd_smi import NPM_ENABLED, gfx_clock_limits, single_clock_limit
 from hyperloom_common.env import EnvValueError, env_float
-from hyperloom.common.gpu_power_settings import (
-    NPM_ENABLED,
-    gfx_clock_limits,
-    gpu_power_sampling_unavailable,
-    single_clock_limit,
-)
+from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
 
 log = logging.getLogger(__name__)
 

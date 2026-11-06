@@ -452,9 +452,9 @@ def _established_gpu_power_settings(
 def _shared_npm_node(node: dict[str, Any] | None) -> tuple[list[int] | None, str]:
     """The cards an NPM-enabled node has outside this session and why it is shared, or ``([], "")`` when NPM is off or
     the session has every card; the cards are ``None`` when the session's own cannot be named."""
-    from hyperloom_common.amd_smi import AmdSmiError
+    from hyperloom_common.amd_smi import NPM_ENABLED, AmdSmiError
 
-    from hyperloom.common.gpu_power_settings import NPM, NPM_ENABLED, gpus_outside_session
+    from hyperloom.common.gpu_power_settings import NPM, gpus_outside_session
 
     if not node or node.get(NPM) != NPM_ENABLED:
         return [], ""
