@@ -24,8 +24,8 @@ from inference_suite.runtime.phases import Phase, PhaseClock
 from inference_suite.runtime.process import spawn
 from inference_suite.runtime.server import Server
 from inference_suite.runtime.watch import RoundGate, Stop, wait_child
+from inference_suite.staging import CLIENT_MODULE
 
-CLIENT_MODULE = "infx.bench_serving.benchmark_serving"
 #: The OpenAI-compatible request format every served framework answers.
 CLIENT_BACKEND = "vllm"
 CLIENT_ENDPOINT = "/v1/completions"
@@ -248,7 +248,6 @@ def run_fixed(fixed_round: FixedRound) -> FixedOutcome:
 
 
 __all__ = [
-    "CLIENT_MODULE",
     "CLIENT_RANDOM_NUM_WORKERS",
     "CLIENT_RANDOM_PREFIX_LEN",
     "ClientPass",
