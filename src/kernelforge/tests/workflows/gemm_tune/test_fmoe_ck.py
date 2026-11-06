@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -128,6 +129,50 @@ def test_caller_supplied_csv_is_tuned_verbatim(tmp_path):
     assert set(_column(resolved, "inter_dim")) == {"512"}
 
 
+def test_rows_share_the_timeout_and_a_failed_row_costs_only_itself(tmp_path, monkeypatch):
+    """aiter writes nothing until a run's every row finishes, so one run over every row loses all of them on a kill."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    tail = "4096,512,256,6,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fn,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0"
+    rows = [f"{token},{tail}" for token in (512, 4, 64)]
+    external = tmp_path / "untuned_fmoe_from_runtime.csv"
+    external.write_text("\n".join([fm._FMOE_CSV_HEADER, *rows]) + "\n", encoding="utf-8")
+    tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path, moe_untuned_csv=external, timeout_s=250))
+    monkeypatch.setattr(fm, "find_tuner_script", lambda _: Path("/fake/tune.py"))
+    monkeypatch.setattr(fm, "resolve_aiter_root", lambda: None)
+    monkeypatch.setattr(fm._tr.FaultBlocklist, "save", lambda self: None)
+    clock = [1000.0]
+    fake_time = SimpleNamespace(time=lambda: clock[0])
+    monkeypatch.setattr(fm, "time", fake_time)
+    monkeypatch.setattr(fm._tr, "time", fake_time)
+    runs = []
+
+    def run(cmd, **kwargs):
+        header, *tuned = Path(cmd[cmd.index("-i") + 1]).read_text(encoding="utf-8").splitlines()
+        profile = Path(cmd[cmd.index("-o2") + 1])
+        runs.append((tuned, kwargs["timeout_s"], profile))
+        if tuned == [rows[2]]:
+            clock[0] += kwargs["timeout_s"]
+            return 124, "", "TimeoutExpired"
+        clock[0] += 100
+        if tuned == [rows[1]]:
+            return 1, "", "Traceback: tuner crashed"
+        profile.write_text(f"{header}\n{tuned[0]}\n", encoding="utf-8")
+        compare_dir = tmp_path / "aiter_compare"
+        compare_dir.mkdir(exist_ok=True)
+        candidate = compare_dir / f"{Path(cmd[cmd.index('-o') + 1]).stem}.1.candidate.csv"
+        candidate.write_text(f"{header},kernelName1,kernelName2\n{tuned[0]},stage1,stage2\n", encoding="utf-8")
+        return 0, f"({tuned[0].split(',')[0]}, shape) | 10 | 8 | 20% | UPDATE", ""
+
+    monkeypatch.setattr(fm._tr, "run_subprocess", run)
+    result = tuner.run()
+
+    assert [(tuned, timeout) for tuned, timeout, _ in runs] == [([rows[0]], 250), ([rows[1]], 150), ([rows[2]], 50)]
+    assert len({profile for _, _, profile in runs}) == 3, "each row writes its own -o2 profile"
+    assert (result.status, result.total_shapes, result.improved_shapes) == ("ok", 1, 1)
+    assert _column(Path(result.artifact_path), "token") == ["512"]
+
+
 def test_no_runtime_key_is_refused_rather_than_derived_from_the_config(tmp_path):
     with pytest.raises(ValueError, match="no runtime-observed MoE miss"):
         fm.FmoeCKTuner(_moe_ctx(tmp_path))._resolve_untuned_csv()
@@ -181,10 +226,9 @@ def test_malformed_caller_csv_raises(tmp_path, content, expected):
         fm.FmoeCKTuner(ctx)._resolve_untuned_csv()
 
 
-@pytest.mark.parametrize("isolated", [False, True])
 @pytest.mark.parametrize("temp_var", ["TMPDIR", "TEMP", "TMP", None])
 @pytest.mark.parametrize("improved", [False, True])
-def test_compare_candidate_uses_child_tempdir(tmp_path, monkeypatch, isolated, temp_var, improved):
+def test_compare_candidate_uses_child_tempdir(tmp_path, monkeypatch, temp_var, improved):
     parent_tmp = tmp_path / "cached"
     parent_tmp.mkdir()
     child_tmp = tmp_path / "child"
@@ -199,7 +243,6 @@ def test_compare_candidate_uses_child_tempdir(tmp_path, monkeypatch, isolated, t
     tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path, moe_untuned_csv=external))
     monkeypatch.setattr(fm, "find_tuner_script", lambda _: Path("/fake/tune.py"))
     monkeypatch.setattr(fm, "resolve_aiter_root", lambda: None)
-    monkeypatch.setattr(fm._tr, "is_isolation_enabled", lambda: isolated)
     monkeypatch.setattr(fm._tr.FaultBlocklist, "save", lambda self: None)
     produced = []
 
@@ -224,7 +267,6 @@ def test_compare_candidate_uses_child_tempdir(tmp_path, monkeypatch, isolated, t
         action = "UPDATE" if improved else "KEEP"
         return 0, f"(4, shape) | 10 | 8 | 20% | {action}", ""
 
-    monkeypatch.setattr(fm, "run_subprocess", run)
     monkeypatch.setattr(fm._tr, "run_subprocess", run)
     result = tuner.run()
     assert result.status == ("ok" if improved else "no_improvement")
@@ -243,17 +285,15 @@ def test_compare_candidate_uses_child_tempdir(tmp_path, monkeypatch, isolated, t
         assert "TMPDIR" not in os.environ
 
 
-@pytest.mark.parametrize("isolated", [False, True])
 @pytest.mark.parametrize("content", [None, "", "token,model_dim\n4,4096\n"])
 @pytest.mark.parametrize("improved", [False, True])
-def test_compare_without_valid_candidate_never_exports_path(tmp_path, monkeypatch, isolated, content, improved):
+def test_compare_without_valid_candidate_never_exports_path(tmp_path, monkeypatch, content, improved):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     external = _write_runtime_csv(tmp_path)
     tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path, moe_untuned_csv=external))
     monkeypatch.setattr(fm, "find_tuner_script", lambda _: Path("/fake/tune.py"))
     monkeypatch.setattr(fm, "resolve_aiter_root", lambda: None)
-    monkeypatch.setattr(fm._tr, "is_isolation_enabled", lambda: isolated)
     monkeypatch.setattr(fm._tr.FaultBlocklist, "save", lambda self: None)
 
     def run(cmd, **kwargs):
@@ -267,7 +307,6 @@ def test_compare_without_valid_candidate_never_exports_path(tmp_path, monkeypatc
         action = "UPDATE" if improved else "KEEP"
         return 0, f"(4, shape) | 10 | 8 | 20% | {action}", ""
 
-    monkeypatch.setattr(fm, "run_subprocess", run)
     monkeypatch.setattr(fm._tr, "run_subprocess", run)
     result = tuner.run()
     assert result.status == ("failed" if improved else "no_improvement")
@@ -313,3 +352,41 @@ def test_compare_temp_env_matches_real_child_with_relative_tmpdir(tmp_path, monk
     assert Path(actual) == selected
     assert env_override == {"TMPDIR": str(selected)}
     assert os.environ["TMPDIR"] == "selected"
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+def test_a_faulting_row_reaches_the_persistent_blocklist_only_under_isolation(tmp_path, monkeypatch, isolated):
+    """The fault blocklist outlives the run, so writing it stays the opt-in it is for every tuner."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    if isolated:
+        monkeypatch.setenv(fm._tr.ISOLATE_ENV, "1")
+    else:
+        monkeypatch.delenv(fm._tr.ISOLATE_ENV, raising=False)
+    blocklist = tmp_path / "faulted_shapes.json"
+    monkeypatch.setattr(fm._tr, "_DEFAULT_BLOCKLIST", str(blocklist))
+    monkeypatch.setattr(fm._tr, "gpu_healthy", lambda _gpus: True)
+    external = _write_runtime_csv(tmp_path)
+    tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path, moe_untuned_csv=external, timeout_s=3600))
+    monkeypatch.setattr(fm, "find_tuner_script", lambda _: Path("/fake/tune.py"))
+    monkeypatch.setattr(fm, "resolve_aiter_root", lambda: None)
+
+    def run(cmd, **kwargs):
+        header, row = Path(cmd[cmd.index("-i") + 1]).read_text(encoding="utf-8").splitlines()
+        if row.startswith("512,"):
+            return 134, "", "Memory access fault by GPU node-1"
+        compare_dir = tmp_path / "aiter_compare"
+        compare_dir.mkdir(exist_ok=True)
+        candidate = compare_dir / f"{Path(cmd[cmd.index('-o') + 1]).stem}.1.candidate.csv"
+        candidate.write_text(f"{header},kernelName1,kernelName2\n{row},stage1,stage2\n", encoding="utf-8")
+        os.utime(candidate, (time.time() + 1, time.time() + 1))
+        return 0, "(4, shape) | 10 | 8 | 20% | UPDATE", ""
+
+    monkeypatch.setattr(fm._tr, "run_subprocess", run)
+    result = tuner.run()
+
+    assert _column(Path(result.artifact_path), "token") == ["4"]
+    assert blocklist.exists() is isolated
+    if isolated:
+        (recorded,) = json.loads(blocklist.read_text(encoding="utf-8")).values()
+        assert [entry["reason"] for entry in recorded.values()] == ["hard_fault"]
