@@ -74,6 +74,7 @@ class _BranchDraft:
     driver: BranchDriver = BranchDriver.SPECIALIST
     rerooted: bool = False
     probations: list[Probation] = field(default_factory=list)
+    focus: str = ""
 
     def node(self) -> BranchNode:
         return BranchNode(
@@ -88,6 +89,7 @@ class _BranchDraft:
             repairs=self.repairs,
             driver=self.driver,
             probations=tuple(self.probations),
+            focus=self.focus,
         )
 
 
@@ -139,10 +141,12 @@ def _apply_event(
             event.from_branch,
             repairs=event.repairs,
             driver=event.driver,
+            focus=event.focus,
         )
     else:
         draft.origin, draft.start_commit, draft.from_branch = event.kind, event.from_commit, event.from_branch
         draft.repairs, draft.driver = event.repairs or draft.repairs, event.driver
+        draft.focus = event.focus or draft.focus
         draft.opened_at = min(draft.opened_at, at)
 
 

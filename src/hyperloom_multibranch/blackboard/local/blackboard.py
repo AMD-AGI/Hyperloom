@@ -366,6 +366,8 @@ def _check_lineage(event: LineageEvent) -> None:
         raise ValueError("only the root event names its commit's recipe digest; judgements name the others'")
     if event.driver is not BranchDriver.SPECIALIST and event.kind is not LineageKind.OPEN:
         raise ValueError(f"only an open event names who drives its branch, not a {event.kind.value} event")
+    if event.focus and event.kind is not LineageKind.OPEN:
+        raise ValueError(f"only an open event names its branch's focus, not a {event.kind.value} event")
 
 
 def _new_lineage(state: BlackboardState, event: LineageEvent) -> bool:
