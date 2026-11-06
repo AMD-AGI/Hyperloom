@@ -22,7 +22,7 @@ PUBLIC_INTERFACE = "is-public-interface"
 LAYERS = "is-layers"
 SUITE_CONTRACTS = (ONLY_COMMON, PUBLIC_INTERFACE, LAYERS)
 SUITE = "inference_suite"
-PUBLIC = ("contracts", "argv", "golden", "server_log")
+PUBLIC = ("contracts", "argv", "golden", "server_log", "frameworks")
 INTERNAL = (
     "__main__",
     "cli",
@@ -39,7 +39,6 @@ INTERNAL = (
     "framework_probe",
     "staging",
     "pins",
-    "frameworks",
 )
 HOST_IMPORTERS = ("hyperloom.consumer", "hyperloom_multibranch.consumer")
 #: The cross-module imports the package design relies on (dev plan 2.1 and 2.3).
@@ -53,7 +52,7 @@ PLANNED_IMPORTS: dict[str, tuple[str, ...]] = {
     f"{SUITE}.compose": (f"{SUITE}.recipe", f"{SUITE}.parser_check", f"{SUITE}.framework_version"),
     f"{SUITE}.recipe": (f"{SUITE}.contracts", f"{SUITE}.golden"),
     f"{SUITE}.parser_check": (f"{SUITE}.framework_probe", f"{SUITE}.frameworks"),
-    f"{SUITE}.contracts": (f"{SUITE}.argv", f"{SUITE}.golden"),
+    f"{SUITE}.contracts": (f"{SUITE}.argv", f"{SUITE}.golden", f"{SUITE}.frameworks"),
     f"{SUITE}.golden": (f"{SUITE}.argv",),
     "hyperloom.consumer": (SUITE, *(f"{SUITE}.{name}" for name in PUBLIC)),
     "hyperloom_multibranch.consumer": (SUITE, f"{SUITE}.contracts"),

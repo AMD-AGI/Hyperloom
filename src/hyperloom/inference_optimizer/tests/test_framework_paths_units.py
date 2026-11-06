@@ -582,7 +582,7 @@ class TestDerivedFromTheRegistry:
     """A framework that declares its package or checkout is discovered without another edit here."""
 
     def test_every_declared_package_is_discovered(self):
-        declared = {spec.python_package for spec in fr.FRAMEWORKS.values() if spec.python_package}
+        declared = {package for name in fr.names() if (package := fr.python_package(name))}
         assert declared - set(fp.FRAMEWORK_SOURCE_PACKAGES) == set()
 
     def test_every_declared_checkout_is_a_default_root(self):

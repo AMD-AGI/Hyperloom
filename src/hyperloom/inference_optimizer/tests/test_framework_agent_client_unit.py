@@ -11,6 +11,6 @@ def test_scriptable_framework_registry_specs() -> None:
 
     xdit_spec = framework_registry.FRAMEWORKS["xdit"]
     assert xdit_spec.repo_url == "https://github.com/xdit-project/xDiT.git"
-    assert xdit_spec.kind == framework_registry.SCRIPTABLE
+    assert framework_registry.is_scriptable("xdit")
     assert xdit_spec.extra_args_env == "EXTRA_XDIT_ARGS"
     assert xdit_spec.throughput_unit == "img/s"

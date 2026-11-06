@@ -24,12 +24,10 @@ class TestFrameworkRegistry:
         assert "xdit" in fr.names()
         assert fr.is_supported("XDiT") is True
         assert fr.is_scriptable("xdit") is True
-        assert fr.FRAMEWORKS["xdit"].kind == fr.SCRIPTABLE
 
     def test_serving_frameworks_not_scriptable(self):
         for name in ("sglang", "vllm", "atom"):
             assert fr.is_scriptable(name) is False
-            assert fr.FRAMEWORKS[name].kind == fr.SERVING
 
     def test_extra_args_env_and_unit(self):
         assert fr.extra_args_env("xdit") == "EXTRA_XDIT_ARGS"
@@ -369,7 +367,7 @@ class TestRegistryOwnsPerFrameworkAssets:
     def test_per_framework_tables_cover_every_serving_framework(self, table):
         """Tables the registry cannot hold still have to name every serving framework, and only registered ones."""
         keys = set(_per_framework_tables()[table])
-        serving = {name for name, spec in fr.FRAMEWORKS.items() if spec.kind == fr.SERVING}
+        serving = {name for name in fr.names() if not fr.is_scriptable(name)}
         assert serving - keys == set()
         assert keys - set(fr.FRAMEWORKS) == set()
 
