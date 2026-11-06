@@ -12,8 +12,8 @@ The shared compiled-code cache is in ``LocalOptions.jit_store``, else in the dir
 account's uid below this host's temporary directory (``TMPDIR`` honoured), not beside the session root: that lies on the
 session's shared storage, where a CK module build crawls. Tests read the directory's verified snapshots before their
 server starts, and what an accepted test compiled is published to it by this host. The runners load what it holds as
-compiled code, so the build refuses a directory that is not this account's own or that its group or others can write:
-another account could otherwise put snapshots of its own there.
+compiled code, so the build refuses a link there, and a directory that is not this account's own or that its group or
+others can write: another account could otherwise put snapshots of its own there.
 
 The short-prompt consistency check is on by default: ``LocalOptions.short_prompts``, or the key named by
 ``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given (``off`` turns it off), else the set
@@ -32,6 +32,7 @@ server.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -298,8 +299,8 @@ class LocalOptions:
     runners read it (``HYPERLOOM_JIT_CACHE`` in their template, which therefore wins over the same name in
     ``runner_envs``) and this host publishes into it; ``None`` takes ``HYPERLOOM_JIT_STORE`` of the host environment,
     and without either :data:`DEFAULT_JIT_STORE` and this account's uid below this host's temporary directory; the
-    build refuses one that is not this account's own or that its group or others can write. ``card_guard`` is what is
-    done about a process that holds a card of a test or of a lease: observed
+    build refuses a link there, and one that is not this account's own or that its group or others can write.
+    ``card_guard`` is what is done about a process that holds a card of a test or of a lease: observed
     (kept and recorded) or enforced (the test refused and retried, the card not handed out); ``None`` takes
     ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard enforces. The runners get the same
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
@@ -351,26 +352,29 @@ def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = No
     """The absolute directory of the shared compiled-code cache: the one ``options`` (or ``HYPERLOOM_JIT_STORE``) names,
     else :data:`DEFAULT_JIT_STORE` and this account's uid below this host's temporary directory.
 
-    The runner starts in a directory of its own, so a relative path is made absolute here, once.
+    The runner starts in a directory of its own, so a relative path is made absolute here, once. A link is not resolved:
+    :func:`private_jit_store` judges what stands under the name, and a link there is refused, never followed.
     """
     source = os.environ if environ is None else environ
     default = Path(tempfile.gettempdir(), f"{DEFAULT_JIT_STORE}-{os.getuid()}")
     named = options.jit_store or source.get(JIT_STORE_ENV, "").strip() or default
-    return Path(named).expanduser().resolve()
+    return Path(named).expanduser().absolute()
 
 
 def private_jit_store(root: Path) -> Path:
-    """``root``, made (mode 0700) when it is missing.
+    """``root``, made (mode 0700) when nothing stands under its name.
 
     Raises:
-        JitStoreNotPrivate: ``root`` is not a directory of this account's, or its group or others can write it: the
-            runners load what it holds as compiled code, and the snapshots prove only their own content.
+        JitStoreNotPrivate: ``root`` is not a directory of this account's (a link to one is refused too), or its group or
+            others can write it: the runners load what it holds as compiled code, and the snapshots prove only their own
+            content. Another account can plant the default name, which stops the build here but feeds it nothing.
     """
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with contextlib.suppress(FileExistsError):  # what already stands there, a link included, is judged below
+        root.mkdir(mode=0o700, parents=True)
     if not is_private_dir(root):
         raise JitStoreNotPrivate(
-            f"the compiled-code cache {root} is not a directory of this account's that only it can write; "
-            f"name one that is with {JIT_STORE_ENV}"
+            f"the compiled-code cache {root} is not a directory of this account's that only it can write (nor may it "
+            f"be a link to one); name one that is with {JIT_STORE_ENV}"
         )
     return root
 
