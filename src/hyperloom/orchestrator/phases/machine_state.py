@@ -24,6 +24,7 @@ from ..state.shared_state import (
     _LIFECYCLE_CAP,
     is_valid_escalate_hint,
 )
+from .controller_settlement import CONTROLLER_TERMINAL_STATUSES, kernel_controller_settled
 from .exit_predicates import budget_exit, framework_exit, framework_plateau
 from .phase_chain import (
     LIFECYCLE_STATUS_ENTER,
@@ -596,36 +597,6 @@ def _geak_phase_terminal(state: Any) -> bool:
     return str(result.get("status") or "").strip().lower() in GEAK_TERMINAL_STATUSES
 
 
-#: Every status the rewrite controller can end on. All of them are terminal for
-#: the phase: the controller is not re-run inside one macro cycle, so a failure
-#: is as final as a published patch.
-CONTROLLER_TERMINAL_STATUSES: frozenset[str] = frozenset(
-    {
-        "completed",
-        "failed",
-        "no_opportunity",
-        "no_result",
-        "partial",
-    }
-)
-
-
-def _controller_phase_terminal(state: Any) -> bool:
-    """Return true when this macro cycle's rewrite controller has stopped."""
-    if str(state.kernel_optimizer or "").strip().lower() != "forge":
-        return False
-    result = state.kernel_rewrite_controller_result or {}
-    if not isinstance(result, dict):
-        return False
-    try:
-        result_cycle = int(result.get("macro_cycle", -1))
-        current_cycle = int(state.macro_cycle or 0)
-    except (TypeError, ValueError):
-        return False
-    status = str(result.get("status") or "").strip().lower()
-    return result_cycle == current_cycle and status in CONTROLLER_TERMINAL_STATUSES
-
-
 def compute_kernel_progress_fingerprint(
     state: Any,
     *,
@@ -662,7 +633,7 @@ def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
     if kernel_decisions.has_keep_pending_integrate(state):
         return True
-    if _controller_phase_terminal(state) or _geak_phase_terminal(state):
+    if kernel_controller_settled(state) or _geak_phase_terminal(state):
         return False
 
     return bool(kernel_decisions.untried_hot_reusable_kernels(state))
