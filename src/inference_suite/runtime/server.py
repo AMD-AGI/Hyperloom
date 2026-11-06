@@ -24,7 +24,7 @@ from pathlib import Path
 
 from hyperloom_common.proctree import proc_identity
 
-from inference_suite.contracts.config import LifecycleMode, SuiteConfig
+from inference_suite.contracts.config import LifecycleMode, ServerConfig, SuiteConfig
 from inference_suite.contracts.layout import SERVER_LOG, SERVER_PID, ReadyStamp, RunLayout
 from inference_suite.contracts.report import FailedStep, LogRange
 from inference_suite.frameworks import Framework
@@ -143,6 +143,11 @@ def stop(pid_dir: Path | str) -> Reaped:
     return outcome
 
 
+def server_url(server: ServerConfig) -> str:
+    """The URL the round's server answers at; the client argv ``launch.json`` records and the one run share it."""
+    return f"http://{server.host}:{server.port}"
+
+
 class ServerLifecycle:
     """One round's server, from :meth:`acquire` to :meth:`release`; the round calls both, whatever happens between."""
 
@@ -166,7 +171,7 @@ class ServerLifecycle:
 
     @property
     def base_url(self) -> str:
-        return f"http://{self._config.server.host}:{self._config.server.port}"
+        return server_url(self._config.server)
 
     def acquire(self) -> Server | Stop:
         self._layout.root.mkdir(parents=True, exist_ok=True)
@@ -269,4 +274,4 @@ class ServerLifecycle:
         return LogRange(self._log_start, self._log_start + copied)
 
 
-__all__ = ["Released", "Server", "ServerLaunch", "ServerLifecycle", "stop"]
+__all__ = ["Released", "Server", "ServerLaunch", "ServerLifecycle", "server_url", "stop"]
