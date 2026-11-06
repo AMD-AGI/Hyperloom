@@ -705,6 +705,7 @@ class Session:
             except SplitFailed as exc:
                 why = f"Arbor cannot deal: {exc}"
             else:
+                await self._branches.record_deal(report, order)
                 return await self._deal_to(branch, agent, order, detail)
         why = why or "no Arbor source to deal with"
         self._decisions.record(Decision(DecisionKind.SHARE, NO_DEAL, branch, {**detail, "why": why}))

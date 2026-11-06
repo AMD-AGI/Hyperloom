@@ -1986,20 +1986,34 @@ async def test_two_agents_each_start_at_the_root_on_the_share_of_the_session_s_d
 REPORT_SECONDS = 600.0
 
 
+def _directions_file(path: Path, *entries: dict[str, str]) -> str:
+    path.write_text(json.dumps({"directions": list(entries)}))
+    return str(path)
+
+
 def _one_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: list[dict[str, str]]
 ) -> tuple[Stage, list[DealRequest], Path]:
-    """A session of two Arbors on their shares of a given map, ``b01`` and ``b02``, in which ``b01`` hands its share
-    back after :data:`REPORT_SECONDS` as the adapter does: it gives the scheduler its worker report, then finishes
-    ``reported``. Arbor's master deals ``order``; every deal asked is kept, with the report ``b01`` gave."""
+    """A session of two Arbors on their shares of a given map, ``b01`` on ``m-attn`` and ``b02`` on ``m-moe``, in which
+    ``b01`` hands its share back after :data:`REPORT_SECONDS` as the adapter does: it gives the scheduler its worker
+    report, which closes ``m-attn``, then finishes ``reported``. Arbor's master deals ``order``; every deal asked is
+    kept, with the report ``b01`` gave."""
 
     asked: list[DealRequest] = []
-    report = tmp_path / "worker_report.json"
+    titles = {"m-attn": "attention decode path", "m-moe": "MoE GEMM tables", "m-allreduce": "custom all-reduce"}
+    _directions_file(tmp_path / "d.json", *({"id": key, "title": title} for key, title in titles.items()))
+    shares = (
+        _directions_file(tmp_path / "share-1.json", {"id": "m-attn"}),
+        _directions_file(tmp_path / "share-2.json", {"id": "m-moe"}),
+    )
+    report = Path(
+        _directions_file(tmp_path / "worker_report.json", {"id": "m-attn", "status": "done", "why": "KEEP 1"})
+    )
 
     async def split(
         agents: tuple[str, ...], map_file: str, work_dir: Path, root_shares: OpShares | None = None, *_source: str
     ) -> tuple[str, ...]:
-        return ("/shares/share-1.json", "/shares/share-2.json")
+        return shares
 
     async def deal(_checkout: Path, request: DealRequest) -> Path:
         asked.append(request)
@@ -2017,7 +2031,9 @@ def _one_reports(
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
     monkeypatch.setattr(agent_plans_module, "deal_order", deal)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions="/maps/d.json")
+    stage.settings = replace(
+        SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions=str(tmp_path / "d.json")
+    )
     stage.steps = {"b01": reports}
     stage.judge = ScriptedCompletion([])
     return stage, asked, report
@@ -2032,9 +2048,9 @@ async def test_a_reported_arbor_is_stopped_as_finished_and_its_slot_dealt_the_ne
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     [request] = asked
-    assert (request.map_file, request.reports, request.size) == (Path("/maps/d.json"), (report,), DEAL_SIZE)
+    assert (request.map_file, request.reports, request.size) == (tmp_path / "d.json", (report,), DEAL_SIZE)
     # The reporter's own share is no longer held, the running worker's still is.
-    assert request.held == (Path("/shares/share-2.json"),)
+    assert request.held == (tmp_path / "share-2.json",)
     roster = {entry["branch"]: entry for entry in json.loads(stage.layout.roster.read_text())["entries"]}
     assert roster["b01"]["stop"]["cause"] == StopCause.GAVE_UP.value
     assert roster["b01"]["stop"]["reason"].startswith("the agent finished its run: reported")
@@ -2051,6 +2067,10 @@ async def test_a_reported_arbor_is_stopped_as_finished_and_its_slot_dealt_the_ne
         index for index, row in enumerate(rows) if row["branch"] == share and row["reason"].startswith("dequeued")
     ]
     assert stop < entered
+    # The map record follows the deal: the report's verdict, and the new branch holding the order it opened on.
+    recorded = {item.id: item for item in (await stage.handle(Role.OBSERVER).snapshot()).agent_map}
+    assert (recorded["m-attn"].status, recorded["m-attn"].why) == ("done", "KEEP 1")
+    assert {key: recorded[key].holder for key in ("m-moe", "m-allreduce")} == {"m-moe": "b02", "m-allreduce": share}
 
 
 async def test_a_reported_arbor_with_nothing_left_to_deal_frees_its_slot_for_the_judge_s_refill(

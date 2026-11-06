@@ -62,6 +62,8 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
     from hyperloom_multibranch.scheduling.agent_map import SharedMap
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -152,6 +154,15 @@ class BranchControl:
 
         self._map = shared
         await self._blackboard.write_agent_map(shared.directions)
+
+    async def record_deal(self, report: Path, order: Path | None) -> None:
+        """Fold a reporting worker's ``report`` and the ``order`` Arbor's master dealt for its slot (``None`` for none)
+        into the session's map on the blackboard (:meth:`SharedMap.folded`); the branch the order opens on is named
+        its directions' holder when it starts. Nothing without a map."""
+
+        if self._map is not None:
+            self._map = self._map.folded(report, order)
+            await self._blackboard.write_agent_map(self._map.directions)
 
     async def integration_head(self) -> str:
         return await self._repo.head(INTEGRATION_BRANCH)
