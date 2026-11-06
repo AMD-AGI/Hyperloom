@@ -7,6 +7,7 @@ nothing another account of the group can change, and an entry in place that only
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -181,15 +182,20 @@ except OSError as exc:
     print(errno.errorcode[exc.errno])
 """
 
-#: Rename the directory the builder made in the cache away and put one of this account's own in its place, with links
-#: where the builder's files go to a file of the builder's that this account cannot even read.
+#: Rename the directory the builder made in the cache away and put something of this account's in its place: a
+#: directory of its own, empty (``dir``) or with links where the builder's files go to a file of the builder's that this
+#: account cannot even read (``links``), or a link to a directory of the builder's (``link``).
 _SWAP = """
 import os, sys
-cache, pending, victim, *names = sys.argv[1:]
-os.rename(os.path.join(cache, pending), os.path.join(cache, ".moved"))
-os.mkdir(os.path.join(cache, pending))
-for name in names:
-    os.symlink(victim, os.path.join(cache, pending, name))
+cache, pending, kind, target, *names = sys.argv[1:]
+pending = os.path.join(cache, pending)
+os.rename(pending, os.path.join(cache, ".moved"))
+if kind == "link":
+    os.symlink(target, pending)
+else:
+    os.mkdir(pending, 0o700)
+    for name in names:
+        os.symlink(target, os.path.join(pending, name))
 print("swapped")
 """
 
@@ -202,15 +208,20 @@ def _as(accounts: Accounts, code: str, *arguments: str) -> str:
     return accounts.run(accounts.second, f"import sys\nsys.argv[1:] = {list(arguments)!r}\n{code}").strip()
 
 
-@pytest.mark.parametrize("swap", ["before-it-is-opened", "after-it-is-opened"])
+@pytest.mark.parametrize("swap", ["dir-before-it-is-opened", "link-before-it-is-opened", "after-it-is-opened"])
 def test_another_account_of_the_group_neither_changes_what_a_build_runs_nor_makes_it_write_through_a_link(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap: str
 ) -> None:
     victim = tmp_path / "builders-own"
     victim.write_text("the builder's own\n")
     victim.chmod(0o600)
+    # A directory of the builder's, empty and 0700 as the one it has just made: only that the name is a link to it, not
+    # what it is, tells it from that one.
+    builders = tmp_path / "builders-dir"
+    builders.mkdir(0o700)
     tools_environment, open_new_directory = cache_build._tools_environment, cache_build._open_new_directory
     seen: dict[str, str] = {}
+    pending: list[str] = []
     with other_accounts() as accounts:
         cache = accounts.shared_dir("cache")
 
@@ -222,11 +233,12 @@ def test_another_account_of_the_group_neither_changes_what_a_build_runs_nor_make
         def swapping(parent: int, name: str) -> int:
             if "swap" in seen:
                 return open_new_directory(parent, name)
+            pending.append(name)
             if swap == "after-it-is-opened":
                 descriptor = open_new_directory(parent, name)
-                seen["swap"] = _as(accounts, _SWAP, str(cache), name, str(victim), *_PLANTED)
+                seen["swap"] = _as(accounts, _SWAP, str(cache), name, "links", str(victim), *_PLANTED)
                 return descriptor
-            seen["swap"] = _as(accounts, _SWAP, str(cache), name, str(victim), *_PLANTED)
+            seen["swap"] = _as(accounts, _SWAP, str(cache), name, swap.split("-")[0], str(builders))
             return open_new_directory(parent, name)
 
         monkeypatch.setattr(cache_build, "_tools_environment", planting)
@@ -236,24 +248,30 @@ def test_another_account_of_the_group_neither_changes_what_a_build_runs_nor_make
         # The build environment is out of the account's reach, and nothing the builder wrote went through its links.
         assert seen == {"pth": "EACCES", "swap": "swapped"}
         assert (victim.read_text(), stat.S_IMODE(victim.stat().st_mode)) == ("the builder's own\n", 0o600)
-        final, moved = cache / rig.cache.sha, cache / ".moved"
-        if swap == "before-it-is-opened":
-            # The builder opened the account's directory, and found its links where its own files go.
-            assert isinstance(built, FileExistsError), built
-            assert not final.exists() and list(moved.iterdir()) == []
-        else:
+        final, moved, (name,) = cache / rig.cache.sha, cache / ".moved", pending
+        if swap == "after-it-is-opened":
             # The builder filled the directory it opened, wherever the account moved it; what the account put in place
             # is its own, and the pin the build returns refuses it.
             assert isinstance(built, CacheEntry), built
             assert check_entry(moved, rig.cache.sha, built.manifest_sha256, verify_hash=True) == []
             assert all((final / planted).is_symlink() for planted in _PLANTED)
             assert check_entry(final, rig.cache.sha, built.manifest_sha256) != []
+            return
+        # The builder refused what the name opened before it wrote anything, and left it as the account put it.
+        assert isinstance(built, CacheBuildError), built
+        assert not final.exists() and list(moved.iterdir()) == [] and list(builders.iterdir()) == []
+        if swap == "dir-before-it-is-opened":
+            assert f"so nothing is written to it: it is owned by uid {accounts.second}," in str(built)
+            assert (cache / name).lstat().st_uid == accounts.second and list((cache / name).iterdir()) == []
+        else:
+            assert f"cannot open {name}, the directory the builder has just made: Not a directory" in str(built)
+            assert os.readlink(cache / name) == str(builders)
 
 
-def _build_or_error(build: Callable[[], CacheEntry]) -> CacheEntry | OSError:
+def _build_or_error(build: Callable[[], CacheEntry]) -> CacheEntry | OSError | CacheBuildError:
     try:
         return build()
-    except OSError as exc:
+    except (OSError, CacheBuildError) as exc:
         return exc
 
 
@@ -282,3 +300,190 @@ def test_an_entry_with_a_link_where_a_builder_makes_a_file_is_refused_and_not_re
     with pytest.raises(CacheConflict, match=r"is left alone: .* is a link"):
         ensure_runner_cache(rig.repo, cache.sha, cache.root, rig.build_options())
     assert entry.is_symlink() if where == "the-entry" else (entry / MANIFEST_NAME).exists()
+
+
+# -- what a builder removes of what it finds in the cache, and what it copies into -------------------------------------
+
+_SHA = "a" * 40
+_LEFTOVER = f".{_SHA}.tmp-"
+
+
+def _own_dir(path: Path, mode: int, *files: str) -> Path:
+    """A new directory of this account's at ``path`` with ``mode``, holding a file of each name in ``files``."""
+    path.mkdir()
+    for name in files:
+        (path / name).write_text(f"{name}\n")
+    path.chmod(mode)
+    return path
+
+
+def _snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
+    """``root`` (as ``.``) and each path below it: its owner, permission bits and content or link target."""
+    found: dict[str, tuple[int, int, str]] = {}
+    for path in [root, *sorted(root.rglob("*"))]:
+        info = os.lstat(path)
+        content = os.readlink(path) if path.is_symlink() else path.read_text() if path.is_file() else ""
+        found[path.relative_to(root).as_posix()] = (info.st_uid, stat.S_IMODE(info.st_mode), content)
+    return found
+
+
+def test_a_builder_removes_of_the_leftovers_only_a_directory_its_account_made_for_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    outside = _own_dir(tmp_path / "outside", 0o700, "kept")
+    # What a build of this account killed while copying left: removed, and nothing through its link.
+    own = _own_dir(cache / f"{_LEFTOVER}1-own", 0o700, "half")
+    _own_dir(own / "source", 0o755, "file")
+    (own / "outside").symlink_to(outside)
+    # What another account of the group may rename to such a name, none of it a directory the builder made for itself:
+    # an entry of the builder's, a file of its own and a link to a directory of its own.
+    _own_dir(cache / f"{_LEFTOVER}2-entry", 0o755, MANIFEST_NAME)
+    (cache / f"{_LEFTOVER}3-file").write_text("file\n")
+    (cache / f"{_LEFTOVER}4-link").symlink_to(outside)
+    # And a directory of the builder's own when it is listed, put away by the account and replaced by an entry or a
+    # link before the builder opens it, or by an empty directory of the builder's once the builder has emptied it.
+    for name in ("5-to-an-entry", "6-to-a-link", "7-after-emptying"):
+        _own_dir(cache / f"{_LEFTOVER}{name}", 0o700, "half")
+    other_entry, other_empty = _own_dir(cache / "entry", 0o755, MANIFEST_NAME), _own_dir(cache / "empty", 0o755)
+    late, emptied = os.lstat(cache / f"{_LEFTOVER}7-after-emptying"), os.lstat(other_empty)
+    remove, empty = cache_build._remove_directory, cache_build._empty
+
+    def swapping_before_the_open(parent: int, name: str, ours: Callable[[os.stat_result], bool]) -> None:
+        if name.endswith("-to-an-entry"):
+            (cache / name).rename(tmp_path / "moved-5")
+            other_entry.rename(cache / name)
+        elif name.endswith("-to-a-link"):
+            (cache / name).rename(tmp_path / "moved-6")
+            (cache / name).symlink_to(outside)
+        remove(parent, name, ours)
+
+    def swapping_once_emptied(directory: int) -> None:
+        empty(directory)
+        if os.path.samestat(os.fstat(directory), late):
+            (cache / f"{_LEFTOVER}7-after-emptying").rename(tmp_path / "moved-7")
+            other_empty.rename(cache / f"{_LEFTOVER}7-after-emptying")
+
+    monkeypatch.setattr(cache_build, "_remove_directory", swapping_before_the_open)
+    monkeypatch.setattr(cache_build, "_empty", swapping_once_emptied)
+    kept = {name: _snapshot(cache / f"{_LEFTOVER}{name}") for name in ("2-entry", "3-file", "4-link")}
+    outside_before = _snapshot(outside)
+
+    cache_build._sweep_leftovers(cache, _SHA)
+
+    assert {path.name for path in cache.iterdir()} == {
+        f"{_LEFTOVER}{name}" for name in (*kept, "5-to-an-entry", "6-to-a-link", "7-after-emptying")
+    }
+    assert {name: _snapshot(cache / f"{_LEFTOVER}{name}") for name in kept} == kept
+    assert sorted(path.name for path in (cache / f"{_LEFTOVER}5-to-an-entry").iterdir()) == [MANIFEST_NAME]
+    assert os.readlink(cache / f"{_LEFTOVER}6-to-a-link") == str(outside) and _snapshot(outside) == outside_before
+    assert os.path.samestat(os.lstat(cache / f"{_LEFTOVER}7-after-emptying"), emptied)
+
+
+_THEIR_LEFTOVER = """
+import os, sys
+os.mkdir(sys.argv[1], 0o700)
+with open(os.path.join(sys.argv[1], "half"), "w") as out:
+    out.write("half\\n")
+print("made")
+"""
+
+
+def test_a_builder_leaves_what_a_build_of_another_account_left() -> None:
+    with other_accounts() as accounts:
+        cache = accounts.shared_dir("cache")
+        theirs = cache / f"{_LEFTOVER}1-theirs"
+        assert _as(accounts, _THEIR_LEFTOVER, str(theirs)) == "made"
+        before = _snapshot(theirs)
+        cache_build._sweep_leftovers(cache, _SHA)
+        assert _snapshot(theirs) == before and before["."][0] == accounts.second
+
+
+def _made(tmp_path: Path) -> Path:
+    """An entry as the builder makes it in its own directory, to copy into the cache."""
+    made = _own_dir(tmp_path / "made", 0o755, MANIFEST_NAME)
+    _own_dir(made / "source", 0o755, "file")
+    return made
+
+
+@pytest.mark.parametrize(
+    ("put", "refusal"),
+    [
+        ("a-shared-directory", "so nothing is written to it: its mode is 0775, not 0700"),
+        ("a-copy-in-progress", "so nothing is written to it: it is not empty"),
+        ("a-link", "the directory the builder has just made: Not a directory"),
+    ],
+)
+def test_a_copy_refuses_what_was_put_in_place_of_its_new_directory_and_leaves_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, put: str, refusal: str
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    made = _made(tmp_path)
+    # Directories of the builder's, which another account of the group can rename where it has just made its own: one
+    # the group may write, another copy in progress, and (through a link) one outside the cache like the one it made.
+    target = {
+        "a-shared-directory": lambda: _own_dir(cache / "shared", 0o775),
+        "a-copy-in-progress": lambda: _own_dir(cache / ".other.tmp-1-x", 0o700, "half"),
+        "a-link": lambda: _own_dir(tmp_path / "elsewhere", 0o700),
+    }[put]()
+    before = _snapshot(target)
+    open_new_directory = cache_build._open_new_directory
+    pending: list[str] = []
+
+    def swapping(parent: int, name: str) -> int:
+        if not pending:
+            pending.append(name)
+            (cache / name).rename(tmp_path / "moved")
+            if put == "a-link":
+                (cache / name).symlink_to(target)
+            else:
+                target.rename(cache / name)
+        return open_new_directory(parent, name)
+
+    monkeypatch.setattr(cache_build, "_open_new_directory", swapping)
+    with pytest.raises(CacheBuildError, match=refusal):
+        cache_build._publish(made, cache / _SHA)
+    planted = cache / pending[0]
+    assert not (cache / _SHA).exists() and list((tmp_path / "moved").iterdir()) == []
+    assert _snapshot(target if put == "a-link" else planted) == before
+    assert planted.is_symlink() == (put == "a-link")
+
+
+@pytest.mark.parametrize("swapped", [False, True], ids=["in-place", "swapped-after-it-is-opened"])
+def test_a_copy_that_fails_removes_the_directory_it_opened_and_nothing_put_in_its_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swapped: bool
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    made = _made(tmp_path)
+    in_progress = _own_dir(cache / ".other.tmp-1-x", 0o700, "half")
+    before = _snapshot(in_progress)
+    open_new_directory, copy_file = cache_build._open_new_directory, cache_build._copy_file
+    pending: list[str] = []
+
+    def opening(parent: int, name: str) -> int:
+        descriptor = open_new_directory(parent, name)
+        if not pending:
+            pending.append(name)
+            if swapped:
+                (cache / name).rename(tmp_path / "moved")
+                in_progress.rename(cache / name)
+        return descriptor
+
+    def failing_on_the_manifest(source: Path, directory: int, name: str, mode: int) -> None:
+        if name == MANIFEST_NAME:
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        copy_file(source, directory, name, mode)
+
+    monkeypatch.setattr(cache_build, "_open_new_directory", opening)
+    monkeypatch.setattr(cache_build, "_copy_file", failing_on_the_manifest)
+    with pytest.raises(OSError, match=os.strerror(errno.ENOSPC)):
+        cache_build._publish(made, cache / _SHA)
+    if swapped:
+        # The directory the copy filled is wherever the account moved it, the builder's own to remove.
+        assert {path.name for path in cache.iterdir()} == {pending[0]} and _snapshot(cache / pending[0]) == before
+        assert (tmp_path / "moved" / "source" / "file").is_file()
+    else:
+        assert {path.name for path in cache.iterdir()} == {in_progress.name} and _snapshot(in_progress) == before
