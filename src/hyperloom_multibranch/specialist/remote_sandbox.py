@@ -45,12 +45,10 @@ from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.sandbox import RunSettings, Sandbox, SandboxGone, SandboxUnavailable
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, CommandResult
 from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, read_tail
-from hyperloom_multibranch.specialist.agent_watch import GRACE_SECONDS, MARKER
+from hyperloom_multibranch.specialist.agent_watch import GRACE_SECONDS, MARKER, PROCESS_MARKER
 
 logger = logging.getLogger(__name__)
 
-#: Set, besides :data:`MARKER`, to ``<root>/<number>`` on every process of one command.
-PROCESS_MARKER = "HYPERLOOM_AGENT_PROCESS"
 #: The exit code of a process that ended with no exit code of its own, as a SIGKILL reports it.
 LOST = 137
 #: How often a running process is probed for a launcher that is gone or a sandbox that ended.
