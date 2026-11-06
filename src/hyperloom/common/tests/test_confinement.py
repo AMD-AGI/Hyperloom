@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,12 +44,13 @@ def home(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def no_passwd_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This process has no passwd entry, so the masks below come only from what each test configures."""
+    """This process has no passwd entry, as the module under test sees it (pytest's own lookups are left alone), so
+    the masks below come only from what each test configures."""
 
     def unknown(uid: int):
         raise KeyError(uid)
 
-    monkeypatch.setattr(confinement.pwd, "getpwuid", unknown)
+    monkeypatch.setattr(confinement, "pwd", SimpleNamespace(getpwuid=unknown))
 
 
 @pytest.fixture
