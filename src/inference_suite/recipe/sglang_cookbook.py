@@ -31,6 +31,7 @@ from inference_suite.recipe.jslit import JsLiteralError, exported_value, has_exp
 from inference_suite.recipe.model import (
     SGLANG_ENTRYPOINT,
     SGLANG_RUNNER_OWNED,
+    SGLANG_TOPOLOGY,
     RecipeSourceError,
     RepoBundle,
     SourceLaunch,
@@ -49,8 +50,6 @@ _ENTRYPOINTS = (("python", "-m", "sglang.launch_server"), SGLANG_ENTRYPOINT, ("s
 _MODEL_FLAGS = frozenset({"model-path", "model"})
 _MAX_RUNNING = frozenset({"max-running-requests"})
 _DEFAULT_STRATEGY = "balanced"
-_TP = frozenset({"tp", "tp-size", "tensor-parallel-size"})
-_EP = frozenset({"ep", "ep-size", "expert-parallel-size"})
 _SPECULATIVE = frozenset({"speculative-algorithm"})
 _HICACHE = frozenset({"enable-hierarchical-cache"})
 _PLACEHOLDER = re.compile(r"{{(\w+)}}")
@@ -157,15 +156,6 @@ def _paths(bundle: RepoBundle, directory: str, suffix: str) -> list[str]:
     return sorted(path for path in bundle.files if path.startswith(directory) and path.endswith(suffix))
 
 
-def _topology(args: Sequence[str]) -> Topology:
-    occurrences = argv_flag_occurrences(args)
-    tp, ep = last_alias_value(occurrences, _TP), last_alias_value(occurrences, _EP)
-    try:
-        return Topology(tp=int(tp or 1), ep=int(ep or 1))
-    except ValueError as error:
-        raise RecipeSourceError(f"its tp {tp!r} or ep {ep!r} is not a size") from error
-
-
 def _misfit(recipe: _Recipe, topology: Topology, query: LaunchQuery) -> str | None:
     """Why ``recipe``, which serves the query's model on a like board, cannot serve ``query``."""
     occurrences = argv_flag_occurrences(recipe.command.args)
@@ -180,7 +170,7 @@ def _misfit(recipe: _Recipe, topology: Topology, query: LaunchQuery) -> str | No
 def _launch(recipe: _Recipe, query: LaunchQuery, bundle: RepoBundle) -> SourceLaunch | str:
     """The launch ``recipe`` gives ``query``, or why it gives none."""
     try:
-        topology = _topology(recipe.command.args)
+        topology = SGLANG_TOPOLOGY.read(recipe.command.args)
     except RecipeSourceError as error:
         return f"{recipe.path} {recipe.locator}: {error}"
     misfit = _misfit(recipe, topology, query)

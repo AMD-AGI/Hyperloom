@@ -39,7 +39,7 @@ from inference_suite.recipe.model import (
 from inference_suite.recipe.resolve import CLIENT_TOOL, Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import parse_user_file
-from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot
+from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, rendering_url
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _FETCHED = 1_793_000_000
@@ -393,3 +393,20 @@ def test_a_snapshot_missing_the_framework_cookbook_is_refused():
             dataclasses.replace(_snapshot(), vllm_recipes=None),
             gpus=8,
         )
+
+
+def test_vllm_short_expert_parallel_reads_the_same_topology_from_a_recipe_and_the_default_table():
+    url = rendering_url(_DSR1, "mi355x", "baseline")
+    responses = dict(_snapshot().vllm_recipes.responses)
+    rendered = json.loads(responses[url].body)
+    rendered["argv"] = [*rendered["argv"][:3], "-tp", "4", "-ep"]
+    responses[url] = dataclasses.replace(responses[url], body=json.dumps(rendered))
+    recipe = _base(
+        _fixed(framework="vllm", isl=1024, osl=1024),
+        dataclasses.replace(_snapshot(), vllm_recipes=VllmRecipesSnapshot(responses)),
+    )
+    default = _base(_fixed("Qwen/Qwen3-8B", framework="vllm", isl=1024, osl=1024, tp=4, ep=4))
+
+    assert (recipe.source.kind, default.source.kind) == (SourceKind.VLLM_RECIPES, SourceKind.DEFAULT_TABLE)
+    for base in (recipe, default):
+        assert base.topology == VLLM_TOPOLOGY.read(base.args) == Topology(4, 4)
