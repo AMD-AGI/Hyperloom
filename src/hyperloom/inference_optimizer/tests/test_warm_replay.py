@@ -808,12 +808,14 @@ async def test_warm_replay_runs_a_recipe_that_changes_the_baseline(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_warm_replay_runs_restated_args_under_reference_launch_controls(tmp_path):
+async def test_warm_replay_runs_restated_args_under_reference_launch_controls(tmp_path, monkeypatch):
     """Materialization re-applies a replacing reference launch, so the replay need not launch the baseline config."""
     recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8")
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
     _vllm_baseline(tmp_path, coord)
-    coord.shared_state.reference_launch_controls = {"args_mode": "replace"}
+    session = tmp_path / "session"
+    SharedState(reference_launch_controls={"args_mode": "replace"}).save(session)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
 
     assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
 

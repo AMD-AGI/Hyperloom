@@ -1131,10 +1131,12 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         launch controls: materialization rebuilds the args from the reference, so
         the replay's launch is not the baseline config plus the request.
         """
-        state = self.shared_state
-        if code_changes or state.reference_launch_controls:
+        from ..actions.executors._workload_envs import resolve_reference_launch
+
+        _, _, reference_controls = resolve_reference_launch()
+        if code_changes or reference_controls:
             return False
-        if not restates_the_baseline_launch(state, args, envs):
+        if not restates_the_baseline_launch(self.shared_state, args, envs):
             return False
         log.info("PRELUDE: warm replay skipped: %r %s only restate the baseline launch", args, sorted(envs))
         self._skip_warm_replay(

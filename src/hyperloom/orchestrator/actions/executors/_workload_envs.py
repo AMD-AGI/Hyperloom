@@ -604,7 +604,10 @@ def _operator_extra_env() -> dict[str, str]:
 
 
 def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
-    """Read the accepted reference recipe and its dedicated launch controls."""
+    """The session's reference launch: its server args, envs and launch controls.
+
+    The one reader of ``SharedState.reference_*``: every other module asks this function, never the state.
+    """
     from hyperloom.inference_optimizer.session.paths import session_dir
 
     from ...state.shared_state import SharedState
