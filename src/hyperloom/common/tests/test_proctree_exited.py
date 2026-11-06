@@ -96,6 +96,7 @@ def test_a_process_whose_leader_exited_runs_until_its_last_thread_has() -> None:
         _wait_for(_leader_exited_thread_blocked, "the leader did not exit while its other thread blocked")
         assert _state(child.pid) == "Z"
         assert proctree.running(child.pid) is True, "a thread of it still runs"
+        assert proctree.leader_exited(child.pid) is True, "its leader alone has exited"
         os.close(write_fd)
         write_fd = -1
         _wait_for(lambda: list(_thread_states(child.pid)) == [child.pid], "the other thread did not exit")
@@ -106,6 +107,16 @@ def test_a_process_whose_leader_exited_runs_until_its_last_thread_has() -> None:
         child.kill()
         child.wait()
     assert child.returncode == 0, "the process ended when its last thread did"
+
+
+def test_leader_exited_reads_the_leader_and_leaves_a_gone_pid_to_running(
+    zombie: subprocess.Popen[bytes], sleeper: subprocess.Popen[bytes]
+) -> None:
+    assert proctree.leader_exited(zombie.pid) is True
+    assert proctree.leader_exited(sleeper.pid) is False
+    sleeper.kill()
+    sleeper.wait()
+    assert proctree.leader_exited(sleeper.pid) is False
 
 
 def test_a_zombie_this_process_may_not_signal_is_not_running(
