@@ -164,7 +164,7 @@ def test_a_branch_served_a_record_carries_it_for_arbor_s_start_check(tmp_path: P
     record = _base(tmp_path)
     spec, checkout = _spec(tmp_path, launch=str(record)), _write(tmp_path / "checkout", CHECKOUT_FILES)
 
-    manifest = arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout, {}), BRANCH_RUN)
+    manifest = arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
 
     carried = checkout.absolute() / BASE_LAUNCH_FILE
     component = manifest.config["component"]
@@ -179,7 +179,7 @@ def test_an_arbor_without_the_check_runs_the_record_unchecked_but_not_another_en
     checkout = _checkout(tmp_path, GATED_COMPONENT)
     config = arbor_config(_spec(tmp_path, launch=str(record)), checkout, BRANCH_RUN)
 
-    said = [reason for reason in refusals(config, {}, declared_keys(checkout)) if PINNED in reason]
+    said = [reason for reason in refusals(config, declared_keys(checkout)) if PINNED in reason]
     fitted, notes = fit_keys(config, checkout)
 
     assert config["component"]["entrypoint"] == ["python3", "-m", "vllm.entrypoints.openai.api_server"]
