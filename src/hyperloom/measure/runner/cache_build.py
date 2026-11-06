@@ -36,16 +36,19 @@ distribution's own build requirements name is never fetched. The lock must there
   (``0664``) and the cache directory. Nothing else of the cache is the group's to write, because the cache is shared
   with whatever else that group can run: an entry is built where only its builder can reach, since the build runs code
   from its tree (the build environment), and is copied into the cache without following or writing over anything
-  another account may have put there, writable by its builder alone (:func:`_publish`). A builder of another account
-  cannot remove the directory a builder killed while copying left behind (``.<sha>.tmp-*``); it builds beside it.
+  another account may have put there, writable by its builder alone (:func:`_publish`). What a builder killed while
+  copying left behind (``.<sha>.tmp-*``) is removed by the next builder of its account, and only when it is a directory
+  that builder made for itself: its own and ``0700`` (:func:`_sweep_leftovers`). Anything else of that name stays, a
+  builder of another account's included, and the entry is built beside it.
 - An entry that is already there is used when it is complete and still what a build would write; one that differs is
   never modified: the build refuses and names the difference (:class:`CacheConflict`). Its manifest file is read once,
   the entry is checked against those bytes and the pin returned is their SHA-256, as a build returns the SHA-256 of the
   text it wrote: never a fresh read of the cache. What the manifest records is checked against the commit, not only
   against the entry: the same commit tree and wheel target, this builder's script, the commit's archive and source
   made again from the clone in a directory of the builder's own (as a build makes them), whose size and hash must be
-  what the manifest records, and every wheel built from a source distribution built again (below). An entry with no
-  manifest is the remains of a build that did not finish; it is removed and built again.
+  what the manifest records, and every wheel built from a source distribution built again (below). No builder leaves an
+  entry without its manifest in place, since one is renamed into place whole, so such an entry is a difference as well
+  and is left as it is: an account of the group may have renamed a directory of the builder's there.
 - ``<entry>/source.tar`` is the commit's ``git archive`` made with every setting that changes its bytes fixed
   (``git -c tar.umask=0022 -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null archive --format=tar
   <sha>``), in a throwaway repository that borrows only the objects of the builder's clone and with git's system and
@@ -110,6 +113,7 @@ from __future__ import annotations
 import argparse
 import re
 import fcntl
+import fnmatch
 import hashlib
 import importlib.metadata
 import io
@@ -125,8 +129,8 @@ import tempfile
 import time
 import zipfile
 import zlib
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -609,51 +613,142 @@ def _publish(made: Path, final: Path) -> None:
     (:data:`_NEW_FILE_FLAGS`). Whatever another account plants, the builder writes the entry and nothing else, into
     what it opened; what is in place is vouched for by the pin, as ever. The new directory is the builder's alone
     (``0700``) until it is whole, each copy has the mode of what it copies without the group's and others' write
-    (:data:`_ENTRY_BITS`), and the manifest is copied last."""
+    (:data:`_ENTRY_BITS`), and the manifest is copied last. A copy that fails removes the directory it opened, through
+    that descriptor, and nothing another account put in its place (:func:`_remove_directory`)."""
     root = os.open(final.parent, _CACHE_FLAGS)
     pending = f".{final.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     try:
         os.mkdir(pending, _OWN_DIR_MODE, dir_fd=root)
+        directory = _open_new_directory(root, pending)
+        opened = os.fstat(directory)
         try:
-            _copy_tree(made, root, pending, last=MANIFEST_NAME)
+            _copy_tree(made, directory, last=MANIFEST_NAME)
             os.rename(pending, final.name, src_dir_fd=root, dst_dir_fd=root)
         except BaseException:
-            shutil.rmtree(final.parent / pending, ignore_errors=True)
+            _remove_directory(root, pending, lambda found: os.path.samestat(found, opened))
             raise
+        finally:
+            os.close(directory)
     finally:
         os.close(root)
 
 
+def _private_problem(info: os.stat_result) -> str:
+    """Why ``info`` is not that of a directory the builder made in the cache for itself: a directory of its effective
+    uid with mode ``0700`` (and the setgid bit it takes from a setgid cache), so no other account can have written in
+    it; empty when it is."""
+    if not stat.S_ISDIR(info.st_mode):
+        return "it is not a directory"
+    if info.st_uid != os.geteuid():
+        return f"it is owned by uid {info.st_uid}, not by this builder's {os.geteuid()}"
+    mode = stat.S_IMODE(info.st_mode) & ~stat.S_ISGID
+    if mode != _OWN_DIR_MODE:
+        return f"its mode is {mode:04o}, not {_OWN_DIR_MODE:04o}"
+    return ""
+
+
+def _is_private(info: os.stat_result) -> bool:
+    return not _private_problem(info)
+
+
 def _open_new_directory(parent: int, name: str) -> int:
     """The directory ``name`` that the builder has just made in the directory open as ``parent``, opened (never through
-    a link) for :func:`_copy_tree` to fill."""
-    return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+    a link) for :func:`_copy_tree` to fill.
+
+    Raises:
+        CacheBuildError: When what the name opens is not still the builder's own, ``0700`` and empty, as made
+            (:func:`_private_problem`): another account of the group renamed it and put its own, a link or another
+            directory of the builder's in its place. Nothing is written to it.
+    """
+    try:
+        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+    except OSError as exc:
+        raise CacheBuildError(f"cannot open {name}, the directory the builder has just made: {exc.strerror}") from None
+    problem = _private_problem(os.fstat(descriptor)) or ("it is not empty" if os.listdir(descriptor) else "")
+    if problem:
+        os.close(descriptor)
+        raise CacheBuildError(
+            f"{name} is not the directory the builder has just made, so nothing is written to it: {problem}"
+        )
+    return descriptor
 
 
-def _copy_tree(source: Path, parent: int, name: str, last: str = "") -> None:
-    """Fill the directory ``name`` that the builder has just made in the directory open as ``parent``
-    (:func:`_open_new_directory`) with a copy of what is in ``source`` (``last`` after the rest), then give it
-    ``source``'s mode without the group's and others' write (:func:`_publish`).
+def _copy_tree(source: Path, directory: int, last: str = "") -> None:
+    """Fill the new directory open as ``directory`` (:func:`_open_new_directory`) with a copy of what is in ``source``
+    (``last`` after the rest), then give it ``source``'s mode without the group's and others' write (:func:`_publish`).
 
     Raises:
         CacheBuildError: For something in ``source`` that is not a directory, a regular file or a link.
     """
-    directory = _open_new_directory(parent, name)
+    for entry in sorted(os.scandir(source), key=lambda item: (item.name == last, item.name)):
+        info = entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode):
+            os.symlink(os.readlink(entry.path), entry.name, dir_fd=directory)
+        elif stat.S_ISDIR(info.st_mode):
+            os.mkdir(entry.name, _OWN_DIR_MODE, dir_fd=directory)
+            child = _open_new_directory(directory, entry.name)
+            try:
+                _copy_tree(Path(entry.path), child)
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(info.st_mode):
+            _copy_file(Path(entry.path), directory, entry.name, info.st_mode)
+        else:
+            raise CacheBuildError(f"{entry.path} is not a directory, a regular file or a link")
+    os.fchmod(directory, stat.S_IMODE(os.stat(source).st_mode) & _ENTRY_BITS)
+
+
+def _remove_directory(parent: int, name: str, ours: Callable[[os.stat_result], bool]) -> None:
+    """Remove the directory ``name`` of the directory open as ``parent`` when, opened without following a link, it is
+    ``ours`` by its ``fstat``: what is in it through that descriptor, never following a link, and the directory itself
+    only while ``name`` still names it. Best effort, as the cleanup after a build that did not finish is: what cannot be
+    removed stays, and the next build is made beside it."""
+    with suppress(OSError):
+        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+        try:
+            found = os.fstat(descriptor)
+            if ours(found):
+                _empty(descriptor)
+                if os.path.samestat(os.stat(name, dir_fd=parent, follow_symlinks=False), found):
+                    os.rmdir(name, dir_fd=parent)
+        finally:
+            os.close(descriptor)
+
+
+def _empty(directory: int) -> None:
+    """Remove what is in the directory open as ``directory``, through descriptors and never following a link."""
+    with os.scandir(directory) as entries:
+        found = list(entries)
+    for entry in found:
+        if entry.is_dir(follow_symlinks=False):
+            child = os.open(entry.name, _DIRECTORY_FLAGS, dir_fd=directory)
+            try:
+                _empty(child)
+            finally:
+                os.close(child)
+            os.rmdir(entry.name, dir_fd=directory)
+        else:
+            os.unlink(entry.name, dir_fd=directory)
+
+
+def _sweep_leftovers(cache_root: Path, sha: str) -> None:
+    """Remove what builders of this account killed while copying an entry of ``sha`` left beside it (``.<sha>.tmp-*``,
+    :func:`_publish`): each a directory of the builder's own with mode ``0700`` when it is checked with ``lstat`` and
+    again by ``fstat`` once it is opened without following a link (:func:`_private_problem`). Another account of the
+    group can rename whatever is in the cache directory to such a name, but cannot move a directory it cannot write
+    from elsewhere into it, so that leaves only a directory a builder of this account made there for itself; anything
+    else (an entry, a directory of another account's builder, a link) is left as it is."""
+    root = os.open(cache_root, _CACHE_FLAGS)
     try:
-        for entry in sorted(os.scandir(source), key=lambda item: (item.name == last, item.name)):
-            info = entry.stat(follow_symlinks=False)
-            if stat.S_ISLNK(info.st_mode):
-                os.symlink(os.readlink(entry.path), entry.name, dir_fd=directory)
-            elif stat.S_ISDIR(info.st_mode):
-                os.mkdir(entry.name, _OWN_DIR_MODE, dir_fd=directory)
-                _copy_tree(Path(entry.path), directory, entry.name)
-            elif stat.S_ISREG(info.st_mode):
-                _copy_file(Path(entry.path), directory, entry.name, info.st_mode)
-            else:
-                raise CacheBuildError(f"{entry.path} is not a directory, a regular file or a link")
-        os.fchmod(directory, stat.S_IMODE(os.stat(source).st_mode) & _ENTRY_BITS)
+        for name in fnmatch.filter(os.listdir(root), f".{sha}.tmp-*"):
+            try:
+                listed = os.stat(name, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if _is_private(listed):
+                _remove_directory(root, name, _is_private)
     finally:
-        os.close(directory)
+        os.close(root)
 
 
 def _copy_file(source: Path, directory: int, name: str, mode: int) -> None:
@@ -875,26 +970,28 @@ def _links(entry: Path) -> list[str]:
     return [f"{path} is a link" for path in found]
 
 
-def _use_or_clear(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry | None:
-    """The finished entry at ``final`` if it is what a build would write, ``None`` when there is nothing to use.
+def _reuse(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry | None:
+    """The entry at ``final`` if it is what a build would write, ``None`` when there is none.
 
     An entry that is a link, or holds one where a builder makes a file or a directory (:func:`_links`), differs and is
-    not read. An entry that has no manifest is an unfinished build's remains and is removed. A finished one is never
-    written to. Its manifest file is read once: the entry is checked against those bytes (:func:`check_entry` pinned to
-    their hash, so a manifest written over meanwhile is refused), those bytes against the commit, its wheels built from
-    a source distribution included (:func:`_differences`), and the pin returned is their SHA-256.
+    not read; so does one with no manifest, which no builder leaves in place. An entry is never written to or removed.
+    Its manifest file is read once: the entry is checked against those bytes (:func:`check_entry` pinned to their hash,
+    so a manifest written over meanwhile is refused), those bytes against the commit, its wheels built from a source
+    distribution included (:func:`_differences`), and the pin returned is their SHA-256.
 
     Raises:
-        CacheConflict: When the entry is finished and differs.
+        CacheConflict: When there is an entry and it differs.
     """
     if not os.path.lexists(final):
         return None
     links = _links(final)
     if links:
         raise CacheConflict(f"{final} is not what a build of {sha} writes, so it is left alone: {'; '.join(links[:3])}")
-    if final.is_dir() and not (final / MANIFEST_NAME).is_file():
-        shutil.rmtree(final)
-        return None
+    if not (final / MANIFEST_NAME).is_file():
+        raise CacheConflict(
+            f"{final} is not what a build of {sha} writes, so it is left alone: it has no {MANIFEST_NAME}, and no "
+            "builder puts an entry in place without one"
+        )
     raw = (final / MANIFEST_NAME).read_bytes()
     pin = hashlib.sha256(raw).hexdigest()
     problems = check_entry(final, sha, pin, verify_hash=True) or _differences(repo, tree, final, raw, options)
@@ -967,9 +1064,8 @@ def ensure_runner_cache(repo: Path, sha: str, cache_root: Path, options: BuildOp
     _shared_dirs(cache_root)
     final = cache_root / sha
     with _exclusive(build_lock(cache_root, sha), options.lock_timeout_sec):
-        for leftover in cache_root.glob(f".{sha}.tmp-*"):
-            shutil.rmtree(leftover, ignore_errors=True)
-        return _use_or_clear(repo, sha, tree, final, options) or _build(repo, sha, tree, final, options)
+        _sweep_leftovers(cache_root, sha)
+        return _reuse(repo, sha, tree, final, options) or _build(repo, sha, tree, final, options)
 
 
 def _repeatable(parser: argparse.ArgumentParser, flag: str, help_text: str) -> None:
