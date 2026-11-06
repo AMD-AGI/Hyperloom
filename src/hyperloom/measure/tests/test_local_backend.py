@@ -766,7 +766,7 @@ def _graded_sweep(tmp_path: Path, *levels: int, run_eval: str = "true") -> TestC
 
 
 @pytest.mark.parametrize("ambient_conc", [None, "64"], ids=["clean", "conc_left_in_the_process"])
-def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_measured_round_changes(
+def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_bench_evaluates(
     grid, server, tmp_path, monkeypatch, ambient_conc
 ):
     if ambient_conc is None:
@@ -782,9 +782,13 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
     boots = [c for c in grid.calls if c["launch"].lifecycle_boot_only]
     measured = [c for c in grid.calls if not c["launch"].lifecycle_boot_only]
     assert [c["grid"][0].name for c in boots] == ["c8", "c4"], "the failed boot and the one it stepped down to"
-    assert [c["grid"][0].name for c in measured] == ["c4", "c2"]
+    assert [c["grid"][0].name for c in measured] == ["c4", "c2", "eval"]
     assert all(c["recipe"].base.extra_envs == BOOT_ENVS for c in boots)
-    assert all(c["recipe"].base.extra_envs is None for c in measured)
+    assert [c["recipe"].base.extra_envs for c in measured] == [
+        {"RUN_EVAL": "false"},
+        {"RUN_EVAL": "false"},
+        {"RUN_EVAL": "true", "EVAL_ONLY": "true"},
+    ]
     assert [Path(p).read_text() for p in call.points] == points, "the points are the ones the call was accepted on"
     for index, boot in enumerate(boots):
         level = (8, 4)[index]
@@ -792,13 +796,132 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
         assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1"), f"the boot at {level}"
         assert "MAGPIE_RUN_PHASE" not in envs and envs["CONC"] == level
         assert envs["NUM_WARMUPS"] == min(level, 8), "a variable outside the reuse check is the point's own"
-    for level, round_ in zip((4, 2), measured, strict=True):
+    for level, round_ in zip((4, 2, 4), measured, strict=True):
         envs = _envs_handed_to_magpie(grid, tmp_path, round_)
-        assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"], envs["NUM_WARMUPS"]) == ("true", level * 10, min(level, 8))
+        assert (envs["NUM_PROMPTS"], envs["NUM_WARMUPS"], envs["CONC"]) == (level * 10, min(level, 8), level)
         assert "MAGPIE_RUN_PHASE" not in envs
-    assert [r.phase for r in outcome.rounds if r.point == 1] == ["measure", "accuracy"]
+    assert [_envs_handed_to_magpie(grid, tmp_path, c)["RUN_EVAL"] for c in measured] == ["false", "false", "true"], (
+        "no bench evaluates; one evaluation, from the level the server booted on, after the last bench"
+    )
+    assert [(r.point, r.phase) for r in outcome.rounds] == [(1, "measure"), (2, "measure"), (1, "accuracy")]
     assert outcome.returncode == 0
     assert os.environ.get("CONC") == ambient_conc, "the process environment is put back after the test"
+
+
+def _graded_sweep_answers(grid: _Grid, *levels: int, score: float = 0.64) -> VariantResult:
+    """The scripted answers of a graded sweep: each level's directory holds a score no round of the test wrote, and the
+    evaluation's score sits in the evaluation round's directory."""
+    for level in levels:
+        bench = grid.answers[f"c{level}"] = grid.result(f"c{level}", output_throughput=100.0 * level)
+        _lm_eval_results(Path(bench.workspace) / "eval_output", level / 100.0)
+    evaluation = grid.answers["eval"] = grid.result("eval", note="evaluation_only")
+    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", score)
+    return evaluation
+
+
+def test_a_graded_sweep_benches_every_level_and_then_evaluates_once_on_the_server_its_boot_left_up(
+    grid, server, tmp_path
+):
+    """Every level after the first used to bench on the KV pool the evaluation of the level before it left full."""
+    evaluation = _graded_sweep_answers(grid, 2, 8, 4)
+    call = _graded_sweep(tmp_path, 2, 8, 4)
+
+    outcome = _run(call)
+
+    assert [c["grid"][0].name for c in grid.calls] == ["c8", "c8", "c4", "c2", "eval"]
+    calls = list(zip(grid.calls, grid.configs))
+    assert [_benches(c, config) for c, config in calls[1:]] == [True, True, True, False]
+    assert [_evaluates(c, config) for c, config in calls] == [False, False, False, False, True], (
+        "nothing evaluates before the last bench"
+    )
+    assert [c["launch"].evaluation_only for c in grid.calls] == [False, False, False, False, True]
+    assert grid.calls[-1]["recipe"].base_yaml_path == call.points[1], "from the level the server booted on"
+    assert [c["launch"].server_already_ready for c in grid.calls] == [False, True, True, True, True], "one boot"
+    assert [_lifecycle(c)["cleanup"] for c in grid.calls] == [False, False, False, False, True]
+    assert len(server.teardowns) == 1
+    assert [(r.point, r.phase, r.returncode) for r in outcome.rounds] == [
+        (1, "measure", 0),
+        (2, "measure", 0),
+        (0, "measure", 0),
+        (1, "accuracy", 0),
+    ]
+    assert [r.accuracy for r in outcome.rounds] == [
+        (),
+        (),
+        (),
+        (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),),
+    ]
+    assert outcome.rounds[-1].output_dir == Path(evaluation.workspace)
+    assert outcome.returncode == 0
+
+
+def test_the_rounds_file_of_a_graded_sweep_lists_every_bench_and_then_its_one_evaluation(grid, server, tmp_path):
+    _graded_sweep_answers(grid, 8, 4)
+
+    outcome = _run(_graded_sweep(tmp_path, 8, 4))
+
+    document = rounds_document(outcome, tmp_path / "ws")
+    assert [(entry["point"], entry["phase"], entry["dir"]) for entry in document] == [
+        (0, "measure", "c8"),
+        (1, "measure", "c4"),
+        (0, "accuracy", "eval"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("answer", "returncode"),
+    [
+        (dict(status="failed", returncode=5, error="boom", error_class="x"), 5),
+        (
+            dict(status="skipped", returncode=None, error_class="session_time_exhausted"),
+            SESSION_TIME_EXHAUSTED_RETURNCODE,
+        ),
+    ],
+    ids=["failed", "stopped"],
+)
+def test_a_graded_sweep_whose_bench_fails_or_is_stopped_runs_no_evaluation(grid, server, tmp_path, answer, returncode):
+    _graded_sweep_answers(grid, 8, 4, 2)
+    grid.answers["c4"] = grid.result("c4", **answer)
+
+    outcome = _run(_graded_sweep(tmp_path, 8, 4, 2))
+
+    assert "eval" not in [c["grid"][0].name for c in grid.calls]
+    assert not any(r.phase == "accuracy" for r in outcome.rounds)
+    assert outcome.returncode == returncode and len(server.teardowns) == 1
+
+
+def test_a_graded_sweep_whose_evaluation_fails_keeps_every_bench_and_fails_its_accuracy(grid, server, tmp_path):
+    _graded_sweep_answers(grid, 8, 4)
+    grid.answers["eval"] = grid.result("eval", status="failed", returncode=1, error="server died", error_class="x")
+
+    outcome = _run(_graded_sweep(tmp_path, 8, 4))
+
+    assert [(r.point, r.phase, r.returncode) for r in outcome.rounds] == [
+        (0, "measure", 0),
+        (1, "measure", 0),
+        (0, "accuracy", 1),
+    ]
+    assert outcome.rounds[-1].accuracy == (), "a score from an evaluation that failed is no score"
+    assert outcome.returncode == 1 and len(server.teardowns) == 1
+
+
+def test_a_graded_sweep_on_a_framework_that_cannot_hold_a_server_evaluates_in_each_levels_own_round(
+    monkeypatch, grid, tmp_path
+):
+    """Each level has a server of its own, which no bench uses after its evaluation."""
+    _Server(monkeypatch, eligible=False)
+    _graded_sweep_answers(grid, 8, 4)
+
+    outcome = _run(_graded_sweep(tmp_path, 8, 4))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["c8", "c4"]
+    assert all(_lifecycle(c) is None and c["recipe"].base.extra_envs is None for c in grid.calls)
+    assert [(r.point, r.phase) for r in outcome.rounds] == [
+        (0, "measure"),
+        (0, "accuracy"),
+        (1, "measure"),
+        (1, "accuracy"),
+    ]
 
 
 def test_a_sweep_that_does_not_run_accuracy_boots_the_same_way(grid, server, tmp_path):
