@@ -36,8 +36,8 @@ from hyperloom_multibranch.contracts.blackboard import ClaimKey, ClaimLost, Role
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, intent
-from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.fake_model import Fate, FailureRatios, FakeToolboxConfig, NoiseModel
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FailureRatios, FakeToolboxConfig, NoiseModel
 
 DELTA = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
 QUIET = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
