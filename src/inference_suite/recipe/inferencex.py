@@ -558,14 +558,20 @@ def _arm_point(points: Sequence[InferencexPoint], target: int) -> InferencexPoin
     return min(fitting, key=lambda point: point.conc) if fitting else None
 
 
-def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
-    """The launch each InferenceX arm that fits ``query`` binds at ``max(query.concurrencies)``, one per arm."""
-    served = [
+def served_points(query: LaunchQuery, bundle: RepoBundle) -> tuple[InferencexPoint, ...]:
+    """The points of ``bundle`` that serve ``query``'s model with its framework on a board interchangeable with its own:
+    every point a snapshot must record InferenceX's selection for to answer ``query``."""
+    return tuple(
         point
-        for point in inferencex_points(snapshot.bundle)
+        for point in inferencex_points(bundle)
         if (point.model, point.framework) == (query.model_id, query.framework)
         and boards_interchangeable(query.board, point.board)
-    ]
+    )
+
+
+def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
+    """The launch each InferenceX arm that fits ``query`` binds at ``max(query.concurrencies)``, one per arm."""
+    served = served_points(query, snapshot.bundle)
     if not served:
         return SourceMiss(
             SourceKind.INFERENCEX, f"no entry serves {query.model_id} with {query.framework} on a {query.board}"
@@ -606,5 +612,6 @@ __all__ = [
     "Scenario",
     "inferencex_launches",
     "inferencex_points",
+    "served_points",
     "srtctl_cli_args",
 ]

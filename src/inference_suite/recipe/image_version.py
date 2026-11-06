@@ -35,13 +35,20 @@ def tag_version(image: str | None) -> str | None:
     return found.group(1) if found else None
 
 
+def release_version(tag: str) -> str | None:
+    """The framework version a release ``tag`` names (``v0.5.23`` gives ``0.5.23``), else ``None``: a release
+    candidate or a nightly names none."""
+    found = _RELEASE_VERSION.fullmatch(tag)
+    return found.group(1) if found else None
+
+
 def recipe_image_facts(image: str | None, latest_release: str | None) -> ImageFacts:
     """The D6 facts of a recipe launch run from ``image``, where ``latest_release`` is the framework's release tag
     when the snapshot was taken (``None`` if it recorded none)."""
     version = tag_version(image)
     if version is not None:
         return ImageFacts(run=None, recipe=image, framework_version=version, version_basis=VersionBasis.TAG)
-    released = _RELEASE_VERSION.fullmatch(latest_release) if latest_release else None
+    released = release_version(latest_release) if latest_release else None
     if released is None:
         raise RecipeSourceError(
             f"the recipe image {image!r} names no framework version, and the snapshot records no release version to "
@@ -50,10 +57,10 @@ def recipe_image_facts(image: str | None, latest_release: str | None) -> ImageFa
     return ImageFacts(
         run=None,
         recipe=image,
-        framework_version=released.group(1),
+        framework_version=released,
         version_basis=VersionBasis.ASSUMED_LATEST,
         assumed_release=latest_release,
     )
 
 
-__all__ = ["NO_RECIPE_IMAGE", "recipe_image_facts", "tag_version"]
+__all__ = ["NO_RECIPE_IMAGE", "recipe_image_facts", "release_version", "tag_version"]

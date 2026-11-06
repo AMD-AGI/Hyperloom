@@ -388,6 +388,7 @@ testpaths = [
 pythonpath = ["src", ".", "scripts"]
 markers = [
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
+    "upstream_sources: runs a recipe source's own code at a pinned commit fetched over the network; skip with '-m \"not upstream_sources\"' in CI.",
     "claw_policy: a sandbox contract test of the Claw sandbox service's own policy (sealed paths, signing identity, platform metadata, avoid-nodes); it runs against the local provider and a real Claw service, not against the E2B stand-in.",
 ]
 
@@ -542,7 +543,7 @@ fail_under = 90
 # Base trailing argv for ``pytest`` in CI; the workflow appends sharding
 # (``--splits``/``--group``) and ``-n`` from the values below.
 pytest_ci_args = [
-    "-m", "not targeted_build_e2e",
+    "-m", "not targeted_build_e2e and not upstream_sources",
     "--cov=.", "--cov-report=",
 ]
 # In-runner pytest-xdist workers per shard job (``-n auto`` yields 1 on the
