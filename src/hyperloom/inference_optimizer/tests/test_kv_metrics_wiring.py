@@ -17,11 +17,11 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
-from hyperloom.orchestrator.actions.executors._kv_metrics import (
+from hyperloom.orchestrator.actions.executors._kv_poll import KvSample
+from hyperloom.orchestrator.actions.executors._kv_record import (
     KV_ARTIFACT_NAME,
     KvMetricsRecorder,
     KvRound,
-    KvSample,
     counter_delta,
 )
 
@@ -738,7 +738,7 @@ def test_a_round_that_nobody_reached_is_still_unavailable(tmp_path):
 
 
 def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
-    from hyperloom.orchestrator.actions.executors._kv_metrics import (
+    from hyperloom.orchestrator.actions.executors._kv_poll import (
         aggregate_series,
         read_aiperf_server_metrics,
     )
@@ -858,7 +858,7 @@ def test_the_port_is_read_from_the_server_the_config_did_not_pin(tmp_path):
     can only ever be right for one of the two. The server's own banner is right
     for both.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_server_log, resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_poll import port_from_server_log, resolve_metrics_port
 
     nested = tmp_path / "benchmark_vllm_1"
     nested.mkdir()
@@ -888,7 +888,7 @@ def test_agentx_rust_frontend_port_is_read_from_vllm_command(tmp_path):
         encoding="utf-8",
     )
 
-    from hyperloom.orchestrator.actions.executors._kv_metrics import (
+    from hyperloom.orchestrator.actions.executors._kv_poll import (
         port_from_server_command,
         resolve_metrics_port,
     )
@@ -916,7 +916,7 @@ def test_bind_line_recognition(tmp_path, line, expected):
     Enumerating phrasings is how this collector got its original bug, so the test
     is the combination: a line announcing the server, carrying a URL with a port.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_server_log
+    from hyperloom.orchestrator.actions.executors._kv_poll import port_from_server_log
 
     (tmp_path / "server.log").write_text(line + "\n", encoding="utf-8")
 
@@ -925,7 +925,7 @@ def test_bind_line_recognition(tmp_path, line, expected):
 
 def test_the_pinned_config_still_outranks_the_server_banner(tmp_path):
     """Both exist on a synthetic round and the config is the earlier authority."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_poll import resolve_metrics_port
 
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
     (tmp_path / "server.log").write_text("INFO:     Uvicorn running on http://0.0.0.0:8000\n", encoding="utf-8")
@@ -936,7 +936,7 @@ def test_the_pinned_config_still_outranks_the_server_banner(tmp_path):
 def test_the_port_is_resolved_on_first_use_not_at_construction(tmp_path):
     """The server writes its banner after the recorder is built, so resolving
     eagerly would cache the default and scrape a port nothing is listening on."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import KvMetricsPoller
+    from hyperloom.orchestrator.actions.executors._kv_poll import KvMetricsPoller
 
     poller = KvMetricsPoller(workspace=tmp_path)
     # The round has not booted yet; the log appears only now.
@@ -972,7 +972,7 @@ def test_counters_resolve_under_aiperfs_family_naming(tmp_path):
     cumulative counters come back empty on this path, and an empty counter looks
     exactly like a round that never retracted.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import families_from_aiperf_record
+    from hyperloom.orchestrator.actions.executors._kv_poll import families_from_aiperf_record
 
     families = families_from_aiperf_record(
         {
@@ -991,7 +991,7 @@ def test_counters_resolve_under_aiperfs_family_naming(tmp_path):
 
 def test_histogram_samples_are_skipped_not_mistaken_for_gauges(tmp_path):
     """aiperf carries histograms as buckets with no ``value``."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import families_from_aiperf_record
+    from hyperloom.orchestrator.actions.executors._kv_poll import families_from_aiperf_record
 
     families = families_from_aiperf_record(
         {
@@ -1026,7 +1026,7 @@ def test_port_comes_from_the_round_config_not_the_default(tmp_path):
     exported into the subprocess environment, so resolving from the environment
     alone lands on 8888 and scrapes a port nothing is listening on.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace, resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_poll import port_from_workspace, resolve_metrics_port
 
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
 
@@ -1036,7 +1036,7 @@ def test_port_comes_from_the_round_config_not_the_default(tmp_path):
 
 def test_port_is_read_from_the_benchmark_config_too(tmp_path):
     """A warm-reuse round carries it here rather than in a lifecycle YAML."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace
+    from hyperloom.orchestrator.actions.executors._kv_poll import port_from_workspace
 
     nested = tmp_path / "benchmark_vllm_1"
     nested.mkdir()
@@ -1047,7 +1047,7 @@ def test_port_is_read_from_the_benchmark_config_too(tmp_path):
 
 def test_explicit_env_still_outranks_the_config(tmp_path):
     """An operator pin has to win over a file we merely found."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_poll import resolve_metrics_port
 
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
 
@@ -1056,7 +1056,7 @@ def test_explicit_env_still_outranks_the_config(tmp_path):
 
 def test_a_round_without_a_pinned_port_falls_back_to_the_default(tmp_path):
     """Which is what the one round that worked was relying on."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import DEFAULT_METRICS_PORT, resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_poll import DEFAULT_METRICS_PORT, resolve_metrics_port
 
     (tmp_path / "baseline_config.with_envs.yaml").write_text(
         "benchmark:\n  framework: vllm\n  envs:\n    TP: 1\n", encoding="utf-8"
@@ -1067,7 +1067,7 @@ def test_a_round_without_a_pinned_port_falls_back_to_the_default(tmp_path):
 
 def test_unreadable_config_does_not_raise(tmp_path):
     """Malformed YAML in a round directory is not a reason to fail a round."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace
+    from hyperloom.orchestrator.actions.executors._kv_poll import port_from_workspace
 
     (tmp_path / "broken.yaml").write_text("benchmark: [unclosed\n", encoding="utf-8")
 
@@ -1076,7 +1076,7 @@ def test_unreadable_config_does_not_raise(tmp_path):
 
 def _refuse(monkeypatch):
     """Make every scrape fail the way a closed port does."""
-    from hyperloom.orchestrator.actions.executors import _kv_metrics as km
+    from hyperloom.orchestrator.actions.executors import _kv_poll as km
 
     def _boom(*_a, **_k):
         raise OSError("connection refused")
@@ -1090,7 +1090,7 @@ def test_poller_does_not_give_up_on_a_slow_start(monkeypatch):
     Giving up on the count alone parked collection for the rest of a round over a
     server that was merely still binding.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import KvMetricsPoller
+    from hyperloom.orchestrator.actions.executors._kv_poll import KvMetricsPoller
 
     _refuse(monkeypatch)
     poller = KvMetricsPoller(port=1)
@@ -1104,7 +1104,7 @@ def test_poller_gives_up_once_the_grace_has_also_passed(monkeypatch):
     """An endpoint that answered nothing for a minute is not coming back."""
     import time
 
-    from hyperloom.orchestrator.actions.executors._kv_metrics import _GIVE_UP_GRACE_SEC, KvMetricsPoller
+    from hyperloom.orchestrator.actions.executors._kv_poll import _GIVE_UP_GRACE_SEC, KvMetricsPoller
 
     _refuse(monkeypatch)
     poller = KvMetricsPoller(port=1)
@@ -1147,7 +1147,7 @@ def _now() -> float:
 
 def test_progress_address_is_read_from_the_round_directory(tmp_path):
     """The client publishes it; the watchdog is a different process."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+    from hyperloom.orchestrator.actions.executors._kv_poll import AiperfProgressPoller
 
     artifacts = tmp_path / "aiperf_artifacts"
     artifacts.mkdir()
@@ -1158,7 +1158,7 @@ def test_progress_address_is_read_from_the_round_directory(tmp_path):
 
 def test_progress_address_is_found_in_a_nested_benchmark_directory(tmp_path):
     """An AgentX round nests its artifacts one level below the server log."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+    from hyperloom.orchestrator.actions.executors._kv_poll import AiperfProgressPoller
 
     artifacts = tmp_path / "benchmark_agentx_1" / "aiperf_artifacts"
     artifacts.mkdir(parents=True)
@@ -1169,7 +1169,7 @@ def test_progress_address_is_found_in_a_nested_benchmark_directory(tmp_path):
 
 def test_missing_progress_address_is_not_an_error(tmp_path):
     """Every non-AgentX round is this case."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+    from hyperloom.orchestrator.actions.executors._kv_poll import AiperfProgressPoller
 
     poller = AiperfProgressPoller(tmp_path)
     assert poller._resolve_url() is None
@@ -1518,12 +1518,12 @@ def test_a_failing_progress_poll_propagates_before_the_engine_is_scraped():
 
 
 def test_a_failing_aiperf_read_propagates_from_the_summary(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _kv_metrics as kv
+    from hyperloom.orchestrator.actions.executors import _kv_record as kv
 
     def _boom(_path):
         raise RuntimeError("aiperf read bug")
 
-    monkeypatch.setattr(kv, "_server_metrics_exports", lambda _workspace: [tmp_path / "export.json"])
+    monkeypatch.setattr(kv, "server_metrics_exports", lambda _workspace: [tmp_path / "export.json"])
     monkeypatch.setattr(kv, "read_aiperf_server_metrics", _boom)
     rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, kv_round=KvRound(workspace=tmp_path))
 

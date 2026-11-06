@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._kv_metrics import (
+from hyperloom.orchestrator.actions.executors._kv_poll import (
     DEFAULT_METRICS_PORT,
     KvMetricsPoller,
     aggregate_series,
@@ -311,7 +311,7 @@ def test_poller_availability_is_tristate_and_gives_up(monkeypatch):
     """
     import time as _time
 
-    from hyperloom.orchestrator.actions.executors._kv_metrics import _GIVE_UP_GRACE_SEC
+    from hyperloom.orchestrator.actions.executors._kv_poll import _GIVE_UP_GRACE_SEC
 
     poller = KvMetricsPoller(port=1)
     assert poller.available is None
@@ -320,7 +320,7 @@ def test_poller_availability_is_tristate_and_gives_up(monkeypatch):
         raise OSError("connection refused")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kv_metrics.urllib.request.urlopen",
+        "hyperloom.orchestrator.actions.executors._kv_poll.urllib.request.urlopen",
         _boom,
     )
     for _ in range(3):
@@ -339,7 +339,7 @@ def test_poller_availability_is_tristate_and_gives_up(monkeypatch):
         raise AssertionError("poller kept scraping after giving up")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kv_metrics.urllib.request.urlopen",
+        "hyperloom.orchestrator.actions.executors._kv_poll.urllib.request.urlopen",
         _explode,
     )
     assert poller.fetch() is None
@@ -349,14 +349,14 @@ def test_a_truncated_response_is_a_missed_scrape_for_both_pollers(monkeypatch, t
     """An engine killed mid-response must cost the round one sample, not the artifact."""
     import http.client
 
-    from hyperloom.orchestrator.actions.executors import _kv_metrics
-    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+    from hyperloom.orchestrator.actions.executors import _kv_poll
+    from hyperloom.orchestrator.actions.executors._kv_poll import AiperfProgressPoller
 
     class _Truncated:
         def open(self, *_args, **_kwargs):
             raise http.client.IncompleteRead(b"partial", 100)
 
-    monkeypatch.setattr(_kv_metrics, "_OPENER", _Truncated())
+    monkeypatch.setattr(_kv_poll, "_OPENER", _Truncated())
 
     kv_poller = KvMetricsPoller(port=1)
     assert kv_poller.fetch() is None
