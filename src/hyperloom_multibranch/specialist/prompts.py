@@ -508,15 +508,18 @@ _HOLDS = {
 }
 
 
+_REFERENCES = """
+Reference material for this session, read-only and copied in when it started, one directory per source: {listed}. \
+Before you guess at a kernel, a tuning step or a setting, read what it says about this model's operators and your \
+direction, and name the file you used in your branch log.
+"""
+
+
 def _references(references: Mapping[str, Path]) -> str:
     if not references:
         return ""
     listed = "; ".join(f"{name} at {path}{_HOLDS.get(name, '')}" for name, path in sorted(references.items()))
-    return (
-        "\nReference material for this session, read-only and copied in when it started, one directory per source: "
-        f"{listed}. Before you guess at a kernel, a tuning step or a setting, read what it says about this model's "
-        "operators and your direction, and name the file you used in your branch log.\n"
-    )
+    return _REFERENCES.format(listed=listed)
 
 
 def launch_prompt(
@@ -651,7 +654,11 @@ def prompt_versions() -> dict[str, str]:
     role = _ROLE.format(
         workload="{workload}", fake_gains=_fake_gains(), directions=_direction_names(), gpu_rule=_NO_GPU
     )
-    texts = {"specialist_role": role, "specialist_launch": "\n".join(_LAUNCH)}
+    settings = (_DEV_SANDBOX, _NATIVE, _REFERENCES, *_HOLDS.values())
+    texts = {
+        "specialist_role": "\n".join((role, *settings)),
+        "specialist_launch": "\n".join((*_LAUNCH, _LEASE_WAKE, _WAIT_WAKE)),
+    }
     return {name: hashlib.sha256(text.encode()).hexdigest()[:VERSION_HEX] for name, text in texts.items()}
 
 
