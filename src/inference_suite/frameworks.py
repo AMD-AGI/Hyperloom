@@ -44,12 +44,16 @@ class ExpertParallelFlag:
 
 @dataclass(frozen=True)
 class ServerFlags:
-    """The flags that carry a round's runtime facts to the server; ``None`` when the server takes no such flag."""
+    """The flags that carry a round's runtime facts to the server; ``None`` when the server takes no such flag.
+
+    ``context_length`` sets the context the server serves; without it the server serves the model's native one.
+    """
 
     model: str
     host: str
     port: str
     served_model_name: str | None
+    context_length: str
 
 
 @dataclass(frozen=True)
@@ -70,19 +74,19 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.SGLANG: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package="sglang",
-        server_flags=ServerFlags("--model-path", "--host", "--port", "--served-model-name"),
+        server_flags=ServerFlags("--model-path", "--host", "--port", "--served-model-name", "--context-length"),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
     ),
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package="vllm",
-        server_flags=ServerFlags("--model", "--host", "--port", "--served-model-name"),
+        server_flags=ServerFlags("--model", "--host", "--port", "--served-model-name", "--max-model-len"),
         expert_parallel=ExpertParallelFlag("--enable-expert-parallel", ("--enable-expert-parallel", "-ep"), False),
     ),
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package="atom",
-        server_flags=ServerFlags("--model", "--host", "--server-port", None),
+        server_flags=ServerFlags("--model", "--host", "--server-port", None, "--max-model-len"),
         expert_parallel=ExpertParallelFlag("--enable-expert-parallel", ("--enable-expert-parallel",), False),
     ),
     Framework.XDIT: FrameworkFacts(kind=FrameworkKind.SCRIPTABLE, python_package="xfuser"),
