@@ -144,7 +144,9 @@ def test_write_variant_abort_marker_json_is_stable_sorted(tmp_path):
 
 
 def test_grid_runner_emits_expected_error_class_labels():
-    src = inspect.getsource(_grid_runner)
+    from hyperloom.orchestrator.state import failure_evidence
+
+    src = inspect.getsource(_grid_runner) + inspect.getsource(failure_evidence)
     expected = {
         "yaml_build_error",
         "mn_server_restart_failed",

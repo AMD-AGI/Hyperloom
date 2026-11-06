@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
-from ....state.failure_evidence import KV_CACHE_OOM_MARKERS, SUBPROCESS_NONZERO
+from ....state.failure_evidence import KV_CACHE_OOM_MARKERS, SERVER_INIT_DEAD, SUBPROCESS_NONZERO
 from .._aiter_jit import is_aiter_jit_registry_mismatch
 from .._subprocess_kill import server_log_death_excerpt
 from .records import _BenchProcess
@@ -318,4 +318,4 @@ def _boot_failure(finished: _BenchProcess, server_log: Path) -> tuple[str, str] 
         return "aiter_jit_registry_mismatch", error
     if _is_cuda_graph_capture_failure(*texts):
         return "cuda_graph_capture_failed", error
-    return ("server_init_dead", death) if death is not None else None
+    return (SERVER_INIT_DEAD, death) if death is not None else None
