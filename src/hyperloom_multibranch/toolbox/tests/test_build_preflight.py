@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import functools
 import json
 import os
 import stat
@@ -16,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import id_map
+from hyperloom.common.tests._id_map_helpers import HOST_MAP, ONE_ID_MAP, use_id_maps
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
 from hyperloom_multibranch.toolbox import build_preflight as preflight
@@ -247,20 +246,11 @@ def test_a_tracelens_that_is_not_importable_is_named() -> None:
 # --- the whole preflight --------------------------------------------------------------------------------------------
 
 
-#: The map of a host's initial user namespace, as the kernel writes it: every id is mapped.
-HOST_MAP = "         0          0 4294967295\n"
-#: A user namespace that maps one id, its root, onto the account that started the container.
-ONE_ID_MAP = "         0       1234          1\n"
-
-
 def _use_id_maps(monkeypatch: pytest.MonkeyPatch, where: Path, uid_map: str, gid_map: str | None = None) -> Path:
-    """Point the preflight at stand-in uid and gid maps under ``where`` (the gid map is the uid map unless given)."""
+    """Have the preflight read stand-in uid and gid maps under ``where`` (the gid map is the uid map unless given)."""
     maps = where / "id-maps"
     maps.mkdir(exist_ok=True)
-    (maps / "uid_map").write_text(uid_map)
-    (maps / "gid_map").write_text(uid_map if gid_map is None else gid_map)
-    checked = functools.partial(id_map.unmapped_ids, uid_map=maps / "uid_map", gid_map=maps / "gid_map")
-    monkeypatch.setattr(preflight, "unmapped_ids", checked)
+    use_id_maps(monkeypatch, maps, uid_map, gid_map)
     return maps
 
 

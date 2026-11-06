@@ -6,7 +6,6 @@ where it cannot, no isolation is offered and the build refuses naming why."""
 
 from __future__ import annotations
 
-import functools
 import shutil
 import subprocess
 import sys
@@ -14,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import id_map
+from hyperloom.common.tests._id_map_helpers import HOST_MAP, ONE_ID_MAP, use_id_maps
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.runner.native import isolated
 from hyperloom.measure.runner.native.isolated import (
@@ -25,11 +24,6 @@ from hyperloom.measure.runner.native.isolated import (
     local_isolation,
 )
 
-#: The map of a host's initial user namespace, as the kernel writes it: every id is mapped.
-HOST_MAP = "         0          0 4294967295\n"
-#: A user namespace that maps one id, its root, onto the account that started the container.
-ONE_ID_MAP = "         0       1234          1\n"
-
 
 @pytest.fixture
 def root_with_setpriv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,17 +33,10 @@ def root_with_setpriv(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def id_maps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Point the check at stand-in uid and gid maps (the gid map is the uid map unless given); returns their paths."""
+    """Have the check read stand-in uid and gid maps (the gid map is the uid map unless given); returns their paths."""
 
     def use(uid_map: str | None, gid_map: str | None = None) -> tuple[Path, Path]:
-        paths = (tmp_path / "uid_map", tmp_path / "gid_map")
-        for path, text in zip(paths, (uid_map, uid_map if gid_map is None else gid_map), strict=True):
-            if text is not None:
-                path.write_text(text, encoding="ascii")
-        monkeypatch.setattr(
-            isolated, "unmapped_ids", functools.partial(id_map.unmapped_ids, uid_map=paths[0], gid_map=paths[1])
-        )
-        return paths
+        return use_id_maps(monkeypatch, tmp_path, uid_map, gid_map)
 
     return use
 
