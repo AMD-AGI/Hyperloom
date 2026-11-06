@@ -407,8 +407,13 @@ class _PhaseStateMixin:
         switches: list[dict[str, Any]],
         *,
         default_on: bool,
+        source_layer: dict[str, Any] | None = None,
     ) -> bool:
-        """Register accepted framework-rewrite switches as search levers."""
+        """Register accepted framework-rewrite switches as search levers.
+
+        ``source_layer`` is the snapshot of dormant code no stack entry carries, replayed at resume. A switch is one
+        row, so a later patch registering the same switch replaces the earlier patch's layer.
+        """
         if not isinstance(switches, list) or not switches:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
@@ -421,6 +426,8 @@ class _PhaseStateMixin:
             name = row["switch"]
             if not name:
                 continue
+            if source_layer:
+                row["source_layer"] = source_layer
             index = by_switch.get(name)
             if index is None:
                 rows.append(row)
@@ -431,6 +438,8 @@ class _PhaseStateMixin:
             # Preserve an attribution already measured for this lever; the measurement is more informative than this
             # registration.
             row["attributed_gain_pct"] = prior.get("attributed_gain_pct")
+            if not source_layer and prior.get("source_layer"):
+                row["source_layer"] = prior["source_layer"]
             if prior != row:
                 rows[index] = row
                 changed = True

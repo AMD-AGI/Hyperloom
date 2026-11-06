@@ -353,8 +353,21 @@ class IntegratePromotionMixin:
             self.shared_state.record_authored_framework_levers(
                 levers,
                 default_on=(lever_outcome == "default_on"),
+                source_layer=self._dormant_source_layer(result) if result.get("status") == "kept_inert" else None,
             )
         )
+
+    def _dormant_source_layer(self, result: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The source layer of a dormant keep, placed after every stack entry committed before it."""
+        handles = _source_layer_handles(result)
+        if not handles["source_snapshot"]:
+            return None
+        return {
+            "scope": "source_patch",
+            "name": str(result.get("specialist_task_id") or ""),
+            "stack_position": len(self.shared_state.optimization_stack or []),
+            **handles,
+        }
 
     async def _lift_integrate_keep(
         self,
