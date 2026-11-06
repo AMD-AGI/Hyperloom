@@ -11,12 +11,11 @@ the process stays root. The calls cannot tell the two apart; the maps can, as th
 a preload does not fake.
 
 A map that cannot be read or parsed answers nothing, so :func:`unmapped_ids` reports it as the problem: a caller that
-refuses on a problem refuses then too.
+refuses on a problem refuses then too. The maps it reads are :data:`UID_MAP` and :data:`GID_MAP`, looked up per call.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,9 +41,9 @@ class _IdMap:
         return any(wanted in mapped for mapped in self.ranges)
 
 
-def _read(path: os.PathLike[str] | str) -> _IdMap:
+def _read(path: Path) -> _IdMap:
     try:
-        text = Path(path).read_text(encoding="ascii")
+        text = path.read_text(encoding="ascii")
     except (OSError, UnicodeDecodeError) as exc:
         raise _Unreadable(f"cannot read {path}: {type(exc).__name__}: {exc}") from None
     ranges, lines = [], []
@@ -58,19 +57,13 @@ def _read(path: os.PathLike[str] | str) -> _IdMap:
     return _IdMap(tuple(ranges), "; ".join(lines)[:_QUOTED] or "empty")
 
 
-def unmapped_ids(
-    uids: Iterable[int] = (),
-    gids: Iterable[int] = (),
-    *,
-    uid_map: os.PathLike[str] | str = UID_MAP,
-    gid_map: os.PathLike[str] | str = GID_MAP,
-) -> str | None:
-    """``None`` when this process's user namespace maps every uid of ``uids`` (in ``uid_map``) and every gid of ``gids``
-    (in ``gid_map``); otherwise the ids it does not map, with the content of the map each was looked up in, or why a
-    map could not be read or parsed (which is never taken as mapped)."""
+def unmapped_ids(uids: Iterable[int] = (), gids: Iterable[int] = ()) -> str | None:
+    """``None`` when this process's user namespace maps every uid of ``uids`` (in :data:`UID_MAP`) and every gid of
+    ``gids`` (in :data:`GID_MAP`); otherwise the ids it does not map, with the content of the map each was looked up in,
+    or why a map could not be read or parsed (which is never taken as mapped)."""
     missing: list[str] = []
     quoted: list[str] = []
-    for kind, ids, path in (("uid", uids, uid_map), ("gid", gids, gid_map)):
+    for kind, ids, path in (("uid", uids, UID_MAP), ("gid", gids, GID_MAP)):
         wanted = list(dict.fromkeys(ids))
         if not wanted:
             continue

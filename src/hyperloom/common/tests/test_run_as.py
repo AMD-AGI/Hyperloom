@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import contextlib
-import functools
 import os
 import pwd
 import shutil
@@ -20,8 +19,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common import env_safety as run_as_mod
-from hyperloom.common import id_map
 from hyperloom.common.env_safety import RunAsError, resolve_run_as, specialist_run_as
+from hyperloom.common.tests._id_map_helpers import HOST_MAP, ONE_ID_MAP, use_id_maps
 
 UNPRIVILEGED = "nobody"
 
@@ -389,25 +388,14 @@ def test_sharing_an_entry_that_became_a_link_changes_nothing_it_points_to(shared
 
 
 # ---- a user namespace that does not map the account: a switch would fail, or under fakeroot only seem to ----
-#: The map of a host's initial user namespace, as the kernel writes it: every id is mapped.
-HOST_MAP = "         0          0 4294967295\n"
-#: A user namespace that maps one id, its root, onto the account that started the container.
-ONE_ID_MAP = "         0       1234          1\n"
 
 
 @pytest.fixture
 def id_maps(tmp_path, monkeypatch):
-    """Point the run-as check at stand-in uid and gid maps; returns the setter (gid map defaults to the uid map)."""
+    """Have the run-as check read stand-in uid and gid maps; returns the setter (gid map defaults to the uid map)."""
 
     def use(uid_map: str | None, gid_map: str | None = None) -> tuple[Path, Path]:
-        paths = (tmp_path / "uid_map", tmp_path / "gid_map")
-        for path, text in zip(paths, (uid_map, uid_map if gid_map is None else gid_map), strict=True):
-            if text is not None:
-                path.write_text(text, encoding="ascii")
-        monkeypatch.setattr(
-            run_as_mod, "unmapped_ids", functools.partial(id_map.unmapped_ids, uid_map=paths[0], gid_map=paths[1])
-        )
-        return paths
+        return use_id_maps(monkeypatch, tmp_path, uid_map, gid_map)
 
     return use
 

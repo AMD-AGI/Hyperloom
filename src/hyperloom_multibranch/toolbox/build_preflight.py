@@ -6,9 +6,9 @@
 :func:`~hyperloom_multibranch.toolbox.native_builds.native_builds` runs :func:`build_preflight` when the build store is
 configured, so a host that is set up wrong refuses at start, naming every item, instead of failing each build later:
 
-- the service runs as root and has ``setpriv`` (the compile runs as user 65534), and its user namespace maps uid and
-  gid 65534 (one that maps only its root has no other id: ``setpriv`` fails there with ``EINVAL``, or under a fakeroot
-  preload seems to succeed while the compile runs as root);
+- the service can compile as user 65534, as the build itself judges it
+  (:func:`~hyperloom.measure.runner.native.isolated.isolation_problem`: root, ``setpriv``, and uid and gid 65534 mapped
+  in its user namespace);
 - user 65534 can reach what the compile runs: this process's interpreter, its environment and source tree (the build
   child imports the builder from it), the image's interpreter (``HYPERLOOM_BUILD_PYTHON``), the image's packages
   (``HYPERLOOM_BUILD_IMAGE_ROOT``) and the upstream checkouts;
@@ -48,9 +48,8 @@ from pathlib import Path
 from shutil import which
 from urllib.parse import unquote, urlparse
 
-from hyperloom.common.id_map import unmapped_ids
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
-from hyperloom.measure.runner.native.isolated import NOBODY, SOURCE_ROOT
+from hyperloom.measure.runner.native.isolated import NOBODY, SOURCE_ROOT, isolation_problem
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
 from hyperloom.orchestrator.trace_analysis import TRACELENS_REF
 
@@ -422,16 +421,9 @@ def build_preflight(site: PreflightSite) -> None:
         BuildStoreConfigError: Naming every item that is not as it must be.
     """
     problems: list[str] = []
-    if geteuid() != 0:
-        problems.append(f"the build service runs as uid {geteuid()}, not root: it cannot compile as user {NOBODY}")
-    if which("setpriv") is None:
-        problems.append(f"setpriv is not on PATH: the build service cannot compile as user {NOBODY}")
-    unmapped = unmapped_ids((NOBODY,), (NOBODY,))
-    if unmapped is not None:
-        problems.append(
-            f"{unmapped}: the build service cannot compile as user {NOBODY} (setpriv fails there, or under a fakeroot "
-            "preload seems to succeed while the compile runs as root)"
-        )
+    isolation = isolation_problem()
+    if isolation is not None:
+        problems.append(f"the build service cannot isolate a native build: {isolation}")
     upstreams = site_upstreams(site)
     checkouts = image_checkouts(site.sources, upstreams)
     problems.extend(sources_problems(site, upstreams))

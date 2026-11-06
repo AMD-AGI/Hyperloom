@@ -16,7 +16,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.specialist import worktree as worktree_module
-from hyperloom_multibranch.specialist.worktree import SourceBase, Upstream, source_unkept
+from hyperloom_multibranch.specialist.worktree import SourceBase, Upstream, installed_upstream, source_unkept
 from hyperloom_multibranch.tests.agent_rig import ROOT
 
 VLLM = "https://github.com/vllm-project/vllm"
@@ -301,3 +301,83 @@ def test_a_framework_the_host_does_not_have_installed_has_no_source_change_kept(
     monkeypatch.setattr(worktree_module, "locate_installed_package", absent)
 
     assert "package vllm is not installed in this image" in source_unkept("vllm", replace(ROOT, components=()))
+
+
+NIGHTLY = "dd4e40142a3280ef404493e5117bde0c60c6e389"
+
+
+@pytest.fixture
+def wheel(tmp_path, monkeypatch):
+    """vLLM installed from a nightly wheel: no checkout, its version naming only an abbreviated commit."""
+    site = tmp_path / "site-packages"
+    (site / "vllm").mkdir(parents=True)
+    (site / "vllm" / "__init__.py").write_bytes(b"")
+    version = "0.33.0rc1.dev711+gdd4e40142"
+    info = site / f"vllm-{version}.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        f"Metadata-Version: 2.4\nName: vllm\nVersion: {version}\nProject-URL: Homepage, {VLLM}\n"
+        "Project-URL: Slack, https://slack.vllm.ai/\n"
+    )
+    worktree_module._wheel_upstream.cache_clear()
+    yield PackageBase("vllm", site / "vllm", "vllm", version)
+    worktree_module._wheel_upstream.cache_clear()
+
+
+def _image(monkeypatch, ref):
+    monkeypatch.setenv("HYPERLOOM_ACTIVE_IMAGE_REF", ref)
+    monkeypatch.setenv("HYPERLOOM_ACTIVE_IMAGE_DIGEST", "sha256:" + "c" * 64)
+
+
+def _fetched(monkeypatch, line):
+    asked = []
+
+    def head(url):
+        asked.append(url)
+        return line
+
+    monkeypatch.setattr(worktree_module, "_patch_head", head)
+    return asked
+
+
+def test_a_wheel_s_upstream_is_the_full_commit_the_active_image_s_reference_names(monkeypatch, wheel):
+    _image(monkeypatch, f"docker.io/vllm/vllm-openai-rocm:nightly-rocm100-{NIGHTLY}")
+    asked = _fetched(monkeypatch, None)
+
+    assert installed_upstream(wheel) == Upstream(VLLM, NIGHTLY)
+    assert asked == []
+
+
+def test_an_image_commit_the_wheel_s_version_does_not_name_is_not_taken(monkeypatch, wheel):
+    _image(monkeypatch, "docker.io/vllm/vllm-openai-rocm:nightly-rocm100-" + "e" * 40)
+    _fetched(monkeypatch, None)
+
+    assert installed_upstream(wheel) is None
+
+
+def test_a_wheel_s_upstream_falls_back_to_the_commit_its_repository_resolves_once(monkeypatch, wheel):
+    _image(monkeypatch, "docker.io/vllm/vllm-openai-rocm:nightly")
+    asked = _fetched(monkeypatch, f"From {NIGHTLY} Mon Sep 17 00:00:00 2001\n")
+
+    assert installed_upstream(wheel) == installed_upstream(wheel) == Upstream(VLLM, NIGHTLY)
+    assert asked == [f"{VLLM}/commit/dd4e40142.patch"]
+
+
+def test_a_resolved_commit_the_version_does_not_name_is_not_taken(monkeypatch, wheel):
+    monkeypatch.delenv("HYPERLOOM_ACTIVE_IMAGE_REF", raising=False)
+    _fetched(monkeypatch, "From " + "e" * 40 + " Mon Sep 17 00:00:00 2001\n")
+
+    assert installed_upstream(wheel) is None
+
+
+def test_a_wheel_neither_the_image_nor_its_repository_resolves_names_no_upstream(monkeypatch, wheel):
+    monkeypatch.delenv("HYPERLOOM_ACTIVE_IMAGE_REF", raising=False)
+
+    def unreachable(url, timeout):
+        raise worktree_module.urllib.error.URLError("no route to host")
+
+    monkeypatch.setattr(worktree_module.urllib.request, "urlopen", unreachable)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: wheel)
+
+    assert installed_upstream(wheel) is None
+    assert "names no upstream commit a checkout holds" in source_unkept("vllm", replace(ROOT, components=()))
