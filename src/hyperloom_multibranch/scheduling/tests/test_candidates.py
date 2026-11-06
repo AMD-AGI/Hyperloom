@@ -18,7 +18,7 @@ from hyperloom.contracts.recipe import (
 )
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request
-from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, TestRecord
+from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, RetractionRef, TestRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
@@ -109,10 +109,12 @@ def _commit(commit_id: str, parent: str, branch: str = "b01") -> CommittedCommit
     return CommittedCommit(commit_id, branch, parent, f"r-{commit_id}", 1.0, False, False)
 
 
-def _landed(commit_id: str, verdict: Verdict, *attachments: AttachmentRef) -> TestRecord:
+def _landed(
+    commit_id: str, verdict: Verdict, *attachments: AttachmentRef, retracts: RetractionRef | None = None
+) -> TestRecord:
     asked = request(f"r-{commit_id}", intent("b01", "c0"), attachments=attachments)
     decided = judgement(-4.0 if verdict is Verdict.REGRESSED else 3.0, (asked.request_id or "",), verdict=verdict)
-    return TestRecord(asked, judgement=decided, conclusion=Conclusion.COMMITTED, commit_id=commit_id)
+    return TestRecord(asked, judgement=decided, conclusion=Conclusion.COMMITTED, commit_id=commit_id, retracts=retracts)
 
 
 async def test_the_commits_a_retraction_was_committed_on_are_not_offered_and_the_retraction_is() -> None:
@@ -121,7 +123,7 @@ async def test_the_commits_a_retraction_was_committed_on_are_not_offered_and_the
     records = {
         "r-c1": _landed("c1", Verdict.IMPROVED),
         "r-c2": _landed("c2", Verdict.IMPROVED),
-        "r-c3": _landed("c3", Verdict.REGRESSED, mark),
+        "r-c3": _landed("c3", Verdict.REGRESSED, mark, retracts=RetractionRef(7, 1, "f7", "c2")),
         "r-d1": _landed("d1", Verdict.IMPROVED),
     }
 
@@ -130,10 +132,10 @@ async def test_the_commits_a_retraction_was_committed_on_are_not_offered_and_the
     assert [commit.commit_id for commit in offered] == ["c3", "d1"]
 
 
-async def test_a_gain_that_carries_the_retraction_mark_hides_nothing() -> None:
+async def test_a_commit_whose_record_names_no_retraction_hides_nothing_whatever_its_request_carries() -> None:
     mark = AttachmentRef(RETRACTION_ID, "file", "b" * 64)
     commits = (_commit("c1", "c0"), _commit("c2", "c1"))
-    records = {"r-c1": _landed("c1", Verdict.IMPROVED), "r-c2": _landed("c2", Verdict.IMPROVED, mark)}
+    records = {"r-c1": _landed("c1", Verdict.IMPROVED), "r-c2": _landed("c2", Verdict.REGRESSED, mark)}
 
     offered = await Candidates(_Committed(commits, records), None).offered_on("i0")
 

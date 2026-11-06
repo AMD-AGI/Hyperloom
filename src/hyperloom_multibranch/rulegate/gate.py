@@ -25,7 +25,7 @@ from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard.interfaces import JudgementSink, LineageSink
 from hyperloom_multibranch.contracts.blackboard.peers import TestRequest
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, TestRecord
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, RetractionRef, TestRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LineageKind
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.rulegate.decision import Action, decide
@@ -110,12 +110,13 @@ class RuleGate:
             await self._blackboard.write_judgement(request.request_id, judgement, Conclusion.DIAGNOSIS_PENDING)
         return action
 
-    async def retract(self, request: TestRequest, judgement: Judgement) -> bool:
+    async def retract(self, request: TestRequest, judgement: Judgement, retracts: RetractionRef) -> bool:
         """Land a retraction the rule refused only for speed (``rules.lands_as_retraction``): its agent undid a change
-        it found invalid, which no gain can show. False, and recorded only, when its branch has moved on."""
+        it found invalid, which no gain can show; its record names what it ``retracts``. False, and recorded only, when
+        its branch has moved on."""
         await self._reverify(request, judgement)
         message = f"{request.request_id}: retraction, {judgement.verdict.value} {judgement.gain_pct:+.2f}%"
-        return await asyncio.shield(self._commit(request, judgement, None, message))
+        return await asyncio.shield(self._commit(request, judgement, None, message, retracts))
 
     async def decline(self, request: TestRequest, judgement: Judgement) -> TestRecord:
         """Record a blocked gain its specialist found no repair for."""
@@ -207,7 +208,14 @@ class RuleGate:
             logger.info("the scheduler voided %s (%s): %s is recorded only", branch, reason, voided.request.request_id)
             await self._record(voided.request, voided.judgement)
 
-    async def _commit(self, request: TestRequest, judgement: Judgement, fix: FixProof | None, message: str) -> bool:
+    async def _commit(
+        self,
+        request: TestRequest,
+        judgement: Judgement,
+        fix: FixProof | None,
+        message: str,
+        retracts: RetractionRef | None = None,
+    ) -> bool:
         # The repository commit comes first: the judgement names the commit it made, and so does the case.
         recipe = apply(await self._repo.read_recipe(request.parent_commit), request.delta)
         try:
@@ -219,7 +227,9 @@ class RuleGate:
         try:
             if fix is not None:
                 await register_case(self._blackboard, commit, fix.candidate.request_id)
-            await self._blackboard.write_judgement(request.request_id, judgement, conclusion, commit, recipe.digest())
+            await self._blackboard.write_judgement(
+                request.request_id, judgement, conclusion, commit, recipe.digest(), retracts
+            )
         except Exception:
             # Whatever kept the judgement out, a commit no judgement names would block the branch for good.
             await self._repo.rewind(request.branch, commit, request.parent_commit)
