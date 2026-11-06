@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import stat
 import sys
 from collections.abc import Mapping
@@ -23,7 +24,7 @@ from hyperloom.measure.runner.cache_layout import file_sha256
 from hyperloom.measure.runner.native import aiter_modules, prewarm
 from hyperloom.measure.runner.native.aiter_modules import MODULES_FILE
 from hyperloom.measure.runner.native.builder import BuildMachine, tree_dir
-from hyperloom.measure.runner.native.isolated import JOB_FILE, Isolation
+from hyperloom.measure.runner.native.isolated import ISOLATION_UID, JOB_FILE, Isolation
 from hyperloom.measure.runner.native.prewarm import PrewarmError, isolated_builder
 from hyperloom.measure.runner.native.tests import _aiter_standin as standin
 from hyperloom.orchestrator.actions.executors._aiter_jit import (
@@ -258,6 +259,24 @@ def test_the_compile_is_handed_its_plan_and_its_job_readable_by_their_owner_alon
     staging = built[standin.MODULE].parent.parent
     plan, job = tree_dir(staging) / MODULES_FILE, staging / JOB_FILE
     assert [stat.S_IMODE(path.stat().st_mode) for path in (plan, job)] == [0o600, 0o600]
+
+
+@pytest.mark.parametrize(
+    ("uid", "mode"), [(None, 0o700), (os.getuid(), 0o701)], ids=["own-user-or-bubblewrap", "another-user"]
+)
+def test_only_a_compile_as_another_user_is_let_through_the_scratch(tmp_path, monkeypatch, uid, mode) -> None:
+    rig = CpuRig(tmp_path, monkeypatch)
+    machine = BuildMachine("prewarm", "prewarm", GFX, sys.executable)
+    builder = isolated_builder(
+        machine, isolation=lambda: Isolation((), uid, ISOLATION_UID), factory=standin.FACTORY, environ={}
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    scratch.chmod(0o700)
+
+    assert standin.MODULE in builder(rig.package, frozenset({standin.MODULE}), scratch)
+
+    assert stat.S_IMODE(scratch.stat().st_mode) == mode
 
 
 def test_the_cpu_build_merges_a_models_tables_below_its_own_tree_not_in_the_images_tmp(tmp_path, monkeypatch) -> None:

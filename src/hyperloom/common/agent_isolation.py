@@ -298,11 +298,11 @@ def choose_sandbox_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolati
     return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False, probe=probe)
 
 
-def bwrap_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolation | None:
-    """Bubblewrap alone, for a launcher with an account tier of its own (a native compile); ``None`` when its probe
-    finds a problem."""
+def bwrap_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolation | NoIsolation:
+    """Bubblewrap alone, for a launcher with an account tier of its own (a native compile), which decides what to do
+    without it; where its probe finds a problem, :class:`NoIsolation` naming bubblewrap's reasons."""
     found = _bwrap(probe)
-    return BwrapIsolation(found) if found.ok else None
+    return BwrapIsolation(found) if found.ok else NoIsolation(_bwrap_reasons(found))
 
 
 def require_agent_isolation(

@@ -6,10 +6,13 @@
 :func:`~hyperloom_multibranch.toolbox.native_builds.native_builds` runs :func:`build_preflight` when the build store is
 configured, so a host that is set up wrong refuses at start, naming every item, instead of failing each build later:
 
-- the service runs as root and has ``setpriv`` (the compile runs as user 65534);
-- user 65534 can reach what the compile runs: this process's interpreter, its environment and source tree (the build
-  child imports the builder from it), the image's interpreter (``HYPERLOOM_BUILD_PYTHON``), the image's packages
-  (``HYPERLOOM_BUILD_IMAGE_ROOT``) and the upstream checkouts;
+- the compile can be isolated: as user 65534 (the service runs as root, has ``setpriv``, and its user namespace maps
+  65534), else under bubblewrap (:func:`~hyperloom.measure.runner.native.isolated.local_isolation`); a host where
+  neither works is refused naming both reasons;
+- what the compile runs is there: this process's interpreter, its environment and source tree (the build child imports
+  the builder from it), the image's interpreter (``HYPERLOOM_BUILD_PYTHON``), the image's packages
+  (``HYPERLOOM_BUILD_IMAGE_ROOT``) and the upstream checkouts; where the compile runs as user 65534, that user can reach
+  each of them (under bubblewrap it runs as this process's user, and the sandbox binds them);
 - no user but this one (and root) can change the signing key, the trust file, the store or the upstream checkouts, nor
   a directory above them (a sticky one such as ``/tmp`` excepted): another user on the host, such as the specialists',
   could otherwise swap the key or plant a source or an output;
@@ -46,8 +49,9 @@ from pathlib import Path
 from shutil import which
 from urllib.parse import unquote, urlparse
 
+from hyperloom.common.agent_isolation import NoIsolation, bwrap_isolation
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
-from hyperloom.measure.runner.native.isolated import NOBODY, SOURCE_ROOT
+from hyperloom.measure.runner.native.isolated import NOBODY, SOURCE_ROOT, account_problem, unisolated
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
 from hyperloom.orchestrator.trace_analysis import TRACELENS_REF
 
@@ -63,6 +67,7 @@ __all__ = [
     "git_head",
     "image_checkouts",
     "image_upstreams",
+    "missing_problems",
     "reach_problems",
     "signing_key_problem",
     "site_upstreams",
@@ -231,8 +236,7 @@ def signing_key_problem(path: Path, euid: int) -> str | None:
     if not stat.S_ISREG(found.st_mode) or found.st_uid != euid or found.st_mode & _OTHERS_ACCESS:
         return (
             f"must name a regular file of this user (uid {euid}) that no one else can read (mode 0600), and "
-            f"{_describe(path, found)} is not: the compile runs as another user on this host and must not be able to "
-            "read the key"
+            f"{_describe(path, found)} is not: the compile must not be able to read the key"
         )
     return None
 
@@ -330,6 +334,16 @@ def reach_problems(site: PreflightSite, checkouts: Sequence[Path]) -> Iterator[s
             yield f"user {NOBODY} cannot reach {what} {path}: {problem}"
 
 
+def missing_problems(site: PreflightSite, checkouts: Sequence[Path]) -> Iterator[str]:
+    """Each path the compile runs (see the module) that is not there, with the upstream ``checkouts``: what a compile
+    under bubblewrap, as this process's user, needs."""
+    for what, path, _run in _reach_items(site, checkouts):
+        if path is None:
+            yield f"{what} is not found on PATH"
+        elif not os.path.exists(path):
+            yield f"{what} {path} does not exist"
+
+
 def image_checkouts(sources: Path, upstreams: Sequence[ImageUpstream]) -> list[Path]:
     """The checkouts in ``sources`` of the commits the image installs."""
     return [sources / up.component / up.ref for up in upstreams if (sources / up.component / up.ref).is_dir()]
@@ -419,14 +433,15 @@ def build_preflight(site: PreflightSite) -> None:
         BuildStoreConfigError: Naming every item that is not as it must be.
     """
     problems: list[str] = []
-    if geteuid() != 0:
-        problems.append(f"the build service runs as uid {geteuid()}, not root: it cannot compile as user {NOBODY}")
-    if which("setpriv") is None:
-        problems.append(f"setpriv is not on PATH: the build service cannot compile as user {NOBODY}")
+    account = account_problem()
+    if account is not None:
+        bwrap = bwrap_isolation()
+        if isinstance(bwrap, NoIsolation):
+            problems.append(unisolated(account, bwrap))
     upstreams = site_upstreams(site)
     checkouts = image_checkouts(site.sources, upstreams)
     problems.extend(sources_problems(site, upstreams))
-    problems.extend(reach_problems(site, checkouts))
+    problems.extend((reach_problems if account is None else missing_problems)(site, checkouts))
     problems.extend(tamper_problems(site, checkouts))
     tracelens_issue = tracelens_problem()
     if tracelens_issue is not None:

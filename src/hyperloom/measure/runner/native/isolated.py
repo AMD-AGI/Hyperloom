@@ -10,14 +10,22 @@ tree in this process (nothing of the candidate runs then), hands it to a child p
 untrusted data, and its output files, which the store copies by hash. The service then signs (:func:`~hyperloom.measure.
 runner.native.service.ensure_build`).
 
-:func:`local_isolation` is the minimal local isolation: the unprivileged user 65534, to whom the scratch directory is
-given, so the compile can read neither the signing key nor any credential of this user, and a network namespace of its
-own (no egress) where the host lets this process make one (``unshare --net`` needs a capability many pods do not have).
-Which of the two a build got is the ``isolation`` entry of its record's toolchain (:data:`ISOLATION_UID_NETNS` or
-:data:`ISOLATION_UID`), written by this process, never by the child. A host that cannot even change the user builds
-nothing: the build fails as the machine's (``BuildInfraError``), naming why (:func:`isolation_problem`). That includes a
-host whose user namespace does not map 65534 (one that maps only its root): there ``setpriv`` cannot become 65534, and
-under a fakeroot preload it would seem to while the compile ran as root. A remote build pool is another
+:func:`local_isolation` is the minimal local isolation, the first of two tiers that works on this host:
+
+1. The unprivileged user 65534, to whom the scratch directory is given, so the compile can read neither the signing key
+   nor any credential of this user, in a network namespace of its own (no egress) where the host lets this process make
+   one (``unshare --net`` needs a capability many pods do not have) (:data:`ISOLATION_UID_NETNS`, else
+   :data:`ISOLATION_UID`). A host whose user namespace does not map 65534 (one that maps only its root) cannot take
+   this tier: ``setpriv`` cannot become 65534 there, and under a fakeroot preload it would seem to while the compile ran
+   as root (:func:`account_problem`).
+2. Else a bubblewrap sandbox (:func:`compile_policy`, :data:`ISOLATION_BWRAP_NETNS`) as this process's own user, which
+   starts from an empty root: only the work directory is writable, the toolchain, the image's packages and the tree the
+   child imports from are read-only, the signing key and this user's credential locations do not exist inside (or are
+   masked where a bound tree holds one), and it has a network of its own (loopback only).
+
+Which one a build got is the ``isolation`` entry of its record's toolchain, written by this process, never by the
+child. A host where neither works builds nothing: the build fails as the machine's (``BuildInfraError``), naming both
+reasons (:func:`isolation_problem`). A remote build pool is another
 :class:`~hyperloom.measure.runner.native.service.Build` behind the same ``runner(inputs)`` seam.
 
 The child imports the builder from the tree this process runs from (``source``), not from whatever ``hyperloom`` the
@@ -41,7 +49,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.bwrap import BwrapPolicy, BwrapPolicyError
+
 import hyperloom
+from hyperloom.common.agent_isolation import BwrapIsolation, NoIsolation, bwrap_isolation
+from hyperloom.common.confinement import Confinement, credential_paths, toolchain_paths
 from hyperloom.common.id_map import unmapped_ids
 from hyperloom.measure import fsafe
 from hyperloom.measure.compile import BlobStore
@@ -57,6 +69,7 @@ from hyperloom.measure.runner.native.service import Build, Staged
 
 __all__ = [
     "ChildInterpreter",
+    "ISOLATION_BWRAP_NETNS",
     "ISOLATION_KEY",
     "ISOLATION_UID",
     "ISOLATION_UID_NETNS",
@@ -65,19 +78,23 @@ __all__ = [
     "STAGED_FILE",
     "IsolatedBuilds",
     "Isolation",
+    "account_problem",
+    "compile_policy",
     "isolation_problem",
     "job_document",
     "local_isolation",
     "staged_record",
+    "unisolated",
 ]
 
 JOB_FILE = "job.json"
 STAGED_FILE = "staged.json"
 NOBODY = 65534
-#: The toolchain entry of a build's record that says how its compile was isolated, and the two levels it names.
+#: The toolchain entry of a build's record that says how its compile was isolated, and the levels it names.
 ISOLATION_KEY = "isolation"
 ISOLATION_UID_NETNS = "uid+netns"
 ISOLATION_UID = "uid"
+ISOLATION_BWRAP_NETNS = "bwrap+netns"
 #: The level of a stand-in that runs the compile as this process's own user (a test's; never a deployment's).
 _NOT_ISOLATED = "none"
 #: The directory this process imports ``hyperloom`` from: the child imports the builder from the same tree.
@@ -102,16 +119,21 @@ _INFRA = "infra"
 _JOB_MODE = 0o600
 #: The permission another user needs to reach a directory below one: search, not read.
 _PASS_THROUGH = stat.S_IXOTH
+#: All of ``/sys`` a compile reads under bubblewrap: the CPU tree (how many CPUs it may use), nothing of the GPUs.
+_COMPILE_SYS = (Path("/sys/devices/system/cpu"),)
 
 
 @dataclass(frozen=True)
 class Isolation:
     """How a compile is cut off from this process: ``prefix`` starts it, as ``uid`` (``None``: this process's own, which
-    a test's stand-in may use and a deployment must not); ``level`` is what its record says of it (:data:`ISOLATION_KEY`)."""
+    a test's stand-in may use and a deployment must not, unless ``bwrap`` sandboxes it); ``level`` is what its record
+    says of it (:data:`ISOLATION_KEY`). With ``bwrap`` the compile runs in that bubblewrap's sandbox
+    (:func:`compile_policy`) instead of under ``prefix``."""
 
     prefix: tuple[str, ...]
     uid: int | None
     level: str = _NOT_ISOLATED
+    bwrap: BwrapIsolation | None = None
 
 
 def private_network(unshare: str) -> bool:
@@ -125,7 +147,7 @@ def private_network(unshare: str) -> bool:
     return done.returncode == 0
 
 
-def isolation_problem() -> str | None:
+def account_problem() -> str | None:
     """Why this host cannot run a compile as user 65534: this process is not root, has no ``setpriv``, or its user
     namespace does not map 65534 (``setpriv`` would fail there, or under a fakeroot preload seem to succeed and leave the
     compile running as root); ``None`` when it can."""
@@ -143,13 +165,34 @@ def isolation_problem() -> str | None:
     return None
 
 
+def unisolated(account: str, bwrap: NoIsolation) -> str:
+    """The reasons a compile can be isolated neither as user 65534 (``account``) nor under bubblewrap (``bwrap``)."""
+    return f"it can compile neither as user {NOBODY} ({account}) nor under bubblewrap ({bwrap.why})"
+
+
+def isolation_problem() -> str | None:
+    """Why this host can isolate a compile in neither tier (see the module), naming both reasons; ``None`` when one
+    works."""
+    account = account_problem()
+    if account is None:
+        return None
+    found = bwrap_isolation()
+    return None if isinstance(found, BwrapIsolation) else unisolated(account, found)
+
+
 def local_isolation(network_probe: Callable[[str], bool] = private_network) -> Isolation | None:
     """User 65534 (``setpriv``), in a network namespace of its own (``unshare --net``) where ``network_probe`` finds the
-    host lets this process make one; ``None`` when this host cannot change the user (:func:`isolation_problem` says
-    why)."""
+    host lets this process make one; else, where this host cannot change the user (:func:`account_problem`), a
+    bubblewrap sandbox with a network of its own where bubblewrap's probe passes (its ``notes`` say why not as 65534);
+    ``None`` when neither works (:func:`isolation_problem` says why)."""
     setpriv = shutil.which("setpriv")
-    if setpriv is None or isolation_problem() is not None:
-        return None
+    account = account_problem()
+    if setpriv is None or account is not None:
+        found = bwrap_isolation()
+        if isinstance(found, NoIsolation):
+            return None
+        noted = replace(found, notes=(f"compiling as user {NOBODY}: {account}",))
+        return Isolation((), None, ISOLATION_BWRAP_NETNS, noted)
     drop = (setpriv, f"--reuid={NOBODY}", f"--regid={NOBODY}", "--clear-groups", "--no-new-privs", "--")
     unshare = shutil.which("unshare")
     if unshare is not None and network_probe(unshare):
@@ -168,6 +211,39 @@ class ChildInterpreter:
     def command(self, work: Path) -> list[str]:
         """The child's command line for the laid tree in ``work``."""
         return [self.python, "-I", "-c", _CHILD_BOOTSTRAP, str(self.source), str(work)]
+
+
+def compile_policy(work: Path, child: ChildInterpreter, laid: LaidTree, environ: Mapping[str, str]) -> BwrapPolicy:
+    """The bubblewrap sandbox of the compile of ``laid`` in ``work`` by ``child``, whose environment is ``environ``.
+
+    Writable: ``work`` alone. Read-only: what running the child's interpreter and the image's (which runs the build)
+    needs under ``environ`` (:func:`~hyperloom.common.confinement.toolchain_paths`: the system roots, this process's
+    interpreter's prefixes (the child's by default), the import path of the first ``python3`` on ``PATH``, every
+    ``PATH`` entry, and each interpreter's own directory), the tree the child imports the builder from, the image's
+    packages and the upstream build directory. ``/sys`` is only the CPU tree, ``/dev`` only the base nodes
+    (``/dev/null`` and the like, no GPU), and the network is its own (loopback only). Every credential location of this
+    process and the files it registers (the signing key among them) is absent, or masked where a bound tree holds it
+    (:func:`~hyperloom.common.confinement.credential_paths`).
+
+    ``--die-with-parent`` is kept on whatever thread starts the compile: that thread waits for it, so it cannot end
+    first, and only that flag lets a timeout's kill of bubblewrap end the sandbox, which runs in a session of its own.
+
+    Raises:
+        BwrapPolicyError: A path the compile reads is reached through ``work``, which the compile writes.
+    """
+    writable = (work,)
+    readable = (
+        *toolchain_paths(environ, child.python, writable=writable),
+        *toolchain_paths(environ, laid.machine.python, writable=writable),
+        child.source,
+        laid.image_root,
+        laid.tracked,
+    )
+    masked = credential_paths(environ, allowed=(*readable, *writable), writable=writable)
+    confinement = Confinement(
+        writable=writable, readable=readable, masked=masked, sys_paths=_COMPILE_SYS, own_network=True
+    )
+    return replace(confinement.policy(chdir=work), die_with_parent=True)
 
 
 def job_document(laid: LaidTree, factory: str) -> dict[str, Any]:
@@ -216,17 +292,11 @@ class IsolatedBuilds:
         work.mkdir()
         laid = planned.lay(self._blobs, work)
         _write_job(work, job_document(laid, self._factories[laid.recipe.component]))
-        if isolation.uid is not None:
-            _give(work, isolation.uid)
+        command, env = self._command(isolation, work, laid)
         started, cpu_before = time.monotonic(), _children_cpu_seconds()
         try:
             done = run_in_group(
-                [*isolation.prefix, *self._child.command(work)],
-                cwd=work,
-                env=_child_environment(work),
-                capture_output=True,
-                text=True,
-                timeout=laid.recipe.budget_sec + _MARGIN_SEC,
+                command, cwd=work, env=env, capture_output=True, text=True, timeout=laid.recipe.budget_sec + _MARGIN_SEC
             )
         except subprocess.TimeoutExpired:
             raise BuildInfraError(f"the build runner of {laid.recipe.component} did not end in time") from None
@@ -236,6 +306,19 @@ class IsolatedBuilds:
             raise BuildInfraError(f"the build runner exited {done.returncode}: {tail}")
         staged = staged_record(work, timing)
         return replace(staged, toolchain=_service_toolchain(staged.toolchain, laid, isolation.level))
+
+    def _command(self, isolation: Isolation, work: Path, laid: LaidTree) -> tuple[list[str], dict[str, str]]:
+        """The child's command line under ``isolation`` and its environment; the work directory is given to the
+        compile's user first, when it has one of its own."""
+        env, command = _child_environment(work), self._child.command(work)
+        if isolation.bwrap is None:
+            if isolation.uid is not None:
+                _give(work, isolation.uid)
+            return [*isolation.prefix, *command], env
+        try:
+            return compile_policy(work, self._child, laid, env).argv(isolation.bwrap.probe, command), env
+        except BwrapPolicyError as refused:
+            raise BuildInfraError(f"bubblewrap cannot sandbox this compile: {refused}; nothing was compiled") from None
 
 
 def _service_toolchain(child: Mapping[str, str], laid: LaidTree, level: str) -> dict[str, str]:

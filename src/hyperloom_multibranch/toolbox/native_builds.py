@@ -11,7 +11,8 @@ It also builds the aiter modules a stack touches before its test
 reads. So it also needs:
 
 - ``HYPERLOOM_BUILD_SIGNING_KEY``: the service's Ed25519 private key, a file of this user with mode 0600 (the compile
-  runs as another user on this host); its public key must be in the trust file;
+  must not be able to read it: as another user it cannot, and under bubblewrap the key is not there or is masked); its
+  public key must be in the trust file;
 - ``HYPERLOOM_BUILD_SOURCES``: the upstream checkouts, ``<dir>/<component>/<upstream_ref>`` (``<dir>/sgl_kernel/<ref>``
   is the SGLang repository, ``<dir>/vllm/<ref>`` vLLM's);
 - ``HYPERLOOM_BUILD_IMAGE_ROOT``: the image's directory of installed packages (``site-packages``);
@@ -25,7 +26,9 @@ A store and trust given without any of the four required ones refuse the build o
 so does a host that is not ready for them (:func:`~hyperloom_multibranch.toolbox.build_preflight.build_preflight`;
 ``python -m hyperloom_multibranch.toolbox.build_setup`` sets one up). The compile runs in
 :class:`~hyperloom.measure.runner.native.isolated.IsolatedBuilds`, out of this process; a host that cannot isolate it
-fails each build as the machine's, never compiles in-process.
+fails each build as the machine's, never compiles in-process. The signing key and the trust file are registered as the
+app's private paths (:data:`~hyperloom.common.confinement.PRIVATE_PATHS`), so no bubblewrap sandbox of this process (a
+compile's, an agent's) shows them where a bound tree holds them.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 
+from hyperloom.common import confinement
 from hyperloom.contracts.measurement import TestRequest
 from hyperloom.measure.compile import BlobStore
 from hyperloom.measure.jit.native.config import (
@@ -57,6 +61,7 @@ from hyperloom.measure.runner.native.isolated import (
     ISOLATION_UID_NETNS,
     IsolatedBuilds,
     Isolation,
+    isolation_problem,
     local_isolation,
 )
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
@@ -135,8 +140,8 @@ def named_commits(environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def _signer(path: Path) -> Signer:
-    """The service's key, from a file only this user can read: the compile runs as another user on this host, and a key
-    it could read is a key it could forge records with.
+    """The service's key, from a file only this user can read: a key the compile could read is a key it could forge
+    records with.
 
     Raises:
         BuildStoreConfigError: The file is a link, is not this user's, can be read by anyone else, or is not a key.
@@ -168,6 +173,7 @@ def native_builds(
         return None
     key = Path(_required(environ, BUILD_SIGNING_KEY_ENV))
     signer = _signer(key)
+    confinement.PRIVATE_PATHS.add(key, "the native build service's signing key")
     image = image_digest.rsplit("@", 1)[-1]
     machine = BuildMachine(
         image,
@@ -178,6 +184,7 @@ def native_builds(
     sources, image_root = Path(_required(environ, BUILD_SOURCES_ENV)), Path(_required(environ, BUILD_IMAGE_ROOT_ENV))
     runner_envs = {BUILD_STORE_ENV: environ[BUILD_STORE_ENV].strip(), BUILD_TRUST_ENV: environ[BUILD_TRUST_ENV].strip()}
     shared = (Path(runner_envs[BUILD_STORE_ENV]), Path(runner_envs[BUILD_TRUST_ENV]))
+    confinement.PRIVATE_PATHS.add(shared[1], "the native build store's trust file")
     build_preflight(PreflightSite(*shared, key, sources, image_root, machine.python, named_commits(environ)))
     recipes = native_recipes()
     site = NativeSite(machine, recipes, sources, image_root)
@@ -194,7 +201,18 @@ def native_builds(
 def _log_isolation(isolated: Isolation | None) -> None:
     """Say once, at the start of the session, how this host isolates a compile (the level each build's record names)."""
     if isolated is None:
-        logger.warning("native builds are configured and this host cannot isolate a compile: every build will fail")
+        why = isolation_problem() or "it was given no isolation"
+        logger.warning(
+            "native builds are configured and this host cannot isolate a compile: every build will fail: %s", why
+        )
+    elif isolated.bwrap is not None:
+        logger.info(
+            "native builds compile under bubblewrap %s as this process's user, in a network namespace of their own "
+            "(%s): %s",
+            isolated.bwrap.shown,
+            isolated.level,
+            "; ".join(isolated.bwrap.notes),
+        )
     elif isolated.level == ISOLATION_UID_NETNS:
         logger.info(
             "native builds compile as user %s in a network namespace of their own (%s)", isolated.uid, isolated.level

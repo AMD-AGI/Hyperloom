@@ -892,6 +892,16 @@ bubblewrap's own line; the usual causes:
 | `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | The container's `/proc` has entries mounted over it (masked paths). |
 | `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`. |
 
+A native build's compile (`hyperloom.measure.runner.native.isolated`) has its own two tiers, also without a switch:
+user 65534 through `setpriv` (in a network namespace of its own where `unshare --net` works) when the build service is
+root and its user namespace maps 65534, else bubblewrap with the same probe and the same choice of binary: the compile
+runs as the service's own user with only its work directory writable, the toolchain, both interpreters, the tree the
+child imports from, the image's packages and the upstream build directory read-only, only `/sys/devices/system/cpu`
+of `/sys`, the base `/dev` nodes and no GPU, a network of its own (outside addresses give `ENETUNREACH`), and the
+signing key and trust file (registered as the app's private paths) absent, or masked where a bound tree holds them.
+The build record's `isolation` entry is `uid+netns`, `uid` or `bwrap+netns`. Where neither tier works, the toolbox
+refuses at start (`build_preflight`) and each build fails as the machine's, naming both reasons.
+
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
 fail instead.

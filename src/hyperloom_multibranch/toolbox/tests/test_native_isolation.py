@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""How a native build's compile is isolated: always another user, a network namespace of its own only where the host
-lets this process make one, the level written in the build's record and logged once; and the child compiles with the
-builder of the tree this process runs from, never with an installed copy."""
+"""How a native build's compile is isolated: another user, with a network namespace of its own only where the host
+lets this process make one, else a bubblewrap sandbox with a network of its own; the level written in the build's
+record and logged once; and the child compiles with the builder of the tree this process runs from, never with an
+installed copy."""
 
 from __future__ import annotations
 
@@ -18,13 +19,19 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common.bwrap import BwrapProbe
+
 import hyperloom
+from hyperloom.common import confinement
+from hyperloom.common.agent_isolation import BwrapIsolation, NoIsolation
+from hyperloom.common.tests._id_map_helpers import HOST_MAP, use_id_maps
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.runner.native import isolated
 from hyperloom.measure.runner.native.isolated import (
+    ISOLATION_BWRAP_NETNS,
     ISOLATION_KEY,
     ISOLATION_UID,
     ISOLATION_UID_NETNS,
@@ -35,11 +42,12 @@ from hyperloom.measure.runner.native.isolated import (
     local_isolation,
     private_network,
 )
+from hyperloom.measure.runner.native.tests._bwrap_compile import bwrap_compile_isolation
 from hyperloom.measure.tests._recipes import IMAGE
 from hyperloom_multibranch.toolbox import native_builds as native_builds_module
 from hyperloom_multibranch.toolbox.native_builds import native_builds
 from hyperloom_multibranch.toolbox.tests import native_support as fake
-from hyperloom_multibranch.toolbox.tests.test_native_builds import EDITED_CU, Hooks, Rig, _configured
+from hyperloom_multibranch.toolbox.tests.test_native_builds import EDITED_CU, Hooks, Rig, _configured, farm_of
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +58,7 @@ def ready_host(monkeypatch: pytest.MonkeyPatch) -> None:
 
 SETPRIV = "/usr/bin/setpriv"
 UNSHARE = "/usr/bin/unshare"
+_BWRAP = BwrapProbe("/usr/bin/bwrap", (0, 9, 0), ())
 #: A child, in a tree of its own, that stages a record saying which tree it came from.
 _MARKED_CHILD = """\
 import json
@@ -65,8 +74,10 @@ _PACKAGES = ("hyperloom", "hyperloom/measure", "hyperloom/measure/runner", "hype
 
 
 @pytest.fixture
-def root_with_tools(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """A root process on a host with ``setpriv`` and ``unshare``; the list is every probe of a network namespace."""
+def root_with_tools(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    """A root process on a host with ``setpriv`` and ``unshare`` whose user namespace maps every id; the list is every
+    probe of a network namespace."""
+    use_id_maps(monkeypatch, tmp_path, HOST_MAP)
     probed: list[str] = []
     monkeypatch.setattr(isolated.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(isolated.os, "geteuid", lambda: 0)
@@ -95,8 +106,9 @@ def test_where_it_cannot_the_compile_still_runs_as_another_user_on_the_hosts_net
 
 
 def test_without_unshare_the_compile_runs_as_another_user_and_nothing_is_probed(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    use_id_maps(monkeypatch, tmp_path, HOST_MAP)
     monkeypatch.setattr(isolated.shutil, "which", lambda name: SETPRIV if name == "setpriv" else None)
     monkeypatch.setattr(isolated.os, "geteuid", lambda: 0)
 
@@ -105,7 +117,10 @@ def test_without_unshare_the_compile_runs_as_another_user_and_nothing_is_probed(
     assert found is not None and (found.prefix[0], found.level) == (SETPRIV, ISOLATION_UID)
 
 
-def test_a_host_that_cannot_change_the_user_gives_no_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_host_that_cannot_change_the_user_or_run_bubblewrap_gives_no_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(isolated, "bwrap_isolation", lambda: NoIsolation(("bubblewrap: not found on PATH",)))
     monkeypatch.setattr(isolated.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(isolated.os, "geteuid", lambda: 1000)
     assert local_isolation(lambda unshare: True) is None, "only root can give the compile another user"
@@ -129,7 +144,7 @@ def test_a_probe_that_cannot_start_finds_no_network_namespace(tmp_path: Path) ->
     assert private_network(str(tmp_path / "missing-unshare")) is False
 
 
-@pytest.mark.parametrize("level", [ISOLATION_UID, ISOLATION_UID_NETNS])
+@pytest.mark.parametrize("level", [ISOLATION_UID, ISOLATION_UID_NETNS, ISOLATION_BWRAP_NETNS])
 async def test_the_build_record_names_the_isolation_its_compile_had(tmp_path: Path, level: str) -> None:
     rig = Rig(tmp_path, isolation=Isolation((), None, level))
     compiled = rig.compiler.compile(rig.recipe(rig.patch({fake.ACT_CU: EDITED_CU})), RecipeDelta())
@@ -144,6 +159,12 @@ async def test_the_build_record_names_the_isolation_its_compile_had(tmp_path: Pa
     [
         (Isolation((UNSHARE, "--net", "--", SETPRIV), 65534, ISOLATION_UID_NETNS), logging.INFO, "of their own"),
         (Isolation((SETPRIV,), 65534, ISOLATION_UID), logging.WARNING, "with this host's network"),
+        (
+            Isolation((), None, ISOLATION_BWRAP_NETNS, BwrapIsolation(_BWRAP, ("compiling as user 65534: not root",))),
+            logging.INFO,
+            "under bubblewrap 0.9.0 /usr/bin/bwrap as this process's user, in a network namespace of their own "
+            f"({ISOLATION_BWRAP_NETNS}): compiling as user 65534: not root",
+        ),
         (None, logging.WARNING, "every build will fail"),
     ],
 )
@@ -242,7 +263,7 @@ def _nobody_python() -> str | None:
     """An interpreter user 65534 can run on this host (this process's may live where only its own user reads)."""
     found = local_isolation(lambda unshare: False)
     for python in (sys.executable, shutil.which("python3")):
-        if found is not None and python is not None:
+        if found is not None and found.uid is not None and python is not None:
             ran = subprocess.run([*found.prefix, python, "-I", "-c", "pass"], capture_output=True, check=False)
             if ran.returncode == 0:
                 return python
@@ -255,7 +276,8 @@ def test_on_a_real_host_the_compile_runs_as_nobody_cannot_read_the_key_and_has_a
     network: bool,
 ) -> None:
     isolation = local_isolation(lambda unshare: network and private_network(unshare))
-    if isolation is None or (network and isolation.level != ISOLATION_UID_NETNS):
+    assert isolation is not None and isolation.uid is not None, "the account tier, as for _nobody_python"
+    if network and isolation.level != ISOLATION_UID_NETNS:
         pytest.skip("this host cannot make a network namespace")
     base = Path(tempfile.mkdtemp(prefix="native-isolation-"))
     try:
@@ -274,3 +296,164 @@ def test_on_a_real_host_the_compile_runs_as_nobody_cannot_read_the_key_and_has_a
         assert (seen["net"] != own_network) is network
     finally:
         subprocess.run(["rm", "-rf", str(base)], check=False)
+
+
+# --- under bubblewrap ----------------------------------------------------------------------------------------------
+
+#: A stand-in ``bwrap``: it writes its arguments to the file ``BWRAP_LOG`` names and runs the command after ``--``.
+_STAND_IN_BWRAP = """\
+#!/bin/sh
+printf '%s\\n' "$@" > "{log}"
+while [ "$1" != "--" ]; do shift; done
+shift
+exec "$@"
+"""
+
+
+def test_a_build_under_bubblewrap_runs_its_child_in_the_compile_sandbox_and_gives_nothing_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log, stand_in = tmp_path / "bwrap.log", tmp_path / "bwrap"
+    stand_in.write_text(_STAND_IN_BWRAP.format(log=log))
+    stand_in.chmod(0o755)
+    monkeypatch.setattr(isolated, "_give", lambda work, uid: pytest.fail("the work directory stays this user's"))
+    sandbox = Isolation((), None, ISOLATION_BWRAP_NETNS, BwrapIsolation(BwrapProbe(str(stand_in), (0, 13, 1), ())))
+
+    staged = _built_with_source(tmp_path, _tree(tmp_path / "tree", _MARKED_CHILD), sandbox)
+
+    assert staged.toolchain == {"tree": "marked", ISOLATION_KEY: ISOLATION_BWRAP_NETNS}
+    argv = log.read_text().splitlines()
+    work = str(staged.staging)
+    flags = argv[: argv.index("--")]
+    assert {"--unshare-net", "--die-with-parent", "--unshare-pid", "--new-session"} <= set(flags)
+    assert ["--bind", work, work] == flags[flags.index(work) - 1 : flags.index(work) + 2]
+    assert ["--chdir", work] == flags[flags.index("--chdir") : flags.index("--chdir") + 2]
+    assert argv[argv.index("--") + 1 :][1:3] == ["-I", "-c"], "the child's own command line follows"
+    assert stat.S_IMODE(staged.staging.parent.stat().st_mode) == 0o700, "nobody else is let through the scratch"
+
+
+#: A child that stages what its sandbox lets it do (``outside`` an address beyond loopback, ``key`` and ``bound_key``
+#: the signing key outside every bind and inside a read-only one, ``read_only`` a path in the tree it imports from).
+_SANDBOX_CHILD = """\
+import errno
+import json
+import os
+import socket
+import subprocess
+from pathlib import Path
+
+
+def outcome(action):
+    try:
+        action()
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno, str(exc.errno))
+    return "ok"
+
+
+def write(path):
+    with open(path, "w") as out:
+        out.write("x")
+
+
+def main(argv):
+    work = Path(argv[0])
+    status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines() if ":" in line)
+    quiet = subprocess.run(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    seen = {{
+        "egress": outcome(lambda: socket.create_connection(({outside!r}, 443), timeout=5).close()),
+        "key": outcome(lambda: Path({key!r}).read_bytes()),
+        "bound_key": outcome(lambda: Path({bound_key!r}).read_bytes()),
+        "dev_null": outcome(lambda: write("/dev/null")),
+        "dev_null_child": str(quiet.returncode),
+        "job": outcome(lambda: (work / "job.json").read_bytes()),
+        "work": outcome(lambda: write(work / "written")),
+        "read_only": outcome(lambda: write({read_only!r})),
+        "cpu": outcome(lambda: os.listdir("/sys/devices/system/cpu")),
+        "sys_class": outcome(lambda: os.listdir("/sys/class")),
+        "uid": str(os.getuid()),
+        "caps": status["CapEff"].strip(),
+        "no_new_privs": status["NoNewPrivs"].strip(),
+        "net": os.readlink("/proc/self/ns/net"),
+        "pid": os.readlink("/proc/self/ns/pid"),
+    }}
+    record = {{"status": "failed", "outputs": [], "toolchain": seen, "log": "", "failure": "probe"}}
+    (work / "staged.json").write_text(json.dumps(record))
+    return 0
+"""
+#: An address no sandbox with a network of its own can route to (TEST-NET-1, never a real host).
+_OUTSIDE = "192.0.2.1"
+
+
+@pytest.fixture
+def bwrap_tier(monkeypatch: pytest.MonkeyPatch) -> Isolation:
+    return bwrap_compile_isolation(monkeypatch)
+
+
+@pytest.mark.agent_isolation
+def test_under_bubblewrap_the_compile_has_no_egress_no_key_a_dev_null_and_writes_only_its_work(
+    tmp_path: Path, bwrap_tier: Isolation
+) -> None:
+    registered = confinement.PRIVATE_PATHS  # this test's own (conftest)
+    key = tmp_path / "service.key"
+    tree = tmp_path / "tree"
+    bound_key = tree / "service.key"
+    child = _SANDBOX_CHILD.format(
+        outside=_OUTSIDE, key=str(key), bound_key=str(bound_key), read_only=str(tree / "written")
+    )
+    _tree(tree, child)
+    for path in (key, bound_key):
+        path.write_text("SECRET signing key")
+        path.chmod(0o600)
+        registered.add(path, "the build service's signing key")
+
+    staged = _built_with_source(tmp_path, tree, bwrap_tier)
+
+    seen = dict(staged.toolchain)
+    assert {name: seen.pop(name) for name in ("net", "pid")} != {
+        "net": os.readlink("/proc/self/ns/net"),
+        "pid": os.readlink("/proc/self/ns/pid"),
+    }
+    assert seen == {
+        "egress": "ENETUNREACH",
+        "key": "ENOENT",
+        "bound_key": "EACCES",
+        "dev_null": "ok",
+        "dev_null_child": "0",
+        "job": "ok",
+        "work": "ok",
+        "read_only": "EROFS",
+        "cpu": "ok",
+        "sys_class": "ENOENT",
+        "uid": str(os.getuid()),
+        "caps": "0000000000000000",
+        "no_new_privs": "1",
+        ISOLATION_KEY: ISOLATION_BWRAP_NETNS,
+    }
+    assert (staged.staging / "written").read_text() == "x" and not (tree / "written").exists()
+    assert "SECRET" not in staged.log
+
+
+@pytest.mark.agent_isolation
+async def test_under_bubblewrap_a_cu_edit_is_built_stored_and_laid_from_a_worker_thread(
+    tmp_path: Path, bwrap_tier: Isolation
+) -> None:
+    rig = Rig(tmp_path, isolation=bwrap_tier)
+    compiled = rig.compiler.compile(rig.recipe(rig.patch({fake.ACT_CU: EDITED_CU})), RecipeDelta())
+
+    hooks = Hooks()
+    builds = await rig.wait(AcceptedMeasurement(compiled, ()), hooks)
+
+    assert (hooks.ready, hooks.ended) == (["r1"], [])
+    assert rig.store.read(compiled.builds[0].inputs).toolchain[ISOLATION_KEY] == ISOLATION_BWRAP_NETNS
+    _, farm = farm_of(rig, builds.resolved(AcceptedMeasurement(compiled, ())))
+    assert (farm.site / fake.COMPONENT / fake.extension().name).read_bytes() == fake.compiled(EDITED_CU)
+
+
+def test_the_build_service_registers_its_signing_key_and_trust_file_as_the_apps_private_paths(tmp_path: Path) -> None:
+    environ = _configured(tmp_path)
+
+    native_builds(environ, LocalBlobStore(tmp_path / "blobs"), IMAGE, isolation=lambda: None)
+
+    registered = set(confinement.PRIVATE_PATHS.paths())
+    assert {Path(environ["HYPERLOOM_BUILD_SIGNING_KEY"]), Path(environ["HYPERLOOM_BUILD_TRUST"])} <= registered
