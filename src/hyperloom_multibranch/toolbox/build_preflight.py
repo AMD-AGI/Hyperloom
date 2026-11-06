@@ -6,7 +6,9 @@
 :func:`~hyperloom_multibranch.toolbox.native_builds.native_builds` runs :func:`build_preflight` when the build store is
 configured, so a host that is set up wrong refuses at start, naming every item, instead of failing each build later:
 
-- the service runs as root and has ``setpriv`` (the compile runs as user 65534);
+- the service runs as root and has ``setpriv`` (the compile runs as user 65534), and its user namespace maps uid and
+  gid 65534 (one that maps only its root has no other id: ``setpriv`` fails there with ``EINVAL``, or under a fakeroot
+  preload seems to succeed while the compile runs as root);
 - user 65534 can reach what the compile runs: this process's interpreter, its environment and source tree (the build
   child imports the builder from it), the image's interpreter (``HYPERLOOM_BUILD_PYTHON``), the image's packages
   (``HYPERLOOM_BUILD_IMAGE_ROOT``) and the upstream checkouts;
@@ -46,6 +48,7 @@ from pathlib import Path
 from shutil import which
 from urllib.parse import unquote, urlparse
 
+from hyperloom.common.id_map import unmapped_ids
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.runner.native.isolated import NOBODY, SOURCE_ROOT
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
@@ -423,6 +426,12 @@ def build_preflight(site: PreflightSite) -> None:
         problems.append(f"the build service runs as uid {geteuid()}, not root: it cannot compile as user {NOBODY}")
     if which("setpriv") is None:
         problems.append(f"setpriv is not on PATH: the build service cannot compile as user {NOBODY}")
+    unmapped = unmapped_ids((NOBODY,), (NOBODY,))
+    if unmapped is not None:
+        problems.append(
+            f"{unmapped}: the build service cannot compile as user {NOBODY} (setpriv fails there, or under a fakeroot "
+            "preload seems to succeed while the compile runs as root)"
+        )
     upstreams = site_upstreams(site)
     checkouts = image_checkouts(site.sources, upstreams)
     problems.extend(sources_problems(site, upstreams))

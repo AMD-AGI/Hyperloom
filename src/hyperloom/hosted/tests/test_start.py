@@ -17,6 +17,12 @@ import pytest
 SH = shutil.which("sh") or "sh"
 START = Path(__file__).resolve().parent.parent / "start.sh"
 _CERT = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n"
+#: start.sh's test-only stand-in for /proc/self: a directory holding uid_map and gid_map.
+_ID_MAPS = "HYPERLOOM_START_TEST_ID_MAPS"
+#: The map of a host's initial user namespace, as the kernel writes it: every id is mapped.
+_HOST_MAP = "         0          0 4294967295\n"
+#: A user namespace that maps one id, its root, onto the account that started the container.
+_ONE_ID_MAP = "         0       1234          1\n"
 
 
 def _tool(path: Path, name: str, body: str = "exit 0") -> None:
@@ -54,6 +60,15 @@ def image(tmp_path) -> Path:
     return tools
 
 
+def _id_maps(tmp_path: Path, uid_map: str = _HOST_MAP, gid_map: str | None = None) -> str:
+    """A stand-in for /proc/self with these maps (the gid map is the uid map unless given)."""
+    maps = tmp_path / "id-maps"
+    maps.mkdir(exist_ok=True)
+    (maps / "uid_map").write_text(uid_map)
+    (maps / "gid_map").write_text(uid_map if gid_map is None else gid_map)
+    return str(maps)
+
+
 def _run(tmp_path, layer, image, **env):
     state = tmp_path / "state"
     state.mkdir(exist_ok=True)
@@ -65,6 +80,8 @@ def _run(tmp_path, layer, image, **env):
         "TMPDIR": str(tmp_path / "local-tmp"),
         **env,
     }
+    if _ID_MAPS not in full:
+        full[_ID_MAPS] = _id_maps(tmp_path)
     Path(full["TMPDIR"]).mkdir(exist_ok=True)
     done = subprocess.run([SH, str(layer / "start.sh")], capture_output=True, text=True, env=full, timeout=60)
     calls = tmp_path / "calls"
@@ -109,6 +126,86 @@ def test_a_name_with_another_uid_is_refused(tmp_path, layer, image):
     )
     done, _ = _run(tmp_path, layer, image)
     assert done.returncode == 1 and "exists with a uid other than 2000" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("uid_map", "gid_map", "kind", "quoted"),
+    [
+        (_ONE_ID_MAP, _ONE_ID_MAP, "uid", "0 1234 1"),
+        (_HOST_MAP, _ONE_ID_MAP, "gid", "0 1234 1"),
+        ("0 0 1\n1 100000 1999\n", _HOST_MAP, "uid", "0 0 1; 1 100000 1999"),
+        ("", _HOST_MAP, "uid", "empty"),
+    ],
+    ids=["one-id", "gid-only", "ranges-ending-below-2000", "empty"],
+)
+def test_an_account_this_user_namespace_does_not_map_is_refused_before_it_is_made(
+    tmp_path, layer, image, uid_map, gid_map, kind, quoted
+):
+    done, calls = _run(tmp_path, layer, image, **{_ID_MAPS: _id_maps(tmp_path, uid_map, gid_map)})
+    assert done.returncode == 1, done.stderr
+    maps = tmp_path / "id-maps"
+    assert (
+        f"{kind} 2000 is not mapped in this container's user namespace ({maps}/{kind}_map: '{quoted}')" in done.stderr
+    )
+    assert "EINVAL" in done.stderr and "fakeroot" in done.stderr
+    assert not calls, "neither the account nor its group may be looked up or made"
+
+
+def test_an_existing_account_this_user_namespace_does_not_map_is_refused_too(tmp_path, layer, image):
+    _tool(image, "getent", 'echo "getent $*" >>"$CALLS"; echo "hl-specialist:x:2000:2000::/h:/bin/sh"')
+    done, calls = _run(tmp_path, layer, image, **{_ID_MAPS: _id_maps(tmp_path, _ONE_ID_MAP)})
+    assert done.returncode == 1 and "uid 2000 is not mapped" in done.stderr, done.stderr
+    assert not calls
+
+
+def test_a_map_of_several_ranges_that_covers_2000_lets_the_account_be_made(tmp_path, layer, image):
+    ranges = "0 1234 1\n1 100000 1999\n2000 300000 1\n"
+    done, calls = _run(tmp_path, layer, image, **{_ID_MAPS: _id_maps(tmp_path, ranges, "0 1234 1\n1000 5000 1001\n")})
+    assert done.returncode == 0, done.stderr
+    assert "groupadd --gid 2000 hl-specialist" in calls
+
+
+@pytest.mark.parametrize(
+    ("uid_map", "says"),
+    [
+        (None, "it cannot be read"),
+        ("0 1234\n", "the line '0 1234' is not 'inside outside count'"),
+        ("0 -1 5\n", "the line '0 -1 5' is not 'inside outside count'"),
+        ("0 0 4294967295 7\n", "the line '0 0 4294967295 7' is not 'inside outside count'"),
+    ],
+    ids=["missing", "two-fields", "signed", "four-fields"],
+)
+def test_a_map_that_cannot_be_read_is_refused_naming_the_file(tmp_path, layer, image, uid_map, says):
+    maps = Path(_id_maps(tmp_path))
+    if uid_map is None:
+        (maps / "uid_map").unlink()
+    else:
+        (maps / "uid_map").write_text(uid_map)
+    done, calls = _run(tmp_path, layer, image, **{_ID_MAPS: str(maps)})
+    assert done.returncode == 1, done.stderr
+    assert f"cannot read {maps}/uid_map as a user namespace map ({says})" in done.stderr
+    assert not calls
+
+
+def _one_id_namespace() -> list[str] | None:
+    """The command prefix of a new user namespace that maps one id (root, onto this process's own), or None here."""
+    unshare = shutil.which("unshare")
+    if unshare is None:
+        return None
+    prefix = [unshare, "--user", "--map-root-user", "--"]
+    probe = subprocess.run([*prefix, "cat", "/proc/self/uid_map"], capture_output=True, text=True, check=False)
+    return prefix if probe.returncode == 0 and len(probe.stdout.split()) == 3 else None
+
+
+@pytest.mark.skipif(_one_id_namespace() is None, reason="this host cannot make a user namespace (unshare --user)")
+def test_in_a_real_one_id_user_namespace_the_kernels_map_is_read_and_the_account_refused(tmp_path, layer, image):
+    env = {"PATH": f"{image}:/usr/bin:/bin", "CALLS": str(tmp_path / "calls"), "TMPDIR": str(tmp_path)}
+    done = subprocess.run(
+        [*_one_id_namespace(), SH, str(layer / "start.sh")], capture_output=True, text=True, env=env, timeout=60
+    )
+    assert done.returncode == 1, done.stderr
+    assert "uid 2000 is not mapped in this container's user namespace (/proc/self/uid_map: '0 " in done.stderr
+    assert not (tmp_path / "calls").exists()
 
 
 def test_a_layer_without_the_cli_is_refused(tmp_path, layer, image):
