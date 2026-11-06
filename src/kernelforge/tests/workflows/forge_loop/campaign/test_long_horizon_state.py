@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.workflows.forge_loop.roles.prompt_view import render_long_horizon_header
+from kernelforge.workflows.forge_loop.roles.prompt_view import OptionalRecords, render_long_horizon_header
 from kernelforge.workflows.forge_loop.campaign.run_state import (
     IterationVerdict,
     LoopStanding,
@@ -44,6 +44,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     start_session,
 )
 from kernelforge.workflows.forge_loop.iteration.campaign_report import LONG_HORIZON_OUTCOME_WINDOW, _long_horizon_header
+from kernelforge.workflows.forge_loop.campaign.unmeasured_lanes import UnmeasuredLane, UnmeasuredLaneArchive
 
 # The header's own rendering budgets, read from the definition that owns them so the expectations below cannot drift
 # from the defaults the loop relies on.
@@ -572,10 +573,38 @@ def test_header_can_expose_iteration_handoffs():
     header = render_long_horizon_header(
         state,
         [],
-        include_handoffs=True,
+        records=OptionalRecords(handoffs=True),
     )
 
     assert "forge_experiments/handoffs/iter_NNN.json" in header
+
+
+def test_header_names_unmeasured_lane_candidates_only_once_there_are_some(tmp_path):
+    """A plan may tell the Implementer to port one, which it can only do if it knows where they are."""
+    state = RunState(baseline_wall_ms=1.0)
+    apply_iteration(
+        state,
+        IterationVerdict(iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.1, commit_hash="", plan="retile"),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
+    )
+    store = LoopStateStore(str(tmp_path))
+
+    assert "unmeasured_lanes" not in _long_horizon_header(state, store)
+
+    UnmeasuredLaneArchive(tmp_path).record(
+        UnmeasuredLane(
+            round_iteration=1,
+            lane_id="2",
+            base_commit="abc123",
+            dropped_iteration=2,
+            canonical_commit="def456",
+            plan="# Lane 2 plan",
+            summary="",
+            diff="--- a/kernel.py\n+++ b/kernel.py\n",
+        )
+    )
+
+    assert "forge_experiments/unmeasured_lanes/round_NNN_lane_K/" in _long_horizon_header(state, store)
 
 
 def test_header_preserves_retrieval_map_when_budget_is_below_essential_content():

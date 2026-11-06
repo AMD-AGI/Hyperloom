@@ -183,7 +183,7 @@ class LockedRunMixin:
                 fan_out_plan=fan_out_plan,
             )
             # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
-            queued_lane = None if hazard or merge.diff else self._take_lane_candidate()
+            queued_lane = None if hazard or merge.diff else self._take_lane_candidate(iteration)
             frame = _IterationFrame(iteration, session_sink, merge)
             attempt = await self._source_attempt(
                 frame,
