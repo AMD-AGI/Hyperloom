@@ -8,12 +8,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from inference_suite.argv import SPECULATIVE_CONFIG_FLAG, flag_occurrences, speculative_config
+from inference_suite.argv import SPECULATIVE_CONFIG_FLAG, flag_occurrences
 from inference_suite.golden import (
     GOLDEN_OWNED_ENV_PREFIXES,
     GOLDEN_OWNED_FLAG_PREFIXES,
-    GOLDEN_OWNED_FLAGS,
-    GOLDEN_OWNED_SPEC_CONFIG_KEYS,
+    golden_owned_settings,
 )
 
 SPECULATIVE_DECODING_PINNED = "speculative_decoding_pinned"
@@ -39,24 +38,9 @@ def _canonical(value: Any) -> str:
 
 
 def _speculative_identity(server_args: str, envs: Mapping[str, Any]) -> dict[str, str]:
-    """The pinned settings a launch carries, keyed by flag, ``--speculative-config`` key or env name.
-
-    vLLM also takes a ``--speculative-config.<key>`` per key, merged over the JSON object by
-    :func:`speculative_config`, so both spellings land in the same keys.
-    """
-    identity = {str(k): _canonical(v) for k, v in envs.items() if str(k).startswith(GOLDEN_OWNED_ENV_PREFIXES)}
-    occurrences = flag_occurrences(server_args)
-    config = speculative_config(occurrences)
-    for flag, value in dict(occurrences).items():
-        if flag in GOLDEN_OWNED_FLAGS or flag.startswith(GOLDEN_OWNED_FLAG_PREFIXES):
-            identity[f"--{flag}"] = _canonical(value)
-    identity.update(
-        {
-            f"--{SPECULATIVE_CONFIG_FLAG}.{key}": _canonical(config[key])
-            for key in GOLDEN_OWNED_SPEC_CONFIG_KEYS & config.keys()
-        }
-    )
-    return identity
+    """The pinned settings a launch carries, canonicalized so equal values compare equal."""
+    settings = golden_owned_settings(flag_occurrences(server_args), envs)
+    return {key: _canonical(value) for key, value in settings.items()}
 
 
 def _simulates_acceptance(identity: Mapping[str, Any]) -> bool:

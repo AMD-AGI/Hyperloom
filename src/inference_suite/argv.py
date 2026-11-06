@@ -285,6 +285,11 @@ def _is_flag(token: str) -> bool:
     return token.startswith("-") and not token[1:2].isdigit() and token.strip("-") != ""
 
 
+def canonical_flag_name(flag: str) -> str:
+    """``flag`` with no leading dashes, lowercase and underscores as dashes: one key per argparse destination."""
+    return flag.lstrip("-").lower().replace("_", "-")
+
+
 def flag_occurrences(server_args: str | None) -> list[tuple[str, str]]:
     """Every flag a composed launch spells, in order, as ``(name, value)``; ``""`` for a bare flag.
 
@@ -292,7 +297,11 @@ def flag_occurrences(server_args: str | None) -> list[tuple[str, str]]:
     accept for one argparse destination meet in one key.
     """
     split = tokenize_server_args_preserving_json(server_args)
-    tokens = split[1] if split is not None else str(server_args or "").split()
+    return argv_flag_occurrences(split[1] if split is not None else str(server_args or "").split())
+
+
+def argv_flag_occurrences(tokens: Sequence[str]) -> list[tuple[str, str]]:
+    """:func:`flag_occurrences` of a launch already split into its argv."""
     occurrences: list[tuple[str, str]] = []
     for index, token in enumerate(tokens):
         if not _is_flag(token):
@@ -300,7 +309,7 @@ def flag_occurrences(server_args: str | None) -> list[tuple[str, str]]:
         name, assigned, value = token.partition("=")
         if not assigned and index + 1 < len(tokens) and not _is_flag(tokens[index + 1]):
             value = tokens[index + 1]
-        occurrences.append((name.lstrip("-").lower().replace("_", "-"), value))
+        occurrences.append((canonical_flag_name(name), value))
     return occurrences
 
 
@@ -352,6 +361,8 @@ def normalize_argv(argv: Sequence[str]) -> tuple[str, ...]:
 __all__ = [
     "SPECULATIVE_CONFIG_FLAG",
     "SPECULATIVE_CONFIG_KEY_PREFIX",
+    "argv_flag_occurrences",
+    "canonical_flag_name",
     "compact_json_server_args",
     "flag_occurrences",
     "json_object",
