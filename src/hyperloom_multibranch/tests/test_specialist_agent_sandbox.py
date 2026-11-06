@@ -127,6 +127,25 @@ def test_run_timeout_kills_the_session(tmp_path: Path) -> None:
     assert not _alive(int(pids.read_text()))
 
 
+def test_a_run_that_times_out_spares_a_process_started_beside_it(tmp_path: Path) -> None:
+    async def scenario() -> tuple[int, int | None, int | None]:
+        sandbox = _sandbox(tmp_path)
+        server = await sandbox.start("echo ready; sleep 100", tmp_path, {})
+        await _until(lambda: "ready" in server.log.read_text())
+        done = await sandbox.run("sleep 100", tmp_path, {}, 0.5)
+        await asyncio.sleep(0.3)
+        alive = server.returncode
+        await sandbox.stop()
+        return done.returncode, alive, server.returncode
+
+    timed_out, while_running, after_stop = asyncio.run(scenario())
+
+    assert timed_out == TIMED_OUT
+    assert while_running is None
+    assert after_stop is not None
+    assert marked_pids(str(tmp_path / "sandbox")) == []
+
+
 def test_kill_reaches_a_grandchild_that_left_the_group(tmp_path: Path) -> None:
     pids = tmp_path / "pids"
     processes = _Processes()

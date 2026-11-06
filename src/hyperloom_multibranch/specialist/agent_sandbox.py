@@ -5,10 +5,12 @@
 
 Every command runs with :data:`~hyperloom_multibranch.specialist.agent_watch.MARKER` in its environment, which every
 process it starts inherits, and under a launcher that is a child subreaper (:mod:`hyperloom.sandbox.launcher`), so the
-marker and the launchers' trees are the sandbox's whole extent: :meth:`LocalProcess.kill` ends every process that
+marker and the launchers' trees are the sandbox's whole extent: :meth:`LocalAgentSandbox.stop` ends every process that
 carries the marker or descends from a launcher, whichever session or process group it moved to and whatever it did to
 its environment (a Claude CLI runs each of its shell commands in a session of its own, and an agent's model starts its
-servers through one), and so does the session's watch (:mod:`agent_watch`) once the session's process is gone. The pod
+servers through one), and so does the session's watch (:mod:`agent_watch`) once the session's process is gone.
+:meth:`LocalProcess.kill` ends one command's alone, selected by
+:data:`~hyperloom_multibranch.specialist.agent_watch.PROCESS_MARKER` and its launcher's tree. The pod
 forbids a PID namespace, so an agent's ``pkill``, ``pgrep`` and ``killall`` would otherwise reach the whole host; Arbor
 stops its server with ``docker exec C pkill -TERM -f sglang.launch_server``, which through the docker shim would stop
 MB's measurement servers too. The sandbox puts wrappers for them first on ``PATH`` that match only the processes
@@ -64,6 +66,7 @@ from hyperloom_multibranch.specialist.agent_watch import (
     GRACE_SECONDS,
     MARKER,
     POLL_SECONDS,
+    PROCESS_MARKER,
     kill_marked,
     revive,
     sandbox_pids,
@@ -296,13 +299,15 @@ async def _restore(guard: FrameworkGuard | None, log: Path | None = None) -> Non
 
 @dataclass
 class LocalProcess:
-    """A command started in a :class:`LocalAgentSandbox` whose processes carry ``marker``, run by the launcher
-    ``popen``, which says on ``status`` how the command ended; its output is in ``log``. ``guard`` restores the
+    """A command started in a :class:`LocalAgentSandbox` whose processes carry ``marker``, its sandbox's, and
+    ``process_marker``, its own (:data:`~hyperloom_multibranch.specialist.agent_watch.PROCESS_MARKER`), run by the
+    launcher ``popen``, which says on ``status`` how the command ended; its output is in ``log``. ``guard`` restores the
     image's frameworks once the process is killed."""
 
     popen: subprocess.Popen[bytes]
     log: Path
     marker: str
+    process_marker: str
     grace_seconds: float = GRACE_SECONDS
     poll_seconds: float = POLL_SECONDS
     status: StatusPipe | None = None
@@ -345,10 +350,11 @@ class LocalProcess:
         return await asyncio.to_thread(read_tail, self.log)
 
     async def kill(self) -> None:
-        """SIGTERM every process of the sandbox, SIGKILL what is left after :attr:`grace_seconds`; return once none
-        is left."""
+        """SIGTERM every process of the command, SIGKILL what is left after :attr:`grace_seconds`; return once none
+        is left. The sandbox's other commands, a server started beside it, run on."""
 
-        await kill_marked(self.marker, self.grace_seconds, self.poll_seconds, partial(_reap, self.marker))
+        reap = partial(_reap, self.marker)
+        await kill_marked(self.process_marker, self.grace_seconds, self.poll_seconds, reap, PROCESS_MARKER)
         if self.returncode is None and self.status is not None:
             self.status.close()
             self.status = None
@@ -426,7 +432,7 @@ class LocalAgentSandbox:
         return merged
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
-        """Run ``command`` to its end or ``timeout``, at which every process of the sandbox is killed.
+        """Run ``command`` to its end or ``timeout``, at which every process of the command is killed.
 
         Raises :class:`~hyperloom_multibranch.specialist.framework_guard.FrameworksUnguarded` when the image's
         frameworks can be neither mounted read-only nor restored."""
@@ -464,7 +470,8 @@ class LocalAgentSandbox:
         return "" if ended is None else _restarted(ended)
 
     async def stop(self) -> None:
-        """Kill every process of the sandbox, as :meth:`LocalProcess.kill` does."""
+        """SIGTERM every process of the sandbox, every command's, SIGKILL what is left after :attr:`grace_seconds`;
+        return once none is left."""
         await kill_marked(str(self.root), self.grace_seconds, self.poll_seconds, partial(_reap, str(self.root)))
         await _restore(self.frameworks.guard)
 
@@ -546,6 +553,7 @@ class LocalAgentSandbox:
             argv = ["nice", "-n", str(self.niceness), *argv]
         if self.frameworks.read_only:
             argv = read_only_argv(self.frameworks.read_only, argv)
+        process_marker = f"{self.root}/{log.name.split('-', 1)[0]}"
         read_fd, write_fd = os.pipe()
         try:
             with log.open("ab") as out:
@@ -554,7 +562,7 @@ class LocalAgentSandbox:
                 popen = subprocess.Popen(
                     launcher_argv(sys.executable, write_fd, argv),
                     cwd=cwd,
-                    env=self.env(env),
+                    env={**self.env(env), PROCESS_MARKER: process_marker},
                     stdin=subprocess.DEVNULL,
                     stdout=out,
                     stderr=subprocess.STDOUT,
@@ -576,6 +584,7 @@ class LocalAgentSandbox:
             popen,
             log,
             str(self.root),
+            process_marker,
             self.grace_seconds,
             self.poll_seconds,
             StatusPipe(read_fd),

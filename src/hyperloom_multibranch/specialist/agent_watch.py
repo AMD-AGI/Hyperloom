@@ -43,6 +43,9 @@ from hyperloom.sandbox.launcher import LAUNCHER_SOURCE
 
 #: The environment variable every process of a sandbox carries, set to the sandbox's root.
 MARKER = "HYPERLOOM_AGENT_SANDBOX"
+#: Set, besides :data:`MARKER`, to ``<root>/<number>`` on every process of one command, so a kill can end one command
+#: and spare the others of its sandbox.
+PROCESS_MARKER = "HYPERLOOM_AGENT_PROCESS"
 #: SIGKILL skips sglang's cleanup and leaves its GPU memory held, so a kill waits this long after SIGTERM first.
 GRACE_SECONDS = 30.0
 #: The grace when the watch is terminated itself: the session's kill SIGKILLs the watch ``TERM_GRACE_SEC`` after its
@@ -121,9 +124,10 @@ def marked_pids(value: str) -> list[int]:
     return [pid for pid, environ in _marked() if environ[MARKER] == value]
 
 
-def sandbox_pids(marker: str) -> tuple[set[int], set[int]]:
-    """The live processes of the sandbox whose processes carry ``marker``: those carrying it and every descendant of
-    its launchers, marked or not; and its launchers, which are the marked processes running the launcher's source."""
+def sandbox_pids(marker: str, variable: str = MARKER) -> tuple[set[int], set[int]]:
+    """The live processes of the sandbox, or of the command, whose processes set ``variable`` to ``marker``: those
+    carrying it and every descendant of its launchers, marked or not; and its launchers, which are the marked processes
+    running the launcher's source."""
 
     parents: dict[int, list[int]] = {}
     marked: set[int] = set()
@@ -133,7 +137,7 @@ def sandbox_pids(marker: str) -> tuple[set[int], set[int]]:
             if state == _ZOMBIE:
                 continue
             parents.setdefault(ppid, []).append(pid)
-            if f"{MARKER}={marker}".encode() in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+            if f"{variable}={marker}".encode() in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
                 marked.add(pid)
         except (OSError, ValueError, IndexError):
             continue
@@ -148,9 +152,13 @@ def sandbox_pids(marker: str) -> tuple[set[int], set[int]]:
 
 
 async def kill_marked(
-    marker: str, grace_seconds: float, poll_seconds: float, reap: Callable[[], object] = lambda: None
+    marker: str,
+    grace_seconds: float,
+    poll_seconds: float,
+    reap: Callable[[], object] = lambda: None,
+    variable: str = MARKER,
 ) -> None:
-    """SIGTERM every process of the sandbox whose processes carry ``marker`` (:func:`sandbox_pids`), SIGKILL what is
+    """SIGTERM every process whose processes set ``variable`` to ``marker`` (:func:`sandbox_pids`), SIGKILL what is
     left after ``grace_seconds``, then the launchers; return once none is left. ``reap`` collects a child of this
     process that ended, which would otherwise linger as a zombie."""
 
@@ -158,7 +166,7 @@ async def kill_marked(
     termed: set[int] = set()
     while True:
         reap()
-        pids, launchers = sandbox_pids(marker)
+        pids, launchers = sandbox_pids(marker, variable)
         if not pids and not launchers:
             return
         if not pids:
@@ -332,6 +340,7 @@ __all__ = [
     "GRACE_SECONDS",
     "MARKER",
     "POLL_SECONDS",
+    "PROCESS_MARKER",
     "REGISTRY_PREFIX",
     "STOP_GRACE_SECONDS",
     "WATCH_ERR",
