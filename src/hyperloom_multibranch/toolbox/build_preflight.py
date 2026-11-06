@@ -52,10 +52,12 @@ from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
 from hyperloom.orchestrator.trace_analysis import TRACELENS_REF
 
 __all__ = [
+    "FULL_COMMIT",
     "IMAGE_CHECKOUTS",
     "IMAGE_SGLANG_CHECKOUT",
     "ImageUpstream",
     "PreflightSite",
+    "SGL_KERNEL",
     "build_preflight",
     "changeable_by_others",
     "git_head",
@@ -70,17 +72,20 @@ __all__ = [
     "unreachable",
 ]
 
+#: The native component built from sglang's ``sgl-kernel``.
+SGL_KERNEL = "sgl_kernel"
+#: A full commit id as git names one: forty lowercase hexadecimal digits.
+FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 #: Where the sglang images keep the checkout their ``sglang`` is installed from.
 IMAGE_SGLANG_CHECKOUT = Path("/sgl-workspace/sglang")
 #: The image's own checkout of a component's upstream, where it keeps one.
-IMAGE_CHECKOUTS = {"sgl_kernel": IMAGE_SGLANG_CHECKOUT}
+IMAGE_CHECKOUTS = {SGL_KERNEL: IMAGE_SGLANG_CHECKOUT}
 _TRACELENS = "TraceLens"
 #: The modules of this repository that import TraceLens when the toolbox starts or analyses a trace.
 _TRACELENS_USERS = (
     "hyperloom.orchestrator.trace_analysis.tracelens_skill_runner",
     "hyperloom.orchestrator.trace_analysis.tracelens_analysis",
 )
-_COMMIT = re.compile(r"[0-9a-f]{40}")
 _VERSION_COMMIT = re.compile(r"\+g([0-9a-f]{7,40})")
 _GIT_TIMEOUT_SEC = 30
 _READ, _RUN = stat.S_IROTH, stat.S_IXOTH
@@ -118,7 +123,7 @@ class ImageUpstream:
 
 #: The installed distribution whose commit each native component
 #: (:data:`~hyperloom.measure.runner.native.recipes.RECIPE_FACTORIES`) is built from.
-_DISTRIBUTIONS = {"sgl_kernel": "sglang", "vllm": "vllm"}
+_DISTRIBUTIONS = {SGL_KERNEL: "sglang", "vllm": "vllm"}
 
 
 def _git(directory: Path, *args: str) -> str | None:
@@ -138,7 +143,7 @@ def _git(directory: Path, *args: str) -> str | None:
 def git_head(directory: Path) -> str | None:
     """The commit checked out in ``directory``, or ``None`` when it is not a git checkout git can read."""
     head = _git(directory, "rev-parse", "HEAD")
-    return head if head is not None and _COMMIT.fullmatch(head) else None
+    return head if head is not None and FULL_COMMIT.fullmatch(head) else None
 
 
 def _direct_url(distribution: importlib.metadata.Distribution) -> dict:
@@ -153,7 +158,7 @@ def _installed_upstream(image_root: Path, component: str, distribution: str) -> 
     for installed in importlib.metadata.distributions(name=distribution, path=[str(image_root)]):
         direct = _direct_url(installed)
         commit = (direct.get("vcs_info") or {}).get("commit_id")
-        if isinstance(commit, str) and _COMMIT.fullmatch(commit):
+        if isinstance(commit, str) and FULL_COMMIT.fullmatch(commit):
             return ImageUpstream(component, commit, None)
         url = urlparse(str(direct.get("url", "")))
         if url.scheme == "file":

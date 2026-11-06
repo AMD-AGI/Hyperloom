@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import partial
@@ -62,7 +61,13 @@ from hyperloom.measure.runner.native.isolated import (
 )
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES, native_recipes
-from hyperloom_multibranch.toolbox.build_preflight import PreflightSite, build_preflight, signing_key_problem
+from hyperloom_multibranch.toolbox.build_preflight import (
+    FULL_COMMIT,
+    SGL_KERNEL,
+    PreflightSite,
+    build_preflight,
+    signing_key_problem,
+)
 from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
@@ -89,8 +94,6 @@ BUILD_PYTHON_ENV = "HYPERLOOM_BUILD_PYTHON"
 BUILDER_IMAGE_ENV = "HYPERLOOM_BUILDER_IMAGE"
 BUILD_SGLANG_REF_ENV = "HYPERLOOM_BUILD_SGLANG_REF"
 _DEFAULT_PYTHON = "python3"
-_SGL_KERNEL = "sgl_kernel"
-_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 logger = logging.getLogger(__name__)
 
@@ -126,9 +129,9 @@ def named_commits(environ: Mapping[str, str]) -> dict[str, str]:
         BuildStoreConfigError: ``HYPERLOOM_BUILD_SGLANG_REF`` is set to something other than a full commit id.
     """
     ref = environ.get(BUILD_SGLANG_REF_ENV, "").strip()
-    if ref and not _FULL_COMMIT.fullmatch(ref):
+    if ref and not FULL_COMMIT.fullmatch(ref):
         raise BuildStoreConfigError(f"{BUILD_SGLANG_REF_ENV} must be a full lowercase commit id")
-    return {_SGL_KERNEL: ref} if ref else {}
+    return {SGL_KERNEL: ref} if ref else {}
 
 
 def _signer(path: Path) -> Signer:

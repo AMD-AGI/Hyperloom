@@ -130,14 +130,23 @@ _WAIT_TEST: dict[str, Any] = {
     "required": ["request_id"],
     "additionalProperties": False,
 }
-#: What a specialist tests: a change of its own (``explore``) or the profile of its head (``profile``). The other
-#: purposes and kinds are the session's (a baseline, a health check, a final candidate, an integration, the confirm
-#: retest of a measured gain, a regression's reproduction, a final sweep): the queue exempts most of them from the
-#: branch's K and its backpressure, so a specialist that could send them would take the session's capacity.
-SPECIALIST_KINDS = (TestKind.TEST, TestKind.PROFILE)
-SPECIALIST_PURPOSES = (Purpose.EXPLORE, Purpose.PROFILE)
+#: What a specialist tests, as ``(kind, purpose)`` pairs: a change of its own (``test`` for ``explore``) or the profile
+#: of its head (``profile`` for ``profile``). The other purposes and kinds are the session's (a baseline, a health check,
+#: a final candidate, an integration, the confirm retest of a measured gain, a regression's reproduction, a final
+#: sweep): the queue exempts most of them from the branch's K and its backpressure, so a specialist that could send them
+#: would take the session's capacity. Kind and purpose are checked as one pair: a measured test sent as a profile would
+#: be queued at the profile's priority, ahead of every branch's explores, skip the explore-only checks and escape the
+#: profile dedup, which is keyed on the kind.
+SPECIALIST_PAIRS = ((TestKind.TEST, Purpose.EXPLORE), (TestKind.PROFILE, Purpose.PROFILE))
+SPECIALIST_KINDS = tuple(kind for kind, _ in SPECIALIST_PAIRS)
+SPECIALIST_PURPOSES = tuple(purpose for _, purpose in SPECIALIST_PAIRS)
+_SPECIALIST_PAIR_VALUES = frozenset((kind.value, purpose.value) for kind, purpose in SPECIALIST_PAIRS)
+_SPECIALIST_PAIRS_TEXT = " and ".join(
+    f"kind {kind.value} with purpose {purpose.value}" for kind, purpose in SPECIALIST_PAIRS
+)
 # The caller's branch is the token's; a request that names a branch or an id, a priority (the purpose's default is the
-# queue's to give) or a purpose or kind that is not the specialist's is refused by the schema.
+# queue's to give) or a purpose or kind that is not the specialist's is refused by the schema, and a pair of the two
+# that is not one of SPECIALIST_PAIRS by the handler (the schema check has no keyword that ties two properties).
 _SUBMIT_TEST: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
@@ -145,8 +154,9 @@ _SUBMIT_TEST: dict[str, Any] = {
         "purpose": {
             "enum": [purpose.value for purpose in SPECIALIST_PURPOSES],
             "description": (
-                "explore for a change of yours, profile for the profile of your head. The runtime retests a measured "
-                "gain itself (confirm) and the session runs its own baselines, finals and integrations."
+                "explore (with kind test) for a change of yours, profile (with kind profile) for the profile of your "
+                "head; any other pair is refused. The runtime retests a measured gain itself (confirm) and the session "
+                "runs its own baselines, finals and integrations."
             ),
         },
         "parent_commit": {"type": _STRING, "minLength": 1},
@@ -411,6 +421,11 @@ def _submit_test(
     toolbox: Toolbox, home: asyncio.AbstractEventLoop | None
 ) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
+        kind, purpose = arguments["kind"], arguments["purpose"]
+        if (kind, purpose) not in _SPECIALIST_PAIR_VALUES:
+            raise InvalidParamsError(
+                f"kind {kind} does not go with purpose {purpose}: a specialist submits {_SPECIALIST_PAIRS_TEXT}"
+            )
         try:
             request = MeasuredRequest.from_document({**arguments, "branch_id": ctx.principal.branch})
         except ValueError as exc:  # MeasurementError and RecipeError both are
@@ -882,6 +897,7 @@ __all__ = [
     "REPLY_INBOX_HEADER",
     "REPLY_INBOX_LINES",
     "SPECIALIST_KINDS",
+    "SPECIALIST_PAIRS",
     "SPECIALIST_PURPOSES",
     "SPECIALIST_TOKEN_ENV",
     "BriefingFor",
