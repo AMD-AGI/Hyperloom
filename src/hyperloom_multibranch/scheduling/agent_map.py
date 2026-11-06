@@ -59,6 +59,30 @@ class SharedMap:
                 listed.setdefault(found.id, found)
         return cls(tuple(listed.values()), {key: plan for key, plan in shares.items() if key in listed})
 
+    def folded(self, report: Path, order: Path | None) -> SharedMap:
+        """The map once a worker's ``report`` is folded in and Arbor's master dealt ``order`` (``None`` for none): each
+        direction the report closed takes its status and why, and the order's directions move to that share, whose
+        holder the branch it is dealt to becomes; every other holder is kept."""
+
+        closed = {
+            str(entry.get("id") or ""): entry
+            for entry in directions(report)
+            if str(entry.get("status") or MAP_OPEN) != MAP_OPEN
+        }
+        folded = tuple(
+            replace(
+                item,
+                status=str(closed[item.id]["status"]),
+                why=" ".join(str(closed[item.id].get("why") or "").split())[:_WHY_CHARS] or item.why,
+            )
+            if item.id in closed
+            else item
+            for item in self.directions
+        )
+        listed = {item.id for item in self.directions}
+        moved = {str(entry.get("id") or ""): str(order) for entry in directions(order)} if order else {}
+        return SharedMap(folded, {**self.shares, **{key: plan for key, plan in moved.items() if key in listed}})
+
     def dealt(self, plan: str, branch: str) -> SharedMap:
         """The map with the directions of the share ``plan`` held by ``branch``, the branch it was dealt to."""
 

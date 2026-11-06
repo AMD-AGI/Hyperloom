@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """Arbor's map as the scheduler deals it: each direction read with the share it is in, and held by the branch that
-share was dealt to."""
+share was dealt to; and a worker's report and the next order Arbor's master deals folded back in."""
 
 from __future__ import annotations
 
@@ -52,3 +52,24 @@ def test_a_share_dealt_to_a_branch_makes_it_the_holder_of_that_share_s_direction
 
 def test_a_map_that_cannot_be_read_is_empty(tmp_path: Path) -> None:
     assert SharedMap.read(tmp_path / "missing.json", ()) == SharedMap((), {})
+
+
+def test_a_report_closes_its_directions_and_a_dealt_order_moves_its_own_to_the_branch_it_opens_on(
+    tmp_path: Path,
+) -> None:
+    shared, one, two = _shared(tmp_path)
+    held = shared.dealt(one, "b01").dealt(two, "b02")
+    report = Path(_write(tmp_path / "worker_report.json", {"id": "m-gemm", "status": "done", "why": "KEEP 2"}))
+    order = Path(_write(tmp_path / "order-1.json", FUSE))
+
+    folded = held.folded(report, order)
+
+    assert [(item.id, item.status, item.why, item.holder) for item in folded.directions] == [
+        ("m-gemm", "done", "KEEP 2", "b01"),
+        ("m-fuse", "open", "rms_norm_kernel 4 %", "b02"),
+        ("m-fp8", "killed", "root is BF16", ""),
+    ]
+    assert folded.shares == {"m-gemm": one, "m-fuse": str(order)}
+    holders = {item.id: item.holder for item in folded.dealt(str(order), "b04").directions}
+    assert holders == {"m-gemm": "b01", "m-fuse": "b04", "m-fp8": ""}
+    assert held.folded(report, None).shares == held.shares
