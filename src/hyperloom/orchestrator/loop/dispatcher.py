@@ -444,7 +444,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 )
         except (sqlite3.Error, ValueError):
             log.exception("dispatcher: dead-running task reclaim failed")
-        dead_tasks.extend(self._coord.reconciler.last_report.failed_tasks)
+        dead_tasks.extend(self._coord.reconciler.take_failed_tasks())
         if dead_tasks:
             try:
                 await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")

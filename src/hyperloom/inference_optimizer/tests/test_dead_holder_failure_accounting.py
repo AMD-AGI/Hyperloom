@@ -114,6 +114,21 @@ async def test_pump_accounts_for_the_reconcilers_confirmed_deaths(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_a_death_survives_a_second_reconcile_before_the_pump(session_dir):
+    import time
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        task = await _running_task_with_dead_lease(c, key="reconciler-death-twice")
+        assert (await c.reconciler.run(time.time())).failed_tasks == [task.task_id]
+        assert (await c.reconciler.run(time.time())).failed_tasks == []
+        await c.dispatcher.pump_dispatcher_once()
+        assert c.shared_state.baseline_failure_streak == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_three_lease_reaped_baselines_trip_the_streak_stop(session_dir):
     """--enablement=off: three lease-reaped baselines trip the three-strike stop."""
     c = Coordinator(session_dir, backends=_silent_backends())
