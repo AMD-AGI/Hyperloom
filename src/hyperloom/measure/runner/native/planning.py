@@ -65,7 +65,8 @@ class PlannedBuild(Protocol):
     """A planned build as a build runner takes it: :meth:`lay` lays its tree below ``work`` (nothing of the candidate
     runs then) for the child that compiles it."""
 
-    def lay(self, blobs: BlobStore, work: Path) -> LaidTree: ...
+    def lay(self, blobs: BlobStore, work: Path) -> LaidTree:
+        """The tree laid below ``work``, its files read from ``blobs``."""
 
 
 @dataclass(frozen=True)
