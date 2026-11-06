@@ -10,7 +10,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from hyperloom.common import proctree
@@ -34,10 +34,13 @@ class Leftovers:
             nothing the reap was after is left.
         unseen: The reap could not tell what is left: ``/proc`` could not be listed, or processes kept appearing that it
             had not yet signalled.
+        launchers: The launchers whose wait timed out: this process's own children, which only their ``Popen`` waits
+            for, so that the exit status stays where the ``Popen`` reads it.
     """
 
     running: tuple[proctree.ProcessId, ...] = ()
     unseen: bool = False
+    launchers: tuple[subprocess.Popen[bytes], ...] = field(default=(), repr=False)
 
     @property
     def clean(self) -> bool:
@@ -46,7 +49,11 @@ class Leftovers:
 
     def __or__(self, other: Leftovers) -> Leftovers:
         """What either reap left, each process once."""
-        return Leftovers(tuple(dict.fromkeys((*self.running, *other.running))), self.unseen or other.unseen)
+        return Leftovers(
+            tuple(dict.fromkeys((*self.running, *other.running))),
+            self.unseen or other.unseen,
+            tuple(dict.fromkeys((*self.launchers, *other.launchers))),
+        )
 
     def describe(self) -> str:
         """The processes left, by pid, command and state, for a log line."""
@@ -124,7 +131,8 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
         grace_sec: How long descendants get to exit on SIGTERM.
 
     Returns:
-        Leftovers: What is still running; clean when no descendant and no launcher is.
+        Leftovers: What is still running; clean when no descendant and no launcher is. A launcher whose wait timed out
+        is named with its ``Popen``, which alone waits for it later (:func:`wait_exited`).
     """
     procs = [p for p in procs if p.returncode is None]
     roots = [p.pid for p in procs]
@@ -156,7 +164,7 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
             proc.wait(timeout=_WINDOW_SEC)
         except subprocess.TimeoutExpired:
             stuck = () if launcher is None else ((proc.pid, launcher[1]),)
-            left = left | Leftovers(stuck, unseen=launcher is None)
+            left = left | Leftovers(stuck, unseen=launcher is None, launchers=(proc,))
     proctree.reap_exited_children(tree)
     return left
 
@@ -216,10 +224,18 @@ def wait_exited(left: Leftovers) -> Leftovers:
     """Wait for those of ``left`` that have exited and are now this process's children; return the ones still running.
 
     Each process in ``left`` was sent SIGKILL before it was named and cannot have started another, so the ones still
-    running are all that is left of them.
+    running are all that is left of them. A launcher among them is collected by its ``Popen`` alone; only the others,
+    the processes this one adopted, go to ``proctree.reap_exited_children``.
     """
-    proctree.reap_exited_children(left.running)
-    return Leftovers(tuple(process for process in left.running if _still_running(process)), left.unseen)
+    for launcher in left.launchers:
+        launcher.poll()
+    own = {launcher.pid for launcher in left.launchers}
+    proctree.reap_exited_children(process for process in left.running if process[0] not in own)
+    return Leftovers(
+        tuple(process for process in left.running if _still_running(process)),
+        left.unseen,
+        tuple(launcher for launcher in left.launchers if launcher.returncode is None),
+    )
 
 
 def _still_running(process: proctree.ProcessId) -> bool:

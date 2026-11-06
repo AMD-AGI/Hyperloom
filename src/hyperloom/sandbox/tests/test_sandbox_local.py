@@ -718,6 +718,57 @@ def test_a_survivor_the_launchers_reap_names_is_looked_at_again_after_the_tag_sw
         _end(monkeypatch, survivor)
 
 
+def test_a_launcher_that_outlives_its_wait_is_collected_by_its_popen_alone(make, monkeypatch) -> None:
+    """A launcher named because its wait timed out is this process's own child: once it exits its ``Popen`` collects it,
+    with the status SIGKILL left, and the wait for the zombies of what a reap named never takes it."""
+    monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    sb.run("sleep 600", background=True)
+    launchers: list[proctree.ProcessId] = []
+    popens: list[subprocess.Popen[bytes]] = []
+    named: list[reaper.Leftovers] = []
+    waited: list[proctree.ProcessId] = []
+    kill_launchers, sweep_tagged = reaper.kill_launchers, reaper.sweep_tagged
+    reap_exited_children = proctree.reap_exited_children
+
+    def _kill_launchers(procs, **kw) -> reaper.Leftovers:
+        popens.extend(procs)
+        for proc in procs:
+            identity = proctree.proc_identity(proc.pid)
+            assert identity is not None
+            launchers.append((proc.pid, identity[1]))
+        _immortal(monkeypatch, procs[0].pid)  # its wait times out, as while the kernel still tears it down
+        named.append(kill_launchers(procs, **kw))
+        return named[-1]
+
+    def _sweep(sandbox_id: str) -> reaper.Leftovers:
+        _mortal(monkeypatch)  # the launcher carries the tag, and the sweep's SIGKILL now ends it
+        return sweep_tagged(sandbox_id)
+
+    def _reap_exited_children(processes) -> int:
+        processes = list(processes)
+        waited.extend(processes)
+        return reap_exited_children(processes)
+
+    monkeypatch.setattr(reaper, "kill_launchers", _kill_launchers)
+    monkeypatch.setattr(reaper, "sweep_tagged", _sweep)
+    monkeypatch.setattr(proctree, "reap_exited_children", _reap_exited_children)
+    try:
+        sb.kill()
+        [launcher] = popens
+        assert [left.running for left in named] == [tuple(launchers)], "the launchers' reap named it"
+        assert launcher.returncode == -signal.SIGKILL, "its Popen collected it, with its own exit status"
+        assert launcher.pid not in {pid for pid, _ in waited}
+        assert provider.quarantined == set()
+        assert provider.pool.free_cards() == (0, 1)
+    finally:
+        _mortal(monkeypatch)
+        for proc in popens:
+            proc.kill()
+            proc.wait()
+
+
 def test_a_named_survivor_that_dies_is_waited_when_it_is_this_process_s_child(make, monkeypatch) -> None:
     """A survivor re-parented to this process (a child subreaper) leaves no zombie once it dies after it was named."""
     monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
