@@ -14,7 +14,6 @@ from typing import Any
 from hyperloom_common.coerce import first_text
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
-from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
 from ...knowledge.kb_writeback import (
@@ -49,6 +48,7 @@ from ._integrate_results import (
 )
 from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS
 from ._patch_git import _uncommitted_revert
+from ._proposal_identity import content_fingerprint
 from ._patch_sources import _done_field
 
 log = logging.getLogger(__name__)
@@ -549,7 +549,7 @@ def _weigh_gate(
         keep_threshold_pct=keep_threshold_pct,
         accuracy_pass=accuracy_pass,
         acc_delta_pct=acc_delta_pct,
-        cfg_fingerprint=canonical_fingerprint(params.get("extra_server_args"), params.get("extra_envs")),
+        cfg_fingerprint=content_fingerprint(params),
         measured_against=_measured_against(params, base_tput=base_tput),
     )
     return _GateVerdict(

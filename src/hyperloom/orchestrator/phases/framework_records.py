@@ -13,48 +13,17 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom_common.coerce import dict_rows, first_str, first_text, to_list, to_mapping
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind
 from ..actions.executors import _integrate_vocabulary
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.task_registry import TaskNotFound
+from .config_levers import config_lever_from_proposal
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
-
-
-def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
-    """The name, server args and env overrides one lever proposal carries, dropping args Magpie cannot transport."""
-    extra_envs = {str(k).strip(): str(v) for k, v in to_mapping(entry.get("extra_envs")).items() if str(k).strip()}
-    args = entry.get("extra_args")
-    tokens = [str(a) for a in args if str(a).strip()] if isinstance(args, (list, tuple)) else []
-    if any(ch.isspace() for token in tokens for ch in token):
-        text, fault = "", "has a whitespace-bearing argv token"
-    else:
-        text, fault = (args if isinstance(args, str) else " ".join(tokens)), ""
-    parsed_args = tokenize_server_args_preserving_json(text)
-    if parsed_args is None:
-        fault = (
-            "has server args unsupported by Magpie's unquoted argv transport"
-            if isinstance(args, str)
-            else "has unparsable server args"
-        )
-    if fault:
-        log.warning(
-            "FRAMEWORK config lever %r %s; dropping the args%s",
-            entry.get("name"),
-            fault,
-            " while preserving its environment overrides" if extra_envs else "",
-        )
-        if not extra_envs:
-            return {}
-    extra_server_args = "" if parsed_args is None else parsed_args[0]
-    if not extra_server_args and not extra_envs:
-        return {}
-    return {"name": str(entry.get("name") or ""), "extra_server_args": extra_server_args, "extra_envs": extra_envs}
 
 
 def _framework_config_levers_from_done(
@@ -89,7 +58,7 @@ def _framework_config_levers_from_done(
         if not proposals:
             return {}
     for entry in proposals:
-        lever = _config_lever_from_proposal(entry) if isinstance(entry, dict) else {}
+        lever = config_lever_from_proposal(entry) if isinstance(entry, dict) else {}
         if lever:
             return lever
     return {}

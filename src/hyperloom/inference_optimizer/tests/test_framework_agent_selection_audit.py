@@ -367,6 +367,45 @@ async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coor
 
 
 @pytest.mark.asyncio
+async def test_a_removal_only_lever_is_benched_and_its_ledger_verdict_found_again(
+    coord: Coordinator, tmp_path, monkeypatch
+) -> None:
+    from hyperloom.agents.framework.kb import KB_ROOT_ENV
+    from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
+    from hyperloom.orchestrator.actions.executors._integrate_perf_gate import _GateBasis, _weigh_gate
+    from hyperloom.orchestrator.knowledge.kb_writeback import (
+        OUTCOME_REVERTED_SMOKE_FAIL,
+        FrameworkOutcome,
+        write_framework_record,
+    )
+
+    monkeypatch.setenv(KB_ROOT_ENV, str(tmp_path / "kb"))
+    done = {"proposal_set": [{"name": "no-cuda-graph-off", "remove_args": ["--disable-cuda-graph"]}]}
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    (prop,) = coord.state.pending_proposals.values()
+    params = prop.payload["params"]
+    assert (params["patch_name"], params["remove_args"]) == ("no-cuda-graph-off", ["--disable-cuda-graph"])
+
+    attempt = IntegrateAttempt(task_id="t-int", specialist_task_id="spec-1", shared_state=coord.shared_state)
+    measured = _weigh_gate(attempt, params, {}, {"accuracy": 0.5}, _GateBasis(100.0, 1.0)).measured
+    await write_framework_record(
+        FrameworkOutcome(
+            pr_url="cand-1",
+            pr_sha="",
+            patch_path="",
+            outcome=OUTCOME_REVERTED_SMOKE_FAIL,
+            tps_delta_pct=0.0,
+            session_id="s",
+            applicability=measured.cfg_fingerprint,
+            accuracy_delta_pct=-2.0,
+        )
+    )
+    coord.state.pending_proposals.clear()
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task("spec-2"), done_payload=done)
+    assert not coord.state.pending_proposals
+
+
+@pytest.mark.asyncio
 async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False)
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
