@@ -29,6 +29,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
+    BlackboardError,
     ClaimLost,
     ClaimService,
     ConflictingWrite,
@@ -258,10 +259,8 @@ class RealToolbox:
         entry = self._log.get(request_id)
         if entry is None or entry.aborted:
             raise UnknownTestRequest(request_id)
-        if entry.outcome is not None:
-            return CancelOutcome.WITHDRAWN if "withdrawal" in entry.outcome else CancelOutcome.FINISHED
         await self._withdraw(entry, "cancelled by the submitter")
-        return CancelOutcome.WITHDRAWN
+        return CancelOutcome.WITHDRAWN if "withdrawal" in (entry.outcome or {}) else CancelOutcome.FINISHED
 
     async def queue_state(self) -> QueueState:
         return replace(self._queue.state(), builds=self._builds.ledger())
@@ -415,10 +414,10 @@ class RealToolbox:
         return tests
 
     async def _withdraw_tests(self, wanted: Callable[[LogEntry], bool], reason: str) -> tuple[str, ...]:
+        """Withdraw the waiting tests ``wanted`` picks; the ids of those withdrawn, not of those whose result landed
+        while the ones before them were withdrawn."""
         pending = [e for e in self._log.entries() if e.waiting and wanted(e)]
-        for entry in pending:
-            await self._withdraw(entry, reason)
-        return tuple(entry.request_id for entry in pending)
+        return tuple([entry.request_id for entry in pending if await self._withdraw(entry, reason)])
 
     def cancel_tool_jobs(self, branch_id: str) -> int:
         """Cancel the tool jobs (profile, roofline, build, kernel_tune, ...) ``branch_id`` started or joined and that have
@@ -520,9 +519,12 @@ class RealToolbox:
         self._pump()
 
     async def tick(self) -> None:
-        """One round of housekeeping: renew the claims of live tests and retry outcomes the blackboard refused."""
+        """One round of housekeeping: renew the claims of live tests and retry outcomes the blackboard refused.
 
-        await self.renew_claims()
+        A claim whose renewal fails is logged by :meth:`_renew_each` and holds up nothing after it in the round.
+        """
+
+        await self._renew_each()
         await self._housekeeping()
         for entry in self._log.entries():
             if entry.unwritten:
@@ -538,15 +540,40 @@ class RealToolbox:
         return None
 
     async def renew_claims(self) -> None:
+        """Renew the claim of every queued and running test, each on its own (see :meth:`_renew_each`).
+
+        Once every claim had its turn, the first renewal that failed for a reason not the blackboard's is raised.
+        """
+
+        errors = await self._renew_each()
+        if errors:
+            raise errors[0]
+
+    async def _renew_each(self) -> list[Exception]:
+        """Renew the claim of every queued and running test; the errors not the blackboard's, in claim order.
+
+        A renewal the blackboard refused, or that did not reach it, is logged as a warning. One that failed for any other
+        reason is logged with its traceback, naming the claim. Either way the round goes on to the claims after it, which
+        would otherwise lapse at their TTL, round after round, behind the one that keeps failing.
+        """
+
         if self._claims is None:
-            return
+            return []
+        errors: list[Exception] = []
         for item in self._queue.items():
             if item.request.intent_fingerprint is None:
                 continue
+            key = self._key(item.request)
             try:
-                await self._claims.renew(self._key(item.request), ttl_seconds=self._ttl)
-            except Exception:
-                logger.warning("could not renew the claim of %s", item.request_id, exc_info=True)
+                await self._claims.renew(key, ttl_seconds=self._ttl)
+            except (BlackboardError, OSError):  # the blackboard refused or was not reached: the next tick retries
+                message = "could not renew the claim of %s; it lapses at its TTL unless a later renewal lands"
+                logger.warning(message, item.request_id, exc_info=True)
+            except Exception as error:
+                message = "renewing the claim of %s (intent %s on %s) failed; the other claims are renewed"
+                logger.exception(message, item.request_id, key.intent_fingerprint, key.parent_commit)
+                errors.append(error)
+        return errors
 
     # --- accepting and recovering --------------------------------------------------------------------------------
 
@@ -594,8 +621,9 @@ class RealToolbox:
             if self._claims is not None and accepted.intent_fingerprint is not None:
                 await self._claims.attach_request(self._key(accepted), entry.request_id, ttl_seconds=self._ttl)
         except ClaimLost as error:
-            await self._sink.write_withdrawal(Withdrawal(entry.request_id, f"claim lost: {error}"))
-            self._log.abort(entry.request_id)
+            # The row is written, so the request ends as withdrawn, logged like any outcome: it waits in no queue, and a
+            # write the blackboard refuses is retried by the next tick and the next start, never left in flight.
+            await self._record_and_write(entry, {"withdrawal": f"claim lost: {error}"})
             raise RequestRejected(f"the claim of this request is not held: {error}") from error
         except BaseException:
             self._log.abort(entry.request_id)
@@ -622,7 +650,8 @@ class RealToolbox:
             prepared = await self._acceptance.prepare(request, replay=True)
             await self._publish(entry, request)
         except RequestRejected as error:
-            await self._record_and_write(entry, {"withdrawal": f"not recoverable: {error}"})
+            if entry.outcome is None:  # a lost claim has recorded its withdrawal already
+                await self._record_and_write(entry, {"withdrawal": f"not recoverable: {error}"})
             return
         self._enqueue(entry, request, prepared.environment, self._builds.plan(request, prepared.environment))
 
@@ -648,7 +677,10 @@ class RealToolbox:
             entry = self._log.get(item.request_id)
             if entry is not None:
                 await self._record_and_write(entry, {"result": result.to_document()})
-            await self._housekeeping()
+            try:
+                await self._housekeeping()
+            except Exception:  # the result is logged and written already, so it stands; every tick runs this again
+                logger.exception("housekeeping after test %s ended failed; its result stands", item.request_id)
         finally:
             self._queue.remove(item.request_id)
             self._builds.forget(item.request_id)
@@ -703,7 +735,15 @@ class RealToolbox:
     async def _notify_build(self, notice: BuildNotice) -> None:
         await self._sink.notify_build(notice)
 
-    async def _withdraw(self, entry: LogEntry, reason: str) -> None:
+    async def _withdraw(self, entry: LogEntry, reason: str) -> bool:
+        """Withdraw ``entry`` unless it has an outcome; whether this call withdrew it.
+
+        The outcome is read again after the test's task is cancelled: a result, or another withdrawal, that landed while
+        this call waited is kept, never written over (the log, a restart's replay and the blackboard would say
+        withdrawn of a measured test).
+        """
+        if not entry.waiting:
+            return False
         self._queue.remove(entry.request_id)
         self._builds.forget(entry.request_id)
         task = self._tasks.pop(entry.request_id, None)
@@ -711,8 +751,11 @@ class RealToolbox:
             self._executor.withdraw(entry.request_id)  # the task's cancel cannot reach the thread that measures
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        await self._record_and_write(entry, {"withdrawal": reason})
+        withdrawn = entry.waiting
+        if withdrawn:
+            await self._record_and_write(entry, {"withdrawal": reason})
         self._pump()
+        return withdrawn
 
     async def _record_and_write(self, entry: LogEntry, outcome: dict[str, object]) -> None:
         self._log.record_outcome(entry.request_id, outcome)
@@ -777,7 +820,10 @@ class RealToolbox:
     async def _renew_loop(self) -> None:
         while True:
             await asyncio.sleep(self._ttl / 3)
-            await self.tick()
+            try:
+                await self.tick()
+            except Exception:  # ended, the loop would let every live claim lapse at its TTL, and close() says nothing
+                logger.exception("a renewal round failed; the claims of live tests are renewed again at the next one")
 
 
 __all__ = ["AcceptanceSetup", "RealToolbox", "ToolboxStores", "ToolboxTuning"]

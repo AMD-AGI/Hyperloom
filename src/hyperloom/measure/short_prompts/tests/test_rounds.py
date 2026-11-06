@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from collections.abc import Callable
 
 import pytest
 
+from hyperloom.measure.short_prompts import client
 from hyperloom.measure.short_prompts.client import CompletionError, complete, discover_model, run_prompts
 from hyperloom.measure.short_prompts.outputs import FAILED, OK, OutputsError, read_outputs
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
@@ -157,6 +159,24 @@ def test_the_client_reads_the_model_the_server_lists_and_refuses_what_is_not_a_c
         assert answer.tokens is None and answer.text and answer.finish_reason == "length"
     with pytest.raises(CompletionError, match="request failed"):
         complete("http://127.0.0.1:1", MODEL, prompt_set()[0], max_new_tokens=4, timeout_sec=1)
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, asyncio.CancelledError, SystemExit])
+def test_a_stop_raised_on_a_requests_own_thread_reaches_the_caller_as_it_was(monkeypatch, stop):
+    raised = stop()
+    ended: list[BaseException | None] = []
+
+    def read(source, timeout_sec):
+        raise raised
+
+    monkeypatch.setattr(client, "_read_json", read)
+    monkeypatch.setattr(threading, "excepthook", lambda args: ended.append(args.exc_value))
+
+    with pytest.raises(stop) as caught:
+        discover_model("http://127.0.0.1:1", 5)
+
+    assert caught.value is raised, "a stop is neither wrapped in a CompletionError nor replaced by a timeout"
+    assert ended == [raised], "and the request's own thread does not swallow it"
 
 
 @pytest.mark.parametrize(

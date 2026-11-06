@@ -11,7 +11,6 @@ import stat
 import subprocess
 import sys
 from dataclasses import replace
-from functools import partial
 from pathlib import Path
 
 import pytest
@@ -73,7 +72,8 @@ def sglang_dist(image_root: Path, direct_url: dict, name: str = "sglang") -> Non
 
 
 @pytest.fixture
-def tree(tmp_path: Path) -> Path:
+def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr(preflight, "stat_path", stat_open_above(tmp_path))
     (tmp_path / "a" / "b").mkdir(parents=True)
     (tmp_path / "a" / "b" / "file").write_text("x")
     for directory in (tmp_path, tmp_path / "a", tmp_path / "a" / "b"):
@@ -83,16 +83,14 @@ def tree(tmp_path: Path) -> Path:
 
 
 def test_a_tree_open_to_others_is_reachable(tree: Path) -> None:
-    reach = partial(unreachable, stat_fn=stat_open_above(tree))
-
-    assert reach(tree / "a" / "b") is None
-    assert reach(tree / "a" / "b" / "file") is None
+    assert unreachable(tree / "a" / "b") is None
+    assert unreachable(tree / "a" / "b" / "file") is None
 
 
 def test_a_private_directory_on_the_way_is_named_with_its_mode_and_owner(tree: Path) -> None:
     (tree / "a").chmod(0o700)
 
-    problem = unreachable(tree / "a" / "b" / "file", stat_fn=stat_open_above(tree))
+    problem = unreachable(tree / "a" / "b" / "file")
 
     assert problem is not None and problem.startswith(f"{tree / 'a'} (mode 0700, owner uid {os.geteuid()}")
     assert problem.endswith("does not let user 65534 pass through")
@@ -101,14 +99,14 @@ def test_a_private_directory_on_the_way_is_named_with_its_mode_and_owner(tree: P
 def test_a_file_others_cannot_read_or_run_is_named(tree: Path) -> None:
     target = tree / "a" / "b" / "file"
     target.chmod(0o640)
-    assert unreachable(target, stat_fn=stat_open_above(tree)).endswith("does not let user 65534 read it")
+    assert unreachable(target).endswith("does not let user 65534 read it")
 
     target.chmod(0o644)
-    assert unreachable(target, stat_fn=stat_open_above(tree)) is None
-    assert unreachable(target, run=True, stat_fn=stat_open_above(tree)).endswith("does not let user 65534 run it")
+    assert unreachable(target) is None
+    assert unreachable(target, run=True).endswith("does not let user 65534 run it")
 
 
-def test_what_user_65534_owns_is_judged_by_the_owner_bits(tree: Path) -> None:
+def test_what_user_65534_owns_is_judged_by_the_owner_bits(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def owned_by_nobody(path: Path) -> os.stat_result:
         found = stat_open_above(tree)(path)
         if Path(path) != tree / "a":
@@ -117,7 +115,8 @@ def test_what_user_65534_owns_is_judged_by_the_owner_bits(tree: Path) -> None:
         fields[0], fields[4] = found.st_mode & ~0o077, 65534
         return os.stat_result(fields)
 
-    assert unreachable(tree / "a" / "b", stat_fn=owned_by_nobody) is None
+    monkeypatch.setattr(preflight, "stat_path", owned_by_nobody)
+    assert unreachable(tree / "a" / "b") is None
 
 
 def test_a_link_into_a_private_directory_names_the_directory_it_resolves_to(tree: Path) -> None:
@@ -125,15 +124,13 @@ def test_a_link_into_a_private_directory_names_the_directory_it_resolves_to(tree
     (tree / "private" / "python").write_text("")
     (tree / "a" / "python").symlink_to(tree / "private" / "python")
 
-    problem = unreachable(tree / "a" / "python", run=True, stat_fn=stat_open_above(tree))
+    problem = unreachable(tree / "a" / "python", run=True)
 
     assert problem is not None and problem.startswith(f"{tree / 'private'} (mode 0700")
 
 
 def test_a_missing_path_is_said_to_be_missing(tree: Path) -> None:
-    assert (
-        unreachable(tree / "a" / "nothing", stat_fn=stat_open_above(tree)) == f"{tree / 'a' / 'nothing'} does not exist"
-    )
+    assert unreachable(tree / "a" / "nothing") == f"{tree / 'a' / 'nothing'} does not exist"
 
 
 # --- the signing key ------------------------------------------------------------------------------------------------
@@ -268,7 +265,7 @@ def ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PreflightSite:
     monkeypatch.setattr(preflight, "geteuid", lambda: 0)
     monkeypatch.setattr(preflight, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(preflight, "tracelens_problem", lambda: None)
-    monkeypatch.setattr(preflight, "unreachable", partial(unreachable, stat_fn=stat_open_above(tmp_path)))
+    monkeypatch.setattr(preflight, "stat_path", stat_open_above(tmp_path))
     return PreflightSite(
         tmp_path / "store",
         tmp_path / "trust.json",

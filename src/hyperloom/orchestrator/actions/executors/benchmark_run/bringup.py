@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
 from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
 from ....state.failure_evidence import KV_CACHE_OOM_MARKERS, SUBPROCESS_NONZERO
 from .._aiter_jit import is_aiter_jit_registry_mismatch
@@ -72,6 +73,12 @@ _NON_RECOVERABLE_MARKERS = (
 # Strong markers are high-confidence, so OOM exclusion is scoped tight (±1 line): only an OOM on/adjacent to the
 # marker line demotes it.
 _STRONG_OOM_CONTEXT_RADIUS = 1
+
+
+# Magpie's ``Benchmarker._apply_gpu_selection`` refusing a round before any server starts: fewer idle GPUs
+# than the round needs, or none it could use. Its ``find_idle_gpus`` names each GPU it turned down and why.
+_GPU_SHORTFALL_RE = re.compile(r"gpu_selection\.auto(?:: needed \d+ idle GPU| failed: )[^\n']*")
+_GPU_REJECTIONS_RE = re.compile(r"find_idle_gpus: requested \d+ but only \d+ idle .*?; rejected: (\[.*\])")
 
 
 #: Subdirectory of a round slot holding earlier attempts' server logs.
@@ -310,7 +317,20 @@ def _classify_subprocess_error(elapsed_sec: float, stderr_tail: str) -> str:
     return SUBPROCESS_NONZERO
 
 
+def _gpu_shortfall(*texts: str) -> str | None:
+    """Magpie's account of a round it refused to launch for want of idle GPUs, naming the GPUs it turned down."""
+    blob = "\n".join(t for t in texts if t)
+    refused = _GPU_SHORTFALL_RE.search(blob)
+    if refused is None:
+        return None
+    rejected = _GPU_REJECTIONS_RE.search(blob)
+    return refused.group(0) if rejected is None else f"{refused.group(0)}; rejected: {rejected.group(1)}"
+
+
 def _boot_failure(finished: _BenchProcess, server_log: Path) -> tuple[str, str] | None:
+    shortfall = _gpu_shortfall(finished.stderr, finished.stdout)
+    if shortfall is not None:
+        return HOST_GPUS_UNAVAILABLE, shortfall
     death = server_log_death_excerpt(str(server_log))
     error = death if death is not None else (finished.stderr or finished.stdout)[-2000:]
     texts = (finished.server_log_text, finished.stderr, finished.stdout)

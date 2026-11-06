@@ -556,35 +556,83 @@ def test_csv_jit_kernel_rows_skips_blank_kernel_names(tmp_path):
     assert names == {"kernel_a", "kernel_b"}
 
 
-def test_serving_modules_cover_csv_when_names_are_in_so(tmp_path):
+def test_csv_jit_kernel_rows_returns_each_pair_once_in_first_seen_order(tmp_path):
+    csv_path = tmp_path / "tuned.csv"
+    csv_path.write_text(
+        "M,N,K,kernelName,libtype\n16,512,7168,kernel_b,ck\n32,512,7168,kernel_a,ck\n"
+        "64,512,7168,kernel_b,ck\n128,512,7168,kernel_a,cktile\n",
+        encoding="utf-8",
+    )
+    assert aj.csv_jit_kernel_rows(csv_path) == [("kernel_b", "ck"), ("kernel_a", "ck"), ("kernel_a", "cktile")]
+
+
+def test_csv_jit_kernel_rows_keeps_only_the_last_row_of_a_dispatch_key(tmp_path):
+    csv_path = tmp_path / "a8w8_tuned_gemm.csv"
+    csv_path.write_text(
+        "gfx,cu_num,M,N,K,q_dtype_w,kernelId,kernelName\n"
+        "gfx950,256,64,57344,8192,torch.int8,46,replaced_int8_kernel\n"
+        "gfx950,256,64,57344,8192,torch.float8_e4m3fn,17,winning_fp8_kernel\n"
+        "gfx950,256,128,57344,8192,torch.int8,46,other_shape_kernel\n",
+        encoding="utf-8",
+    )
+    assert aj.csv_jit_kernel_rows(csv_path, frozenset({("gfx950", 256)})) == [
+        ("winning_fp8_kernel", ""),
+        ("other_shape_kernel", ""),
+    ]
+
+
+def test_csv_jit_kernel_rows_does_not_let_another_libtype_replace_a_row(tmp_path):
+    csv_path = tmp_path / "a8w8_bpreshuffle_tuned_gemm.csv"
+    csv_path.write_text(
+        "gfx,cu_num,M,N,K,libtype,kernelName\ngfx950,256,64,512,7168,ck,ck_kernel\ngfx950,256,64,512,7168,cktile,tile_kernel\n",
+        encoding="utf-8",
+    )
+    assert aj.csv_jit_kernel_rows(csv_path) == [("ck_kernel", "ck"), ("tile_kernel", "cktile")]
+
+
+def test_serving_modules_cover_rows_when_a_replaced_row_is_missing_from_so(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    (jit_dir / "module_gemm_a8w8.so").write_bytes(b"padding a8w8_rowwise_winner padding")
+    csv_path = tmp_path / "a8w8_tuned_gemm.csv"
+    csv_path.write_text(
+        "gfx,cu_num,M,N,K,q_dtype_w,kernelName\n"
+        "gfx950,256,64,57344,8192,torch.int8,a8w8_rowwise_replaced\n"
+        "gfx950,256,64,57344,8192,torch.float8_e4m3fn,a8w8_rowwise_winner\n",
+        encoding="utf-8",
+    )
+    assert aj.serving_modules_cover_rows(jit_dir, ("module_gemm_a8w8",), aj.csv_jit_kernel_rows(csv_path))
+
+
+def test_serving_modules_cover_rows_when_names_are_in_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
     so_path.write_bytes(b"padding kernel_a more kernel_b padding")
     csv_path = tmp_path / "merged.csv"
     csv_path.write_text("kernelName\nkernel_a\nkernel_b\n", encoding="utf-8")
-    assert aj.serving_modules_cover_csv(
+    assert aj.serving_modules_cover_rows(
         jit_dir,
         ("module_gemm_a8w8_blockscale_bpreshuffle",),
-        csv_path,
+        aj.csv_jit_kernel_rows(csv_path),
     )
 
 
-def test_serving_modules_cover_csv_false_when_name_missing(tmp_path):
+def test_serving_modules_cover_rows_false_when_name_missing(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
     so_path.write_bytes(b"only kernel_a")
     csv_path = tmp_path / "merged.csv"
     csv_path.write_text("kernelName\nkernel_a\nkernel_b\n", encoding="utf-8")
-    assert not aj.serving_modules_cover_csv(
+    assert not aj.serving_modules_cover_rows(
         jit_dir,
         ("module_gemm_a8w8_blockscale_bpreshuffle",),
-        csv_path,
+        aj.csv_jit_kernel_rows(csv_path),
     )
 
 
-def test_serving_modules_cover_csv_ignores_asm_kernel_names(tmp_path):
+def test_serving_modules_cover_rows_ignores_asm_kernel_names(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
@@ -594,14 +642,14 @@ def test_serving_modules_cover_csv_ignores_asm_kernel_names(tmp_path):
         "libtype,kernelName\nck,kernel_ck\nasm,_ZN5aiter42fp8gemm_bf16_blockscale_BpreShuffle_64x128E\n",
         encoding="utf-8",
     )
-    assert aj.serving_modules_cover_csv(
+    assert aj.serving_modules_cover_rows(
         jit_dir,
         ("module_gemm_a8w8_blockscale_bpreshuffle",),
-        csv_path,
+        aj.csv_jit_kernel_rows(csv_path),
     )
 
 
-def test_serving_modules_cover_csv_finds_cktile_in_bpreshuffle_cktile_so(tmp_path):
+def test_serving_modules_cover_rows_finds_cktile_in_bpreshuffle_cktile_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
@@ -615,14 +663,14 @@ def test_serving_modules_cover_csv_finds_cktile_in_bpreshuffle_cktile_so(tmp_pat
         "cktile,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1\n",
         encoding="utf-8",
     )
-    assert aj.serving_modules_cover_csv(
+    assert aj.serving_modules_cover_rows(
         jit_dir,
         aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"],
-        csv_path,
+        aj.csv_jit_kernel_rows(csv_path),
     )
 
 
-def test_serving_modules_cover_csv_false_when_cktile_only_in_tune_so(tmp_path):
+def test_serving_modules_cover_rows_false_when_cktile_only_in_tune_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
@@ -637,22 +685,22 @@ def test_serving_modules_cover_csv_false_when_cktile_only_in_tune_so(tmp_path):
         "cktile,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1\n",
         encoding="utf-8",
     )
-    assert not aj.serving_modules_cover_csv(
+    assert not aj.serving_modules_cover_rows(
         jit_dir,
         aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"],
-        csv_path,
+        aj.csv_jit_kernel_rows(csv_path),
     )
 
 
-def test_serving_modules_cover_csv_when_so_absent(tmp_path):
+def test_serving_modules_cover_rows_when_so_absent(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     csv_path = tmp_path / "merged.csv"
     csv_path.write_text("kernelName\nkernel_a\n", encoding="utf-8")
-    assert aj.serving_modules_cover_csv(
+    assert aj.serving_modules_cover_rows(
         jit_dir,
         ("module_gemm_a8w8_blockscale_bpreshuffle",),
-        csv_path,
+        aj.csv_jit_kernel_rows(csv_path),
     )
 
 
@@ -1355,12 +1403,13 @@ def test_coverage_reads_only_the_rows_aiter_compiles_for_the_targets(tmp_path):
     )
     modules = aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE"]
 
-    assert aj.serving_modules_cover_csv(jit, modules, table, frozenset({("gfx950", 256)}))
-    assert not aj.serving_modules_cover_csv(jit, modules, table, frozenset({("gfx942", 80)}))
-    assert not aj.serving_modules_cover_csv(jit, modules, table), "with the targets unknown, every row counts"
+    def covered(csv_path: Path, targets: frozenset[tuple[str, int]] | None = None) -> bool:
+        return aj.serving_modules_cover_rows(jit, modules, aj.csv_jit_kernel_rows(csv_path, targets))
+
+    assert covered(table, frozenset({("gfx950", 256)}))
+    assert not covered(table, frozenset({("gfx942", 80)}))
+    assert not covered(table), "with the targets unknown, every row counts"
     assert aj.csv_jit_kernel_rows(table, frozenset({("gfx950", 256)})) == [("a8w8_bpreshuffle_card", "ck")]
     untargeted = tmp_path / "legacy.csv"
     untargeted.write_text("kernelName,libtype\na8w8_bpreshuffle_mi308,ck\n", encoding="utf-8")
-    assert not aj.serving_modules_cover_csv(jit, modules, untargeted, frozenset({("gfx950", 256)})), (
-        "a row that names no target is kept"
-    )
+    assert not covered(untargeted, frozenset({("gfx950", 256)})), "a row that names no target is kept"

@@ -419,15 +419,6 @@ class SpecialistDefinition:
 
 
 @dataclass(frozen=True)
-class DispatchIntent:
-    """Minimal probabilistic role/case intent returned by orchestration."""
-
-    role_id: str
-    target_case_ids: tuple[str, ...]
-    reason: str = ""
-
-
-@dataclass(frozen=True)
 class SpecialistAssignment:
     """Assign one specialist to an evidence-scoped analysis task."""
 
@@ -570,13 +561,7 @@ class PlanCriticOutcome:
     review: str = ""
     error: str = ""
     duration_sec: float = 0.0
-    verdict_source: str = "explicit"
     lane_drops: tuple[LaneDrop, ...] = ()
-    # What reading the review's width block found: a block that was not there, an entry that named no lane.
-    narrowing_notes: tuple[str, ...] = ()
-    # How the width ruling above was arrived at, which no count of drops can say: an empty ``lane_drops`` is the
-    # answer to "run every lane", to "the review never answered", and to "the block was there and unusable" alike.
-    narrowing_status: str = "not_asked"
 
     def __post_init__(self) -> None:
         if self.verdict not in {"ACCEPT", "REVISE", "REPLACE", "NOT_REVIEWED"}:
@@ -589,21 +574,9 @@ class PlanCriticOutcome:
         _text(self.error, "plan critic error", allow_empty=True)
         if self.duration_sec < 0:
             raise ValueError("plan critic duration_sec must be non-negative")
-        if self.verdict_source not in {"explicit", "inferred", "error"}:
-            raise ValueError("plan critic verdict_source is unsupported")
         lane_ids = [drop.lane_id for drop in self.lane_drops]
         if len(set(lane_ids)) != len(lane_ids):
             raise ValueError("plan critic lane_drops must name each lane once")
-        for note in self.narrowing_notes:
-            _text(note, "plan critic narrowing note")
-        if self.narrowing_status not in {
-            "not_asked",
-            "answered",
-            "repaired",
-            "absent",
-            "malformed",
-        }:
-            raise ValueError("plan critic narrowing_status is unsupported")
 
     @property
     def fail_open(self) -> bool:
@@ -624,10 +597,7 @@ class PlanCriticOutcome:
             "error": self.error,
             "fail_open": self.fail_open,
             "duration_sec": self.duration_sec,
-            "verdict_source": self.verdict_source,
             "lane_drops": [drop.to_dict() for drop in self.lane_drops],
-            "narrowing_notes": list(self.narrowing_notes),
-            "narrowing_status": self.narrowing_status,
         }
 
     def render_artifact(self) -> str:
@@ -636,7 +606,7 @@ class PlanCriticOutcome:
                 f"STATUS: CRITIC_ERROR\n\nVERDICT: {self.verdict}\n\nERROR: {self.error}\n\n"
                 "The draft plan was used without critic enforcement."
             )
-        return self.review.strip()
+        return f"VERDICT: {self.verdict}\n\n{self.review.strip()}"
 
 
 @dataclass(frozen=True)
