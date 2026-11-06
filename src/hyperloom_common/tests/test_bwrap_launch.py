@@ -42,7 +42,8 @@ from hyperloom_common.tests._bwrap_host import usable_bwrap
 
 pytestmark = pytest.mark.agent_isolation
 
-SECRET = "hf_CANARY_SECRET_7f3a"
+#: What a masked credential holds; it must never reach the sandbox's output.
+CANARY = "canary-canary-canary"
 TIMEOUT = 60
 #: Imported by every check below: ``outcome(action)`` is ``"ok"`` or the errno's name.
 PRELUDE = """
@@ -128,8 +129,8 @@ def wait_for(predicate: Callable[[], object], timeout: float = 10.0) -> object:
 def test_masks_hide_credentials_inside_a_bound_tree(launcher: tuple[str, ...], tmp_path: Path) -> None:
     hf = tmp_path / "hf"
     (hf / "stored_tokens").mkdir(parents=True)
-    (hf / "stored_tokens" / "default").write_text(SECRET)
-    (hf / "token").write_text(SECRET)
+    (hf / "stored_tokens" / "default").write_text(CANARY)
+    (hf / "token").write_text(CANARY)
     (hf / "config.json").write_text("{}")
     check = """
 hf = sys.argv[1]
@@ -151,8 +152,8 @@ print(json.dumps({
         "stored_read": "EACCES",
         "stored_create": "EACCES",
     }
-    assert SECRET not in masked.stdout + masked.stderr
-    assert report(unmasked)["token"] == "ok" and SECRET in unmasked.stdout
+    assert CANARY not in masked.stdout + masked.stderr
+    assert report(unmasked)["token"] == "ok" and CANARY in unmasked.stdout
 
 
 def test_read_only_binds_refuse_writes_and_metadata(launcher: tuple[str, ...], tmp_path: Path) -> None:
@@ -302,7 +303,8 @@ print(json.dumps(dict(os.environ)))
 
     inside = report(done)
     # bubblewrap sets PWD; Python's C-locale coercion (PEP 538) sets LC_CTYPE in its own environment.
-    assert inside.pop("PWD") == "/" and inside.pop("LC_CTYPE", "C.UTF-8") == "C.UTF-8"
+    pwd, ctype = inside.pop("PWD"), inside.pop("LC_CTYPE", "C.UTF-8")
+    assert (pwd, ctype) == ("/", "C.UTF-8")
     assert inside == {"PATH": "/usr/bin:/bin", "GIVEN": "1", "HYPERLOOM_TEST_MARK": "m1"}
     assert piped == b"through the pipe"
 
@@ -454,7 +456,8 @@ print(json.dumps({{
             one = subprocess.Popen(
                 joined.argv(launcher, python(first)), stdout=subprocess.PIPE, text=True, pass_fds=joined.join
             )
-        assert one.stdout and json.loads(one.stdout.readline()) == {"sysv_own": True}
+        first_line = one.stdout.readline() if one.stdout else ""
+        assert json.loads(first_line) == {"sysv_own": True}
         with holder.joined(sandbox) as joined:
             two = run(launcher, joined, python(second), pass_fds=joined.join)
         one_rc = one.wait(timeout=TIMEOUT)
