@@ -123,6 +123,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MANIFEST_FILE = "agent-manifest.json"
+#: How often the run reads the agent's keeps, output and blackboard.
+POLL_SECONDS = 5.0
 LEASE_FILE = "agent-lease.json"
 #: How often the agent's LLM spend is read and recorded while it runs: one record per CLI session a minute, not a poll.
 SPEND_SECONDS = 60.0
@@ -179,7 +181,7 @@ class AutonomousSetup:
     the repository they are read against, ``component``, the framework the agent edits, ``spend``, the agent's own LLM
     spend for the directories it works under, read with the file of what was read, ``aiter_configs``, the image's
     aiter tables the start commit's rows-only tables are laid over, and ``least_run_seconds``, the least the agent must
-    still run for its branch to wait for cards its lease was refused, asked again every ``lease_poll_seconds``."""
+    still run for its branch to wait for cards its lease was refused."""
 
     onboarding: Callable[[AgentSandbox], OnboardingSetup]
     sandbox: Callable[[BranchLease], AgentSandbox]
@@ -188,16 +190,10 @@ class AutonomousSetup:
     repo: ExperimentRepo
     component: str
     spend: Callable[[tuple[Path, ...], Path], AgentSpend]
-    poll_seconds: float = 5.0
-    cutoff_seconds: float = CUTOFF_SECONDS
-    upstream: Callable[[str], Upstream | None] = installed_component_upstream
-    settle_seconds: float = SETTLE_SECONDS
-    stall_seconds: float = STALL_SECONDS
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.time
     aiter_configs: Path = field(default_factory=image_configs)
     least_run_seconds: float = 0.0
-    lease_poll_seconds: float = LEASE_POLL_SECONDS
 
 
 @dataclass
@@ -335,7 +331,7 @@ class AutonomousSession:
         that, until EXPLORE ends; 0, no end, with no deadline."""
 
         deadline = self._start.task.deadline
-        return run_seconds(deadline - self._setup.clock(), records, self._setup.cutoff_seconds) if deadline else 0.0
+        return run_seconds(deadline - self._setup.clock(), records, CUTOFF_SECONDS) if deadline else 0.0
 
     async def run(self) -> None:
         manifest, process, sandbox = await self._running()
@@ -380,7 +376,7 @@ class AutonomousSession:
 
     async def _pause(self) -> None:
         self._polled_at = self._setup.clock()
-        await self._setup.sleep(self._setup.poll_seconds)
+        await self._setup.sleep(POLL_SECONDS)
 
     async def _listen(self, process: AgentProcess) -> None:
         output = await process.output()
@@ -389,13 +385,13 @@ class AutonomousSession:
 
     async def _stall(self, process: AgentProcess, written_at: Callable[[], float | None]) -> None:
         """Raise a lost :class:`SessionCrashed` once the poll has not come round, or the running agent has written
-        nothing, for :attr:`AutonomousSetup.stall_seconds`. Writing is its console, its CLI's transcripts or its
+        nothing, for :data:`STALL_SECONDS`. Writing is its console, its CLI's transcripts or its
         files: an agent may print nothing for hours while it works (GEAK captures its workflow's output), so the
         transcripts and files are read once the console has been quiet that long."""
 
-        bound = self._setup.stall_seconds
+        bound = STALL_SECONDS
         while True:
-            await self._setup.sleep(self._setup.poll_seconds)
+            await self._setup.sleep(POLL_SECONDS)
             now = self._setup.clock()
             if now - self._polled_at > bound:
                 raise SessionCrashed(f"the run has not polled the agent for {bound:g} s", lost=True)
@@ -423,7 +419,7 @@ class AutonomousSession:
         if manifest.signals_keeps or watch.collected or not deadline:
             return
         records = (await self._place.blackboard.snapshot()).records
-        if self._setup.clock() < deadline - collection_margin(records, self._setup.cutoff_seconds):
+        if self._setup.clock() < deadline - collection_margin(records, CUTOFF_SECONDS):
             return
         watch.collected = True
         await self._note("EXPLORE ends soon: the agent's workspace is taken as its keep now")
@@ -524,7 +520,7 @@ class AutonomousSession:
 
         Cards another lease or the session's tests hold now are given back within their lifetime, so a refusal for
         want of them (:data:`~.dev_sandbox.TOO_MANY`, or none free within the toolbox's own wait) is asked again every
-        ``lease_poll_seconds`` while the agent would still run ``least_run_seconds`` once it starts
+        :data:`LEASE_POLL_SECONDS` while the agent would still run ``least_run_seconds`` once it starts
         (:meth:`_may_wait`), the wait noted once in the branch log; past that, and on any other refusal, the
         preflight fails with why."""
 
@@ -552,7 +548,7 @@ class AutonomousSession:
                 noted = True
                 log.info("the agent of %s waits for cards: %s", self._start.branch, busy)
                 await self._note(f"the agent's sandbox waits for cards, asked again until they are free: {busy}")
-            await self._setup.sleep(self._setup.lease_poll_seconds)
+            await self._setup.sleep(LEASE_POLL_SECONDS)
         return lease
 
     def _hold(self, lease: BranchLease) -> None:
@@ -584,9 +580,9 @@ class AutonomousSession:
         deadline = self._start.task.deadline
         if not deadline:
             return True
-        left = deadline - self._setup.clock() - self._setup.lease_poll_seconds
+        left = deadline - self._setup.clock() - LEASE_POLL_SECONDS
         records = (await self._place.blackboard.snapshot()).records
-        return left > 0 and run_seconds(left, records, self._setup.cutoff_seconds) >= self._setup.least_run_seconds
+        return left > 0 and run_seconds(left, records, CUTOFF_SECONDS) >= self._setup.least_run_seconds
 
     def _held(self) -> BranchLease:
         document = json.loads((self._place.workspace / LEASE_FILE).read_text(encoding=ENCODING))
@@ -794,7 +790,7 @@ class AutonomousSession:
             return delta
         if any(item.component == component for item in recipe.components):
             return delta
-        upstream = await asyncio.to_thread(self._setup.upstream, component)
+        upstream = await asyncio.to_thread(installed_component_upstream, component)
         return delta if upstream is None else added_at(delta, recipe, upstream)
 
     async def _increment(self, head: str, imported: tuple[PatchRef, ...], cumulative: str) -> str:
@@ -965,7 +961,7 @@ class AutonomousSession:
         """Whether a test of the branch is in flight, or measured and not judged yet within the settle time."""
 
         snapshot = await self._place.blackboard.snapshot()
-        settled_before = self._setup.clock() - self._setup.settle_seconds
+        settled_before = self._setup.clock() - SETTLE_SECONDS
         return any(
             record.request.branch == self._start.branch and (record.in_flight or _being_judged(record, settled_before))
             for record in snapshot.records

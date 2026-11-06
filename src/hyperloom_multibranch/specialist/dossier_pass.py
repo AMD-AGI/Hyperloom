@@ -102,8 +102,7 @@ DossierPass = Callable[[DossierStart], Awaitable[DossierOutcome]]
 class DossierSetup:
     """What the pass runs on: ``spec``, the session's agent spec with the pass's port and client; ``repo`` and
     ``toolbox``; ``sandbox``, the sandbox of a lease; ``worktree``, the pass's own; and ``agent_dir``, where its Arbor
-    is fetched. ``start_seconds`` is how long its start may take (:class:`OnboardingSetup`), ``exit_grace_seconds`` how
-    long past its deadline it has to end of itself. ``holder`` holds its lease, charged as ``charge`` says."""
+    is fetched. ``holder`` holds its lease, charged as ``charge`` says."""
 
     spec: AgentSpec
     repo: ExperimentRepo
@@ -113,9 +112,6 @@ class DossierSetup:
     agent_dir: Path
     clock: Callable[[], float] = time.time
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
-    poll_seconds: float = POLL_SECONDS
-    start_seconds: float = START_SECONDS
-    exit_grace_seconds: float = EXIT_GRACE_SECONDS
     holder: str = DOSSIER_HOLDER
     charge: LeaseCharge = DOSSIER_CHARGE
 
@@ -151,7 +147,7 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
     )
     try:
         lease = await setup.toolbox.lease_branch_sandbox(
-            setup.holder, spec.tp, charge=setup.charge, lifetime_sec=seconds + setup.exit_grace_seconds
+            setup.holder, spec.tp, charge=setup.charge, lifetime_sec=seconds + EXIT_GRACE_SECONDS
         )
     except (RequestRejected, SandboxUnavailable) as error:
         return DossierOutcome(None, None, f"no cards were leased for it: {error}")
@@ -161,8 +157,8 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
             setup.sandbox(lease),
             _arbor_only,
             run=DOSSIER_PASS,
-            start_seconds=setup.start_seconds,
-            poll_seconds=setup.poll_seconds,
+            start_seconds=START_SECONDS,
+            poll_seconds=POLL_SECONDS,
             sleep=setup.sleep,
         )
         try:
@@ -185,8 +181,8 @@ async def _ended(ready: ReadyAgent, start: DossierStart, setup: DossierSetup) ->
     """Wait for the pass to end, until a little past its deadline, and read how it did."""
 
     process, checkout = ready.process, ready.source_dir
-    while process.returncode is None and setup.clock() < start.deadline + setup.exit_grace_seconds:
-        await setup.sleep(setup.poll_seconds)
+    while process.returncode is None and setup.clock() < start.deadline + EXIT_GRACE_SECONDS:
+        await setup.sleep(POLL_SECONDS)
     session = checkout / DOSSIER_PASS.session_dir
     dossier = pass_dossier(checkout, session)
     if process.returncode is None:

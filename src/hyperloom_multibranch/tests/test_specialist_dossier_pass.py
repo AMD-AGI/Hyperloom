@@ -136,14 +136,15 @@ async def _pass(
         agent_dir,
         clock=clock,
         sleep=clock.sleep,
-        poll_seconds=0.05,
-        start_seconds=start_seconds,
-        exit_grace_seconds=0.3,
         holder=held_by[0],
         charge=held_by[1],
     )
     start = DossierStart(str(source), rig.root, clock() + seconds, SHARES, "kernel shares")
-    outcome = await run_dossier_pass(start, setup)
+    with pytest.MonkeyPatch.context() as waits:
+        waits.setattr(dossier_pass, "POLL_SECONDS", 0.05)
+        waits.setattr(dossier_pass, "START_SECONDS", start_seconds)
+        waits.setattr(dossier_pass, "EXIT_GRACE_SECONDS", 0.3)
+        outcome = await run_dossier_pass(start, setup)
     return outcome, toolbox, setup.agent_dir / "src", setup
 
 

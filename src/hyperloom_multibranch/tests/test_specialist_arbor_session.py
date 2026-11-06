@@ -37,7 +37,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     _replayed,
     _until,
 )
-from hyperloom_multibranch.tests.test_specialist_autonomous_session import Rig, _imported, _rig
+from hyperloom_multibranch.tests.test_specialist_autonomous_session import Rig, _imported, _rig, fast_session  # noqa: F401
 
 
 async def test_an_arbor_run_on_the_adapter_s_config_has_its_keeps_imported_end_to_end(
