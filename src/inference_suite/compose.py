@@ -3,11 +3,12 @@
 
 """Compose a round's launch from its frozen base and the config's layers.
 
-The order is fixed: base, user removals, user additions, candidate removals, candidate additions, the golden layer
-(when the round applies it), the guard (the round's model path, address and GPU mask), then the runner's layer. A
-layer's flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies
-the last one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden
-layer, what golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was.
+The order is fixed: base, user removals, user additions, candidate removals, candidate additions, the golden layer (when
+the round applies it), the guard (the round's model path, address and GPU mask), the runner's layer, then the profiler
+layer of a profile round. A layer's flag beats every earlier group of the same flag; a later alias of it wins only
+because the engine applies the last one. Neither the user nor the candidate may set what the guard or the runner owns,
+nor, under a golden layer, what golden owns; such a layer is refused, not overridden, so the refusal names whose layer
+it was.
 """
 
 from __future__ import annotations
@@ -48,6 +49,8 @@ class RoundFacts:
     tool_pins: Mapping[str, str] = field(default_factory=dict)
     client: ClientInvocation | None = None
     eval: EvalInvocation | None = None
+    #: The profile round's profiler layer, from ``inference_suite.profile.inject.profiler_layer``.
+    profiler: LaunchDelta | None = None
 
 
 @dataclass(frozen=True)
@@ -236,6 +239,8 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     composer.add_args(guard_args, LayerSource.GUARD)
     composer.set_env(guard_env, LayerSource.GUARD)
     composer.apply_runner(server.runner)
+    if facts.profiler is not None:
+        composer.apply_delta(facts.profiler, LayerSource.PROFILE)
 
     return Launch(
         base=base,

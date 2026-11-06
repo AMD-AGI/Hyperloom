@@ -54,6 +54,8 @@ class LayerSource(str, Enum):
     GUARD = "guard"
     #: The runner's own layer (D12).
     RUNNER = "runner"
+    #: The torch profiler of a profile round, last so the trace dir it names is the one the server writes to.
+    PROFILE = "profile"
 
 
 class VersionCheck(str, Enum):
