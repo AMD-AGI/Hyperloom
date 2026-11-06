@@ -15,7 +15,6 @@ import yaml
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
-    remove_server_args,
     removals_absent_from_args,
 )
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
@@ -516,37 +515,6 @@ def test_launch_keeps_what_the_persisted_recipe_strips() -> None:
     launched = compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
     assert "--no-enable-prefix-caching" in launched
     assert strip_benchmark_harness_flags(launched) == "--max-num-seqs 256"
-
-
-def test_remove_server_args_accepts_multi_flag_string() -> None:
-    out = remove_server_args(
-        "--flag-a --flag-b --flag-c 3 --keep 4",
-        "--flag-a --flag-b --flag-c",
-    )
-    assert out == "--keep 4"
-
-
-def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
-    """Removing one flag must not corrupt a JSON-valued sibling."""
-    args = (
-        '--online_quant_config {"global_quant_config":"ptpc_fp8",'
-        '"exclude_layer":["*.mlp.gate","*expert*"]} '
-        "--no-enable-prefix-caching --tp 8"
-    )
-    out = remove_server_args(args, ["--no-enable-prefix-caching"])
-    tokens = out.split(" ")
-    assert tokens[0] == "--online_quant_config"
-    assert json.loads(tokens[1]) == {
-        "global_quant_config": "ptpc_fp8",
-        "exclude_layer": ["*.mlp.gate", "*expert*"],
-    }
-    assert tokens[2:] == ["--tp", "8"]
-
-
-def test_remove_server_args_unbalanced_brace_drops_only_its_own_flag() -> None:
-    """A stray ``}`` is not a JSON blob and must not take the tail with it."""
-    out = remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
-    assert out == "--tp 8 --max-num-seqs 64"
 
 
 def test_removals_absent_from_args_drops_only_what_the_args_assert() -> None:

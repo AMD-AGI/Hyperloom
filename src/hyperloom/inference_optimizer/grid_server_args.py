@@ -13,11 +13,25 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom_common.coerce import optional_positive_int, to_str_list
+from hyperloom_common.coerce import optional_positive_int
+from inference_suite import argv as _argv
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 
 log = logging.getLogger(__name__)
+
+# Transitional re-exports of the names that moved to ``inference_suite.argv``, kept until their importers
+# import it directly; the last batch of that migration (dev plan unit 1.03e) deletes this block.
+SPECULATIVE_CONFIG_FLAG = _argv.SPECULATIVE_CONFIG_FLAG
+_reserialize_json_blobs = _argv.reserialize_json_blobs
+_split_args_preserving_json = _argv.split_args_preserving_json
+compact_json_server_args = _argv.compact_json_server_args
+flag_occurrences = _argv.flag_occurrences
+last_alias_value = _argv.last_alias_value
+removal_option_names = _argv.removal_option_names
+remove_server_args = _argv.remove_server_args
+speculative_config = _argv.speculative_config
+tokenize_server_args_preserving_json = _argv.tokenize_server_args_preserving_json
 
 _UNSAFE_SERVER_ARG_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
 #: What the 2nd..nth value of a not-yet-whitelisted multi-value flag may look
@@ -62,125 +76,6 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-def _unwrap_one_pair(s: str) -> str:
-    """Strip one balanced pair of outer shell quotes from *s* when safe to do so."""
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
-        inner = s[1:-1]
-        if inner and not inner.startswith(("{", "[")) and s[0] not in inner and not any(ch.isspace() for ch in inner):
-            return inner
-    return s
-
-
-def _unwrap_shell_quotes(token: str) -> str:
-    """Drop one balanced pair of shell quotes from a token produced by shlex."""
-    if token.startswith("-") and "=" in token:
-        flag, _, value = token.partition("=")
-        unwrapped = _unwrap_one_pair(value)
-        return f"{flag}={unwrapped}" if unwrapped != value else token
-    return _unwrap_one_pair(token)
-
-
-def _split_args_preserving_json(text: str) -> list[str] | None:
-    """Tokenize a server-arg string WITHOUT stripping JSON's inner double quotes."""
-    try:
-        tokens = shlex.split(_reserialize_json_blobs(text), posix=False)
-    except ValueError:
-        return None
-    return [_unwrap_shell_quotes(tok) for tok in tokens]
-
-
-def _parse_removal_specs(remove_args: Any) -> list[tuple[str, str | None]]:
-    """Parse removal specs into ``(flag, value)`` pairs, in the order they are written.
-
-    One entry may name several options (``"--a --b"``), and a removal may be scoped to a value
-    (``"--a 8"``, ``"--a=8"``); a bare flag parses as ``(flag, None)`` and drops every copy of it.
-    """
-    parsed: list[tuple[str, str | None]] = []
-    for spec in to_str_list(remove_args):
-        spec_tokens = _split_args_preserving_json(spec)
-        if spec_tokens is None:
-            spec_tokens = spec.split()
-        i = 0
-        while i < len(spec_tokens):
-            tok = spec_tokens[i]
-            if not tok.startswith("--"):
-                i += 1
-                continue
-            if "=" in tok:
-                flag, _, value = tok.partition("=")
-                parsed.append((flag, value))
-                i += 1
-            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
-                parsed.append((tok, spec_tokens[i + 1]))
-                i += 2
-            else:
-                parsed.append((tok, None))
-                i += 1
-    return parsed
-
-
-def removal_option_names(remove_args: Any) -> list[str]:
-    """The bare long option names a removal spec names, in order, each one once.
-
-    Only for a consumer whose contract is option names, such as Magpie's ``launch_overrides.remove_args``:
-    the value a spec is scoped to is dropped here, so this must not stand in for a removal composed against
-    args we build ourselves -- ``remove_server_args`` keeps the scope there.
-    """
-    names: list[str] = []
-    for flag, _value in _parse_removal_specs(remove_args):
-        if flag not in names:
-            names.append(flag)
-    return names
-
-
-def _removed_token_count(tokens: list[str], index: int, removals: set[tuple[str, str | None]]) -> int:
-    """Count the tokens at *index* that *removals* deletes; 0 when the token survives."""
-    tok = tokens[index]
-    if not tok.startswith("--"):
-        return 0
-    flag, sep, value = tok.partition("=")
-    drops_flag = (flag, None) in removals
-    if sep and (drops_flag or (flag, value) in removals):
-        return 1
-    if index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
-        if drops_flag or (flag, tokens[index + 1]) in removals:
-            return 2
-    return 1 if drops_flag else 0
-
-
-def remove_server_args(server_args: str | None, remove_args: Any) -> str:
-    """Remove flag specs from a server-arg string."""
-    # Normalized up front as well as inside the tokenizer, so the nothing-to-remove early return below hands back the
-    # same shape a caller with a non-empty denylist would get.
-    args = _reserialize_json_blobs(str(server_args or "").strip())
-    removes = to_str_list(remove_args)
-    if not args or not removes:
-        return args
-    # Non-POSIX split plus the wrapper strip: a plain operand written as ``--tool-call-parser 'kimi_k3'`` -- or
-    # ``--tool-call-parser='kimi_k3'`` -- must not keep its quotes, because Magpie expands EXTRA_*_ARGS unquoted and
-    # they would reach argv literally. _unwrap_shell_quotes only touches whitespace-free content, and on a
-    # leading-dash token only the value side of the first ``=``, so a JSON blob (starts with ``{``/``[``) is never
-    # affected and token boundaries cannot shift.
-    tokens = _split_args_preserving_json(args)
-    if tokens is None:
-        return args
-
-    removals: set[tuple[str, str | None]] = set(_parse_removal_specs(removes))
-
-    out: list[str] = []
-    i = 0
-    while i < len(tokens):
-        dropped = _removed_token_count(tokens, i, removals)
-        if dropped:
-            i += dropped
-            continue
-        out.append(tokens[i])
-        i += 1
-    # No re-serialisation on the way out: the tokens are already JSON-compacted and the non-POSIX split kept each one
-    # byte-for-byte, so re-joining the survivors cannot corrupt a sibling flag.
-    return " ".join(out)
-
-
 def removals_absent_from_args(server_args: str | None, remove_args: Any) -> list[str]:
     """The removal specs that delete nothing from ``server_args``, one spec per entry, in the order they are written.
 
@@ -192,9 +87,9 @@ def removals_absent_from_args(server_args: str | None, remove_args: Any) -> list
     kept: list[str] = []
     # Per parsed spec rather than per written entry: one entry may name several options ("--a --b"), and an entry is
     # dropped only for the options that collide.
-    for flag, value in _parse_removal_specs(remove_args):
+    for flag, value in _argv.parse_removal_specs(remove_args):
         spec = flag if value is None else f"{flag} {value}"
-        if spec not in kept and remove_server_args(args, [spec]) == args:
+        if spec not in kept and _argv.remove_server_args(args, [spec]) == args:
             kept.append(spec)
     return kept
 
@@ -206,7 +101,7 @@ _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching
 
 def strip_benchmark_harness_flags(server_args: str | None) -> str:
     """Drop every :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entry from ``server_args``."""
-    return remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
+    return _argv.remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
 
 
 def normalize_server_args(server_args: str | None) -> str:
@@ -214,10 +109,10 @@ def normalize_server_args(server_args: str | None) -> str:
 
     Magpie expands ``EXTRA_*_ARGS`` unquoted, so a ``--quantization 'fp8'`` wrapper would reach argv literally.
     """
-    args = _reserialize_json_blobs(str(server_args or "").strip())
+    args = _argv.reserialize_json_blobs(str(server_args or "").strip())
     if not args:
         return ""
-    tokens = _split_args_preserving_json(args)
+    tokens = _argv.split_args_preserving_json(args)
     return args if tokens is None else " ".join(tokens)
 
 
@@ -237,13 +132,13 @@ def compose_server_args(
     mode = str(args_mode or "append").strip().lower()
     if mode == "replace":
         raw = merge_server_args(base_extra_args, variant_extra_args)
-        pruned_base = remove_server_args(base_extra_args, remove_args)
-        pruned_variant = remove_server_args(variant_extra_args, remove_args)
+        pruned_base = _argv.remove_server_args(base_extra_args, remove_args)
+        pruned_variant = _argv.remove_server_args(variant_extra_args, remove_args)
         composed = merge_server_args(pruned_base, pruned_variant)
     else:
         combined_base = merge_server_args(inherited_args, base_extra_args)
         raw = merge_server_args(combined_base, variant_extra_args)
-        pruned = remove_server_args(combined_base, remove_args)
+        pruned = _argv.remove_server_args(combined_base, remove_args)
         composed = merge_server_args(pruned, variant_extra_args)
     result = normalize_server_args(composed)
     # Compare against the RAW inputs, not against ``composed``.
@@ -291,104 +186,6 @@ def _parses_as_json(value: str) -> bool:
     return True
 
 
-# A JSON "bareword": an identifier-like token that appears where a double-quoted JSON key or string value should be
-# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths). It may start with ``/`` so an
-# absolute path value (a spec-decode draft ``model``) is quoted too; a bare number never matches and stays numeric.
-_JSON_BAREWORD = r"[+-]?[A-Za-z_/][A-Za-z0-9_./-]*"
-_UNQUOTED_KEY_RE = re.compile(r"([{,]\s*)(" + _JSON_BAREWORD + r")(\s*:)")
-_UNQUOTED_VALUE_RE = re.compile(r"([:\[,]\s*)(" + _JSON_BAREWORD + r")")
-
-
-def _repair_unquoted_json(blob: str) -> str | None:
-    """Best-effort repair of a JSON blob whose double quotes were stripped."""
-
-    def _quote_value(m: "re.Match[str]") -> str:
-        prefix, word = m.group(1), m.group(2)
-        if word in ("true", "false", "null"):
-            return m.group(0)  # JSON literals stay unquoted
-        return f'{prefix}"{word}"'
-
-    # Keys first (so a re-quoted key is not re-matched as a value), then values.
-    candidate = _UNQUOTED_KEY_RE.sub(r'\1"\2"\3', blob)
-    candidate = _UNQUOTED_VALUE_RE.sub(_quote_value, candidate)
-    try:
-        return json.dumps(json.loads(candidate), separators=(",", ":"))
-    except ValueError:
-        return None
-
-
-def compact_json_server_args(server_args: str | None) -> str:
-    """Normalize JSON-valued server args for unquoted Magpie expansion."""
-    args = str(server_args or "").strip()
-    if not args or ("{" not in args and "[" not in args):
-        return args
-    return _reserialize_json_blobs(args)
-
-
-def _json_blob_end(args: str, start: int) -> int:
-    """Offset just past the close balancing the bracket at *start*, or ``len(args)`` when it never balances."""
-    depth = 0
-    in_str = False
-    esc = False
-    j = start
-    n = len(args)
-    while j < n:
-        c = args[j]
-        if in_str:
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
-            elif c == '"':
-                in_str = False
-        elif c == '"':
-            in_str = True
-        elif c in "{[":
-            depth += 1
-        elif c in "}]":
-            depth -= 1
-            if depth == 0:
-                return j + 1
-        j += 1
-    return n
-
-
-def _reserialize_json_blobs(args: str) -> str:
-    """Normalize every JSON object/array while preserving invalid substrings."""
-    if "{" not in args and "[" not in args:
-        return args
-    out: list[str] = []
-    i = 0
-    n = len(args)
-    while i < n:
-        if args[i] not in "{[":
-            out.append(args[i])
-            i += 1
-            continue
-        j = _json_blob_end(args, i)
-        # A prior shlex.join can wrap a JSON token in shell single quotes.
-        single_quote_wrapped = bool(
-            i > 0 and args[i - 1] == "'" and out and out[-1] == "'" and j < n and args[j] == "'"
-        )
-        blob = args[i:j]
-        try:
-            rendered: str | None = json.dumps(json.loads(blob), separators=(",", ":"))
-        except ValueError:
-            # A prior shlex round-trip can strip the JSON double quotes, leaving an unquoted-bareword object
-            # (``{"m":"ngram"}`` -> ``{m:ngram}``) that vLLM's json.loads rejects at boot.
-            rendered = _repair_unquoted_json(blob)
-        if rendered is None:
-            # Keep both wrappers when the content is not valid/repairable.
-            out.append(blob)
-            i = j
-            continue
-        if single_quote_wrapped:
-            out.pop()
-        out.append(rendered)
-        i = j + 1 if single_quote_wrapped else j
-    return "".join(out)
-
-
 # Flags whose values may be JSON or otherwise space-bearing.
 SPACE_VALUE_FLAGS = (
     "--json-model-override-args",
@@ -407,9 +204,6 @@ _MULTI_VALUE_FLAGS = (
     "--cuda-graph-max-bs",
 )
 
-# Canonical flag names (as ``flag_occurrences`` spells them) for the launch settings read in more than one place.
-SPECULATIVE_CONFIG_FLAG = "speculative-config"
-SPECULATIVE_CONFIG_KEY_PREFIX = f"{SPECULATIVE_CONFIG_FLAG}."
 # One argparse destination the engines spell three ways, so the last of them is the tensor parallel size they run.
 TENSOR_PARALLEL_FLAGS = frozenset({"tensor-parallel-size", "tp", "tp-size"})
 # The model being served: vLLM takes ``--model``, SGLang ``--model-path``.
@@ -449,100 +243,6 @@ def server_arg_value(args: str | None, flag: str) -> str:
     return value
 
 
-def tokenize_server_args_preserving_json(
-    server_args: str | None,
-) -> tuple[str, list[str]] | None:
-    """Tokenize server args without stripping JSON's inner double quotes."""
-    normalized = _reserialize_json_blobs(str(server_args or "").strip())
-    if not normalized:
-        return "", []
-    try:
-        tokens = shlex.split(normalized, posix=False)
-    except ValueError:
-        return None
-    for token in tokens:
-        # A balanced JSON value must remain one token.
-        depth = 0
-        in_string = False
-        escaped = False
-        for char in token:
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-            elif char == '"':
-                in_string = True
-            elif char in "{[":
-                depth += 1
-            elif char in "}]":
-                depth -= 1
-        if depth != 0:
-            return None
-        if any(ch.isspace() for ch in token):
-            return None
-        # ``shlex.split(..., posix=False)`` can fracture a quoted operand with whitespace into edge-quoted pieces
-        # (``"my`` / ``parser"``).
-        if token.startswith(("'", '"')) or token.endswith(("'", '"')):
-            return None
-    return normalized, tokens
-
-
-def _is_flag(token: str) -> bool:
-    """``token`` names a flag rather than carrying a value (``-tp`` does, ``-1`` does not)."""
-    return token.startswith("-") and not token[1:2].isdigit() and token.strip("-") != ""
-
-
-def flag_occurrences(server_args: str | None) -> list[tuple[str, str]]:
-    """Every flag a composed launch spells, in order, as ``(name, value)``; ``""`` for a bare flag.
-
-    Names come back canonical -- no leading dashes, lowercase, underscores as dashes -- so the spellings the engines
-    accept for one argparse destination meet in one key.
-    """
-    split = tokenize_server_args_preserving_json(server_args)
-    tokens = split[1] if split is not None else str(server_args or "").split()
-    occurrences: list[tuple[str, str]] = []
-    for index, token in enumerate(tokens):
-        if not _is_flag(token):
-            continue
-        name, assigned, value = token.partition("=")
-        if not assigned and index + 1 < len(tokens) and not _is_flag(tokens[index + 1]):
-            value = tokens[index + 1]
-        occurrences.append((name.lstrip("-").lower().replace("_", "-"), value))
-    return occurrences
-
-
-def last_alias_value(occurrences: list[tuple[str, str]], aliases: frozenset[str]) -> str | None:
-    """The value of the last flag spelling one argparse destination -- the one the engine keeps."""
-    return next((value for name, value in reversed(occurrences) if name in aliases), None)
-
-
-def json_object(text: str) -> dict[str, Any]:
-    """``text`` read as a JSON object, or ``{}`` when it is neither."""
-    try:
-        parsed = json.loads(text)
-    except ValueError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def speculative_config(occurrences: list[tuple[str, str]]) -> dict[str, Any]:
-    """The speculative config a launch spells, both spellings merged the way vLLM merges them.
-
-    It arrives as a JSON object under ``--speculative-config`` and as ``--speculative-config.<key>`` flags, and the
-    per-key flags win over the object.
-    """
-    config: dict[str, Any] = {}
-    for flag, value in dict(occurrences).items():
-        if flag == SPECULATIVE_CONFIG_FLAG:
-            config = {**json_object(value), **config}
-        elif flag.startswith(SPECULATIVE_CONFIG_KEY_PREFIX):
-            config[flag.removeprefix(SPECULATIVE_CONFIG_KEY_PREFIX).replace("-", "_")] = value
-    return config
-
-
 def dedup_vllm_server_args(
     server_args: str | None,
     framework: str | None,
@@ -555,7 +255,7 @@ def dedup_vllm_server_args(
         return args
     if any(f in args for f in _MULTI_VALUE_FLAGS):
         return args
-    parsed = tokenize_server_args_preserving_json(args)
+    parsed = _argv.tokenize_server_args_preserving_json(args)
     if parsed is None:
         return args
     normalized, tokens = parsed
@@ -727,7 +427,7 @@ def validate_warm_replay_context_length(
     max_len = optional_positive_int(max_model_len)
     if max_len is not None and max_len < required:
         raise ValueError(f"target workload exceeds MAX_MODEL_LEN: isl+osl={required} > max_model_len={max_len}")
-    parsed = tokenize_server_args_preserving_json(args)
+    parsed = _argv.tokenize_server_args_preserving_json(args)
     if parsed is None:
         raise ValueError("warm replay server args are not safely tokenizable")
     _normalized, tokens = parsed
@@ -922,7 +622,7 @@ def dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string."""
     if not args_str:
         return ""
-    parsed = tokenize_server_args_preserving_json(args_str)
+    parsed = _argv.tokenize_server_args_preserving_json(args_str)
     if parsed is None:
         return args_str
     normalized, tokens = parsed
@@ -974,10 +674,9 @@ def merge_cumulative_extra_server_args(
 def _json_with_field_set(blob: str, field: str, value: str) -> str | None:
     """``blob`` with ``field`` set to ``value``, compact; ``None`` when it is not a JSON object."""
     try:
-        config = json.loads(blob)
+        config = json.loads(_argv.reserialize_json_blobs(blob))
     except json.JSONDecodeError:
-        repaired = _repair_unquoted_json(blob)
-        config = json.loads(repaired) if repaired is not None else None
+        return None
     if not isinstance(config, dict):
         return None
     if config.get(field) == value:
@@ -996,7 +695,7 @@ def _with_dotted_config_merged(args: str, flag: str) -> str:
     """
     option, off_value = flag.split()
     config_option, field = option.split(".", 1)
-    tokens = _split_args_preserving_json(args)
+    tokens = _argv.split_args_preserving_json(args)
     if tokens is None:
         # Unsplittable args hold no object we could identify to merge into.
         return f"{args} {flag}".strip()

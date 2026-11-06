@@ -22,10 +22,8 @@ import yaml
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.inference_optimizer.grid_server_args import (
-    compact_json_server_args,
     compose_server_args,
     dedup_vllm_server_args,
-    remove_server_args,
 )
 from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
@@ -2172,172 +2170,34 @@ class TestSessionBudgetWarmupRounds:
         assert results[0].error_class == "warmup_magpie_timeout"
 
 
-class TestCompactJsonServerArgs:
-    """JSON-valued flags must be space-free to survive Magpie's unquoted ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config explore variants always crash the server at boot)."""
+def test_compose_preserves_json_for_every_args_mode():
+    """All four variant shapes keep both JSON flags ``json.loads``-able."""
+    cc = '{"mode":3,"custom_ops":["+fused_rms_norm_gated"]}'
+    sc = '{"method":"mtp","num_speculative_tokens":2}'
+    base = f"--max-num-seqs 20 --compilation-config {cc} --speculative-config {sc}"
 
-    def test_compilation_config_separator_space_removed(self):
-        out = compact_json_server_args('--compilation-config {"full_cuda_graph": true}')
-        assert out == '--compilation-config {"full_cuda_graph":true}'
-        # the JSON value is now a single shell word under bash word-splitting
-        assert len(out.split()) == 2
+    def _blob(text, flag):
+        toks = text.split()
+        return json.loads(toks[toks.index(flag) + 1])
 
-    def test_speculative_config_multikey(self):
-        out = compact_json_server_args('--speculative-config {"method": "eagle", "num_speculative_tokens": 3}')
-        assert out == ('--speculative-config {"method":"eagle","num_speculative_tokens":3}')
-        assert len(out.split()) == 2
-
-    def test_compact_json_server_args_internal_space_unsupported(self):
-        # Spaces inside JSON string values are not collapsed, so the value is not a single shell word under Magpie's
-        # unquoted expansion; this flag shape is unsupported.
-        out = compact_json_server_args('--speculative-config {"model": "draft model name"}')
-        # Value is preserved verbatim (separator space after ':' removed only).
-        assert out == '--speculative-config {"model":"draft model name"}'
-        # ...but it still splits into MORE than the ideal 2 words: the two internal spaces of "draft model name"
-        # survive, so the shell sees ['--speculative-config', '{"model":"draft', 'model', 'name"}'].
-        assert len(out.split()) == 4
-
-    def test_quote_stripped_json_is_repaired(self):
-        # A prior shlex round-trip (e.g. in the GEMM shape-capture path) can strip the JSON double-quotes, turning a
-        # stored-valid ``{"method":"ngram",...}`` into ``{method:ngram,...}`` which vLLM's ``json.loads`` rejects at
-        # boot (observed: shape_capture server never boots -> shape_capture_failed). compact must repair the barewords
-        # back to valid JSON.
-        out = compact_json_server_args(
-            "--speculative-config {method:ngram,num_speculative_tokens:7,prompt_lookup_min:2,prompt_lookup_max:8}"
-        )
-        assert out == (
-            "--speculative-config "
-            '{"method":"ngram","num_speculative_tokens":7,"prompt_lookup_min":2,"prompt_lookup_max":8}'
-        )
-        blob = out.split(" ", 1)[1]
-        json.loads(blob)  # must be valid JSON now
-
-    def test_quote_stripped_json_with_path_value_repaired(self):
-        # Bareword string values containing ``/``, ``.``, ``-`` (e.g. a model id) must also be re-quoted.
-        out = compact_json_server_args(
-            "--speculative-config {method:eagle3,model:RedHatAI/Llama-3.1-8B-Instruct-speculator}"
-        )
-        blob = out.split(" ", 1)[1]
-        assert json.loads(blob) == {
-            "method": "eagle3",
-            "model": "RedHatAI/Llama-3.1-8B-Instruct-speculator",
-        }
-
-    def test_quote_stripped_nested_json_is_repaired(self):
-        out = compact_json_server_args("--compilation-config {method:ngram,nested:{a:1}}")
-        blob = out.split(" ", 1)[1]
-        assert json.loads(blob) == {
-            "method": "ngram",
-            "nested": {"a": 1},
-        }
-
-    def test_shell_single_quote_wrappers_are_removed(self):
-        out = compact_json_server_args("""--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """)
-        assert out.strip() == ('--speculative-config {"method":"ngram","num_speculative_tokens":7}')
-        json.loads(out.split(" ", 1)[1].strip())
-
-    def test_unrepairable_json_left_verbatim(self):
-        # Genuinely broken blobs that cannot be repaired to valid JSON are left verbatim (no worse than before), never
-        # raising.
-        raw = "--compilation-config {this is : not ] json"
-        out = compact_json_server_args(raw)
-        assert "{this is" in out
-
-    def test_other_flags_around_json_untouched(self):
-        out = compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}')
-        assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
-
-    def test_sglang_json_is_normalized_for_unquoted_transport(self):
-        raw = '--speculative-config {"method": "eagle"}'
-        assert compact_json_server_args(raw) == ('--speculative-config {"method":"eagle"}')
-
-    def test_legacy_shell_wrappers_removed(self):
-        raw = """--json-model-override-args '{"rope_scaling":null}'"""
-        assert compact_json_server_args(raw) == '--json-model-override-args {"rope_scaling":null}'
-
-    def test_no_json_is_noop(self):
-        raw = "--block-size 128 --no-enable-prefix-caching"
-        assert compact_json_server_args(raw) == raw
-
-    def test_malformed_json_left_verbatim(self):
-        raw = "--compilation-config {not json}"
-        assert compact_json_server_args(raw) == raw
-
-    def test_malformed_wrapped_json_keeps_both_shell_wrappers(self):
-        raw = "--compilation-config '{not json}'"
-        assert compact_json_server_args(raw) == raw
-
-    def test_empty_is_noop(self):
-        assert compact_json_server_args("") == ""
-        assert compact_json_server_args(None) == ""
-
-
-class TestRemoveServerArgsPreservesJson:
-    """``remove_server_args`` tokenizes with ``shlex.split`` (which strips JSON inner double quotes) and runs AFTER ``compact_json_server_args`` in ``materialize_config_with_envs`` (GEMM shape-capture always passes ``remove_args=['--port']``)."""
-
-    def test_remove_port_keeps_sibling_json_valid(self):
-        raw = '--compilation-config {"cudagraph_mode":"FULL"} --port 8888'
-        out = remove_server_args(raw, ["--port"])
-        assert "--port" not in out
-        blob = out.split("--compilation-config ", 1)[1].strip()
-        assert json.loads(blob) == {"cudagraph_mode": "FULL"}
-
-    def test_remove_keeps_multikey_speculative_config_valid(self):
-        raw = '--speculative-config {"method":"ngram","num_speculative_tokens":7} --port 8888'
-        out = remove_server_args(raw, ["--port"])
-        blob = out.split("--speculative-config ", 1)[1].strip()
-        assert json.loads(blob) == {"method": "ngram", "num_speculative_tokens": 7}
-
-    def test_remove_noop_when_nothing_matches_keeps_json(self):
-        raw = '--compilation-config {"cudagraph_mode":"FULL"}'
-        out = remove_server_args(raw, ["--port"])
-        assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {"cudagraph_mode": "FULL"}
-
-    def test_sign_prefixed_custom_op_survives_removal(self):
-        """A ``+``/``-`` prefixed custom-op value must survive the round trip."""
-        raw = (
-            "--compilation-config "
-            '{"mode":3,"custom_ops":["+fused_rms_norm_gated"],'
-            '"cudagraph_capture_sizes":[1,2,3]} --port 8888'
-        )
-        out = remove_server_args(raw, ["--port"])
-        assert "--port" not in out
-        blob = json.loads(out.split("--compilation-config ", 1)[1].strip())
-        assert blob["custom_ops"] == ["+fused_rms_norm_gated"]
-        assert blob["cudagraph_capture_sizes"] == [1, 2, 3]
-
-    def test_compose_preserves_json_for_every_args_mode(self):
-        """All four variant shapes keep both JSON flags ``json.loads``-able."""
-        cc = '{"mode":3,"custom_ops":["+fused_rms_norm_gated"]}'
-        sc = '{"method":"mtp","num_speculative_tokens":2}'
-        base = f"--max-num-seqs 20 --compilation-config {cc} --speculative-config {sc}"
-
-        def _blob(text, flag):
-            toks = text.split()
-            return json.loads(toks[toks.index(flag) + 1])
-
-        for kwargs in (
-            {"inherited_args": base},
-            {"inherited_args": base, "remove_args": ["--max-num-seqs"]},
-            {"base_extra_args": base, "args_mode": "replace"},
-        ):
-            out = compose_server_args(**kwargs)
-            assert _blob(out, "--compilation-config") == json.loads(cc)
-            assert _blob(out, "--speculative-config") == json.loads(sc)
-        # Removing the JSON flag and supplying a variant replacement.
-        repl = '{"mode":3,"custom_ops":["-rms_norm"]}'
-        out = compose_server_args(
-            inherited_args=base,
-            remove_args=["--compilation-config"],
-            variant_extra_args=f"--compilation-config {repl}",
-        )
-        assert out.count("--compilation-config") == 1
-        assert _blob(out, "--compilation-config") == json.loads(repl)
+    for kwargs in (
+        {"inherited_args": base},
+        {"inherited_args": base, "remove_args": ["--max-num-seqs"]},
+        {"base_extra_args": base, "args_mode": "replace"},
+    ):
+        out = compose_server_args(**kwargs)
+        assert _blob(out, "--compilation-config") == json.loads(cc)
         assert _blob(out, "--speculative-config") == json.loads(sc)
-
-    def test_shell_quoted_plain_operand_loses_its_wrappers(self):
-        """Magpie expands ``EXTRA_*_ARGS`` unquoted, so wrappers must not persist."""
-        out = remove_server_args("--tool-call-parser 'kimi_k3' --port 8888", ["--port"])
-        assert out == "--tool-call-parser kimi_k3"
+    # Removing the JSON flag and supplying a variant replacement.
+    repl = '{"mode":3,"custom_ops":["-rms_norm"]}'
+    out = compose_server_args(
+        inherited_args=base,
+        remove_args=["--compilation-config"],
+        variant_extra_args=f"--compilation-config {repl}",
+    )
+    assert out.count("--compilation-config") == 1
+    assert _blob(out, "--compilation-config") == json.loads(repl)
+    assert _blob(out, "--speculative-config") == json.loads(sc)
 
 
 # benchmark_report settling (real-run race)
@@ -2447,25 +2307,13 @@ class TestServerArgTokenizerOnTheSyntheticPath:
         out = compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
         assert out == "--quantization fp8 --max-num-seqs 512"
 
-    def test_an_unbalanced_quote_leaves_the_string_alone(self, monkeypatch):
-        """Untokenizable input is returned untouched rather than guessed at."""
-        self._off(monkeypatch)
-        broken = "--served-model-name 'oops --max-num-seqs 512"
-        assert remove_server_args(broken, ["--max-num-seqs"]) == broken
-
-    def test_a_synthetic_json_value_survives_a_removal(self, monkeypatch):
-        """Synthetic runs carry JSON flags too (compilation-config, and friends)."""
-        self._off(monkeypatch)
-        args = '--compilation-config {"mode":3} --max-num-seqs 512'
-        out = remove_server_args(args, ["--max-num-seqs"])
-        assert out == '--compilation-config {"mode":3}'
-
 
 def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
     """The window must cover ``remove_server_args``, which is what it is about."""
     from hyperloom.inference_optimizer import grid_server_args as gsa
+    from inference_suite import argv
 
-    real = gsa.remove_server_args
+    real = argv.remove_server_args
 
     def _lossy(server_args, remove_args):
         out = real(server_args, remove_args)
@@ -2473,7 +2321,7 @@ def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
         return out.replace('{"mode":3}', '{"ignore":[*.mlp.gate]}')
 
     args = '--compilation-config {"mode":3} --max-num-seqs 512'
-    with patch.object(gsa, "remove_server_args", side_effect=_lossy):
+    with patch.object(argv, "remove_server_args", side_effect=_lossy):
         with caplog.at_level("ERROR"):
             gsa.compose_server_args(base_extra_args=args, remove_args=["--max-num-seqs"])
     assert any("CORRUPTED" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
