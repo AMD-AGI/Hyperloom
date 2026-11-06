@@ -46,7 +46,7 @@ from hyperloom.common.outside_facts import (
     TUNABLEOP_TUNING_ENV,
     UPSTREAM_PR_REPOS,
 )
-from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.measurement import TestRequest as MeasuredRequest
 from hyperloom.contracts.recipe import KernelKind
 from hyperloom.hosted.mcp_server import (
@@ -128,12 +128,25 @@ _WAIT_TEST: dict[str, Any] = {
     "required": ["request_id"],
     "additionalProperties": False,
 }
-# The caller's branch is the token's; a request that names a branch or an id is refused by the schema.
+#: What a specialist tests: a change of its own (``explore``) or the profile of its head (``profile``). The other
+#: purposes and kinds are the session's (a baseline, a health check, a final candidate, an integration, the confirm
+#: retest of a measured gain, a regression's reproduction, a final sweep): the queue exempts most of them from the
+#: branch's K and its backpressure, so a specialist that could send them would take the session's capacity.
+SPECIALIST_KINDS = (TestKind.TEST, TestKind.PROFILE)
+SPECIALIST_PURPOSES = (Purpose.EXPLORE, Purpose.PROFILE)
+# The caller's branch is the token's; a request that names a branch or an id, a priority (the purpose's default is the
+# queue's to give) or a purpose or kind that is not the specialist's is refused by the schema.
 _SUBMIT_TEST: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
-        "kind": {"enum": [kind.value for kind in TestKind]},
-        "purpose": {"enum": [purpose.value for purpose in Purpose]},
+        "kind": {"enum": [kind.value for kind in SPECIALIST_KINDS]},
+        "purpose": {
+            "enum": [purpose.value for purpose in SPECIALIST_PURPOSES],
+            "description": (
+                "explore for a change of yours, profile for the profile of your head. The runtime retests a measured "
+                "gain itself (confirm) and the session runs its own baselines, finals and integrations."
+            ),
+        },
         "parent_commit": {"type": _STRING, "minLength": 1},
         "delta": {
             "type": _OBJECT,
@@ -143,8 +156,6 @@ _SUBMIT_TEST: dict[str, Any] = {
             ),
         },
         "intent_fingerprint": {"type": [_STRING, _NULL]},
-        "priority": {"type": [_INTEGER, _NULL], "minimum": PRIORITY_HIGHEST, "maximum": PRIORITY_LOWEST},
-        "retest_of": {"type": [_STRING, _NULL]},
         "avoid_nodes": {"type": _ARRAY, "items": {"type": _STRING}},
         "accuracy": {"type": _BOOLEAN},
         "concurrency": {"type": _ARRAY, "items": {"type": _INTEGER, "minimum": 1}},
@@ -319,13 +330,6 @@ _POLL_INBOX: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-# The specialist runtime submits the confirm retest of a measured win itself, through the toolbox interface.
-_CONFIRM_REFUSED_CODE = "confirm_not_for_specialists"
-_CONFIRM_REFUSED_REASON = (
-    "a specialist does not submit purpose=confirm: the runtime retests a measured win itself, "
-    "and a confirm of your own would be measured and never used; submit purpose=explore instead"
-)
-
 BlackboardFor = Callable[[str], Blackboard]
 BriefingFor = Callable[[str], StartupBriefProvider]
 
@@ -412,8 +416,6 @@ def _submit_test(
             request = MeasuredRequest.from_document({**arguments, "branch_id": ctx.principal.branch})
         except ValueError as exc:  # MeasurementError and RecipeError both are
             raise InvalidParamsError(str(exc)) from exc
-        if request.purpose is Purpose.CONFIRM:
-            raise ToolError(f"rejected ({_CONFIRM_REFUSED_CODE}): {_CONFIRM_REFUSED_REASON}")
         try:
             return {"request_id": await _on(home, toolbox.submit_test(request))}
         except RequestRejected as exc:
@@ -879,6 +881,8 @@ __all__ = [
     "POLL_INBOX_MAX_ITEMS",
     "REPLY_INBOX_HEADER",
     "REPLY_INBOX_LINES",
+    "SPECIALIST_KINDS",
+    "SPECIALIST_PURPOSES",
     "SPECIALIST_TOKEN_ENV",
     "BriefingFor",
     "BlackboardFor",
