@@ -353,19 +353,22 @@ def agent_isolation_report(*, probe: ProbeBwrap = bwrap_probe) -> IsolationRepor
 
 
 def announce_agent_isolation(*, probe: ProbeBwrap = bwrap_probe) -> IsolationReport:
-    """Say once at start-up how this process's agents are isolated: one WARNING when some run unconfined (or would
-    be refused), else one INFO line. Returns the report."""
+    """Say once at start-up how this process's agents are isolated: one WARNING when some run unconfined or would be
+    refused, naming which and why, else one INFO line. Returns the report."""
     report = agent_isolation_report(probe=probe)
     decisions = (("specialists", report.specialists), ("agent sandboxes", report.sandboxes))
     unconfined = [name for name, how in decisions if how == NONE]
+    refused = [name for name, how in decisions if how == REFUSED]
+    said = []
     if unconfined:
         what = "agents" if len(unconfined) == len(decisions) else unconfined[0]
-        message = (
-            f"{what} run unconfined on this host, as before: they can read this account's files and credentials "
-            f"({'; '.join(report.reasons)})"
+        said.append(
+            f"{what} run unconfined on this host, as before: they can read this account's files and credentials"
         )
-        _log_once(logging.WARNING, message)
+    if refused:
+        said.append(f"{' and '.join(refused)} will be refused: they must be isolated here, and no tier can")
+    if said:
+        _log_once(logging.WARNING, f"{'; '.join(said)} ({'; '.join(report.reasons)})")
     else:
-        refused = any(how == REFUSED for _, how in decisions)
-        _log_once(logging.WARNING if refused else logging.INFO, report.line())
+        _log_once(logging.INFO, report.line())
     return report
