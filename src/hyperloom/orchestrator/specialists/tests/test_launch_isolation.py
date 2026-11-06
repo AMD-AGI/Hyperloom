@@ -25,6 +25,7 @@ from hyperloom.common.agent_isolation import (
     BwrapIsolation,
     IsolationRefused,
     NoIsolation,
+    session_isolation_lines,
 )
 from hyperloom.common.env_safety import RunAs
 from hyperloom.common.proctree import REAP_MARK_ENV, running
@@ -140,6 +141,17 @@ def test_a_sandbox_points_cli_state_and_caches_named_elsewhere_into_its_workspac
     assert env["AITER_JIT_DIR"] == inside
     assert "TORCHINDUCTOR_CACHE_DIR" not in env  # unset: the tool's default is under the home or /tmp
     assert env["TMP"] == env["TMPDIR"] == "/tmp"
+
+
+def test_an_unconfined_launch_is_counted_for_the_session_report_and_said_once(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.common.agent_isolation"):
+        for _ in range(2):
+            prepare_launch(NoIsolation(("no tier here",)), _place(tmp_path), ["claude"], _env())
+
+    assert len(caplog.records) == 1 and caplog.records[0].getMessage().endswith("(no tier here)")
+    assert session_isolation_lines() == ("agent isolation: 2 agent launches ran unconfined: no tier here",)
+    prepare_launch(_bwrap(), _place(tmp_path), ["claude"], _env()).release()
+    assert session_isolation_lines() == ("agent isolation: 2 agent launches ran unconfined: no tier here",)
 
 
 @pytest.mark.parametrize(("version", "bound"), [((0, 9, 0), False), ((0, 13, 1), True)])

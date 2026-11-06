@@ -47,6 +47,7 @@ from hyperloom.common.agent_isolation import (
     IsolationRefused,
     NoIsolation,
     choose_agent_isolation,
+    unconfined_launch,
 )
 from hyperloom.common.confinement import Confinement, credential_paths, toolchain_paths
 from hyperloom.common.env_safety import RunAs
@@ -525,7 +526,8 @@ def prepare_launch(
     As another account: the workspace and worktree are shared with it, the private files set back to 0600, and the
     identity variables are its. In a bubblewrap sandbox: ``HOME``, the CLI state and compiler caches named outside
     the trees it writes, and the temporary directory, are pointed inside it (:data:`SANDBOX_DIRECTORIES`), and its
-    confinement is derived (:func:`specialist_confinement`). Unconfined: nothing.
+    confinement is derived (:func:`specialist_confinement`). Unconfined: nothing is changed, and the launch is said and
+    counted for the session report (:func:`~hyperloom.common.agent_isolation.unconfined_launch`).
 
     Raises:
         IsolationRefused: The sandbox's confinement cannot be built: a path it reads is reached through a tree it
@@ -536,6 +538,7 @@ def prepare_launch(
     if isinstance(isolation, AccountIsolation):
         return PreparedLaunch(isolation, popen_kwargs=_demote(isolation.run_as, place, env))
     if not isinstance(isolation, BwrapIsolation):
+        unconfined_launch(isolation)
         return PreparedLaunch(isolation)
     _point_into_sandbox(place, env)
     confinement = specialist_confinement(place, cmd[0], env)
