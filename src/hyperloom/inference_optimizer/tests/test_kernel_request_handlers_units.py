@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.llm import llm_config
+from hyperloom.common.ports import DEV_SANDBOX_PORTS, RAY_WORKER_PORTS
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
     DEFAULT_CODEX_SANDBOX_MODE,
@@ -2256,7 +2257,6 @@ class TestRunGemmTuningHandler:
                 return {"status": "succeeded"}
 
         monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
-        monkeypatch.setattr(shape_capture, "_pick_shape_capture_port", lambda: 19001)
 
         result = asyncio.run(
             shape_capture._capture_vllm_tunableop_shapes(
@@ -2281,7 +2281,10 @@ class TestRunGemmTuningHandler:
         assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_TUNING"] == "0"
         assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_RECORD_UNTUNED"] == "1"
         assert task.params["extra_envs"]["HL_TUNABLEOP_MODE"] == ""
-        assert task.params["extra_envs"]["PORT"] == "19001"
+        capture_port = int(task.params["extra_envs"]["PORT"])
+        ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text(encoding="utf-8").split()[0])
+        assert capture_port < ephemeral_start and capture_port not in DEV_SANDBOX_PORTS
+        assert capture_port not in RAY_WORKER_PORTS
         assert task.params["extra_envs"]["TP"] == "1"
         assert task.params["extra_envs"]["CONC"] == "128"
         assert task.params["extra_envs"]["ISL"] == "1024"
