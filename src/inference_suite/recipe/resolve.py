@@ -46,6 +46,7 @@ from inference_suite.contracts.base_launch import (
     Workload,
 )
 from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, GOLDEN_OWNED_SPEC_CONFIG_KEYS, is_golden_owned_flag
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
 from inference_suite.recipe.atom_catalog import atom_catalog_launches
 from inference_suite.recipe.defaults import TABLE_PATH, default_table
 from inference_suite.recipe.golden_curve import (
@@ -80,7 +81,7 @@ from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import UserFile
 from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, vllm_recipes_launches
 
-#: The load client every base is measured with: InferenceX's own harness, at the snapshot's InferenceX commit.
+#: The load client every base is measured with: InferenceX's own harness, at its pinned commit.
 CLIENT_TOOL = "inferencex"
 
 _FIELDS = ContractFields(RecipeSourceError)
@@ -111,8 +112,8 @@ class UnreadSource:
 class SourceSnapshot:
     """Everything resolving reads, recorded once when the session starts.
 
-    ``inferencex`` is read for every query; its commit also pins the load client and keys the golden curves. A
-    cookbook is carried for the query's framework only. ``golden_lengths`` are InferenceX's ``golden_length`` answers
+    ``inferencex`` is read for every query a recipe may serve, and keys the golden curves; it is ``None`` when the
+    operator's ``user_file`` is the base or InferenceX could not be read. A cookbook is carried for the query's framework only. ``golden_lengths`` are InferenceX's ``golden_length`` answers
     for the cookbook's AgentX launches (see :func:`~inference_suite.recipe.golden_curve.golden_requests`) and
     ``base_model`` the model's HF ``cardData.base_model``. ``latest_releases`` maps a framework to its latest release
     tag, which stands for a recipe image that names no version. ``user_file``, when the operator gave one, is the
@@ -120,7 +121,7 @@ class SourceSnapshot:
     source reading stopped at, when one could not be read; what it and every later source hold is missing.
     """
 
-    inferencex: InferencexSnapshot
+    inferencex: InferencexSnapshot | None
     fetched_unix: int
     user_file: UserFile | None = None
     sglang_cookbook: RepoBundle | None = None
@@ -175,7 +176,7 @@ _Reader = Callable[[LaunchQuery, SourceSnapshot], "tuple[SourceLaunch, ...] | So
 
 
 def _inferencex(query: LaunchQuery, snapshot: SourceSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
-    return inferencex_launches(query, snapshot.inferencex)
+    return inferencex_launches(query, _carried(snapshot.inferencex, "InferenceX"))
 
 
 def _sglang_cookbook(query: LaunchQuery, snapshot: SourceSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
@@ -322,8 +323,8 @@ def _entrypoint(framework: str) -> tuple[str, ...]:
     return _carried(_ENTRYPOINTS.get(framework), f"{framework} serving entrypoint")
 
 
-def _client(snapshot: SourceSnapshot, env: Mapping[str, str]) -> ClientLaunch:
-    return ClientLaunch(tool=CLIENT_TOOL, commit=snapshot.inferencex.bundle.commit, env=env)
+def _client(env: Mapping[str, str]) -> ClientLaunch:
+    return ClientLaunch(tool=CLIENT_TOOL, commit=INFERENCEX_CLIENT_COMMIT, env=env)
 
 
 def _recipe_base(
@@ -343,7 +344,7 @@ def _recipe_base(
         topology=launch.topology,
         args=layers.args,
         env=_without_runner_env(layers.env),
-        client=_client(snapshot, launch.client_env),
+        client=_client(launch.client_env),
         resolved_unix=snapshot.fetched_unix,
         golden_al=layers.golden,
         runner_owned=_runner_owned(launch.framework),
@@ -382,7 +383,7 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
         topology=spelling.read(shell.args),
         args=shell.args,
         env=_without_runner_env(shell.env),
-        client=_client(snapshot, {}),
+        client=_client({}),
         resolved_unix=snapshot.fetched_unix,
         runner_owned=_runner_owned(query.framework),
         stripped=(*shell.stripped, *_runner_env(shell.env)),
@@ -415,7 +416,7 @@ def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[So
         topology=topology,
         args=(*row.args, *topology_args),
         env=row.env,
-        client=_client(snapshot, {}),
+        client=_client({}),
         resolved_unix=snapshot.fetched_unix,
         runner_owned=_runner_owned(query.framework),
         warnings=(
@@ -432,7 +433,7 @@ def _why_default(query: LaunchQuery, snapshot: SourceSnapshot) -> str:
 
 
 def _golden_table(snapshot: SourceSnapshot) -> GoldenTable:
-    return GoldenTable(snapshot.inferencex.bundle, snapshot.golden_lengths)
+    return GoldenTable(_carried(snapshot.inferencex, "InferenceX").bundle, snapshot.golden_lengths)
 
 
 def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> BaseLaunch | Miss:
