@@ -85,3 +85,75 @@ async def test_an_agent_that_keeps_no_transcript_spends_nothing_recorded(tmp_pat
     await AgentSpend(tmp_path / "claude", (tmp_path / "b01",), tmp_path / "spend.json", "b01", MODEL, usage).record()
 
     assert usage.recorded == []
+
+
+class _FailingOnce(_Usage):
+    """A sink whose ``fail_at``-th write fails once."""
+
+    def __init__(self, fail_at: int) -> None:
+        super().__init__()
+        self.calls, self.fail_at = 0, fail_at
+
+    async def record_llm_usage(self, usage) -> None:
+        self.calls += 1
+        if self.calls == self.fail_at:
+            raise OSError("the blackboard is unwritable")
+        await super().record_llm_usage(usage)
+
+
+async def test_spend_the_sink_failed_to_record_is_recorded_at_the_next_read_and_the_rest_once(tmp_path: Path) -> None:
+    config, branch_dir = tmp_path / "claude", tmp_path / "b01"
+    usage = _FailingOnce(fail_at=2)
+    spend = AgentSpend(config, (branch_dir,), tmp_path / "spend.json", "b01", MODEL, usage)
+    _transcript(config, branch_dir, "s-1").write_text(_message("m1", "s-1", 40))
+    _transcript(config, branch_dir, "s-2").write_text(_message("m2", "s-2", 7))
+
+    with pytest.raises(OSError, match="unwritable"):
+        await spend.record()
+    await spend.record()
+    await spend.record()
+
+    assert sorted((item.launch, item.tokens) for item in usage.recorded) == [
+        ("s-1", TokenCounts(2, 40, 100)),
+        ("s-2", TokenCounts(2, 7, 100)),
+    ]
+
+
+async def test_a_ledger_write_torn_midway_leaves_the_last_whole_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, branch_dir = tmp_path / "claude", tmp_path / "b01"
+    usage = _Usage()
+    spend = AgentSpend(config, (branch_dir,), tmp_path / "spend.json", "b01", MODEL, usage)
+    agent = _transcript(config, branch_dir, "s-1")
+    agent.write_text(_message("m1", "s-1", 40))
+    await spend.record()
+    with agent.open("a") as handle:
+        handle.write(_message("m2", "s-1", 7))
+    write_text = Path.write_text
+
+    def torn(path: Path, data: str, *args, **kwargs) -> int:
+        write_text(path, data[: len(data) // 2], *args, **kwargs)
+        raise OSError("no space left on device")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "write_text", torn)
+        with pytest.raises(OSError, match="no space"):
+            await spend.record()
+    await spend.record()
+
+    # The torn write cost one double count of m2, not every later read.
+    assert [item.tokens for item in usage.recorded] == [TokenCounts(2, 40, 100), *[TokenCounts(2, 7, 100)] * 2]
+
+
+async def test_a_ledger_that_is_no_ledger_is_refused_naming_it_and_records_nothing(tmp_path: Path) -> None:
+    config, branch_dir = tmp_path / "claude", tmp_path / "b01"
+    usage = _Usage()
+    ledger = tmp_path / "spend.json"
+    ledger.write_text('{"offsets": {"a": 1')
+    _transcript(config, branch_dir, "s-1").write_text(_message("m1", "s-1", 40))
+
+    with pytest.raises(ValueError, match="spend.json"):
+        await AgentSpend(config, (branch_dir,), ledger, "b01", MODEL, usage).record()
+
+    assert usage.recorded == [] and ledger.read_text() == '{"offsets": {"a": 1'
