@@ -12,12 +12,14 @@ from typing import Any
 
 import pytest
 
+from hyperloom_multibranch.specialist import agent_onboarding
 from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_onboarding import (
     ATTEMPTS,
     GATEWAY_PAUSE_SECONDS,
     RETRY_SECONDS,
     AgentSpec,
+    CommandResult,
     ModelRefused,
     OnboardingSetup,
     agent_env,
@@ -123,6 +125,39 @@ async def test_each_failed_attempt_reaches_the_next_prompt_and_three_give_up(tmp
     assert reasons[0] in onboard.prompts[1] and reasons[1] in onboard.prompts[2]
 
 
+async def test_the_preflight_gives_up_after_the_attempts_the_module_allows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_onboarding, "ATTEMPTS", 1)
+    onboard = Onboarder(["no json here", _manifest()])
+
+    with pytest.raises(PreflightFailed) as failed:
+        await make_ready(str(_agent_repo(tmp_path)), SPEC, tmp_path / "agent", _setup(Sandbox([]), onboard))
+
+    assert len(failed.value.reasons) == 1 and len(onboard.prompts) == 1
+
+
+class _TimedSandbox(Sandbox):
+    def __init__(self, starts: list[Process]) -> None:
+        super().__init__(starts, keep="run/session.json")
+        self.timeouts: list[float] = []
+
+    async def run(self, command: str, cwd: Path, env, timeout: float) -> CommandResult:
+        self.timeouts.append(timeout)
+        return await super().run(command, cwd, env, timeout)
+
+
+async def test_each_install_command_runs_with_the_module_s_install_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_onboarding, "INSTALL_SECONDS", 12.5)
+    sandbox = _TimedSandbox([Process(None)])
+
+    await make_ready(str(_agent_repo(tmp_path)), SPEC, tmp_path / "agent", _setup(sandbox, Onboarder([_manifest()])))
+
+    assert sandbox.timeouts == [12.5]
+
+
 async def test_a_model_call_the_gateway_refuses_fails_the_preflight_at_once_naming_it(tmp_path: Path) -> None:
     refusal = "the onboarding model's call failed: API Error: 400 this CLI does not support this model"
     asked, waits = [], []
@@ -217,7 +252,9 @@ class _Clock:
         self.now += seconds
 
 
-def _outage(tmp_path: Path, down: int) -> tuple[OnboardingSetup, _Clock, Path, Process]:
+def _outage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, down: int
+) -> tuple[OnboardingSetup, _Clock, Path, Process]:
     cli = tmp_path / "claude"
     cli.write_text(OUTAGE_CLI.format(python=sys.executable, answer=_manifest()), encoding="utf-8")
     cli.chmod(0o755)
@@ -226,11 +263,14 @@ def _outage(tmp_path: Path, down: int) -> tuple[OnboardingSetup, _Clock, Path, P
     onboard = cli_onboard(AgentCommand("claude", str(cli), "claude-sonnet-5-5"), env, "b01", _Usage())
     clock, process = _Clock(), Process(None)
     sandbox = Sandbox([process], keep="run/session.json")
-    return OnboardingSetup(sandbox, onboard, sleep=clock.sleep, clock=clock), clock, runs, process
+    monkeypatch.setattr(agent_onboarding, "monotonic", clock)
+    return OnboardingSetup(sandbox, onboard, sleep=clock.sleep), clock, runs, process
 
 
-async def test_a_gateway_outage_longer_than_every_attempt_is_waited_out_and_the_agent_onboards(tmp_path: Path) -> None:
-    setup, clock, runs, process = _outage(tmp_path, down=ATTEMPTS + 2)
+async def test_a_gateway_outage_longer_than_every_attempt_is_waited_out_and_the_agent_onboards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup, clock, runs, process = _outage(tmp_path, monkeypatch, down=ATTEMPTS + 2)
 
     ready = await make_ready(str(_agent_repo(tmp_path)), SPEC, tmp_path / "agent", setup)
 
@@ -240,9 +280,9 @@ async def test_a_gateway_outage_longer_than_every_attempt_is_waited_out_and_the_
 
 
 async def test_a_gateway_outage_is_waited_out_for_half_the_branch_s_time_then_spends_the_attempts(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    setup, clock, _runs, _process = _outage(tmp_path, down=1000)
+    setup, clock, _runs, _process = _outage(tmp_path, monkeypatch, down=1000)
 
     with pytest.raises(PreflightFailed) as failed:
         await make_ready(str(_agent_repo(tmp_path)), SPEC, tmp_path / "agent", setup)

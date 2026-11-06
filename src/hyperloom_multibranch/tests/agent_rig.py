@@ -71,14 +71,15 @@ class Onboarder:
 
 
 def _setup(sandbox: Sandbox, onboard, waits: list[float] | None = None) -> OnboardingSetup:
+    """Onboarding that skips the waits between attempts, recording them in ``waits``, and gives a started agent a
+    tenth of a second to stay up."""
+
     async def no_wait(seconds: float) -> None:
         if waits is not None:
             waits.append(seconds)
+        await asyncio.sleep(0)
 
-    ticks = iter(range(1000))
-    return OnboardingSetup(
-        sandbox, onboard, start_seconds=3.0, poll_seconds=1.0, sleep=no_wait, clock=lambda: float(next(ticks))
-    )
+    return OnboardingSetup(sandbox, onboard, start_seconds=0.1, poll_seconds=0.01, sleep=no_wait)
 
 
 BRANCH = "a1"
