@@ -72,16 +72,20 @@ def _bounded(timeout_sec: float, call: Callable[[], _T]) -> _T:
     outlives it is left to its own thread (a daemon, which ends when the server is stopped or its socket times out).
 
     Raises:
-        CompletionError: The call did not finish in time. Whatever the call raises is raised as it was.
+        CompletionError: The call did not finish in time. Whatever the call raises is raised as it was; a stop (an
+            exception that is not an :class:`Exception`, such as ``KeyboardInterrupt``) also ends the call's own thread.
     """
     outcome: list[tuple[bool, object]] = []
 
     def work() -> None:
         try:
             outcome.append((True, call()))
-        except BaseException as exc:  # raised again, below, in the caller's thread
+        except Exception as exc:  # raised again, below, in the caller's thread
             log.debug("a short-prompt request raised on its own thread; the caller raises it again", exc_info=True)
             outcome.append((False, exc))
+        except BaseException as exc:  # a stop: raised again, below, in the caller's thread, and here too
+            outcome.append((False, exc))
+            raise
 
     thread = threading.Thread(target=work, name="hl-short-prompt-request", daemon=True)
     thread.start()

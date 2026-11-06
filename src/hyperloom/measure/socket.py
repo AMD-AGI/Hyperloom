@@ -214,7 +214,8 @@ class MeasurementBackend(Protocol):
 
     name: str
 
-    def run_test(self, call: TestCall) -> TestOutcome: ...
+    def run_test(self, call: TestCall) -> TestOutcome:
+        """Run the test ``call`` describes and return what it produced."""
 
 
 #: The backend used until another is chosen, by import path: the local backend imports this module for its types.
