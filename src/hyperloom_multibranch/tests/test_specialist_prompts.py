@@ -319,6 +319,13 @@ def test_the_role_says_a_cross_image_lead_is_measured_here_and_its_left_out_file
     assert "never replay it as is" in prompt
 
 
+def test_the_role_holds_the_specialist_to_arbor_s_map_when_its_brief_has_one():
+    role = role_prompt(WORKLOAD)
+
+    assert "Arbor's map" in role and "binding" in role
+    assert "a direction a running Arbor branch holds" in role and "answers its reason" in role
+
+
 def test_the_role_names_each_workload_s_bar_as_its_gate_sets_it():
     role = role_prompt(WORKLOAD)
 
