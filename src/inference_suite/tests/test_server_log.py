@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from inference_suite import server_log
-from inference_suite.server_log import READY_MARKERS, LogCursor, round_start_offsets
+from inference_suite.server_log import READY_MARKERS, LogCursor, round_start_offsets, throughput_samples
 
 
 def test_the_ready_table_is_the_only_one_the_launcher_reads() -> None:
@@ -256,3 +256,16 @@ def test_a_previous_runs_nested_stderr_is_not_activity(tmp_path):
     offsets = round_start_offsets(str(tmp_path / "server.log"))
     scan = LogCursor(offsets).advance(str(tmp_path / "server.log"))
     assert not scan.saw_eval_start
+
+
+def test_throughput_samples_reads_sglang_and_vllm_lines_and_drops_non_positive() -> None:
+    text = "\n".join(
+        [
+            "Decode batch. #running-req: 4 gen throughput (token/s): 100.0",
+            "Decode batch. #running-req: 4 gen throughput (token/s): 200.5",
+            "Avg generation throughput: 300 tokens/s",
+            "irrelevant line",
+            "gen throughput (token/s): 0",
+        ]
+    )
+    assert throughput_samples(text) == [100.0, 200.5, 300.0]
