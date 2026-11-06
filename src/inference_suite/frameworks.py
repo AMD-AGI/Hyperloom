@@ -70,24 +70,28 @@ class FrameworkFacts:
     expert_parallel: ExpertParallelFlag | None = None
 
 
+_HOST_FLAG = "--host"
+#: The expert-parallel switch vLLM and ATOM share.
+_VLLM_STYLE_EP_SWITCH = "--enable-expert-parallel"
+
 _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.SGLANG: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package="sglang",
-        server_flags=ServerFlags("--model-path", "--host", "--port", "--served-model-name", "--context-length"),
+        server_flags=ServerFlags("--model-path", _HOST_FLAG, "--port", "--served-model-name", "--context-length"),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
     ),
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package="vllm",
-        server_flags=ServerFlags("--model", "--host", "--port", "--served-model-name", "--max-model-len"),
-        expert_parallel=ExpertParallelFlag("--enable-expert-parallel", ("--enable-expert-parallel", "-ep"), False),
+        server_flags=ServerFlags("--model", _HOST_FLAG, "--port", "--served-model-name", "--max-model-len"),
+        expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH, "-ep"), False),
     ),
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package="atom",
-        server_flags=ServerFlags("--model", "--host", "--server-port", None, "--max-model-len"),
-        expert_parallel=ExpertParallelFlag("--enable-expert-parallel", ("--enable-expert-parallel",), False),
+        server_flags=ServerFlags("--model", _HOST_FLAG, "--server-port", None, "--max-model-len"),
+        expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH,), False),
     ),
     Framework.XDIT: FrameworkFacts(kind=FrameworkKind.SCRIPTABLE, python_package="xfuser"),
     Framework.CUSTOM: FrameworkFacts(kind=FrameworkKind.SCRIPTABLE, python_package=None),
