@@ -786,7 +786,7 @@ async def test_reap_loop_keeps_a_cli_waiting_on_a_tool_it_started_after_its_last
 @pytest.mark.asyncio
 async def test_reap_loop_reaps_a_silent_cli_whose_children_predate_its_last_output(tmp_path: Path):
     """A child older than the CLI's last output is not a tool call in flight, so silence still reaps the CLI."""
-    from hyperloom.common.proctree import descendants
+    from hyperloom_common.proctree import descendants
 
     workspace = tmp_path / "ws"
     proc = _cli("import subprocess; subprocess.run(['sleep', '30'])")
