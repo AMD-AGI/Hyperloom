@@ -24,6 +24,7 @@ from enum import Enum
 from pathlib import Path
 
 from hyperloom_common.jsonio import read_jsonl
+from hyperloom_common.shared_storage import make_shared_dirs, open_shared_append
 from hyperloom_multibranch.contracts.blackboard.vocab import Role
 from hyperloom_multibranch.blackboard.codec import key_sorted
 
@@ -180,9 +181,10 @@ def _cut_torn_tail(path: Path) -> None:
 
 
 def _append_line(path: Path, line: bytes) -> None:
-    """Append ``line`` whole, or put the segment back as it was when the write fails partway."""
+    """Append ``line`` whole, or put the segment back as it was when the write fails partway. A new segment is ``664``:
+    the run's next leg, maybe another account of the group, appends to it."""
 
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+    fd = open_shared_append(path)
     try:
         size = os.fstat(fd).st_size
         try:
@@ -213,7 +215,7 @@ class SegmentWriter:
         if entry.writer != self.writer or entry.seq != self._last_seq + 1:
             raise ValueError(f"segment {self.writer} expects seq {self._last_seq + 1}, got {entry.entry_id}")
         line = json.dumps(key_sorted(entry.to_dict()), ensure_ascii=True) + "\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(self.path.parent)
         if not self._ends_whole:
             _cut_torn_tail(self.path)
         self._ends_whole = False

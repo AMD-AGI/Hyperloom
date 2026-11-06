@@ -33,6 +33,7 @@ SHARED_CHILD_UMASK = 0o002
 
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+_APPEND = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
 _PROBE_PREFIX = ".hl-writable-"
 
 
@@ -87,6 +88,22 @@ def create_shared_file(path: Path) -> None:
         os.fchmod(descriptor, SHARED_FILE_MODE)
     finally:
         os.close(descriptor)
+
+
+def open_shared_append(path: Path) -> int:
+    """``path`` opened for appending, never through a link: made ``664`` by ``fchmod`` when this call creates it, so the
+    next account of the group appends to it too, and opened as it is when it exists. One another account made without
+    group write fails ``EACCES``: a file that is appended to cannot be replaced by rename."""
+    try:
+        descriptor = os.open(path, _APPEND | os.O_CREAT | os.O_EXCL, SHARED_FILE_MODE)
+    except FileExistsError:
+        return os.open(path, _APPEND)
+    try:
+        os.fchmod(descriptor, SHARED_FILE_MODE)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def write_shared_bytes(path: Path, data: bytes, *, mode: int = SHARED_FILE_MODE) -> None:
@@ -176,6 +193,7 @@ __all__ = [
     "create_shared_file",
     "current_umask",
     "make_shared_dirs",
+    "open_shared_append",
     "ownership",
     "share_new_directory",
     "setgid_warnings",

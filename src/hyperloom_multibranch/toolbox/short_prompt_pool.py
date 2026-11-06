@@ -27,6 +27,7 @@ from hyperloom.contracts.measurement import TestResult
 from hyperloom.measure.short_prompts.compare import Outputs, PromptInfo, compare_outputs
 from hyperloom.measure.short_prompts.outputs import OutputsError, output_document, parse_output, read_outputs
 from hyperloom_multibranch.toolbox.short_prompts import output_counts
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_multibranch.toolbox.submission_log import append_line, complete_lines
 
 __all__ = ["POOL_FILE", "PoolKey", "ShortPromptPool", "pooled_result"]
@@ -55,7 +56,7 @@ class ShortPromptPool:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._answers: dict[PoolKey, dict[str, Outputs]] = {}
-        path.parent.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(path.parent)
         if path.exists():
             self._replay()
 

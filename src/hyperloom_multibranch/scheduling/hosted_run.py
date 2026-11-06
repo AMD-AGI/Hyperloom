@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
-from hyperloom_common.shared_storage import make_shared_dirs, setgid_warnings, writable_problems
+from hyperloom_common.shared_storage import make_shared_dirs, ownership, setgid_warnings, writable_problems
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
@@ -58,7 +58,9 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 #: Seconds between the session's hard stop and the grant's end, for the process to write ``exit.json`` and exit.
 GRANT_MARGIN_SECONDS = 60.0
-_DURABLE = WriteOptions(fsync=True)
+#: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
+#: another account of the group, reads ``session.json`` to finish the session it names.
+_DURABLE = WriteOptions(fsync=True, shared=True)
 _ENCODING = "utf-8"
 
 log = logging.getLogger(__name__)
@@ -279,12 +281,20 @@ def record_session(state_dir: Path, root: Path) -> None:
 
 
 def recorded_session(state_dir: Path) -> Path | None:
-    """The session directory an earlier start of the run named, ``None`` when none did."""
+    """The session directory an earlier start of the run named, ``None`` when none did.
 
+    Raises:
+        HostedRefused: When this account cannot read ``session.json``, naming it with its owner and mode: an earlier
+            leg of another account wrote it owner-only, and a restart would meet the same file.
+    """
+
+    path = state_dir / SESSION_FILE
     try:
-        text = (state_dir / SESSION_FILE).read_text(encoding=_ENCODING)
+        text = path.read_text(encoding=_ENCODING)
     except FileNotFoundError:
         return None
+    except PermissionError as exc:
+        raise HostedRefused(f"this account cannot read {path}{ownership(path)}: {exc.strerror}") from None
     return Path(json.loads(text)["session_dir"])
 
 

@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom_common.io import atomic_write_json
+from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.provenance import detect_code_revision
 from hyperloom_multibranch.blackboard.codec import decode, encode
@@ -89,9 +89,10 @@ class SessionManifest:
     image_check: ImageCheckSummary = NO_IMAGE_CHECK
 
     def write(self, path: Path) -> None:
-        """Write the document to ``path``, replacing whatever is there."""
+        """Write the document to ``path``, replacing whatever is there; ``664``, as a later leg of a hosted run, maybe
+        another account of the group, reads it back to finish the session."""
 
-        atomic_write_json(path, encode(self))
+        atomic_write_json(path, encode(self), options=WriteOptions(shared=True))
 
 
 def read_manifest(path: Path) -> SessionManifest:

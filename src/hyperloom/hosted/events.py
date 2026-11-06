@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from hyperloom.plugs.socket import PlugContext
+from hyperloom_common.shared_storage import make_shared_dirs, open_shared_append
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ class HostedProgressEvents:
         self._dirty = False
         self._last_sync = clock()
         self._closed = False
-        self._dir.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(self._dir)
         self._segment, self._last_id = _resume_point(self._dir)
         self._fd, self._size = self._open_segment(self._segment)
 
@@ -135,8 +136,11 @@ class HostedProgressEvents:
         return self._last_id
 
     def _open_segment(self, segment: int) -> tuple[int, int]:
-        """Open a segment file; the descriptor and its size.  Changes no state, so a failure leaves the writer as it was."""
-        fd = os.open(self._dir / segment_name(segment), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        """Open a segment file; the descriptor and its size.  Changes no state, so a failure leaves the writer as it was.
+
+        A segment is ``664`` (and the directory ``2775``): the run's next leg, maybe another account of the group,
+        resumes it."""
+        fd = open_shared_append(self._dir / segment_name(segment))
         try:
             return fd, os.fstat(fd).st_size
         except OSError:

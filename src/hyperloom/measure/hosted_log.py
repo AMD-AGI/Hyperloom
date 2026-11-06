@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.sandbox.socket import Sandbox, SandboxError
+from hyperloom_common.shared_storage import make_shared_dirs, open_shared_append
 
 __all__ = [
     "FAILURE_DETAIL_CHARS",
@@ -94,14 +95,17 @@ class Record:
 
 
 class MeasurementJournal:
-    """An append-only journal plus the sheets of every attempt, under one directory."""
+    """An append-only journal plus the sheets of every attempt, under one directory.
+
+    The journal is ``664`` and the directories ``2775``: a restarted application re-attaches to the sandboxes it
+    lists, and its account may be another one of the group."""
 
     def __init__(self, directory: Path) -> None:
         self._dir = Path(directory)
         self._path = self._dir / "measurements.jsonl"
         self._specs = self._dir / "specs"
         self._lock = threading.Lock()
-        self._specs.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(self._specs)
 
     @property
     def path(self) -> Path:
@@ -111,7 +115,7 @@ class MeasurementJournal:
         """Add a line and force it to disk before returning."""
         line = (record.to_line() + "\n").encode("utf-8")
         with self._lock:
-            fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            fd = open_shared_append(self._path)
             try:
                 os.write(fd, line)
                 os.fsync(fd)
