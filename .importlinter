@@ -58,7 +58,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.benchmark_backend
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.bypass_scriptable
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
@@ -422,7 +422,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.benchmark_backend
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.bypass_scriptable
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator

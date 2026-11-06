@@ -59,7 +59,7 @@ from ..stop_attribution import (
 )
 from ._accuracy_gate import parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
-from .bypass_scriptable import declared_lever_payload
+from .explore_prefilter.declared_levers import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
