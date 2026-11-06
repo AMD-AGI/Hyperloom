@@ -22,6 +22,8 @@ from contextlib import contextmanager
 from types import FrameType
 from typing import Any, Callable, Iterator, Mapping
 
+from hyperloom_common.amd_smi import AmdSmiError
+
 from hyperloom.common.gpu_power_control import (
     GPU_POWER_LEDGER_DIR,
     PowerSettingsLease,
@@ -185,7 +187,7 @@ def _restore_and_verify(originals: Mapping[int, Mapping[str, Any]]) -> dict[int,
     failed_sets = restore_gpu_power_settings(originals)
     try:
         mismatches = _restore_mismatches(read_gpu_power_settings(), originals)
-    except GpuPowerSettingsError as exc:
+    except AmdSmiError as exc:
         unread = f"the restored settings could not be read back: {exc}"
         return {gpu: [*failed_sets, unread] for gpu in originals}
     return {gpu: [*failed_sets, *problems] for gpu, problems in mismatches.items()}
@@ -297,7 +299,7 @@ def apply_declared_gpu_power_settings(declared: DeclaredPowerSettings, *, nodes:
         originals = _originals(observed, touched)
         _refuse_unrestorable_levels(originals)
         lease.record(originals, applied={key: wanted[key] for key in applied_keys}, owner=owner)
-    except GpuPowerSettingsError:
+    except AmdSmiError:
         lease.release()
         raise
 
@@ -322,7 +324,7 @@ def apply_declared_gpu_power_settings(declared: DeclaredPowerSettings, *, nodes:
     _GUARD.arm(_restore)
     try:
         apply_gpu_power_settings({gpu: {key: wanted[key] for key in keys} for gpu, keys in touched.items()})
-    except GpuPowerSettingsError as exc:
+    except AmdSmiError as exc:
         leftover = _restore()
         _GUARD.disarm()
         suffix = f" (restoring the originals also failed: {'; '.join(leftover)})" if leftover else ""
@@ -351,14 +353,14 @@ def orphaned_power_settings_warning() -> str:
     """
     try:
         gpus = visible_gpu_indices()
-    except GpuPowerSettingsError:
+    except AmdSmiError:
         gpus = None
     orphans = orphaned_power_records(GPU_POWER_LEDGER_DIR, gpus)
     if not orphans:
         return ""
     try:
         observed = read_gpu_power_settings()
-    except GpuPowerSettingsError:
+    except AmdSmiError:
         observed = None
     if observed is not None:
         orphans = {

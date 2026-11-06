@@ -421,7 +421,7 @@ def _established_gpu_power_settings(
     The check after applying is the one an operator-set value gets, so a set that did not take is caught the same way.
     With NPM enabled the session must also have every card on the node, unless it is allowed to share it.
     """
-    from hyperloom.common.gpu_power_settings import GpuPowerSettingsError
+    from hyperloom_common.amd_smi import AmdSmiError
 
     from . import gpu_power_apply
 
@@ -431,7 +431,7 @@ def _established_gpu_power_settings(
             applied = gpu_power_apply.apply_for_session(declared, nodes=nodes, owner=owner)
         else:
             gpu_power_apply.warn_about_orphaned_cards()
-    except GpuPowerSettingsError as exc:
+    except AmdSmiError as exc:
         return {}, f"cannot apply the declared GPU power settings: {exc}"
     record, error = resolve_gpu_power_settings(declared, nodes=nodes, just_applied=bool(applied))
     if applied:
@@ -452,13 +452,15 @@ def _established_gpu_power_settings(
 def _shared_npm_node(node: dict[str, Any] | None) -> tuple[list[int] | None, str]:
     """The cards an NPM-enabled node has outside this session and why it is shared, or ``([], "")`` when NPM is off or
     the session has every card; the cards are ``None`` when the session's own cannot be named."""
-    from hyperloom.common.gpu_power_settings import NPM, NPM_ENABLED, GpuPowerSettingsError, gpus_outside_session
+    from hyperloom_common.amd_smi import AmdSmiError
+
+    from hyperloom.common.gpu_power_settings import NPM, NPM_ENABLED, gpus_outside_session
 
     if not node or node.get(NPM) != NPM_ENABLED:
         return [], ""
     try:
         outside = gpus_outside_session()
-    except GpuPowerSettingsError as exc:
+    except AmdSmiError as exc:
         return None, f"node power management is enabled and the cards this session uses cannot be named ({exc})"
     if not outside:
         return [], ""
@@ -479,7 +481,9 @@ def _per_gpu_launch_error(args: Any, available_gpus: set[int] | None) -> str:
 def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, Any]:
     """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
     applied or a requested power budget cannot be measured or checked. Nothing is applied when a budget is refused."""
-    from hyperloom.common.gpu_power_settings import GpuPowerSettingsError, visible_gpu_indices
+    from hyperloom_common.amd_smi import AmdSmiError
+
+    from hyperloom.common.gpu_power_settings import visible_gpu_indices
 
     gpu_power: dict[str, Any] = {}
     mask: set[int] | None = None
@@ -492,7 +496,7 @@ def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, 
     if not error and getattr(args, _MAX_PER_GPU_POWER_W, None):
         try:
             mask = visible_gpu_indices()
-        except GpuPowerSettingsError as exc:
+        except AmdSmiError as exc:
             error = f"--max-per-gpu-power-w cannot be checked against the visible cards: {exc}"
         else:
             error = _per_gpu_launch_error(args, mask) if mask is not None else ""
@@ -551,15 +555,13 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
 def _node_power_settings(declared: DeclaredPowerSettings) -> tuple[dict[str, Any] | None, str]:
     """The node's NPM reading and why the declared values do not hold; ``(None, "")`` when it cannot be read and
     nothing about it was declared (an amd-smi before ROCm 7.2, or a GPU without NPM)."""
-    from hyperloom.common.gpu_power_settings import (
-        GpuPowerSettingsError,
-        declared_node_problems,
-        read_node_power_settings,
-    )
+    from hyperloom_common.amd_smi import AmdSmiError
+
+    from hyperloom.common.gpu_power_settings import declared_node_problems, read_node_power_settings
 
     try:
         node = read_node_power_settings()
-    except GpuPowerSettingsError as exc:
+    except AmdSmiError as exc:
         if any(declared.node_row().values()):
             return None, f"the declared node power management settings cannot be checked: {exc}"
         return None, ""
@@ -585,11 +587,9 @@ def resolve_gpu_power_settings(
     level and sclk limit with ``amd-smi set`` before launch, or ``--apply-gpu-power-settings`` set the cap and level
     just before this check; NPM is set on the BMC.
     """
-    from hyperloom.common.gpu_power_settings import (
-        GpuPowerSettingsError,
-        read_gpu_power_settings,
-        visible_gpu_indices,
-    )
+    from hyperloom_common.amd_smi import AmdSmiError
+
+    from hyperloom.common.gpu_power_settings import read_gpu_power_settings, visible_gpu_indices
 
     declared = declared_settings.as_record()
     if nodes >= 2:
@@ -604,7 +604,7 @@ def resolve_gpu_power_settings(
     cards_declared = any(declared_settings.card_row().values())
     try:
         observed = read_gpu_power_settings()
-    except GpuPowerSettingsError as exc:
+    except AmdSmiError as exc:
         if cards_declared:
             return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
         if not declared:
@@ -613,7 +613,7 @@ def resolve_gpu_power_settings(
         observed = {}
     try:
         gpus = visible_gpu_indices()
-    except GpuPowerSettingsError as exc:
+    except AmdSmiError as exc:
         if cards_declared:
             return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
         gpus = None
