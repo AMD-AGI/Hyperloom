@@ -8,8 +8,7 @@ holds shared `runtime/` and `logs/`.
 
 ```text
 $USER_DATA_PATH/                          # workspace_root — set by operator / Claw / SaFE
-├── runtime/                              # workspace-shared env files / config
-│   ├── kernel-agent.env.sh
+├── runtime/                              # workspace-shared config (no credentials)
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>-<rand8>/   # session_dir — manifest.json, state.json, runs/, …
@@ -38,7 +37,9 @@ directory is **platform isolation** (one Claw job). The optimizer then creates
 
 `session/paths.py` is the single authority for Hyperloom paths. The launching
 agent does not need to recreate that logic in shell. Prepare the runtime with
-`install.sh`; optimizer preflight loads `runtime/kernel-agent.env.sh` in process.
+`install.sh`; optimizer preflight loads `kernel-agent.env.sh` (`$KERNEL_AGENT_ENV`) in process.
+It carries credentials, so it lives on the container's own disk in a directory only this
+account can enter, never under `$USER_DATA_PATH`, and does not outlive the container.
 Read the session directory from the CLI's launch-info output.
 
 | Concept | Env / helper | Meaning |

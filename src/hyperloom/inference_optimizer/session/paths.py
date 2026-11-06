@@ -61,7 +61,7 @@ PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 # Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by install.sh + reused for every session_dir
 # launched from this workspace.
 _WORKSPACE_SKELETON: tuple[str, ...] = (
-    "runtime",  # install-generated env files (kernel-agent.env.sh, GEAK litellm config)
+    "runtime",  # install-generated runtime state (GEAK litellm config, source mirrors)
     # Workspace-level KB root; it only coincides with the KB path when session_dir == workspace_root.
     "runtime/recipe_kb",
     "logs",  # launcher stdout (workspace-shared)
