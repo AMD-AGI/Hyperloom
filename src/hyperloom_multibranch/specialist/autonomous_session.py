@@ -286,6 +286,7 @@ class AutonomousSession:
         recipe = await self._setup.repo.read_recipe(self._start.start_commit)
         tables = await self._lay_start_tables(recipe.kernels)
         lease = await self._lease(self._setup.spec.tp)
+        self._hold(lease)
         await self._notes.refresh()
         snapshot = await self._place.blackboard.snapshot()
         baseline = snapshot.baseline
@@ -479,33 +480,47 @@ class AutonomousSession:
         manifest = AgentManifest.read(document)
         command = manifest.resume or manifest.launch
         checkout, env = self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
-        try:
-            sandbox = self._setup.sandbox(self._held())
-            process = await sandbox.start(command, checkout, env)
-        except SandboxGone as gone:
-            sandbox = await self._leased_again(manifest, gone)
+        sandbox: AgentSandbox | None = None
+        if (self._place.workspace / LEASE_FILE).exists():
+            try:
+                sandbox = self._setup.sandbox(self._held())
+                process = await sandbox.start(command, checkout, env)
+            except SandboxGone as gone:
+                await self._note(f"the agent's sandbox ended ({gone})")
+                await self.release()
+                (self._place.workspace / LEASE_FILE).unlink()
+                sandbox = None
+        if sandbox is None:
+            sandbox = await self._installed_again(manifest)
             process = await sandbox.start(command, checkout, env)
         self._manifest, self._process, self._sandbox = manifest, process, sandbox
         await self._note(f"the agent resumed with `{command}`")
         return manifest, process, sandbox
 
-    async def _leased_again(self, manifest: AgentManifest, gone: SandboxGone) -> AgentSandbox:
-        """A sandbox of a new lease in place of the one that ended, with the agent's install run in it again; what the
-        agent wrote is on this host and stays."""
+    async def _installed_again(self, manifest: AgentManifest) -> AgentSandbox:
+        """The sandbox of a new lease with the agent's install run in it again; what the agent wrote is on this host and
+        stays. The lease is held only once the install succeeded, so a later run never resumes the agent in a sandbox
+        without it; a lease whose install failed is given back."""
 
-        await self._note(f"the agent's sandbox ended ({gone}): the agent is installed in a new one and resumed")
-        await self.release()
-        sandbox = self._setup.sandbox(await self._lease(self._setup.spec.tp))
-        checkout = self._agent_dir / SOURCE_DIR
+        await self._note("the agent is installed in a new sandbox and resumed")
+        lease = await self._lease(self._setup.spec.tp)
+        installed = False
         try:
-            await install(manifest, self._setup.onboarding(sandbox), checkout, agent_env(self._agent_dir))
+            sandbox = self._setup.sandbox(lease)
+            await install(
+                manifest, self._setup.onboarding(sandbox), self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
+            )
+            installed = True
         except AttemptFailed as failed:
             raise SessionCrashed(f"the agent's install in its new sandbox failed: {failed}") from failed
+        finally:
+            if not installed:
+                await asyncio.shield(self._setup.toolbox.release_branch_sandbox(lease.lease_id))
+        self._hold(lease)
         return sandbox
 
     async def _lease(self, cards: int) -> BranchLease:
-        """Lease ``cards`` for the branch's sandbox, for as long as is left until the branch's deadline, and keep the
-        lease for :meth:`release` and a later run.
+        """Lease ``cards`` for the branch's sandbox, for as long as is left until the branch's deadline.
 
         Cards another lease or the session's tests hold now are given back within their lifetime, so a refusal for
         want of them (:data:`~.dev_sandbox.TOO_MANY`, or none free within the toolbox's own wait) is asked again every
@@ -513,8 +528,6 @@ class AutonomousSession:
         (:meth:`_may_wait`), the wait noted once in the branch log; past that, and on any other refusal, the
         preflight fails with why."""
 
-        # The lease is only given back through its file, so the file's directory must exist before the lease does.
-        self._place.workspace.mkdir(parents=True, exist_ok=True)
         began, noted = self._setup.clock(), False
         while True:
             try:
@@ -540,6 +553,11 @@ class AutonomousSession:
                 log.info("the agent of %s waits for cards: %s", self._start.branch, busy)
                 await self._note(f"the agent's sandbox waits for cards, asked again until they are free: {busy}")
             await self._setup.sleep(self._setup.lease_poll_seconds)
+        return lease
+
+    def _hold(self, lease: BranchLease) -> None:
+        """Keep ``lease`` for :meth:`release` and a later run."""
+
         document = {
             "lease_id": lease.lease_id,
             "branch_id": lease.branch_id,
@@ -549,7 +567,6 @@ class AutonomousSession:
             "remaining_cards": lease.remaining_cards,
         }
         (self._place.workspace / LEASE_FILE).write_text(json.dumps(document), encoding=ENCODING)
-        return lease
 
     async def _lease_now(self, cards: int) -> BranchLease:
         deadline = self._start.task.deadline
