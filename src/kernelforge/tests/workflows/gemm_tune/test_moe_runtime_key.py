@@ -103,6 +103,22 @@ class TestMissSignal:
         assert key["untuned_tokens"] == [512]
         assert key["miss_count"] == 1
 
+    @pytest.mark.parametrize(
+        ("lines", "misses"),
+        [
+            # aiter prints the FlyDSL fallback after the ``default`` dispatch of the same lookup.
+            ((_UNTUNED_DISPATCH, _MISS), 1),
+            ((_UNTUNED_DISPATCH,), 1),
+            ((_MISS,), 1),
+            # Two ranks, each logging its own lookup.
+            ((_UNTUNED_DISPATCH, _UNTUNED_DISPATCH, _MISS, _MISS), 2),
+        ],
+    )
+    def test_one_lookup_counts_one_miss(self, lines, misses):
+        rep = _log(*(line.format(tok=8) for line in lines))
+        (key,) = ev.moe_dispatch_keys(rep)
+        assert (key["miss_count"], key["untuned_token_counts"]) == (misses, {"8": misses})
+
     def test_the_two_lines_fold_into_one_key_not_two(self):
         rep = _log(_DISPATCH.format(tok=1), _MISS.format(tok=1))
         assert len(ev.moe_dispatch_keys(rep)) == 1

@@ -310,6 +310,8 @@ class _LogScan:
     consulted: set[str] = field(default_factory=set)
     dispatch: dict[str, Any] = field(default_factory=dict)
     vllm_moe: dict[str, list[str]] = field(default_factory=lambda: {"hit": [], "miss": []})
+    # ``default`` MoE dispatches per tuple whose fallback line has not been seen yet; that line is the same lookup.
+    moe_unpaired_defaults: dict[tuple[str, ...], int] = field(default_factory=dict)
     # Present only when a bound was hit, so its absence means the report describes the whole log.
     truncated: dict[str, Any] = field(default_factory=dict)
 
@@ -374,16 +376,30 @@ def _record_moe_dispatch(scan: _LogScan, match: re.Match) -> None:
     moe = _moe_dispatch_record(scan)
     stage_key = f"{match.group('stage')}/{match.group('tag')}"
     record = moe["by_stage"].setdefault(stage_key, {"tokens": set(), "tuple": parts})
-    token = _record_moe_key(moe, parts, miss=match.group("tag") == _UNTUNED_DISPATCH_TAG)
+    missed = match.group("tag") == _UNTUNED_DISPATCH_TAG
+    if missed:
+        lookup = tuple(parts)
+        scan.moe_unpaired_defaults[lookup] = scan.moe_unpaired_defaults.get(lookup, 0) + 1
+    token = _record_moe_key(moe, parts, miss=missed)
     if token is not None:
         record["tokens"].add(token)
 
 
 def _record_moe_miss(scan: _LogScan, match: re.Match) -> None:
-    """Record a fused-MoE lookup that found no tuned row, and the fallback it took."""
+    """Record the fallback a fused-MoE lookup with no tuned row took, and the miss when nothing counted it yet.
+
+    aiter prints this after the ``default`` dispatch of the same lookup, which already counted the miss; a line
+    with no such dispatch before it is the only record of its lookup.
+    """
     moe = _moe_dispatch_record(scan)
     moe["fallback_flavour"] = match.group("flavour")
-    _record_moe_key(moe, moe_tuple(match.group("tuple")), miss=True)
+    parts = moe_tuple(match.group("tuple"))
+    lookup = tuple(parts)
+    unpaired = scan.moe_unpaired_defaults.get(lookup, 0)
+    if unpaired:
+        scan.moe_unpaired_defaults[lookup] = unpaired - 1
+        return
+    _record_moe_key(moe, parts, miss=True)
 
 
 def _moe_dispatch_record(scan: _LogScan) -> dict[str, Any]:
