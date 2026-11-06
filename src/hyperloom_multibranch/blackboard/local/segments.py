@@ -61,6 +61,7 @@ class EntryKind(str, Enum):
     BUILD = "build"
     LEASE_START = "lease_start"
     LEASE_END = "lease_end"
+    AGENT_MAP = "agent_map"
 
 
 def require_token(value: str, name: str) -> str:
