@@ -127,6 +127,7 @@ _BRANCH_SANDBOXES = "branch-sandboxes"
 _RULE_PACK = "rule-pack"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
+FREED_CARDS_REASON = "nothing of the sandbox that held them runs any more"
 #: A running test's files below its sandbox's directory: a local sandbox's root is its ``fs`` directory.
 _LIVE_FILES = Path("fs") / FILES_ROOT.lstrip("/")
 logger = logging.getLogger(__name__)
@@ -136,8 +137,9 @@ class LocalHostedToolbox(LeasedToolbox):
     """A :class:`RealToolbox` that also owns its hosted backend and local sandbox provider; ``close`` releases them.
 
     ``sandboxes`` is the provider's directory, where a running test's live files are read for :meth:`progress`. The
-    cards tests can run on are the provider's pool less the cards it lost for good (``provider.quarantined``) and the
-    leases; node quarantine does not reduce them.
+    cards tests can run on are the provider's pool less the cards it lost (``provider.quarantined``) and the leases;
+    node quarantine does not reduce them. A card lost by a sandbox of this process comes back once nothing of that
+    sandbox runs; one an earlier process lost stays lost.
     """
 
     backend: HostedMeasurementBackend
@@ -184,12 +186,14 @@ class LocalHostedToolbox(LeasedToolbox):
         return frozenset(self.provider.quarantined)
 
     async def _housekeeping(self) -> None:
-        """Tell the blackboard about cards the provider lost since last time: one event for all the new ones.
+        """Take back the cards the provider freed, then tell the blackboard about cards it lost since last time: one
+        event for all the new ones.
 
         The provider only grows a plain set; this polls it after each settled test and on every tick, so the sandbox
         layer knows nothing of the blackboard. A refused write is retried at the next poll.
         """
 
+        await self._take_back_freed_cards()
         new = self._leaked() - self._reported_cards
         if not new:
             return
@@ -199,6 +203,31 @@ class LocalHostedToolbox(LeasedToolbox):
             logger.warning("could not record leaked cards in the blackboard", exc_info=True)
             return
         self._reported_cards |= new
+
+    async def _take_back_freed_cards(self) -> None:
+        """Put back in the pool the cards of ended sandboxes nothing of which runs any more
+        (:meth:`~hyperloom.sandbox.local.LocalSandboxProvider.release_freed_cards`), lift their record in the blackboard
+        and start the tests they let run.
+
+        A refused lift is not retried: the blackboard keeps the cards recorded as lost, which is read back only by a
+        restart into this session, and keeps them out of the pool there.
+        """
+
+        freed = frozenset(await asyncio.to_thread(self.provider.release_freed_cards))
+        if not freed:
+            return
+        logger.info("cards %s are back in the pool: %s", sorted(freed), FREED_CARDS_REASON)
+        recorded = freed & self._reported_cards
+        if recorded:
+            try:
+                await self._quarantine.return_cards(self.provider.hostname, recorded, FREED_CARDS_REASON)
+            except (BlackboardError, OSError):  # refused or not reached: the cards stay recorded lost
+                logger.warning(
+                    "could not record in the blackboard that cards %s are back", sorted(recorded), exc_info=True
+                )
+            else:
+                self._reported_cards -= recorded
+        self._pump_soon()
 
     async def close(self) -> None:
         await super().close()

@@ -56,11 +56,13 @@ SCHEDULER_BRANCH = "scheduler"
 def adopting_orphans() -> Iterator[None]:
     """Make this process the child subreaper of everything it starts, for the duration (Linux).
 
-    An orphaned descendant is reparented to this process rather than to init. Nothing reaps it here: every adopted
-    orphan, killed or exited on its own, stays a zombie until this process exits. A zombie holds only its pid, and
-    ``running`` skips it, so the kills and the leftovers are unaffected. Reaping them is not safe: an in-process
-    caller, such as the AI work socket, starts a child in a session of its own and registers it only after the launch,
-    and until then nothing tells that child from an orphan, so a reap would take the exit status its ``poll`` needs.
+    An orphaned descendant is reparented to this process rather than to init. Nothing reaps an adopted orphan here in
+    general: it stays a zombie until this process exits. A zombie holds only its pid, and ``running`` skips it, so the
+    kills and the leftovers are unaffected. Reaping them all is not safe: an in-process caller, such as the AI work
+    socket, starts a child in a session of its own and registers it only after the launch, and until then nothing
+    tells that child from an orphan, so a reap would take the exit status its ``poll`` needs. A local sandbox's reap is
+    the exception: it waits only the processes it found below the launchers it killed, by pid and start time
+    (``proctree.reap_exited_children``), so the processes of every test it ran do not stay behind as zombies.
     """
 
     _set_child_subreaper(1)

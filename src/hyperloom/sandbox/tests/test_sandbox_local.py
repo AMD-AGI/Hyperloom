@@ -700,6 +700,55 @@ def test_a_tree_that_keeps_forking_past_the_window_is_unseen(monkeypatch) -> Non
     assert left.unseen and not left.clean
 
 
+def test_withheld_cards_come_back_once_what_outlived_the_reap_is_gone(make, monkeypatch) -> None:
+    monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    survivor = _detached_immortal(sb, monkeypatch)
+    try:
+        with pytest.raises(SandboxUnavailable, match="its GPUs stay leased"):
+            sb.kill()
+        assert provider.release_freed_cards() == (), "a process that dropped the tag still holds the cards"
+        assert provider.quarantined == {0}
+    finally:
+        _end(monkeypatch, survivor)
+    assert provider.release_freed_cards() == (0,)
+    assert provider.quarantined == set()
+    assert provider.pool.free_cards() == (0, 1)
+    assert provider.release_freed_cards() == (), "cards come back once"
+
+
+def test_withheld_cards_stay_while_a_process_with_the_sandbox_tag_runs(make, monkeypatch) -> None:
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0])
+    sb = _create(provider, "dev", "dev")
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait()
+    monkeypatch.setattr(local_sandbox, "reap_sandbox_processes", lambda *a, **k: reaper.Leftovers(((exited.pid, 1),)))
+    with pytest.raises(SandboxUnavailable, match="its GPUs stay leased"):
+        sb.kill()
+    tagged = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)"], env={**os.environ, SANDBOX_TAG_ENV: sb.sandbox_id}
+    )
+    try:
+        _wait(lambda: proctree.marked_pids(SANDBOX_TAG_ENV, sb.sandbox_id))
+        assert provider.release_freed_cards() == ()
+    finally:
+        tagged.kill()
+        tagged.wait()
+    assert provider.release_freed_cards() == (0,)
+
+
+def test_cards_a_reap_could_not_look_after_are_never_given_back(make, monkeypatch) -> None:
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0])
+    sb = _create(provider, "dev", "dev")
+    monkeypatch.setattr(local_sandbox, "reap_sandbox_processes", lambda *a, **k: reaper.Leftovers(unseen=True))
+    with pytest.raises(SandboxUnavailable, match="what else is left is unknown"):
+        sb.kill()
+    assert provider.release_freed_cards() == ()
+    assert provider.quarantined == {0}
+    assert provider.pool.free_cards() == ()
+
+
 def test_a_kill_in_a_child_subreaper_leaves_no_zombie(tmp_path: Path) -> None:
     script = tmp_path / "kill_as_subreaper.py"
     script.write_text(_KILL_AS_SUBREAPER)

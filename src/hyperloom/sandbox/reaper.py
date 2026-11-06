@@ -16,7 +16,7 @@ from pathlib import Path
 from hyperloom.common import proctree
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 
-__all__ = ["Leftovers", "kill_launchers", "reap_sandbox_processes", "sweep_tagged", "wait_exited"]
+__all__ = ["Leftovers", "kill_launchers", "reap_sandbox_processes", "sweep_tagged", "tag_in_use", "wait_exited"]
 
 _WINDOW_SEC = 5.0
 _POLL_SEC = 0.05
@@ -225,3 +225,9 @@ def _still_running(process: proctree.ProcessId) -> bool:
         return False
     identity = proctree.proc_identity(pid)
     return identity is None or identity[1] == start_time
+
+
+def tag_in_use(sandbox_id: str) -> bool:
+    """Whether a running process still carries this sandbox's id in its environment; True also when ``/proc`` cannot be
+    listed to tell."""
+    return not _proc_listed() or bool(_tagged(sandbox_id))
