@@ -114,7 +114,6 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
-from hyperloom.common.agent_isolation import announce_agent_isolation
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom_common.env import EnvValueError
 from hyperloom_common.shared_storage import open_shared_append
@@ -1161,7 +1160,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{parser.prog}: error: {exc}", file=sys.stderr)
         raise SystemExit(EXIT_USAGE) from exc
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
-    announce_agent_isolation()
     try:
         if persisted is not None:
             ready = ready_session(settings.workload, load_peers)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import subprocess
 import urllib.request
@@ -22,7 +23,9 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from hyperloom.common.agent_isolation import NONE
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path, is_magpie_agentx
+from hyperloom.common.env_safety import SPECIALIST_USER_ENV
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.inference_optimizer import inferencex_checkout
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
@@ -57,7 +60,9 @@ from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.hosted_peers import HostedSandboxes
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
+from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
 from hyperloom_multibranch.scheduling import local_peers as local_peers_module
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, LOCAL_SANDBOX, LOCAL_TEST, launch_isolation
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
     AGENTX_TRACE_SEC,
@@ -794,6 +799,36 @@ async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_too
         assert toolbox.trace_root == layout.toolbox and toolbox.blobs is built.setup.blobs
         assert built.peers.base_image_digest == IMAGE.digest
         assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
+
+
+async def test_peers_on_this_machine_record_and_say_once_that_their_sandboxes_and_tests_run_unconfined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    monkeypatch.delenv(SPECIALIST_USER_ENV, raising=False)
+
+    with caplog.at_level(logging.INFO, logger=launch_isolation_module.__name__):
+        async with _peers(tmp_path, monkeypatch, WORKLOAD) as built:
+            isolation = built.peers.isolation
+
+    assert isolation == launch_isolation(local=True)
+    assert (isolation.specialists, isolation.sandboxes, isolation.tests) == (NONE, NONE, NONE)
+    said = [record for record in caplog.records if record.name == launch_isolation_module.__name__]
+    assert [record.levelno for record in said] == [logging.WARNING]
+    assert said[0].getMessage().startswith("specialists and agent and dev sandboxes and tests run unconfined on this")
+
+
+async def test_peers_measuring_in_the_services_sandboxes_record_their_sandboxes_and_tests_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    host = replace(HOST, backend=_service_sandboxes(monkeypatch, []))
+
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, host) as built:
+        isolation = built.peers.isolation
+
+    assert (isolation.sandboxes, isolation.tests) == (HOSTED, HOSTED), "the grant's sandboxes run them, not this host"
+    assert LOCAL_SANDBOX not in isolation.reasons and LOCAL_TEST not in isolation.reasons
 
 
 async def test_an_agentx_test_in_the_services_sandboxes_may_outlast_its_trace_window_too(

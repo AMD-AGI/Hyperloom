@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import errno
 import json
-import logging
 import os
 import stat
 import subprocess
@@ -1794,27 +1793,6 @@ def test_a_restart_of_a_spec_measured_locally_finishes_the_session_on_this_conta
 
     assert agent_cli == [_settings()] and loaded == [_settings().workload]
     assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
-
-
-@pytest.mark.usefixtures("ready_environment")
-def test_run_says_once_at_start_that_agents_run_unconfined_where_neither_tier_works(
-    agent_cli: list[RunSettings],
-    bubblewrap: Bubblewrap,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
-    bubblewrap.problems = (DENIED,)
-
-    with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        assert cli.main(["run", *WORKLOAD_ARGS]) == 0
-
-    warned = [r for r in caplog.records if r.name == agent_isolation.__name__ and r.levelno >= logging.WARNING]
-    assert len(warned) == 1 and agent_cli == [_settings()]
-    assert warned[0].getMessage().startswith("agents run unconfined on this host, as before: ")
-    assert DENIED in warned[0].getMessage()
 
 
 # -- run --measurement hosted -----------------------------------------------------------------------------------------

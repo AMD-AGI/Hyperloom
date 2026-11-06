@@ -22,13 +22,13 @@ from dataclasses import dataclass
 
 from hyperloom_common.io import SHARED, atomic_write_json, atomic_write_text
 from hyperloom_common.jsonio import read_json_strict
-from hyperloom.common.agent_isolation import IsolationReport
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports, step_lines
 from hyperloom_multibranch.scheduling.final import FinalChoice
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import live_processes
 from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason, StopReport
@@ -55,7 +55,7 @@ class CloseReport:
 
 
 def report_document(
-    report: CloseReport, session_id: str, closed_at: float, agent_isolation: IsolationReport | None
+    report: CloseReport, session_id: str, closed_at: float, agent_isolation: LaunchIsolation | None
 ) -> dict[str, object]:
     """``MB-report.json``: the session's ending, its final choice, the exports, what outlived the stop and how its
     agents were isolated (``None`` when its manifest did not record it)."""
@@ -136,7 +136,7 @@ def _final_lines(final: FinalChoice | None) -> list[str]:
     return lines
 
 
-def report_markdown(report: CloseReport, session_id: str, agent_isolation: IsolationReport | None) -> str:
+def report_markdown(report: CloseReport, session_id: str, agent_isolation: LaunchIsolation | None) -> str:
     """``MB-report.md``: the same outcome for people."""
 
     lines = [
@@ -158,7 +158,7 @@ def report_markdown(report: CloseReport, session_id: str, agent_isolation: Isola
     return "\n".join(lines) + "\n"
 
 
-def _isolation_line(agent_isolation: IsolationReport | None) -> str:
+def _isolation_line(agent_isolation: LaunchIsolation | None) -> str:
     if agent_isolation is None:
         return "Agent isolation: not recorded"
     line = agent_isolation.line()
@@ -197,7 +197,7 @@ class Closer:
         stopper: SessionStopper,
         exports: SessionExports,
         clock: Clock,
-        agent_isolation: IsolationReport | None,
+        agent_isolation: LaunchIsolation | None,
     ) -> None:
         self._layout = layout
         self._stopper = stopper
