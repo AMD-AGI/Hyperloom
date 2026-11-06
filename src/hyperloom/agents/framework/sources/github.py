@@ -102,4 +102,9 @@ def pr_patches(repo_slug: str, number: int, *, timeout_sec: float = 30.0) -> str
     return ""
 
 
-__all__ = ["search_perf_prs", "PERF_TERMS", "pr_patches"]
+#: Public names of ``_auth_headers`` (the headers of a GitHub API request, with the host's token when it holds one) and
+#: ``_build_query`` (the search query of a repository), for a caller that must see a failed search rather than an empty list.
+auth_headers = _auth_headers
+build_query = _build_query
+
+__all__ = ["search_perf_prs", "PERF_TERMS", "pr_patches", "auth_headers", "build_query"]
