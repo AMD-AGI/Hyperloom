@@ -864,7 +864,9 @@ deployments.
    a native install under `~/.local/bin` does not make the rest of `~/.local` readable. Nothing is bound, run or
    read for the confinement through a tree the agent writes (its work trees and scratch): a symlink it leaves there
    never becomes a bind of its target at the next launch, and a read-only path inside such a tree refuses the launch.
-   The masks come from the app's own environment and home as well as the child's. Everything under the readable
+   A work path reached through another work tree is not bound on its own (that tree shows it), and where work paths
+   are reached through each other's trees, which takes a link in one of them, none of them is bound, and each still
+   counts as a tree the agent writes. The masks come from the app's own environment and home as well as the child's. Everything under the readable
    system roots (`/etc`, `/opt`, `/usr`) is readable: an image must not keep a credential there.
 
 Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch in a hosted
