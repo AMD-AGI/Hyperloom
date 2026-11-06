@@ -143,6 +143,62 @@ def test_a_sandbox_points_cli_state_and_caches_named_elsewhere_into_its_workspac
     assert env["TMP"] == env["TMPDIR"] == "/tmp"
 
 
+def test_a_sandboxed_gpu_task_gets_its_jit_caches_in_its_workspace_not_in_the_read_only_frameworks(tmp_path):
+    """Unset, AITER builds its JIT modules in its installed tree, which the sandbox shows read-only; only a CPU task
+    had them set (``apply_gpu_env``)."""
+    place = _place(tmp_path, gpu=True)
+    env = _env()
+    launch_env.apply_gpu_env(env, place.workspace, (0,), None)
+    prepare_launch(_bwrap(), place, ["claude"], env).release()
+
+    cache = place.workspace / ".cache"
+    assert env["AITER_JIT_DIR"] == env["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] == str(cache / "aiter_jit")
+    assert env["FLYDSL_RUNTIME_CACHE_DIR"] == str(cache / "flydsl")
+    assert "TRITON_CACHE_DIR" not in env  # its default is under the sandbox's home
+
+    unconfined = _env()
+    prepare_launch(NoIsolation(("why",)), place, ["claude"], unconfined)
+    assert "AITER_JIT_DIR" not in unconfined
+
+
+def test_hugging_faces_default_directory_stays_visible_read_only_once_the_home_moves(tmp_path):
+    home = tmp_path / "app-home"
+    hub = home / ".cache" / "huggingface"
+    (hub / "hub" / "models--org--m").mkdir(parents=True)
+    (hub / "token").write_text("hf_secret", encoding="utf-8")
+    place = _place(tmp_path)
+    env = _env(HOME=str(home))
+
+    prepared = prepare_launch(_bwrap(), place, ["claude"], env)
+    prepared.release()
+
+    assert env["HF_HOME"] == str(hub) and env["HOME"] == str(place.workspace / ".home")
+    assert str(hub) in prepared.policy.read_only and str(hub / "token") in prepared.policy.masked
+    named = _env(HOME=str(home), HF_HUB_CACHE=str(tmp_path / "hub"))
+    prepare_launch(_bwrap(), place, ["claude"], named).release()
+    assert "HF_HOME" not in named
+
+
+def test_the_apps_state_directory_is_masked_where_a_bind_would_show_it(tmp_path, monkeypatch):
+    shared = tmp_path / "shared"
+    (shared / "state").mkdir(parents=True)
+    monkeypatch.setenv("HYPERLOOM_STATE_DIR", str(shared / "state"))
+
+    confinement = specialist_confinement(_place(tmp_path, readable=(shared,)), sys.executable, _env())
+
+    assert shared in confinement.readable and shared / "state" in confinement.masked
+
+
+def test_a_sandbox_launch_with_no_policy_is_refused_never_run_unconfined(tmp_path):
+    prepared = PreparedLaunch(_bwrap())
+
+    with pytest.raises(IsolationRefused, match="no sandbox policy"):
+        prepared.local(["claude"], _env())
+    with pytest.raises(IsolationRefused, match="no sandbox policy"):
+        prepared.actor(["claude"], _env())
+    assert prepared.status is None
+
+
 def test_an_unconfined_launch_is_counted_for_the_session_report_and_said_once(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="hyperloom.common.agent_isolation"):
         for _ in range(2):
@@ -152,6 +208,25 @@ def test_an_unconfined_launch_is_counted_for_the_session_report_and_said_once(tm
     assert session_isolation_lines() == ("agent isolation: 2 agent launches ran unconfined: no tier here",)
     prepare_launch(_bwrap(), _place(tmp_path), ["claude"], _env()).release()
     assert session_isolation_lines() == ("agent isolation: 2 agent launches ran unconfined: no tier here",)
+
+
+def test_the_parents_copy_of_the_status_pipe_is_closed_once_the_launch_holds_its_own(tmp_path):
+    """bubblewrap's status reads end of file only when every write end is closed, the app's own copy included."""
+    prepared = prepare_launch(_bwrap(), _place(tmp_path), ["claude"], env := _env())
+    try:
+        prepared.local(["claude"], env)
+        status = prepared.status
+        write_fd = status.write_fd
+        pipe = os.fstat(write_fd)
+        prepared.started(object())
+        assert status.write_fd == -1
+        try:
+            still = os.fstat(write_fd)
+        except OSError:
+            still = None
+        assert still is None or (still.st_dev, still.st_ino) != (pipe.st_dev, pipe.st_ino)
+    finally:
+        prepared.release()
 
 
 @pytest.mark.parametrize(("version", "bound"), [((0, 9, 0), False), ((0, 13, 1), True)])

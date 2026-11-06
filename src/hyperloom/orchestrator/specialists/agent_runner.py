@@ -557,6 +557,9 @@ class LocalAgentRunner:
             raise AgentConfigError(f"specialist isolation refused: {exc}") from exc
         try:
             proc = prepared.started(self._spawn(spec, prepared.local(argv, env)))
+        except RunAsError as exc:
+            prepared.release()
+            raise AgentConfigError(f"specialist isolation refused: {exc}") from exc
         except BaseException:
             prepared.release()
             raise

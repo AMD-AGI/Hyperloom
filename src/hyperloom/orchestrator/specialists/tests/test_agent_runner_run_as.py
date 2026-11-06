@@ -10,6 +10,7 @@ import errno
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,8 +22,8 @@ from hyperloom.common import agent_isolation
 from hyperloom.common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists.agent_runner import AgentConfigError
-from hyperloom.orchestrator.specialists.launch_env import CODEX_BYPASS_FLAG
-from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec
+from hyperloom.orchestrator.specialists.launch_env import CODEX_BYPASS_FLAG, LaunchPlace, LaunchStatus, SandboxedProcess
+from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec, wait_finished
 
 _USER_ENV = "HYPERLOOM_SPECIALIST_USER"
 _TODAYS_KWARGS = {"stdin", "stdout", "stderr", "env", "cwd", "start_new_session"}
@@ -105,6 +106,86 @@ async def test_each_tier_starts_the_cli_its_own_way(tmp_path: Path, monkeypatch:
     assert kwargs.keys() == expected
     staged = workspace / ("runtime" if tier == "none" else "") / "specialist_mcp.json"
     assert cli[-2:] == ["--mcp-config", str(staged)]
+
+
+async def test_a_gpu_session_is_placed_with_the_gpu_devices_and_the_git_metadata_its_repository_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_runner, "_launch_isolation", lambda: _tier("bwrap"))
+    places: list[LaunchPlace] = []
+    real = agent_runner.prepare_launch
+
+    def prepare(isolation: Any, place: LaunchPlace, *args: Any) -> Any:
+        places.append(place)
+        return real(isolation, place, *args)
+
+    monkeypatch.setattr(agent_runner, "prepare_launch", prepare)
+    admin = tmp_path / "repo" / ".git" / "worktrees" / "worktree"
+
+    await _launch(tmp_path, env={"CLAUDE_CODE_OAUTH_TOKEN": "tok"}, gpus=1, git_admin=admin)
+    await _launch(tmp_path / "cpu", env={"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+
+    assert [(place.gpu, place.git_admin) for place in places] == [(True, admin), (False, None)]
+
+
+async def test_a_sandbox_launch_whose_policy_cannot_be_used_fails_as_a_config_error_and_starts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_runner, "_launch_isolation", lambda: _tier("bwrap"))
+    monkeypatch.setattr(
+        agent_runner, "prepare_launch", lambda isolation, *_args: agent_runner.PreparedLaunch(isolation)
+    )
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    runner = make_runner(tmp_path / "session", popen=_recording_popen(calls))
+
+    with pytest.raises(AgentConfigError, match="no sandbox policy"):
+        await runner.launch(make_spec(tmp_path / "w", env={"CLAUDE_CODE_OAUTH_TOKEN": "tok"}))
+    assert calls == []
+
+
+async def test_a_finished_session_releases_what_its_launch_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sandbox's scratch (its /tmp and /dev/shm) and status descriptor go once its session ends."""
+    monkeypatch.setattr(agent_runner, "_launch_isolation", lambda: _tier("none"))
+    released: list[bool] = []
+    real = agent_runner.prepare_launch
+
+    def prepare(*args: Any) -> Any:
+        prepared = real(*args)
+        monkeypatch.setattr(prepared, "release", lambda: released.append(True))
+        return prepared
+
+    monkeypatch.setattr(agent_runner, "prepare_launch", prepare)
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(make_spec(tmp_path / "w", code="pass"))
+    await wait_finished(runner, handle)
+    await runner.collect(handle)
+
+    assert released == [True]
+
+
+async def test_a_sandboxed_sessions_liveness_looks_below_the_agents_own_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """bubblewrap's pid has the sandbox's init and the CLI below it, which would read as a tool the CLI waits on."""
+
+    class Sandboxed(SandboxedProcess):
+        agent_pid = 4242
+
+    asked: list[int] = []
+
+    def alive(_workspace: Path, pid: int, **_kwargs: Any) -> bool:
+        asked.append(pid)
+        return False
+
+    monkeypatch.setattr(agent_runner, "cli_alive", alive)
+    runner = make_runner(tmp_path / "session", wall=lambda: 1e9)
+    proc = Sandboxed(SimpleNamespace(pid=7, poll=lambda: None), "mark", LaunchStatus())
+    session = SimpleNamespace(spec=SimpleNamespace(workspace=tmp_path), started_unix=0.0, proc=proc)
+
+    assert await runner._silent(session, None)
+    assert asked == [4242]
 
 
 async def test_a_sandboxed_claude_without_a_login_it_can_read_is_refused_before_anything_starts(
