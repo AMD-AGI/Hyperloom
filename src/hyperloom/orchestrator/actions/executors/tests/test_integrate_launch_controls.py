@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,10 @@ from hyperloom.orchestrator.actions.executors import _ray_serving
 from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.shared_state import EnablementRound
+from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.tests._helpers import integrate_extra
 
 
 def _fake_grid(monkeypatch, config_path: Path) -> list:
@@ -60,3 +66,45 @@ async def test_the_bench_launches_without_what_the_round_removes(tmp_path: Path,
         "unset_envs": ["BASE_OFF", "VLLM_FOO"],
         "args_mode": "append",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_removal_only_round_benches_without_the_removed_flag(tmp_path: Path, monkeypatch):
+    session_dir = tmp_path / "session"
+    workspace = session_dir / "runs" / "specialist" / "t-spec"
+    workspace.mkdir(parents=True)
+    (workspace / "specialist_done.json").write_text(json.dumps({"proposal_set": [], "patches_written": []}))
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    grids = _fake_grid(monkeypatch, config_path)
+    params = {
+        "specialist_task_id": "t-spec",
+        "config_path": str(config_path),
+        "framework": "vllm",
+        "base_extra_args": "--enable-foo --max-num-seqs 64",
+        "remove_args": ["--enable-foo"],
+    }
+    task = Task(
+        task_id="t-int",
+        kind="integrate_patch",
+        state="queued",
+        params=params,
+        idempotency_key="t-int",
+        requires_lanes=(),
+    )
+    ctx = RunnerContext(task=task, lease=None, extra=integrate_extra(params))
+    ctx.extra["shared_state"] = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        framework="vllm",
+        benchmark_mode="synthetic",
+        current_best={"tput": 100.0},
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
+    )
+
+    result = await IntegratePatchExecutor(session_dir=session_dir)(ctx)
+
+    assert result["status"] != "no_patches", result.get("reason")
+    assert [variant.remove_args for grid in grids for variant in grid] == [["--enable-foo"]]
+    assert result["bench_result"]["effective_config"]["extra_server_args"] == "--max-num-seqs 64"

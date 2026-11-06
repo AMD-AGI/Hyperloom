@@ -22,6 +22,7 @@ from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _FIX_ACCURACY_UNAVAILABLE, _derive_lane, _preflight_missing_targets
 from ._patch_artifacts import _ArtifactSpec, _resolve_artifact_specs, _validate_aiter_gemm_artifacts
 from ._patch_sources import _read_patch_texts, _resolve_patch_paths, resolved_explicit_root
+from ._proposal_identity import controls_of, normalize_proposal
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,8 @@ class _Deliverable:
     config_changes: dict[str, str]
     extra_server_args: str
     extra_envs: dict[str, str]
+    #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``.
+    launch_controls: dict[str, Any]
     dropped_env_overrides: list[str]
     switch_manifest: list[dict[str, Any]]
     artifact_specs: list[_ArtifactSpec]
@@ -158,6 +161,7 @@ class _Deliverable:
             config_changes=config_changes,
             extra_server_args=(raw_args if isinstance(raw_args, str) and raw_args.strip() else ""),
             extra_envs=extra_envs,
+            launch_controls=controls_of(normalize_proposal(params)),
             dropped_env_overrides=dropped,
             switch_manifest=switch_manifest,
             artifact_specs=artifact_specs,
