@@ -30,6 +30,7 @@ These are set in the app container's environment.
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`): what a session publishes there is readable by the others (`0644`) in folders they write (`2775`), and an entry a session cannot read is named in a warning with its owner and mode. |
 | `INFERENCEX_PATH` | yes, unless `install.sh` left a checkout | A writable InferenceX checkout at the commit Hyperloom pins. Without one the session refuses to start, naming `INFERENCEX_PATH`. |
+| `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as (and then still for local measurement) | The hosting layer's directory. A hosted run launches agents isolated, and with no bubblewrap but the layer's `bin/bwrap` there, never one on `PATH` (the framework image may carry its own). Where neither that account nor that bubblewrap can isolate the specialists, and with local measurement the agent and dev sandboxes too, the run ends before anything starts, naming both reasons; a bubblewrap that gives no answer within 10 s leaves the host to start the run again. |
 
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
@@ -72,6 +73,26 @@ and write, and the model at the path the campaign spec names. The sandbox's comm
 host's LLM gateway variables (`ANTHROPIC_*`, `OPENAI_*`) and its CA bundle variables (`SSL_CERT_FILE` and the like), whose
 paths must exist in the sandbox too. A lease lives as long as its holder needs it, bounded by the grant's
 `max_runtime_sec`.
+
+## One node: measuring on the app container's own cards
+
+A spec with `placement.measurement: local` and `placement.profile: hosted-gpu` measures on the cards of the app
+container itself, as `hyperloom-multibranch run` does on a machine's: tests, dev sandboxes and autonomous agents all
+run in the app container, so the run needs no measurement or `dev` template, no sandbox key, no
+`HYPERLOOM_SOURCE_REPO`/`HYPERLOOM_SOURCE_SHA` for the runner cache, and no grant. `placement.measurement: local` with
+`hosted-cpu` is refused. What changes on the app host:
+
+- Give the container the node's cards. As many tests run at once as its cards hold at the spec's TP, at most
+  `placement.max_parallel_tests`.
+- Every test runs the app container's own framework, so `HYPERLOOM_ACTIVE_IMAGE_REF` and
+  `HYPERLOOM_ACTIVE_IMAGE_DIGEST` name the image the app container runs, and the spec's `framework.image` must name it by
+  that digest (`<repository>@sha256:<digest>`); any other image is refused (exit code 2), and missing pins end the run
+  (exit code 1).
+- `HYPERLOOM_GRANT_LIMITS` is optional. Without it the spec's `budget.max_hours` bounds the session; with a
+  `max_runtime_sec`, the earlier of the two does. Its other totals are not read.
+- `HYPERLOOM_RUNNER_CACHE` is still required: the session stages its prompt sets there.
+- The agent and dev sandboxes run in this container, so they must be isolated as the specialists are
+  (`HYPERLOOM_HOST_LAYER` above).
 
 ## Example: clusters with an NFS share
 
