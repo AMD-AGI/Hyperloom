@@ -45,10 +45,10 @@ sandbox's processes only, and the sandbox's one private ``/tmp`` and full-size `
 leaves there is the next one's to read. The launcher runs inside, its subreaper in the sandbox's pid namespace, and
 the markers are set inside only, so the kills and the watch reach the command's processes, never bubblewrap's. The
 environment is no longer the app's: only what a command needs (:func:`confined_env`), with a home, Claude config,
-user site and Triton cache of the sandbox's own; aiter keeps its JIT modules and FlyDSL cache in its own tree, where
-the image's prebuilt ones are. A sandbox whose paths bubblewrap cannot bind safely runs unconfined, as before, with a
-WARNING; in a hosted run it is refused. Where bubblewrap cannot sandbox an agent at all, commands run
-as before, said once at start-up.
+pip install target and Triton cache of the sandbox's own; aiter keeps its JIT modules and FlyDSL cache in its own tree,
+where the image's prebuilt ones are. A sandbox whose paths bubblewrap cannot bind safely runs unconfined, as before,
+with a WARNING; in a hosted run it is refused. Where bubblewrap cannot sandbox an agent at all, commands run as before,
+said once at start-up.
 """
 
 from __future__ import annotations
@@ -149,10 +149,15 @@ UNCONFINED = NoIsolation(())
 #: Where a confined command finds its temporary directory: the sandbox's own, bound there for every command.
 CONFINED_TMP = Path("/tmp")
 #: A confined sandbox's home, below its root unless its factory names another (:attr:`SandboxPaths.home`), and where
-#: in it the Claude CLI keeps its state and transcripts, and pip its user site.
+#: in it the Claude CLI keeps its state and transcripts, and Python its user base.
 HOME_DIR = "home"
 CLAUDE_DIR = ".claude"
 USER_BASE = ".local"
+#: Where in a confined home pip installs (``PIP_TARGET``), with every dependency an install brings: on no import path,
+#: so no inference server a command starts imports those ahead of the image's and runs other packages than the
+#: baseline it is measured against. Arbor imports from it on its own commands alone (``ARBOR_SITE``,
+#: :mod:`~hyperloom_multibranch.specialist.arbor_adapter`).
+SITE_DIR = "site-packages"
 #: The programs a confined command may run besides those of its toolchain's trees: its shell and the agent CLIs.
 AGENT_PROGRAMS = ("bash", "claude", "codex")
 #: The cards' device nodes, bound into a confined sandbox where the host has them.
@@ -628,9 +633,7 @@ class LocalAgentSandbox:
         merged[ROCR_VISIBLE_DEVICES_ENV] = ",".join(map(str, self.cards))
         merged["HIP_VISIBLE_DEVICES"] = ",".join(map(str, range(len(self.cards))))
         merged[MARKER] = str(self.root)
-        # What a confined command installs with pip goes to its home's user site, whose scripts it runs by name.
-        user_bin = [] if confined is None else [str(confined.home / USER_BASE / BIN_DIR)]
-        merged["PATH"] = os.pathsep.join(filter(None, [str(self.root / BIN_DIR), *user_bin, merged.get("PATH")]))
+        merged["PATH"] = os.pathsep.join(filter(None, [str(self.root / BIN_DIR), merged.get("PATH")]))
         return merged
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
@@ -944,12 +947,12 @@ def confined_env(environ: Mapping[str, str], home: Path, forwarded: Mapping[str,
     """What a confined sandbox's commands start from, taken from ``environ`` (the app's, a lease's on top): the
     search paths, locale, terminal and the models and benchmark checkout it names (:data:`BASIC_NAMES`), the framework
     image's own settings (:func:`~hyperloom.measure.local_templates.image_env`), and ``forwarded`` (the LLM gateway,
-    its credentials and models, proxies and CA bundle); with ``home`` as the home, Claude config, cache, pip's user
-    site and Triton's cache, which the image's settings may name in the app's home. aiter's JIT directory and FlyDSL's
-    cache are left to aiter: its own tree, which a confined command writes, where the image's prebuilt modules and
-    FlyDSL kernels are, which a directory of the home would hide. No other variable of the app's: not its other
-    credentials, nor its home or tools' configuration. Without a Hugging Face location of its own, the hub cache is
-    the app's, which a model id resolves in."""
+    its credentials and models, proxies and CA bundle); with ``home`` as the home, Claude config, cache, Python's user
+    base, pip's install target (:data:`SITE_DIR`) and Triton's cache, which the image's settings may name in the app's
+    home. aiter's JIT directory and FlyDSL's cache are left to aiter: its own tree, which a confined command writes,
+    where the image's prebuilt modules and FlyDSL kernels are, which a directory of the home would hide. No other
+    variable of the app's: not its other credentials, nor its home or tools' configuration. Without a Hugging Face
+    location of its own, the hub cache is the app's, which a model id resolves in."""
     kept = {name: value for name, value in environ.items() if name in BASIC_NAMES or name.startswith(BASIC_PREFIXES)}
     kept.update(image_env(environ))
     kept.update(forwarded)
@@ -961,8 +964,8 @@ def confined_env(environ: Mapping[str, str], home: Path, forwarded: Mapping[str,
             "HOME": str(home),
             "CLAUDE_CONFIG_DIR": str(home / CLAUDE_DIR),
             "XDG_CACHE_HOME": str(home / ".cache"),
-            "PIP_USER": "1",
             "PYTHONUSERBASE": str(home / USER_BASE),
+            "PIP_TARGET": str(home / SITE_DIR),
             "TRITON_CACHE_DIR": str(home / ".triton" / CACHE_DIR),
             # The inner user is the app's, root in a container, which the Claude CLI accepts only in a sandbox.
             "IS_SANDBOX": "1",
@@ -1050,6 +1053,7 @@ __all__ = [
     "CONFINED_TMP",
     "GUARDED_NOTE",
     "READ_ONLY_FRAMEWORKS",
+    "SITE_DIR",
     "TAIL_BYTES",
     "TIMED_OUT",
     "UNCONFINED",

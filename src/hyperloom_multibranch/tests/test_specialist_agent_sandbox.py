@@ -517,11 +517,8 @@ def test_a_confined_sandbox_s_commands_start_from_its_own_environment_and_tmp(tm
     assert env["ANTHROPIC_BASE_URL"] == "http://gateway" and env["FOO"] == "bar"
     assert (env["HOME"], env["CLAUDE_CONFIG_DIR"]) == (str(home), str(home / ".claude"))
     assert env["TMPDIR"] == "/tmp" and sandbox.tmp == Path("/tmp") and sandbox.cache_root == Path("/tmp/cache")
-    assert env["PATH"].split(os.pathsep)[:3] == [
-        str(tmp_path / "sandbox" / "bin"),
-        str(home / ".local/bin"),
-        "/agent/bin",
-    ]
+    assert env["PATH"].split(os.pathsep)[:2] == [str(tmp_path / "sandbox" / "bin"), "/agent/bin"]
+    assert not [entry for entry in env["PATH"].split(os.pathsep) if entry.startswith(str(home))], "a home's bin"
     assert env["ROCR_VISIBLE_DEVICES"] == "4,5" and env["HIP_VISIBLE_DEVICES"] == "0,1"
     assert (home / ".claude").is_dir()
     assert sandbox.frameworks == FrameworkProtection(), "no mount namespace is asked for inside bubblewrap"
@@ -562,8 +559,8 @@ def test_confined_env_keeps_what_a_command_needs_and_nothing_else_of_the_app_s(t
         "HOME": str(home),
         "CLAUDE_CONFIG_DIR": str(home / ".claude"),
         "XDG_CACHE_HOME": str(home / ".cache"),
-        "PIP_USER": "1",
         "PYTHONUSERBASE": str(home / ".local"),
+        "PIP_TARGET": str(home / "site-packages"),
         "TRITON_CACHE_DIR": str(home / ".triton" / "cache"),
         "IS_SANDBOX": "1",
     }

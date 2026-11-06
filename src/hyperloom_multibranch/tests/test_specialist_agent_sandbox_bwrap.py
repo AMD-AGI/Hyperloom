@@ -2,13 +2,17 @@
 # SPDX-License-Identifier: MIT
 
 """A local agent sandbox under real bubblewrap: what its commands reach, a server one command starts and a later one
-reads and stops (by ``pkill``, and by its PID file as Arbor does), and the kills and the stop that still reach every
-process of it. The trees live outside ``/tmp``: before bubblewrap 0.12 nothing may be bound below the sandbox's own
-``/tmp``, which every command shares."""
+reads and stops (by ``pkill``, and by its PID file as Arbor does), the kills and the stop that still reach every
+process of it, and where pip installs in it, in a venv laid out as the image's: for Arbor, which reads ``ARBOR_SITE``,
+never for a server. The trees live outside ``/tmp``: before bubblewrap 0.12 nothing may be bound below the sandbox's
+own ``/tmp``, which every command shares."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import dataclasses
+import hashlib
 import json
 import os
 import shlex
@@ -18,7 +22,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+import zipfile
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -35,6 +40,7 @@ from hyperloom_multibranch.specialist.agent_sandbox import (
     read_tail,
 )
 from hyperloom_multibranch.specialist.agent_watch import MARKER, PROCESS_MARKER, sandbox_pids
+from hyperloom_multibranch.specialist.arbor_adapter import ARBOR_PYTHON, INSTALL, SITE_ENV
 
 pytestmark = pytest.mark.agent_isolation
 
@@ -415,8 +421,10 @@ async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_o
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/gateway" and env["HF_HOME"] == str(hf)
     assert (env["HOME"], env["CLAUDE_CONFIG_DIR"], env["TMPDIR"]) == (str(home), str(home / ".claude"), "/tmp")
     assert "AITER_JIT_DIR" not in env and "FLYDSL_RUNTIME_CACHE_DIR" not in env, "aiter's own, in its writable tree"
-    assert env["TRITON_CACHE_DIR"].startswith(f"{home}/") and env["PIP_USER"] == "1"
-    assert env["PATH"].split(os.pathsep)[:2] == [str(sandbox.root / "bin"), str(home / ".local" / "bin")]
+    assert env["TRITON_CACHE_DIR"].startswith(f"{home}/") and env["PIP_TARGET"] == str(home / "site-packages")
+    assert "PIP_USER" not in env and SITE_ENV not in env and str(home) not in env.get("PYTHONPATH", "")
+    assert env["PATH"].split(os.pathsep)[0] == str(sandbox.root / "bin")
+    assert not [entry for entry in env["PATH"].split(os.pathsep) if entry.startswith(f"{home}/")], "a home's bin"
     assert env[MARKER] == str(sandbox.root) and env[PROCESS_MARKER].startswith(f"{sandbox.root}/")
 
 
@@ -522,3 +530,193 @@ def _wait(predicate: Callable[[], object], seconds: float, what: str) -> None:
     while not predicate():
         assert time.monotonic() < until, what
         time.sleep(0.1)
+
+
+# ---- where pip installs, in a venv laid out as the image's -----------------------------------------------------------
+
+#: What an inference server started in the sandbox sees: whether the SDK imports, which hl_shadow (the image's, or the
+#: one the SDK's install brought), its import path and ``ARBOR_SITE``.
+SERVER_SEES = r"""
+import json, os, sys
+try:
+    import claude_agent_sdk
+    sdk = "imported"
+except ImportError:
+    sdk = "absent"
+import hl_shadow
+print(json.dumps({"sdk": sdk, "shadow": hl_shadow.VALUE, "path": sys.path, "site": os.environ.get("ARBOR_SITE")}))
+"""
+#: An Arbor that reads ``ARBOR_SITE``: the directory on its own import path, at its import.
+ARBOR_INIT = r"""
+import os, sys
+_site = os.environ.get("ARBOR_SITE")
+if _site and _site not in sys.path:
+    sys.path.insert(0, _site)
+"""
+#: Arbor's driver: imports the SDK, starts a server from its shell as its server turn does, says what each saw.
+ARBOR_MAIN = r"""
+import json, subprocess, sys
+import claude_agent_sdk, hl_shadow
+server = subprocess.run(["bash", "-c", "python3 server_sees.py"], capture_output=True, text=True)
+if server.returncode:
+    sys.exit(server.stderr)
+print(json.dumps({"sdk": claude_agent_sdk.SHADOW, "shadow": hl_shadow.VALUE, "server": json.loads(server.stdout)}))
+"""
+
+
+@dataclasses.dataclass(frozen=True)
+class Image:
+    """A venv laid out as the image's ``/opt/venv`` and the wheels an index would serve."""
+
+    venv: Path
+    wheels: Path
+
+    def index(self) -> dict[str, str]:
+        """What a command is given for pip to find :attr:`wheels` alone, the index's stand-in."""
+        return {"PIP_NO_INDEX": "1", "PIP_FIND_LINKS": str(self.wheels), "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
+
+
+@pytest.fixture(scope="module")
+def image() -> Iterator[Image]:
+    """``python3 -m venv`` without system site packages, so with pip and without a user site, holding hl-shadow 1.0
+    (the image's own packages); and wheels of PyYAML, of claude-agent-sdk, which needs hl-shadow 2 or later, and of
+    hl-shadow 2.0, all built here."""
+    if not os.access("/var/tmp", os.W_OK):
+        unavailable("no writable /var/tmp to hold an image's venv outside /tmp")
+    made = Path(tempfile.mkdtemp(prefix="hl-image-", dir="/var/tmp")).resolve()
+    venv, wheels, own = made / "venv", made / "wheels", made / "own"
+    wheels.mkdir()
+    own.mkdir()
+    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True, capture_output=True)
+    shadow = _wheel(own, "hl-shadow", "1.0", {"hl_shadow/__init__.py": 'VALUE = "image"\n'})
+    pip = [str(venv / "bin" / "python3"), "-m", "pip", "install", "--no-index", "--quiet", str(shadow)]
+    environ = {name: value for name, value in os.environ.items() if not name.startswith("PIP_")}
+    subprocess.run(pip, check=True, capture_output=True, env={**environ, "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
+    _wheel(wheels, "PyYAML", "6.0", {"yaml/__init__.py": ""})
+    sdk = {"claude_agent_sdk/__init__.py": "import hl_shadow\nSHADOW = hl_shadow.VALUE\n"}
+    _wheel(wheels, "claude-agent-sdk", "1.0", sdk, requires=("hl-shadow>=2",))
+    _wheel(wheels, "hl-shadow", "2.0", {"hl_shadow/__init__.py": 'VALUE = "target"\n'})
+    yield Image(venv, wheels)
+    shutil.rmtree(made, ignore_errors=True)
+
+
+def _wheel(directory: Path, name: str, version: str, files: Mapping[str, str], requires: tuple[str, ...] = ()) -> Path:
+    """A pure-Python wheel of ``files``, written here: no index, no build backend."""
+    dist = name.replace("-", "_")
+    info = f"{dist}-{version}.dist-info"
+    metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+    contents = {
+        **files,
+        f"{info}/METADATA": metadata + "".join(f"Requires-Dist: {requirement}\n" for requirement in requires),
+        f"{info}/WHEEL": "Wheel-Version: 1.0\nGenerator: hyperloom-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    record = [f"{member},sha256={_digest(text)},{len(text.encode())}" for member, text in contents.items()]
+    wheel = directory / f"{dist}-{version}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for member, text in contents.items():
+            archive.writestr(member, text)
+        archive.writestr(f"{info}/RECORD", "\n".join([*record, f"{info}/RECORD,,"]) + "\n")
+    return wheel
+
+
+def _digest(text: str) -> str:
+    return base64.urlsafe_b64encode(hashlib.sha256(text.encode()).digest()).rstrip(b"=").decode()
+
+
+def _image_sandbox(area: Path, probe: BwrapProbe, image: Image) -> LocalAgentSandbox:
+    """A sandbox whose ``python3`` is ``image``'s venv, bound read-only whole, as the image's ``/opt`` is."""
+    agent = area / "agent"
+    agent.mkdir(exist_ok=True)
+    return LocalAgentSandbox(
+        cards=(0,),
+        python_path=(),
+        root=area / "lease",
+        base_env={**os.environ, "PATH": f"{image.venv / 'bin'}{os.pathsep}{os.environ['PATH']}"},
+        grace_seconds=5.0,
+        poll_seconds=0.05,
+        isolation=BwrapIsolation(probe),
+        paths=SandboxPaths(writable=(agent,), readable=(image.venv, image.wheels), home=agent / "sandbox" / "home"),
+    )
+
+
+def _arbor(agent: Path, init: str) -> Path:
+    """An Arbor checkout in ``agent`` whose package's import runs ``init``."""
+    checkout = agent / "arbor-checkout"
+    for name, text in (("arbor/__init__.py", init), ("arbor/__main__.py", ARBOR_MAIN), ("server_sees.py", SERVER_SEES)):
+        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / name).write_text(text)
+    return checkout
+
+
+async def test_what_pip_installs_in_a_confined_sandbox_imports_for_arbor_alone_never_for_a_server(
+    area: Path, probe: BwrapProbe, image: Image
+) -> None:
+    """Arbor's install puts the SDK, and every package its install brings, in the home's site directory, out of the
+    image's venv; Arbor's commands, given it as ARBOR_SITE, import them; a server started from Arbor's shell, or from a
+    plain shell of the sandbox, imports the image's packages, and its import path has no site directory."""
+    sandbox = _image_sandbox(area, probe, image)
+    checkout = _arbor(area / "agent", ARBOR_INIT)
+    site = area / "agent" / "sandbox" / "home" / "site-packages"
+    as_arbor = (
+        'import os, sys; sys.path.insert(0, os.environ["ARBOR_SITE"]); '
+        "import claude_agent_sdk; print(claude_agent_sdk.SHADOW)"
+    )
+    try:
+        # INSTALL[0] is the Python 3.11 gate, not where the SDK goes.
+        installed = [await sandbox.run(command, checkout, image.index(), 300) for command in INSTALL[1:]]
+        driver = await sandbox.run(f"{ARBOR_PYTHON} -m arbor", checkout, {}, 120)
+        simulated = await sandbox.run(f"{ARBOR_PYTHON} -c {shlex.quote(as_arbor)}", area, {}, 60)
+        plain = await sandbox.run("python3 server_sees.py", checkout, {}, 60)
+    finally:
+        await sandbox.stop()
+
+    assert [done.returncode for done in installed] == [0, 0, 0], [done.output for done in installed]
+    packages = sorted(entry.name for entry in site.iterdir() if not entry.name.endswith(".dist-info"))
+    assert packages == ["claude_agent_sdk", "hl_shadow", "yaml"]
+    assert not list(image.venv.glob("lib/python*/site-packages/claude_agent_sdk")), "the install wrote the venv"
+    assert driver.returncode == 0, driver.output
+    seen = json.loads(driver.output.strip().splitlines()[-1])
+    server = seen.pop("server")
+    assert seen == {"sdk": "target", "shadow": "target"}, "Arbor imports the SDK and what its install brought"
+    assert (simulated.returncode, simulated.output.strip()) == (0, "target"), simulated.output
+    assert plain.returncode == 0, plain.output
+    alone = json.loads(plain.output.strip().splitlines()[-1])
+    for sees in (server, alone):
+        assert (sees["sdk"], sees["shadow"]) == ("absent", "image"), sees
+        assert not [entry for entry in sees["path"] if entry.startswith(str(site))], sees["path"]
+    assert (server["site"], alone["site"]) == (str(site), None), "ARBOR_SITE is Arbor's commands' alone"
+
+
+async def test_an_arbor_that_does_not_read_arbor_site_fails_its_install_saying_why(
+    area: Path, probe: BwrapProbe, image: Image
+) -> None:
+    sandbox = _image_sandbox(area, probe, image)
+    checkout = _arbor(area / "agent", "")
+    site = area / "agent" / "sandbox" / "home" / "site-packages"
+    try:
+        installed = [await sandbox.run(command, checkout, image.index(), 300) for command in INSTALL[1:]]
+    finally:
+        await sandbox.stop()
+
+    assert [done.returncode for done in installed] == [0, 0, 1], [done.output for done in installed]
+    assert (site / "claude_agent_sdk").is_dir() and "No module named 'yaml'" in installed[-1].output
+    said = f"this Arbor does not read ARBOR_SITE, so it cannot import what pip installed in {site}: pin Arbor 545a850"
+    assert said in installed[-1].output, installed[-1].output
+
+
+async def test_the_image_s_venv_takes_neither_a_user_install_nor_one_into_itself(
+    area: Path, probe: BwrapProbe, image: Image
+) -> None:
+    """Why a confined pip installs to a target of its own: the image's venv refuses the user site the sandbox once
+    named (``PIP_USER=1``), and is read-only."""
+    sandbox = _image_sandbox(area, probe, image)
+    install = "python3 -m pip install claude-agent-sdk"
+    try:
+        user = await sandbox.run(f"env -u PIP_TARGET PIP_USER=1 {install}", area, image.index(), 300)
+        into = await sandbox.run(f"env -u PIP_TARGET {install}", area, image.index(), 300)
+    finally:
+        await sandbox.stop()
+
+    assert user.returncode != 0, user.output
+    assert "Can not perform a '--user' install. User site-packages are not visible in this virtualenv." in user.output
+    assert into.returncode != 0 and "Read-only file system" in into.output, into.output

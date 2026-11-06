@@ -23,6 +23,7 @@ from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_manifest import REFUSED_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, make_ready, root_profile
 from hyperloom_multibranch.specialist.arbor_adapter import (
+    ARBOR_PYTHON,
     BRANCH_RUN,
     DOSSIER_DIR,
     DOSSIER_PASS,
@@ -351,12 +352,18 @@ def test_a_framework_not_installed_or_with_no_layout_links_nothing(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_arbor_s_install_checks_each_import_it_needs_before_installing_it() -> None:
+def test_arbor_s_install_checks_each_import_it_needs_as_arbor_before_installing_it() -> None:
+    """Each import is checked after Arbor's own, with ``ARBOR_SITE`` set as Arbor's commands have it, so a module pip
+    installed out of the interpreter's reach counts as there only for an Arbor that reads it."""
+    assert ARBOR_PYTHON == 'env ${PIP_TARGET:+"ARBOR_SITE=$PIP_TARGET"} python3'
     assert INSTALL[1:3] == (
-        "python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet pyyaml",
-        "python3 -c 'import claude_agent_sdk' 2>/dev/null || python3 -m pip install --quiet claude-agent-sdk",
+        f"{ARBOR_PYTHON} -c 'import arbor, yaml' 2>/dev/null || python3 -m pip install --quiet pyyaml",
+        f"{ARBOR_PYTHON} -c 'import arbor, claude_agent_sdk' 2>/dev/null"
+        " || python3 -m pip install --quiet claude-agent-sdk",
     )
-    assert "(3, 11)" in INSTALL[0] and INSTALL[-1] == "python3 -c 'import yaml, claude_agent_sdk'"
+    assert "(3, 11)" in INSTALL[0] and INSTALL[-1].startswith(
+        f"{ARBOR_PYTHON} -c 'import arbor, yaml, claude_agent_sdk' ||"
+    )
 
 
 async def test_the_root_s_op_shares_reach_arbor_s_profile_as_mb_writes_them_beside_the_adapter_s_config(
