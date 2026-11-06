@@ -437,6 +437,9 @@ class DevLeases:
         queued = (await self._toolbox.queue_state()).queued
         now = self._clock()
         for branch, held in list(self._held.items()):
+            # Ending an earlier lease awaits, and a release or reclaim meanwhile may have ended this one.
+            if self._held.get(branch) is not held:
+                continue
             if not queued:
                 held.queued_since = None
             elif held.queued_since is None:

@@ -409,6 +409,31 @@ async def test_the_runtime_takes_back_an_expired_lease_and_says_why(rig):
     assert "expired" in refused
 
 
+async def test_a_sweep_skips_a_lease_released_while_it_ended_another(tmp_path):
+    stopping, stop = asyncio.Event(), asyncio.Event()
+
+    class _SlowStop(_Sandbox):
+        async def stop(self) -> None:
+            stopping.set()
+            await stop.wait()
+            await super().stop()
+
+    clock, toolbox = _Clock(), _Toolbox(tmp_path / "leases")
+    leases = DevLeases(
+        toolbox, lambda _b, lease: _SlowStop(lease), lambda _b: _Logs(), limits=replace(LIMITS, cap=2), clock=clock
+    )
+    await leases.lease(B1, 1, 30)
+    await leases.lease(B2, 1, 30)
+    clock.now += 31 * MINUTE
+    sweep = asyncio.create_task(leases.sweep())
+    await stopping.wait()
+    released = asyncio.create_task(leases.release(B2))
+    stop.set()
+    await asyncio.gather(sweep, released)
+
+    assert sorted(toolbox.released) == ["lease-1", "lease-2"]
+
+
 async def test_the_runtime_takes_back_an_idle_lease(rig):
     built = rig.build()
     await built.server.call("dev_sandbox_lease")
