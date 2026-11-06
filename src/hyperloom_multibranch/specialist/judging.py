@@ -185,9 +185,11 @@ class BranchJudge:
             if action is Action.REQUEST_FORK:
                 reason = f"correctness fix of {first.request_id}"
                 admission = await self._gate.fork(first.request, judgement, reason, fix=fix)
-                if admission.status is not AdmissionStatus.REJECTED:
+                if admission.status is AdmissionStatus.REJECTED:
+                    forked = f"{_fixes(first.request)}: its fork was refused ({admission.reason}); it is recorded only"
+                else:
                     forked = _forked_to(first.request, pending=admission.status is AdmissionStatus.PENDING)
-                    await self._notice(logged, forked, *judgement.request_ids)
+                await self._notice(logged, forked, *judgement.request_ids)
         except ResultUnverified as error:
             await self._unverified(logged, first, judgement, error)
             return
