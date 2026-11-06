@@ -10,6 +10,7 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -23,8 +24,11 @@ from hyperloom_common.bwrap import (
     BASE_DEV_NODES,
     SYSTEM_ROOTS,
     BwrapPolicy,
+    BwrapPolicyError,
     BwrapProbe,
+    BwrapSetupError,
     BwrapStatus,
+    Holder,
     Scratch,
     bwrap_probe,
     interpreter_roots,
@@ -117,6 +121,11 @@ def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeBwrap:
     return stand_in
 
 
+def probed(path: str = "bwrap", version: tuple[int, int, int] = (0, 13, 1)) -> BwrapProbe:
+    """A probe that passed, of bubblewrap ``version`` at ``path``."""
+    return BwrapProbe(path, version, ())
+
+
 # ---- the argv ------------------------------------------------------------------------------------------------------
 
 
@@ -137,7 +146,7 @@ def test_argv_mounts_by_depth_with_the_masks_last(tmp_path: Path) -> None:
         chdir=str(work),
     )
 
-    argv = policy.argv(["/opt/bin/bwrap"], ["claude", "--print"], status_fd=9)
+    argv = policy.argv(probed("/opt/bin/bwrap"), ["claude", "--print"], status_fd=9)
 
     nodes = [arg for node in (*BASE_DEV_NODES, "/dev/kfd") for arg in ("--dev-bind-try", node, node)]
     links = ["/proc/self/fd", "/dev/fd", "/proc/self/fd/0", "/dev/stdin", "/proc/self/fd/1", "/dev/stdout"]
@@ -165,7 +174,7 @@ def test_argv_mounts_by_depth_with_the_masks_last(tmp_path: Path) -> None:
 def test_a_bind_below_tmp_comes_after_the_tmp_mount() -> None:
     policy = BwrapPolicy(read_only=(), writable=("/tmp/pytest-of-ci/wt",), tmp="/scratch/hl-agent-a")
 
-    argv = policy.argv(["bwrap"], ["true"])
+    argv = policy.argv(probed(), ["true"])
 
     tmp = argv.index("/tmp")
     assert argv[tmp - 2 : tmp + 1] == ["--bind", "/scratch/hl-agent-a", "/tmp"]
@@ -173,7 +182,7 @@ def test_a_bind_below_tmp_comes_after_the_tmp_mount() -> None:
 
 
 def test_argv_flags_follow_the_policy() -> None:
-    joined = BwrapPolicy(read_only=(), die_with_parent=False, own_network=True, join=(7, 8)).argv(["bwrap"], ["true"])
+    joined = BwrapPolicy(read_only=(), die_with_parent=False, own_network=True, join=(7, 8)).argv(probed(), ["true"])
 
     assert joined[1:9] == ["--userns", "7", "--pidns", "8", "--unshare-ipc", "--new-session", "--cap-drop", "ALL"]
     assert joined[9] == "--unshare-net"
@@ -187,7 +196,7 @@ def test_a_symlinked_root_stays_a_symlink_when_its_target_is_bound(tmp_path: Pat
     (tmp_path / "elsewhere").symlink_to("/nonexistent/target")
     usr, link, elsewhere = (str(tmp_path / name) for name in ("usr", "bin", "elsewhere"))
 
-    argv = BwrapPolicy(read_only=(usr, link, elsewhere)).argv(["bwrap"], ["true"])
+    argv = BwrapPolicy(read_only=(usr, link, elsewhere)).argv(probed(), ["true"])
 
     assert argv[argv.index(link) - 2 : argv.index(link) + 1] == ["--symlink", f"{usr}/bin", link]
     assert argv[argv.index(elsewhere) - 1 : argv.index(elsewhere) + 2] == ["--ro-bind-try", elsewhere, elsewhere]
@@ -199,7 +208,7 @@ def test_a_writable_path_a_writable_bind_already_shows_is_left_out() -> None:
         writable=("/work", "/work/cache", "/work/ro/rw", "/work"),
     )
 
-    argv = policy.argv(["bwrap"], ["true"])
+    argv = policy.argv(probed(), ["true"])
 
     assert [argv[index + 1] for index, arg in enumerate(argv) if arg == "--bind"] == ["/work", "/work/ro/rw"]
 
@@ -252,32 +261,57 @@ def test_a_read_only_bind_or_mask_below_a_writable_bind_needs_0_12() -> None:
     assert policy.problems((0, 12, 0)) == []
 
 
-def test_below_a_scratch_earlier_commands_shared_anything_needs_0_12() -> None:
-    joined = BwrapPolicy(
+@pytest.mark.parametrize("join", [None, (7, 8)])
+def test_below_a_bound_scratch_anything_needs_0_12(join: tuple[int, int] | None) -> None:
+    # A Scratch an earlier launch or command used may hold a link it left, whether or not this launch joins a holder.
+    policy = BwrapPolicy(
         read_only=("/tmp/hyperloom-host/ca-bundle.pem",),
         writable=("/tmp/pytest-of-ci/ws",),
+        masked=("/tmp/hl-key",),
+        devices=("/dev/shm/hl-node",),
         tmp="/var/tmp/hl-agent-a",
         shm="/dev/shm/hl-agent-b",
-        join=(7, 8),
+        join=join,
     )
 
-    assert joined.problems((0, 9, 0)) == [
-        f"{path} would be mounted below the agent-writable /tmp, which needs bubblewrap 0.12.0 (this is 0.9.0)"
-        for path in ("/tmp/hyperloom-host/ca-bundle.pem", "/tmp/pytest-of-ci/ws")
+    assert policy.problems((0, 11, 1)) == [
+        f"{path} would be mounted below the agent-writable {parent}, which needs bubblewrap 0.12.0 (this is 0.11.1)"
+        for path, parent in (
+            ("/tmp/hyperloom-host/ca-bundle.pem", "/tmp"),
+            ("/tmp/hl-key", "/tmp"),
+            ("/tmp/pytest-of-ci/ws", "/tmp"),
+            ("/dev/shm/hl-node", "/dev/shm"),
+        )
     ]
-    assert joined.problems((0, 13, 1)) == []
-    assert BwrapPolicy(read_only=joined.read_only, writable=joined.writable, join=(7, 8)).problems((0, 9, 0)) == []
+    assert policy.problems((0, 12, 0)) == []
 
 
-def test_writable_below_writable_and_anything_below_the_scratch_mounts_pass_on_any_version() -> None:
+def test_writable_below_writable_and_anything_below_a_fresh_tmp_pass_on_any_version() -> None:
     policy = BwrapPolicy(
         read_only=("/tmp/hyperloom-host/ca-bundle.pem", "/srv/models"),
-        writable=("/ws", "/ws/.home", "/ws/.cache/ccache"),
-        tmp="/var/tmp/hl-agent-a",
-        shm="/dev/shm/hl-agent-b",
+        writable=("/ws", "/ws/.home", "/ws/.cache/ccache", "/tmp/pytest-of-ci/ws"),
+        masked=("/tmp/hl-key",),
+        devices=("/dev/shm/hl-node",),
     )
 
     assert policy.problems((0, 5, 0)) == []
+
+
+def test_a_launch_the_probed_bwrap_must_not_make_is_refused_before_it_starts(fake: FakeBwrap) -> None:
+    policy = BwrapPolicy(read_only=("/ws/.git",), writable=("/ws",), tmp="/var/tmp/hl-agent-a")
+    old = probed(str(fake.path), (0, 11, 1))
+
+    with pytest.raises(BwrapPolicyError) as refused:
+        policy.argv(old, ["true"])
+    assert refused.value.problems == tuple(policy.problems((0, 11, 1))) != ()
+    with pytest.raises(BwrapPolicyError):
+        Holder.start(old, policy)
+    with pytest.raises(BwrapPolicyError):
+        Holder.start(old, BwrapPolicy(read_only=("/tmp/pytest-of-ci/ca.pem",), tmp="/var/tmp/hl-agent-a"))
+    assert fake.runs == []
+    assert policy.argv(probed(str(fake.path), (0, 12, 0)), ["true"])[0] == str(fake.path)
+    with pytest.raises(RuntimeError, match="no answer"):
+        policy.argv(BwrapProbe(str(fake.path), (0, 13, 1), ("no answer",), transient=True), ["true"])
 
 
 # ---- scratch, status ---------------------------------------------------------------------------------------------
@@ -480,3 +514,56 @@ def test_main_prints_the_probe(fake: FakeBwrap, capsys: pytest.CaptureFixture[st
     fake.configure(stderr=UID_MAP_DENIED, code=1)
     assert main(["probe"]) == 1
     assert capsys.readouterr().out == f"{UID_MAP_DENIED}\n"
+
+
+def test_the_probe_runs_the_bubblewrap_it_is_given(
+    fake: FakeBwrap, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layer = FakeBwrap(tmp_path / "layer", version="0.13.1")
+
+    assert bwrap_probe(str(layer.path)).path == str(layer.path) and layer.runs == ["plain"] and fake.runs == []
+    assert bwrap_probe(str(layer.path)) is bwrap_probe(str(layer.path)) and layer.runs == ["plain"]
+    assert bwrap_probe().path == str(fake.path) and fake.runs == ["plain"] and layer.runs == ["plain"]
+    assert probe_bwrap("bin/bwrap").problems == ("bubblewrap at bin/bwrap is not an absolute path",)
+
+    assert main(["probe", "--bwrap", str(layer.path)]) == 0
+    assert capsys.readouterr().out == f"ok bubblewrap 0.13.1 {layer.path}\n"
+    assert layer.runs == ["plain", "plain"] and fake.runs == ["plain"]
+
+
+def test_a_canary_tree_where_the_sandbox_mounts_its_own_is_a_problem(
+    fake: FakeBwrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not os.access("/dev/shm", os.W_OK | os.X_OK):
+        pytest.skip("no writable /dev/shm to put the canary's tree in")
+    monkeypatch.setattr(tempfile, "tempdir", "/dev/shm")
+
+    problems = probe_bwrap().problems
+
+    assert problems and all(problem.startswith("the canary's policy: /dev/shm/hl-bwrap-probe-") for problem in problems)
+    assert "is mounted by the sandbox itself" in problems[0] and fake.runs == []
+
+
+# ---- the holder ----------------------------------------------------------------------------------------------------
+
+
+def test_a_holder_whose_setup_failed_never_signals_the_process_its_pid_now_names(fake: FakeBwrap) -> None:
+    # The stand-in names a pid 1 that is not its child, as bubblewrap's would be once reaped and the number reused,
+    # then fails its setup (bash: dash cannot redirect to a descriptor above 9).
+    decoy = subprocess.Popen([sys.executable, "-I", "-S", "-c", "import time; time.sleep(60)"])
+    fake.path.write_text(
+        "#!/bin/bash\n"
+        'fd=""; prev=""\n'
+        'for arg in "$@"; do [ "$prev" = --json-status-fd ] && fd="$arg"; prev="$arg"; done\n'
+        f'echo "{{ \\"child-pid\\": {decoy.pid} }}" >&"$fd"\n'
+        'echo "bwrap: Can\'t find source path /missing: No such file or directory" >&2\n'
+        "exit 1\n"
+    )
+    try:
+        with pytest.raises(BwrapSetupError, match="^bwrap: Can't find source path /missing"):
+            Holder.start(probed(str(fake.path)), BwrapPolicy(read_only=()))
+        with pytest.raises(subprocess.TimeoutExpired):
+            decoy.wait(timeout=0.5)
+    finally:
+        decoy.kill()
+        decoy.wait()

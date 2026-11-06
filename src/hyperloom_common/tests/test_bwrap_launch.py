@@ -30,8 +30,11 @@ import pytest
 
 from hyperloom_common import bwrap
 from hyperloom_common.bwrap import (
+    NESTED_SAFE,
     SYSTEM_ROOTS,
     BwrapPolicy,
+    BwrapPolicyError,
+    BwrapProbe,
     BwrapSetupError,
     BwrapStatus,
     Holder,
@@ -58,8 +61,8 @@ def outcome(action):
 
 
 @pytest.fixture(scope="module")
-def launcher() -> tuple[str, ...]:
-    return usable_bwrap().launcher
+def probe() -> BwrapProbe:
+    return usable_bwrap()
 
 
 @pytest.fixture
@@ -79,10 +82,10 @@ def python(code: str, *args: object) -> list[str]:
 
 
 def run(
-    launcher: Sequence[str], sandbox: BwrapPolicy, command: Sequence[str], **popen: object
+    probe: BwrapProbe, sandbox: BwrapPolicy, command: Sequence[str], **popen: object
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        sandbox.argv(launcher, command),
+        sandbox.argv(probe, command),
         capture_output=True,
         text=True,
         timeout=TIMEOUT,
@@ -126,7 +129,7 @@ def wait_for(predicate: Callable[[], object], timeout: float = 10.0) -> object:
 # ---- what the agent reaches --------------------------------------------------------------------------------------
 
 
-def test_masks_hide_credentials_inside_a_bound_tree(launcher: tuple[str, ...], tmp_path: Path) -> None:
+def test_masks_hide_credentials_inside_a_bound_tree(probe: BwrapProbe, tmp_path: Path) -> None:
     hf = tmp_path / "hf"
     (hf / "stored_tokens").mkdir(parents=True)
     (hf / "stored_tokens" / "default").write_text(CANARY)
@@ -142,8 +145,8 @@ print(json.dumps({
     "stored_create": outcome(lambda: open(os.path.join(hf, "stored_tokens", "new"), "w").close()),
 }))
 """
-    masked = run(launcher, policy(str(hf), masked=(str(hf / "stored_tokens"), str(hf / "token"))), python(check, hf))
-    unmasked = run(launcher, policy(str(hf)), python(check, hf))
+    masked = run(probe, policy(str(hf), masked=(str(hf / "stored_tokens"), str(hf / "token"))), python(check, hf))
+    unmasked = run(probe, policy(str(hf)), python(check, hf))
 
     assert report(masked) == {
         "config": "ok",
@@ -156,7 +159,7 @@ print(json.dumps({
     assert report(unmasked)["token"] == "ok" and CANARY in unmasked.stdout
 
 
-def test_read_only_binds_refuse_writes_and_metadata(launcher: tuple[str, ...], tmp_path: Path) -> None:
+def test_read_only_binds_refuse_writes_and_metadata(probe: BwrapProbe, tmp_path: Path) -> None:
     tree, work = tmp_path / "tree", tmp_path / "wt"
     tree.mkdir()
     work.mkdir()
@@ -175,7 +178,7 @@ print(json.dumps({
     "worktree": outcome(lambda: open(os.path.join(work, "edit"), "w").write("landed")),
 }))
 """
-    result = report(run(launcher, policy(str(tree), writable=(str(work),)), python(check, tree, work)))
+    result = report(run(probe, policy(str(tree), writable=(str(work),)), python(check, tree, work)))
 
     assert result == {
         "create": "EROFS",
@@ -190,7 +193,7 @@ print(json.dumps({
     assert (work / "edit").read_text() == "landed"
 
 
-def test_the_app_is_out_of_reach(launcher: tuple[str, ...], tmp_path: Path) -> None:
+def test_the_app_is_out_of_reach(probe: BwrapProbe, tmp_path: Path) -> None:
     state = tmp_path / "app-state"
     state.mkdir()
     (state / "exit.json").write_text("{}")
@@ -225,8 +228,7 @@ print(json.dumps({
 """
     try:
         sandbox = policy(str(tree), masked=(str(tree / "secret"),), app_only=(str(state),))
-        assert sandbox.problems(usable_bwrap().version or (0, 0, 0)) == []
-        result = report(run(launcher, sandbox, python(check, app.pid, state, host_tmp.name, tree, tree / "secret")))
+        result = report(run(probe, sandbox, python(check, app.pid, state, host_tmp.name, tree, tree / "secret")))
     finally:
         os.unlink(host_tmp.name)
         app.kill()
@@ -248,7 +250,7 @@ print(json.dumps({
     }
 
 
-def test_loopback_is_shared_unless_the_sandbox_has_its_own_network(launcher: tuple[str, ...]) -> None:
+def test_loopback_is_shared_unless_the_sandbox_has_its_own_network(probe: BwrapProbe) -> None:
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
@@ -265,9 +267,9 @@ print(json.dumps({
 }))
 """
     try:
-        agent = report(run(launcher, policy(), python(check, port)))
+        agent = report(run(probe, policy(), python(check, port)))
         compile_shape = report(
-            run(launcher, policy(own_network=True, sys_paths=("/sys/devices/system/cpu",)), python(check, port))
+            run(probe, policy(own_network=True, sys_paths=("/sys/devices/system/cpu",)), python(check, port))
         )
     finally:
         listener.close()
@@ -282,7 +284,7 @@ print(json.dumps({
     }
 
 
-def test_the_command_gets_its_environment_its_marks_and_its_descriptors(launcher: tuple[str, ...]) -> None:
+def test_the_command_gets_its_environment_its_marks_and_its_descriptors(probe: BwrapProbe) -> None:
     read_end, write_end = os.pipe()
     check = """
 os.write(int(sys.argv[1]), b"through the pipe")
@@ -290,7 +292,7 @@ print(json.dumps(dict(os.environ)))
 """
     try:
         done = run(
-            launcher,
+            probe,
             policy(marks=(("HYPERLOOM_TEST_MARK", "m1"),)),
             python(check, write_end),
             env={"PATH": "/usr/bin:/bin", "GIVEN": "1"},
@@ -309,13 +311,13 @@ print(json.dumps(dict(os.environ)))
     assert piped == b"through the pipe"
 
 
-def test_the_status_tells_a_failed_setup_from_a_command_that_ran(launcher: tuple[str, ...], tmp_path: Path) -> None:
+def test_the_status_tells_a_failed_setup_from_a_command_that_ran(probe: BwrapProbe, tmp_path: Path) -> None:
     def launched(sandbox: BwrapPolicy, command: list[str]) -> tuple[subprocess.CompletedProcess[str], BwrapStatus]:
         read_end, write_end = os.pipe()
         with os.fdopen(read_end, "rb") as status:
             try:
                 done = subprocess.run(
-                    sandbox.argv(launcher, command, status_fd=write_end),
+                    sandbox.argv(probe, command, status_fd=write_end),
                     capture_output=True,
                     text=True,
                     timeout=TIMEOUT,
@@ -339,11 +341,11 @@ def test_the_status_tells_a_failed_setup_from_a_command_that_ran(launcher: tuple
 # ---- how it ends -------------------------------------------------------------------------------------------------
 
 
-def test_a_term_to_the_marked_processes_stops_the_agent_gracefully(launcher: tuple[str, ...]) -> None:
+def test_a_term_to_the_marked_processes_stops_the_agent_gracefully(probe: BwrapProbe) -> None:
     token = f"graceful-{os.getpid()}-{time.monotonic_ns()}"
     agent = subprocess.Popen(
         policy(marks=(("HYPERLOOM_TEST_MARK", token),)).argv(
-            launcher, ["sh", "-c", 'trap "echo TERM-HANDLED; exit 0" TERM; sleep 1000 & wait']
+            probe, ["sh", "-c", 'trap "echo TERM-HANDLED; exit 0" TERM; sleep 1000 & wait']
         ),
         stdout=subprocess.PIPE,
         text=True,
@@ -376,12 +378,12 @@ time.sleep(1000)
 
 @pytest.mark.parametrize("die_with_parent", [True, False])
 def test_the_sandbox_outlives_its_bwrap_process_unless_it_dies_with_its_parent(
-    launcher: tuple[str, ...], die_with_parent: bool
+    probe: BwrapProbe, die_with_parent: bool
 ) -> None:
     token = f"parent-{die_with_parent}-{os.getpid()}-{time.monotonic_ns()}"
     sandbox = policy(die_with_parent=die_with_parent, marks=(("HYPERLOOM_TEST_MARK", token),))
     read_end, write_end = os.pipe()
-    argv = sandbox.argv(launcher, ["sleep", "1000"], status_fd=write_end)
+    argv = sandbox.argv(probe, ["sleep", "1000"], status_fd=write_end)
     parent = subprocess.Popen(
         [sys.executable, "-c", PARENT, json.dumps(argv), str(write_end)],
         stdout=subprocess.PIPE,
@@ -422,9 +424,7 @@ def test_the_sandbox_outlives_its_bwrap_process_unless_it_dies_with_its_parent(
 # ---- one holder, many commands -----------------------------------------------------------------------------------
 
 
-def test_joined_commands_share_pids_tmp_and_dev_shm_but_not_sysv_ipc(
-    launcher: tuple[str, ...], scratch: Scratch
-) -> None:
+def test_joined_commands_share_pids_tmp_and_dev_shm_but_not_sysv_ipc(probe: BwrapProbe, scratch: Scratch) -> None:
     sleep = shutil.which("sleep", path="/usr/bin:/bin")
     key = 0x484C0000 + os.getpid() % 0xFFFF
     sandbox = policy(tmp=scratch.tmp, shm=scratch.shm)
@@ -450,20 +450,20 @@ print(json.dumps({{
     "killed": len(servers),
 }}))
 """
-    holder = Holder.start(launcher, sandbox)
+    holder = Holder.start(probe, sandbox)
     try:
         with holder.joined(sandbox) as joined:
             one = subprocess.Popen(
-                joined.argv(launcher, python(first)), stdout=subprocess.PIPE, text=True, pass_fds=joined.join
+                joined.argv(probe, python(first)), stdout=subprocess.PIPE, text=True, pass_fds=joined.join
             )
         first_line = one.stdout.readline() if one.stdout else ""
         assert json.loads(first_line) == {"sysv_own": True}
         with holder.joined(sandbox) as joined:
-            two = run(launcher, joined, python(second), pass_fds=joined.join)
+            two = run(probe, joined, python(second), pass_fds=joined.join)
         one_rc = one.wait(timeout=TIMEOUT)
         token = f"holder-{os.getpid()}-{time.monotonic_ns()}"
         with holder.joined(replace(sandbox, marks=(("HYPERLOOM_TEST_MARK", token),))) as joined:
-            three = subprocess.Popen(joined.argv(launcher, ["sleep", "3000"]), pass_fds=joined.join)
+            three = subprocess.Popen(joined.argv(probe, ["sleep", "3000"]), pass_fds=joined.join)
         started = wait_for(lambda: marked("HYPERLOOM_TEST_MARK", token))
     finally:
         holder.stop()
@@ -481,6 +481,67 @@ print(json.dumps({{
         pass
 
 
+def test_a_holder_whose_pid_1_ended_is_not_joined_before_bubblewrap_reaps_it(probe: BwrapProbe) -> None:
+    sandbox = policy()
+    holder = Holder.start(probe, sandbox)
+    try:
+        # bubblewrap, stopped, cannot reap the pid 1 killed here: that number still opens the dead holder's
+        # namespaces, so only the pidfd tells that it has ended.
+        os.kill(holder.process.pid, signal.SIGSTOP)
+        os.kill(holder.pid, signal.SIGKILL)
+        assert wait_for(lambda: _state(holder.pid) == "Z")
+        os.close(os.open(f"/proc/{holder.pid}/ns/user", os.O_RDONLY))
+        with pytest.raises(ProcessLookupError), holder.joined(sandbox):
+            pass
+    finally:
+        os.kill(holder.process.pid, signal.SIGCONT)
+        holder.stop()
+
+
+def _state(pid: int) -> str:
+    """The state letter of process ``pid`` (``Z`` for a zombie); empty when there is none."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return ""
+
+
+def test_a_symlink_a_launch_left_in_a_shared_scratch_does_not_carry_a_later_mount_out(
+    probe: BwrapProbe, scratch: Scratch
+) -> None:
+    # Two launches given the same Scratch, as a sandbox's commands are. The first leaves a link at /tmp/<carried> to a
+    # host directory, through bubblewrap's view of the old root; the second binds a file below /tmp. Before 0.12
+    # bubblewrap follows that link while it makes the mount point and creates the file on the host, so the adapter
+    # refuses the launch there; from 0.12 bubblewrap refuses to follow it.
+    host = Path(tempfile.mkdtemp(prefix="hl-host-", dir="/tmp"))
+    carried = Path(tempfile.mkdtemp(prefix="hl-carried-", dir="/tmp"))
+    (carried / "ca.pem").write_text("CA\n")
+    sandbox = policy(tmp=scratch.tmp, shm=scratch.shm)
+    plant = f"os.symlink({'/oldroot' + str(host)!r}, {str(carried)!r}); print(json.dumps(os.listdir('/tmp')))"
+    later = replace(sandbox, read_only=(*sandbox.read_only, str(carried / "ca.pem")))
+    refused: tuple[str, ...] = ()
+    done = None
+    try:
+        planted = report(run(probe, sandbox, python(plant)))
+        try:
+            done = run(probe, later, ["true"])
+        except BwrapPolicyError as refusal:
+            refused = refusal.problems
+        landed = os.listdir(host)
+    finally:
+        shutil.rmtree(host)
+        shutil.rmtree(carried)
+
+    assert planted == [carried.name]
+    assert landed == [], "a mount below the shared /tmp created a file on the host"
+    if (probe.version or (0, 0, 0)) < NESTED_SAFE:
+        assert refused == tuple(later.problems(probe.version or (0, 0, 0))) != ()
+        assert refused[0].startswith(f"{carried / 'ca.pem'} would be mounted below the agent-writable /tmp")
+    else:
+        assert done is not None and done.returncode == 1, done
+        assert done.stderr.startswith("bwrap: "), done.stderr
+
+
 def _remove_sysv_segment(key: int) -> None:
     """Remove the segment ``key`` where a command left it in this IPC namespace (only when IPC was not unshared)."""
     libc = ctypes.CDLL(None, use_errno=True)
@@ -489,12 +550,12 @@ def _remove_sysv_segment(key: int) -> None:
         libc.shmctl(segment, 0, None)  # IPC_RMID
 
 
-def test_a_holder_whose_setup_fails_says_why(launcher: tuple[str, ...], tmp_path: Path) -> None:
+def test_a_holder_whose_setup_fails_says_why(probe: BwrapProbe, tmp_path: Path) -> None:
     with pytest.raises(BwrapSetupError, match="Can't find source path"):
-        Holder.start(launcher, policy(writable=(str(tmp_path / "missing"),)))
+        Holder.start(probe, policy(writable=(str(tmp_path / "missing"),)))
 
 
-# ---- hosts the probe refuses, and the unbindable-root launcher ---------------------------------------------------
+# ---- hosts the probe refuses, and the unbindable-root prefix -----------------------------------------------------
 
 
 def test_the_probe_refuses_where_a_user_cannot_make_a_user_namespace(tmp_path: Path) -> None:
@@ -532,12 +593,23 @@ def test_the_probe_refuses_where_a_user_cannot_make_a_user_namespace(tmp_path: P
     assert "uid map: Permission denied" in done.stdout
 
 
-def test_a_launch_runs_under_unshare_mount(launcher: tuple[str, ...]) -> None:
+def test_a_launch_runs_under_unshare_mount(probe: BwrapProbe) -> None:
     unshare = shutil.which("unshare")
     if os.geteuid() != 0 or unshare is None:
         pytest.skip("unshare --mount needs CAP_SYS_ADMIN, which only root has here")
-    private = (unshare, "--mount", "--", launcher[-1])
+    private = replace(probe, prefix=(unshare, "--mount", "--"))
+    sandbox = policy()
 
-    done = run(private, policy(), python('print(json.dumps({"pid": os.getpid()}))'))
+    done = run(private, sandbox, python('print(json.dumps({"pid": os.getpid()}))'))
+    # unshare execs bubblewrap, so the holder's pid 1 is still the child of the process it started.
+    holder = Holder.start(private, sandbox)
+    try:
+        with holder.joined(sandbox) as joined:
+            pids = 'print(json.dumps(sorted(int(name) for name in os.listdir("/proc") if name.isdigit())))'
+            inside = run(private, joined, python(pids), pass_fds=joined.join)
+    finally:
+        holder.stop()
 
     assert report(done) == {"pid": 2}
+    seen = report(inside)
+    assert seen[:2] == [1, 2] and len(seen) > 2, seen  # the holder's pid 1 and its process, then this command's
