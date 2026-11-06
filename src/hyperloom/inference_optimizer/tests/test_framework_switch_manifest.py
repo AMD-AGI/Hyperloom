@@ -683,6 +683,21 @@ async def test_an_inert_keep_is_committed_so_the_next_revert_keeps_it(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_an_inert_keep_snapshots_the_source_it_committed(tmp_path, monkeypatch):
+    """The stack has to carry the committed code, or an export of the tree matches no snapshot."""
+    import json
+    from pathlib import Path
+
+    result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    assert result["status"] == "kept_inert"
+    snapshot = Path(result["source_snapshot"])
+    manifest = json.loads((snapshot / "manifest.json").read_text())
+    assert result["source_snapshot_complete"] is True
+    assert [record["rel"] for record in manifest["files"]] == ["src.py"]
+    assert (snapshot / "files" / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
 async def test_without_a_base_an_unprofitable_bundle_reverts_instead_of_keeping_inert(tmp_path, monkeypatch):
     """Before anything boots there is no base, so inertness cannot be shown and the code must not stay."""
     result, repo, _, legs = await _run_rewrite_integrate(
@@ -748,6 +763,10 @@ async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     assert [row["switch"] for row in state.authored_framework_levers] == ["HL_HOIST", "HL_CACHE"]
     assert all(row["default_on"] is False for row in state.authored_framework_levers)
     assert not state.current_best
+    # The committed code is stacked so an export of the tree has a snapshot to match.
+    assert [entry["variant_name"] for entry in state.optimization_stack] == ["t-spec-rw:inert"]
+    assert state.optimization_stack[0]["source_snapshot"] == result["source_snapshot"] != ""
+    assert outcome.changed
 
 
 # switch-off parity

@@ -15,9 +15,11 @@ import pytest
 
 from hyperloom.orchestrator.deployment.export import export_custom_inference
 from hyperloom.orchestrator.framework.optimization_scope import (
+    OptimizationScope,
     aoti_config,
     check_patch_scope,
     optimization_file,
+    optimization_scope,
     scope_instructions,
 )
 
@@ -50,14 +52,13 @@ def accept_source(session, hook, stack_entry_id="accepted0"):
     }
 
 
-@pytest.fixture
-def workload(tmp_path, monkeypatch):
+def _make_workload(tmp_path, monkeypatch, module: str, function: str, scope: dict):
     root, bench, session = [tmp_path / name for name in ("model", "bench", "session")]
     for directory in (root, bench, session):
         directory.mkdir()
-    hook = root / "hyperloom_optimize.py"
-    hook.write_text("def hyperloom_optimize(model):\n    return model\n")
-    (bench / "optimization_scope.json").write_text(json.dumps({"schema_version": 1, "file": str(hook)}))
+    hook = root / module
+    hook.write_text(f"def {function}(model):\n    return model\n")
+    (bench / "optimization_scope.json").write_text(json.dumps({**scope, "file": str(hook)}))
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(bench))
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(root))
     state = {
@@ -70,13 +71,24 @@ def workload(tmp_path, monkeypatch):
     return root, hook, session, state
 
 
+@pytest.fixture
+def workload(tmp_path, monkeypatch):
+    return _make_workload(tmp_path, monkeypatch, "hyperloom_optimize.py", "hyperloom_optimize", {"schema_version": 1})
+
+
+@pytest.fixture
+def named_workload(tmp_path, monkeypatch):
+    scope = {"schema_version": 2, "function": "apply"}
+    return _make_workload(tmp_path, monkeypatch, "encoder_opt.py", "apply", scope)
+
+
 def patch(name):
     return f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n"
 
 
 def test_scope_allows_hook_only(workload, tmp_path):
     root, hook, _, _ = workload
-    assert optimization_file() == hook
+    assert optimization_scope() == OptimizationScope(file=hook, function="hyperloom_optimize")
     check_patch_scope(root, [patch(hook.name)])
     for name in ("benchmark.py", "extra.py", "../transformers/model.py"):
         with pytest.raises(ValueError):
@@ -235,7 +247,7 @@ def test_launch_scope_check_accepts_the_declared_hook(workload, tmp_path):
     from hyperloom.orchestrator.actions.executors.bypass_scriptable import enforce_custom_scope
 
     root, hook, _, _ = workload
-    assert optimization_file() == hook
+    assert optimization_scope() == OptimizationScope(file=hook, function="hyperloom_optimize")
     enforce_custom_scope("custom")
     enforce_custom_scope("sglang")
 
@@ -281,6 +293,62 @@ def test_export_contains_only_module_and_metadata(workload):
     assert (session / "deployment" / hook.name).read_bytes() == hook.read_bytes()
 
 
+def test_named_module_and_function_export(named_workload):
+    _, hook, session, state = named_workload
+    state["current_best"]["extra_envs"] = {"HL_FUSE_ATTN": "1"}
+    assert optimization_scope() == OptimizationScope(file=hook, function="apply")
+    assert "define apply(model)" in scope_instructions()
+
+    result = export_custom_inference(session, state)
+
+    assert result["status"] == "exported"
+    assert result["entrypoint"] == "encoder_opt.apply"
+    assert {p.name for p in (session / "deployment").iterdir()} == {"encoder_opt.py"}
+    assert "HL_FUSE_ATTN" in (session / "deployment" / "encoder_opt.py").read_text()
+
+
+def test_export_refuses_a_module_without_its_declared_function(named_workload):
+    _, hook, session, state = named_workload
+    hook.write_text("def hyperloom_optimize(model):\n    return model\n")
+    state["optimization_stack"] = [accept_source(session, hook, "renamed")]
+    result = export_custom_inference(session, state)
+    assert result["status"] != "exported"
+    assert not (session / "deployment" / hook.name).exists()
+
+
+def test_a_declaration_may_name_a_function_and_declare_an_export(named_workload):
+    """Both schema-2 keys are independent: either, both or neither may appear."""
+    _, hook, _, state = named_workload
+    bench = Path(state["bypass_scripts_dir"])
+    scope = {"schema_version": 2, "file": str(hook), "function": "apply", "aoti": {"enabled": True}}
+    (bench / "optimization_scope.json").write_text(json.dumps(scope))
+
+    assert optimization_scope() == OptimizationScope(file=hook, function="apply")
+    assert aoti_config().enabled
+    assert "define apply(model)" in scope_instructions()
+
+
+def test_a_declaration_without_a_function_keeps_the_original_name(workload):
+    """An aoti-only declaration predates the configurable entry function."""
+    _, hook, _, state = workload
+    declare(Path(state["bypass_scripts_dir"]), hook, {"enabled": True})
+
+    assert optimization_scope() == OptimizationScope(file=hook, function="hyperloom_optimize")
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"schema_version": 2, "function": "not an identifier"},
+        {"schema_version": 3, "function": "apply"},
+    ],
+)
+def test_scope_refuses_an_invalid_declaration(tmp_path, monkeypatch, scope):
+    _make_workload(tmp_path, monkeypatch, "encoder_opt.py", "apply", scope)
+    with pytest.raises(ValueError, match="Invalid"):
+        optimization_scope()
+
+
 def test_dirty_source_does_not_export_as_accepted(workload):
     _, hook, session, state = workload
     hook.write_text("def hyperloom_optimize(model):\n    return None\n")
@@ -304,7 +372,7 @@ def test_export_bakes_accepted_switches_into_module(workload):
     assert result["settings"]["base_sha256"] == hashlib.sha256(hook.read_bytes()).hexdigest()
 
 
-def test_export_reports_untranslatable_settings(workload):
+def test_export_ships_settings_read_at_gpu_init(workload):
     _, hook, session, state = workload
     state["current_best"]["extra_envs"] = {"PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True"}
 
@@ -312,14 +380,29 @@ def test_export_reports_untranslatable_settings(workload):
 
     exported_text = (session / "deployment" / hook.name).read_text()
     assert result["status"] == "exported"
+    assert result["settings"]["applied_env"] == {"PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True"}
+    assert result["settings"]["untranslated"] == []
+    assert "PYTORCH_HIP_ALLOC_CONF" in exported_text
+    assert "is_initialized()" in exported_text
+    assert result["warnings"] == []
+
+
+def test_export_reports_untranslatable_settings(workload):
+    _, hook, session, state = workload
+    state["current_best"]["extra_envs"] = {"PYTORCH_TUNABLEOP_FILENAME": "/scratch/run/tuned.csv"}
+
+    result = export_custom_inference(session, state)
+
+    exported_text = (session / "deployment" / hook.name).read_text()
+    assert result["status"] == "exported"
     assert {
-        "name": "PYTORCH_HIP_ALLOC_CONF",
-        "value": "expandable_segments:True",
-        "reason": "pre_context_init",
+        "name": "PYTORCH_TUNABLEOP_FILENAME",
+        "value": "/scratch/run/tuned.csv",
+        "reason": "unportable_absolute_path",
     } in result["settings"]["untranslated"]
-    assert "PYTORCH_HIP_ALLOC_CONF" not in exported_text
+    assert "PYTORCH_TUNABLEOP_FILENAME" not in exported_text
     assert len(result["warnings"]) == 1
-    assert "PYTORCH_HIP_ALLOC_CONF" in result["warnings"][0]
+    assert "PYTORCH_TUNABLEOP_FILENAME" in result["warnings"][0]
 
 
 def test_export_excludes_benchmark_control_envs(workload):
@@ -436,7 +519,7 @@ def test_scope_refuses_symlink(workload, tmp_path):
     hook.unlink()
     hook.symlink_to(other)
     with pytest.raises(ValueError, match="regular"):
-        optimization_file()
+        optimization_scope()
 
 
 def test_specialist_inherits_scope_and_writable_cli_config(workload, monkeypatch):
@@ -794,6 +877,77 @@ def test_first_export_is_stacked_although_slower_than_the_baseline(tmp_path):
     assert coord.writeback.lift_to_current_best("integrate_patch", 850.0, _slower_winner(keep_reason="export_landed"))
     assert coord.shared_state.current_best["tput"] == 850.0
     assert [entry["variant_name"] for entry in coord.shared_state.optimization_stack] == ["aoti-export"]
+
+
+def _snapshot(root, name, content):
+    import json
+
+    snapshot = root / name
+    (snapshot / "files").mkdir(parents=True)
+    (snapshot / "files" / "hook.py").write_text(content)
+    (snapshot / "manifest.json").write_text(
+        json.dumps({"complete": True, "files": [{"rel": "hook.py", "op": "upsert"}]})
+    )
+    return str(snapshot)
+
+
+def _inert_result(snapshot):
+    return {
+        "status": "kept_inert",
+        "specialist_task_id": "spec",
+        "workspace": "/w",
+        "source_snapshot": snapshot,
+        "source_manifest": snapshot + "/manifest.json",
+        "source_snapshot_complete": True,
+        "target_files": ["hook.py"],
+    }
+
+
+def test_an_inert_keep_is_stacked_without_lifting_current_best(tmp_path):
+    coord = _lift_coordinator(tmp_path)
+    assert coord.writeback.lift_to_current_best(
+        "integrate_patch",
+        1100.0,
+        {
+            "name": "kept",
+            "extra_server_args": "",
+            "output_throughput": 1100.0,
+            "source_snapshot": _snapshot(tmp_path, "keep", "v1\n"),
+        },
+    )
+    before = dict(coord.shared_state.current_best)
+
+    assert coord.writeback._record_inert_source_layer(_inert_result(_snapshot(tmp_path, "inert", "v2\n")))
+
+    stack = coord.shared_state.optimization_stack
+    assert [entry["variant_name"] for entry in stack] == ["kept", "spec:inert"]
+    assert stack[-1]["source_snapshot"].endswith("inert") and stack[-1]["attribution_eligible"] is False
+    assert coord.shared_state.current_best["tput"] == before["tput"] == stack[-1]["tput"]
+    assert coord.shared_state.current_best["extra_envs"] == before["extra_envs"]
+    assert len(coord.shared_state.gain_per_stack_entry) == len(stack)
+
+
+def test_an_inert_keep_without_a_snapshot_adds_nothing(tmp_path):
+    coord = _lift_coordinator(tmp_path)
+
+    assert not coord.writeback._record_inert_source_layer({"status": "kept_inert", "source_snapshot": ""})
+    assert not coord.shared_state.optimization_stack
+
+
+def test_export_accepts_a_tree_the_inert_keep_changed_only_once_it_is_stacked(tmp_path):
+    """A KEEP, then an inert KEEP that rewrites the same file: the tree matches the later snapshot only."""
+    from hyperloom.orchestrator.deployment.export import _verify_accepted_source
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "hook.py").write_text("v2\n")
+    keep = {"source_snapshot": _snapshot(tmp_path, "keep", "v1\n")}
+
+    with pytest.raises(ValueError, match="differs from the accepted stack"):
+        _verify_accepted_source({"optimization_stack": [keep]}, tree)
+
+    inert = {"source_snapshot": _snapshot(tmp_path, "inert", "v2\n")}
+    assert _verify_accepted_source({"optimization_stack": [keep, inert]}, tree) == {"hook.py"}
 
 
 def test_a_slower_winner_without_the_export_reason_is_still_held(tmp_path):

@@ -9,6 +9,8 @@ import ast
 import hashlib
 from pathlib import Path
 
+from hyperloom.orchestrator.framework.optimization_scope import OptimizationScope
+
 from .settings_prelude import apply_settings_prelude, plan_settings
 
 
@@ -69,13 +71,14 @@ def module_uses_aoti(path: Path) -> bool:
         return False
 
 
-def build_single_file(state: dict, root: Path, hook: Path, dest: Path) -> dict:
+def build_single_file(state: dict, root: Path, scope: OptimizationScope, dest: Path) -> dict:
     """Capture a clean, accepted optimization module without wrapping its API.
 
     The module is read from disk: the caller (``export._verify_accepted_source``) has
     already proven it byte-identical to the complete KEEP-time stack snapshots, which
     does not require the operator to keep the file in a repository.
     """
+    hook = scope.file
     if hook.parent != root.resolve() or not state.get("current_best"):
         raise ValueError("No accepted single-file workload to export")
     content = hook.read_bytes()
@@ -83,15 +86,15 @@ def build_single_file(state: dict, root: Path, hook: Path, dest: Path) -> dict:
         tree = ast.parse(content)
     except SyntaxError as exc:
         raise ValueError("Optimization module is not valid Python") from exc
-    if not any(isinstance(node, ast.FunctionDef) and node.name == "hyperloom_optimize" for node in tree.body):
-        raise ValueError("Module must define hyperloom_optimize(model)")
+    if not any(isinstance(node, ast.FunctionDef) and node.name == scope.function for node in tree.body):
+        raise ValueError(f"Module must define {scope.function}(model)")
     sibling = _sibling_import(tree, root, hook)
     if sibling is not None:
         raise ValueError(f"Optimization module imports {sibling!r} from beside itself; the export ships one file")
     base_digest = hashlib.sha256(content).hexdigest()
     best = state.get("current_best") or {}
     plan = plan_settings(best.get("extra_envs"), unset_envs=best.get("unset_envs") or ())
-    content = apply_settings_prelude(content, plan)
+    content = apply_settings_prelude(content, plan, scope.function)
     (dest / hook.name).write_bytes(content)
     warnings = [f"settings_not_carried: {entry['name']} ({entry['reason']})" for entry in plan.untranslated]
     usage = (
@@ -104,7 +107,7 @@ def build_single_file(state: dict, root: Path, hook: Path, dest: Path) -> dict:
         "status": "exported",
         "reasons": [],
         "kind": "single_file",
-        "entrypoint": "hyperloom_optimize.hyperloom_optimize",
+        "entrypoint": f"{hook.stem}.{scope.function}",
         "files": {hook.name: hashlib.sha256(content).hexdigest()},
         "settings": {
             "source": "current_best.extra_envs",
