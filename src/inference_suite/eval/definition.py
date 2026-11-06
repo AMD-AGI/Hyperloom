@@ -32,6 +32,7 @@ _NATIVE_CONTEXT_KEYS = ("max_position_embeddings", "max_sequence_length", "seq_l
 #: Where a model ships its chat template, newest convention first.
 _CHAT_TEMPLATE_FILES = ("chat_template.jinja", "chat_template.json")
 _MODEL_CLASS_FILE = Path(__file__).with_name("model.py")
+_UTF8 = "utf-8"
 
 
 @dataclass(frozen=True)
@@ -68,9 +69,9 @@ class EvalPlan:
     def write(self, layout: RunLayout, request_file: Path) -> None:
         """Write the definition into the run_dir's eval directory and the request to ``request_file``."""
         layout.eval_dir.mkdir(parents=True, exist_ok=True)
-        layout.eval_definition.write_text(_canonical(self.definition.to_document()) + "\n", encoding="utf-8")
+        layout.eval_definition.write_text(_canonical(self.definition.to_document()) + "\n", encoding=_UTF8)
         request_file.parent.mkdir(parents=True, exist_ok=True)
-        request_file.write_text(_canonical(self.request.to_document()) + "\n", encoding="utf-8")
+        request_file.write_text(_canonical(self.request.to_document()) + "\n", encoding=_UTF8)
 
 
 def _canonical(document: object) -> str:
@@ -88,7 +89,7 @@ def definition_digest(definition: EvalDefinition) -> str:
 
 def _read_json(path: Path) -> dict[str, object]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding=_UTF8))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}

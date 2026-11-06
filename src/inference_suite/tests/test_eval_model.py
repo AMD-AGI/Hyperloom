@@ -24,7 +24,7 @@ from inference_suite.eval.model import (
     generations,
     model_terminators,
 )
-from inference_suite.eval.run import MODEL_CLASS, MODEL_NAME
+from inference_suite.eval.run import MODEL_CLASS, MODEL_NAME, EvalRequest, model_args
 
 
 def _response(*finishes: str, content: str | None = "x") -> dict[str, object]:
@@ -87,18 +87,24 @@ def test_the_task_stops_keep_their_place_ahead_of_the_model_terminators():
 
 def _model(tmp_path: Path, **changes) -> SuiteChatCompletion:
     settings = {
+        "task_yaml": str(tmp_path / "gsm8k.yaml"),
         "base_url": "http://127.0.0.1:1/v1/chat/completions",
-        "model": "glm",
-        "num_concurrent": 2,
-        "tokenized_requests": False,
+        "served_model_name": "glm",
+        "output_dir": str(tmp_path / "eval"),
+        "probe_file": str(tmp_path / "eval" / "hyperloom_eval_probe.json"),
+        "concurrency": 2,
         "max_length": 65536,
+        "max_tokens": 4096,
+        "num_fewshot": 0,
         "probe_enabled": True,
         "probe_min_samples": 2,
         "probe_length_ratio": 0.5,
-        "probe_file": str(tmp_path / "eval" / "hyperloom_eval_probe.json"),
         **changes,
     }
-    return SuiteChatCompletion(**settings)
+    request = EvalRequest(**settings)
+    request_file = tmp_path / "request.json"
+    request_file.write_text(json.dumps(request.to_document()))
+    return SuiteChatCompletion.create_from_arg_string(model_args(request, str(request_file)))
 
 
 def test_the_name_the_process_registers_resolves_to_the_model_class():
@@ -124,7 +130,7 @@ def test_a_tripped_probe_answers_the_sequential_path_empty_without_a_request(tmp
         raise AssertionError("a request was sent after the probe tripped")
 
     monkeypatch.setattr(LocalChatCompletion, "model_call", unreachable)
-    model = _model(tmp_path, num_concurrent=1)
+    model = _model(tmp_path, concurrency=1)
     model.parse_generations(outputs=[_response("length", "length")])
 
     assert model.parse_generations(outputs=model.model_call([["m"]], generate=True, gen_kwargs={})) == [""]

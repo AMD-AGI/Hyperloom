@@ -3,7 +3,8 @@
 
 """The lm-eval model an eval scores through: chat completions against the served model.
 
-Imported only inside the eval process, so it builds on lm-eval and the standard library alone. Over lm-eval's
+Imported only inside the eval process, so it builds on lm-eval, the standard library and the eval request alone. It
+reads its probe thresholds, probe file and model directory from the request file. Over lm-eval's
 ``LocalChatCompletion`` it:
 
 - takes a reasoning model's ``reasoning_content`` when ``content`` is empty, and sends chat history without lm-eval's
@@ -27,6 +28,8 @@ from typing import Any
 
 from lm_eval.models.api_models import JsonChatStr
 from lm_eval.models.openai_completions import LocalChatCompletion
+
+from inference_suite.eval.run import read_request
 
 #: Stop strings the chat completions API takes at most.
 MAX_STOP_STRINGS = 4
@@ -156,22 +159,16 @@ def bounded_payload(payload: dict[str, Any], stops: list[str], stop_ids: list[in
 class SuiteChatCompletion(LocalChatCompletion):
     """``local-chat-completions`` with the suite's probe and terminators; see the module docstring."""
 
-    def __init__(
-        self,
-        *,
-        probe_enabled: bool,
-        probe_min_samples: int,
-        probe_length_ratio: float,
-        probe_file: str,
-        model_dir: str | None = None,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, *, request: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        settings = read_request(request)
         self._probe = TruncationProbe(
-            enabled=probe_enabled, min_samples=probe_min_samples, length_ratio=probe_length_ratio
+            enabled=settings.probe_enabled,
+            min_samples=settings.probe_min_samples,
+            length_ratio=settings.probe_length_ratio,
         )
-        self._probe_file = probe_file
-        self._stops, self._stop_ids = model_terminators(model_dir)
+        self._probe_file = settings.probe_file
+        self._stops, self._stop_ids = model_terminators(settings.model_dir)
         # asyncio.run gives each batch a fresh loop, and a semaphore binds to the first loop that awaits it.
         self._gate: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
         atexit.register(self._write_probe)

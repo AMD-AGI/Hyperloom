@@ -31,6 +31,7 @@ _REQUEST = EvalRequest(
     limit=200,
     model_dir="/models/GLM-5.3",
 )
+_REQUEST_FILE = "/s/runs/r1/eval/request.json"
 
 
 def test_round_trip_through_json():
@@ -66,7 +67,7 @@ def _model_args(argv: list[str]) -> dict[str, str]:
 
 
 def test_lm_eval_runs_greedy_chat_completions_with_the_request_budget():
-    argv = lm_eval_argv(_REQUEST)
+    argv = lm_eval_argv(_REQUEST, _REQUEST_FILE)
 
     assert argv[0] == "run"
     assert _option(argv, "--model") == MODEL_NAME
@@ -77,27 +78,32 @@ def test_lm_eval_runs_greedy_chat_completions_with_the_request_budget():
     assert _option(argv, "--gen_kwargs") == "max_tokens=4096,temperature=0,top_p=1"
 
 
-def test_the_model_args_carry_the_probe_and_the_served_context():
-    args = _model_args(lm_eval_argv(_REQUEST))
+def test_the_model_args_carry_the_served_context_and_the_request_file():
+    args = _model_args(lm_eval_argv(_REQUEST, _REQUEST_FILE))
 
     assert args["max_length"] == "65536"
     assert args["num_concurrent"] == "32"
     assert args["tokenized_requests"] == "False"
-    assert (args["probe_enabled"], args["probe_min_samples"], args["probe_length_ratio"]) == ("True", "48", "0.6")
-    assert args["probe_file"] == _REQUEST.probe_file
-    assert args["model_dir"] == _REQUEST.model_dir
+    assert args["request"] == _REQUEST_FILE
+    assert not {"probe_enabled", "probe_file", "model_dir"} & set(args)
 
 
-def test_a_request_without_model_dir_or_limit_leaves_them_out():
-    argv = lm_eval_argv(replace(_REQUEST, model_dir=None, limit=None))
+def test_the_request_file_reads_back_as_the_request(tmp_path: Path):
+    request_file = tmp_path / "request.json"
+    request_file.write_text(json.dumps(_REQUEST.to_document()))
+
+    assert eval_run.read_request(str(request_file)) == _REQUEST
+
+
+def test_a_request_without_a_limit_leaves_it_out():
+    argv = lm_eval_argv(replace(_REQUEST, limit=None), _REQUEST_FILE)
 
     assert "--limit" not in argv
-    assert "model_dir" not in _model_args(argv)
 
 
 def test_a_value_lm_eval_would_split_is_refused():
-    with pytest.raises(EvalRequestError, match="model_dir"):
-        lm_eval_argv(replace(_REQUEST, model_dir="/models/a,b"))
+    with pytest.raises(EvalRequestError, match="request"):
+        lm_eval_argv(_REQUEST, "/s/runs/a,b/request.json")
 
 
 def test_main_takes_exactly_one_request_file():
