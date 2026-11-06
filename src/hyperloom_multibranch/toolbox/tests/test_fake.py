@@ -567,6 +567,36 @@ async def test_a_test_cancelled_while_its_branch_is_withdrawn_is_withdrawn_once(
     assert [w.request_id for w in book.of("withdrawal")] == [request_id]
 
 
+class HeldResults(Blackboard):
+    """Holds each result write until ``release`` is set; ``holding`` is set once one waits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.holding, self.release = asyncio.Event(), asyncio.Event()
+
+    async def write_result(self, result: TestResult) -> None:
+        self.holding.set()
+        await self.release.wait()
+        await super().write_result(result)
+
+
+async def test_cancel_of_a_test_whose_result_is_being_written_lets_the_write_finish() -> None:
+    """The result is logged, its blackboard write is under way: the cancel leaves that write to land now, not at a
+    later tick after the write was cut off."""
+    book = HeldResults()
+    box = _toolbox(blackboard=book)
+    request_id = await box.submit_test(_request())
+    box.executor.gate.set()
+    await asyncio.wait_for(book.holding.wait(), timeout=5)
+
+    assert await box.cancel(request_id) is CancelOutcome.FINISHED
+    book.release.set()
+
+    await _until(lambda: bool(book.of("result")))
+    assert [r.request_id for r in book.of("result")] == [request_id] and book.of("withdrawal") == []
+    assert box.withdrawn == {}
+
+
 class LostClaims:
     """Claims taken by another branch by the time the toolbox hands them to a test."""
 
