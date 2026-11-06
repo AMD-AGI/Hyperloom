@@ -1098,7 +1098,7 @@ def _record_root(state_dir: Path, root: Path) -> None:
 
 
 def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
-    """End a run no session ran in for good: a start of it again would meet what kept this one from running."""
+    """End a run that cannot be served for good: a start of it again would meet what kept this one from running."""
 
     print(f"{PROG}: hosted run: {exc}", file=sys.stderr)
     write_final_exit(state_dir, HostedExit(returncode, error=str(exc)))
