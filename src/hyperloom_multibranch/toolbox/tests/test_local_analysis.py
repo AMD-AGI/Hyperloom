@@ -24,7 +24,7 @@ from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected, WorkloadKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.acceptance import check_kind
-from hyperloom_multibranch.toolbox.fake import FakeToolbox
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.local_hosted import (
     LocalHostedToolbox,
     LocalOptions,
