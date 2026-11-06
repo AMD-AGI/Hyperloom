@@ -20,7 +20,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
-from hyperloom_common.contract_fields import ContractFields
+from hyperloom_common.contract_fields import ContractFields, field_names
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
 from inference_suite.golden import golden_owned_settings
 
@@ -30,6 +30,9 @@ DEFAULT_THINKING_MODE = "thinking_on"
 #: The frameworks InferenceX and the cookbooks publish AgentX launches for.
 AGENTX_FRAMEWORKS = frozenset({"sglang", "vllm"})
 
+#: The field every launch layer keeps its argv in.
+_ARGS = "args"
+_RUNNER_OWNED_ENV = "the runner-owned env"
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _OPTION = re.compile(r"--[A-Za-z0-9][\w.-]*")
@@ -140,8 +143,7 @@ class LaunchQuery:
 
     @classmethod
     def from_document(cls, document: object) -> LaunchQuery:
-        keys = ("model_id", "framework", "board", "workload", "concurrencies", "tp", "ep", "isl", "osl")
-        fields = _FIELDS.known(document, keys, "a launch query")
+        fields = _FIELDS.known(document, field_names(cls), "a launch query")
         return cls(
             model_id=fields.get("model_id"),
             framework=fields.get("framework"),
@@ -173,7 +175,7 @@ class SourceApi:
 
     @classmethod
     def from_document(cls, document: object) -> SourceApi:
-        fields = _FIELDS.known(document, ("url", "response_sha256", "fetched_unix"), "a source API")
+        fields = _FIELDS.known(document, field_names(cls), "a source API")
         return cls(fields.get("url"), fields.get("response_sha256"), fields.get("fetched_unix"))
 
 
@@ -226,8 +228,7 @@ class LaunchSource:
 
     @classmethod
     def from_document(cls, document: object) -> LaunchSource:
-        keys = ("kind", "repo", "commit", "api", "path", "entry", "locator", "strategy", "files", "tools")
-        fields = _FIELDS.known(document, keys, "a launch source")
+        fields = _FIELDS.known(document, field_names(cls), "a launch source")
         api = fields.get("api")
         return cls(
             kind=fields.get("kind"),
@@ -259,7 +260,7 @@ class LaunchModel:
 
     @classmethod
     def from_document(cls, document: object) -> LaunchModel:
-        fields = _FIELDS.known(document, ("id", "path"), "the model")
+        fields = _FIELDS.known(document, field_names(cls), "the model")
         return cls(fields.get("id"), fields.get("path"))
 
 
@@ -277,7 +278,7 @@ class Topology:
 
     @classmethod
     def from_document(cls, document: object) -> Topology:
-        fields = _FIELDS.known(document, ("tp", "ep"), "a topology")
+        fields = _FIELDS.known(document, field_names(cls), "a topology")
         return cls(fields.get("tp"), fields.get("ep"))
 
 
@@ -296,7 +297,7 @@ class PointAlternative:
 
     @classmethod
     def from_document(cls, document: object) -> PointAlternative:
-        fields = _FIELDS.known(document, ("topology", "locator"), "a point alternative")
+        fields = _FIELDS.known(document, field_names(cls), "a point alternative")
         return cls(Topology.from_document(fields.get("topology")), fields.get("locator"))
 
 
@@ -321,7 +322,7 @@ class LaunchPoint:
 
     @classmethod
     def from_document(cls, document: object) -> LaunchPoint:
-        fields = _FIELDS.known(document, ("conc", "exact", "alternatives"), "a launch point")
+        fields = _FIELDS.known(document, field_names(cls), "a launch point")
         alternatives = _FIELDS.items(fields.get("alternatives", ()), "the point's alternatives")
         return cls(fields.get("conc"), fields.get("exact"), tuple(map(PointAlternative.from_document, alternatives)))
 
@@ -365,7 +366,7 @@ class ImageFacts:
 
     @classmethod
     def from_document(cls, document: object) -> ImageFacts:
-        keys = ("run", "recipe", "framework_version", "version_basis", "assumed_release")
+        keys = field_names(cls)
         fields = _FIELDS.known(document, keys, "the image facts")
         return cls(*(fields.get(key) for key in keys))
 
@@ -429,7 +430,7 @@ class GoldenCurve:
 
     @classmethod
     def from_document(cls, document: object) -> GoldenCurve:
-        keys = ("repo", "commit", "path", "sha256")
+        keys = field_names(cls)
         fields = _FIELDS.known(document, keys, "a golden curve")
         return cls(*(fields.get(key) for key in keys))
 
@@ -459,7 +460,7 @@ class GoldenAcceptance:
             _FIELDS.text(getattr(self, name), f"the golden {name}")
         _FIELDS.optional_text(self.draft_model, "the golden draft model")
         _FIELDS.integer(self.draft_length, "the golden draft length", minimum=1)
-        object.__setattr__(self, "args", _argv(self.args, "the golden args"))
+        object.__setattr__(self, _ARGS, _argv(self.args, "the golden args"))
         _env_names(list(_FIELDS.string_map(self.env, "the golden env")), "the golden env")
 
     def to_document(self) -> dict[str, object]:
@@ -478,19 +479,7 @@ class GoldenAcceptance:
 
     @classmethod
     def from_document(cls, document: object) -> GoldenAcceptance:
-        keys = (
-            "value",
-            "method",
-            "token_mode",
-            "thinking_mode",
-            "spec_method",
-            "draft_model",
-            "draft_length",
-            "curve",
-            "args",
-            "env",
-        )
-        fields = _FIELDS.known(document, keys, "a golden acceptance")
+        fields = _FIELDS.known(document, field_names(cls), "a golden acceptance")
         return cls(
             value=fields.get("value"),
             method=fields.get("method"),
@@ -520,7 +509,7 @@ class ClientLaunch:
     def __post_init__(self) -> None:
         _FIELDS.text(self.tool, "the client tool")
         _FIELDS.matching(_COMMIT, self.commit, "the client commit")
-        object.__setattr__(self, "args", _argv(self.args, "the client args"))
+        object.__setattr__(self, _ARGS, _argv(self.args, "the client args"))
         _env_names(list(_FIELDS.string_map(self.env, "the client env")), "the client env")
 
     @property
@@ -536,7 +525,7 @@ class ClientLaunch:
     @classmethod
     def from_document(cls, document: object) -> ClientLaunch:
         """The client a document records; a ``command`` other than the one its tool and args render is refused."""
-        fields = _FIELDS.known(document, ("tool", "commit", "args", "env", "command"), "a client launch")
+        fields = _FIELDS.known(document, (*field_names(cls), "command"), "a client launch")
         client = cls(
             tool=fields.get("tool"),
             commit=fields.get("commit"),
@@ -559,7 +548,7 @@ class RunnerOwned:
     def __post_init__(self) -> None:
         for name in _FIELDS.string_tuple(self.args, "the runner-owned args"):
             _FIELDS.matching(_OPTION, name, "a runner-owned flag")
-        _env_names(_FIELDS.string_tuple(self.env, "the runner-owned env"), "the runner-owned env")
+        _env_names(_FIELDS.string_tuple(self.env, _RUNNER_OWNED_ENV), _RUNNER_OWNED_ENV)
 
     def flags(self) -> frozenset[str]:
         """The owned flags as :func:`~inference_suite.argv.flag_occurrences` names them."""
@@ -570,33 +559,13 @@ class RunnerOwned:
 
     @classmethod
     def from_document(cls, document: object) -> RunnerOwned:
-        fields = _FIELDS.known(document, ("args", "env"), "the runner-owned keys")
+        fields = _FIELDS.known(document, field_names(cls), "the runner-owned keys")
         return cls(
             _FIELDS.strings(fields.get("args", ()), "the runner-owned args"),
-            _FIELDS.strings(fields.get("env", ()), "the runner-owned env"),
+            _FIELDS.strings(fields.get("env", ()), _RUNNER_OWNED_ENV),
         )
 
 
-_DOCUMENT_KEYS = (
-    "schema",
-    "query",
-    "source",
-    "point",
-    "image",
-    "framework",
-    "entrypoint",
-    "model",
-    "topology",
-    "args",
-    "env",
-    "golden_al",
-    "client",
-    "runner_owned",
-    "stripped",
-    "warnings",
-    "resolved_unix",
-    "digest",
-)
 _DIGEST_KEYS = ("schema", "framework", "entrypoint", "model", "topology", "args", "env", "golden_al", "client")
 
 
@@ -629,7 +598,7 @@ class BaseLaunch:
         _FIELDS.text(self.framework, "the framework")
         if not _FIELDS.string_tuple(self.entrypoint, "the entrypoint") or not all(self.entrypoint):
             raise BaseLaunchError(f"the entrypoint must be non-empty words, got {self.entrypoint!r}")
-        object.__setattr__(self, "args", _argv(self.args, "the args"))
+        object.__setattr__(self, _ARGS, _argv(self.args, "the args"))
         object.__setattr__(self, "env", _env(self.env, "the env"))
         _FIELDS.string_tuple(self.stripped, "the stripped flags")
         _FIELDS.string_tuple(self.warnings, "the warnings")
@@ -706,7 +675,7 @@ class BaseLaunch:
     def from_document(cls, document: object) -> BaseLaunch:
         """The base a document records; a document whose digest does not match its content is refused."""
 
-        fields = _FIELDS.known(document, _DOCUMENT_KEYS, "a base launch")
+        fields = _FIELDS.known(document, ("schema", *field_names(cls), "digest"), "a base launch")
         if fields.get("schema") != BASE_LAUNCH_SCHEMA:
             raise BaseLaunchError(f"base launch schema {fields.get('schema')!r} is not {BASE_LAUNCH_SCHEMA}")
         golden = fields.get("golden_al")

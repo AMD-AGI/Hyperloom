@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
-from hyperloom_common.contract_fields import ContractFields
+from hyperloom_common.contract_fields import ContractFields, field_names
 from inference_suite.contracts.base_launch import (
     _ENV_NAME,
     DIGEST_PREFIX,
@@ -110,7 +110,7 @@ class LaunchArg:
 
     @classmethod
     def from_document(cls, document: object) -> LaunchArg:
-        fields = _FIELDS.known(document, ("flag", "values", "source", "overrode"), "a launch arg")
+        fields = _FIELDS.known(document, field_names(cls), "a launch arg")
         return cls(
             flag=fields.get("flag"),
             values=_FIELDS.strings(fields.get("values", ()), "a launch arg's values"),
@@ -145,7 +145,7 @@ class LaunchEnv:
 
     @classmethod
     def from_document(cls, document: object) -> LaunchEnv:
-        fields = _FIELDS.known(document, ("name", "value", "source", "overrode"), "a launch env")
+        fields = _FIELDS.known(document, field_names(cls), "a launch env")
         return cls(
             name=fields.get("name"),
             value=_env_value(fields.get("value"), f"the launch env {fields.get('name')}"),
@@ -171,7 +171,7 @@ class Removal:
 
     @classmethod
     def from_document(cls, document: object) -> Removal:
-        fields = _FIELDS.known(document, ("name", "by"), "a removal")
+        fields = _FIELDS.known(document, field_names(cls), "a removal")
         return cls(fields.get("name"), fields.get("by"))
 
 
@@ -206,7 +206,7 @@ class FrameworkCheck:
 
     @classmethod
     def from_document(cls, document: object) -> FrameworkCheck:
-        keys = ("name", "installed_version", "python", "recipe_min_version", "version_check")
+        keys = field_names(cls)
         fields = _FIELDS.known(document, keys, "the framework check")
         return cls(*(fields.get(key) for key in keys))
 
@@ -238,7 +238,7 @@ class ClientInvocation:
 
     @classmethod
     def from_document(cls, document: object) -> ClientInvocation:
-        fields = _FIELDS.known(document, ("argv", "env", "seed", "warmup_seed"), "the client invocation")
+        fields = _FIELDS.known(document, field_names(cls), "the client invocation")
         return cls(
             argv=_FIELDS.strings(fields.get("argv"), "the client argv"),
             env=fields.get("env", {}),
@@ -264,7 +264,7 @@ class EvalInvocation:
 
     @classmethod
     def from_document(cls, document: object) -> EvalInvocation:
-        fields = _FIELDS.known(document, ("argv", "definition_digest"), "the eval invocation")
+        fields = _FIELDS.known(document, field_names(cls), "the eval invocation")
         return cls(_FIELDS.strings(fields.get("argv"), "the eval argv"), fields.get("definition_digest"))
 
 
@@ -291,26 +291,6 @@ class ToolPins:
         return cls(pins.pop(STAGING_MANIFEST_KEY, None), pins)
 
 
-_DOCUMENT_KEYS = (
-    "schema",
-    "base",
-    "base_digest",
-    "config_sha256",
-    "argv",
-    "env",
-    "args",
-    "env_sources",
-    "removed",
-    "golden_use",
-    "golden",
-    "forced_acceptance",
-    "framework",
-    "client",
-    "eval",
-    "tools",
-    "source_files",
-    "digest",
-)
 #: Written for readers, and checked against what the records give on the way in.
 _DERIVED_KEYS = ("base_digest", "argv", "env", "golden", "forced_acceptance", "digest")
 
@@ -404,7 +384,7 @@ class Launch:
     def from_document(cls, document: object) -> Launch:
         """The launch a document records; one whose derived fields disagree with its records is refused."""
 
-        fields = _FIELDS.known(document, _DOCUMENT_KEYS, "a launch")
+        fields = _FIELDS.known(document, ("schema", *field_names(cls), *_DERIVED_KEYS), "a launch")
         if fields.get("schema") != LAUNCH_SCHEMA:
             raise LaunchError(f"launch schema {fields.get('schema')!r} is not {LAUNCH_SCHEMA}")
         client, eval_ = fields.get("client"), fields.get("eval")

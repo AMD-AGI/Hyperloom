@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
-from hyperloom_common.contract_fields import ContractFields
+from hyperloom_common.contract_fields import ContractFields, field_names
 from inference_suite.argv import normalize_argv, parse_removal_specs
 from inference_suite.contracts.base_launch import _ENV_NAME, _OPTION, BaseLaunch, Workload
 
@@ -121,7 +121,7 @@ class BaseRef:
 
     @classmethod
     def from_document(cls, document: object) -> BaseRef:
-        fields = _FIELDS.known(document, ("path", "digest"), "the base reference")
+        fields = _FIELDS.known(document, field_names(cls), "the base reference")
         return cls(fields.get("path"), fields.get("digest"))
 
 
@@ -196,7 +196,7 @@ class RunnerLayer:
 
     @classmethod
     def from_document(cls, document: object) -> RunnerLayer:
-        fields = _FIELDS.known(document, ("env_prepend", "env_set", "args_floor"), "the runner layer")
+        fields = _FIELDS.known(document, field_names(cls), "the runner layer")
         return cls(fields.get("env_prepend", {}), fields.get("env_set", {}), fields.get("args_floor", {}))
 
 
@@ -302,20 +302,6 @@ class ServerConfig:
         )
 
 
-_FIXED_KEYS = (
-    "concurrency",
-    "isl",
-    "osl",
-    "random_range_ratio",
-    "num_prompts",
-    "num_warmups",
-    "seed",
-    "warmup_seed",
-    "tokenizer_mode",
-    "trust_remote_code",
-)
-
-
 @dataclass(frozen=True)
 class FixedWorkload:
     """A fixed-shape load; every client knob is explicit so two arms run the same requests."""
@@ -349,16 +335,7 @@ class FixedWorkload:
         return cls(**{key: fields.get(key) for key in _FIXED_KEYS})
 
 
-_AGENTX_KEYS = (
-    "concurrency",
-    "dataset",
-    "num_prompts",
-    "warmup_requests_per_lane",
-    "seed",
-    "warmup_seed",
-    "failed_request_threshold",
-    "client_env",
-)
+_FIXED_KEYS = field_names(FixedWorkload)
 
 
 @dataclass(frozen=True)
@@ -401,6 +378,9 @@ class AgentxWorkload:
         return cls(**{key: fields.get(key) for key in _AGENTX_KEYS})
 
 
+_AGENTX_KEYS = field_names(AgentxWorkload)
+
+
 @dataclass(frozen=True)
 class ScriptableWorkload:
     """A server-less script (xDiT); its ``params`` carry no acceptance threshold (D2)."""
@@ -425,19 +405,10 @@ class ScriptableWorkload:
 
     @classmethod
     def from_document(cls, document: object) -> ScriptableWorkload:
-        fields = _FIELDS.known(document, ("script", "params", "quality_reference"), "the scriptable workload")
+        fields = _FIELDS.known(document, field_names(cls), "the scriptable workload")
         return cls(fields.get("script"), fields.get("params", {}), fields.get("quality_reference"))
 
 
-_PROFILE_KEYS = (
-    "enabled",
-    "start_body",
-    "num_prompts",
-    "delay_iters",
-    "max_iters",
-    "agentx_open_after_sec",
-    "agentx_duration_sec",
-)
 #: The window fields each workload's capture needs; the caller computes them (``_profile_setup``).
 _PROFILE_WINDOW = {
     WorkloadKind.FIXED: ("num_prompts", "delay_iters", "max_iters"),
@@ -485,6 +456,9 @@ class ProfileConfig:
         return cls(**{key: fields.get(key) for key in _PROFILE_KEYS})
 
 
+_PROFILE_KEYS = field_names(ProfileConfig)
+
+
 @dataclass(frozen=True)
 class EvalProbe:
     """The truncation probe's thresholds, which the caller passes in (D2): nothing here defaults them."""
@@ -503,15 +477,12 @@ class EvalProbe:
 
     @classmethod
     def from_document(cls, document: object) -> EvalProbe:
-        keys = ("enabled", "min_samples", "length_ratio")
+        keys = field_names(cls)
         fields = _FIELDS.known(document, keys, "the eval probe")
         missing = [key for key in keys if key not in fields]
         if missing:
             raise ConfigError(f"the eval probe must set {', '.join(missing)}")
         return cls(**{key: fields.get(key) for key in keys})
-
-
-_EVAL_KEYS = ("enabled", "task", "limit", "num_fewshot", "concurrency", "max_tokens_cap", "probe")
 
 
 @dataclass(frozen=True)
@@ -549,7 +520,7 @@ class EvalConfig:
 
     @classmethod
     def from_document(cls, document: object) -> EvalConfig:
-        fields = _FIELDS.known(document, _EVAL_KEYS, "the eval config")
+        fields = _FIELDS.known(document, field_names(cls), "the eval config")
         if fields.get("probe") is None:
             raise ConfigError("the eval config must set probe; its thresholds come from the caller")
         return cls(
@@ -578,7 +549,7 @@ class GpuTelemetry:
     @classmethod
     def from_document(cls, document: object) -> GpuTelemetry:
         telemetry = _FIELDS.known(document, ("gpu",), "the telemetry config")
-        fields = _FIELDS.known(telemetry.get("gpu"), ("enabled", "interval_sec"), "the GPU telemetry")
+        fields = _FIELDS.known(telemetry.get("gpu"), field_names(cls), "the GPU telemetry")
         return cls(fields.get("enabled"), fields.get("interval_sec"))
 
 
@@ -601,7 +572,7 @@ class Lifecycle:
 
     @classmethod
     def from_document(cls, document: object) -> Lifecycle:
-        fields = _FIELDS.known(document, ("mode", "pid_dir"), "the lifecycle")
+        fields = _FIELDS.known(document, field_names(cls), "the lifecycle")
         return cls(fields.get("mode"), fields.get("pid_dir"))
 
 
@@ -656,30 +627,13 @@ class RunPaths:
 
     @classmethod
     def from_document(cls, document: object) -> RunPaths:
-        keys = ("run_dir", "tool_cache", "tool_manifest_sha256")
+        keys = field_names(cls)
         fields = _FIELDS.known(document, keys, "the paths")
         return cls(*(fields.get(key) for key in keys))
 
 
-_DOCUMENT_KEYS = (
-    "schema",
-    "server",
-    "workload",
-    "fixed",
-    "agentx",
-    "scriptable",
-    "profile",
-    "eval",
-    "telemetry",
-    "lifecycle",
-    "deadlines",
-    "paths",
-)
-_WORKLOAD_SECTIONS = {
-    WorkloadKind.FIXED: "fixed",
-    WorkloadKind.AGENTX: "agentx",
-    WorkloadKind.SCRIPTABLE: "scriptable",
-}
+#: The workload kinds with a config section; each section is the field named by its kind's value.
+_SECTIONED_WORKLOADS = (WorkloadKind.FIXED, WorkloadKind.AGENTX, WorkloadKind.SCRIPTABLE)
 _BASE_WORKLOAD = {WorkloadKind.FIXED: Workload.FIXED, WorkloadKind.AGENTX: Workload.AGENTX}
 
 
@@ -702,8 +656,8 @@ class SuiteConfig:
     def __post_init__(self) -> None:
         kind = _FIELDS.enum(WorkloadKind, self.workload, "the workload kind")
         object.__setattr__(self, "workload", kind)
-        present = sorted(section for section in _WORKLOAD_SECTIONS.values() if getattr(self, section) is not None)
-        expected = [_WORKLOAD_SECTIONS[kind]] if kind in _WORKLOAD_SECTIONS else []
+        present = sorted(item.value for item in _SECTIONED_WORKLOADS if getattr(self, item.value) is not None)
+        expected = [kind.value] if kind in _SECTIONED_WORKLOADS else []
         if present != expected:
             raise ConfigError(f"a {kind.value} workload sets {expected or 'no workload section'}, got {present}")
         if kind is WorkloadKind.NONE and not (self.lifecycle.mode is LifecycleMode.BOOT or self.eval.enabled):
@@ -731,7 +685,7 @@ class SuiteConfig:
             )
 
     def to_document(self) -> dict[str, object]:
-        sections = {name: getattr(self, name) for name in _WORKLOAD_SECTIONS.values()}
+        sections = {item.value: getattr(self, item.value) for item in _SECTIONED_WORKLOADS}
         return {
             "schema": CONFIG_SCHEMA,
             "server": self.server.to_document(),
@@ -747,7 +701,7 @@ class SuiteConfig:
 
     @classmethod
     def from_document(cls, document: object) -> SuiteConfig:
-        fields = _FIELDS.known(document, _DOCUMENT_KEYS, "a suite config")
+        fields = _FIELDS.known(document, ("schema", *field_names(cls)), "a suite config")
         if fields.get("schema") != CONFIG_SCHEMA:
             raise ConfigError(f"suite config schema {fields.get('schema')!r} is not {CONFIG_SCHEMA}")
         if fields.get("eval") is None:

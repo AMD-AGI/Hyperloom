@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
-from hyperloom_common.contract_fields import ContractFields
+from hyperloom_common.contract_fields import ContractFields, field_names
 from inference_suite.contracts.base_launch import DIGEST_PREFIX
 from inference_suite.contracts.config import ConfigError, EvalProbe, WorkloadKind
 
@@ -143,7 +143,7 @@ class MetricStats:
 
     @classmethod
     def from_document(cls, document: object) -> MetricStats:
-        fields = _complete(document, ("min", "max", "avg"), "a GPU metric")
+        fields = _complete(document, field_names(cls), "a GPU metric")
         return cls(fields["min"], fields["max"], fields["avg"])
 
 
@@ -337,6 +337,9 @@ class AgentxResult:
         )
 
 
+_SCRIPTABLE_RESULT = "the scriptable result"
+
+
 @dataclass(frozen=True)
 class ScriptableResult:
     """The scriptable script's own result document, kept verbatim; the file it was read from is run_dir-relative."""
@@ -346,30 +349,15 @@ class ScriptableResult:
 
     def __post_init__(self) -> None:
         _FIELDS.text(self.result_file, "the scriptable result file")
-        _FIELDS.mapping(self.result, "the scriptable result")
+        _FIELDS.mapping(self.result, _SCRIPTABLE_RESULT)
 
     def to_document(self) -> dict[str, object]:
         return {"result_file": self.result_file, "result": dict(self.result)}
 
     @classmethod
     def from_document(cls, document: object) -> ScriptableResult:
-        fields = _complete(document, ("result_file", "result"), "the scriptable result")
-        return cls(fields["result_file"], dict(_FIELDS.mapping(fields["result"], "the scriptable result")))
-
-
-_DEFINITION_KEYS = (
-    "task_yaml_sha256",
-    "lm_eval_version",
-    "model_class_sha256",
-    "chat_template_sha256",
-    "concurrency",
-    "max_length",
-    "max_tokens_cap",
-    "limit",
-    "num_fewshot",
-    "golden_applied",
-    "probe",
-)
+        fields = _complete(document, field_names(cls), _SCRIPTABLE_RESULT)
+        return cls(fields["result_file"], dict(_FIELDS.mapping(fields["result"], _SCRIPTABLE_RESULT)))
 
 
 @dataclass(frozen=True)
@@ -417,6 +405,9 @@ class EvalDefinition:
         return cls(**{key: fields[key] for key in _DEFINITION_KEYS if key != "probe"}, probe=probe)
 
 
+_DEFINITION_KEYS = field_names(EvalDefinition)
+
+
 @dataclass(frozen=True)
 class ProbeOutcome:
     """What the truncation probe saw: raw counts, judged against the thresholds in the definition."""
@@ -439,11 +430,8 @@ class ProbeOutcome:
 
     @classmethod
     def from_document(cls, document: object) -> ProbeOutcome:
-        fields = _complete(document, ("tripped", "samples_seen", "length_ratio_observed"), "the probe outcome")
+        fields = _complete(document, field_names(cls), "the probe outcome")
         return cls(fields["tripped"], fields["samples_seen"], fields["length_ratio_observed"])
-
-
-_EVAL_RESULT_KEYS = ("task", "scores", "task_version", "definition", "definition_digest", "results_file", "probe")
 
 
 @dataclass(frozen=True)
@@ -483,7 +471,7 @@ class EvalResult:
 
     @classmethod
     def from_document(cls, document: object) -> EvalResult:
-        fields = _complete(document, _EVAL_RESULT_KEYS, "the eval result")
+        fields = _complete(document, field_names(cls), "the eval result")
         return cls(
             task=fields["task"],
             scores=dict(_FIELDS.mapping(fields["scores"], "the eval scores")),
@@ -554,7 +542,7 @@ class ExitCodes:
 
     @classmethod
     def from_document(cls, document: object) -> ExitCodes:
-        fields = _complete(document, ("server", "client", "eval"), "the return codes")
+        fields = _complete(document, field_names(cls), "the return codes")
         return cls(fields["server"], fields["client"], fields["eval"])
 
 
@@ -574,7 +562,7 @@ class LogRange:
 
     @classmethod
     def from_document(cls, document: object) -> LogRange:
-        fields = _complete(document, ("start", "end"), "the log range")
+        fields = _complete(document, field_names(cls), "the log range")
         return cls(fields["start"], fields["end"])
 
 

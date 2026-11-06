@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from enum import Enum
 
 import pytest
 
-from hyperloom_common.contract_fields import ContractFields
+from hyperloom_common.contract_fields import ContractFields, field_names
 
 
 class _OwnError(ValueError):
@@ -60,3 +61,12 @@ def test_accepted_values_come_back() -> None:
     assert FIELDS.optional_integer(None, "count") is None
     assert FIELDS.optional_number(None, "rate") is None
     assert FIELDS.optional_boolean(None, "flag") is None
+
+
+def test_field_names_are_a_dataclass_s_fields_in_declaration_order():
+    @dataclass(frozen=True)
+    class Pair:
+        second: int
+        first: int = 0
+
+    assert field_names(Pair) == ("second", "first")
