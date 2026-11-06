@@ -19,7 +19,7 @@ from ._apply_feedback import ApplyFeedback, PatchApplyResult
 from ._enablement_config import _established_enablement_config, _merge_established_server_args
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._integrate_refusals import _preflight_missing_targets
+from ._integrate_refusals import UNSWITCHED_BRIDGE_ADVISORY, _preflight_missing_targets, _unswitched_bridge_refusal
 from ._integrate_results import (
     _Deliverable,
     _KbLesson,
@@ -191,19 +191,9 @@ class ApplyStageMixin:
 
         deliverable = _Deliverable.resolve(attempt, params)
         attempt.switch_manifest = deliverable.switch_manifest
-        if deliverable.artifact_runtime_errors:
-            return await self._refuse_apply(
-                attempt,
-                params,
-                "artifact_not_runtime_ready",
-                deliverable.artifact_runtime_errors,
-                artifacts_applied=[],
-                artifact_errors=deliverable.artifact_runtime_errors,
-                reason=(
-                    "AITER GEMM model-config artifacts must contain measured, "
-                    "non-placeholder rows for the target GPU architecture and CU count"
-                ),
-            )
+        refusal = await self._refuse_deliverable(attempt, params, deliverable)
+        if refusal is not None:
+            return refusal
 
         if not (deliverable.patch_paths or _changes_beyond_patches(attempt, deliverable)):
             if params.get("enablement_launch_only"):
@@ -305,6 +295,39 @@ class ApplyStageMixin:
                     workspace=str(attempt.output_root),
                 )
         return None
+
+    async def _refuse_deliverable(
+        self, attempt: IntegrateAttempt, params: dict[str, Any], deliverable: _Deliverable
+    ) -> dict[str, Any] | None:
+        """The refusal of a deliverable that may not reach the tree as handed over; None when it may."""
+        if deliverable.artifact_runtime_errors:
+            return await self._refuse_apply(
+                attempt,
+                params,
+                "artifact_not_runtime_ready",
+                deliverable.artifact_runtime_errors,
+                artifacts_applied=[],
+                artifact_errors=deliverable.artifact_runtime_errors,
+                reason=(
+                    "AITER GEMM model-config artifacts must contain measured, "
+                    "non-placeholder rows for the target GPU architecture and CU count"
+                ),
+            )
+        bridge = _unswitched_bridge_refusal(
+            params,
+            attempt.done_payload,
+            patch_paths=deliverable.patch_paths,
+            switch_manifest=deliverable.switch_manifest,
+        )
+        if not bridge:
+            return None
+        return await self._refuse_apply(
+            attempt,
+            params,
+            "bridge_not_switch_gated",
+            f"bridge patch declares no framework_switches although {bridge}",
+            **_reauthor_fields(params, deliverable.patch_paths, advisory=UNSWITCHED_BRIDGE_ADVISORY),
+        )
 
     async def _resolve_apply_root(
         self,
