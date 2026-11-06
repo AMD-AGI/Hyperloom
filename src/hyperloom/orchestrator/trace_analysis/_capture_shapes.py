@@ -12,15 +12,18 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS
+
 #: Directory shapes a profile writes capture sidecars into, matched per path
-#: component: ``capture_traces`` exactly, or a name *starting* with
-#: ``graph_capture`` (``graph_capture``, ``graph_capture_profile``), which
-#: covers every layout observed. Anchored, unlike the filename rule below: a
-#: directory is named for what it holds, so an unanchored token would also
-#: condemn e.g. ``torch_profiler_with_graph_capture/`` -- and because the
-#: capture-only preflight is an ``all(...)``, one such false positive rejects
-#: the entire input.
-CAPTURE_DIR_RE = re.compile(r"\Acapture_traces\Z|\Agraph_capture", re.IGNORECASE)
+#: component: a run_dir's capture directory exactly, or a name *starting* with
+#: ``graph_capture`` (a Magpie workspace's bare ``graph_capture``). Anchored,
+#: unlike the filename rule below: a directory is named for what it holds, so an
+#: unanchored token would also condemn e.g. ``torch_profiler_with_graph_capture/``
+#: -- and because the capture-only preflight is an ``all(...)``, one such false
+#: positive rejects the entire input.
+CAPTURE_DIR_RE = re.compile(
+    "|".join([*(rf"\A{re.escape(name)}\Z" for name in CAPTURE_TRACE_DIRS), r"\Agraph_capture"]), re.IGNORECASE
+)
 
 #: Sidecar filename shapes: ``bs_<batch>[_rank<n>]`` anchored to the start, and
 #: ``graph_capture`` anywhere in the name (an unpatched SGLang prefixes it with

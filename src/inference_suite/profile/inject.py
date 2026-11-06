@@ -18,19 +18,14 @@ from pathlib import Path
 
 from inference_suite.contracts.config import LaunchDelta, ProfileConfig, SuiteConfig
 from inference_suite.contracts.launch import LaunchError
-from inference_suite.contracts.layout import PROFILE_TRACE_DIRS, RunLayout
+from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS, RunLayout
 from inference_suite.frameworks import Framework
 
-TORCH_TRACE_DIR, CAPTURE_TRACES_DIR, GRAPH_CAPTURE_DIR = PROFILE_TRACE_DIRS
 SGLANG_PROFILER_DIR_ENV = "SGLANG_TORCH_PROFILER_DIR"
 ATOM_PROFILER_DIR_FLAG = "--torch-profiler-dir"
 VLLM_PROFILER_CONFIG = "--profiler-config."
 #: The ``/start_profile`` body keys that bound SGLang's capture window, in engine forward steps.
 SGLANG_WINDOW_KEYS = ("start_step", "num_steps")
-
-
-def torch_trace_dir(layout: RunLayout) -> Path:
-    return layout.profile_dir / TORCH_TRACE_DIR
 
 
 def _vllm_args(profile: ProfileConfig, trace_dir: str) -> tuple[str, ...]:
@@ -48,7 +43,7 @@ def profiler_layer(config: SuiteConfig, framework: Framework) -> LaunchDelta | N
     """
     if not config.profile.enabled:
         return None
-    trace_dir = str(torch_trace_dir(RunLayout(Path(config.paths.run_dir))).absolute())
+    trace_dir = str(RunLayout(Path(config.paths.run_dir)).profile_torch_trace.absolute())
     if framework is Framework.SGLANG:
         return LaunchDelta(env_set={SGLANG_PROFILER_DIR_ENV: trace_dir})
     if framework is Framework.VLLM:
@@ -76,8 +71,8 @@ def settle_traces(layout: RunLayout) -> tuple[str, ...]:
 
     Runs once the server has stopped writing, after :func:`make_trace_dirs`. The paths are relative to the run_dir.
     """
-    for name in (CAPTURE_TRACES_DIR, GRAPH_CAPTURE_DIR):
-        nested = torch_trace_dir(layout) / name
+    for name in CAPTURE_TRACE_DIRS:
+        nested = layout.profile_torch_trace / name
         if nested.is_dir():
             # rmdir refuses a non-empty target, so two captures are never merged into one directory.
             (layout.profile_dir / name).rmdir()
@@ -90,13 +85,9 @@ def settle_traces(layout: RunLayout) -> tuple[str, ...]:
 
 
 __all__ = [
-    "CAPTURE_TRACES_DIR",
-    "GRAPH_CAPTURE_DIR",
     "SGLANG_PROFILER_DIR_ENV",
-    "TORCH_TRACE_DIR",
     "make_trace_dirs",
     "profiler_layer",
     "settle_traces",
     "start_body",
-    "torch_trace_dir",
 ]

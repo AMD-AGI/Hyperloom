@@ -66,4 +66,5 @@ def test_run_dir_names(tmp_path: Path) -> None:
         "profile/capture_traces",
         "profile/graph_capture_profile",
     ]
+    assert layout.profile_torch_trace == layout.profile_trace_dirs()[0]
     assert HOST_DERIVED == (GPU_METRICS,)
