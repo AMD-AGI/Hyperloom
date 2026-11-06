@@ -70,10 +70,11 @@ KV_ARTIFACT_NAME = "kv_metrics.json"
 #: them makes every statistic meaningless: ``boot`` has no traffic at all, ``warmup`` runs a deliberately cold cache,
 #: and ``eval`` drives accuracy traffic whose shape has nothing to do with the throughput benchmark. Only ``measured``
 #: may enter a comparison.
-PHASES = ("boot", "warmup", "measured", "finished", "eval")
-
+_BOOT = "boot"
+_EVAL = "eval"
 #: The one phase whose numbers may be compared against another round's.
 _COMPARABLE_PHASE = "measured"
+PHASES = (_BOOT, "warmup", _COMPARABLE_PHASE, "finished", _EVAL)
 
 #: Row cap before stride downsampling, mirroring ``_MN_GPU_SAMPLE_CAP``. A three-hour round at the scrape interval below
 #: lands well over this.
@@ -179,7 +180,7 @@ class KvMetricsRecorder:
         self._phase_timeline: dict[str, dict[str, Any]] = {}
         # Tri-state: unknown until the round directory is first looked at.
         self._aiperf_present: bool | None = None
-        self._phase = "boot"
+        self._phase = _BOOT
         self._rows: list[dict[str, Any]] = []
         self._last_scrape_mono: float | None = None
         self._phase_marks: list[dict[str, Any]] = []
@@ -225,7 +226,7 @@ class KvMetricsRecorder:
 
         The eval phase is excluded because aiperf has exited by then, so that window is ours alone.
         """
-        if self._phase == "eval":
+        if self._phase == _EVAL:
             return False
         if self._aiperf_present is None and self._workspace is not None:
             try:
@@ -447,7 +448,7 @@ class KvMetricsRecorder:
             # pool. That is boot. Defaulting it to "measured" put readings of a pool under no load into the one
             # phase allowed into a comparison: observed on a live round, where three such rows produced a measured
             # prefix-cache delta of 34,395 describing nothing that happened.
-            self._phase = phase or "boot"
+            self._phase = phase or _BOOT
             self._absorb(sample, timing=timing)
         self._phase = previous_phase
         if kept:
@@ -503,7 +504,7 @@ class KvMetricsRecorder:
         ordered = sorted(bounds.items(), key=lambda item: item[1][0], reverse=True)
         moved = 0
         for row in self._rows:
-            if row.get("phase") == "eval":
+            if row.get("phase") == _EVAL:
                 continue
             ts = json_number(row.get("ts"))
             if ts is None:
