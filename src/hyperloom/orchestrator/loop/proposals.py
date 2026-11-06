@@ -284,6 +284,12 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
     )
 
 
+def _twin_answers(action_name: str, twin: Task) -> bool:
+    """Whether an existing task of a proposal's content answers it, rather than leaving a retry key to it."""
+    # A measured baseline answers every later proposal of the same content; a failed or cancelled one is retried.
+    return twin.state not in TERMINAL_STATES or (action_name == "baseline" and twin.state == "succeeded")
+
+
 class ProposalsCollaborator(CoordinatorCollaborator):
     """Turns approved proposals into queued tasks."""
 
@@ -379,16 +385,15 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 lease_ttl_sec=ttl,
                 dispatch_class="llm",
             ),
-            spent=lambda twin: twin.state in TERMINAL_STATES,
+            spent=lambda twin: not _twin_answers(pending.action_name, twin),
         )
         if created is None:
             await self._record_materialize_skipped(pending, "idempotency_key_exhausted", idempotency_key=raw_key)
             return
         task, was_existing = created
         if was_existing:
-            await self._record_materialize_skipped(
-                pending, "duplicate_proposal_content", task_id=task.task_id, task_state=task.state
-            )
+            reason = "duplicate_proposal_content" if task.state not in TERMINAL_STATES else "baseline_already_succeeded"
+            await self._record_materialize_skipped(pending, reason, task_id=task.task_id, task_state=task.state)
             return
         # The round the authoring specialist opened runs on under this task id.
         await self._coord.enablement_lane.handoff_enablement_round(task)
