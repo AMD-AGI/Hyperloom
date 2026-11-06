@@ -10,7 +10,7 @@ import logging
 import os
 import subprocess
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -202,7 +202,7 @@ class EnablementGateMixin:
         # timestamp, so it stays correct as the gate progresses.
         try:
             bench_result, gate_evidence = await self._bench_patch(
-                _PatchBench.for_attempt(attempt, params),
+                replace(_PatchBench.for_attempt(attempt, params), launch_controls=attempt.launch_controls),
                 extra_server_args_applied=attempt.extra_server_args_applied,
                 extra_envs_applied=attempt.extra_envs_applied,
             )

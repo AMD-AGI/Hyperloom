@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,8 @@ class _PatchBench:
     session_deadline_sec: float | None = None
     variant_expected_sec: float | None = None
     benchmark_mode: str = ""
+    #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``; the parity leg runs without them.
+    launch_controls: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def for_attempt(cls, attempt: IntegrateAttempt, params: dict[str, Any]) -> _PatchBench:
