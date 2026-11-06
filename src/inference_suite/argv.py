@@ -342,6 +342,19 @@ def speculative_config(occurrences: list[tuple[str, str]]) -> dict[str, Any]:
     return config
 
 
+def without_speculative_config(argv: Sequence[str]) -> list[str]:
+    """``argv`` with every ``--speculative-config`` and ``--speculative-config.<key>`` flag and its value dropped."""
+    kept: list[str] = []
+    dropping = False
+    for token in argv:
+        if _is_flag(token):
+            name = canonical_flag_name(token.partition("=")[0])
+            dropping = name == SPECULATIVE_CONFIG_FLAG or name.startswith(SPECULATIVE_CONFIG_KEY_PREFIX)
+        if not dropping:
+            kept.append(token)
+    return kept
+
+
 def normalize_argv(argv: Sequence[str]) -> tuple[str, ...]:
     """``argv`` as a launch identity reads it: ``--flag=value`` split in two and JSON values compacted.
 
@@ -375,4 +388,5 @@ __all__ = [
     "speculative_config",
     "split_args_preserving_json",
     "tokenize_server_args_preserving_json",
+    "without_speculative_config",
 ]

@@ -18,6 +18,7 @@ from inference_suite.argv import (
     remove_server_args,
     speculative_config,
     split_args_preserving_json,
+    without_speculative_config,
 )
 
 
@@ -263,3 +264,18 @@ def test_speculative_config_merges_the_per_key_flags_over_the_object():
         '--speculative-config {"method":"mtp","num_speculative_tokens":2} --speculative-config.num-speculative-tokens 3'
     )
     assert speculative_config(occurrences) == {"method": "mtp", "num_speculative_tokens": "3"}
+
+
+def test_without_speculative_config_drops_both_spellings_and_their_values():
+    argv_in = [
+        "--tp",
+        "8",
+        "--speculative-config",
+        '{"method":"mtp"}',
+        "--speculative_config.num_speculative_tokens=3",
+        "--speculative-config.draft-model",
+        "m",
+        "--max-num-seqs",
+        "-1",
+    ]
+    assert without_speculative_config(argv_in) == ["--tp", "8", "--max-num-seqs", "-1"]
