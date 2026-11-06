@@ -118,6 +118,23 @@ _CATEGORIES: dict[str, str] = {
     AITER_TUNED_MISS: PERF_PATH,
     _RUNTIME_TRACEBACK: CORRECTNESS,
 }
+#: Correctness-fix rules a patch clears by restoring a path the framework switched off, i.e. by bridging a gate.
+RESTORED_PATH_RULES = frozenset(rule for rule in CORRECTNESS_FIX_RULES if _CATEGORIES[rule] == PERF_PATH)
+
+
+def restores_disabled_path(finding_id: str) -> bool:
+    """Whether the ``rule_id:subject`` names a path the framework switched off, which only a bridge restores."""
+    return finding_id.partition(":")[0] in RESTORED_PATH_RULES
+
+
+_RESTORED_PATH_LINE = re.compile(
+    r"^- detected \[[^\]\n]*\] (?:" + "|".join(map(re.escape, sorted(RESTORED_PATH_RULES))) + r")[ :]", re.M
+)
+
+
+def lists_disabled_path(rendered: str) -> bool:
+    """Whether ``render_runtime_findings`` output detects a switched-off path a bridge could restore."""
+    return bool(_RESTORED_PATH_LINE.search(rendered))
 
 
 def _line_rules(framework: str) -> list[_LineRule]:

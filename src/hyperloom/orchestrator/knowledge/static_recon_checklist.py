@@ -9,6 +9,9 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+#: Canonical-id prefix of every gap static recon seeds, its own recon task's included.
+STATIC_RECON_GAP_PREFIX = "gap.static_recon."
+
 
 @dataclass(frozen=True)
 class ChecklistEntry:
@@ -270,6 +273,7 @@ def filter_entries_for_model(entries: list[ChecklistEntry], model_info: dict) ->
 
 
 __all__ = [
+    "STATIC_RECON_GAP_PREFIX",
     "ChecklistEntry",
     "entries_for",
     "workload_precision",
