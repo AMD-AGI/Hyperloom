@@ -80,7 +80,7 @@ def share_new_directory(directory: Path, *, mode: int = SHARED_DIR_MODE) -> None
 def create_shared_file(path: Path) -> None:
     """Create ``path`` empty with mode ``664``; an existing file is replaced by rename, never truncated or chmodded."""
     try:
-        descriptor = os.open(path, _NEW_FILE, SHARED_FILE_MODE)
+        descriptor = os.open(path, _NEW_FILE, 0o600)  # the umask never decides it: fchmod below
     except FileExistsError:
         write_shared_bytes(path, b"")
         return
