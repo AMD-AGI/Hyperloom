@@ -206,7 +206,7 @@ def test_on_magpie_the_boot_and_the_rounds_that_measure_have_one_server_identity
     assert (boot["envs"]["RUN_EVAL"], boot["envs"]["NUM_PROMPTS"]) == ("false", "1"), "a boot is still small"
 
 
-def test_on_magpie_the_warmup_and_the_measured_round_of_a_graded_test_have_one_server_identity(
+def test_on_magpie_the_warmup_the_measured_and_the_evaluation_round_of_a_graded_test_have_one_server_identity(
     rounds, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
@@ -225,12 +225,14 @@ def test_on_magpie_the_warmup_and_the_measured_round_of_a_graded_test_have_one_s
 
     LocalMeasurementBackend().run_test(call)
 
-    warmup, measured = rounds.rounds
-    assert (warmup["name"], measured["name"]) == ("warmup", "test")
-    assert (warmup["ready"], measured["ready"]) == (False, True), "the measured round reuses the server it booted"
-    assert (warmup["envs"]["RUN_EVAL"], measured["envs"]["RUN_EVAL"]) == ("true", "false"), "one evaluation, first"
-    assert magpie_server_env(measured["envs"]) == magpie_server_env(warmup["envs"]), "Magpie's reuse check passes"
-    assert warmup["envs"]["NUM_PROMPTS"] == measured["envs"]["NUM_PROMPTS"], "both are full rounds"
+    warmup, measured, evaluation = rounds.rounds
+    assert [r["name"] for r in rounds.rounds] == ["warmup", "test", "eval"]
+    assert [r["ready"] for r in rounds.rounds] == [False, True, True], "the later rounds reuse the server it booted"
+    assert [r["envs"]["RUN_EVAL"] for r in rounds.rounds] == ["false", "false", "true"], "one evaluation, last"
+    assert [r["envs"].get("EVAL_ONLY") for r in rounds.rounds] == [None, None, "true"], "and no bench in it"
+    for round_ in (measured, evaluation):
+        assert magpie_server_env(round_["envs"]) == magpie_server_env(warmup["envs"]), "Magpie's reuse check passes"
+    assert warmup["envs"]["NUM_PROMPTS"] == measured["envs"]["NUM_PROMPTS"], "both benches are full rounds"
 
 
 TABLE_ENV = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"

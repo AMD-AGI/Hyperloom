@@ -3,10 +3,10 @@
 
 """The accuracy values of the round that evaluated, read from the ``results*.json`` lm-eval wrote for it.
 
-Only the directory of the round that evaluated is read: the warmup round of a graded test, which is its one
-evaluation, or else the measured round. When ``run_grid`` itself discards a warm-up round and evaluates in it too, that
-round's files sit below a ``warmup_round`` directory and never count, even when they are the only result there is: a
-score with nothing behind it from the measured round is no score.
+Only the directory of the round that evaluated is read: the evaluation round a graded test runs after its measured
+bench on a held server, which is its one evaluation, or else the measured round. When ``run_grid`` itself discards a
+warm-up round and evaluates in it too, that round's files sit below a ``warmup_round`` directory and never count, even
+when they are the only result there is: a score with nothing behind it from the round that evaluated is no score.
 """
 
 from __future__ import annotations

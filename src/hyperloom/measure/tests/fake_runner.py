@@ -35,9 +35,9 @@ did not answer).
 task families (``niah``, ``tracking``, ``words``) and serves ``served`` tokens, when the sheet asks for the check.
 ``fake_export: [line, ...]`` lists the per-request export of an AgentX round (``aiperf_artifacts/profile_export.jsonl``
 below the round's directory) with those lines.
-``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
-warmup round): a warmup round and the accuracy round on one directory, the measured round on another, and the lm-eval
-results file of ``fake_accuracy`` below the warmup's.
+``fake_eval_round: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in a round of
+its own after the measured bench): a warmup round, the measured round and the accuracy round, each on a directory of its
+own, and the lm-eval results file of ``fake_accuracy`` below the accuracy round's.
 ``fake_log_line: <text>`` writes a server log whose last line that is, so the runner's progress reports it as the last
 line of the live output.
 ``fake_jit: true`` stages a contribution to the shared compiled-code cache (one aiter module, below ``/out/jit-cache``) and
@@ -143,8 +143,8 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         files[EXPORT_PATH] = "".join(f"{line}\n" for line in config["fake_export"]).encode()
     if config.get("fake_warmup") and REPORT_PATH in files:
         files["warmup_round/benchmark_fake_20000101_000000/benchmark_report.json"] = files[REPORT_PATH]
-    in_warmup = bool(config.get("fake_eval_in_warmup")) and REPORT_PATH in files
-    if in_warmup:
+    held = bool(config.get("fake_eval_round")) and REPORT_PATH in files
+    if held:
         report_bytes = files.pop(REPORT_PATH)
         for variant in ("warmup", "test"):
             files[f"variant_00_{variant}/{REPORT_PATH}"] = report_bytes
@@ -154,7 +154,7 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         files["server.log"] = b"something odd happened\n"
     bench = REPORT_PATH.rsplit("/", 1)[0]
     rounds = [{"point": 0, "phase": "measure", "dir": bench, "returncode": 0}]
-    if in_warmup:
+    if held:
         rounds = [
             {"point": 0, "phase": "warmup", "dir": f"variant_00_warmup/{bench}", "returncode": 0},
             {"point": 0, "phase": "measure", "dir": f"variant_00_test/{bench}", "returncode": 0},
@@ -167,13 +167,14 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         if "fake_accuracy_version" in config:
             values = [{**value, "version": config["fake_accuracy_version"]} for value in values]
         accuracy_round = {**rounds[0], "phase": "accuracy", "accuracy": values}
-        if in_warmup:
-            rounds.insert(1, accuracy_round)  # chronological: warmup bench, the evaluation, measured bench
+        if held:
+            accuracy_round["dir"] = f"variant_00_eval/{bench}"
             if score is not None:
                 results = {"results": {"gsm8k": {"exact_match,flexible-extract": float(score)}}}
-                files[f"{rounds[0]['dir']}/eval_output/results_2000-01-01T10-00-00.json"] = json.dumps(results).encode()
-        else:
-            rounds.append(accuracy_round)
+                files[f"{accuracy_round['dir']}/lm_eval/results_2000-01-01T10-00-00.json"] = json.dumps(
+                    results
+                ).encode()
+        rounds.append(accuracy_round)
     if "fake_warnings" in config:
         rounds[0]["nonfatal_warnings"] = list(config["fake_warnings"])
     if config.get("fake_rounds") or "fake_accuracy" in config or "fake_warnings" in config:

@@ -406,6 +406,7 @@ class GridLaunch:
     # The grid's measured round is itself a caller's discarded warmup, so it must not send the prompts of the
     # measured round that follows it on the same server.
     warmup_round: bool = False
+    evaluation_only: bool = False  # the round only evaluates (its caller sets EVAL_ONLY): a clean exit is its success
 
 
 @dataclass(frozen=True)
@@ -1464,29 +1465,28 @@ async def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVaria
         measured.workspace,
         config_path=measured.rounds.cfg_path,
         subprocess_started_unix=measured.round.started_unix,
-        settle_seconds=REPORT_SETTLE_SECONDS,
+        settle_seconds=0.0 if run.launch.evaluation_only else REPORT_SETTLE_SECONDS,  # no throughput to wait for
     )
     outcome = _VariantOutcome(measured, report, measurement, _round_warnings(measurement, measured))
     if round_succeeded(measurement):
         return _measured_row(at, outcome)
-    if run.launch.lifecycle_boot_only and measured.round.proc.returncode == 0:
-        return _booted_server_row(at, outcome)
+    if measured.round.proc.returncode == 0 and (run.launch.lifecycle_boot_only or run.launch.evaluation_only):
+        return _unmeasured_row(at, outcome, run.launch)
     _abort_on_invalid_measurement(run, at, outcome)
 
 
-def _booted_server_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
-    workspace = outcome.measured.workspace
-    report_path = workspace / "benchmark_report.json"
+def _unmeasured_row(at: _VariantSlot, outcome: _VariantOutcome, launch: GridLaunch) -> VariantResult:
+    report_path = outcome.measured.workspace / "benchmark_report.json"
     return VariantResult(
         name=at.variant.name,
         extra_server_args=at.variant.extra_server_args,
         extra_envs=dict(at.variant.extra_envs),
         status="succeeded",
-        workspace=str(workspace),
+        workspace=str(report_path.parent),
         report_path=str(report_path) if report_path.exists() else None,
         returncode=outcome.measured.round.proc.returncode,
         nonfatal_warnings=outcome.warnings,
-        note="server_lifecycle_boot_only",
+        note="evaluation_only" if launch.evaluation_only else "server_lifecycle_boot_only",
         granted_cap_sec=at.benchmark_timeout_sec,
     )
 
