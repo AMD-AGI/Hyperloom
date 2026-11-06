@@ -79,6 +79,8 @@ PHASES = (_BOOT, "warmup", _COMPARABLE_PHASE, "finished", _EVAL)
 #: Row cap before stride downsampling, mirroring ``_MN_GPU_SAMPLE_CAP``. A three-hour round at the scrape interval below
 #: lands well over this.
 _MAX_STORED_ROWS = 5000
+#: Decimal places kept on recorded clock readings: millisecond resolution.
+_CLOCK_DIGITS = 3
 
 #: Floor between scrapes, enforced on the monotonic clock -- the loop this runs in iterates faster than its nominal
 #: period when a deadline bounds the slice, so counting passes would sample fastest exactly when the run is most loaded.
@@ -202,7 +204,7 @@ class KvMetricsRecorder:
         # engine's behaviour change most.
         boundary = None if self._closed else self._scrape(mono)
         self._phase = phase
-        self._phase_marks.append({"phase": phase, "mono": round(float(mono), 3), "ts": time.time()})
+        self._phase_marks.append({"phase": phase, "mono": round(float(mono), _CLOCK_DIGITS), "ts": time.time()})
         if boundary is not None:
             self._record_counters(boundary)
 
@@ -267,8 +269,8 @@ class KvMetricsRecorder:
             timing={
                 "scrape_start_unix": math.floor(start_unix * 1000) / 1000,
                 "scrape_end_unix": math.ceil((start_unix + elapsed) * 1000) / 1000,
-                "scrape_start_mono": round(start_mono, 3),
-                "scrape_end_mono": round(end_mono, 3),
+                "scrape_start_mono": round(start_mono, _CLOCK_DIGITS),
+                "scrape_end_mono": round(end_mono, _CLOCK_DIGITS),
                 "scrape_sec": round(elapsed, 4),
             },
             workload=workload,
@@ -332,8 +334,8 @@ class KvMetricsRecorder:
         # this module's aggregation to do it.
         row = {
             "phase": self._phase,
-            "ts": round(sample.ts, 3),
-            "mono": round(sample.mono, 3),
+            "ts": round(sample.ts, _CLOCK_DIGITS),
+            "mono": round(sample.mono, _CLOCK_DIGITS),
             **(timing or {"scrape_sec": 0.0}),
         }
         if workload is not None:
