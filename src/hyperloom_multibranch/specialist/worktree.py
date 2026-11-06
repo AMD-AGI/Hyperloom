@@ -41,7 +41,7 @@ from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta
 from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, SHARED_DIR_MODE, make_shared_dirs, share_new_directory
 from hyperloom_multibranch.repo.isolated_git import (
     INIT,
-    blank_filter_drivers,
+    blank_driver_programs,
     git_argv,
     git_env,
     leading_options,
@@ -82,6 +82,7 @@ _FIXED_CONFIG = (
     "diff.mnemonicPrefix=false",
 )
 _STAGE = ("add", "--all", "--")
+_GITLINK = "160000"
 _HEAD = "HEAD"
 #: The commit the worktree's last sync made, kept apart for each worktree as ``refs/worktree/*`` is: an agent may commit
 #: its change on top, and the change is everything since.
@@ -214,8 +215,8 @@ def source_unkept(component: str, recipe: Recipe) -> str:
 
 
 def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
-    """``git <args>`` in ``cwd``, a tree the run's sandboxes write: every filter driver its config defines is blanked
-    (:func:`~hyperloom_multibranch.repo.isolated_git.blank_filter_drivers`), as the add, diff, apply and reset here
+    """``git <args>`` in ``cwd``, a tree the run's sandboxes write: every driver program its config defines is blanked
+    (:func:`~hyperloom_multibranch.repo.isolated_git.blank_driver_programs`), as the add, diff, apply and reset here
     would run one on the tree's files. git runs under umask ``002``: what it makes -- a worktree, its files, the
     repository's objects and refs -- is the group's, as the dev sandboxes and the run's next leg write it. The tree is
     trusted whoever owns it (``safe.directory``), as the leg that made it may be another account of the group: nothing
@@ -224,7 +225,7 @@ def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None =
     env = git_env(**pinned)
     trusted = trusting(cwd)
     try:
-        blanked = blank_filter_drivers(cwd, env, *trusted, *leading_options(args))
+        blanked = blank_driver_programs(cwd, env, *trusted, *leading_options(args))
     except (OSError, subprocess.SubprocessError) as error:
         raise WorktreeError(f"git config in {cwd} cannot be read to blank its filter drivers: {error}") from error
     done = subprocess.run(
@@ -242,8 +243,17 @@ def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None =
     return done.stdout.decode()
 
 
+def _stage(cwd: Path, paths: Sequence[str] = (), index: Path | None = None) -> None:
+    """``git add --all`` of ``paths``, the whole tree when none, but for every repository nested in it that the index
+    tracks: add checks one for local changes by running git in it, under that repository's own config, which nothing
+    pinned here reaches. One the index does not track is added as it is, which runs nothing in it."""
+    entries = _git(cwd, "ls-files", "--stage", "-z", index=index).split("\0")
+    nested = [entry.partition("\t")[2] for entry in entries if entry.startswith(f"{_GITLINK} ")]
+    _git(cwd, *_STAGE, *paths, *(f":(exclude,literal){path}" for path in nested), index=index)
+
+
 def _commit_all(cwd: Path, message: str) -> None:
-    _git(cwd, *_STAGE)
+    _stage(cwd)
     _git(cwd, "commit", _QUIET, "--allow-empty", "-m", message)
 
 
@@ -487,7 +497,7 @@ class BranchWorktree:
         with tempfile.TemporaryDirectory(prefix="mb-diff-") as scratch:
             index = Path(scratch) / "index"
             _git(self.path, "read-tree", commit, index=index)
-            _git(self.path, *_STAGE, *paths, index=index)
+            _stage(self.path, paths, index)
             return _git(self.path, _DIFF, _CACHED, *_PLAIN, commit, "--", *paths, index=index)
 
     def diff_between(self, commit: str, before: Sequence[str], after: str, component: str) -> str:
@@ -552,7 +562,7 @@ class BranchWorktree:
 
     def _staged_diff(self, component: str, *options: str) -> str:
         paths = self._paths(component)
-        _git(self.path, *_STAGE, *paths)
+        _stage(self.path, paths)
         return _git(self.path, _DIFF, _CACHED, *options, self._since(), "--", *paths)
 
     def _synced(self) -> str | None:

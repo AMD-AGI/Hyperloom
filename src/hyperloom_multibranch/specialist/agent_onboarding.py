@@ -50,13 +50,8 @@ from typing import Protocol
 
 from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, make_shared_dirs, write_shared_text
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
-from hyperloom_multibranch.repo.isolated_git import (
-    NO_LAZY_FETCH,
-    NO_PROGRAMS,
-    blank_filter_drivers,
-    leading_options,
-    trusting,
-)
+from hyperloom_common.git_safety import NO_PROGRAMS
+from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
 from hyperloom_multibranch.specialist.agent_spec import ROOT_PROFILE_SOURCE, AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import (
@@ -456,7 +451,7 @@ async def _git(argv: list[str], cwd: Path) -> CommandResult:
     make_shared_dirs(cwd)
     env = {**os.environ, **NO_LAZY_FETCH}
     try:
-        blanked = await asyncio.to_thread(blank_filter_drivers, cwd, env, *leading_options(argv[1:]))
+        blanked = await asyncio.to_thread(blank_driver_programs, cwd, env, *leading_options(argv[1:]))
     except (OSError, subprocess.SubprocessError) as error:
         return CommandResult(1, f"git config in {cwd} cannot be read to blank its filter drivers: {error}")
     process = await asyncio.create_subprocess_exec(
