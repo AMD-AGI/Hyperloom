@@ -17,6 +17,7 @@ from hyperloom.common.env_safety import (
     valid_env_key,
 )
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from inference_suite.argv import reserialize_json_blobs
 
 _DROP = object()
 
@@ -188,9 +189,7 @@ def sanitize_publish_server_args(value: str) -> str:
             "extra_server_args contains a whitespace-bearing value unsupported "
             "by Magpie's unquoted environment expansion"
         )
-    from hyperloom.inference_optimizer.grid_server_args import _reserialize_json_blobs
-
-    return _reserialize_json_blobs(" ".join(safe))
+    return reserialize_json_blobs(" ".join(safe))
 
 
 def _sanitize_value(value: Any, *, key: str = "", allow_absolute: bool = False) -> Any:

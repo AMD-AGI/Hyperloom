@@ -34,11 +34,10 @@ from pathlib import PurePosixPath
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedupe_extra_server_args,
-    removal_option_names,
-    tokenize_server_args_preserving_json,
     validate_server_args_shell_safe,
 )
 from hyperloom_common.contract_fields import ContractFields
+from inference_suite.argv import removal_option_names, tokenize_server_args_preserving_json
 
 RECIPE_SCHEMA_VERSION = 1
 PATCH_ROOT = "patch"
