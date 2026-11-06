@@ -594,9 +594,9 @@ class RealToolbox:
             if self._claims is not None and accepted.intent_fingerprint is not None:
                 await self._claims.attach_request(self._key(accepted), entry.request_id, ttl_seconds=self._ttl)
         except ClaimLost as error:
-            # Aborted before the withdrawal is written: a write that fails must not leave the entry waiting in no queue.
-            self._log.abort(entry.request_id)
-            await self._sink.write_withdrawal(Withdrawal(entry.request_id, f"claim lost: {error}"))
+            # The row is written, so the request ends as withdrawn, logged like any outcome: it waits in no queue, and a
+            # write the blackboard refuses is retried by the next tick and the next start, never left in flight.
+            await self._record_and_write(entry, {"withdrawal": f"claim lost: {error}"})
             raise RequestRejected(f"the claim of this request is not held: {error}") from error
         except BaseException:
             self._log.abort(entry.request_id)
@@ -623,7 +623,8 @@ class RealToolbox:
             prepared = await self._acceptance.prepare(request, replay=True)
             await self._publish(entry, request)
         except RequestRejected as error:
-            await self._record_and_write(entry, {"withdrawal": f"not recoverable: {error}"})
+            if entry.outcome is None:  # a lost claim has recorded its withdrawal already
+                await self._record_and_write(entry, {"withdrawal": f"not recoverable: {error}"})
             return
         self._enqueue(entry, request, prepared.environment, self._builds.plan(request, prepared.environment))
 
@@ -789,7 +790,10 @@ class RealToolbox:
     async def _renew_loop(self) -> None:
         while True:
             await asyncio.sleep(self._ttl / 3)
-            await self.tick()
+            try:
+                await self.tick()
+            except Exception:  # ended, the loop would let every live claim lapse at its TTL, and close() says nothing
+                logger.exception("a renewal round failed; the claims of live tests are renewed again at the next one")
 
 
 __all__ = ["AcceptanceSetup", "RealToolbox", "ToolboxStores", "ToolboxTuning"]
