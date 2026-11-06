@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -58,6 +59,8 @@ from hyperloom_multibranch.specialist.worktree import BranchWorktree, WorktreeEr
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+
+log = logging.getLogger(__name__)
 
 #: The holder of the pass's lease, and the name of its worktree and directory beside the branches': it is no branch.
 DOSSIER_HOLDER = "dossier"
@@ -168,10 +171,14 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
             return DossierOutcome(None, None, f"it did not start: {'; '.join(failed.reasons)}")
         return await _ended(ready, start, setup)
     finally:
-        # Always: Arbor's top process may have exited with a server it started still on the cards.
-        if ready is not None:
-            await ready.process.kill()
-        await asyncio.shield(setup.toolbox.release_branch_sandbox(lease.lease_id))
+        try:
+            # Always: Arbor's top process may have exited with a server it started still on the cards.
+            if ready is not None:
+                await ready.process.kill()
+        except SandboxUnavailable as error:
+            log.warning("the dossier pass of %s could not be killed: %s", setup.holder, error)
+        finally:
+            await asyncio.shield(setup.toolbox.release_branch_sandbox(lease.lease_id))
 
 
 async def _ended(ready: ReadyAgent, start: DossierStart, setup: DossierSetup) -> DossierOutcome:
