@@ -22,6 +22,8 @@ FLOW_SINGLE = "single"
 FLOW_MULTIBRANCH = "multibranch"
 MEASUREMENT_LOCAL = "local"
 MEASUREMENT_HOSTED = "hosted"
+#: The profile whose application container has cards of its own, the only one a multibranch run measures locally on.
+PROFILE_WITH_CARDS = "hosted-gpu"
 DEFAULT_MAX_PARALLEL_TESTS = 8
 
 _FLOWS = (FLOW_SINGLE, FLOW_MULTIBRANCH)
@@ -86,7 +88,7 @@ FIELDS: tuple[Field, ...] = (
     Field("options.framework_agent", "framework_agent", Kind.BOOL),
     Field("options.eval", "eval", Kind.ENUM, choices=(True,)),
     Field("options.enablement", "enablement", Kind.ENUM, choices=("all", "launch", "eval", "off")),
-    Field("placement.profile", "profile", Kind.ENUM, required=True, choices=("hosted-gpu", "hosted-cpu")),
+    Field("placement.profile", "profile", Kind.ENUM, required=True, choices=(PROFILE_WITH_CARDS, "hosted-cpu")),
     Field("placement.measurement", "measurement", Kind.ENUM, choices=(MEASUREMENT_LOCAL, MEASUREMENT_HOSTED)),
     Field("placement.max_parallel_tests", "max_parallel_tests", Kind.INT, minimum=1),
     Field("placement.specialist_capacity", "specialist_capacity", Kind.INT, minimum=0),
@@ -233,8 +235,12 @@ def _check_rules(values: Mapping[str, Any], problems: list[str]) -> None:
     measurement = values.get("measurement", _DEFAULT_MEASUREMENT[flow])
     if flow == FLOW_SINGLE and measurement != MEASUREMENT_LOCAL:
         problems.append(f"placement.measurement must be 'local' for flow 'single', got {measurement!r}")
-    if flow == FLOW_MULTIBRANCH and measurement != MEASUREMENT_HOSTED:
-        problems.append(f"placement.measurement must be 'hosted' for flow 'multibranch', got {measurement!r}")
+    profile = values.get("profile")
+    if flow == FLOW_MULTIBRANCH and measurement == MEASUREMENT_LOCAL and profile not in (None, PROFILE_WITH_CARDS):
+        problems.append(
+            f"placement.measurement 'local' measures on the application container's own cards for flow 'multibranch':"
+            f" placement.profile must be {PROFILE_WITH_CARDS!r}, got {profile!r}"
+        )
     for key in values.get("extra_env") or {}:
         if not key or "=" in key:
             problems.append(f"launch.extra_env has the invalid name {key!r}")
