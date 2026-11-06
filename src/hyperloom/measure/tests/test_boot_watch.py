@@ -28,6 +28,7 @@ from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec, boot_second
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.socket import TestCall
+from inference_suite.contracts.layout import READY_STAMP
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -193,10 +194,9 @@ def test_a_round_whose_server_never_stamps_a_ready_banner_has_no_limit(framework
 
 
 def test_the_literals_the_guard_copies_equal_their_definitions() -> None:
-    kill = importlib.import_module("hyperloom.orchestrator.actions.executors._subprocess_kill")
     engine = importlib.import_module("hyperloom.orchestrator.actions.executors.bypass_engine")
 
-    assert boot_watch._READY_STAMP == kill._READY_STAMP_NAME
+    assert boot_watch._READY_STAMP == READY_STAMP
     assert set(boot_watch._SERVER_FRAMEWORKS) == set(engine.SERVER_FRAMEWORKS)
 
 

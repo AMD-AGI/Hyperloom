@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+from inference_suite.server_log import LogCursor, LogScan
 from hyperloom.orchestrator.actions.executors.benchmark_run.records import (
     _config_framework,
     _watchdog_server_log_path,
@@ -39,7 +40,7 @@ def _count_scans(monkeypatch) -> dict[str, int]:
 
     def _scan(self, server_log_path):
         calls["scan"] += 1
-        return sk._LogScan(
+        return LogScan(
             saw_ready=False,
             saw_progress=False,
             saw_eval_start=False,
@@ -47,7 +48,7 @@ def _count_scans(monkeypatch) -> dict[str, int]:
             child_spoke=False,
         )
 
-    monkeypatch.setattr(sk._LogCursor, "advance", _scan)
+    monkeypatch.setattr(LogCursor, "advance", _scan)
     return calls
 
 

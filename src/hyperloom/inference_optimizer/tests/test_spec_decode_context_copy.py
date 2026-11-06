@@ -18,7 +18,6 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
-from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
 from hyperloom.orchestrator.actions.executors._spec_decode_context_copy import (
     CONTEXT_COPY_REFUSAL,
     context_copy_method,
@@ -29,36 +28,6 @@ from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
-
-
-# --------------------------------------------------------------------------
-# eval-start marker
-# --------------------------------------------------------------------------
-def test_eval_marker_in_magpies_nested_stderr_opens_the_eval_phase(tmp_path):
-    """The engine logs to the round's own server.log while Magpie's stderr, which carries the marker, is nested.
-
-    Reached only through a nested server.log, the stderr was never scanned and the eval was folded into the
-    measured phase (a 12h vLLM session's warmup round recorded only ``measured`` across its whole GSM8K eval).
-    """
-    primary = tmp_path / "server.log"
-    offsets = sk._stale_scan_log_sizes(str(primary))
-    primary.write_text("Application startup complete\n", encoding="utf-8")
-    nested = tmp_path / "benchmark_vllm_20261014_204322"
-    nested.mkdir()
-    (nested / "benchmark_stderr.log").write_text("+ run_eval\nHYPERLOOM_EVAL_START\n", encoding="utf-8")
-
-    scan = sk._LogCursor(offsets).advance(str(primary))
-    assert scan.saw_eval_start
-
-
-def test_a_previous_runs_nested_stderr_is_not_activity(tmp_path):
-    """A stderr that was already there when the round started belongs to an earlier run and must stay silent."""
-    nested = tmp_path / "benchmark_vllm_old"
-    nested.mkdir()
-    (nested / "benchmark_stderr.log").write_text("HYPERLOOM_EVAL_START\n", encoding="utf-8")
-    offsets = sk._stale_scan_log_sizes(str(tmp_path / "server.log"))
-    scan = sk._LogCursor(offsets).advance(str(tmp_path / "server.log"))
-    assert not scan.saw_eval_start
 
 
 # --------------------------------------------------------------------------

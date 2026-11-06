@@ -26,14 +26,12 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     RoundWatch,
-    _LogCursor,
-    _scan_server_log_increment,
     kill_my_spawned_server,
     run_with_session_kill,
-    server_log_death_excerpt,
     session_deadline_to_remaining_sec,
     session_remaining_to_deadline_sec,
 )
+from inference_suite.server_log import LogCursor, LogScan, death_excerpt
 
 
 class _FakeCapture:
@@ -171,7 +169,7 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
             raise subprocess.TimeoutExpired(self.args, timeout)
 
     monkeypatch.setattr(sk.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(sk._LogCursor, "advance", lambda *args: sk._LogScan(ready, False, False, noise, False))
+    monkeypatch.setattr(LogCursor, "advance", lambda *args: LogScan(ready, False, False, noise, False))
     error = sk._ServerStalledDetected if expected == 600 else subprocess.TimeoutExpired
     with pytest.raises(error):
         sk._communicate_with_watchdog(
@@ -258,11 +256,9 @@ def test_exited_process_wins_over_expired_gates(monkeypatch):
 
 
 def test_log_rotation_and_truncation_do_not_invent_activity(tmp_path):
-    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
-
     path = tmp_path / "server.log"
     path.write_text("x" * 100, encoding="utf-8")
-    cursor = sk._LogCursor()
+    cursor = LogCursor()
     cursor.advance(str(path))
     path.write_text("Application startup complete\n", encoding="utf-8")
     scan = cursor.advance(str(path))
@@ -942,31 +938,31 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
 
 
 # Server-liveness watchdog
-def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
+def test_death_excerpt_surfaces_nested_root_cause(tmp_path):
     """The excerpt helper also falls back to a nested ``benchmark_*/server.log``
     so the failure classifier still surfaces the real server fault."""
     watched = tmp_path / "server.log"
     nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
     nested_dir.mkdir()
     nested_log = nested_dir / "server.log"
-    assert server_log_death_excerpt(str(watched)) is None
+    assert death_excerpt(str(watched)) is None
     nested_log.write_text(
         "(EngineCore pid=2581809)     raise RuntimeError(\n"
         "(EngineCore pid=2581809) RuntimeError: Engine core initialization "
         "failed. See root cause above. Failed core proc(s): {}\n"
     )
-    excerpt = server_log_death_excerpt(str(watched))
+    excerpt = death_excerpt(str(watched))
     assert excerpt is not None
     assert "Engine core initialization failed" in excerpt
 
 
-def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
+def test_death_excerpt_surfaces_root_cause(tmp_path):
     """The excerpt helper returns the engine/worker-init root-cause line (with a
     little context) for the failure classifier; a healthy / missing log returns ``None``."""
     log_path = tmp_path / "server.log"
-    assert server_log_death_excerpt(str(log_path)) is None  # missing → None
+    assert death_excerpt(str(log_path)) is None  # missing → None
     log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
-    assert server_log_death_excerpt(str(log_path)) is None  # healthy → None
+    assert death_excerpt(str(log_path)) is None  # healthy → None
     log_path.write_text(
         "(APIServer pid=16160)   File '.../vllm/v1/engine/utils.py', line 1057, "
         "in wait_for_engine_startup\n"
@@ -974,12 +970,12 @@ def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
         "(APIServer pid=16160) RuntimeError: Engine core initialization failed. "
         "See root cause above. Failed core proc(s): {}\n"
     )
-    excerpt = server_log_death_excerpt(str(log_path))
+    excerpt = death_excerpt(str(log_path))
     assert excerpt is not None
     assert "Engine core initialization failed" in excerpt
 
 
-def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path):
+def test_death_excerpt_surfaces_config_validation_arch_miss(tmp_path):
     """A config-validation-stage failure (brand-new checkpoint ``model_type``
     unknown to the installed transformers/vLLM) dies BEFORE the engine starts and
     must still be surfaced as a fatal excerpt. Without this the enablement failure
@@ -991,7 +987,7 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
     log_path = tmp_path / "server.log"
     # A healthy INFO banner naming architectures must NOT trip the markers.
     log_path.write_text("INFO [registry] Model architectures ['Qwen3ForCausalLM'] loaded\n")
-    assert server_log_death_excerpt(str(log_path)) is None
+    assert death_excerpt(str(log_path)) is None
     # The real DeepSeek-V4 config-validation failure.
     log_path.write_text(
         "(APIServer pid=1046234) Traceback (most recent call last):\n"
@@ -1001,7 +997,7 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
         "load has model type `deepseek_v4` but Transformers does not recognize "
         "this architecture.\n"
     )
-    excerpt = server_log_death_excerpt(str(log_path))
+    excerpt = death_excerpt(str(log_path))
     assert excerpt is not None
     assert "does not recognize this architecture" in excerpt
     # The extracted excerpt must classify as missing_model_arch (not unknown),
@@ -1059,131 +1055,6 @@ def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
 
 
 # ── Detokenizer-stall watchdog ──
-def test_scan_server_log_increment_detects_vllm_rust_frontend_ready(tmp_path):
-    """vLLM's Rust frontend (`vllm serve`, VLLM_USE_RUST_FRONTEND=1) runs no uvicorn; its own ready line is the ready
-    marker, colour codes included, or the boot guard ends the round at its boot share."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text(
-        "\x1b[36m(RustFrontend pid=4242)\x1b[0m \x1b[32mINFO\x1b[0m 10-29 06:18:45 [server/src/lib.rs:331] "
-        'OpenAI server is ready to accept requests bind_address="0.0.0.0:45369"\n'
-    )
-    assert _scan_server_log_increment(str(log_path), 0).saw_ready is True
-
-
-def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
-    """The incremental scanner advances its offset and flags ready/progress
-    markers only in the newly appended bytes."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("INFO loading weights\nApplication startup complete\n")
-    first = _scan_server_log_increment(str(log_path), 0)
-    assert first.saw_ready is True
-    assert first.saw_progress is False and first.saw_eval_start is False
-    assert first.offset == log_path.stat().st_size
-    # Re-scan from the advanced offset: nothing new, no re-trigger.
-    second = _scan_server_log_increment(str(log_path), first.offset)
-    assert second.saw_ready is False and second.saw_progress is False and second.saw_eval_start is False
-    assert second.offset == first.offset
-    # Append a vLLM throughput line; only the new bytes are scanned.
-    with log_path.open("a") as f:
-        f.write("Avg generation throughput: 123.4 tokens/s, Running: 8\n")
-    third = _scan_server_log_increment(str(log_path), second.offset)
-    assert third.saw_progress is True and third.saw_ready is False and third.saw_eval_start is False
-    assert third.offset == log_path.stat().st_size
-    # The eval-start marker is reported independently of ready/progress.
-    with log_path.open("a") as f:
-        f.write("HYPERLOOM_EVAL_START\n")
-    fourth = _scan_server_log_increment(str(log_path), third.offset)
-    assert fourth.saw_eval_start is True and fourth.saw_ready is False and fourth.saw_progress is False
-    assert fourth.offset == log_path.stat().st_size
-    # An idle engine keeps printing the same line with no rate on it: the value
-    # is the progress signal, not the marker.
-    with log_path.open("a") as f:
-        f.write("Avg generation throughput: 0.0 tokens/s, Running: 0 reqs\n")
-    fifth = _scan_server_log_increment(str(log_path), fourth.offset)
-    assert fifth.saw_progress is False and fifth.offset == log_path.stat().st_size
-
-
-def test_log_cursor_reads_nested_stderr_for_eval_start(tmp_path):
-    """The real Magpie layout: the caller passes ``<output_dir>/server.log``,
-    which does not exist, while the engine log and the eval-start marker live in
-    a ``benchmark_*/`` subdir -- the marker only ever reaching stderr."""
-    output_dir = tmp_path / "measure_round"
-    bench = output_dir / "benchmark_atom_20260731_085850"
-    bench.mkdir(parents=True)
-    (bench / "server.log").write_text("Application startup complete\n")
-    (bench / "benchmark_stderr.log").write_text("running benchmark\n")
-    passed = str(output_dir / "server.log")
-    assert not Path(passed).exists()
-
-    cursor = _LogCursor()
-    first = cursor.advance(passed)
-    assert first.saw_ready is True and first.saw_eval_start is False and first.grew is True
-
-    # The marker lands in stderr, never in server.log.
-    with (bench / "benchmark_stderr.log").open("a") as f:
-        f.write("HYPERLOOM_EVAL_START\n")
-    second = cursor.advance(passed)
-    assert second.saw_eval_start is True and second.saw_ready is False and second.grew is True
-
-    # Nothing new appended: no re-trigger, offsets stay put.
-    third = cursor.advance(passed)
-    assert third.saw_eval_start is False and third.grew is False
-
-
-def test_log_cursor_tells_the_childs_own_log_from_the_servers(tmp_path):
-    """Only one of the resolved logs is written by the process being waited on.
-
-    ``server.log`` is the inference server's; ``benchmark_stderr.log`` is where
-    Magpie redirects the benchmark body's own stderr, so the parent's pipe stays
-    empty for the whole round and that file is the only place the child's own
-    output shows up. Liveness that cannot tell them apart either vouches for a
-    wedged client or leaves a working one unable to report.
-    """
-    bench = tmp_path / "benchmark_atom_20260731_085850"
-    bench.mkdir(parents=True)
-    server_log = bench / "server.log"
-    child_log = bench / "benchmark_stderr.log"
-    server_log.write_text("Application startup complete\n")
-    child_log.write_text("running benchmark\n")
-    passed = str(tmp_path / "server.log")
-    cursor = _LogCursor()
-    cursor.advance(passed)
-
-    with server_log.open("a") as f:
-        f.write("[atom 22:29:41] Scheduled prefill batch: 4 reqs, 3707 new tokens\n")
-    server_only = cursor.advance(passed)
-    assert server_only.grew is True and server_only.child_spoke is False
-
-    with child_log.open("a") as f:
-        f.write("bench: 128/2000 requests done\n")
-    child_only = cursor.advance(passed)
-    assert child_only.grew is True and child_only.child_spoke is True
-
-
-def test_health_probe_lines_are_not_server_activity(tmp_path):
-    """An engine that died behind a live HTTP front end still answers /metrics.
-
-    ATOM's ModelRunner crashed on a GPU memory fault while its API server kept
-    serving the monitor's /metrics polls, so the log grew every few seconds and
-    the silence gate never fired: lm_eval waited on 64 requests nothing would
-    serve until the 7800s hard cap.
-    """
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Application startup complete\n", encoding="utf-8")
-    cursor = _LogCursor()
-    cursor.advance(str(log_path))
-
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write('INFO:     127.0.0.1:45518 - "GET /metrics HTTP/1.1" 200 OK\n')
-        f.write('INFO:     127.0.0.1:45520 - "GET /health HTTP/1.1" 200 OK\n')
-    assert cursor.advance(str(log_path)).grew is False
-
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write('INFO:     127.0.0.1:45522 - "GET /metrics HTTP/1.1" 200 OK\n')
-        f.write("[atom 23:29:42] Request 639 arrived, input tokens: 1295, pending requests: 64\n")
-    assert cursor.advance(str(log_path)).grew is True
-
-
 def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_path):
     """A server that reports ready then produces no generation progress is
     reaped with ``DETOKENIZER_STALL_RETURNCODE`` well before the hard timeout."""
@@ -1346,7 +1217,7 @@ class _Round:
 
     def __init__(self, log: Path) -> None:
         self.log = log
-        self.activity = _subprocess_kill._RoundActivity(started_at=0.0, cursor=_LogCursor({}), last_activity_at=0.0)
+        self.activity = _subprocess_kill._RoundActivity(started_at=0.0, cursor=LogCursor({}), last_activity_at=0.0)
 
     def poll(self, now: float, written: str = "") -> float:
         """The last activity after a poll at ``now`` that finds ``written`` appended to the log."""
@@ -1453,7 +1324,7 @@ def test_a_server_that_dies_after_serving_yields_a_classifiable_excerpt(tmp_path
     """
     from hyperloom.common.failure_signature import classify_failure
 
-    excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
+    excerpt = death_excerpt(str(_engine_death_log(tmp_path)))
 
     assert excerpt is not None
     assert "EngineCore encountered a fatal error" in excerpt
@@ -1463,7 +1334,7 @@ def test_a_server_that_dies_after_serving_yields_a_classifiable_excerpt(tmp_path
 
 def test_the_excerpt_leads_with_the_marker_not_the_scheduler_dump(tmp_path):
     """vLLM dumps its whole scheduler state on the line above the fatal error."""
-    excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
+    excerpt = death_excerpt(str(_engine_death_log(tmp_path)))
 
     assert excerpt is not None
     assert excerpt.splitlines()[0].endswith("EngineCore encountered a fatal error.")
@@ -1472,7 +1343,7 @@ def test_the_excerpt_leads_with_the_marker_not_the_scheduler_dump(tmp_path):
 
 def test_the_cause_outranks_the_consequence_it_triggered(tmp_path):
     """`EngineDeadError` is what the API server saw; the OOM is why."""
-    excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
+    excerpt = death_excerpt(str(_engine_death_log(tmp_path)))
 
     assert excerpt is not None
     assert "HIP out of memory" in excerpt
@@ -1487,7 +1358,7 @@ def test_a_log_with_no_fatal_marker_still_yields_nothing(tmp_path):
     log = tmp_path / "server.log"
     log.write_text("(APIServer pid=1) INFO:     Application startup complete.\n" * 50, encoding="utf-8")
 
-    assert server_log_death_excerpt(str(log)) is None
+    assert death_excerpt(str(log)) is None
 
 
 def test_a_bootstrap_wrapper_keeps_the_root_cause_above_it(tmp_path):
@@ -1513,7 +1384,7 @@ def test_a_bootstrap_wrapper_keeps_the_root_cause_above_it(tmp_path):
         encoding="utf-8",
     )
 
-    excerpt = server_log_death_excerpt(str(log))
+    excerpt = death_excerpt(str(log))
 
     assert excerpt is not None
     assert "out of memory" in excerpt.lower(), "the cause above the wrapper must survive"
@@ -1545,7 +1416,7 @@ def test_a_death_past_any_head_bound_and_outside_the_tail_is_still_found(tmp_pat
         for _ in range(4000):  # past a 64 KiB tail window
             fh.write(trailing)
 
-    excerpt = server_log_death_excerpt(str(log))
+    excerpt = death_excerpt(str(log))
 
     assert excerpt is not None
     assert "HIP out of memory" in excerpt
@@ -1573,7 +1444,7 @@ def test_a_legacy_marker_that_contains_a_fatal_one_keeps_legacy_handling(tmp_pat
             encoding="utf-8",
         )
 
-        excerpt = server_log_death_excerpt(str(log))
+        excerpt = death_excerpt(str(log))
 
         assert excerpt is not None, legacy
         assert "out of memory" in excerpt.lower(), f"{legacy} must keep the cause above it"

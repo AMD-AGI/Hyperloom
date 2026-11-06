@@ -4,8 +4,7 @@
 """Tests for KV collection riding the watchdog loop.
 
 Covers the phase split, the recorder itself, and the ``finally`` that closes a
-window on every exit path. Also covers the scanner's truncation branch, which
-has been reachable and untested since it was written.
+window on every exit path.
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+from inference_suite.server_log import LogCursor, LogScan
 from inference_suite.telemetry.kv_poll import KvSample
 from inference_suite.telemetry.kv_record import (
     KV_ARTIFACT_NAME,
@@ -44,50 +44,6 @@ def _sample(**kwargs) -> KvSample:
     base = {"ts": 1.0, "mono": 1.0, "engine": "sglang", "active_pool_usage": 0.5}
     base.update(kwargs)
     return KvSample(**base)
-
-
-# --------------------------------------------------------------------------
-# scanner
-# --------------------------------------------------------------------------
-def test_scan_survives_truncation_by_rescanning_from_the_top(tmp_path):
-    """A rotated log is shorter than the consumed offset; markers in the new
-    content must still be seen rather than skipped past."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("x" * 500 + "\n", encoding="utf-8")
-    first = sk._scan_server_log_increment(str(log_path), 0)
-    assert first.offset == log_path.stat().st_size
-
-    log_path.write_text("Application startup complete\n", encoding="utf-8")
-    after = sk._scan_server_log_increment(str(log_path), first.offset)
-
-    assert after.saw_ready is True
-    assert after.offset == log_path.stat().st_size
-
-
-def test_scan_reports_agentx_phase_boundaries(tmp_path):
-    """aiperf prints these itself; we add no marker of our own."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Phase warmup (warmup) started | target: 44 requests\n", encoding="utf-8")
-    warm = sk._scan_server_log_increment(str(log_path), 0)
-    assert warm.saw_warmup_begin is True and warm.saw_measured_begin is False
-
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write("Phase profiling (profiling) started | phase_index=0\n")
-    measured = sk._scan_server_log_increment(str(log_path), warm.offset)
-    assert measured.saw_measured_begin is True and measured.saw_warmup_begin is False
-
-
-def test_resolve_scan_logs_includes_the_agentx_client_log(tmp_path):
-    """An AgentX workspace has no benchmark_stderr.log, so without this the
-    phase lines are unreachable."""
-    bench = tmp_path / "benchmark_sglang_20260903"
-    (bench / "aiperf_artifacts" / "logs").mkdir(parents=True)
-    (bench / "server.log").write_text("up\n", encoding="utf-8")
-    (bench / "aiperf_artifacts" / "logs" / "aiperf.log").write_text("phases\n", encoding="utf-8")
-
-    resolved = sk._resolve_scan_logs(str(tmp_path / "server.log"))
-
-    assert any(p.endswith("aiperf.log") for p in resolved)
 
 
 # --------------------------------------------------------------------------
@@ -448,52 +404,6 @@ def test_warm_reuse_rounds_scrape_immediately_and_are_tagged_measured():
     assert rec.phases == ["measured"]
 
 
-def test_marker_split_across_a_read_boundary_is_still_seen(tmp_path):
-    """Half a marker is in neither chunk, so without a carried tail the phase
-    boundary is lost outright -- not seen late, never seen."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Phase profiling (prof", encoding="utf-8")
-
-    residuals: dict[str, str] = {}
-    first = sk._scan_server_log_increment(str(log_path), 0, residuals.get("k", ""))
-    residuals["k"] = first.residual
-    assert first.saw_measured_begin is False
-
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write("iling) started | phase_index=0\n")
-    second = sk._scan_server_log_increment(str(log_path), first.offset, residuals["k"])
-
-    assert second.saw_measured_begin is True
-
-
-def test_residual_is_held_per_path(tmp_path):
-    """The resolved logs have different writers; splicing one's tail into
-    another's next read would invent a line neither of them wrote."""
-    bench = tmp_path / "benchmark_sglang"
-    bench.mkdir()
-    (bench / "server.log").write_text("Phase profiling (prof", encoding="utf-8")
-    (bench / "benchmark_stderr.log").write_text("iling) started\n", encoding="utf-8")
-
-    cursor = sk._LogCursor()
-    scan = cursor.advance(str(tmp_path / "server.log"))
-
-    assert scan.saw_measured_begin is False
-    assert len(cursor.residuals) >= 2
-
-
-def test_truncation_drops_the_carried_tail(tmp_path):
-    """The tail belonged to a file that no longer exists."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Phase profiling (prof", encoding="utf-8")
-    first = sk._scan_server_log_increment(str(log_path), 0)
-    assert first.residual
-
-    log_path.write_text("iling) started\n", encoding="utf-8")
-    after = sk._scan_server_log_increment(str(log_path), 10_000, first.residual)
-
-    assert after.saw_measured_begin is False
-
-
 def test_scope_identifies_the_round_without_another_file(tmp_path):
     """A consumer must not have to join against something else to know which
     variant and action produced the artifact."""
@@ -520,13 +430,13 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
     rec = _Recorder()
     scans = iter(
         [
-            sk._LogScan(True, False, False, True, False, False, False),
-            sk._LogScan(False, False, False, True, False, True, False),
-            sk._LogScan(False, False, False, True, False, False, True),
-            sk._LogScan(False, False, True, True, False, False, False),
+            LogScan(True, False, False, True, False, False, False),
+            LogScan(False, False, False, True, False, True, False),
+            LogScan(False, False, False, True, False, False, True),
+            LogScan(False, False, True, True, False, False, False),
         ]
     )
-    monkeypatch.setattr(sk._LogCursor, "advance", lambda *_a, **_k: next(scans, sk._LogScan(*([False] * 7))))
+    monkeypatch.setattr(LogCursor, "advance", lambda *_a, **_k: next(scans, LogScan(*([False] * 7))))
     monkeypatch.setattr(sk, "stamp_server_ready", lambda *_a, **_k: None)
     log_path = tmp_path / "server.log"
     log_path.write_text("x\n", encoding="utf-8")
