@@ -8,11 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from hyperloom.inference_optimizer.grid_server_args import (
-    SPECULATIVE_CONFIG_FLAG,
-    flag_occurrences,
-    speculative_config,
-)
+from inference_suite.argv import SPECULATIVE_CONFIG_FLAG, flag_occurrences, speculative_config
 from inference_suite.golden import (
     GOLDEN_OWNED_ENV_PREFIXES,
     GOLDEN_OWNED_FLAG_PREFIXES,
