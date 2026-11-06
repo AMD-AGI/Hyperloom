@@ -189,6 +189,7 @@ async def test_an_unknown_flag_from_any_source_is_refused_by_name_and_never_drop
     from hyperloom.orchestrator.actions.executors import _workload_envs as we
     from hyperloom.orchestrator.actions.executors._server_argv import config_server_argv
     from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, MaterializeOptions
+    from hyperloom.orchestrator.state.base_launch import ServerBase
 
     from ._workload_envs_helpers import clear_env, write_config
 
@@ -197,7 +198,7 @@ async def test_an_unknown_flag_from_any_source_is_refused_by_name_and_never_drop
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SERVER_ARGS", raising=False)
     stale = f"{_STALE_FLAG} triton"
     recipe_args = f"--tp 8 {stale}" if source == "recipe" else "--tp 8"
-    monkeypatch.setattr(we, "resolve_reference_launch", lambda: (recipe_args, {}, {}))
+    monkeypatch.setattr(we, "session_server_base", lambda: ServerBase(args=recipe_args))
     if source == "user":
         monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", stale)
     candidate = LaunchLayer(extra_server_args=stale if source == "candidate" else "--context-length 4096")
