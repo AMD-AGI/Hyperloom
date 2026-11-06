@@ -549,6 +549,32 @@ def test_a_writable_path_reached_through_another_never_adds_where_it_points_to_t
     assert kube in credential_paths(environ, app_environ={}, allowed=(tools, work), writable=writable)
 
 
+@pytest.mark.parametrize("target", ["root", "parent", "link_holder"])
+def test_a_writable_path_re_pointed_through_another_never_takes_a_tree_from_the_agent(
+    tmp_path, no_child_python, target
+):
+    """``into-work/sub`` leads into ``work`` (as ``via/work``, the worktree as given, does), so the agent decides what
+    it is. Pointed at ``/``, at ``work``'s parent, or at ``via`` (which holds the app's link), it has ``work`` reached
+    through it; yet ``work`` stays a tree: nothing reached through it is bound or read. Pointed at ``via``, the two
+    are reached through each other's trees: neither is bound, both stay trees, and a credential location of the
+    child's in ``via`` is masked, not taken for one the agent writes."""
+    _home, work, _key = _planted(tmp_path)
+    (work / "bin").mkdir()
+    (tmp_path / "via").mkdir()
+    (tmp_path / "via" / "work").symlink_to(work)
+    (tmp_path / "into-work").symlink_to(work)
+    (work / "sub").symlink_to({"root": Path("/"), "parent": tmp_path, "link_holder": tmp_path / "via"}[target])
+    kube = _write(tmp_path / "via" / "kubeconfig")
+    writable = (tmp_path / "via" / "work", tmp_path / "into-work" / "sub")
+
+    assert Confinement(writable=writable).policy().writable == (() if target == "link_holder" else (str(work),))
+    with pytest.raises(BwrapPolicyError):
+        Confinement(writable=writable, readable=(work / "bin",)).policy()
+    environ = {"PATH": f"{work / 'bin'}:/usr/bin", "KUBECONFIG": str(kube)}
+    assert work / "bin" not in toolchain_paths(environ, "sh", writable=writable)
+    assert kube in credential_paths(environ, app_environ={}, writable=writable)
+
+
 @pytest.mark.parametrize("planted", [False, True], ids=["directory", "link"])
 def test_a_readable_path_reached_through_a_tree_the_agent_writes_is_refused(tmp_path, planted):
     """Its target would be the agent's choice, and a read-only bind over a tree the agent writes cannot hold."""
