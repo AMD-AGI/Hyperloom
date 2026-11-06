@@ -90,7 +90,13 @@ SANDBOX_DIRECTORIES = {
     "TORCHINDUCTOR_CACHE_DIR": (_CACHE_DIR, "torchinductor"),
     "AITER_JIT_DIR": (_CACHE_DIR, _AITER_JIT_DIR),
     _AITER_JIT_ENV: (_CACHE_DIR, _AITER_JIT_DIR),
+    "FLYDSL_RUNTIME_CACHE_DIR": (_CACHE_DIR, "flydsl"),
 }
+#: Those of :data:`SANDBOX_DIRECTORIES` whose tool writes into its own installed tree when they are unset (AITER
+#: builds its JIT modules in ``aiter/jit``): that tree is read-only in a sandbox, so each is set into the workspace.
+SANDBOX_JIT_CACHES = ("AITER_JIT_DIR", _AITER_JIT_ENV, "FLYDSL_RUNTIME_CACHE_DIR")
+#: Hugging Face's directories; with neither set, its default under the app's home is shown read-only as ``HF_HOME``.
+HF_VARIABLES = ("HF_HOME", "HF_HUB_CACHE")
 #: The temporary-directory variables, which name the sandbox's own ``/tmp``.
 TEMP_VARIABLES = ("TMPDIR", "TMP", "TEMP")
 #: The app's own trees, masked wherever a sandbox's binds would show them.
@@ -454,14 +460,15 @@ class PreparedLaunch:
         only, and bubblewrap's status goes to a pipe whose write end ``kwargs`` passes on.
 
         Raises:
-            IsolationRefused: This bubblewrap must not launch the sandbox's policy.
+            IsolationRefused: This bubblewrap must not launch the sandbox's policy, or there is none.
         """
         if isinstance(self.isolation, AccountIsolation):
             return Spawn(self.isolation.run_as.command(cmd), dict(env), dict(self.popen_kwargs))
-        if not isinstance(self.isolation, BwrapIsolation) or self.policy is None:
+        if not isinstance(self.isolation, BwrapIsolation):
             return Spawn(list(cmd), dict(env), {})
+        policy = self._policy()
         self.status = LaunchStatus.pipe()
-        argv, child_env = self._sandboxed(self.isolation, cmd, env, self.policy, self.status.write_fd)
+        argv, child_env = self._sandboxed(self.isolation, cmd, env, policy, self.status.write_fd)
         return Spawn(argv, child_env, {"pass_fds": (self.status.write_fd,)})
 
     def actor(self, cmd: Sequence[str], env: Mapping[str, str]) -> Spawn:
@@ -470,14 +477,26 @@ class PreparedLaunch:
         descriptor 3 and execs bubblewrap, which keeps no ``--die-with-parent`` (the actor's thread is not this one).
 
         Raises:
-            IsolationRefused: This bubblewrap must not launch the sandbox's policy.
+            IsolationRefused: This bubblewrap must not launch the sandbox's policy, or there is none.
         """
-        if not isinstance(self.isolation, BwrapIsolation) or self.policy is None:
+        if not isinstance(self.isolation, BwrapIsolation):
             return self.local(cmd, env)
+        policy = replace(self._policy(), die_with_parent=False)
         self.status = LaunchStatus.file()
-        policy = replace(self.policy, die_with_parent=False)
         argv, child_env = self._sandboxed(self.isolation, cmd, env, policy, _ACTOR_STATUS_FD)
         return Spawn(["/bin/sh", "-c", _OPEN_STATUS, str(self.status.path), *argv], child_env, {})
+
+    def _policy(self) -> BwrapPolicy:
+        """The sandbox's policy, which :func:`prepare_launch` made; a sandbox without one is never started unconfined.
+
+        Raises:
+            IsolationRefused: No policy was prepared for this launch.
+        """
+        if self.policy is None:
+            raise IsolationRefused(
+                ("bubblewrap was chosen for this launch, and no sandbox policy was prepared for it",)
+            )
+        return self.policy
 
     def _sandboxed(
         self,
@@ -576,22 +595,41 @@ def _at_or_under(path: str, root: str) -> bool:
 
 
 def _point_into_sandbox(place: LaunchPlace, env: dict[str, str]) -> None:
-    """Point ``env``'s home, CLI state and caches named outside the trees the specialist writes into its workspace,
-    and its temporary directory at the sandbox's ``/tmp``; make the home."""
+    """Point ``env``'s home, CLI state and caches named outside the trees the specialist writes (and the unset
+    :data:`SANDBOX_JIT_CACHES`) into its workspace, and its temporary directory at the sandbox's ``/tmp``; name Hugging
+    Face's default directory under the app's home ``HF_HOME`` (read-only, its login masked), kept as the home moves."""
     trees = [str(tree) for tree in place.writable]
 
     def outside(value: str) -> bool:
         return not any(_at_or_under(value, tree) for tree in trees)
 
+    hf_home = _default_hf_home(env)
+    if hf_home is not None and outside(str(hf_home)):
+        env["HF_HOME"] = str(hf_home)
     if outside(env.get("HOME", "") or "/"):
         home = place.workspace / SANDBOX_HOME
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
         env["HOME"] = str(home)
     for name, parts in SANDBOX_DIRECTORIES.items():
-        if env.get(name) and outside(env[name]):
+        if (env.get(name) and outside(env[name])) or (name in SANDBOX_JIT_CACHES and not env.get(name)):
             env[name] = str(place.workspace.joinpath(*parts))
     for name in TEMP_VARIABLES:
         env[name] = "/tmp"
+
+
+def _default_hf_home(env: Mapping[str, str]) -> Path | None:
+    """Hugging Face's directory as ``env`` leaves it to its default (``$XDG_CACHE_HOME/huggingface``, else
+    ``~/.cache/huggingface``), when that is a directory; ``None`` when ``env`` names one of :data:`HF_VARIABLES`."""
+    if any(env.get(name) for name in HF_VARIABLES):
+        return None
+    cache, home = env.get("XDG_CACHE_HOME", ""), env.get("HOME", "")
+    if os.path.isabs(cache):
+        found = Path(cache, "huggingface")
+    elif os.path.isabs(home):
+        found = Path(home, ".cache", "huggingface")
+    else:
+        return None
+    return found if found.is_dir() else None
 
 
 def _scratch_where_free(policy: BwrapPolicy, version: tuple[int, int, int] | None) -> BwrapPolicy:
