@@ -28,6 +28,7 @@ from hyperloom.measure.tests.phase_rounds import READY_ONLY_LOG, FakeClock, Roun
 from hyperloom.measure.tests.test_local_backend import (  # noqa: F401 - magpie_backend is the module's autouse fixture
     _call,
     _graded_call,
+    _graded_sweep,
     _point,
     _sweep_call,
     magpie_backend,
@@ -193,6 +194,28 @@ def test_a_sweep_arm_boots_once_and_every_level_is_a_measured_round_of_its_own_p
         ("teardown", 2.0, 0),
         ("teardown", 3.0, None),
     ], "the points are the call's own (c8, c4, c2 are 1, 2, 0) and the server is stopped once, after the last level"
+
+
+def test_a_graded_sweep_arm_benches_every_level_and_its_one_evaluation_is_a_phase_of_its_own_after_the_last(
+    monkeypatch, clock, tmp_path
+) -> None:
+    scripts = {**_sweep_scripts(clock), "eval": Rounds(clock).graded()["eval"]}
+
+    outcome, _ = _run(monkeypatch, clock, _graded_sweep(tmp_path, 2, 8, 4), scripts)
+
+    assert _stamped(outcome.phases)[10:] == [
+        ("round_setup", 1.0, 2),
+        ("measured", 20.0, 2),
+        ("round_collect", 2.0, 2),
+        ("round_setup", 1.0, 0),
+        ("measured", 20.0, 0),
+        ("round_collect", 2.0, 0),
+        ("round_setup", 3.0, 1),
+        ("accuracy_eval", 52.0, 1),
+        ("teardown", 2.0, 1),
+        ("teardown", 3.0, None),
+    ], "the last level leaves the server up for the evaluation, which runs from the level the server booted on"
+    assert [p.name for p in outcome.phases].count("accuracy_eval") == 1
 
 
 # -- a test that timed out ----------------------------------------------------------------------------------------
