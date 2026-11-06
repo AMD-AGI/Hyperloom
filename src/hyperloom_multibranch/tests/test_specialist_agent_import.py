@@ -744,3 +744,31 @@ def test_a_retraction_of_a_keep_made_on_the_root_counts_only_what_that_keep_chan
 
     assert clean is not None and clean.beyond == ""
     assert more is not None and more.beyond == "vllm/a.py"
+
+
+def test_a_retraction_whose_undo_would_erase_a_later_keep_s_change_to_the_same_entry_names_it(tmp_path: Path) -> None:
+    outbox = _outbox(
+        tmp_path,
+        Keep({"vllm/a.py": "v1"}),
+        Keep({"vllm/topk.py": "v1"}, {"TOPK": "1"}),
+        Keep({"vllm/topk.py": "v2"}, {"TOPK": "1"}),
+        Keep({"vllm/topk.py": GONE}, retracts=FINDING),
+    )
+
+    retraction = _read_newest(outbox).retracts
+
+    assert retraction is not None and retraction.beyond == "vllm/topk.py"
+
+
+def test_a_retraction_of_a_keep_before_the_one_its_chain_restarts_from_is_out_of_scope(tmp_path: Path) -> None:
+    outbox = _outbox(
+        tmp_path,
+        Keep({"vllm/a.py": "v1"}),
+        Keep({"vllm/topk.py": "v1"}, {"TOPK": "1"}),
+        Keep({"vllm/a.py": "v1"}, served=True),
+        Keep({}, retracts=FINDING),
+    )
+
+    retraction = _read_newest(outbox).retracts
+
+    assert retraction is not None and retraction.beyond == "keep 2 is not among the keeps it was made on"

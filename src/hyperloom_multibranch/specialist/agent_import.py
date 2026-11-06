@@ -440,20 +440,24 @@ class _State:
 def _beyond(newest: _Snapshot, named: int, reader: _Reader) -> str:
     """Every entry (file, server flag, launch variable, kernel table) in which ``newest`` differs from the keep it was
     made on with keep ``named``'s changes undone: each entry keep ``named`` changed as it was before that keep, every
-    other entry as the keep it was made on has it. Empty when ``newest`` undoes keep ``named`` and does nothing else."""
+    other entry as the keep it was made on has it; and every entry keep ``named`` changed that a later keep changed
+    again, whose undo would erase that later change too. Empty when ``newest`` undoes keep ``named`` and nothing else."""
 
     if newest.previous is None or newest.rebased or not 0 < named <= newest.previous:
         return f"it was not made on a keep after keep {named}"
+    if named not in {link.number for link in _chain(reader.outbox, newest.previous, reader.root)}:
+        return f"keep {named} is not among the keeps it was made on"
     before = reader.state(_snapshot(reader.outbox, named, reader.root).previous)
     retracted, made_on, after = reader.state(named), reader.state(newest.previous), reader.state(newest.number)
     differs: list[str] = []
     for kind in ("files", "flags", "envs", "tables"):
-        old, new = getattr(before, kind), getattr(retracted, kind)
+        old, new, made = getattr(before, kind), getattr(retracted, kind), getattr(made_on, kind)
         changed = {name for name in {*old, *new} if old.get(name) != new.get(name)}
-        undone = {name: value for name, value in getattr(made_on, kind).items() if name not in changed}
+        undone = {name: value for name, value in made.items() if name not in changed}
         undone.update({name: old[name] for name in changed if name in old})
         got = getattr(after, kind)
-        differs += sorted(name for name in {*got, *undone} if got.get(name) != undone.get(name))
+        changed_again = {name for name in changed if made.get(name) != new.get(name)}
+        differs += sorted(changed_again | {name for name in {*got, *undone} if got.get(name) != undone.get(name)})
     return ", ".join(differs)
 
 
