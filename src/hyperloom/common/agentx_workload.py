@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.outside_facts import ENV_CONC
+from hyperloom.common.outside_facts import AIPERF_EXPORT_DIR, ENV_CONC
 
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
 AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
@@ -30,7 +30,7 @@ AGENTX_SERVER_PIDFILE = "agentx_server.pid"
 
 # Where the AgentX client leaves aiperf's artifacts, relative to the round's directory; a round may nest its benchmark
 # one level down.
-AIPERF_ARTIFACT_DIRS = ("aiperf_artifacts", "*/aiperf_artifacts")
+AIPERF_ARTIFACT_DIRS = (AIPERF_EXPORT_DIR, f"*/{AIPERF_EXPORT_DIR}")
 
 BACKEND_ENV = "HYPERLOOM_AGENTIC_BACKEND"
 
