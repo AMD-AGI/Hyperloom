@@ -36,6 +36,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from hyperloom.common.agent_isolation import IsolationReport, agent_isolation_report
 from hyperloom.common.outside_facts.image_check import ImageCheckReport, run_image_check
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
@@ -299,6 +300,7 @@ class Session:
         self._signals = StopSignals()
         self._in_final = False
         self._image_check: ImageCheckReport | None = None
+        self._agent_isolation: IsolationReport | None = None
         # The budget and hard stop the session's deadline is read from, which a person's review moves by its length
         # (_extend); while the review is pending the deadline does not pass.
         self._budget: SessionBudget | None = None
@@ -397,15 +399,16 @@ class Session:
         start and a recovery over it is refused while it is. The image check then compares the rule pack's outside
         facts with this environment, off the event loop; its summary goes into the manifest and CLOSE attaches the
         whole report. Under ``HYPERLOOM_IMAGE_CHECK=strict`` a failing fact raises :class:`ImageCheckFailed` here,
-        before the manifest is written and before any phase or CLOSE runs. The reference material the run was given
-        is copied in before the manifest, so the manifest the session writes describes a directory that already holds
-        it.
+        before the manifest is written and before any phase or CLOSE runs. How this process isolates the agents it
+        launches goes into the manifest and the report. The reference material the run was given is copied in before
+        the manifest, so the manifest the session writes describes a directory that already holds it.
         """
 
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
         self._processes.record_scheduler()
         image_check = await asyncio.to_thread(run_image_check)
         self._image_check = image_check
+        self._agent_isolation = await asyncio.to_thread(agent_isolation_report)
         await asyncio.to_thread(copy_references, self._settings.references, self._layout.reference)
         self._write_manifest(budget, await asyncio.to_thread(code_version), image_check)
         hard_stop = HardStop(budget, self._clock)
@@ -421,10 +424,12 @@ class Session:
 
         The candidates are read before anything else happens, so a session FINAL cannot run over is refused without a
         stop or a report being written. The budget is already spent, which is the state the normal path is in when
-        FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from its end.
+        FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from its end. The report says
+        how that session's agents were isolated, as its manifest recorded.
         """
 
         candidates = await self._final_candidates()
+        self._agent_isolation = read_manifest(self._layout.manifest).agent_isolation
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
@@ -887,7 +892,7 @@ class Session:
         )
         services = ExportServices(self._recipe_kb, self._author, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
-        return Closer(self._layout, self._stopper, closing, self._clock)
+        return Closer(self._layout, self._stopper, closing, self._clock, self._agent_isolation)
 
     async def _root_session(self) -> PreludeResult:
         """PRELUDE: the root commit with its baseline, the commit EXPLORE opens on and the warm-start leads every
@@ -995,6 +1000,7 @@ class Session:
             metric=self._settings.workload.metric,
             policy_versions=self._policy_versions(),
             image_check=ImageCheckSummary(image_check.summary()),
+            agent_isolation=self._agent_isolation,
         ).write(self._layout.manifest)
 
 
