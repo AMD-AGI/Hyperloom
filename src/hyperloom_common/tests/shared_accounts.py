@@ -91,6 +91,17 @@ class Accounts:
         out, err = child.communicate("go\n", timeout=_TIMEOUT_SEC)
         return _finish(subprocess.CompletedProcess(child.args, child.returncode, out, err))
 
+    def run_as_root_in_single_id_namespace(self, code: str, *, umask: int = 0o022) -> str:
+        """Run ``code`` as root of the new user namespace ``unshare --user --map-root-user`` makes for root holding
+        :attr:`group`: only ``0`` is mapped, to root (``setgroups`` denied), so the group is held but unmapped, as in a
+        container whose root is the host account; its stdout."""
+        prefix = ["setpriv", f"--groups={self.group}", "--", "unshare", "--user", "--map-root-user", "--"]
+        probe = subprocess.run([*prefix, "true"], capture_output=True, text=True, timeout=_TIMEOUT_SEC, check=False)
+        if probe.returncode != 0:
+            pytest.skip(f"unshare --user --map-root-user fails here: {probe.stderr.strip()}")
+        command = [*prefix, *self._interpreter(code, umask)]
+        return _finish(subprocess.run(command, capture_output=True, text=True, timeout=_TIMEOUT_SEC))
+
     def _command(self, uid: int, code: str, umask: int) -> list[str]:
         return [*self._setpriv(uid), *self._interpreter(code, umask)]
 
