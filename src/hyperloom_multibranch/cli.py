@@ -84,7 +84,7 @@ cards, as the spec says. Started again over a run whose ``session.json`` names a
 ``final-only`` does. It tells the host the run is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when
 the spec, the environment, agents it cannot isolate, a missing package of the ``hosted`` extra or the runner cache keeps
 a session from running, with exit code 2 for a refused spec or session and 1 otherwise; a crash leaves no ``exit.json``,
-and the host starts the run again.
+and the host starts the run again. Each command says at start how agents are isolated; manifest and report record it.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -114,6 +114,7 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
+from hyperloom.common.agent_isolation import announce_agent_isolation
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom_common.env import EnvValueError
 from hyperloom_common.shared_storage import open_shared_append
@@ -1160,6 +1161,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{parser.prog}: error: {exc}", file=sys.stderr)
         raise SystemExit(EXIT_USAGE) from exc
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
+    announce_agent_isolation()
     try:
         if persisted is not None:
             ready = ready_session(settings.workload, load_peers)
