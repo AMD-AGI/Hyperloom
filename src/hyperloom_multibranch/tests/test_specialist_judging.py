@@ -51,6 +51,7 @@ from hyperloom_multibranch.tests.fakes import (
     quick_polls,  # noqa: F401
 )
 from hyperloom_multibranch.toolbox import fake as fake_toolbox
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.acceptance import AcceptanceSetup
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
@@ -262,6 +263,68 @@ async def test_a_gain_whose_retest_failed_to_measure_is_left_unjudged(session):
     assert notice.endswith("nothing was judged")
 
 
+async def test_a_candidate_whose_retest_was_refused_stays_unjudged_after_later_results(session):
+    refusals = [RequestRejected("the branch has no quota", code="branch_stopped")]
+    session.toolbox.reject_if(
+        lambda request: refusals.pop() if request.purpose is Purpose.CONFIRM and refusals else None
+    )
+    first = await session.explore(FAST)
+    await session.step()
+    await session.explore(FLAT)
+    await session.step()
+    await session.step()
+
+    assert (await session.runtime.record(first)).judgement is None
+    assert session.retests() == []
+    assert await session.repo.head(BRANCH) == ROOT
+    (notice,) = [notice for notice in await session.notices() if first in notice]
+    assert notice.endswith("nothing was judged")
+
+
+class _CutOff:
+    """Cancels the first branch log write whose content holds ``text``, as a stop landing between a gate step and
+    its notice does."""
+
+    def __init__(self, session: "_Session", text: str) -> None:
+        self.append, self.text, self.fired = session.runtime.append_branch_log, text, False
+        session.runtime.append_branch_log = self
+
+    async def __call__(self, entry):
+        if not self.fired and self.text in entry.content:
+            self.fired = True
+            raise asyncio.CancelledError
+        return await self.append(entry)
+
+
+async def test_a_commit_whose_notice_a_stop_cut_off_is_announced_by_the_next_judge(session):
+    first = await session.explore(FAST)
+    await session.step()
+    _CutOff(session, "landed on your branch")
+    with pytest.raises(asyncio.CancelledError):
+        await session.step()
+    assert (await session.runtime.record(first)).conclusion is Conclusion.COMMITTED
+
+    await session.new_judge().reconcile()
+    await session.new_judge().reconcile()
+
+    (notice,) = await session.notices()
+    assert notice.startswith(f"{NOTICE} {first} landed on your branch at +") and f"% over {ROOT};" in notice
+
+
+async def test_a_fork_whose_notice_a_stop_cut_off_is_announced_by_the_next_judge(session, tmp_path):
+    first = await session.declare(SLOW, session.check_fixes(tmp_path, _Critic()))
+    _CutOff(session, "fixes a defect")
+    with pytest.raises(asyncio.CancelledError):
+        await session.step()
+    assert (await session.runtime.record(first)).conclusion is Conclusion.SPLIT_REQUESTED
+
+    await session.new_judge().reconcile()
+    await session.new_judge().reconcile()
+
+    (notice,) = await session.notices()
+    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch cut at that commit" in notice
+
+
 async def test_a_gain_the_retest_does_not_repeat_is_recorded_only(tmp_path):
     session = _Session(tmp_path / "blackboard", effect_fn=lambda r: 0.05 if r.purpose is Purpose.EXPLORE else 0.0)
     await session.prelude()
@@ -333,6 +396,18 @@ async def test_a_retraction_slower_than_its_parent_lands_held_to_its_errors_and_
     assert notice.startswith(f"{NOTICE} {first} landed on your branch as a retraction at -")
 
 
+async def test_a_landed_retraction_is_announced_once_as_a_retraction_and_never_as_a_gain(tmp_path):
+    session = await _retraction_session(tmp_path)
+    first = await session.toolbox.submit_test(_retraction(SLOW))
+    await session.step()
+
+    await session.step()
+    await session.new_judge().reconcile()
+
+    (notice,) = await session.notices()
+    assert notice.startswith(f"{NOTICE} {first} landed on your branch as a retraction at -")
+
+
 @pytest.mark.parametrize(
     ("driver", "request_of"),
     [
@@ -396,7 +471,7 @@ async def test_a_proven_reachable_fix_that_costs_performance_asks_for_its_fork(s
     record = await session.runtime.record(first)
     assert (record.conclusion, await session.repo.head(BRANCH)) == (Conclusion.SPLIT_REQUESTED, ROOT)
     (notice,) = await session.notices()
-    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch, fork-1, cut at that commit" in notice
+    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch cut at that commit" in notice
 
 
 @pytest.mark.parametrize(
