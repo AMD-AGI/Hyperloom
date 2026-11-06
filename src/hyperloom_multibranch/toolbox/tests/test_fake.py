@@ -29,6 +29,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     CancelOutcome,
     RequestRejected,
     TestProgress,
+    TestWithdrawn,
     Toolbox,
     UnknownTestRequest,
 )
@@ -605,8 +606,16 @@ class LostClaims:
 
 
 class UnwritableWithdrawals(Blackboard):
+    """Withdrawal writes fail until ``reachable`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reachable = False
+
     async def write_withdrawal(self, withdrawal: Withdrawal) -> None:
-        raise ConnectionError("the blackboard cannot be reached")
+        if not self.reachable:
+            raise ConnectionError("the blackboard cannot be reached")
+        await super().write_withdrawal(withdrawal)
 
 
 class RenewalsRefusedFor:
@@ -685,13 +694,51 @@ async def test_a_lost_claim_whose_withdrawal_cannot_be_written_leaves_no_request
     book = UnwritableWithdrawals()
     box = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(claims=LostClaims()))  # type: ignore[arg-type]
 
-    with pytest.raises(ConnectionError, match="cannot be reached"):
+    with pytest.raises(RequestRejected, match="the claim of this request is not held"):
         await box.submit_test(_request(intent_fingerprint="intent-1"))
 
     (written,) = book.of("request")
-    assert box.requests == {} and (await box.queue_state()).queued == 0
-    with pytest.raises(UnknownTestRequest):
+    assert (await box.queue_state()).queued == 0 and book.of("withdrawal") == []
+    with pytest.raises(TestWithdrawn, match="claim lost"):
         await asyncio.wait_for(box.outcome(written.request_id), timeout=5)
+
+
+async def test_a_lost_claims_withdrawal_the_blackboard_refused_is_written_by_the_next_tick() -> None:
+    """The request row is on the blackboard already: without its withdrawal it would read as in flight for good."""
+    book = UnwritableWithdrawals()
+    box = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(claims=LostClaims()))  # type: ignore[arg-type]
+    with pytest.raises(RequestRejected):
+        await box.submit_test(_request(intent_fingerprint="intent-1"))
+    (written,) = book.of("request")
+
+    book.reachable = True
+    await box.tick()
+
+    assert [(w.request_id, w.reason.startswith("claim lost")) for w in book.of("withdrawal")] == [
+        (written.request_id, True)
+    ]
+
+
+async def test_a_lost_claims_withdrawal_the_blackboard_refused_is_written_by_the_next_start(tmp_path: Path) -> None:
+    log_path = tmp_path / "submissions.jsonl"
+    book = UnwritableWithdrawals()
+    wiring = FakeWiring(claims=LostClaims(), log_path=log_path)  # type: ignore[arg-type]
+    first = FakeToolbox(blackboard=book, autorun=False, wiring=wiring)
+    with pytest.raises(RequestRejected):
+        await first.submit_test(_request(intent_fingerprint="intent-1"))
+    await first.close()
+    (written,) = book.of("request")
+
+    book.reachable = True
+    restarted = FakeToolbox(blackboard=book, autorun=False, wiring=wiring)
+    try:
+        await restarted.drain()  # the toolbox starts on first use: recovery writes what the log holds unwritten
+    finally:
+        await restarted.close()
+
+    assert [(w.request_id, w.reason.startswith("claim lost")) for w in book.of("withdrawal")] == [
+        (written.request_id, True)
+    ]
 
 
 # --- the whole thing ---------------------------------------------------------------------------------------------
