@@ -70,6 +70,7 @@ from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling import review
@@ -77,6 +78,7 @@ from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, c
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version
 from hyperloom_multibranch.scheduling import local_peers
+from hyperloom_multibranch.scheduling.launch_isolation import NO_ACCOUNT, LaunchIsolation, launch_isolation
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
@@ -647,6 +649,30 @@ def bubblewrap(monkeypatch: pytest.MonkeyPatch) -> Bubblewrap:
     monkeypatch.setattr(bwrap_module, "_PROBES", {})
     monkeypatch.setattr(bwrap_module, "probe_bwrap", stand_in)
     return stand_in
+
+
+#: The launch paths of a hosted run as they record once every launch they make on this host is isolated.
+ISOLATED = {
+    True: LaunchIsolation(agent_isolation.ACCOUNT, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()),
+    False: LaunchIsolation(agent_isolation.ACCOUNT, "hosted", "hosted", True, ()),
+}
+#: How a hosted run's start was told it launches on this host: ``local`` for each start.
+LaunchesAsked = list[bool]
+
+
+@pytest.fixture(autouse=True)
+def isolated_launches(monkeypatch: pytest.MonkeyPatch) -> LaunchesAsked:
+    """A hosted run's every launch on this host is isolated (:data:`ISOLATED`), so its start's check passes; the
+    tests of that check put the real record back."""
+
+    asked: LaunchesAsked = []
+
+    def isolation(*, local: bool) -> LaunchIsolation:
+        asked.append(local)
+        return ISOLATED[local]
+
+    monkeypatch.setattr(hosted_run_module, "launch_isolation", isolation)
+    return asked
 
 
 @pytest.fixture(autouse=True)
@@ -1323,7 +1349,7 @@ def _session_ending(stop_reason: str | None, returncode: int) -> Callable[..., i
 
 @pytest.mark.usefixtures("ready_environment")
 def test_a_hosted_spec_runs_the_session_the_same_options_of_run_would(
-    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+    host: Host, agent_cli: list[RunSettings], isolated_launches: LaunchesAsked, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     on_the_command_line = _settings(*SPEC_RUN_ARGS)
     monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
@@ -1331,6 +1357,7 @@ def test_a_hosted_spec_runs_the_session_the_same_options_of_run_would(
     assert cli.main(["hosted", "run"]) == 0
 
     assert agent_cli == [on_the_command_line]
+    assert isolated_launches == [False], "its start checks the launches on this host of a run measured elsewhere"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a host credential"
 
 
@@ -1641,7 +1668,7 @@ def _grant_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.usefixtures("ready_environment")
 def test_a_spec_measured_locally_runs_on_this_containers_cards_with_no_grant_sandbox_or_source(
-    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+    host: Host, agent_cli: list[RunSettings], isolated_launches: LaunchesAsked, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _grant_untouched(monkeypatch)
     for name in ("HYPERLOOM_GRANT_LIMITS", *SANDBOX_INPUTS):
@@ -1653,6 +1680,26 @@ def test_a_spec_measured_locally_runs_on_this_containers_cards_with_no_grant_san
 
     assert agent_cli == [on_the_command_line], "dev sandboxes and agents run here: no dev key is needed"
     assert host.stops == [], "without a grant the spec's hours alone bound the session"
+    assert isolated_launches == [True], "its start checks the sandboxes and tests it runs on this host"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_measured_locally_ends_for_good_while_its_specialists_would_run_unconfined_here(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hosted_run_module, "launch_isolation", launch_isolation)
+    host.spec(**LOCAL)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    error = str(document["error"])
+    assert error.startswith("a hosted run launches nothing unconfined beside its credentials, and here ")
+    assert error.endswith(f"here specialists run unconfined on this host ({NO_ACCOUNT})"), (
+        "the layer's bubblewrap confines the sandboxes and tests the run starts here"
+    )
+    assert agent_cli == [] and not any(host.workspace.iterdir())
 
 
 @pytest.mark.parametrize(("left", "hours"), [(3600, None), (86400, 2.0)], ids=["grant-first", "spec-first"])
