@@ -19,6 +19,7 @@ import yaml
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+from inference_suite.argv import removal_option_names, remove_server_args, tokenize_server_args_preserving_json
 
 
 _ENCODING = "utf-8"
@@ -91,8 +92,6 @@ def _inherited_server_args(argv: list[str]) -> str:
     Raises:
         ServerArgvInvalidError: When a token, such as one written by hand in the workload YAML, is not one argv token.
     """
-    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
-
     for token in argv:
         split = tokenize_server_args_preserving_json(token)
         if split is None or len(split[1]) != 1:
@@ -110,8 +109,6 @@ def _server_argv(server_args: str, requested: str) -> list[str]:
         ServerArgvInvalidError: When a token boundary is ambiguous or a JSON-looking value does not parse; the
             message quotes ``requested``, the caller's own args, since ``server_args`` is already normalized.
     """
-    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
-
     split = tokenize_server_args_preserving_json(server_args)
     if split is None:
         raise ServerArgvInvalidError(
@@ -141,7 +138,7 @@ def _launch_server_args(recipe: RecipeLaunch, launch: Mapping[str, Any]) -> str:
     The recipe's argv is read as text rather than validated as one, since only the settings it spells are wanted:
     a recipe pins them whether or not a layer on top restates them.
     """
-    from hyperloom.inference_optimizer.grid_server_args import merge_server_args, remove_server_args
+    from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 
     appended = " ".join(launch.get("append_args", []))
     if launch.get("replace_args"):
@@ -180,11 +177,7 @@ def apply_launch_changes(
         SpeculativeDecodingPinnedError: When a candidate changes the draft or the simulated acceptance its accepted
             launch pins.
     """
-    from hyperloom.inference_optimizer.grid_server_args import (
-        compose_server_args,
-        dedupe_extra_server_args,
-        removal_option_names,
-    )
+    from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
 
     from ._spec_decode_pin import refuse_unpinned_speculative_change
 

@@ -17,8 +17,8 @@ import yaml
 from hyperloom.inference_optimizer.framework_registry import expert_parallel_flag, server_args_env_name
 
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
-from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
+from inference_suite.argv import tokenize_server_args_preserving_json
 
 from ._multi_node_env import is_multi_node
 

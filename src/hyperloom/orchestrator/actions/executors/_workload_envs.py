@@ -60,7 +60,6 @@ from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURC
 from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
 from hyperloom.inference_optimizer.grid_server_args import (
     WorkloadTokenWindow,
-    compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
@@ -68,8 +67,8 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
-from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
+from inference_suite.argv import compact_json_server_args, remove_server_args
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ._recipe_script import launcher_overwritten_envs
