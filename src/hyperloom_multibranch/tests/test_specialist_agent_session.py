@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 import os
+import stat
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -1437,3 +1438,14 @@ async def test_a_run_that_ends_keeps_a_long_dev_lease_whose_process_runs_and_its
 
     await session.release()
     assert dev.toolbox.released == ["lease-1"] and not dev.forge.alive(), "the branch's stop ends it"
+
+
+async def test_the_workspace_a_session_makes_is_the_group_s_for_the_dev_sandboxes_and_the_next_leg(rig):
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+
+    await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert stat.S_IMODE(rig.workspace.stat().st_mode) == 0o2775

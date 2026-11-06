@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -1634,6 +1635,33 @@ def test_a_hosted_run_measures_in_the_sandboxes_of_the_grant_handed_to_it(handed
     on_three_cards = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 3)
     assert settings == replace(on_three_cards, max_hours=settings.max_hours), "the flags give the workload"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a grant key"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_names_every_shared_directory_it_cannot_write_in_one_message_before_a_session_starts(
+    handed: Started, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    blocker = tmp_path / "a-file"
+    blocker.write_text("")
+    monkeypatch.setenv("USER_DATA_PATH", str(blocker / "workspace"))
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(blocker / "runner-cache"))
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "no-such-archive"))
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == cli.EXIT_FAILED
+
+    [line] = [line for line in capsys.readouterr().err.splitlines() if "cannot write the shared storage" in line]
+    assert f"USER_DATA_PATH {blocker / 'workspace'}: ENOTDIR" in line
+    assert f"HYPERLOOM_RUNNER_CACHE {blocker / 'runner-cache'}: ENOTDIR" in line
+    assert f"{ARCHIVE_ENV} {tmp_path / 'no-such-archive'}: ENOENT" in line
+    assert not handed.sessions
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_missing(handed: Started) -> None:
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    for name in ("USER_DATA_PATH", "HYPERLOOM_RUNNER_CACHE"):
+        assert stat.S_IMODE(Path(os.environ[name]).stat().st_mode) == 0o2775, name
 
 
 @pytest.mark.usefixtures("ready_environment")

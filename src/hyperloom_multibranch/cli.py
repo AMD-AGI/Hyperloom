@@ -139,11 +139,13 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     arm_grant_stop,
     campaign_spec,
     grant_deadline,
+    hosted_storage,
     record_session,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
     run_argv,
+    storage_problems,
     toolbox_grant,
     write_final_exit,
 )
@@ -831,18 +833,25 @@ def recipe_kb_from_env() -> RemoteRecipeClient | None:
         raise EnvironmentIncomplete(f"the Recipe KB is half configured: {exc}") from exc
 
 
-def require_rsi_archive(env: Mapping[str, str]) -> None:
-    """Raise :class:`EnvironmentIncomplete` naming ``HYPERLOOM_RSI_ARCHIVE`` when ``env`` does not set it, and unless
-    the archive it names is a writable directory. There is no default: the archive is the deployment's shared folder."""
+def rsi_archive_dir(env: Mapping[str, str]) -> dict[str, Path]:
+    """The RSI archive ``env`` names, by its variable; raises :class:`EnvironmentIncomplete` naming
+    ``HYPERLOOM_RSI_ARCHIVE`` when ``env`` does not set it (no default: it is the deployment's shared folder)."""
 
     if not env.get(ARCHIVE_ENV, "").strip():
         raise EnvironmentIncomplete(
             f"{ARCHIVE_ENV} is not set: name the writable shared directory the session archives its search tree in"
         )
-    archive = Path(env[ARCHIVE_ENV].strip())
-    if not (archive.is_dir() and os.access(archive, os.W_OK)):
+    return {ARCHIVE_ENV: Path(env[ARCHIVE_ENV].strip())}
+
+
+def require_writable_storage(dirs: Mapping[str, Path]) -> None:
+    """Raise :class:`EnvironmentIncomplete` naming, in one message, each of ``dirs`` this account cannot write
+    (:func:`~hyperloom_multibranch.scheduling.hosted_run.storage_problems`)."""
+
+    problems = storage_problems(dirs)
+    if problems:
         raise EnvironmentIncomplete(
-            f"the RSI archive {archive} is not a writable directory: mount it, or set {ARCHIVE_ENV} to one"
+            f"this account (uid {os.geteuid()}) cannot write the shared storage: {'; '.join(problems)}"
         )
 
 
@@ -958,8 +967,9 @@ def hosted_ready_session(host: HostInfo, workload: Workload) -> ReadySession:
     """:func:`ready_session` measured in the sandboxes of ``host``'s grant: the one builder of the peers of
     ``hosted run`` and ``run --measurement hosted``."""
 
-    inputs = PinnedToolboxInputs(host, hosted_runner_cache(os.environ))
-    return ready_session(workload, partial(load_hosted_peers, inputs=inputs))
+    cache = hosted_runner_cache(os.environ)
+    inputs = PinnedToolboxInputs(host, cache)
+    return ready_session(workload, partial(load_hosted_peers, inputs=inputs), hosted_storage(host, os.environ, cache))
 
 
 def hosted_runner_cache(env: Mapping[str, str]) -> Path:
@@ -986,12 +996,15 @@ def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
     return partial(parallel_tests_for, toolbox_grant(host.grant_limits))
 
 
-def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -> ReadySession:
-    """The peers ``load`` has for ``workload`` and the services, the Recipe KB and the RSI archive checked first;
-    raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming what is missing. Creates nothing."""
+def ready_session(
+    workload: Workload, load: Callable[[Workload], PeerFactory], storage: Mapping[str, Path] | None = None
+) -> ReadySession:
+    """The peers ``load`` has for ``workload`` and the services, the Recipe KB checked first, then that this account
+    can write the RSI archive and each of ``storage`` (:func:`require_writable_storage`); raises
+    :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming what is missing. Creates nothing."""
 
     recipe_kb = recipe_kb_from_env()
-    require_rsi_archive(os.environ)
+    require_writable_storage({**(storage or {}), **rsi_archive_dir(os.environ)})
     peer_factory = load(workload)
     return ReadySession(peer_factory, session_services(recipe_kb))
 
@@ -1176,7 +1189,7 @@ __all__ = [
     "recipe_kb_from_env",
     "ready_session",
     "require_priced_models",
-    "require_rsi_archive",
+    "require_writable_storage",
     "require_session_environment",
     "require_workload_switch",
     "run_session",

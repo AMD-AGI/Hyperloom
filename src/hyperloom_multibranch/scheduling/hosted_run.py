@@ -29,7 +29,9 @@ package does not import: importing it loads the legacy flow's state.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import signal
 import threading
@@ -40,9 +42,11 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
+from hyperloom_common.shared_storage import make_shared_dirs, setgid_warnings, writable_problems
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
+from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -57,9 +61,43 @@ GRANT_MARGIN_SECONDS = 60.0
 _DURABLE = WriteOptions(fsync=True)
 _ENCODING = "utf-8"
 
+log = logging.getLogger(__name__)
+
 
 class HostedRefused(ValueError):
     """The run cannot be served as the host gave it, and a restart would not change that; names the field."""
+
+
+def hosted_storage(host: HostInfo, env: Mapping[str, str], runner_cache: Path) -> dict[str, Path]:
+    """The directories a hosted session writes in that an earlier leg of the run, maybe another account of the group,
+    may have made, each by the variable that names it: the host's state directory and events directory (when set),
+    ``USER_DATA_PATH`` (whose sessions the ``dev`` sandboxes write too) and ``runner_cache``. Each but the state
+    directory, which the host makes, is made ``2775`` when missing, as the session would make it; one that cannot be
+    made is named by :func:`storage_problems`."""
+
+    made: dict[str, Path] = {}
+    if env.get(Var.EVENTS_DIR, "").strip():
+        made[Var.EVENTS_DIR] = Path(env[Var.EVENTS_DIR].strip())
+    if env.get(ENV_USER_DATA_PATH, "").strip():
+        made[ENV_USER_DATA_PATH] = Path(env[ENV_USER_DATA_PATH].strip())
+    made[RUNNER_CACHE_ENV] = runner_cache
+    for directory in made.values():
+        with contextlib.suppress(OSError):  # one that cannot be made is named by storage_problems
+            make_shared_dirs(directory)
+    return {Var.STATE_DIR: host.state_dir, **made} if host.state_dir is not None else made
+
+
+def storage_problems(dirs: Mapping[str, Path]) -> list[str]:
+    """One line for each of ``dirs`` this account cannot create and remove a file in, with its errno, owner and mode; a
+    warning is logged for each that is not setgid.
+
+    A real write (:func:`~hyperloom_common.shared_storage.writable_problems`), not ``os.access``: each leg of a hosted
+    run may be another account of one group, and on NFS and in a user namespace neither ``access()`` nor a comparison
+    of ids says what a write will do."""
+
+    for warning in setgid_warnings(dirs):
+        log.warning("%s", warning)
+    return writable_problems(dirs)
 
 
 def campaign_spec(host: HostInfo) -> CampaignSpec:
@@ -270,11 +308,13 @@ __all__ = [
     "arm_grant_stop",
     "campaign_spec",
     "grant_deadline",
+    "hosted_storage",
     "record_session",
     "recorded_session",
     "refuse_unhosted_branches",
     "reported_stop_reason",
     "run_argv",
+    "storage_problems",
     "toolbox_grant",
     "write_final_exit",
 ]

@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import os
+import stat
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -290,6 +293,134 @@ def test_the_operator_s_git_config_changes_nothing_a_worktree_builds_or_patches(
     assert ("b/vllm/config.py" in kept, "b/vllm/lpm.py" in kept, outside) == (True, True, ())
     worktree.sync("c1", [patch.encode()])
     assert (worktree.head(), (worktree.path / "vllm" / "lpm.py").exists()) == ("c1", True)
+
+
+def test_the_base_and_each_worktree_are_the_group_s_to_write_whatever_the_umask(tmp_path, installed, monkeypatch):
+    with open("/proc/self/status", encoding="ascii") as status:
+        umask = next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
+    assert umask & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    branches = tmp_path / "MB-branches"
+    branches.mkdir()
+    branches.chmod(0o2775)
+    base = SourceBase(tmp_path / "MB-source")
+    base.build(["vllm"])
+
+    worktree = base.worktree("s1", branches / "s1" / "worktree")
+    worktree.sync("c0", [])
+
+    def group_writes(path: Path) -> bool:
+        return path.lstat().st_mode & 0o020 == 0o020
+
+    assert stat.S_IMODE(base.path.stat().st_mode) == 0o2775
+    git_dirs = [base.path / ".git" / name for name in ("objects", "refs", "worktrees")]
+    assert all(map(group_writes, git_dirs)), [oct(path.stat().st_mode) for path in git_dirs]
+    assert stat.S_IMODE((branches / "s1").stat().st_mode) == 0o2775, "the branch's directory, for its dev sandboxes"
+    assert group_writes(worktree.path) and group_writes(worktree.path / "vllm" / "config.py")
+
+
+def _recording_filter(where: Path, ran: Path) -> Path:
+    """A program that notes it ran in ``ran`` and passes its input through, as a filter or a text conversion would."""
+    program = where / "recording-filter"
+    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
+    program.chmod(0o755)
+    return program
+
+
+def _plant_programs(base_git: Path, tree: Path, ran: Path) -> None:
+    """What a sandbox that writes the worktree and its repository can plant: a config naming a program for every hook
+    of git it can name -- filter drivers under names of its own, an fsmonitor, a text conversion, a signing program on
+    commit, a pager -- an attributes file that applies them to every path, and executable hooks."""
+    program = _recording_filter(base_git.parent.parent, ran)
+    marker = f"#!/bin/sh\necho ran >> {ran}\n"
+    with (base_git / "config").open("a") as config:
+        config.write(
+            f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n'
+            f'[filter "other.name"]\n\tprocess = {program}\n'
+            f"[core]\n\tfsmonitor = {base_git / 'hooks' / 'fsmonitor'}\n\tpager = {program}\n"
+            f'[diff "own"]\n\ttextconv = {program}\n\tcommand = {program}\n'
+            f"[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = {base_git / 'hooks' / 'fsmonitor'}\n"
+        )
+    (base_git / "hooks").mkdir(exist_ok=True)
+    for hook in ("fsmonitor", "pre-commit", "post-commit", "post-checkout", "reference-transaction"):
+        (base_git / "hooks" / hook).write_text(marker)
+        (base_git / "hooks" / hook).chmod(0o755)
+    (tree / ".gitattributes").write_text("* filter=own diff=own\n*.py filter=other.name\n")
+
+
+def test_no_program_a_sandbox_writes_into_the_worktree_s_repository_runs_as_the_app(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    root = worktree.commit()
+    ran = tmp_path / "ran"
+    _plant_programs(base.path / ".git", worktree.path, ran)
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    patch = worktree.diff("vllm")
+    changed = worktree.changed("vllm")
+    since = worktree.diff_from(root, "vllm")
+    worktree.sync("c1", [patch.encode()])
+
+    assert not ran.exists(), ran.read_text()
+    assert "+max_num_seqs = 256" in patch and "+max_num_seqs = 256" in since
+    assert changed.written == ("vllm/config.py",)
+    assert worktree.head() == "c1"
+    assert (worktree.path / "vllm" / "config.py").read_bytes() == b"max_num_seqs = 256\n"
+
+
+def test_a_repository_made_a_partial_clone_by_its_config_fetches_nothing_behind_the_app_s_command(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    transport = tmp_path / "transport"
+    transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
+    transport.chmod(0o755)
+    git = base.path / ".git"
+    with (git / "config").open("a") as config:
+        config.write(
+            "[core]\n\trepositoryformatversion = 1\n"
+            f"\tsshCommand = {transport}\n[extensions]\n\tpartialClone = promisor\n"
+            '[remote "promisor"]\n\turl = ssh://example.invalid/repo\n\tpromisor = true\n'
+        )
+    blob = subprocess.run(
+        ["git", "-C", str(base.path), "rev-parse", "installed:vllm/config.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    (git / "objects" / blob[:2] / blob[2:]).unlink()
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    with pytest.raises(worktree_module.WorktreeError):
+        worktree.diff("vllm")
+
+    assert not ran.exists()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+def test_a_repository_trusted_by_the_command_s_own_safe_directory_has_its_filter_drivers_blanked_too(tmp_path):
+    repo = tmp_path / "image-checkout"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    ran = tmp_path / "ran"
+    with (repo / ".git" / "config").open("a") as config:
+        config.write(f'[filter "own"]\n\tclean = {_recording_filter(tmp_path, ran)}\n')
+    (repo / ".gitattributes").write_text("* filter=own\n")
+    (repo / "file").write_text("x\n")
+    for path in (repo, *repo.rglob("*")):
+        os.lchown(path, 65534, 65534)  # another owner's, as the image's checkout is: git trusts it only by -c
+
+    worktree_module._git(repo, "-c", "safe.directory=*", "add", "--all")
+
+    assert not ran.exists()
+
+
+def test_a_filter_driver_git_cannot_be_told_to_blank_refuses_the_command(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    with (base.path / ".git" / "config").open("a") as config:
+        config.write('[filter "a=b"]\n\tclean = false\n')
+
+    with pytest.raises(worktree_module.WorktreeError, match="'='"):
+        worktree.sync("c0", [])
 
 
 def test_a_framework_the_host_does_not_have_installed_has_no_source_change_kept(
