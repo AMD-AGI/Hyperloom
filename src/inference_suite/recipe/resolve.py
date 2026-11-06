@@ -46,7 +46,7 @@ from inference_suite.contracts.base_launch import (
     Workload,
 )
 from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, GOLDEN_OWNED_SPEC_CONFIG_KEYS, is_golden_owned_flag
-from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.atom_catalog import atom_catalog_launches
 from inference_suite.recipe.defaults import TABLE_PATH, default_table
 from inference_suite.recipe.golden_curve import (
@@ -80,9 +80,6 @@ from inference_suite.recipe.model import (
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import UserFile
 from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, vllm_recipes_launches
-
-#: The load client every base is measured with: InferenceX's own harness, at its pinned commit.
-CLIENT_TOOL = "inferencex"
 
 _FIELDS = ContractFields(RecipeSourceError)
 _T = TypeVar("_T")
@@ -324,7 +321,7 @@ def _entrypoint(framework: str) -> tuple[str, ...]:
 
 
 def _client(env: Mapping[str, str]) -> ClientLaunch:
-    return ClientLaunch(tool=CLIENT_TOOL, commit=INFERENCEX_CLIENT_COMMIT, env=env)
+    return ClientLaunch(tool=INFERENCEX_TOOL, commit=INFERENCEX_CLIENT_COMMIT, env=env)
 
 
 def _recipe_base(
@@ -465,4 +462,4 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
     return _default_base(query, snapshot, tuple(misses))
 
 
-__all__ = ["CLIENT_TOOL", "Miss", "SourceSnapshot", "UnreadSource", "resolve_base"]
+__all__ = ["Miss", "SourceSnapshot", "UnreadSource", "resolve_base"]

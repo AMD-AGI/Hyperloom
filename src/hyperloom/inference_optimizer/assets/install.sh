@@ -1693,6 +1693,45 @@ ensure_inferencex() {
   log "InferenceX cloned at ${INFERENCEX_PATH} (pinned ${INFERENCEX_REF})"
 }
 
+# --- 3b. InferenceSuite offline staging (D11) ---
+#
+# A round fetches nothing: it runs the InferenceX client and GSM8K task staged
+# here at the commit inference_suite.pins pins, and refuses with staging_missing
+# when the tool cache's manifest lists anything absent, changed or off-pin.
+INFERENCE_SUITE_TOOL_CACHE="${INFERENCE_SUITE_TOOL_CACHE:-${_open_source_root}/inference-suite-tools}"
+
+ensure_inference_suite_staging() {
+  local commit checkout sha
+  if sha="$("$PYTHON" -m inference_suite.staging check --tool-cache "$INFERENCE_SUITE_TOOL_CACHE")"; then
+    log "InferenceSuite tools staged at ${INFERENCE_SUITE_TOOL_CACHE} (manifest sha256 ${sha})"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    _STALE_KEYS+=("INFERENCE_SUITE_TOOL_CACHE")
+    return 0
+  fi
+  commit="$("$PYTHON" -c 'from inference_suite.pins import INFERENCEX_CLIENT_COMMIT; print(INFERENCEX_CLIENT_COMMIT)')"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would stage InferenceX ${commit} from ${INFERENCEX_REPO} into ${INFERENCE_SUITE_TOOL_CACHE}"
+    return 0
+  fi
+  checkout="${INFERENCE_SUITE_TOOL_CACHE}/.source-${commit}"
+  rm -rf -- "$checkout"
+  mkdir -p "$INFERENCE_SUITE_TOOL_CACHE"
+  # Fail-soft like ensure_inferencex: nothing runs a round at install time, and a round
+  # on an unstaged cache refuses with staging_missing naming what is absent.
+  if ! git_fetch_pinned "$INFERENCEX_REPO" "$checkout" "$commit" "InferenceX (InferenceSuite client)"; then
+    warn "could not fetch InferenceX ${commit} from ${INFERENCEX_REPO}; InferenceSuite rounds will refuse with staging_missing"
+    return 0
+  fi
+  if ! sha="$("$PYTHON" -m inference_suite.staging stage --source "$checkout" --tool-cache "$INFERENCE_SUITE_TOOL_CACHE")"; then
+    warn "InferenceSuite staging from ${checkout} failed; InferenceSuite rounds will refuse with staging_missing"
+    return 0
+  fi
+  rm -rf -- "$checkout"
+  log "InferenceSuite tools staged at ${INFERENCE_SUITE_TOOL_CACHE} (manifest sha256 ${sha})"
+}
+
 # --- 4. InferenceX bench_serving runtime deps ---
 #
 # `benchmark_serving.py` lives under InferenceX (not under Magpie's
@@ -1963,6 +2002,7 @@ else
   ensure_magpie
 fi
 ensure_inferencex
+ensure_inference_suite_staging
 # Ordering matters: the Magpie script patch also scrubs the redundant
 # `--concurrent-requests` eval flag from the InferenceX `benchmarks/` copies
 # Magpie actually executes, and teaches `benchmark_lib.sh::run_lm_eval` to
