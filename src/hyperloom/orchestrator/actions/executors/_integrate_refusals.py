@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.coerce import to_float, to_str_list
+from hyperloom_common.coerce import first_text, to_float, to_str_list
 from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import (
@@ -26,11 +26,14 @@ from hyperloom.orchestrator.measurement.runtime_findings import (
     CORRECTNESS_FIX_MAX_DROP_PCT,
     correctness_fix_refusal,
     load_runtime_findings,
+    restores_disabled_path,
 )
 
 from ...enablement.lane import takes_enablement_round
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ...specialists.patch_safety import patch_targets_missing
+from ...state.gaps import STATIC_RECON_GAP_PREFIX
+from ._patch_sources import _done_field
 
 
 def _derive_lane(params: dict[str, Any]) -> str:
@@ -113,6 +116,34 @@ def _preflight_missing_targets(
         if missing:
             records.append({"patch": str(patch), "missing_targets": missing})
     return records
+
+
+UNSWITCHED_BRIDGE_ADVISORY = (
+    "Put the relaxed gate behind its own environment switch that defaults OFF, so the tree behaves exactly as before "
+    "with no switch set, and declare it in framework_switches (switch, target, evidence)."
+)
+
+
+def _unswitched_bridge_refusal(
+    params: Mapping[str, Any],
+    done_payload: dict[str, Any] | None,
+    *,
+    patch_paths: list[Path],
+    switch_manifest: list[dict[str, Any]],
+) -> str:
+    """What makes this round an un-switched bridge patch; empty when it is no bridge or its bridge is switch-gated.
+
+    A bridge relaxes a gate that switches a path off. Behind a default-off switch, one that does not clear the KEEP
+    gate stays in the tree dormant as a lever explore can turn on next to later changes; without one it is reverted.
+    An enablement round is judged on runnability alone, so it is never refused here.
+    """
+    if not patch_paths or switch_manifest or params.get("enablement"):
+        return ""
+    finding = first_text(_done_field(done_payload, "resolves_finding"))
+    if restores_disabled_path(finding):
+        return f"it restores {finding}"
+    gap = first_text(params.get("gap_canonical_id"), _done_field(done_payload, "gap_canonical_id"))
+    return f"it bridges {gap}" if gap.startswith(STATIC_RECON_GAP_PREFIX) else ""
 
 
 _FIX_ACCURACY_UNAVAILABLE = "accuracy result unavailable"
