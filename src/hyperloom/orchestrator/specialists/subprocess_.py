@@ -99,6 +99,7 @@ log = logging.getLogger(__name__)
 #: How long the reaper waits on a specialist nobody bounded, matching the
 #: largest deadline the dispatcher hands down.
 UNBOUNDED_REAP_CAP_SEC: float = 4 * 60 * 60.0
+_CODEX_BYPASS = "bypass"
 
 
 # Configuration
@@ -474,35 +475,11 @@ class SpecialistSubprocessDispatcher:
         prompt_file = request.workspace / "prompt.md"
         # A reused workspace may hold a link the previous run's account planted at this name.
         write_text_nofollow(request.workspace, (prompt_file.name,), request.user_prompt)
-        process_log = request.workspace / PROCESS_LOG_NAME
-
-        # An isolation that must be and cannot be fails the task: running the specialist unconfined would defeat it.
-        try:
-            isolation = resolve_launch_isolation(request.gpu_lease)
-        except RunAsError as exc:
-            return _launch_failure(process_log, f"specialist isolation refused: {exc}")
-
-        env, reap_mark = compose_launch_env(request.task_id)
-
-        backend = ""
-        try:
-            backend = self._agent_backend()
-            cmd = self._build_launch(backend, request, env, isolation)
-            watch = self._reap_watch(request)
-            apply_gpu_env(env, request.workspace, request.gpu_ids, request.gpu_lease)
-            prepared = await asyncio.to_thread(prepare_launch, isolation, self._place(request), cmd, env)
-        except SpecialistAgentUnavailableError as exc:
-            # No runtime for this deployment's credential shape. Report it as the
-            # task's failure rather than degrading to a CLI that cannot auth.
-            return _launch_failure(
-                process_log, f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}"
-            )
-        except (RunAsError, OSError) as exc:
-            return _launch_failure(process_log, f"specialist isolation refused: {exc}")
-
-        launch = SpecialistLaunch(
-            cmd=cmd, env=env, isolation=isolation, backend=backend, prompt_file=prompt_file, process_log=process_log
-        )
+        launch = await self._ready(request, prompt_file, request.workspace / PROCESS_LOG_NAME)
+        if isinstance(launch, SpecialistSubprocessResult):
+            return launch
+        backend, process_log, prepared = launch.backend, launch.process_log, launch.prepared
+        watch = self._reap_watch(request)
 
         with cancel_scope_listener() as scope:
             log_fh: Any = None
@@ -537,7 +514,7 @@ class SpecialistSubprocessDispatcher:
                 self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
-                await asyncio.to_thread(self._reap_marked, reap_mark, prepared)
+                await asyncio.to_thread(self._reap_marked, launch.reap_mark, prepared)
                 prepared.release()
                 if log_fh is not None:
                     log_fh.close()
@@ -548,13 +525,35 @@ class SpecialistSubprocessDispatcher:
 
         return self._harvest_result(request, watch, backend, outcome, worktree_base_commit=worktree_base_commit)
 
-    def _place(self, request: SpecialistSpawn) -> LaunchPlace:
-        """Where ``request``'s specialist runs, as its isolation reads it."""
-        private = (request.workspace / "prompt.md", request.workspace / PROCESS_LOG_NAME)
+    async def _ready(
+        self, request: SpecialistSpawn, prompt_file: Path, process_log: Path
+    ) -> SpecialistLaunch | SpecialistSubprocessResult:
+        """Choose how to isolate the specialist, build its CLI and environment, and prepare the launch in its tier;
+        a launch that cannot be made returns the task's result."""
+        # An isolation that must be and cannot be fails the task: running the specialist unconfined would defeat it.
+        try:
+            isolation = resolve_launch_isolation(request.gpu_lease)
+        except RunAsError as exc:
+            return _launch_failure(process_log, f"specialist isolation refused: {exc}")
+        env, reap_mark = compose_launch_env(request.task_id)
+        backend = ""
         gpu = bool(request.gpu_ids) or request.gpu_lease is not None
-        return LaunchPlace(
-            request.workspace, request.worktree, private, request.readable, gpu, self.config.mcp_config_path
-        )
+        private, mcp = (prompt_file, process_log), self.config.mcp_config_path
+        place = LaunchPlace(request.workspace, request.worktree, private, request.readable, gpu, mcp)
+        try:
+            backend = self._agent_backend()
+            cmd = self._build_launch(backend, request, env, isolation)
+            apply_gpu_env(env, request.workspace, request.gpu_ids, request.gpu_lease)
+            prepared = await asyncio.to_thread(prepare_launch, isolation, place, cmd, env)
+        except SpecialistAgentUnavailableError as exc:
+            # No runtime for this deployment's credential shape. Report it as the
+            # task's failure rather than degrading to a CLI that cannot auth.
+            return _launch_failure(
+                process_log, f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}"
+            )
+        except (RunAsError, OSError) as exc:
+            return _launch_failure(process_log, f"specialist isolation refused: {exc}")
+        return SpecialistLaunch(cmd, env, isolation, backend, prompt_file, process_log, prepared, reap_mark)
 
     @staticmethod
     async def _start_ray_actor(
@@ -859,7 +858,7 @@ class SpecialistSubprocessDispatcher:
             provider_config = resolve_codex_provider_config(env=resolver_env)
         except CodexSessionError as exc:
             raise SpecialistAgentUnavailableError(f"codex gateway is not configured: {exc}") from exc
-        sandbox_mode = "bypass" if sandbox_off else self._codex_sandbox_mode(base_env)
+        sandbox_mode = _CODEX_BYPASS if sandbox_off else self._codex_sandbox_mode(base_env)
 
         provider_env_additions = dict(provider_config.env_additions)
         child_env_before_mcp = dict(base_env)
@@ -902,7 +901,7 @@ class SpecialistSubprocessDispatcher:
                 "Codex sandbox mode 'read-only' cannot run a specialist: "
                 "the specialist must write its result and may need to author patches"
             )
-        if sandbox_mode != "bypass" and not probe_codex_sandbox_capability(env=dict(base_env)):
+        if sandbox_mode != _CODEX_BYPASS and not probe_codex_sandbox_capability(env=dict(base_env)):
             raise SpecialistAgentUnavailableError(
                 f"Codex sandbox mode {sandbox_mode!r} requires a working bubblewrap "
                 "sandbox, but the capability probe failed; refusing to fall back to bypass"
@@ -922,7 +921,7 @@ class SpecialistSubprocessDispatcher:
             "--strict-config",
             "--skip-git-repo-check",
         ]
-        if sandbox_mode == "bypass":
+        if sandbox_mode == _CODEX_BYPASS:
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
         else:
             cmd.extend(["--sandbox", sandbox_mode])

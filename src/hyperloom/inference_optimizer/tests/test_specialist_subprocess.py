@@ -159,6 +159,30 @@ def test_runner_accepts_subprocess_config_only():
     assert runner.subprocess_dispatcher is not None
 
 
+@pytest.mark.parametrize("local", [True, False])
+async def test_the_runner_hands_the_dispatcher_the_tasks_model_to_read(tmp_path, local):
+    model = tmp_path / "models" / "llama"
+    model.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
+    spawns: list[SpecialistSpawn] = []
+
+    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+        spawns.append(spawn)
+        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+
+    runner.subprocess_dispatcher.run = run
+    ctx = _make_runner_ctx("t-model")
+    ctx.task.params["model_path"] = str(model) if local else "org/hub-model"
+
+    await runner.run(ctx)
+
+    [spawn] = spawns
+    assert (model in spawn.readable) is local
+    assert all(not path.is_absolute() for path in spawn.readable) is not local
+
+
 def test_denylist_blocks_dangerous_process_tools():
     """KillShell and SlashCommand are in the denylist to enforce the prompt-rule against global process cleanup that could kill the serving / benchmark process."""
     assert "KillShell" in SPECIALIST_TOOL_DENYLIST
