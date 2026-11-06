@@ -70,6 +70,7 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
+from hyperloom_multibranch.scheduling.launch_isolation import announce_launch_isolation, launch_isolation
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import AGENT_PORT, Workload
 from hyperloom_multibranch.specialist.fix_check import FixChecking
@@ -327,7 +328,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     Raises :class:`PeersUnavailable` when the session's canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
-    close releases the backend and the sandboxes. The MCP service is started; the session stop stops it.
+    close releases the backend and the sandboxes. The MCP service is started; the session stop stops it. How the
+    specialists, sandboxes and tests it launches are isolated is said once here, at WARNING when some are not
+    (:func:`~hyperloom_multibranch.scheduling.launch_isolation.announce_launch_isolation`).
     """
 
     from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
@@ -356,6 +359,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     briefs = _specialist_briefs(setup, repo)
     _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs)
     sandboxes = branch_sandboxes(host.backend, setup, lambda branch: built.worktrees(branch))
+    isolation = launch_isolation(local=host.backend.on_this_machine)
+    announce_launch_isolation(isolation)
     leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_blackboard, sandboxes)
     tokens = McpSpecialistTokens(mcp)
     rendered = canonical_dir / RENDERED_CANONICAL
@@ -377,7 +382,17 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     gate_service = GateService(gate_blackboard, toolbox, rule, toolbox)
     regression = RegressionSet(gate_blackboard, runner, repo, pool=session_cases(host.image.digest, gate_blackboard))
     return Peers(
-        runtime, toolbox, repo, gate_service, mcp, briefs, host.image.digest, gate, regression, built.dossier_pass
+        runtime,
+        toolbox,
+        repo,
+        gate_service,
+        mcp,
+        briefs,
+        host.image.digest,
+        gate,
+        regression,
+        isolation,
+        built.dossier_pass,
     )
 
 

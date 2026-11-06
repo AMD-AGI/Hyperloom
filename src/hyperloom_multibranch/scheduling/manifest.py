@@ -19,9 +19,9 @@ from pathlib import Path
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
-from hyperloom.common.agent_isolation import IsolationReport
 from hyperloom.common.provenance import detect_code_revision
 from hyperloom_multibranch.blackboard.codec import decode, encode
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.settings import RunSettings
 
 #: The distribution this package ships in (pyproject.toml ``[project] name``).
@@ -79,9 +79,9 @@ class SessionManifest:
     :meth:`~hyperloom.common.outside_facts.image_check.ImageCheckReport.summary` of the check the session ran before its
     first phase: its mode, the pack digest, the counts and the facts that failed; a manifest without it reads as
     empty, so a session directory an earlier build wrote still reads back far enough to be refused for its build.
-    ``agent_isolation`` is :func:`~hyperloom.common.agent_isolation.agent_isolation_report` as the session's process
-    answered it before its first phase: how its specialists and agent sandboxes were launched, and why not as an
-    account; ``None`` in a manifest an earlier build wrote."""
+    ``agent_isolation`` is how the session's peers launched its specialists, agent and dev sandboxes and tests
+    (:mod:`~hyperloom_multibranch.scheduling.launch_isolation`), and why a launch on its host was not isolated; ``None``
+    in a manifest an earlier build wrote."""
 
     code_version: CodeVersion
     rule_pack: dict[str, str]
@@ -92,7 +92,7 @@ class SessionManifest:
     metric: str
     policy_versions: dict[str, str]
     image_check: ImageCheckSummary = NO_IMAGE_CHECK
-    agent_isolation: IsolationReport | None = None
+    agent_isolation: LaunchIsolation | None = None
 
     def write(self, path: Path) -> None:
         """Write the document to ``path``, replacing whatever is there; ``664``, as a later leg of a hosted run, maybe

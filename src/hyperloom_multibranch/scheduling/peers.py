@@ -30,6 +30,7 @@ from hyperloom_multibranch.scheduling.settings import AGENT_PORT, SHARE_MINUTES,
 
 if TYPE_CHECKING:
     from hyperloom.hosted.mcp_server import McpServer
+    from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
     from hyperloom_multibranch.specialist.dossier_pass import DossierPass
     from hyperloom_multibranch.specialist.map_session import MapCalls
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -44,7 +45,9 @@ class Peers:
     is the image the toolbox measures on, which every recipe must carry: PRELUDE roots the session on it.
     ``reserved`` is the rule gate that asks for the forks and repairs: it lands each fork the fork desk admits before
     the scheduler starts it, and records each fork and repair the scheduler voids. ``regression`` runs the
-    regression set the integrator asks for before a merge and FINAL for every candidate. ``dossier_pass`` runs the dossier pass of a session that stops after its map; a session that
+    regression set the integrator asks for before a merge and FINAL for every candidate. ``isolation`` is how the
+    specialists, agent and dev sandboxes and tests these peers launch are isolated, which the session's manifest and
+    report record. ``dossier_pass`` runs the dossier pass of a session that stops after its map; a session that
     runs no agent has none.
     """
 
@@ -57,6 +60,7 @@ class Peers:
     base_image_digest: str
     reserved: ReservedBranches
     regression: RegressionCheck
+    isolation: LaunchIsolation
     dossier_pass: DossierPass | None = None
 
 
