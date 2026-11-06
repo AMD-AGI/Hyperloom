@@ -459,8 +459,9 @@ def _kernel_agent_ctx() -> Any:
 
 @pytest.mark.asyncio
 async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch):
-    """The kernel_agent task (no-GEMM path) reprofiles under its own lease when projected tput (120) diverges from the last measured trace (100), anchoring on the new snapshot."""
+    """The kernel_agent task (no-GEMM path) reprofiles under its own lease when projected tput (120) moved off the last trace's anchor (100), anchoring on the new snapshot."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.last_roofline_tput = 100.0
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
     monkeypatch.setattr(coord.phase_kernel, "geak_enabled", lambda: False)
     monkeypatch.setattr(coord.phase_kernel, "_gemm_tuning_required_before_kernel_opt", lambda: False)
@@ -668,11 +669,29 @@ def test_serving_config_changes_still_force_a_reprofile(coord: Coordinator, labe
 
 @pytest.mark.asyncio
 async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
-    """Projected tput matching the last measured trace (cur == measured) skips the reprofile."""
+    """Projected tput matching the last trace's anchor (cur == anchor) skips the reprofile."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.last_roofline_tput = 100.0
     coord.sub = _StubSub(coord.shared_state)
-    coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == measured
+    coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == anchor
     coord.shared_state.last_profile_workload = coord.shared_state.current_profile_workload_context()
+
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
+
+    assert coord.sub.tasks_run == []
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_does_not_reprofile_the_stack_its_cycle_just_profiled(coord: Coordinator):
+    """The projection is compared with the anchor the last roofline left, never with the snapshot's measured tok/s."""
+    state = coord.shared_state
+    state.baseline_tput = 310.62342
+    state.cumulative_gain_validated = 9.694526883651713
+    projected = coord.phase_kernel.current_tput_from_validated_gain()
+    state.roofline_snapshots = [{"achieved_tok_per_sec": 316.6582}]
+    state.last_roofline_tput = projected
+    state.last_profile_workload = state.current_profile_workload_context()
+    coord.sub = _StubSub(state)
 
     await coord.phase_kernel._maybe_reprofile_for_kernel()
 
