@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: MIT
 
 """What a hosted run reads from the host and writes back: the grant's bound on the session's time, the stop the
-grant's end sends, the files that tell the host whether to start the run again, and the isolation its agents must
-have. The mapping of the spec onto ``run`` is pinned through the command in ``test_cli``."""
+grant's end sends, the files that tell the host whether to start the run again, the image a spec measured on this
+container's cards must name, and the isolation its agents must have. The mapping of the spec onto ``run`` is pinned
+through the command in ``test_cli``."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -30,8 +32,6 @@ from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, read_host_info
 from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
-from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, LaunchIsolation, launch_isolation
-from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.hosted_run import (
     GRANT_MARGIN_SECONDS,
     GrantDeadline,
@@ -42,12 +42,44 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     record_session,
     recorded_session,
     require_hosted_isolation,
+    require_local_image,
     run_argv,
     share_with_the_group,
     write_final_exit,
 )
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, LaunchIsolation, launch_isolation
+from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 
 CREATED = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
+DIGEST = "sha256:" + "2" * 64
+#: The measurement pins of a container that runs the image ``registry.example/vllm:v1`` at :data:`DIGEST`.
+PINS = {"HYPERLOOM_ACTIVE_IMAGE_REF": "registry.example/vllm:v1", "HYPERLOOM_ACTIVE_IMAGE_DIGEST": DIGEST}
+LAYER = Path("/opt/layer")
+LAYER_BWRAP = str(LAYER / "bin" / "bwrap")
+ACCOUNT = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="/home/hl", drop_tool="/usr/bin/setpriv")
+DENIED = "bwrap: setting up uid map: Permission denied"
+
+
+def _spec(
+    measurement: str,
+    image: str = f"registry.example/vllm@{DIGEST}",
+    hardware: dict[str, int] | None = None,
+    **sections: dict[str, object],
+) -> CampaignSpec:
+    return parse_campaign(
+        {
+            "schema": "hyperloom.campaign-spec/v1",
+            "flow": "multibranch",
+            "model": {"path": "/models/Llama-3-8B"},
+            "framework": {"name": "vllm", "image": image},
+            "hardware": {"gpu_type": "mi355x", "tp": 1, **(hardware or {})},
+            "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
+            "budget": {"max_hours": 1},
+            "placement": {"profile": "hosted-gpu", "measurement": measurement},
+            "multibranch": {"workload": "inferencex"},
+            **sections,
+        }
+    )
 
 
 def _host(tmp_path: Path, **grant: int) -> HostInfo:
@@ -113,28 +145,19 @@ def test_the_host_reads_a_final_ending_and_the_session_a_restart_finishes(tmp_pa
     assert exit_document == {"final": True, "returncode": 2, "error": "multibranch.workload is missing"}
 
 
-def _document(**multibranch: object) -> dict[str, object]:
-    return {
-        "schema": "hyperloom.campaign-spec/v1",
-        "flow": "multibranch",
-        "model": {"path": "/models/Llama-3-8B"},
-        "framework": {"name": "vllm", "image": "registry.example/vllm@sha256:" + "2" * 64},
-        "hardware": {"gpu_type": "mi355x", "tp": 1},
-        "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
-        "budget": {"max_hours": 1},
-        "placement": {"profile": "hosted-gpu", "measurement": "hosted"},
-        "multibranch": {"workload": "inferencex", **multibranch},
-    }
-
-
-def _spec(**multibranch: object) -> CampaignSpec:
-    return parse_campaign(_document(**multibranch))
+@pytest.mark.parametrize("measurement", ["local", "hosted"])
+def test_the_run_command_line_says_where_the_spec_measures(measurement: str) -> None:
+    assert f"--measurement={measurement}" in run_argv(_spec(measurement), 1.0, 8)
 
 
 def test_an_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names() -> None:
-    spec = parse_campaign({**_document(), "hardware": {"gpu_type": "mi355x", "tp": 8, "ep": 8}})
+    argv = run_argv(_spec("hosted", hardware={"tp": 8, "ep": 8}), 1.0, 1)
 
-    assert {"--workload=inferencex", "--tp=8", "--ep=8"} <= set(run_argv(spec, 1.0, 1))
+    assert {"--workload=inferencex", "--tp=8", "--ep=8"} <= set(argv)
+
+
+def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
+    assert "--workload=inferencex" in run_argv(_spec("hosted"), 1.0, 1)
 
 
 @pytest.mark.parametrize(
@@ -149,43 +172,44 @@ def test_an_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names() -> No
 def test_a_spec_whose_launch_a_multibranch_run_would_not_read_is_refused_naming_the_field(
     launch: dict[str, object], named: str
 ) -> None:
-    spec = parse_campaign({**_document(), "launch": launch})
+    spec = _spec("hosted", launch=launch)
 
     with pytest.raises(HostedRefused, match=named) as refused:
         run_argv(spec, 1.0, 1)
     assert "its base launch is resolved from the recipe sources" in str(refused.value)
 
 
-def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
-    assert "--workload=inferencex" in run_argv(_spec(), 1.0, 1)
+@pytest.mark.parametrize(
+    "image",
+    [f"registry.example/vllm@{DIGEST}", f"registry.example/vllm:v1@{DIGEST}", f"mirror.example/any/name@{DIGEST}"],
+)
+def test_a_spec_measured_here_names_the_image_this_container_runs_by_its_digest(image: str) -> None:
+    require_local_image(_spec("local", image), PINS)
 
 
 @pytest.mark.parametrize(
-    ("given", "switches"),
-    [
-        ({}, []),  # run's default: on
-        ({"make_before_break": True}, ["--make-before-break"]),
-        ({"make_before_break": False}, ["--no-make-before-break"]),
-    ],
+    "image",
+    ["submitted.example/vllm:v1", f"submitted.example/vllm@sha256:{'3' * 64}", f"submitted.example/vllm@{DIGEST}0"],
+    ids=["by-tag", "another-digest", "a-longer-digest"],
 )
-def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
-    given: dict[str, bool], switches: list[str]
-) -> None:
-    argv = run_argv(_spec(**given), 1.0, 8)
-    assert [arg for arg in argv if arg.endswith("make-before-break")] == switches
+def test_a_spec_measured_here_on_another_image_is_refused_naming_the_one_this_container_runs(image: str) -> None:
+    with pytest.raises(HostedRefused) as refused:
+        require_local_image(_spec("local", image), PINS)
+
+    assert str(refused.value) == (
+        f"placement.measurement 'local' measures the image this container runs, registry.example/vllm:v1 at {DIGEST}:"
+        " framework.image must name it by that digest"
+    )
+    assert image not in str(refused.value), "a string the submitter wrote is not echoed"
 
 
-@pytest.mark.parametrize("given", ["false", 0, 1])
-def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
-    with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
-        run_argv(_spec(make_before_break=given), 1.0, 8)
+def test_a_spec_measured_here_without_the_pins_is_refused_naming_what_is_missing() -> None:
+    with pytest.raises(PeersUnavailable, match="HYPERLOOM_ACTIVE_IMAGE_DIGEST not set"):
+        require_local_image(_spec("local"), {"HYPERLOOM_ACTIVE_IMAGE_REF": "registry.example/vllm:v1"})
 
 
-LAYER = Path("/opt/layer")
-LAYER_BWRAP = str(LAYER / "bin" / "bwrap")
-#: An account the chooser takes, as ``HYPERLOOM_SPECIALIST_USER`` names it.
-ACCOUNT = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="/home/hl", drop_tool="/usr/bin/setpriv")
-DENIED = "bwrap: setting up uid map: Permission denied"
+def test_a_spec_measured_in_the_grants_sandboxes_is_not_held_to_this_containers_image() -> None:
+    require_local_image(_spec("hosted", "registry.example/vllm:v1"), {})
 
 
 class Probes:
@@ -373,6 +397,29 @@ def test_a_hosted_run_whose_layer_has_no_bubblewrap_is_refused_naming_it(
 
     assert f"bubblewrap at {layer / 'bin' / 'bwrap'}: No such file or directory" in str(refused.value)
     assert "not the layer bubblewrap" not in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("given", "switches"),
+    [
+        ({}, []),  # run's default: on
+        ({"make_before_break": True}, ["--make-before-break"]),
+        ({"make_before_break": False}, ["--no-make-before-break"]),
+    ],
+)
+def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
+    given: dict[str, bool], switches: list[str]
+) -> None:
+    spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", **given})
+    argv = run_argv(spec, 1.0, 8)
+    assert [arg for arg in argv if arg.endswith("make-before-break")] == switches
+
+
+@pytest.mark.parametrize("given", ["false", 0, 1])
+def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
+    spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", "make_before_break": given})
+    with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
+        run_argv(spec, 1.0, 8)
 
 
 @pytest.fixture
