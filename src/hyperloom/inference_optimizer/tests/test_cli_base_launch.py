@@ -132,12 +132,7 @@ def test_a_new_session_state_carries_no_reference_launch(tmp_path, fetched):
     saved = json.loads((tmp_path / "state.json").read_text())
 
     assert saved["base_launch_digest"] == base.digest()
-    assert {name: saved.get(name) for name in _REFERENCE_FIELDS} == {
-        "reference_server_args": "",
-        "reference_envs": {},
-        "reference_launch_controls": {},
-        "reference_model": "",
-    }
+    assert not set(_REFERENCE_FIELDS) & saved.keys()
 
 
 def test_the_seeded_state_names_the_frozen_file_by_its_digest_across_a_resume(tmp_path, fetched):

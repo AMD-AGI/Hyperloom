@@ -1215,7 +1215,7 @@ def test_an_exported_setting_with_an_overlay_cannot_be_reimported(tmp_path):
     (overlay / "sitecustomize.py").write_text("")
     session = tmp_path / "session"
     session.mkdir()
-    state = SharedState(framework="sglang", reference_model="/models/test")
+    state = SharedState(framework="sglang")
     state.current_best = {"extra_server_args": "--max-running-requests 4", "final_overlay": str(overlay)}
     state.save(session)
 

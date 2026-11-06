@@ -269,6 +269,9 @@ _LIFECYCLE_CAP = 500
 # Experience KB injection log cap (orchestration and specialist rows share it).
 _KB_INJECTIONS_CAP = 20
 
+# The server base a session kept in state before base_launch.json replaced it; only read to refuse such a resume.
+_RETIRED_REFERENCE_FIELDS = ("reference_server_args", "reference_envs", "reference_launch_controls", "reference_model")
+
 
 @dataclass(frozen=True)
 class KbInjection:
@@ -465,12 +468,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     current_best_measurement: dict[str, Any] = field(default_factory=dict)
     # Digest of the session's frozen ``base_launch.json``; empty when the session froze none.
     base_launch_digest: str = ""
-    # Reference launch recipe from the operator's --reference-script: lowest-priority base server args/envs seeding
-    # every baseline.
-    reference_server_args: str = ""
-    reference_envs: dict[str, str] = field(default_factory=dict)
-    reference_launch_controls: dict[str, Any] = field(default_factory=dict)
-    reference_model: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
     operator_server_args: str = ""
     # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
@@ -982,7 +979,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
 
     @classmethod
     def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
-        """Reject damaged crash evidence before migrating a persisted state."""
+        """Reject damaged crash evidence, and a pre-base-launch session whose server base lived in state."""
+        stale = [key for key in _RETIRED_REFERENCE_FIELDS if raw.get(key)]
+        if stale and not raw.get("base_launch_digest"):
+            raise ValueError(
+                f"state.json carries {', '.join(stale)} but no base_launch_digest: this session predates "
+                "base_launch.json and cannot be resumed; start a new session"
+            )
         if "crash_count" in raw:
             count = raw["crash_count"]
             if not isinstance(count, int) or isinstance(count, bool):
@@ -1132,7 +1135,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
                         args_mode=str(cb.get("args_mode") or "append"),
                     ),
                     target=reference_script.ServingTarget(
-                        model=self.reference_model or os.environ.get("MODEL_PATH"),
+                        model=os.environ.get("MODEL_PATH"),
                         tp=int(self.tp or 0) or None,
                         max_model_len=int(self.max_model_len or 0) or None,
                         gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
