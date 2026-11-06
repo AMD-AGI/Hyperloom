@@ -1,17 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's profile and manifest fingerprints, and the snapshot every downstream view reads."""
+"""The session's profile, manifest fingerprints and Arbor's map, and the snapshot every downstream view reads."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, NotRecorded, Role, WriterNotAllowed
 from hyperloom_multibranch.contracts.blackboard.peers import BranchLogEntry, BranchLogType
-from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, LineageEvent, ManifestFingerprint
+from hyperloom_multibranch.contracts.blackboard.records import (
+    BaselineRecord,
+    LineageEvent,
+    ManifestFingerprint,
+    MapDirection,
+)
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, Conclusion, LineageKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import (
@@ -24,8 +31,11 @@ from hyperloom_multibranch.blackboard.tests.factories import (
     request,
     result,
 )
+from hyperloom_multibranch.blackboard.tests.sessions import scripted_session
 
 Open = Callable[..., LocalBlackboard]
+GEMM = MapDirection("m-gemm", "Dense GEMMs: tuned kernels", "open", holder="b02", ops=("gemm_a8w8.kd",))
+FP8 = MapDirection("m-fp8-weights", "FP8 weights", "killed", "pays only by changing the precision of record")
 
 
 async def test_the_scheduler_writes_the_profile_and_the_latest_one_is_in_force(open_as: Open) -> None:
@@ -54,6 +64,74 @@ async def test_manifest_fingerprints_keep_every_activity_in_order(open_as: Open)
     assert await open_as(Role.OBSERVER).manifest_fingerprints() == (first, second)
     with pytest.raises(WriterNotAllowed):
         await open_as(Role.GATE).write_manifest_fingerprint(first)
+
+
+async def test_the_scheduler_writes_arbors_map_and_every_reader_sees_the_latest_one(open_as: Open) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    fuse = MapDirection("m-fuse", "Small kernels folded into their producers", "open", holder="b03")
+
+    await scheduler.write_agent_map([GEMM, FP8])
+    first = (await open_as(Role.OBSERVER).snapshot()).agent_map
+    await scheduler.write_agent_map((GEMM, fuse))
+
+    assert first == (GEMM, FP8)
+    assert (await open_as(Role.GATE).snapshot()).agent_map == (GEMM, fuse)
+
+
+@pytest.mark.parametrize(
+    ("role", "branch"),
+    [(Role.TOOLBOX, ""), (Role.GATE, ""), (Role.INTEGRATOR, ""), (Role.OBSERVER, ""), (Role.SPECIALIST_RUNTIME, "b02")],
+)
+async def test_only_the_scheduler_writes_arbors_map(open_as: Open, role: Role, branch: str) -> None:
+    with pytest.raises(WriterNotAllowed):
+        await open_as(role, branch).write_agent_map([GEMM])
+
+
+@pytest.mark.parametrize(
+    "directions",
+    [
+        [GEMM, MapDirection("", "A direction without an id", "open")],
+        [GEMM, FP8, MapDirection("m-gemm", "Again", "done")],
+    ],
+    ids=["no_id", "same_id"],
+)
+async def test_a_map_with_a_direction_without_an_id_or_with_anothers_is_refused_and_not_kept(
+    open_as: Open, directions: list[MapDirection]
+) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+
+    with pytest.raises(ValueError, match="id"):
+        await scheduler.write_agent_map(directions)
+    assert (await scheduler.snapshot()).agent_map == ()
+
+
+async def test_a_blackboard_written_without_arbors_map_reads_an_empty_one_held_by_nobody(tmp_path: Path) -> None:
+    snap = await (await scripted_session(tmp_path / "blackboard", FakeClock())).snapshot()
+
+    assert (snap.agent_map, snap.map_holders()) == ((), {})
+
+
+async def test_an_open_direction_is_held_while_its_holder_runs_and_free_once_it_stops(open_as: Open) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    for branch in ("b02", "b03"):
+        await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c0"))
+    await scheduler.write_agent_map(
+        [
+            GEMM,
+            MapDirection("m-fuse", "Small kernels folded into their producers", "open", holder="b03"),
+            MapDirection("m-attn", "Decode attention", "open", holder="b09"),
+            MapDirection("m-moe", "MoE routing", "open"),
+            replace(FP8, holder="b02"),
+        ]
+    )
+
+    running = (await scheduler.snapshot()).map_holders()
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "b03", reason="its agent finished"))
+    stopped = (await scheduler.snapshot()).map_holders()
+
+    assert running == {"m-gemm": "b02", "m-fuse": "b03"}
+    assert stopped == {"m-gemm": "b02"}
 
 
 async def test_a_snapshot_holds_every_view_with_the_times_the_facts_arrived(open_as: Open, clock: FakeClock) -> None:
