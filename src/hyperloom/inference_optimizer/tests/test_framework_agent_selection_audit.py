@@ -51,6 +51,7 @@ def test_config_levers_preserve_envs_and_args() -> None:
         }
     )
     assert levers == {
+        "name": "",
         "extra_server_args": '--enable-x --compilation-config {"mode":"max-autotune"} --bare',
         "extra_envs": {"VLLM_FOO": "1"},
     }
@@ -75,6 +76,7 @@ def test_invalid_config_args_preserve_independent_env_overrides() -> None:
         }
     )
     assert levers == {
+        "name": "",
         "extra_server_args": "",
         "extra_envs": {"SAFE_ENV": "1"},
     }
@@ -95,6 +97,7 @@ def test_config_levers_json_args_as_list_stay_unquoted() -> None:
         }
     )
     assert levers == {
+        "name": "",
         "extra_server_args": '--json-model-override-args {"rope_scaling":null}',
         "extra_envs": {},
     }
@@ -345,6 +348,22 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
     assert params["extra_server_args"] == "--speculative 4"
     assert params["extra_envs"] == {"VLLM_MTP": "1"}
     assert "config_changes" not in params
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coord: Coordinator) -> None:
+    done = {
+        "proposal_set": [
+            {"name": "research-notes"},
+            {"name": "eagle-spec", "extra_args": "--speculative-algorithm EAGLE --speculative-num-steps 3"},
+        ]
+    }
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    params = (next(iter(coord.state.pending_proposals.values())).payload or {}).get("params") or {}
+    assert (params["patch_name"], params["extra_server_args"]) == (
+        "eagle-spec",
+        "--speculative-algorithm EAGLE --speculative-num-steps 3",
+    )
 
 
 @pytest.mark.asyncio

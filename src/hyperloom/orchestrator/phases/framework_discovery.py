@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging as _logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +31,19 @@ log = _logging.getLogger(__name__)
 
 #: Consecutive empty discovery rounds tolerated before the source arm declines.
 DISCOVER_FAILURE_RETRY_LIMIT: int = 3
+
+
+def _config_lever_deliverable(config_levers: Mapping[str, Any]) -> dict[str, Any]:
+    """The integrate deliverable a config-lever round is reviewed with."""
+    deliverable: dict[str, Any] = {
+        "extra_server_args": config_levers.get("extra_server_args", ""),
+        "extra_envs": dict(config_levers.get("extra_envs", {})),
+        "framework_agent_authoring": True,
+    }
+    if config_levers:
+        # The round is named after the proposal whose lever it benches, not the deliverable's first proposal.
+        deliverable["patch_name"] = config_levers["name"]
+    return deliverable
 
 
 def _specialist_resolve_bases(session_dir: Any, sid: str) -> list[Path]:
@@ -348,7 +362,7 @@ class _CandidateDiscoveryMixin:
             sid,
             spec_params,
             done_payload,
-            {"extra_server_args": extra_server_args, "extra_envs": extra_envs, "framework_agent_authoring": True},
+            _config_lever_deliverable(config_levers),
             observation={
                 "kind": "framework_config_autosubmitted_for_review",
                 "candidate_id": candidate_id,

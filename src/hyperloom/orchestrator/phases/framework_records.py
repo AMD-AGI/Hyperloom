@@ -27,7 +27,7 @@ log = _logging.getLogger(__name__)
 
 
 def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
-    """The server args and env overrides one lever proposal carries, dropping args Magpie cannot transport."""
+    """The name, server args and env overrides one lever proposal carries, dropping args Magpie cannot transport."""
     extra_envs = {str(k).strip(): str(v) for k, v in to_mapping(entry.get("extra_envs")).items() if str(k).strip()}
     args = entry.get("extra_args")
     tokens = [str(a) for a in args if str(a).strip()] if isinstance(args, (list, tuple)) else []
@@ -54,7 +54,7 @@ def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
     extra_server_args = "" if parsed_args is None else parsed_args[0]
     if not extra_server_args and not extra_envs:
         return {}
-    return {"extra_server_args": extra_server_args, "extra_envs": extra_envs}
+    return {"name": str(entry.get("name") or ""), "extra_server_args": extra_server_args, "extra_envs": extra_envs}
 
 
 def _framework_config_levers_from_done(
