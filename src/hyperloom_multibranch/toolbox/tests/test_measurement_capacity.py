@@ -20,7 +20,9 @@ from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, Workloa
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
+from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom_multibranch.toolbox.local_hosted import (
+    FREED_CARDS_REASON,
     LEAKED_CARDS_REASON,
     LocalHostedToolbox,
     LocalOptions,
@@ -307,3 +309,96 @@ async def test_cards_leaked_while_shutting_down_are_recorded(tmp_path: Path, mon
     monkeypatch.setattr(toolbox.provider, "close", close_and_leak)
     await toolbox.close()
     assert [e.gpu_ids for e in await _gpu_events(blackboard)] == [(1,)]
+
+
+def _frees_once(provider: Any, card: int) -> Any:
+    """A ``release_freed_cards`` that finds ``card``'s sandbox gone at its first call and nothing after."""
+    freed: list[int] = []
+
+    def _release() -> tuple[int, ...]:
+        if freed:
+            return ()
+        freed.append(card)
+        provider.quarantined.discard(card)
+        provider.pool.release([card])
+        return (card,)
+
+    return _release
+
+
+async def test_freed_cards_come_back_and_only_they_are_lifted_in_the_blackboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    for name in ("one", "two"):
+        (tmp_path / name).mkdir()
+    first = _local_toolbox(tmp_path / "one", blackboard)
+    try:
+        await first.start()
+        provider = first.provider
+        provider.quarantined.update(GpuPool.acquire(provider.pool, 2, 0.0))
+        await first.tick()
+        assert [e.gpu_ids for e in await _gpu_events(blackboard)] == [(0, 1)]
+        monkeypatch.setattr(provider, "release_freed_cards", _frees_once(provider, 1))
+        await first.tick()
+        assert [e.gpu_ids for e in await _gpu_events(blackboard)] == [(0,)], "card 0 is still lost"
+        assert await first.measurement_capacity() == MeasurementCapacity(8, 7)
+        assert provider.pool.free_cards() == (1, 2, 3, 4, 5, 6, 7)
+    finally:
+        await first.close()
+    second = _local_toolbox(tmp_path / "two", blackboard)
+    try:
+        await second.start()
+        assert second.provider.quarantined == {0}, "a restart takes back only the card still lost"
+    finally:
+        await second.close()
+
+
+async def test_a_refused_lift_frees_the_card_and_leaves_it_recorded_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _local_toolbox(tmp_path, blackboard)
+    try:
+        await toolbox.start()
+        provider = toolbox.provider
+        provider.quarantined.update(GpuPool.acquire(provider.pool, 1, 0.0))
+        await toolbox.tick()
+
+        async def refuse(*args: Any, **kwargs: Any) -> None:
+            raise OSError("blackboard down")
+
+        monkeypatch.setattr(toolbox._quarantine, "return_cards", refuse)
+        monkeypatch.setattr(provider, "release_freed_cards", _frees_once(provider, 0))
+        await toolbox.tick()
+        assert await toolbox.measurement_capacity() == MeasurementCapacity(8, 8)
+        assert [e.gpu_ids for e in await _gpu_events(blackboard)] == [(0,)], "a restart would still take it back"
+    finally:
+        await toolbox.close()
+
+
+async def test_a_freed_card_lost_again_is_recorded_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _local_toolbox(tmp_path, blackboard)
+    try:
+        await toolbox.start()
+        provider = toolbox.provider
+        provider.quarantined.update(GpuPool.acquire(provider.pool, 2, 0.0))
+        await toolbox.tick()
+        monkeypatch.setattr(provider, "release_freed_cards", _frees_once(provider, 1))
+        await toolbox.tick()
+        provider.quarantined.add(GpuPool.acquire(provider.pool, 1, 0.0)[0])
+        await toolbox.tick()
+        assert sorted(e.gpu_ids for e in await _gpu_events(blackboard)) == [(0,), (1,)]
+    finally:
+        await toolbox.close()
+
+
+async def test_returning_cards_lifts_each_recorded_set_and_keeps_the_rest_lost(tmp_path: Path) -> None:
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    quarantine = Quarantine(blackboard)
+    await quarantine.add_cards(NODE, (0, 1), LEAKED_CARDS_REASON)
+    await quarantine.add_cards(NODE, (4,), LEAKED_CARDS_REASON)
+    await quarantine.add_cards("another-node", (1,), LEAKED_CARDS_REASON)
+    await quarantine.return_cards(NODE, (1, 4), FREED_CARDS_REASON)
+    assert sorted((e.node, e.gpu_ids) for e in await _gpu_events(blackboard)) == [("another-node", (1,)), (NODE, (0,))]

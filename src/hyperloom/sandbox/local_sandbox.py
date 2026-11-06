@@ -117,6 +117,11 @@ class LocalSandbox:
         """bool: True once the sandbox was killed or timed out."""
         return self._ended
 
+    @property
+    def leftovers(self) -> Leftovers:
+        """Leftovers: What the sandbox's reaps could not confirm gone; clean while they all could."""
+        return self._leftovers
+
     def _require_alive(self) -> None:
         if self._ended:
             raise SandboxGone(f"sandbox {self.sandbox_id} has ended")

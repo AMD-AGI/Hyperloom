@@ -28,6 +28,7 @@ from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
 from hyperloom.sandbox.node import node_name
 from hyperloom.sandbox.local_sandbox import WORK_DIR, LocalSandbox, SandboxPlan, SandboxRuntime
+from hyperloom.sandbox.reaper import Leftovers, tag_in_use, wait_exited
 from hyperloom.sandbox.socket import (
     AVOID_NODES_KEY,
     IDEMPOTENCY_KEY,
@@ -63,6 +64,14 @@ class ProcessUsers:
     launcher_python: str = sys.executable
     sealed_user: tuple[int, int] | None = None
     unsealed_user: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class _Withheld:
+    """The cards of an ended sandbox its reap could not confirm empty, and what that reap left."""
+
+    cards: tuple[int, ...]
+    leftovers: Leftovers
 
 
 @dataclass(frozen=True)
@@ -127,6 +136,7 @@ class LocalSandboxProvider:
         self._creating: set[tuple[Role, str]] = set()
         self._cards: dict[str, tuple[int, ...]] = {}
         self.quarantined: set[int] = set()
+        self._withheld: dict[str, _Withheld] = {}
 
     # -- socket ------------------------------------------------------------
 
@@ -356,7 +366,31 @@ class LocalSandboxProvider:
         with self._cond:
             self._live.pop(sandbox.sandbox_id, None)
             cards = self._cards.pop(sandbox.sandbox_id, ())
+            if not reaped:
+                self.quarantined.update(cards)
+                self._withheld[sandbox.sandbox_id] = _Withheld(cards, sandbox.leftovers)
         if reaped:
             self.pool.release(cards)
-        else:
-            self.quarantined.update(cards)
+
+    def release_freed_cards(self) -> tuple[int, ...]:
+        """Put back in the pool the withheld cards of every ended sandbox nothing of which runs any more; return them.
+
+        A sandbox whose reap could not confirm it empty keeps its cards out of the pool (``quarantined``). The reap named
+        what it left, each process sent SIGKILL so that it could start no other, and every process the sandbox started
+        that kept its environment carries the sandbox's id. Once none of the named processes and no process with the id
+        runs, nothing of the sandbox can use the cards. A reap that could not tell what it left keeps them for good, and
+        so does a card put in ``quarantined`` by anything but a reap.
+        """
+        with self._cond:
+            withheld = list(self._withheld.items())
+        freed: list[int] = []
+        for sandbox_id, held in withheld:
+            if not wait_exited(held.leftovers).clean or tag_in_use(sandbox_id):
+                continue
+            with self._cond:
+                if self._withheld.pop(sandbox_id, None) is None:
+                    continue  # another call gave them back first
+                self.quarantined.difference_update(held.cards)
+            self.pool.release(held.cards)
+            freed.extend(held.cards)
+        return tuple(sorted(freed))
