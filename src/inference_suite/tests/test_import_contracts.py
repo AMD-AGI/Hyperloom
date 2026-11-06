@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -14,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-CONFIG = Path(__file__).resolve().parents[3] / ".importlinter"
+SRC = Path(__file__).resolve().parents[2]
+CONFIG = SRC.parent / ".importlinter"
 ONLY_COMMON = "is-only-common"
 PUBLIC_INTERFACE = "is-public-interface"
 LAYERS = "is-layers"
@@ -91,7 +93,10 @@ def _write_tree(root: Path, imports: Mapping[str, tuple[str, ...]]) -> Path:
 
 
 def _lint(tmp_path: Path, imports: Mapping[str, tuple[str, ...]], contract: str | None = None) -> str:
-    src = _write_tree(tmp_path, imports)
+    return _lint_tree(tmp_path, _write_tree(tmp_path, imports), contract)
+
+
+def _lint_tree(tmp_path: Path, src: Path, contract: str | None = None) -> str:
     selected = ["--contract", contract] if contract else []
     completed = subprocess.run(
         [
@@ -154,3 +159,28 @@ def test_upward_or_same_layer_import_breaks(tmp_path: Path, importer: str, impor
     output = _lint(tmp_path, {f"{SUITE}.{importer}": (f"{SUITE}.{imported}",)}, LAYERS)
 
     assert "Contracts: 0 kept, 1 broken." in output, output
+
+
+#: What a host resolving a base launch imports, all of it from the package root (dev plan 2.1 and 4.1).
+ROOT_NAMES = ("LaunchQuery", "Miss", "SourceSnapshot", "fetch_sources", "resolve_base")
+
+
+def test_host_importing_the_resolution_names_from_the_package_root_keeps_every_suite_contract(tmp_path: Path) -> None:
+    src = _write_tree(tmp_path, {})
+    for package in (SUITE, "hyperloom_common"):
+        shutil.rmtree(src / package)
+        shutil.copytree(SRC / package, src / package, ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    (src / "hyperloom" / "consumer" / "__init__.py").write_text(
+        f"from {SUITE} import {', '.join(ROOT_NAMES)}\n", encoding="utf-8"
+    )
+
+    output = _lint_tree(tmp_path, src)
+
+    assert f"Contracts: {len(SUITE_CONTRACTS)} kept, 0 broken." in output, output
+
+
+def test_the_package_root_exports_the_resolution_names() -> None:
+    import inference_suite
+
+    assert set(ROOT_NAMES) <= set(inference_suite.__all__)
+    assert all(callable(getattr(inference_suite, name)) for name in ROOT_NAMES)
