@@ -87,7 +87,7 @@ from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles,
 from .reap_watch import PROCESS_LOG_NAME, ReapWatch, cli_alive
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
-from hyperloom_common.git_safety import app_git, worktree_head
+from hyperloom_common.git_safety import app_git_diff, worktree_head
 from ..delivery.deliverable import declared_targets
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
@@ -1211,11 +1211,11 @@ class SpecialistSubprocessDispatcher:
         """Return the worktree's edits as one ``-p1`` diff, or ``""``.
 
         The comparison is ``base``-against-working-tree, since a specialist is
-        not required to commit. Intent-to-add stages untracked paths so they
-        render as creations, ``git diff`` being blind to them otherwise, which
-        is what keeps "edited a file and added one" from harvesting a patch
-        that silently omits the addition. Proven Python comment-only edits
-        produce no installable patch at all.
+        not required to commit. ``app_git_diff`` marks untracked paths
+        intent-to-add so they render as creations, ``git diff`` being blind to
+        them otherwise, which keeps "edited a file and added one" from
+        harvesting a patch that silently omits the addition. Proven Python
+        comment-only edits produce no installable patch at all.
 
         Args:
             worktree: Per-task worktree holding a ``.git`` marker.
@@ -1227,19 +1227,14 @@ class SpecialistSubprocessDispatcher:
                 git could not be run.
         """
 
-        def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
-            try:
-                return app_git(worktree, *args)
-            except (OSError, subprocess.SubprocessError) as exc:
-                log.warning("specialist: git %s in %s failed: %r", args[0], worktree, exc)
-                return None
-
         from .patch_safety import patch_is_annotation_only
 
-        pathspec = SpecialistSubprocessDispatcher._harvest_pathspec(targets)
-        _git("add", "-A", "-N", "--", *pathspec)
-        diff = _git("diff", "--no-ext-diff", "--no-textconv", base, "--", *pathspec)
-        if diff is None or diff.returncode != 0 or not diff.stdout.strip():
+        try:
+            diff = app_git_diff(worktree, base, SpecialistSubprocessDispatcher._harvest_pathspec(targets))
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("specialist: git diff in %s failed: %r", worktree, exc)
+            return ""
+        if diff.returncode != 0 or not diff.stdout.strip():
             return ""
         if patch_is_annotation_only(diff.stdout, worktree, reverse=True):
             return ""
