@@ -25,7 +25,7 @@ from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import argv_flag_occurrences
 from inference_suite.contracts import BaseLaunch, LaunchQuery, SourceKind, Topology, VersionBasis, Workload
 from inference_suite.golden import golden_owned_settings
-from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.defaults import TABLE_PATH, default_table
 from inference_suite.recipe.golden_curve import GoldenLength, golden_requests
 from inference_suite.recipe.image_version import recipe_image_facts, tag_version
@@ -37,7 +37,7 @@ from inference_suite.recipe.model import (
     RecipeSourceError,
     RepoBundle,
 )
-from inference_suite.recipe.resolve import CLIENT_TOOL, Miss, SourceSnapshot, UnreadSource, resolve_base
+from inference_suite.recipe.resolve import Miss, SourceSnapshot, UnreadSource, resolve_base
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import parse_user_file
 from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, rendering_url
@@ -113,7 +113,7 @@ def test_inferencex_wins_and_its_base_round_trips_through_its_document():
     assert base.source.entry == "dsr1-fp8-mi355x-sglang"
     assert (base.topology, base.point.conc, base.point.exact) == (Topology(8), 64, True)
     assert (base.image.framework_version, base.image.version_basis) == ("0.5.22", VersionBasis.TAG)
-    assert (base.client.tool, base.client.commit) == (CLIENT_TOOL, INFERENCEX_CLIENT_COMMIT)
+    assert (base.client.tool, base.client.commit) == (INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT)
     assert base.resolved_unix == _FETCHED
     assert "--served-model-name" in base.runner_owned.args
     assert "HIP_VISIBLE_DEVICES" in base.runner_owned.env
@@ -420,7 +420,7 @@ def test_a_fixed_query_whose_inferencex_could_not_be_read_runs_the_default_row_w
     base = _base(_fixed(tp=8), _no_inferencex_snapshot())
 
     assert base.source.kind is SourceKind.DEFAULT_TABLE
-    assert (base.client.tool, base.client.commit) == (CLIENT_TOOL, INFERENCEX_CLIENT_COMMIT)
+    assert (base.client.tool, base.client.commit) == (INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT)
     assert base.warnings[-1].startswith("InferenceX could not be read, so no recipe was consulted")
     assert BaseLaunch.from_document(json.loads(json.dumps(base.to_document()))) == base
 
