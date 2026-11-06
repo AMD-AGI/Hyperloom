@@ -7,8 +7,8 @@ import json
 import subprocess
 
 import pytest
+from hyperloom_common import amd_smi
 
-from hyperloom.common import gpu_power_settings
 from hyperloom.common.rocm_smi import GpuVram
 from hyperloom.measure.runner.hardware import (
     EccCounts,
@@ -91,7 +91,7 @@ def test_an_amd_smi_that_fails_reads_as_none_instead_of_raising(monkeypatch):
             raise FileNotFoundError(cmd[0])
         return subprocess.CompletedProcess(cmd, 0 if cmd[1] == "static" else 2, "{}", "failed")
 
-    monkeypatch.setattr(gpu_power_settings.subprocess, "run", run)
+    monkeypatch.setattr(amd_smi.subprocess, "run", run)
 
     assert amd_smi_or_none(["static", "--json"]) == "{}"
     assert amd_smi_or_none(["metric", "--json"]) is None
