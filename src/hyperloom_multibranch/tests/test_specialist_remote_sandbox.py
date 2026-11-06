@@ -185,6 +185,7 @@ def test_only_the_gateway_its_credentials_and_the_ca_bundle_are_forwarded():
         "ANTHROPIC_BASE_URL": "u",
         "CLAUDE_MODEL": "m",
         "GEAK_CLAUDE_MODEL": "g",
+        "CLAUDE_CODE_OAUTH_TOKEN": "t",
         "SSL_CERT_FILE": "/tmp/hyperloom-host/ca-bundle.pem",
         "HOME": "/root",
         "PATH": "/usr/bin",
@@ -198,6 +199,7 @@ def test_only_the_gateway_its_credentials_and_the_ca_bundle_are_forwarded():
         "ANTHROPIC_BASE_URL": "u",
         "CLAUDE_MODEL": "m",
         "GEAK_CLAUDE_MODEL": "g",
+        "CLAUDE_CODE_OAUTH_TOKEN": "t",
         "SSL_CERT_FILE": "/tmp/hyperloom-host/ca-bundle.pem",
     }
 

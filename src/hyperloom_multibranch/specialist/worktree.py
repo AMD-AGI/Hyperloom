@@ -325,7 +325,14 @@ class SourceBase:
             if not (path / prefix).exists():
                 make_shared_dirs((path / prefix).parent)
                 (path / prefix).symlink_to(target)
-        return self._worktrees.setdefault(path, BranchWorktree(path, self._native))
+        return self._worktrees.setdefault(path, BranchWorktree(path, self._native, self._linked()))
+
+    def _linked(self) -> tuple[Path, ...]:
+        """What every worktree's links point at, read from this base's own record, never from a worktree, whose
+        ``.git`` file whoever writes the worktree decides."""
+        record = self.path / _GIT_DIR / LINKED_PATHS
+        lines = record.read_text().splitlines() if record.exists() else []
+        return tuple(Path(line.split("\t", 1)[1]) for line in lines if "\t" in line)
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
         """Copy ``native`` to its upstream path, but for what ``laid`` already put there: the package a test loads is
@@ -434,9 +441,13 @@ class BranchWorktree:
         self,
         path: Path,
         native: Mapping[str, NativeTree] | None = None,
+        linked: Sequence[Path] = (),
     ) -> None:
         self.path = path
         self._native = dict(native or {})
+        #: The installed files and trees the worktree's links point at, as its source base recorded them: a sandbox
+        #: that binds the worktree binds them too, so the links resolve inside.
+        self.linked = tuple(linked)
         self.lock = threading.Lock()
 
     def holds(self, component: str) -> bool:

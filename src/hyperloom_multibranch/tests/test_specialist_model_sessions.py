@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import shlex
 from dataclasses import replace
 from pathlib import Path
@@ -8,10 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.agent_isolation import BwrapIsolation
 from hyperloom.measure.compile import PackageBase
+from hyperloom_common.bwrap import BwrapProbe
 from hyperloom.sandbox import SandboxGone
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist import agent_sessions
+from hyperloom_multibranch.specialist.agent_sandbox import UNCONFINED
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import MAPPED
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierSetup, DossierStart
@@ -64,7 +68,9 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
 def _agent_sessions() -> AgentSessions:
     spec = AgentSpec("/models/m", "vllm", 1, "bf16", "mi355x", {}, "output_throughput", "", {}, "", (), 3600.0, 31100)
     command = AgentCommand("claude", "claude", model="claude-opus-5-5")
-    return AgentSessions(spec, command, {}, object(), object(), LocalAgentSandboxes(object()))
+    return AgentSessions(
+        spec, command, {}, object(), object(), LocalAgentSandboxes(object(), choose=lambda: UNCONFINED)
+    )
 
 
 def test_an_agent_branch_waits_for_cards_while_it_would_still_run_the_session_s_least(tmp_path):
@@ -233,3 +239,34 @@ def test_a_hosted_agent_runs_in_its_lease_s_sandbox_found_again_by_the_lease_alo
     assert sandboxes.claude_config(place) == place.workspace / "sandbox" / "home" / ".claude"
     with pytest.raises(SandboxGone):
         sandboxes.sandbox("a1", place, tmp_path / "src", BranchLease("lease-2", "a1", (0,), tmp_path, {}, 6))
+
+
+def test_where_bubblewrap_sandboxes_an_agent_its_sandbox_writes_its_branch_s_trees_and_keeps_its_own_claude_dir(
+    tmp_path: Path,
+) -> None:
+    asked: list[object] = []
+    isolation = BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ()))
+
+    def choose() -> BwrapIsolation:
+        asked.append(isolation)
+        return isolation
+
+    worktree = SimpleNamespace(path=tmp_path / "worktree", linked=(tmp_path / "base" / "3rdparty",))
+    for path in (worktree.path, *worktree.linked, tmp_path / "branch" / "session"):
+        path.mkdir(parents=True)
+    place = BranchPlace(worktree, object(), tmp_path / "branch" / "session")
+    sandboxes = LocalAgentSandboxes(object(), choose=choose)
+    lease = BranchLease("lease-1", "a1", (6,), tmp_path / "lease-1", {}, 1)
+
+    sandbox = sandboxes.sandbox("a1", place, worktree.path / "python", lease)
+    try:
+        home = place.workspace / "sandbox" / "home"
+        assert sandbox.isolation is isolation and sandbox.paths.home == home
+        assert sandbox.paths.writable == (place.workspace, worktree.path)
+        assert sandbox.paths.readable == worktree.linked
+        assert sandboxes.claude_config(place) == home / ".claude" == Path(sandbox.env({})["CLAUDE_CONFIG_DIR"])
+    finally:
+        asyncio.run(sandbox.stop())
+    assert len(asked) == 1, "the session asks once how its sandboxes run"
+    unconfined = LocalAgentSandboxes(object(), choose=lambda: UNCONFINED)
+    assert unconfined.claude_config(place) != home / ".claude"
