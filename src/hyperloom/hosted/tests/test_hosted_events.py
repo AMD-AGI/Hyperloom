@@ -287,3 +287,14 @@ def test_the_directory_comes_from_the_host_inputs_not_from_the_environment(tmp_p
 def test_the_hosted_implementation_refuses_to_start_without_host_inputs():
     with pytest.raises(ValueError, match="host inputs"):
         hosted_events.create(PlugContext("events", {}, None, None, lambda name: None))
+
+
+def test_the_events_directory_and_each_segment_are_the_group_s_for_the_run_s_next_leg(tmp_path):
+    events = tmp_path / "events"
+    sink = HostedProgressEvents(events, "r", segment_max_bytes=1)
+    sink.emit("hyperloom.warning", {"code": "c", "message": "one"})
+    sink.emit("hyperloom.warning", {"code": "c", "message": "two"})
+    sink.close()
+
+    assert oct(events.stat().st_mode & 0o7777) == oct(0o2775)
+    assert [oct(path.stat().st_mode & 0o777) for path in sorted(events.iterdir())] == [oct(0o664)] * 2

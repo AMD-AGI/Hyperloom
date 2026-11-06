@@ -8,6 +8,7 @@ the single-id user namespace its container is."""
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -300,3 +301,69 @@ def test_io_shared_writes_are_664_whatever_the_umask_and_make_their_parents_2775
         umask=0o077,
     )
     assert (_mode(target.parent), _mode(target)) == (0o2775, 0o664)
+
+
+def test_a_file_appended_to_in_turn_is_made_664_whatever_the_umask_and_is_appended_to_not_replaced(tmp_path):
+    shared = _setgid_parent(tmp_path / "shared")
+    log, link = shared / "events.log", shared / "link.log"
+    link.symlink_to(tmp_path / "elsewhere.log")
+    out = _here(
+        "import os\n"
+        "from pathlib import Path\n"
+        "from hyperloom_common.shared_storage import open_shared_append\n"
+        f"for text in (b'one\\n', b'two\\n'):\n"
+        f"    fd = open_shared_append(Path({str(log)!r}))\n"
+        "    os.write(fd, text)\n"
+        "    os.close(fd)\n"
+        "try:\n"
+        f"    open_shared_append(Path({str(link)!r}))\n"
+        "except OSError as exc:\n"
+        "    print(exc.errno)\n",
+        umask=0o077,
+    )
+    assert (_mode(log), log.read_bytes()) == (0o664, b"one\ntwo\n")
+    assert int(out) == errno.ELOOP and not (tmp_path / "elsewhere.log").exists(), "never through a link"
+
+
+_APPENDING_LEG = """
+import os
+from pathlib import Path
+from hyperloom_common.shared_storage import open_shared_append
+shared = Path({shared!r})
+os.write(log := open_shared_append(shared / "events.log"), b"leg 1\\n")
+os.close(log)
+with open(shared / "plain.log", "a") as plain:
+    plain.write("leg 1\\n")
+"""
+
+_NEXT_APPENDING_LEG = """
+import errno, json, os
+from pathlib import Path
+from hyperloom_common.shared_storage import open_shared_append
+shared = Path({shared!r})
+seen = {{}}
+def append(path):
+    descriptor = open_shared_append(path)
+    os.write(descriptor, b"leg 2\\n")
+    os.close(descriptor)
+def attempt(name, action):
+    try:
+        action()
+        seen[name] = "ok"
+    except OSError as exc:
+        seen[name] = errno.errorcode[exc.errno]
+attempt("append to its log", lambda: append(shared / "events.log"))
+attempt("append to its umask-022 log", lambda: append(shared / "plain.log"))
+print(json.dumps(seen))
+"""
+
+
+def test_the_next_account_of_the_group_appends_to_what_the_first_made_for_appending_and_to_nothing_else(tmp_path):
+    with other_accounts() as accounts:
+        shared = accounts.shared_dir("shared")
+        accounts.run(accounts.first, _APPENDING_LEG.format(shared=str(shared)), umask=0o022)
+
+        seen = json.loads(accounts.run(accounts.second, _NEXT_APPENDING_LEG.format(shared=str(shared)), umask=0o022))
+
+        assert seen == {"append to its log": "ok", "append to its umask-022 log": "EACCES"}
+        assert (shared / "events.log").read_text() == "leg 1\nleg 2\n"

@@ -115,6 +115,7 @@ from pathlib import Path
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom_common.env import EnvValueError
+from hyperloom_common.shared_storage import open_shared_append
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
@@ -941,6 +942,7 @@ async def _final_only(persisted: PersistedRun, peer_factory: PeerFactory, servic
 
 
 def _file_handler(path: Path) -> logging.Handler:
+    os.close(open_shared_append(path))  # 664: final-only of a later leg, maybe another account, appends to it
     handler = logging.FileHandler(path, encoding=ENCODING)
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     return handler

@@ -28,11 +28,20 @@ These are set in the app container's environment.
 | `HYPERLOOM_RUNNER_WHEEL_TARGET` | yes | The measurement image's interpreter and platform, for example `cp310-manylinux_2_28_x86_64`, or `cp314-manylinux_2_28_x86_64` for the Python 3.14 `rocm/vllm` images. The runner cache's wheels are built for it, not for the app container, from the lock of that Python: `requirements/runner-cp314.lock` for `cp314`, `requirements/runner.lock` for the others. An entry holds the wheels of one Python, so deployments whose images run different Pythons need different `HYPERLOOM_RUNNER_CACHE` directories; a sandbox whose interpreter is not the entry's fails its start with `runner_start_failed`. |
 | `HYPERLOOM_SOURCE_REPO` | yes | Where the run's Hyperloom source is fetched from: `OWNER/NAME` on GitHub, any git URL, or a local path (for example a mirror on shared storage when the app host has no GitHub egress). |
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
-| `HYPERLOOM_RSI_ARCHIVE` | yes | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. |
+| `HYPERLOOM_RSI_ARCHIVE` | yes | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`): what a session publishes there is readable by the others (`0644`) in folders they write (`2775`), and an entry a session cannot read is named in a warning with its owner and mode. |
 | `INFERENCEX_PATH` | yes, unless `install.sh` left a checkout | A writable InferenceX checkout at the commit Hyperloom pins. Without one the session refuses to start, naming `INFERENCEX_PATH`. |
 
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
+
+Each leg of a run may be another host account of one group (the `dev` sandboxes too, which write the session
+directory). Before a session starts, `hyperloom-multibranch hosted run` creates and removes a file in
+`HYPERLOOM_STATE_DIR`, `HYPERLOOM_EVENTS_DIR` (when set), `USER_DATA_PATH`, `HYPERLOOM_RUNNER_CACHE` and
+`HYPERLOOM_RSI_ARCHIVE`, and ends the run with one message naming every one it cannot write, with its errno, owner and
+mode; one that is not setgid is a warning. What the session makes in them is the group's: directories `2775`, and the
+files a later leg reads, appends to or replaces `0664`, whatever the umask. Nothing the application runs or sources is
+kept there, and the application's git runs no hook, fsmonitor, pager, external diff, signing program or filter driver
+that a repository there names.
 
 ## Measurement sandbox template
 
