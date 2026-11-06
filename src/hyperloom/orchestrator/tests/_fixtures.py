@@ -49,6 +49,24 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
         monkeypatch.setattr(aiter_jit, "AITER_JIT_PROBE_PATHS", ())
     _isolate_ray_head(monkeypatch)
     _isolate_framework_trees(monkeypatch)
+    _isolate_agent_isolation(monkeypatch)
+
+
+def _isolate_agent_isolation(monkeypatch) -> None:
+    """Launch every specialist as on a host without bubblewrap, unless a test picks a tier itself.
+
+    The tests of the launch paths run fake CLIs that read and write where a sandbox would not let them, so where
+    bubblewrap works (CI installs it) they would run sandboxed. The account tier and the refusals are unchanged.
+    """
+    import functools
+
+    from hyperloom_common.bwrap import BwrapProbe
+    from hyperloom.common import agent_isolation
+    from hyperloom.orchestrator.specialists import launch_env
+
+    absent = BwrapProbe(None, None, ("bubblewrap: not found on PATH",))
+    choose = functools.partial(agent_isolation.choose_agent_isolation, probe=lambda _path: absent)
+    monkeypatch.setattr(launch_env, "choose_agent_isolation", choose)
 
 
 def _isolate_ray_head(monkeypatch) -> None:
