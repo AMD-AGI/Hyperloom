@@ -238,6 +238,17 @@ def test_a_specialist_cannot_submit_a_kind_the_session_owns(rig: Rig, kind: str)
     assert rig.toolbox.submitted == []
 
 
+@pytest.mark.parametrize(("kind", "purpose"), [("test", "profile"), ("profile", "explore")])
+def test_a_specialist_submits_kind_and_purpose_only_as_a_pair_it_owns(rig: Rig, kind: str, purpose: str) -> None:
+    """A measured test sent as a profile would be queued at the profile's priority, ahead of every branch's explores,
+    skip the explore-only checks and escape the profile dedup, which is keyed on the kind."""
+    _, reply = rig.call(rig.token("s1"), "submit_test", kind=kind, purpose=purpose, parent_commit="c1")
+    assert reply["error"]["code"] == -32602
+    assert f"kind {kind} does not go with purpose {purpose}" in reply["error"]["message"]
+    assert "kind test with purpose explore and kind profile with purpose profile" in reply["error"]["message"]
+    assert rig.toolbox.submitted == []
+
+
 @pytest.mark.parametrize("named", [{"priority": 0}, {"priority": 4}, {"priority": None}, {"retest_of": "req-0"}])
 def test_a_specialist_names_no_priority_and_no_retest(rig: Rig, named: dict[str, object]) -> None:
     _, reply = rig.call(rig.token("s1"), "submit_test", kind="test", purpose="explore", parent_commit="c1", **named)
