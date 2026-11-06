@@ -111,7 +111,7 @@ def test_an_entry_whose_wheels_the_runner_cannot_install_is_refused_before_it_is
         ensure_runner_cache(commit.repo, commit.sha, cache, _options(f"{runner}-manylinux_2_28_x86_64", wheelhouse))
 
     assert "bin-pkg" in str(refused.value).lower().replace("_", "-")
-    assert sorted(path.name for path in cache.iterdir()) == [f".{commit.sha}.lock"]
+    assert sorted(path.name for path in cache.iterdir()) == [f".{commit.sha}.flock"]
 
 
 #: The interpreter running the test: its wheels are what a builder that ignored the target would have fetched, and

@@ -27,9 +27,14 @@ distribution's own build requirements name is never fetched. The lock must there
 
 - A commit is built once. The entry is made in a directory of its own beside the final one, its manifest is written last
   and the directory is renamed into place in one step, so ``<cache>/<sha>`` is either absent or complete.
-- Builders of one commit exclude each other with an exclusive ``flock`` on ``<cache>/.<sha>.lock``; the one that waits
+- Builders of one commit exclude each other with an exclusive ``flock`` on ``<cache>/.<sha>.flock``; the one that waits
   finds the finished entry when it gets the lock and uses it, with no download. The lock is also what keeps two hosts that
   share the cache directory over NFS apart (the cache's file system must support ``flock``, as NFSv4 does).
+- The builders may be different accounts of one group (the cache directory setgid in that group). What a builder makes
+  for them follows its umask with every group bit let through (``002`` for ``022``, ``007`` for ``077``): the lock file
+  (``0664``), the cache directory and, while an entry is built, every directory of its tree (``2775``), which the
+  builder's child processes fill under that umask too. So a builder of another account removes what one that died left
+  behind; the finished tree is made writable by its owner alone before it is renamed into place.
 - An entry that is already there is used when it is complete and still what a build would write; one that differs is
   never modified: the build refuses and names the difference (:class:`CacheConflict`). Its manifest file is read once,
   the entry is checked against those bytes and the pin returned is their SHA-256, as a build returns the SHA-256 of the
@@ -100,6 +105,7 @@ it (``--python-version``, or the ``cpXY`` of ``$HYPERLOOM_RUNNER_WHEEL_TARGET``)
 from __future__ import annotations
 
 import argparse
+import errno
 import re
 import fcntl
 import hashlib
@@ -113,6 +119,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import zipfile
@@ -123,6 +130,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.shared_storage import current_umask, make_shared_dirs, ownership, share_new_directory
 from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
 from hyperloom.measure.runner.cache_layout import (
     BOOTSTRAP_NAME,
@@ -151,6 +159,7 @@ from hyperloom.measure.runner.cache_layout import (
 
 __all__ = [
     "BuildOptions",
+    "build_lock",
     "RUNNER_TARGET_ENV",
     "CacheBuildError",
     "CacheConflict",
@@ -165,6 +174,12 @@ __all__ = [
 
 DEFAULT_LOCK_TIMEOUT_SEC = 1800.0
 _LOCK_POLL_SEC = 0.1
+#: How a lock is opened: for writing, which ``flock`` over NFS needs, and never through a link.
+_LOCK_FLAGS = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+#: How a file of a finished tree is opened to change its mode: never through a link, never blocking on a FIFO.
+_SEAL_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_GROUP_OR_OTHER_WRITE = stat.S_IWGRP | stat.S_IWOTH
+_ALL_DIR_BITS, _ALL_FILE_BITS = 0o2777, 0o666
 _TAIL = 2000
 _UTF8 = "utf-8"
 #: ``bootstrap.sh`` is run with ``sh`` and may be run directly: readable and executable by the sandbox's account.
@@ -306,7 +321,7 @@ class CacheEntry:
 
 
 def _run(command: Sequence[str], what: str, env: Mapping[str, str] | None = None) -> str:
-    done = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+    done = subprocess.run(command, capture_output=True, text=True, check=False, env=env, umask=_shared_umask())
     if done.returncode != 0:
         raise CacheBuildError(f"{what} failed (exit {done.returncode}): {(done.stdout + done.stderr).strip()[-_TAIL:]}")
     return done.stdout.strip()
@@ -335,15 +350,15 @@ def _archive_source(repo: Path, sha: str, archive: Path) -> None:
     configuration or attributes (:data:`_GIT_NO_SYSTEM_OR_GLOBAL`), and :data:`_ARCHIVE_SETTINGS` fixes the rest.
     """
     objects = Path(repo, _run(_git(repo, "rev-parse", "--git-path", _OBJECTS), f"finding the objects of {repo}"))
-    with tempfile.TemporaryDirectory(dir=archive.parent, prefix=".archive-") as scratch:
-        home, borrower = Path(scratch, "home"), Path(scratch, "repo")
-        home.mkdir()
+    with _scratch(archive.parent, ".archive-") as scratch:
+        home, borrower = scratch / "home", scratch / "repo"
+        _shared_dirs(home)
         env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
         env.update(HOME=str(home), XDG_CONFIG_HOME=str(home), **_GIT_NO_SYSTEM_OR_GLOBAL)
         object_format = ["--object-format=sha256"] if len(sha) == 64 else []
         _run([_GIT, "init", "-q", "--bare", "--template=", *object_format, str(borrower)], "making a repository", env)
         alternates = borrower.joinpath(*_ALTERNATES)
-        alternates.parent.mkdir(parents=True, exist_ok=True)
+        _shared_dirs(alternates.parent)
         alternates.write_text(f"{objects.resolve()}\n", encoding=_UTF8)
         export = [_GIT, f"--git-dir={borrower}", *_ARCHIVE_SETTINGS, "archive", "--format=tar"]
         _run([*export, "-o", str(archive.absolute()), sha], f"exporting {sha} from {repo}", env)
@@ -351,11 +366,18 @@ def _archive_source(repo: Path, sha: str, archive: Path) -> None:
 
 def _export_source(repo: Path, sha: str, entry: Path) -> FileDigest:
     """Write the commit's archive as ``entry/source.tar`` (:func:`_archive_source`) and unpack it into ``entry/source``
-    with the builder's umask; the archive's size and SHA-256."""
+    with the builder's umask (:func:`_shared_umask`), into directories made before (which the unpack leaves as they
+    are), so that a builder of another account can remove them if this one dies unpacking; the archive's size and
+    SHA-256."""
     archive, source = entry / SOURCE_ARCHIVE, entry / SOURCE_DIR
     _archive_source(repo, sha, archive)
-    source.mkdir()
-    unpack = ["tar", "-x", "--no-same-owner", "--no-same-permissions", "-f", str(archive), "-C", str(source)]
+    _shared_dirs(source)
+    with tarfile.open(archive) as members:
+        for member in members:
+            if member.isdir():
+                _shared_dirs(source / member.name)
+    unpack = ["tar", "-x", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir", "-f", str(archive)]
+    unpack += ["-C", str(source)]
     _run(unpack, f"unpacking {sha}")
     return FileDigest(archive.stat().st_size, file_sha256(archive))
 
@@ -366,7 +388,7 @@ def _pip(*args: str, python: Path | None = None) -> list[str]:
 
 
 def _pip_download(requirements: Path, dest: Path, extra: Sequence[str], what: str, python: Path | None = None) -> None:
-    dest.mkdir()
+    _shared_dirs(dest)
     command = _pip("download", _NO_DEPS, _REQUIRE_HASHES, *_PIP_QUIET, python=python)
     _run([*command, "--dest", str(dest), "-r", str(requirements), *extra], what)
 
@@ -416,7 +438,7 @@ def _pure_wheel(python: Path, sdist: Path, out: Path) -> Path:
         CacheBuildError: When the build fails, or makes anything but one pure-Python wheel: a platform wheel built on
             the builder is not one for the image.
     """
-    out.mkdir()
+    _shared_dirs(out)
     build = [_ISOLATED, "wheel", "--no-build-isolation", _NO_INDEX, _NO_DEPS, "--no-cache-dir", *_PIP_QUIET]
     _run(_pip(*build, "-w", str(out), str(sdist), python=python), f"building a wheel from {sdist.name}")
     made = sorted(path.name for path in out.iterdir())
@@ -438,10 +460,10 @@ def _build_sdists(python: Path, wheels: Path, pins: list[LockPin]) -> dict[str, 
     for sdist in (path for path in sorted(wheels.iterdir()) if not path.name.endswith(".whl")):
         if file_sha256(sdist) not in allowed:
             raise CacheBuildError(f"{sdist.name} is not a file the lock allows")
-        with tempfile.TemporaryDirectory(dir=wheels.parent, prefix=".wheel-build-") as scratch:
-            wheel = _pure_wheel(python, sdist, Path(scratch) / "out")
+        with _scratch(wheels.parent, ".wheel-build-") as scratch:
+            wheel = _pure_wheel(python, sdist, scratch / "out")
             shutil.move(wheel, wheels / wheel.name)
-        sdists.mkdir(exist_ok=True)
+        _shared_dirs(sdists)
         shutil.move(sdist, sdists / sdist.name)
         built[wheel.name] = sdist.name
     return built
@@ -450,8 +472,8 @@ def _build_sdists(python: Path, wheels: Path, pins: list[LockPin]) -> dict[str, 
 def _download_wheels(lock: Path, wheels: Path, pins: list[LockPin], options: BuildOptions) -> dict[str, str]:
     """Download what the lock pins into ``wheels`` and build the source distributions among it, in an environment of
     the lock's own build tools; see :func:`_wheel_entries` for the result."""
-    with tempfile.TemporaryDirectory(dir=wheels.parent, prefix=".build-env-") as scratch:
-        python = _build_environment(pins, options, Path(scratch))
+    with _scratch(wheels.parent, ".build-env-") as scratch:
+        python = _build_environment(pins, options, scratch)
         extra = ["--no-build-isolation", *options.target.pip_args(), *options.source.pip_args()]
         _pip_download(lock, wheels, extra, "pip download of the wheels the lock pins", python)
         return _build_sdists(python, wheels, pins)
@@ -498,10 +520,10 @@ def _requires_python_flags(target: WheelTarget) -> list[str]:
 
 def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> None:
     """Refuse an entry whose wheels alone do not satisfy what the sandbox installs, for the target's interpreter."""
-    with tempfile.TemporaryDirectory(dir=entry, prefix=".resolve-") as scratch:
-        requirements = Path(scratch) / "runner-wheels.lock"
+    with _scratch(entry, ".resolve-") as scratch:
+        requirements = scratch / "runner-wheels.lock"
         requirements.write_text(requirements_text(manifest), encoding=_UTF8)
-        install = [_ISOLATED, "install", "--dry-run", "--target", str(Path(scratch) / "site"), _NO_INDEX]
+        install = [_ISOLATED, "install", "--dry-run", "--target", str(scratch / "site"), _NO_INDEX]
         install += [_FIND_LINKS, str(entry / WHEELS_DIR), _ONLY_BINARY, _REQUIRE_HASHES, _NO_DEPS]
         install += [*_PIP_QUIET, *target.pip_args(), *_requires_python_flags(target), "-r", str(requirements)]
         interpreter = f"Python {target.python_version}" if target.python_version else "the builder's interpreter"
@@ -530,11 +552,57 @@ def _builder_problems(raw: bytes, manifest: Manifest) -> list[str]:
     return []
 
 
+def _shared_umask() -> int:
+    """The umask of what this builder makes for the other builders of the cache: its own, with every group bit let
+    through, so the group may read, enter and write whatever the umask keeps from others."""
+    return current_umask() & ~stat.S_IRWXG
+
+
+def _shared_dirs(path: Path) -> Path:
+    return make_shared_dirs(path, mode=_ALL_DIR_BITS & ~_shared_umask())
+
+
+@contextmanager
+def _scratch(parent: Path, prefix: str) -> Iterator[Path]:
+    """A new directory below ``parent`` for the block, removed after it: one that a builder killed inside the block
+    leaves in an entry's tree, another account's builder can remove (:func:`_shared_dirs`)."""
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    try:
+        share_new_directory(path, mode=_ALL_DIR_BITS & ~_shared_umask())
+        yield path
+    finally:
+        shutil.rmtree(path)
+
+
+def _seal(tree: Path) -> None:
+    """Take the group's and others' write bits off each directory and regular file of ``tree``, which this builder
+    made, so that an entry in place is changed by no one; a link is neither changed nor followed."""
+    for _directory, _subdirectories, files, directory in os.fwalk(tree):
+        _drop_shared_write(directory)
+        for name in files:
+            try:
+                descriptor = os.open(name, _SEAL_FLAGS, dir_fd=directory)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    continue
+                raise
+            try:
+                if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    _drop_shared_write(descriptor)
+            finally:
+                os.close(descriptor)
+
+
+def _drop_shared_write(descriptor: int) -> None:
+    os.fchmod(descriptor, stat.S_IMODE(os.fstat(descriptor).st_mode) & ~_GROUP_OR_OTHER_WRITE)
+
+
 def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry:
     """Make the entry beside ``final`` and rename it into place; the manifest is the last file written, and the pin
     returned is the SHA-256 of the text written, which the check of the new entry is pinned to."""
     pending = final.parent / f".{sha}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     pending.mkdir()
+    share_new_directory(pending, mode=_ALL_DIR_BITS & ~_shared_umask())
     try:
         archive = _export_source(repo, sha, pending)
         source = pending / SOURCE_DIR
@@ -555,6 +623,7 @@ def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
         problems = check_entry(pending, sha, pin, verify_hash=True)
         if problems:
             raise CacheBuildError(f"the entry just built does not verify: {'; '.join(problems[:3])}")
+        _seal(pending)
         os.rename(pending, final)
     except BaseException:
         shutil.rmtree(pending, ignore_errors=True)
@@ -775,10 +844,38 @@ def _use_or_clear(repo: Path, sha: str, tree: str, final: Path, options: BuildOp
     return CacheEntry(final, pin, reused=True)
 
 
+def _open_lock(path: Path) -> int:
+    """``path`` opened for writing, made ``0664`` (:func:`_shared_umask`) when this call creates it, so that every
+    account of the cache directory's group can take the lock after this one.
+
+    Raises:
+        CacheBuildError: When it cannot be opened so, naming it: a lock another account made without group write.
+    """
+    mode = _ALL_FILE_BITS & ~_shared_umask()
+    try:
+        try:
+            descriptor = os.open(path, _LOCK_FLAGS | os.O_CREAT | os.O_EXCL, mode)
+        except FileExistsError:
+            return os.open(path, _LOCK_FLAGS)
+    except OSError as exc:
+        raise CacheBuildError(
+            f"cannot open the build lock {path} for writing: {exc.strerror}{ownership(path)}; every account that builds "
+            "into this cache must be able to"
+        ) from None
+    os.fchmod(descriptor, mode)
+    return descriptor
+
+
+def build_lock(cache_root: Path, sha: str) -> Path:
+    """The lock the builders of commit ``sha`` into ``cache_root`` take. Named apart from the ``.<sha>.lock`` of builders
+    whose locks were ``0644``, which another account cannot open for writing."""
+    return cache_root / f".{sha}.flock"
+
+
 @contextmanager
 def _exclusive(path: Path, timeout_sec: float) -> Iterator[None]:
     """Hold an exclusive ``flock`` on ``path`` for the block; wait for it for at most ``timeout_sec``."""
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT)
+    descriptor = _open_lock(path)
     try:
         deadline = time.monotonic() + timeout_sec
         while True:
@@ -806,9 +903,9 @@ def ensure_runner_cache(repo: Path, sha: str, cache_root: Path, options: BuildOp
     if not is_full_commit(sha):
         raise CacheBuildError(f"{sha!r} is not a full lowercase commit hash")
     tree = _commit_tree(repo, sha)
-    cache_root.mkdir(parents=True, exist_ok=True)
+    _shared_dirs(cache_root)
     final = cache_root / sha
-    with _exclusive(cache_root / f".{sha}.lock", options.lock_timeout_sec):
+    with _exclusive(build_lock(cache_root, sha), options.lock_timeout_sec):
         for leftover in cache_root.glob(f".{sha}.tmp-*"):
             shutil.rmtree(leftover, ignore_errors=True)
         return _use_or_clear(repo, sha, tree, final, options) or _build(repo, sha, tree, final, options)
