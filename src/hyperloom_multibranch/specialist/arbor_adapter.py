@@ -16,7 +16,8 @@ would write the same config, so a refusal, this side's or Arbor's own, fails the
 The spec's ``plan``, the file of the branch's share of the session's directions, becomes ``component.plan``. Those
 shares come from one map, which Arbor's dossier pass writes on one lease before the branches open
 (:data:`DOSSIER_PASS`, its end read by :func:`mapped`) or Arbor generates from the root's profile with no GPU time
-(:func:`generate_directions`), split by Arbor's own command line (:func:`split_directions`); the scheduling calls these.
+(:func:`generate_directions`), split by Arbor's own command line (:func:`split_directions`), and once a worker hands its
+share back, the slot's next order is dealt from it by Arbor's master (:func:`deal_order`); the scheduling calls these.
 The dossier the pass wrote (:func:`pass_dossier`) is copied into each branch's checkout (:func:`carry_dossier`), where
 Arbor looks a dossier up. The root's op shares are not the adapter's: the preflight sets
 ``component.profile`` for Arbor as for any agent run as a component
@@ -131,6 +132,11 @@ INSTALL = (
 EXIT_REFUSED = 2
 #: The exit reason of a dossier pass that set its map, and the map's file in its session.
 MAPPED = "mapped"
+#: The command lines of Arbor's map: ``arbor.directions`` splits and generates one, the master in ``arbor.roles``
+#: deals from it.
+DIRECTIONS_MODULE, ROLES_MODULE = "arbor.directions", "arbor.roles"
+#: Where each of those command lines writes what it makes.
+OUT_FLAG = "--out"
 MAP_FILE = "directions.json"
 #: Where Arbor's dossier skill writes a dossier in its checkout and looks one up: a directory per dossier, with its
 #: index. Arbor ships dossiers of its own there, which git tracks.
@@ -254,6 +260,18 @@ class ArborRun:
 #: exits 0 once the map is set (:func:`mapped`).
 BRANCH_RUN = ArborRun(f"{MB_DIR}/config.json", f"{MB_DIR}/session")
 DOSSIER_PASS = ArborRun(f"{MB_DIR}/dossier.json", f"{MB_DIR}/dossier", stop_at="map")
+
+
+@dataclass(frozen=True)
+class DealRequest:
+    """What the master deals from: the session's map, the reports its workers handed back, the shares and orders
+    running workers hold, and where the order goes (``out``), of at most ``size`` directions."""
+
+    map_file: Path
+    reports: tuple[Path, ...]
+    held: tuple[Path, ...]
+    out: Path
+    size: int
 
 
 def is_arbor(checkout: Path) -> bool:
@@ -765,7 +783,9 @@ async def split_directions(checkout: Path, map_file: Path, shares: int, out: Pat
     Arbor printed when it cannot: a map with fewer independent groups than shares, or one that does not validate."""
 
     paths = tuple(out / f"share-{number}.json" for number in range(1, shares + 1))
-    await _directions(checkout, paths, "split", str(map_file), "--shares", str(shares), "--out", str(out))
+    await _arbor_cli(
+        checkout, paths, DIRECTIONS_MODULE, "split", str(map_file), "--shares", str(shares), OUT_FLAG, str(out)
+    )
     return paths
 
 
@@ -775,15 +795,30 @@ async def generate_directions(checkout: Path, profile: Path, out: Path) -> Path:
     ``out``, which :func:`split_directions` splits as any map. Raise :class:`SplitFailed` with what Arbor printed when
     it cannot: a profile with no share above its cut, or an Arbor older than ``generate``."""
 
-    await _directions(checkout, (out,), "generate", "--profile", str(profile), "--out", str(out))
+    await _arbor_cli(checkout, (out,), DIRECTIONS_MODULE, "generate", "--profile", str(profile), OUT_FLAG, str(out))
     return out
 
 
-async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> None:
-    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``; raise :class:`SplitFailed` with what it
-    printed when it fails or leaves any of ``written`` unwritten."""
+async def deal_order(checkout: Path, deal: DealRequest) -> Path:
+    """Have the master of the Arbor checkout ``checkout`` write the order ``deal.out``: at most ``deal.size`` open
+    directions of ``deal.map_file`` that no report settled and no held share or order holds, as Arbor picks them
+    (``python3 -m arbor.roles deal``, Arbor ``74933a2``). An order of no directions means nothing is left to deal.
+    Raise :class:`SplitFailed` with what Arbor printed when it cannot."""
 
-    argv = [PYTHON, "-m", "arbor.directions", *args]
+    args = ["deal", "--map", str(deal.map_file), "--size", str(deal.size)]
+    if deal.reports:
+        args += ["--reports", *(str(report) for report in deal.reports)]
+    for held in deal.held:
+        args += ["--held-order", str(held)]
+    await _arbor_cli(checkout, (deal.out,), ROLES_MODULE, *args, OUT_FLAG, str(deal.out))
+    return deal.out
+
+
+async def _arbor_cli(checkout: Path, written: tuple[Path, ...], module: str, *args: str) -> None:
+    """Run ``python3 -m <module>`` with ``args`` in ``checkout``; raise :class:`SplitFailed` with what it printed when
+    it fails or leaves any of ``written`` unwritten."""
+
+    argv = [PYTHON, "-m", module, *args]
     process = await asyncio.create_subprocess_exec(
         *argv, cwd=checkout, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
     )
@@ -821,12 +856,14 @@ __all__ = [
     "ArborCheckout",
     "ArborRefused",
     "ArborRun",
+    "DealRequest",
     "ResolvedLaunch",
     "SplitFailed",
     "arbor_config",
     "arbor_manifest",
     "bench_command",
     "carry_dossier",
+    "deal_order",
     "dossier_notes",
     "generate_directions",
     "has_review_gate",

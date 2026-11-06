@@ -192,7 +192,10 @@ from hyperloom_multibranch.tests.fakes import RecordingVerifier, RefusingCritic
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.tests.fake_model import DEFAULT_BASELINE, Fate
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
+from hyperloom_multibranch.scheduling import agent_plans as agent_plans_module
 from hyperloom_multibranch.scheduling.agent_plans import (
+    DEAL_SIZE,
+    DEALT,
     DOSSIER_ENDED,
     DOSSIER_SKIPPED,
     DOSSIER_STARTED,
@@ -202,6 +205,7 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     MADE_BY_PASS,
     MADE_BY_SHARES,
     MAP_KEPT,
+    NOTHING_TO_DEAL,
     ROOT_SHARES_READ,
     SHARES_TOO_LATE,
 )
@@ -216,11 +220,11 @@ from hyperloom_multibranch.scheduling.review import (
 )
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
 from hyperloom_multibranch.specialist import autonomous_session
-from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
+from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, DealRequest, SplitFailed
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
-from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
+from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed, SessionFinished
 
 START = 1_700_000_000.0
 CONC = 16
@@ -1976,6 +1980,110 @@ async def test_two_agents_each_start_at_the_root_on_the_share_of_the_session_s_d
     assert stage.sessions.started["b01"] == stage.sessions.started["b02"] == root
     assert stage.sessions.plans == {"b01": "/shares/share-1.json", "b02": "/shares/share-2.json"}
     assert _agent_map(stage) == []  # a given map: no shares waited for and no dossier pass
+
+
+#: When the first Arbor of :func:`_one_reports` hands its share back, in virtual seconds after its branch started.
+REPORT_SECONDS = 600.0
+
+
+def _directions_file(path: Path, *entries: dict[str, str]) -> str:
+    path.write_text(json.dumps({"directions": list(entries)}))
+    return str(path)
+
+
+def _one_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: list[dict[str, str]]
+) -> tuple[Stage, list[DealRequest], Path]:
+    """A session of two Arbors on their shares of a given map, ``b01`` on ``m-attn`` and ``b02`` on ``m-moe``, in which
+    ``b01`` hands its share back after :data:`REPORT_SECONDS` as the adapter does: it gives the scheduler its worker
+    report, which closes ``m-attn``, then finishes ``reported``. Arbor's master deals ``order``; every deal asked is
+    kept, with the report ``b01`` gave."""
+
+    asked: list[DealRequest] = []
+    titles = {"m-attn": "attention decode path", "m-moe": "MoE GEMM tables", "m-allreduce": "custom all-reduce"}
+    _directions_file(tmp_path / "d.json", *({"id": key, "title": title} for key, title in titles.items()))
+    shares = (
+        _directions_file(tmp_path / "share-1.json", {"id": "m-attn"}),
+        _directions_file(tmp_path / "share-2.json", {"id": "m-moe"}),
+    )
+    report = Path(
+        _directions_file(tmp_path / "worker_report.json", {"id": "m-attn", "status": "done", "why": "KEEP 1"})
+    )
+
+    async def split(
+        agents: tuple[str, ...], map_file: str, work_dir: Path, root_shares: OpShares | None = None, *_source: str
+    ) -> tuple[str, ...]:
+        return shares
+
+    async def deal(_checkout: Path, request: DealRequest) -> Path:
+        asked.append(request)
+        request.out.write_text(json.dumps({"directions": order}))
+        return request.out
+
+    async def reports(branch: str) -> None:
+        await stage.time.sleep(REPORT_SECONDS)
+        maps = stage.setup.agent_maps
+        assert maps is not None
+        said = await maps.deal(branch, stage.sessions.agents[branch], stage.sessions.plans[branch], report)
+        raise SessionFinished(f"the agent finished its run: reported; {said}")
+
+    monkeypatch.setattr(lifecycle, "agent_plans", split)
+    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(agent_plans_module, "deal_order", deal)
+    stage = _stage(tmp_path)
+    stage.settings = replace(
+        SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions=str(tmp_path / "d.json")
+    )
+    stage.steps = {"b01": reports}
+    stage.judge = ScriptedCompletion([])
+    return stage, asked, report
+
+
+async def test_a_reported_arbor_is_stopped_as_finished_and_its_slot_dealt_the_next_order_once_its_cards_are_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage, asked, report = _one_reports(tmp_path, monkeypatch, [{"id": "m-allreduce"}])
+
+    outcome = await stage.run()
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
+    [request] = asked
+    assert (request.map_file, request.reports, request.size) == (tmp_path / "d.json", (report,), DEAL_SIZE)
+    # The reporter's own share is no longer held, the running worker's still is.
+    assert request.held == (tmp_path / "share-2.json",)
+    roster = {entry["branch"]: entry for entry in json.loads(stage.layout.roster.read_text())["entries"]}
+    assert roster["b01"]["stop"]["cause"] == StopCause.GAVE_UP.value
+    assert roster["b01"]["stop"]["reason"].startswith("the agent finished its run: reported")
+    rows = _decisions(stage)
+    [dealt] = [row for row in rows if row["reason"] == DEALT]
+    share = dealt["detail"]["branch"]
+    assert (dealt["branch"], dealt["detail"]["status"]) == ("b01", "pending")
+    assert _shares(stage) == {share: str(request.out)}
+    assert roster[share]["from_branch"] == "b01"
+    assert stage.sessions.started[share] == await stage.repo.head(INTEGRATION_BRANCH)
+    # The share waited for the slot: it entered the roster only after b01 stopped and gave its cards back.
+    [stop] = [index for index, row in enumerate(rows) if row["kind"] == "stop" and row["branch"] == "b01"]
+    [entered] = [
+        index for index, row in enumerate(rows) if row["branch"] == share and row["reason"].startswith("dequeued")
+    ]
+    assert stop < entered
+    # The map record follows the deal: the report's verdict, and the new branch holding the order it opened on.
+    recorded = {item.id: item for item in (await stage.handle(Role.OBSERVER).snapshot()).agent_map}
+    assert (recorded["m-attn"].status, recorded["m-attn"].why) == ("done", "KEEP 1")
+    assert {key: recorded[key].holder for key in ("m-moe", "m-allreduce")} == {"m-moe": "b02", "m-allreduce": share}
+
+
+async def test_a_reported_arbor_with_nothing_left_to_deal_frees_its_slot_for_the_judge_s_refill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage, asked, _report = _one_reports(tmp_path, monkeypatch, [])
+
+    outcome = await stage.run()
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
+    assert len(asked) == 1 and _shares(stage) == {}
+    assert [row["branch"] for row in _decisions(stage) if row["reason"] == NOTHING_TO_DEAL] == ["b01"]
+    assert not [row for row in _decisions(stage) if row["kind"] == "share" and row["detail"].get("status")]
 
 
 #: Two agents' keeps, each a gain alone and more together: ``a1`` and ``a2`` both land on the integration branch.

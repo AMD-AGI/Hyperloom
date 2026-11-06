@@ -67,20 +67,24 @@ from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.agent_map import SharedMap
 from hyperloom_multibranch.scheduling.agent_plans import (
     AGENT_SOURCES_UNREAD,
+    DEALT,
     DOSSIER_ENDED,
     DOSSIER_SKIPPED,
     DOSSIER_STARTED,
     GENERATED_FOR,
-    GENERATED_MAP,
     MADE_BY_PASS,
     MADE_BY_SHARES,
     MAP_KEPT,
+    NO_DEAL,
+    NOTHING_TO_DEAL,
     ROOT_SHARES_READ,
     SHARES_TOO_LATE,
+    MapDealer,
     agent_plans,
     arbor_agents,
     generated_map,
     keep_map,
+    map_dealer,
 )
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
@@ -264,6 +268,7 @@ class Session:
         self._desk = desk
         self._prelude: PreludeResult | None = None
         self._map_shares: tuple[RootShares | None] | None = None
+        self._dealer: MapDealer | None = None
         self._explore_end = math.inf
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
@@ -334,7 +339,7 @@ class Session:
             settings.agent_dossier,
             # The session's review stands in for each Arbor's own; without one, nobody's does.
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
-            MapCalls(self._map_start, self._map_split) if settings.agents else None,
+            MapCalls(self._map_start, self._map_split, self._deal) if settings.agents else None,
             settings.agent_share_minutes,
         )
 
@@ -601,9 +606,7 @@ class Session:
             if settings.agent_directions and settings.review_gate and await self._arbors():
                 dossier = Path(settings.agent_dossier) if settings.agent_dossier else None
                 await self._review(Path(settings.agent_directions), dossier, MADE_BY_USER)
-            plans = await agent_plans(settings.agents, settings.agent_directions, work)
-            await self._hand_map(settings.agent_directions, plans)
-            return AgentBranches(settings.agents, plans)
+            return AgentBranches(settings.agents, await self._split(settings.agents, settings.agent_directions))
         arbors = await self._arbors()
         if not arbors or (len(arbors) < GENERATED_FOR and not settings.review_gate):
             return AgentBranches(settings.agents, await agent_plans(settings.agents, "", work))
@@ -663,10 +666,7 @@ class Session:
                 return f"the map was rejected at its review ({exc}); no share branch opens"
             if late := await self._too_late(branch, map_for, "after the review"):
                 return late
-        work = self._layout.agent_plans
-        given = () if shares is None else (shares.shares, shares.source)
-        plans = await agent_plans(map_for, map_file, work, *given)
-        await self._hand_map(map_file, plans)
+        plans = await self._split(map_for, map_file, shares)
         answers = []
         for agent, plan in zip(map_for, plans):
             admission = await self._desk.admit_share(ShareRequest(branch, start_commit, agent, plan))
@@ -674,14 +674,55 @@ class Session:
         split = "split" if any(plans) else "not split, each Arbor maps its own"
         return f"{len(map_for)} share branches asked, the map {split}: {', '.join(answers)}"
 
-    async def _hand_map(self, map_file: str, plans: tuple[str, ...]) -> None:
-        """Keep the map ``plans`` were split from on the blackboard (:mod:`agent_map`), for the open areas, the briefs,
-        the menu and the judge to read: ``map_file``, or the one generated from the root's shares when it is ``""``;
-        none when nothing was split."""
+    async def _split(self, agents: tuple[str, ...], map_file: str, shares: RootShares | None = None) -> tuple[str, ...]:
+        """Each of ``agents``' share of ``map_file``, as :func:`agent_plans` splits it, or a map it generates from the
+        root's ``shares``; the map it split is kept to deal from, and on the blackboard (:mod:`agent_map`) for the open
+        areas, the briefs, the menu and the judge to read."""
 
-        if any(plans):
-            given = Path(map_file) if map_file else self._layout.agent_plans / GENERATED_MAP
-            await self._branches.record_map(SharedMap.read(given, plans))
+        work = self._layout.agent_plans
+        given = () if shares is None else (shares.shares, shares.source)
+        plans = await agent_plans(agents, map_file, work, *given)
+        self._dealer = map_dealer(map_file, plans, work)
+        if self._dealer is not None:
+            await self._branches.record_map(SharedMap.read(self._dealer.map_file, plans))
+        return plans
+
+    async def _deal(self, branch: str, agent: str, plan: str, report: Path) -> str:
+        """Fold the ``report`` of the Arbor ``agent`` whose branch ``branch`` handed its share ``plan`` back into the
+        session's map, and ask the fork desk for a share branch, cut at the integration head, on the next order its
+        master deals; the branch takes the slot ``branch`` frees once it stops. None when no map was split, too little
+        time is left for an Arbor iteration, Arbor cannot deal or nothing is left to deal: the slot then goes to the
+        judge's refill. Each deal is a ``SHARE`` decision of ``branch``; what was done, for its notice."""
+
+        detail: dict[str, object] = {"agent": agent, "plan": plan, "report": str(report)}
+        dealer = self._dealer
+        why = "no map was split for this session's Arbors" if dealer is None else ""
+        why = why or await self._too_late(branch, (agent,), "at the deal")
+        arbors = {} if why else await self._arbors()
+        if dealer is not None and arbors:
+            try:
+                order = await dealer.deal(arbors[min(arbors)], plan, report)
+            except SplitFailed as exc:
+                why = f"Arbor cannot deal: {exc}"
+            else:
+                await self._branches.record_deal(report, order)
+                return await self._deal_to(branch, agent, order, detail)
+        why = why or "no Arbor source to deal with"
+        self._decisions.record(Decision(DecisionKind.SHARE, NO_DEAL, branch, {**detail, "why": why}))
+        return f"no order is dealt: {why}"
+
+    async def _deal_to(self, branch: str, agent: str, order: Path | None, detail: dict[str, object]) -> str:
+        """Ask the fork desk for a share branch of the Arbor ``agent`` on ``order``, cut at the integration head, in
+        the slot ``branch`` frees; none for no order."""
+
+        if order is None:
+            self._decisions.record(Decision(DecisionKind.SHARE, NOTHING_TO_DEAL, branch, detail))
+            return "nothing is left to deal; the slot goes to the judge's refill"
+        head = await self._repo.head(INTEGRATION_BRANCH)
+        admission = await self._desk.admit_share(ShareRequest(branch, head, agent, str(order)))
+        dealt = {**detail, "order": str(order), "branch": admission.branch, "status": admission.status.value}
+        self._decisions.record(Decision(DecisionKind.SHARE, DEALT, branch, dealt))
+        return f"the next order {order.name} is dealt to {admission.branch or admission.reason}"
 
     async def _too_late(self, branch: str, map_for: tuple[str, ...], step: str) -> str:
         """Why the shares of ``map_for`` do not open when each would now run less than ``--agent-share-minutes``
