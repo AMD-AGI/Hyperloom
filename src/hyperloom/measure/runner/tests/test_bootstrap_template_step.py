@@ -101,7 +101,7 @@ def started() -> Iterator[list[int]]:
         try:
             os.killpg(group, signal.SIGKILL)
         except ProcessLookupError:
-            pass  # the group already exited on its own; nothing is left to kill
+            pass
 
 
 def _wait_for(path: Path, seconds: float) -> bool:
