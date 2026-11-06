@@ -17,7 +17,6 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -983,7 +982,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
             raise UnsupportedComponentError(f"package {layout.import_name} is not installed in this image")
         return installed[layout.import_name]
 
-    monkeypatch.setattr(worktree_module, "SourceBase", partial(worktree_module.SourceBase, locator=locate))
+    monkeypatch.setattr(worktree_module, "locate_installed_package", locate)
     layout = SimpleNamespace(
         logs=tmp_path / "logs",
         source=tmp_path / "MB-source",
@@ -1101,7 +1100,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
             raise UnsupportedComponentError(f"package {layout.import_name} is not installed in this image")
         return installed[layout.import_name]
 
-    monkeypatch.setattr(worktree_module, "SourceBase", partial(worktree_module.SourceBase, locator=locate))
+    monkeypatch.setattr(worktree_module, "locate_installed_package", locate)
     real = model_sessions_module.model_sessions
 
     def sessions(setup: AgentSetup, **kwargs: object) -> ModelSessions:

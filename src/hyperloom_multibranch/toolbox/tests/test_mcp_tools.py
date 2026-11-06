@@ -215,19 +215,54 @@ def test_submit_test_cannot_name_a_branch_or_an_id(rig: Rig) -> None:
 
 
 def test_submit_test_reports_a_contract_violation_as_invalid_params(rig: Rig) -> None:
-    _, reply = rig.call(rig.token("s1"), "submit_test", kind="test", purpose="confirm", parent_commit="c1")
-    assert reply["error"]["code"] == -32602 and "retest_of" in reply["error"]["message"]
+    args = {"kind": "test", "purpose": "explore", "parent_commit": "c1", "concurrency": [4, 4]}
+    _, reply = rig.call(rig.token("s1"), "submit_test", **args)
+    assert reply["error"]["code"] == -32602 and "must not repeat" in reply["error"]["message"]
     assert rig.toolbox.submitted == []
 
 
-def test_a_specialist_cannot_submit_a_confirm_retest_but_can_explore(rig: Rig) -> None:
+@pytest.mark.parametrize("purpose", ["baseline", "health", "final", "integration", "confirm", "repro", "accuracy"])
+def test_a_specialist_cannot_submit_a_purpose_the_session_owns(rig: Rig, purpose: str) -> None:
+    """The queue exempts the session's purposes from the branch's K and backpressure, or ranks them above an explore."""
+    _, reply = rig.call(rig.token("s1"), "submit_test", kind="test", purpose=purpose, parent_commit="c1")
+    assert reply["error"]["code"] == -32602
+    assert "purpose must be one of ['explore', 'profile']" in reply["error"]["message"]
+    assert rig.toolbox.submitted == []
+
+
+@pytest.mark.parametrize("kind", ["repro", "sweep", "accuracy"])
+def test_a_specialist_cannot_submit_a_kind_the_session_owns(rig: Rig, kind: str) -> None:
+    """A reproduction check takes no slot of the branch's K whatever its purpose; a sweep is the final selection's."""
+    _, reply = rig.call(rig.token("s1"), "submit_test", kind=kind, purpose="explore", parent_commit="c1")
+    assert reply["error"]["code"] == -32602 and "kind must be one of ['test', 'profile']" in reply["error"]["message"]
+    assert rig.toolbox.submitted == []
+
+
+@pytest.mark.parametrize(("kind", "purpose"), [("test", "profile"), ("profile", "explore")])
+def test_a_specialist_submits_kind_and_purpose_only_as_a_pair_it_owns(rig: Rig, kind: str, purpose: str) -> None:
+    """A measured test sent as a profile would be queued at the profile's priority, ahead of every branch's explores,
+    skip the explore-only checks and escape the profile dedup, which is keyed on the kind."""
+    _, reply = rig.call(rig.token("s1"), "submit_test", kind=kind, purpose=purpose, parent_commit="c1")
+    assert reply["error"]["code"] == -32602
+    assert f"kind {kind} does not go with purpose {purpose}" in reply["error"]["message"]
+    assert "kind test with purpose explore and kind profile with purpose profile" in reply["error"]["message"]
+    assert rig.toolbox.submitted == []
+
+
+@pytest.mark.parametrize("named", [{"priority": 0}, {"priority": 4}, {"priority": None}, {"retest_of": "req-0"}])
+def test_a_specialist_names_no_priority_and_no_retest(rig: Rig, named: dict[str, object]) -> None:
+    _, reply = rig.call(rig.token("s1"), "submit_test", kind="test", purpose="explore", parent_commit="c1", **named)
+    assert reply["error"]["code"] == -32602
+    assert f"additional properties are not allowed ({next(iter(named))})" in reply["error"]["message"]
+    assert rig.toolbox.submitted == []
+
+
+def test_a_specialist_explores_and_profiles_at_the_priority_the_queue_gives(rig: Rig) -> None:
     token = rig.token("s1")
-    confirm = {"kind": "test", "purpose": "confirm", "parent_commit": "c1", "retest_of": "req-0"}
-    text = rig.failed(token, "submit_test", **confirm)
-    assert text.startswith("rejected (confirm_not_for_specialists):") and "purpose=explore" in text
-    assert rig.toolbox.submitted == []
     rig.ok(token, "submit_test", kind="test", purpose="explore", parent_commit="c1")
-    assert [request.purpose.value for request in rig.toolbox.submitted] == ["explore"]
+    rig.ok(token, "submit_test", kind="profile", purpose="profile", parent_commit="c1")
+    submitted = [(r.kind.value, r.purpose.value, r.priority, r.retest_of) for r in rig.toolbox.submitted]
+    assert submitted == [("test", "explore", None, None), ("profile", "profile", None, None)]
 
 
 def test_toolbox_refusals_come_back_as_error_results_with_their_code(rig: Rig) -> None:
@@ -751,6 +786,14 @@ def test_a_poll_inbox_cursor_that_is_not_one_says_how_to_get_one(rig: Rig) -> No
         "code": -32602,
         "message": "not an inbox cursor: 'latest'; pass the cursor of an earlier reply, or none to read the whole inbox",
     }
+
+
+@pytest.mark.parametrize("count", ["\u00b2", "1\u00b9", "\u0661"])
+def test_a_page_cursor_whose_count_is_not_ascii_digits_is_refused_as_invalid_params(rig: Rig, count: str) -> None:
+    cursor = f"page:{count}:abcdef01:"
+    status, reply = rig.call(rig.token("s1"), "poll_inbox", cursor=cursor)
+    assert status == 200 and reply["error"]["code"] == -32602
+    assert reply["error"]["message"].startswith(f"not an inbox cursor: {cursor!r}")
 
 
 async def test_a_large_inbox_is_paged_with_no_item_lost_or_repeated(wait_rig: Rig, waiting: Writers) -> None:

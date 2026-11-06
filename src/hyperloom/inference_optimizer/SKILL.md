@@ -1019,6 +1019,17 @@ executor refuses the retry unlaunched and the phase closes the run with
 Only the failures booked by the current leg count, so a session resumed past the
 line still gets the one baseline its new `--max-minutes` was granted for.
 
+A baseline Magpie refuses to launch because `gpu_selection.auto` found fewer idle
+GPUs than the round needs (`needed 8 idle GPU(s) but only found 7`) fails with
+`error_class=host_gpus_unavailable` and stops the run with
+`stop_reason='host_gpus_unavailable'` on the first occurrence, whatever
+`--enablement` says. No server started, so the ENABLEMENT lane has nothing to
+author against, and no patch frees a GPU another workload holds. The failure's
+`error_excerpt` in `last_action_failures` names each GPU Magpie turned down and why
+(`rejected: ['GPU 0: has running compute process']`). Handle it as IR-1 finding a
+foreign workload: ask the user before stopping the holder, then `--resume-from`
+the session.
+
 An AgentX baseline whose server ran with the prefix cache off fails with
 `error_class=agentx_baseline_prefix_cache_off` and stops the run with
 `stop_reason='baseline_failed'` on the first occurrence, whichever AgentX client
@@ -1486,7 +1497,8 @@ directory already holds `manifest.json` and `state.json`, otherwise the spec map
 `--plug-profile <profile> --session-dir <dir>`. The directory is derived from the run, so a restart resumes the same session.
 It records the outcome in `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. A spec it
 refuses ends with `final: true` and return code 2. A spec with `flow: "multibranch"` is handed to `hyperloom-multibranch hosted
-run` with the environment unchanged.
+run` after the same `install.sh` run as the legacy flow, with the entry's environment plus the running interpreter's bin
+directory first on `PATH`.
 
 ## Resume Existing Session
 

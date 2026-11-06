@@ -35,6 +35,8 @@ class IntegrateAttempt:
     output_root: Path | None = None
     framework_root: Path | None = None
     applied: list[Path] = field(default_factory=list)
+    #: One ``{patch, strategy, steps}`` row per applied patch that had to be merged onto the kept stack.
+    merged_patches: list[dict[str, Any]] = field(default_factory=list)
     applied_artifacts: list[dict[str, Any]] = field(default_factory=list)
     extra_envs_applied: dict[str, str] = field(default_factory=dict)
     extra_server_args_applied: str = ""

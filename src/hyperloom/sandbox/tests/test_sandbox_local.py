@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import pytest
 
 from hyperloom.common import proctree
 from hyperloom.sandbox import local_sandbox, reaper
+from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate, ProcessUsers
 from hyperloom.sandbox.socket import (
@@ -420,6 +422,38 @@ def test_kill_after_a_command_timeout_never_signals_the_launcher_the_timeout_rea
     sb.kill()
     assert timed_out[0] not in handed
     assert signalled == []
+
+
+def _ends_nothing(procs, **kw) -> bool:
+    """A timeout's reap stuck past its windows: it ends nothing and confirms nothing."""
+    return False
+
+
+def _ends_the_launcher_unconfirmed(procs, **kw) -> bool:
+    """A timeout's reap that waits the launcher but cannot confirm its tree, as when a descendant outlives SIGKILL."""
+    reaper.kill_launchers(procs, **kw)
+    return False
+
+
+@pytest.mark.parametrize("timeout_reap", [_ends_nothing, _ends_the_launcher_unconfirmed])
+def test_a_command_timeout_whose_reap_is_unconfirmed_keeps_the_cards_leased(make, monkeypatch, timeout_reap) -> None:
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    monkeypatch.setattr(local_sandbox, "kill_launchers", timeout_reap)
+    with pytest.raises(SandboxUnavailable, match="command timed out"):
+        # The job drops the sandbox's tag, so only the launcher's tree leads kill() to it.
+        sb.run(f"env -u {SANDBOX_TAG_ENV} sleep 300 & echo $! > pid; wait", settings=RunSettings(timeout_sec=0.5))
+    pid = int(_read_when_present(sb, "/work/pid"))
+    job = proctree.proc_identity(pid)
+    try:
+        with pytest.raises(SandboxUnavailable, match="its GPUs stay leased"):
+            sb.kill()
+        _assert_all_gone([pid])
+        assert provider.quarantined == {0}
+        assert provider.pool.free_cards() == (1,)
+    finally:
+        if job is not None:
+            proctree.signal_processes([(pid, job[1])], signal.SIGKILL)
 
 
 def test_kill_launchers_skips_a_launcher_that_was_already_waited(monkeypatch) -> None:

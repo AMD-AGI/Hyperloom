@@ -20,7 +20,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, Protocol
 
 from hyperloom_common.env import env_flag
 from hyperloom.common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
@@ -204,6 +204,10 @@ SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
 # Sentinel ``returncode`` when the orchestrator cancelled the action this child was launched for -- a shutdown, or a
 # budget that is spent.
 ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
+
+# Sentinel ``returncode`` and ``error_class`` of an AgentX round its checkpoint stopped for trailing the reference.
+AGENTX_EARLY_STOP_RETURNCODE: int = -919
+AGENTX_EARLY_STOP_ERROR_CLASS: str = "agentx_early_stop"
 
 # Server-ready markers: their appearance in ``server.log`` means the server has
 # finished startup and is accepting traffic. Only after one is observed does the
@@ -893,15 +897,35 @@ class _RecorderFanout:
             raise first_error
 
 
-def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> _RecorderFanout:
-    """KV metrics and measured-phase GPU power for this round, behind one recorder surface."""
+class RoundCheckpoint(Protocol):
+    """A ruling made while the round runs, by a recorder it builds for the round's slot."""
+
+    def judge(self, slot: Path) -> Any:
+        """The recorder that rules for the round writing into ``slot``."""
+
+
+def _build_checkpoint_judge(server_log_path: str | None, checkpoint: RoundCheckpoint | None) -> Any:
+    """The AgentX checkpoint judge for this round, or ``None`` when the round has no checkpoint."""
+    if checkpoint is None or not server_log_path:
+        return None
+    return checkpoint.judge(Path(server_log_path).parent)
+
+
+def _build_round_recorders(
+    server_log_path: str | None, env: dict[str, str] | None, checkpoint: RoundCheckpoint | None = None
+) -> _RecorderFanout:
+    """KV metrics, measured-phase GPU power and the AgentX checkpoint for this round, behind one recorder surface."""
     from ._gpu_power import build_gpu_power_recorder
     from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
 
     return _RecorderFanout(
         [
             recorder
-            for recorder in (_build_kv_recorder(server_log_path, env), build_gpu_power_recorder(server_log_path, env))
+            for recorder in (
+                _build_kv_recorder(server_log_path, env),
+                build_gpu_power_recorder(server_log_path, env),
+                _build_checkpoint_judge(server_log_path, checkpoint),
+            )
             if recorder is not None
         ],
         ready_phase="boot" if is_magpie_agentx(configured_benchmark(env)) else "measured",
@@ -925,6 +949,7 @@ class RoundWatch:
     silence_timeout_sec: float | None = None
     server_already_ready: bool = False
     session_deadline_sec: float | None = None
+    checkpoint: RoundCheckpoint | None = None
 
 
 def run_with_session_kill(
@@ -962,7 +987,7 @@ def run_with_session_kill(
                     _WatchedRound(watch, started_at=started_at, scan_offsets=scan_offsets),
                     capture=capture,
                     cancel_scope=cancel_scope,
-                    recorders=_build_round_recorders(watch.server_log_path, child_env),
+                    recorders=_build_round_recorders(watch.server_log_path, child_env, watch.checkpoint),
                 )
             except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc, mark=mark)
@@ -1017,6 +1042,13 @@ class _OrchestratorCancelled(_ReapedByWatchdog):
         super().__init__(
             f"the orchestrator cancelled this action ({reason or 'no reason given'}; round elapsed={elapsed_sec:.1f}s)"
         )
+
+
+class AgentxCheckpointMissed(_ReapedByWatchdog):
+    """The round's checkpoint median trailed its reference by more than the allowed drop."""
+
+    returncode = AGENTX_EARLY_STOP_RETURNCODE
+    log_level = logging.INFO
 
 
 class _ServerStalledDetected(_ReapedByWatchdog):
@@ -1169,15 +1201,19 @@ def _communicate_with_watchdog(
 
 
 __all__ = [
+    "AGENTX_EARLY_STOP_ERROR_CLASS",
+    "AGENTX_EARLY_STOP_RETURNCODE",
     "AGENTX_PREFLIGHT_ERROR_CLASS",
     "AGENTX_PREFLIGHT_RETURNCODE",
     "BENCHMARK_SILENCE_TIMEOUT_ENV",
     "BENCHMARK_TIMEOUT_ENV",
+    "AgentxCheckpointMissed",
     "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "INFERENCEX_CHECKOUT_INVALID_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
+    "RoundCheckpoint",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",

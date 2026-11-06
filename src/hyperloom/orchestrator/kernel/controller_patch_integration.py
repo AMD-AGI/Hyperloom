@@ -26,6 +26,11 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _patch_touched_paths,
 )
 from hyperloom.orchestrator.actions.executors._patch_git import _git_apply_reverse, _git_restore_to_head
+from hyperloom.orchestrator.actions.executors.patch_conflict_merge import (
+    LandingContext,
+    PatchMergeOutcome,
+    apply_patch_resolving_conflicts,
+)
 from hyperloom.orchestrator.actions.stop_attribution import StoppedByTheRun
 from hyperloom.orchestrator.enablement.runtime.adapters import get_adapter
 from hyperloom.orchestrator.source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
@@ -35,7 +40,6 @@ from .controller_publication import (
     ControllerPublicationError,
     load_controller_publication,
 )
-from .patch_conflict_merge import LandingContext, PatchMergeOutcome, apply_patch_resolving_conflicts
 
 log = logging.getLogger(__name__)
 

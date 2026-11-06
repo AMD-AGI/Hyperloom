@@ -8,10 +8,16 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import hip_mask_within_rocr
+
+from . import _ray_runtime
+
+if TYPE_CHECKING:
+    from ._agentx_checkpoint import AgentxCheckpoint
 
 log = logging.getLogger(__name__)
 
@@ -27,13 +33,16 @@ def ray_exec_enabled() -> bool:
     """Whether serving and ``needs_gpu`` specialist work runs through the Ray backend.
 
     Multi-node is always OFF. On single-node ``INFERENCE_OPTIMIZER_RAY_EXEC`` decides when set; otherwise it is ON,
-    and OFF under pytest.
+    and OFF under pytest. ON also needs a Ray head that answers a driver (``ray_head_answers_driver``): one that does
+    not turns this OFF, as if the flag were ``0``, until the head is probed again after a reconnect or a head start.
     """
     from ._multi_node_env import is_multi_node
 
     if is_multi_node():
         return False
-    return env_flag("INFERENCE_OPTIMIZER_RAY_EXEC", default=not os.environ.get("PYTEST_CURRENT_TEST"))
+    if not env_flag("INFERENCE_OPTIMIZER_RAY_EXEC", default=not os.environ.get("PYTEST_CURRENT_TEST")):
+        return False
+    return _ray_runtime.ray_head_answers_driver()
 
 
 def ray_gpu_pending_limit() -> int:
@@ -98,6 +107,7 @@ class SessionKillRound:
     server_log_path: str | None = None
     server_already_ready: bool = False
     session_remaining_sec: float | None = None
+    checkpoint: AgentxCheckpoint | None = None
 
 
 def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str]:
@@ -118,6 +128,7 @@ def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str
             server_log_path=bench_round.server_log_path,
             server_already_ready=bench_round.server_already_ready,
             session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
+            checkpoint=bench_round.checkpoint,
         ),
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
@@ -202,13 +213,15 @@ def get_ray_backend() -> RayExecutionBackend:
 
 
 def mark_ray_backend_unhealthy() -> None:
-    """Disconnect the current Ray driver and force the next use to re-ensure."""
+    """Disconnect the current Ray driver and force the next use to re-ensure, probing the head before it reconnects."""
     try:
         import ray
 
         ray.shutdown()
     except (RuntimeError, OSError):
         pass
+    # The head may have stopped answering drivers since it was probed, and the re-ensure connects in-process.
+    _ray_runtime.forget_ray_head_verdict()
     if _BACKEND is not None:
         _BACKEND._ensured = False
 

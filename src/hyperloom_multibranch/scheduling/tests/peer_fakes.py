@@ -6,9 +6,9 @@
 The session's process registry holds the virtual clock while it kills (:class:`HeldRegistry`). The specialist
 lifecycle is the specialist runtime itself on scripted sessions (:class:`RecordedSessions`,
 :func:`specialist_runtime`). The toolbox is the toolbox module's
-:class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of it; what a
-test measures follows from the recipe it measures (:func:`recipe_effect`). The regression set is scripted per base
-commit (:class:`FakeRegressionCheck`). The
+:class:`~hyperloom_multibranch.toolbox.tests.fake.FakeToolbox`, noise-free and noting what the scheduler asked of it;
+what a test measures follows from the recipe it measures (:func:`recipe_effect`). The regression set is scripted per
+base commit (:class:`FakeRegressionCheck`). The
 experiment repository and the rule gate are their owners' own; :func:`session_gate` is the gate's session service as
 the session's peers build it.
 """
@@ -75,8 +75,8 @@ from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.scripted import BranchHeads, ScriptedSession, ScriptedSetup
-from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, NoiseModel
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 BASELINE_VALUE = DEFAULT_BASELINE[GRADED_OUTPUT]
