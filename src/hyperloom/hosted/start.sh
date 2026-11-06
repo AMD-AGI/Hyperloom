@@ -61,6 +61,23 @@ in_id_map() {
   return "$map_found"
 }
 
+# Refuses (exit 1, naming the map) unless the user namespace maps the id $1 as a uid (in the uid map $2) and as a gid
+# (in the gid map $3). A map that cannot be read, or has a line that is not three decimal ids, never counts as mapped.
+require_mapped() {
+  wanted="$1"
+  shift
+  for kind in uid gid; do
+    rc=0
+    in_id_map "$wanted" "$1" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) die "$kind $wanted is not mapped in this container's user namespace ($1: '${map_text:-empty}'): no process here can become the specialist account (setuid fails with EINVAL, or under a fakeroot preload seems to succeed while the specialist stays root and can read the application's credentials); run on a node whose user namespace maps uid and gid $wanted" ;;
+      *) die "cannot read $1 as a user namespace map ($map_error), so whether the specialist account can be switched to is unknown" ;;
+    esac
+    shift
+  done
+}
+
 for tool in git setpriv bash; do
   command -v "$tool" >/dev/null 2>&1 || die "the image has no $tool; use a framework image that has git, setpriv (util-linux) and bash"
 done
@@ -69,17 +86,7 @@ done
 
 # The account must be one a process here can become: its uid and gid mapped in this container's user namespace. The
 # maps are kernel files; a fakeroot preload, which makes setuid seem to succeed, does not change what they say.
-# HYPERLOOM_START_TEST_ID_MAPS is for this script's tests only: a directory holding stand-in uid_map and gid_map files.
-maps="${HYPERLOOM_START_TEST_ID_MAPS:-/proc/self}"
-for kind in uid gid; do
-  rc=0
-  in_id_map "$uid" "$maps/${kind}_map" || rc=$?
-  case "$rc" in
-    0) ;;
-    1) die "$kind $uid is not mapped in this container's user namespace ($maps/${kind}_map: '${map_text:-empty}'): no process here can become the specialist account (setuid fails with EINVAL, or under a fakeroot preload seems to succeed while the specialist stays root and can read the application's credentials); run on a node whose user namespace maps uid and gid $uid" ;;
-    *) die "cannot read $maps/${kind}_map as a user namespace map ($map_error), so whether the specialist account can be switched to is unknown" ;;
-  esac
-done
+require_mapped "$uid" /proc/self/uid_map /proc/self/gid_map
 
 # The account: its own uid and primary group, no supplementary group, a home it can write.
 by_uid="$(getent passwd "$uid" | cut -d: -f1 || true)"
