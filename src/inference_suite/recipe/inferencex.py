@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from inference_suite.argv import argv_flag_occurrences, speculative_config
+from inference_suite.frameworks import Framework
 from inference_suite.contracts.base_launch import (
     AGENTX_FRAMEWORKS,
     GoldenCurve,
@@ -65,6 +66,8 @@ _BYTES_PER_MIB = 1024 * 1024
 _BYTES_PER_GB = 1_000_000_000
 _RANDOM_RANGE_RATIO = "0.8"
 _THINKING_MODE = "thinking_on"
+#: InferenceX's value for a spec-decoding or KV-offloading setting the point leaves off.
+_UNSET = "none"
 
 #: What a matrix point writes into ``benchmark.env`` (InferenceX ``workload.BOUND_ENV`` for single-node points, and
 #: the workload values ``validate_recipe`` holds a recipe to); the rest of it configures the client for any point.
@@ -281,7 +284,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
             dcp=benchmark.get("dcp-size", 1),
             pcp=benchmark.get("pcp-size", 1),
             dp_attention=bool(benchmark.get("dp-attn") or False),
-            spec_decoding=benchmark.get("spec-decoding", "none"),
+            spec_decoding=benchmark.get("spec-decoding", _UNSET),
             isl=block["isl"] if fixed else None,
             osl=block["osl"] if fixed else None,
             kv_offloading=None if fixed else benchmark["kv-offloading"],
@@ -303,7 +306,7 @@ def srtctl_cli_args(engine: str, config: Mapping[str, Any]) -> tuple[str, ...]:
     left out, a list one flag with several values. ATOM keeps its mixed spelling; the others take ``_`` as ``-``."""
     args: list[str] = []
     for key, value in sorted(config.items()):
-        flag = f"--{key if engine == 'atom' else key.replace('_', '-')}"
+        flag = f"--{key if engine == Framework.ATOM else key.replace('_', '-')}"
         if value is True:
             args.append(flag)
         elif value is False or value is None:
@@ -426,11 +429,11 @@ def _server_command(engine: str, role: Mapping[str, Any]) -> _ServerCommand:
     stripped = tuple(f"--{key}" for key in sorted(config) if key.replace("_", "-") in owned)
     config = {key: value for key, value in config.items() if key.replace("_", "-") not in owned}
     prefix: tuple[str, ...] = ()
-    if engine == "sglang" and not {"enable-metrics", "enable_metrics"} & config.keys():
+    if engine == Framework.SGLANG and not {"enable-metrics", "enable_metrics"} & config.keys():
         prefix = ("--enable-metrics",)
-    elif engine == "vllm":
+    elif engine == Framework.VLLM:
         config = {key: _kv_transfer_text(key, value) for key, value in config.items()}
-    elif engine == "atom":
+    elif engine == Framework.ATOM:
         prefix = ("-tp", str(_atom_tensor_parallel_size(role["gpus"], config)))
     return _ServerCommand((*prefix, *srtctl_cli_args(engine, config)), stripped)
 
@@ -457,9 +460,11 @@ def _atom_tensor_parallel_size(gpus: int, config: Mapping[str, Any]) -> int:
 
 
 def _no_golden_reason(point: InferencexPoint, engine: str, args: Sequence[str]) -> str:
-    if point.spec_decoding == "none":
+    if point.spec_decoding == _UNSET:
         return "the launch drafts no tokens"
-    if engine == "vllm" and (adaptive := adaptive_verification_reason(speculative_config(argv_flag_occurrences(args)))):
+    if engine == Framework.VLLM and (
+        adaptive := adaptive_verification_reason(speculative_config(argv_flag_occurrences(args)))
+    ):
         return adaptive
     return "InferenceX simulates no acceptance length for this launch"
 
@@ -529,7 +534,7 @@ def _launch(
         },
         client_env={key: str(value) for key, value in client.items() if key not in _POINT_CLIENT_ENV},
         golden=_golden(point, selection, bundle, engine, command.args),
-        kv_offloading=point.kv_offloading or "none",
+        kv_offloading=point.kv_offloading or _UNSET,
         stripped=command.stripped,
         warnings=_warnings(point, query, target),
     )
@@ -540,7 +545,7 @@ def _misfit(point: InferencexPoint, query: LaunchQuery) -> str | None:
     if point.scenario is not _SCENARIO_OF[query.workload]:
         return f"it runs {point.scenario.value}, not {_SCENARIO_OF[query.workload].value}"
     if query.workload is Workload.FIXED:
-        if point.spec_decoding != "none":
+        if point.spec_decoding != _UNSET:
             return f"it drafts with {point.spec_decoding}, and a fixed workload runs no speculative decoding"
         if (point.isl, point.osl) != (query.isl, query.osl):
             return f"it runs {point.isl}/{point.osl}, not {query.isl}/{query.osl}"

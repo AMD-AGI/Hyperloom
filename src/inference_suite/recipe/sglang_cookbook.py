@@ -22,6 +22,7 @@ import re
 import shlex
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -255,33 +256,44 @@ def _lookup(table: object, keys: Sequence[str | None]) -> Any:
     return next((table[key] for key in keys if key is not None and table.get(key)), None)
 
 
-def _keys(match: Mapping[str, Any], *dims: str) -> str | None:
+class _Dim(str, Enum):
+    """A cell ``match`` dimension the cookbook joins into its table keys."""
+
+    HW = "hw"
+    VARIANT = "variant"
+    QUANT = "quant"
+    STRATEGY = "strategy"
+
+
+#: The cookbook's most-specific-first key orders for a cell's model name and image.
+_MODEL_KEYS = (
+    (_Dim.HW, _Dim.VARIANT, _Dim.QUANT),
+    (_Dim.VARIANT, _Dim.QUANT),
+    (_Dim.HW, _Dim.QUANT),
+    (_Dim.QUANT,),
+    (_Dim.HW,),
+)
+_IMAGE_KEYS = (
+    (_Dim.HW, _Dim.VARIANT, _Dim.QUANT),
+    (_Dim.VARIANT, _Dim.QUANT),
+    (_Dim.HW, _Dim.QUANT, _Dim.STRATEGY),
+    (_Dim.HW, _Dim.QUANT),
+    (_Dim.HW,),
+)
+
+
+def _keys(match: Mapping[str, Any], dims: tuple[_Dim, ...]) -> str | None:
     """``match``'s values for ``dims`` joined as the cookbook keys its tables, or None when a dim is absent."""
-    values = [match.get(dim) for dim in dims]
+    values = [match.get(dim.value) for dim in dims]
     return "|".join(values) if all(isinstance(value, str) for value in values) else None
 
 
 def _cell_model(config: Mapping[str, Any], match: Mapping[str, Any]) -> Any:
-    keys = [
-        _keys(match, "hw", "variant", "quant"),
-        _keys(match, "variant", "quant"),
-        _keys(match, "hw", "quant"),
-        _keys(match, "quant"),
-        _keys(match, "hw"),
-        "default",
-    ]
-    return _lookup(config["modelNames"], keys)
+    return _lookup(config["modelNames"], [*(_keys(match, dims) for dims in _MODEL_KEYS), "default"])
 
 
 def _cell_image(config: Mapping[str, Any], match: Mapping[str, Any]) -> Any:
-    keys = [
-        _keys(match, "hw", "variant", "quant"),
-        _keys(match, "variant", "quant"),
-        _keys(match, "hw", "quant", "strategy"),
-        _keys(match, "hw", "quant"),
-        _keys(match, "hw"),
-    ]
-    return _lookup(config.get("dockerImages"), keys)
+    return _lookup(config.get("dockerImages"), [_keys(match, dims) for dims in _IMAGE_KEYS])
 
 
 def _single_node(cell: Mapping[str, Any]) -> bool:

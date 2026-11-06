@@ -77,22 +77,26 @@ class TopologySpelling:
         return (*args, self.ep_switch[0])
 
 
+#: The spellings sglang, vLLM and ATOM share for the bind host and the TP size.
+_HOST = "host"
+_TENSOR_PARALLEL_SIZE = "--tensor-parallel-size"
+
 SGLANG_ENTRYPOINT = ("python3", "-m", "sglang.launch_server")
 #: The sglang server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
 SGLANG_RUNNER_OWNED = frozenset(
-    {"model-path", "served-model-name", "host", "port", "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port"}
+    {"model-path", "served-model-name", _HOST, "port", "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port"}
 )
 SGLANG_TOPOLOGY = TopologySpelling(
-    tp=("--tensor-parallel-size", "--tp-size", "--tp"), ep=("--ep-size", "--expert-parallel-size", "--ep")
+    tp=(_TENSOR_PARALLEL_SIZE, "--tp-size", "--tp"), ep=("--ep-size", "--expert-parallel-size", "--ep")
 )
 
 VLLM_ENTRYPOINT = ("vllm", "serve")
 #: The vLLM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
 VLLM_RUNNER_OWNED = frozenset(
-    {"model", "served-model-name", "host", "port", "headless", "master-addr", "nnodes", "node-rank"}
+    {"model", "served-model-name", _HOST, "port", "headless", "master-addr", "nnodes", "node-rank"}
 )
 VLLM_TOPOLOGY = TopologySpelling(
-    tp=("--tensor-parallel-size", "-tp"),
+    tp=(_TENSOR_PARALLEL_SIZE, "-tp"),
     ep_switch=("--enable-expert-parallel", "-ep"),
     dp=("--data-parallel-size", "-dp"),
 )
@@ -100,8 +104,8 @@ VLLM_TOPOLOGY = TopologySpelling(
 
 ATOM_ENTRYPOINT = ("python3", "-m", "atom.entrypoints.openai_server")
 #: The ATOM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
-ATOM_RUNNER_OWNED = frozenset({"model", "host", "server-port"})
-ATOM_TOPOLOGY = TopologySpelling(tp=("-tp", "--tensor-parallel-size"), ep_switch=("--enable-expert-parallel",))
+ATOM_RUNNER_OWNED = frozenset({"model", _HOST, "server-port"})
+ATOM_TOPOLOGY = TopologySpelling(tp=("-tp", _TENSOR_PARALLEL_SIZE), ep_switch=("--enable-expert-parallel",))
 
 
 def boards_interchangeable(board: str, other: str) -> bool:

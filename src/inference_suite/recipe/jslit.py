@@ -36,6 +36,7 @@ _IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")
 _KEYWORDS = {"true": True, "false": False, "null": None}
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0", "\n": ""}
 _VALUE_END = ",;)]}"
+_HEX = 16
 
 
 class _Reader:
@@ -169,12 +170,12 @@ class _Reader:
         if code == "u" and self.text.startswith("{", self.position + 2):
             end = self.text.index("}", self.position)
             digits, self.position = self.text[self.position + 3 : end], end + 1
-            return chr(int(digits, 16))
+            return chr(int(digits, _HEX))
         if code in ("u", "x"):
             width = 4 if code == "u" else 2
             digits = self.text[self.position + 2 : self.position + 2 + width]
             self.position += 2 + width
-            return chr(int(digits, 16))
+            return chr(int(digits, _HEX))
         self.position += 2
         return _ESCAPES.get(code, code)
 
@@ -236,7 +237,7 @@ class _Reader:
 
 def _number(text: str) -> int | float:
     if text.lstrip("-")[:2] in ("0x", "0X"):
-        return int(text, 16)
+        return int(text, _HEX)
     return float(text) if any(char in text for char in ".eE") else int(text)
 
 
