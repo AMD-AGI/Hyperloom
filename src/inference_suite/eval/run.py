@@ -74,8 +74,14 @@ class EvalRequest:
             raise EvalRequestError(f"an incomplete eval request: {exc}") from exc
 
 
-def model_args(request: EvalRequest) -> str:
-    """The ``--model_args`` of ``request``: lm-eval's own settings, then the ones the suite's model class takes."""
+def read_request(path: str) -> EvalRequest:
+    """The eval request written to ``path``."""
+    return EvalRequest.from_document(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def model_args(request: EvalRequest, request_file: str) -> str:
+    """The ``--model_args`` of ``request``: lm-eval's own settings, then ``request_file``, which the suite's model
+    class reads its probe and model directory from."""
     values: dict[str, object] = {
         "model": request.served_model_name,
         "base_url": request.base_url,
@@ -84,21 +90,17 @@ def model_args(request: EvalRequest) -> str:
         "timeout": REQUEST_TIMEOUT_SEC,
         "tokenized_requests": False,
         "max_length": request.max_length,
-        "probe_enabled": request.probe_enabled,
-        "probe_min_samples": request.probe_min_samples,
-        "probe_length_ratio": request.probe_length_ratio,
-        "probe_file": request.probe_file,
+        "request": request_file,
     }
-    if request.model_dir is not None:
-        values["model_dir"] = request.model_dir
     for name, value in values.items():
         if _MODEL_ARGS_SEPARATOR in str(value):
             raise EvalRequestError(f"the eval model arg {name}={value!r} holds a ',' lm-eval would split it on")
     return _MODEL_ARGS_SEPARATOR.join(f"{name}={value}" for name, value in values.items())
 
 
-def lm_eval_argv(request: EvalRequest) -> list[str]:
-    """The lm-eval ``run`` arguments of ``request``: greedy chat completions with the request's completion budget."""
+def lm_eval_argv(request: EvalRequest, request_file: str) -> list[str]:
+    """The lm-eval ``run`` arguments of ``request``, read from ``request_file``: greedy chat completions with the
+    request's completion budget."""
     argv = [
         "run",
         "--model",
@@ -112,7 +114,7 @@ def lm_eval_argv(request: EvalRequest) -> list[str]:
         request.output_dir,
         "--log_samples",
         "--model_args",
-        model_args(request),
+        model_args(request, request_file),
         "--gen_kwargs",
         f"max_tokens={request.max_tokens},temperature=0,top_p=1",
     ]
@@ -126,14 +128,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1:
         raise SystemExit(f"usage: python -I -m {EVAL_MODULE} <request.json>")
-    request = EvalRequest.from_document(json.loads(Path(args[0]).read_text(encoding="utf-8")))
+    request = read_request(args[0])
 
     from lm_eval.__main__ import cli_evaluate
     from lm_eval.api.registry import model_registry
 
     model_registry.register(MODEL_NAME, target=MODEL_CLASS)
     # lm-eval's CLI parses sys.argv and offers no argv parameter.
-    sys.argv = ["lm-eval", *lm_eval_argv(request)]
+    sys.argv = ["lm-eval", *lm_eval_argv(request, args[0])]
     cli_evaluate()
 
 
@@ -149,6 +151,7 @@ __all__ = [
     "lm_eval_argv",
     "main",
     "model_args",
+    "read_request",
 ]
 
 
