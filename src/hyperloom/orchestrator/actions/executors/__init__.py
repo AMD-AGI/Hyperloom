@@ -3,7 +3,7 @@
 
 """Concrete ActionRunner implementations."""
 
-from ._proposal_identity import controls_of, normalize_proposal
+from ._proposal_identity import content_fingerprint, controls_of, normalize_proposal
 from .baseline import baseline_executor
 from .explore import explore_executor
 from .conc_sweep import conc_sweep_executor
@@ -85,6 +85,7 @@ __all__ = [
     "benchmark_serving_path_in",
     "build_launch_evidence",
     "conc_sweep_executor",
+    "content_fingerprint",
     "controls_of",
     "context_copy_refusal",
     "default_baseline_config",

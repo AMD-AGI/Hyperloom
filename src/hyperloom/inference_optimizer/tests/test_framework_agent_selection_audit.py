@@ -367,8 +367,13 @@ async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coor
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "removals",
+    [["--disable-cuda-graph"], ["--disable-cuda-graph", "--disable-cuda-graph"]],
+    ids=["once", "repeated"],
+)
 async def test_a_removal_only_lever_is_benched_and_its_ledger_verdict_found_again(
-    coord: Coordinator, tmp_path, monkeypatch
+    coord: Coordinator, tmp_path, monkeypatch, removals
 ) -> None:
     from hyperloom.agents.framework.kb import KB_ROOT_ENV
     from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
@@ -380,11 +385,11 @@ async def test_a_removal_only_lever_is_benched_and_its_ledger_verdict_found_agai
     )
 
     monkeypatch.setenv(KB_ROOT_ENV, str(tmp_path / "kb"))
-    done = {"proposal_set": [{"name": "no-cuda-graph-off", "remove_args": ["--disable-cuda-graph"]}]}
+    done = {"proposal_set": [{"name": "no-cuda-graph-off", "remove_args": removals}]}
     await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     (prop,) = coord.state.pending_proposals.values()
     params = prop.payload["params"]
-    assert (params["patch_name"], params["remove_args"]) == ("no-cuda-graph-off", ["--disable-cuda-graph"])
+    assert (params["patch_name"], params["remove_args"]) == ("no-cuda-graph-off", removals)
 
     attempt = IntegrateAttempt(task_id="t-int", specialist_task_id="spec-1", shared_state=coord.shared_state)
     measured = _weigh_gate(attempt, params, {}, {"accuracy": 0.5}, _GateBasis(100.0, 1.0)).measured
