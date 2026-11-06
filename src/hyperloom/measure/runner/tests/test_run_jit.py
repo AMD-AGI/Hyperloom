@@ -86,6 +86,8 @@ class _CompilingGrid(_Grid):
         self.triton_group_held = False
 
     async def __call__(self, **kwargs):
+        if kwargs["launch"].server_already_ready:  # a round on the server an earlier one booted compiles nothing
+            return await super().__call__(**kwargs)
         log = self.files / "variant_0" / "server.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         compiled = {"AITER_JIT_DIR": "module_gemm.so", "AITER_ROOT_DIR": "build/pa_x/lib.so"}

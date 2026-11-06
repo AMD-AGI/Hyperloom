@@ -3,11 +3,11 @@
 
 """The local measurement backend: one complete test on this machine, through the existing ``run_grid``.
 
-* a single-point test is ``run_grid`` with one variant: warmup round, measured round, optional accuracy round, teardown;
-* a graded single-point test (accuracy asked for) with a warmup evaluates once, in InferenceX's own order: warmup
-  bench, the evaluation, then the measured bench, with none after it. It runs as two ``run_grid`` calls on one server
-  the lifecycle holds up: the warmup round keeps the point's ``RUN_EVAL``, the measured round sets it off, and the
-  accuracy comes from the warmup round;
+* a single-point test runs on one server the lifecycle holds up, one ``run_grid`` call per round, in one order whatever
+  the test: the warmup bench, the measured bench, then, for a graded test (accuracy asked for), the evaluation in a round
+  of its own that runs no bench, which the accuracy is read from. No bench evaluates;
+* a single-point test whose server the lifecycle cannot hold (a profile, a framework it cannot hold) is ``run_grid``
+  with one variant: measured round, the evaluation after its bench when the point asks for one, teardown;
 * one arm of a concurrency sweep boots the inference server once and measures the levels from high to low on it, the
   way ``conc_sweep`` does, stepping down a level when the boot fails;
 * accuracy is the ``RUN_EVAL`` switch in the point's own YAML, which must say what the caller asked for.
@@ -39,6 +39,7 @@ from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
     ENV_CONC,
+    ENV_EVAL_ONLY,
     ENV_NUM_PROMPTS,
     ENV_RUN_EVAL,
     ENV_TP,
@@ -97,7 +98,8 @@ from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure import ruppell
-from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_MEASURE, ROLE_WARMUP, RoundShape, read_runs, round_boundaries
+from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_EVAL, ROLE_MEASURE, ROLE_WARMUP, RoundShape
+from hyperloom.measure.round_marks import read_runs, round_boundaries
 from hyperloom.sandbox.node import node_name
 from hyperloom.measure.short_prompts.rounds import Serving, write_answered
 from hyperloom.measure.short_prompts.staging import load_prompt_set
@@ -174,11 +176,13 @@ _PROCESS_LOCK = threading.Lock()
 #: warmups from the concurrency). An AgentX point has no evaluation round and no prompt count; its boot round carries
 #: only what the backend says.
 _BOOT_CLIENT_ENVS = {ENV_RUN_EVAL: "false", ENV_NUM_PROMPTS: "1"}
-#: The warmup round of a graded test, the one that evaluates (``_eval_then_measure``).
-_WARMUP = "warmup"
-#: The measured round of a graded test must not evaluate again. ``RUN_EVAL`` is one of Magpie's
-#: ``CLIENT_ONLY_REUSE_ENV_KEYS``, so the server the warmup round booted is the one this round reuses.
-_MEASURED_ENVS = {ENV_RUN_EVAL: "false"}
+_WARMUP, _EVAL = ROLE_WARMUP, ROLE_EVAL  # a held test's rounds other than the measured one are named for their roles
+#: No bench of a graded test evaluates, although its point does. ``RUN_EVAL`` is one of Magpie's
+#: ``CLIENT_ONLY_REUSE_ENV_KEYS``, so the server the first round booted is the one each later round reuses.
+_BENCH_ENVS = {ENV_RUN_EVAL: "false"}
+#: The evaluation round runs no bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``, which
+#: Magpie's reuse check leaves out (an ``EVAL_*`` name).
+_EVAL_ENVS = {ENV_RUN_EVAL: "true", ENV_EVAL_ONLY: "true"}
 #: What ``run_grid`` writes on a point whose warmup round it discarded, with the throughput of that round.
 _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
 #: What a test that failed records in place of the short-prompt check it would have run.
@@ -202,9 +206,10 @@ class _Run:
     unset_envs: list[str]
     results: list[tuple[int, VariantResult]] = field(default_factory=list)
     stopped_rc: int | None = None
-    #: The warmup round of a graded test, which holds its evaluation; ``None`` when the test evaluates in its measured
-    #: round or is not graded.
+    #: The warmup and evaluation rounds of a test on a held server, which evaluates apart from its measured round.
     warmup: VariantResult | None = None
+    evaluation: VariantResult | None = None
+    evaluates_apart: bool = False
     traceless: bool = False
     case_failed: bool = False
     started: float = field(default_factory=time.monotonic)
@@ -643,7 +648,7 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
 async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResult:
     """One ``run_grid`` call for the point at index ``point``: ``launch`` its GridLaunch, and its base_extra_envs."""
     call, envs = run.call, launch.pop("base_extra_envs", None)
-    launch.setdefault("warmup_round", name == _WARMUP)  # the held warmup draws its own prompts (_eval_then_measure)
+    launch.setdefault("warmup_round", name == _WARMUP)  # the held warmup draws its own prompts (_held_rounds)
     with _free_port_for(call.points[point], launch.get("server_lifecycle")) as base_yaml, _booting(run, point, launch):
         started = time.time()
         results = await run_grid(
@@ -661,7 +666,7 @@ async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResul
 def _round_shape(run: _Run, point: int, name: str, kwargs: dict[str, Any], result: VariantResult) -> RoundShape:
     """What a round's call says about it, for reading the phases off the marks it left."""
     lifecycle = kwargs.get("server_lifecycle")
-    role = ROLE_BOOT if kwargs.get("lifecycle_boot_only") else ROLE_WARMUP if name == _WARMUP else ROLE_MEASURE
+    role = ROLE_BOOT if kwargs.get("lifecycle_boot_only") else name if name in (_WARMUP, _EVAL) else ROLE_MEASURE
     benchmark = _point_config(run.call.points[point]).get("benchmark") or {}
     stays_up = lifecycle is not None and not lifecycle.get("cleanup", True)
     return RoundShape(
@@ -683,11 +688,11 @@ def _stamp_round(run: _Run, point: int, shape: RoundShape, window: tuple[float, 
 async def _single(run: _Run) -> None:
     # A profiled round is not a statistic: it runs once, with no warmup before it.
     warmup = 0 if run.call.kind == _PROFILE else run.call.rounds.warmup_rounds
-    lifecycle = _held_lifecycle(run, warmup)
-    if lifecycle is None:
-        run.add(0, await _grid(run, 0, _TEST, warmup_before_measure=None if warmup is None else bool(warmup)))
+    lifecycle = _Lifecycle(run)
+    if lifecycle.eligible:
+        await _held_rounds(run, lifecycle, _warms(warmup))
     else:
-        await _eval_then_measure(run, lifecycle, warmup)
+        run.add(0, await _grid(run, 0, _TEST, warmup_before_measure=None if warmup is None else bool(warmup)))
 
 
 def _warms(warmup: int | None) -> bool:
@@ -699,55 +704,51 @@ def _checks_held(call: TestCall) -> bool:
     return call.short_prompts is not None or call.long_context is not None
 
 
-def _held_lifecycle(run: _Run, warmup: int | None) -> _Lifecycle | None:
-    """The server a test holds up across its rounds; ``None`` when it runs the old way.
-
-    ``run_grid`` gives its warmup and measured rounds one configuration, so a graded test evaluated in both. Evaluating
-    once needs the rounds apart, which needs a server the lifecycle can hold up; so does a test whose accuracy checks ask
-    its server after the measured round. Any other test (an AgentX test has no evaluation) runs as before.
+async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
+    """The warmup bench, the measured bench and, for a graded test, the evaluation, on one server; then the accuracy
+    checks on it. Nothing but the warmup bench precedes the measured bench, in an explore as in a graded test: a bench
+    that followed the evaluation started on the KV pool it left full, and read lower. The warmup draws prompts of its own
+    (``_grid``); when it failed, was stopped or its logs name a cause that settles the test (a crashed server, a refused
+    request), nothing is measured. A failed evaluation fails the test's accuracy, never the measured round's reading.
     """
-    call = run.call
-    agentx = is_magpie_agentx(_point_config(call.points[0]).get("benchmark") or {})
-    if not (call.accuracy and _warms(warmup) and not agentx) and not _checks_held(call):
-        return None
-    lifecycle = _Lifecycle(run)
-    return lifecycle if lifecycle.eligible else None
-
-
-async def _eval_then_measure(run: _Run, lifecycle: _Lifecycle, warmup: int | None) -> None:
-    """Warmup bench, the evaluation, then the measured bench on one server, with no evaluation after it; then the accuracy
-    checks on that server, before its teardown.
-
-    InferenceX's own order, the warmup on prompts of its own (``_grid``): the evaluation between the benches does not
-    always evict the warmup's from the prefix cache. The warmup round keeps the point's ``RUN_EVAL`` (on, as validated)
-    and leaves the server up; when it failed or was stopped, nothing is measured, and neither when its logs or its
-    evaluation's name a cause that settles the test (a crashed server, a refused request), which then ends with the
-    failure those logs state. A test with no warmup boots in its measured round, which then evaluates as the point says.
-    """
-    warm = _warms(warmup)
+    run.evaluates_apart = True
+    graded, checked = run.call.accuracy, _checks_held(run.call)
+    bench_envs = _BENCH_ENVS if graded else None  # an explore's point does not evaluate
     try:
-        if warm and not await _warmup_round(run, lifecycle):
+        if warm and not await _warmup_round(run, lifecycle, bench_envs):
             return
         measured = await _grid(
             run,
             0,
             _TEST,
-            server_lifecycle=lifecycle.settings(cleanup=not _checks_held(run.call)),
+            server_lifecycle=lifecycle.settings(cleanup=not (graded or checked)),
             server_already_ready=warm,
-            base_extra_envs=_MEASURED_ENVS if warm and run.call.accuracy else None,
+            base_extra_envs=bench_envs,
             warmup_before_measure=False,
         )
-        if run.add(0, measured):
-            await _held_checks(run, lifecycle)
+        if not run.add(0, measured) or _test_failed(run):
+            return
+        if graded:
+            run.evaluation = await _grid(
+                run,
+                0,
+                _EVAL,
+                server_lifecycle=lifecycle.settings(cleanup=not checked),
+                server_already_ready=True,
+                base_extra_envs=_EVAL_ENVS,
+                warmup_before_measure=False,
+                evaluation_only=True,
+            )
+            run.add(0, run.evaluation)
+        await _held_checks(run, lifecycle)
     finally:
         lifecycle.teardown()
 
 
-async def _warmup_round(run: _Run, lifecycle: _Lifecycle) -> bool:
+async def _warmup_round(run: _Run, lifecycle: _Lifecycle, envs: dict[str, str] | None) -> bool:
     """The warmup bench on the server it leaves up; whether the measured round follows."""
-    warmup = await _grid(
-        run, 0, _WARMUP, server_lifecycle=lifecycle.settings(cleanup=False), warmup_before_measure=False
-    )
+    held = lifecycle.settings(cleanup=False)
+    warmup = await _grid(run, 0, _WARMUP, server_lifecycle=held, base_extra_envs=envs, warmup_before_measure=False)
     run.warmup = warmup
     return run.add(0, warmup) and not _is_failure(warmup) and not decides_test(_ended(run).verdict)
 
@@ -1082,31 +1083,30 @@ def _eval_returncode(result: VariantResult) -> int:
         return _result_returncode(result)
 
 
-def _warmup_rounds(point: int, result: VariantResult, workspace: Path) -> list[RoundOutcome]:
-    """The warmup round of a graded test and, unless it failed, the accuracy round of its evaluation."""
-    rounds = [RoundOutcome(point, _WARMUP, workspace, _result_returncode(result))]
+def _warmup_round_outcome(point: int, result: VariantResult, workspace: Path) -> RoundOutcome:
+    """The warmup round of a held test, which says what ``run_grid`` says of a warmup it discarded."""
     warnings = list(result.nonfatal_warnings)
     if not _is_failure(result):
-        rounds.append(RoundOutcome(point, _ACCURACY, workspace, _eval_returncode(result), read_accuracy(workspace)))
         discarded = [_WARMUP_DISCARDED]
         if result.output_throughput is not None:
             discarded.append(f"{_WARMUP_TPUT}:{float(result.output_throughput):.1f}")
         warnings = [*discarded, *warnings]
-    rounds[0] = dataclasses.replace(rounds[0], nonfatal_warnings=tuple(warnings))
-    return rounds
+    return RoundOutcome(point, _WARMUP, workspace, _result_returncode(result), nonfatal_warnings=tuple(warnings))
 
 
 def _rounds(run: _Run, point: int, result: VariantResult) -> list[RoundOutcome]:
     workspace = Path(result.workspace) if result.workspace else Path(run.call.output_dir)
     if result is run.warmup:
-        warmed = _warmup_rounds(point, result, workspace)
-        return warmed if run.call.accuracy else [r for r in warmed if r.phase != _ACCURACY]
+        return [_warmup_round_outcome(point, result, workspace)]
+    if result is run.evaluation:  # no scores from an evaluation that failed
+        scores, warnings = () if _is_failure(result) else read_accuracy(workspace), tuple(result.nonfatal_warnings)
+        return [RoundOutcome(point, _ACCURACY, workspace, _eval_returncode(result), scores, warnings)]
     rounds = []
     if any(w == _WARMUP_DISCARDED for w in result.nonfatal_warnings):
         rounds.append(RoundOutcome(point, _WARMUP, workspace.parent / "warmup_round", 0))
     if result.note != _BOOT_ONLY_NOTE:
         rounds.append(RoundOutcome(point, "measure", workspace, _result_returncode(result)))
-    if run.call.accuracy and run.warmup is None and not _is_failure(result):
+    if run.call.accuracy and not run.evaluates_apart and not _is_failure(result):
         rounds.append(RoundOutcome(point, _ACCURACY, workspace, _eval_returncode(result), read_accuracy(workspace)))
     if rounds:
         rounds[0] = dataclasses.replace(rounds[0], nonfatal_warnings=tuple(result.nonfatal_warnings))

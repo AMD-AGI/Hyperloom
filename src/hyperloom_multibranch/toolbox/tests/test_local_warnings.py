@@ -77,8 +77,11 @@ async def test_the_warnings_run_grid_wrote_are_on_the_stored_result_and_an_edite
         assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry
         result = TestResult.from_document(entry.outcome["result"])
         assert result.validity is Validity.SUCCEEDED, result.failure_reason
-        rounds, notes = result.nonfatal_warnings[: len(WARNINGS)], result.nonfatal_warnings[len(WARNINGS) :]
-        assert rounds == tuple(WARNINGS), "run_grid's warnings first, in order"
+        # The test holds its server: its warmup round says what run_grid says of a warmup it discarded, then each round
+        # carries the warnings run_grid wrote for it.
+        written = ("run_grid_warmup_discarded_first", *WARNINGS, *WARNINGS)
+        rounds, notes = result.nonfatal_warnings[: len(written)], result.nonfatal_warnings[len(written) :]
+        assert rounds == written, "run_grid's warnings first, round by round, in order"
         assert NO_DIGEST in notes, "then the shipped runner's own notes, from its signed manifest"
         stored = (await blackboard.record(request_id)).result
         assert stored is not None and stored.nonfatal_warnings == result.nonfatal_warnings
