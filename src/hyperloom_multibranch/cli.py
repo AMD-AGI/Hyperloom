@@ -1084,11 +1084,12 @@ def hosted_run() -> int:
 def _hosted_start(host: HostInfo) -> HostedStart:
     """A new session of the spec, or the close or finish of the one ``session.json`` names, which the restart takes
     over (:func:`take_over_earlier_session`), measured where the spec says; raises ValueError on a refused spec or
-    session, ImportError when a ``hosted`` package is missing, and what :func:`ready_session` raises."""
+    session, ImportError when a ``hosted`` package is missing, and what :func:`require_hosted_isolation` and
+    :func:`ready_session` raise."""
 
-    require_hosted_isolation(os.environ)
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     spec = campaign_spec(host)
+    require_hosted_isolation(spec, os.environ)
     require_local_image(spec, os.environ)
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json

@@ -266,7 +266,7 @@ def test_a_hosted_run_marks_its_process_with_the_layers_bubblewrap_and_no_other(
     probed = probes({LAYER_BWRAP: ()})
 
     with caplog.at_level(logging.INFO):
-        require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+        require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
     assert caplog.records == [], "the session says how it launches its agents once, when its peers are built"
     assert probed.asked == [LAYER_BWRAP], "the account is chosen, and the layer's bubblewrap probed for the Ray path"
@@ -278,32 +278,84 @@ def test_a_hosted_run_marks_its_process_with_the_layers_bubblewrap_and_no_other(
 
 
 @pytest.mark.usefixtures("account")
-def test_a_hosted_run_with_an_account_needs_only_its_specialists_isolated_here(probes: Callable[..., Probes]) -> None:
+def test_a_hosted_run_measured_in_the_grants_sandboxes_needs_only_its_specialists_isolated_here(
+    probes: Callable[..., Probes],
+) -> None:
     probes({LAYER_BWRAP: (DENIED,)})
 
-    require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
     assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.ACCOUNT, HOSTED, HOSTED, True, ())
 
 
-def test_a_hosted_run_with_no_account_starts_with_its_specialists_under_the_layers_bubblewrap(
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_whose_runner_would_start_its_specialists_unconfined_is_refused_naming_them(
+    probes: Callable[..., Probes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probes({LAYER_BWRAP: ()})
+    unconfined = LaunchIsolation(agent_isolation.NONE, HOSTED, HOSTED, True, ("the runner asks no chooser",))
+    monkeypatch.setattr(hosted_run_module, "launch_isolation", lambda *, local: unconfined)
+
+    with pytest.raises(PeersUnavailable) as refused:
+        require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert str(refused.value) == (
+        "a hosted run launches nothing unconfined beside its credentials, and here specialists run unconfined on this"
+        " host (the runner asks no chooser)"
+    )
+
+
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_measured_here_is_refused_while_its_layers_bubblewrap_cannot_sandbox_its_sandboxes_and_tests(
     probes: Callable[..., Probes],
+) -> None:
+    probes({LAYER_BWRAP: (DENIED,)})
+
+    with pytest.raises(PeersUnavailable) as refused:
+        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert str(refused.value) == (
+        "a hosted run launches nothing unconfined beside its credentials, and here agent and dev sandboxes and tests"
+        f" will be refused (running them as an account: {agent_isolation.SANDBOX_ACCOUNT};"
+        f" bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}; running them as an account: {agent_isolation.TEST_ACCOUNT})"
+    )
+
+
+@pytest.mark.parametrize("measurement", ["local", "hosted"])
+def test_a_hosted_run_with_no_account_starts_with_its_specialists_under_the_layers_bubblewrap(
+    measurement: str, probes: Callable[..., Probes]
 ) -> None:
     probed = probes({LAYER_BWRAP: ()})
 
-    require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+    require_hosted_isolation(_spec(measurement), {HOST_LAYER_ENV: str(LAYER)})
 
-    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.BWRAP, HOSTED, HOSTED, True, ())
+    here = agent_isolation.BWRAP if measurement == "local" else HOSTED
+    assert launch_isolation(local=measurement == "local") == LaunchIsolation(
+        agent_isolation.BWRAP, here, here, True, ()
+    )
     assert set(probed.asked) == {LAYER_BWRAP}, "the runner's chooser takes the layer's bubblewrap for the specialists"
 
 
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_measured_here_starts_once_every_launch_here_is_isolated(probes: Callable[..., Probes]) -> None:
+    probed = probes({LAYER_BWRAP: ()})
+
+    require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert launch_isolation(local=True) == LaunchIsolation(
+        agent_isolation.ACCOUNT, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()
+    )
+    assert set(probed.asked) == {LAYER_BWRAP}, "the sandboxes and tests here use the layer's bubblewrap"
+
+
+@pytest.mark.parametrize("measurement", ["local", "hosted"])
 def test_a_hosted_run_whose_host_names_no_layer_is_refused_and_probes_no_bubblewrap(
-    probes: Callable[..., Probes],
+    measurement: str, probes: Callable[..., Probes]
 ) -> None:
     probed = probes({LAYER_BWRAP: ()})
 
     with pytest.raises(PeersUnavailable) as refused:
-        require_hosted_isolation({})
+        require_hosted_isolation(_spec(measurement), {})
 
     assert str(refused.value) == (
         f"agents cannot be isolated on this host: running them as an account: {SPECIALIST_USER_ENV} is not set; "
@@ -318,28 +370,11 @@ def test_a_hosted_run_where_no_tier_can_isolate_a_specialist_is_refused_naming_b
     probes({LAYER_BWRAP: (DENIED,)})
 
     with pytest.raises(PeersUnavailable) as refused:
-        require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+        require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
     assert str(refused.value) == (
         f"agents cannot be isolated on this host: running them as an account: {SPECIALIST_USER_ENV} is not set; "
         f"bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}"
-    )
-
-
-@pytest.mark.usefixtures("account")
-def test_a_hosted_run_whose_runner_would_start_its_specialists_unconfined_is_refused_naming_them(
-    probes: Callable[..., Probes], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    probes({LAYER_BWRAP: ()})
-    unconfined = LaunchIsolation(agent_isolation.NONE, HOSTED, HOSTED, True, ("the runner asks no chooser",))
-    monkeypatch.setattr(hosted_run_module, "launch_isolation", lambda *, local: unconfined)
-
-    with pytest.raises(PeersUnavailable) as refused:
-        require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
-
-    assert str(refused.value) == (
-        "a hosted run launches nothing unconfined beside its credentials, and here specialists run unconfined on this"
-        " host (the runner asks no chooser)"
     )
 
 
@@ -349,7 +384,7 @@ def test_a_bubblewrap_that_gives_no_answer_in_time_leaves_the_run_to_be_started_
     probes({LAYER_BWRAP: (f"bubblewrap at {LAYER_BWRAP}: no answer in 10 s",)}, transient=True)
 
     with pytest.raises(TimeoutError, match="no answer in 10 s"):
-        require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
 
 
 def _layer(tmp_path: Path, bwrap_target: str | None) -> Path:
@@ -368,17 +403,16 @@ def _layer(tmp_path: Path, bwrap_target: str | None) -> Path:
 
 
 @pytest.mark.agent_isolation
-@pytest.mark.usefixtures("unmarked")
-def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_starts_its_specialists_under_it(
+@pytest.mark.usefixtures("account")
+def test_a_hosted_runs_later_launches_use_a_real_layer_bubblewrap_and_never_the_one_on_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     real = usable_bwrap()
     layer = _layer(tmp_path, str(real.path))
     monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
 
-    require_hosted_isolation({HOST_LAYER_ENV: str(layer)})
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(layer)})
 
-    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.BWRAP, HOSTED, HOSTED, True, ())
     later = agent_isolation.choose_sandbox_isolation()
     assert isinstance(later, agent_isolation.BwrapIsolation), later
     version = ".".join(map(str, real.version or ()))
@@ -393,10 +427,44 @@ def test_a_hosted_run_whose_layer_has_no_bubblewrap_is_refused_naming_it(
     monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
 
     with pytest.raises(PeersUnavailable) as refused:
-        require_hosted_isolation({HOST_LAYER_ENV: str(layer)})
+        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(layer)})
 
     assert f"bubblewrap at {layer / 'bin' / 'bwrap'}: No such file or directory" in str(refused.value)
     assert "not the layer bubblewrap" not in str(refused.value)
+
+
+@pytest.mark.agent_isolation
+@pytest.mark.usefixtures("unmarked")
+def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_starts_its_specialists_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = usable_bwrap()
+    layer = _layer(tmp_path, str(real.path))
+    monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
+
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(layer)})
+
+    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.BWRAP, HOSTED, HOSTED, True, ())
+    later = agent_isolation.choose_sandbox_isolation()
+    assert isinstance(later, agent_isolation.BwrapIsolation), later
+    version = ".".join(map(str, real.version or ()))
+    assert later.shown == f"{version} {layer / 'bin' / 'bwrap'}"
+
+
+@pytest.mark.agent_isolation
+@pytest.mark.usefixtures("unmarked")
+def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_measures_here_with_every_launch_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = usable_bwrap()
+    layer = _layer(tmp_path, str(real.path))
+    monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
+
+    require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(layer)})
+
+    assert launch_isolation(local=True) == LaunchIsolation(
+        agent_isolation.BWRAP, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()
+    )
 
 
 @pytest.mark.parametrize(

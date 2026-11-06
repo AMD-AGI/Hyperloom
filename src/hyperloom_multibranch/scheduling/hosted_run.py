@@ -41,7 +41,8 @@ marks the process so (:func:`~hyperloom.common.agent_isolation.require_agent_iso
 bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names
 (:func:`~hyperloom.common.agent_isolation.layer_bwrap`), and no other, and refuses a run that would launch anything
 unconfined on this host, as the path that launches it would (:func:`require_hosted_isolation`): its specialists run
-here, its agent and dev sandboxes and its tests in the grant's sandboxes.
+here; with ``local``, its agent and dev sandboxes and its tests run here too, so a host where they run unconfined
+measures no spec ``local``.
 
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
@@ -271,12 +272,13 @@ def require_local_image(spec: CampaignSpec, env: Mapping[str, str]) -> None:
         )
 
 
-def require_hosted_isolation(env: Mapping[str, str]) -> None:
+def require_hosted_isolation(spec: CampaignSpec, env: Mapping[str, str]) -> None:
     """Mark this process as a hosted run's, whose agents must be isolated, with the hosting layer's bubblewrap
     (:func:`~hyperloom.common.agent_isolation.layer_bwrap`) and no other, and refuse now a run that would launch one
     unconfined on this host, as the path that launches it would
-    (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its specialists; its agent and dev
-    sandboxes and its tests run in the grant's sandboxes.
+    (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its specialists always, and the
+    agent and dev sandboxes and the tests of a spec measured on this container's cards, which then run here (in the
+    grant's sandboxes otherwise).
 
     Raises:
         PeersUnavailable: A launch on this host would run unconfined or be refused, naming which and why; the run ends
@@ -290,7 +292,7 @@ def require_hosted_isolation(env: Mapping[str, str]) -> None:
         if refused.transient:
             raise TimeoutError(str(refused)) from refused
         raise PeersUnavailable(str(refused)) from refused
-    problems = launch_isolation(local=False).problems()
+    problems = launch_isolation(local=spec.measurement == MEASUREMENT_LOCAL).problems()
     if problems:
         raise PeersUnavailable(f"a hosted run launches nothing unconfined beside its credentials, and here {problems}")
 
