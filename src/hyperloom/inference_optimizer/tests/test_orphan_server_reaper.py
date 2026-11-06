@@ -403,14 +403,37 @@ def test_reap_waits_out_the_last_thread_of_an_exited_leader(tmp_path, monkeypatc
         assert not pidfile.exists()
 
 
-def test_reap_keeps_the_pidfile_of_an_exited_leader_whose_thread_still_runs(tmp_path):
-    """Nothing in the group reads as a server, so nothing is signalled; the process runs, so its pidfile stays."""
+def test_reap_signals_a_lone_exited_leader_by_the_cmdline_of_its_running_thread(tmp_path):
+    """A one-process server whose main thread exited holds its GPU through the thread left, which reads its cmdline."""
     with _threaded_leader(tmp_path, "sglang.launch_server", None, leader_exits=True) as (leader, _):
+        assert Path(f"/proc/{leader.pid}/cmdline").read_bytes() == b"", "the exited leader's own cmdline reads empty"
+        pidfile = _write_pidfile(tmp_path, "agentx_server", leader.pid)
+
+        assert reap_recorded_servers(tmp_path / "runs") == ServerReap(reaped=[leader.pid], survivors=[])
+        assert not pidfile.exists()
+        assert leader.wait(timeout=5) == -signal.SIGTERM, "the group's SIGTERM ended the leader's last thread"
+
+
+def test_reap_keeps_the_pidfile_of_an_exited_leader_whose_thread_still_runs(tmp_path):
+    """A reused pid whose running thread reads no server cmdline is left untouched; it runs, so its pidfile stays."""
+    with _threaded_leader(tmp_path, "totally-unrelated-process", None, leader_exits=True) as (leader, _):
         pidfile = _write_pidfile(tmp_path, "agentx_server", leader.pid)
 
         assert reap_recorded_servers(tmp_path / "runs") == ServerReap(reaped=[], survivors=[])
         assert running(leader.pid)
         assert pidfile.exists()
+
+
+def test_teardown_signals_a_server_whose_leader_exited_while_a_thread_of_it_runs(tmp_path):
+    """The lifecycle teardown tells the server by the same cmdline, so it signals the group too."""
+    with _threaded_leader(tmp_path, "sglang.launch_server", None, leader_exits=True) as (leader, _):
+        pid_file = tmp_path / "sglang_8888.pid"
+        pid_file.write_text(f"{leader.pid} {leader.pid}", encoding="utf-8")
+
+        sl.teardown_lifecycle_server(pid_dir=tmp_path, framework="sglang", port=8888)
+
+        assert leader.wait(timeout=5) == -signal.SIGTERM
+        assert not pid_file.exists()
 
 
 def test_reap_reports_a_group_that_outlives_sigkill_and_keeps_its_pidfile(tmp_path, monkeypatch):
