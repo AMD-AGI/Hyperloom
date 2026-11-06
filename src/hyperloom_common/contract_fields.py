@@ -12,14 +12,19 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 from enum import Enum
 from typing import TypeVar
 
-__all__ = ["ContractFields"]
+__all__ = ["ContractFields", "field_names"]
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _E = TypeVar("_E", bound=Enum)
+
+
+def field_names(kind: type) -> tuple[str, ...]:
+    """The dataclass ``kind``'s field names in declaration order: the keys of a document that mirrors its fields."""
+    return tuple(item.name for item in dataclass_fields(kind))
 
 
 @dataclass(frozen=True)
