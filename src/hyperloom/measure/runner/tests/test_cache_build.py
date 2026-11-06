@@ -409,17 +409,46 @@ def test_an_entry_built_for_another_target_is_refused_not_overwritten(rig: Rig, 
     assert check_cache(cache.root, rig.cache.sha) == []
 
 
-def test_an_unfinished_entry_is_refused_by_the_check_and_replaced_by_a_build(rig: Rig, tmp_path: Path) -> None:
+def _tree(root: Path) -> dict[str, tuple[int, bytes]]:
+    """Each path below ``root`` with its permission bits and, for a file or a link, its bytes or target."""
+    found: dict[str, tuple[int, bytes]] = {}
+    for path in sorted(root.rglob("*")):
+        info = os.lstat(path)
+        data = os.readlink(path).encode() if path.is_symlink() else path.read_bytes() if path.is_file() else b""
+        found[path.relative_to(root).as_posix()] = (stat.S_IMODE(info.st_mode), data)
+    return found
+
+
+def test_an_entry_without_a_manifest_is_refused_and_left_as_it_was(rig: Rig, tmp_path: Path) -> None:
     cache = copy_cache(rig, tmp_path / "cache")
     entry = cache.root / cache.sha
     (entry / MANIFEST_NAME).unlink()
-    stale = cache.root / f".{cache.sha}.tmp-1-dead"
-    stale.mkdir()
-    (stale / "half").write_text("x")
+    before = _tree(entry)
     assert "has no manifest: an unfinished build" in check_cache(cache.root, cache.sha)[0]
+    with pytest.raises(CacheConflict, match=f"is left alone: it has no {MANIFEST_NAME}, and no builder puts"):
+        ensure_runner_cache(rig.repo, cache.sha, cache.root, rig.build_options())
+    assert _tree(entry) == before
+
+
+def test_what_a_build_of_this_account_killed_while_copying_left_is_removed(rig: Rig, tmp_path: Path) -> None:
+    cache = copy_cache(rig, tmp_path / "cache")
+    (cache.root / cache.sha).rename(tmp_path / "moved")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "kept").write_text("kept\n")
+    # A copy cut short as :func:`_publish` makes one: the directory 0700, a subdirectory already given its mode, a file
+    # still 0600 and a link of the commit's tree, here to a directory outside the cache.
+    stale = cache.root / f".{cache.sha}.tmp-1-dead"
+    stale.mkdir(0o700)
+    (stale / "source").mkdir(0o700)
+    (stale / "source" / "half").write_text("x")
+    (stale / "source" / "half").chmod(0o600)
+    (stale / "source").chmod(0o755)
+    (stale / "outside").symlink_to(outside)
     built = ensure_runner_cache(rig.repo, cache.sha, cache.root, rig.build_options())
-    assert built.reused is False and check_entry(entry, cache.sha, verify_hash=True) == []
+    assert built.reused is False and check_entry(cache.root / cache.sha, cache.sha, verify_hash=True) == []
     assert _names(cache.root) == {cache.sha, f".{cache.sha}.flock"}
+    assert (outside / "kept").read_text() == "kept\n"
 
 
 def _assert_nothing_left(cache: Path, sha: str) -> None:
@@ -556,8 +585,8 @@ def test_the_entry_is_built_out_of_the_cache_and_appears_whole_in_one_step(
         assert not (wheels.parent / MANIFEST_NAME).exists()
         return download(lock, wheels, pins, options)
 
-    def watching_copy(source: Path, parent: int, name: str, last: str = "") -> None:
-        copy(source, parent, name, last)
+    def watching_copy(source: Path, directory: int, last: str = "") -> None:
+        copy(source, directory, last)
         if last:
             (pending,) = cache.glob(f".{rig.cache.sha}.tmp-*")
             copied.append(({path.name for path in pending.iterdir()}, final.exists()))
