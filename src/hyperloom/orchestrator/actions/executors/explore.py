@@ -16,7 +16,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.coerce import to_float, to_int, to_str_list
-from hyperloom.common.gain_math import accuracy_passed, gain_pct
+from hyperloom.common.gain_math import accuracy_passed, gain_pct, graded_gate_row
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
@@ -1346,21 +1346,7 @@ class _ExploreRound:
             reason = graded.veto_reason or (f"{graded.refused_by} ({axes})" if on_intvty else GAIN_BELOW_THRESHOLD)
         else:
             gain = gain_pct(graded.candidate, graded.reference)
-        gates: list[dict[str, Any]] = []
-        if r.status == "succeeded":
-            gates.append(
-                {
-                    "gate": graded.vetoed_by
-                    if graded.veto_reason
-                    else ("graded_axes" if (on_intvty or graded.degrade_reason) else "keep_threshold"),
-                    "passed": False if graded.degrade_reason else graded.verdict != VERDICT_REVERT,
-                    # The anchor is the reference; the floor the candidate has to clear belongs to the gate, as
-                    # the tolerance does for accuracy.
-                    "observed": graded.candidate if on_intvty else gain_pct(graded.candidate, graded.reference),
-                    "threshold": graded.reference if on_intvty else self.keep_threshold_pct,
-                    "reason": reason,
-                }
-            )
+        gates = [graded_gate_row(graded, self.keep_threshold_pct, reason)] if r.status == "succeeded" else []
         return {
             "outcome": outcome,
             # Which gate refused the variant. The prompt ledger renders this row, and without the reason a REVERT
