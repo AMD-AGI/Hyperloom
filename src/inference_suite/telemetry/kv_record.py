@@ -66,14 +66,14 @@ __all__ = [
 #: Artifact the recorder writes, alongside the round's ``server.log``.
 KV_ARTIFACT_NAME = "kv_metrics.json"
 
-#: Collection phases. An engine process outlives the window that is actually being measured by a wide margin, and mixing
-#: them makes every statistic meaningless: ``boot`` has no traffic at all, ``warmup`` runs a deliberately cold cache,
-#: and ``eval`` drives accuracy traffic whose shape has nothing to do with the throughput benchmark. Only ``measured``
-#: may enter a comparison.
 _BOOT = "boot"
 _EVAL = "eval"
 #: The one phase whose numbers may be compared against another round's.
 _COMPARABLE_PHASE = "measured"
+#: Collection phases. An engine process outlives the window that is actually being measured by a wide margin, and mixing
+#: them makes every statistic meaningless: ``boot`` has no traffic at all, ``warmup`` runs a deliberately cold cache,
+#: and ``eval`` drives accuracy traffic whose shape has nothing to do with the throughput benchmark. Only ``measured``
+#: may enter a comparison.
 PHASES = (_BOOT, "warmup", _COMPARABLE_PHASE, "finished", _EVAL)
 
 #: Row cap before stride downsampling, mirroring ``_MN_GPU_SAMPLE_CAP``. A three-hour round at the scrape interval below
