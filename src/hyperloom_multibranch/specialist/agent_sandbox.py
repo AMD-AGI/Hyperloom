@@ -194,10 +194,67 @@ def found(selection):
     return [line for line in done.stdout.splitlines() if line.split()[:1] and ours(line.split()[0])]
 
 
-def matching(selection):
-    spared = ancestors()
-    pids = (line.split()[0] for line in found(selection))
-    return [int(pid) for pid in pids if pid.isdigit() and int(pid) not in spared]
+# pgrep counts, joins and picks the newest or oldest over the host, so the wrapper does it over the sandbox's lines.
+def shaping(args):
+    selection, shape = [], {{"count": False, "delimiter": "\\n", "pick": None}}
+    rest = list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--":
+            selection += [arg, *rest]
+            break
+        if arg == "--count":
+            shape["count"] = True
+        elif arg in ("--newest", "--oldest"):
+            shape["pick"] = arg[2:]
+        elif arg.partition("=")[0] == "--delimiter":
+            shape["delimiter"] = arg.partition("=")[2] if "=" in arg else rest.pop(0) if rest else ""
+        elif arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+            kept = ""
+            for at, letter in enumerate(arg[1:], 2):
+                if letter == "c":
+                    shape["count"] = True
+                elif letter in "no":
+                    shape["pick"] = "newest" if letter == "n" else "oldest"
+                elif letter == "d":
+                    shape["delimiter"] = arg[at:] or (rest.pop(0) if rest else "")
+                    break
+                else:
+                    kept += letter
+                    if letter in VALUED:
+                        kept += arg[at:]
+                        if at == len(arg) and rest:
+                            selection += ["-" + kept, rest.pop(0)]
+                            kept = ""
+                        break
+            if kept:
+                selection.append("-" + kept)
+        else:
+            selection.append(arg)
+    return selection, shape
+
+
+def started(line):
+    try:
+        with open(f"/proc/{{line.split()[0]}}/stat") as stat:
+            return int(stat.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def picked(lines, pick):
+    if pick is None or not lines:
+        return lines
+    return [(max if pick == "newest" else min)(lines, key=started)]
+
+
+def unspared(lines):
+    spared = {{str(pid) for pid in ancestors()}}
+    return [line for line in lines if line.split()[0] not in spared]
+
+
+def matching(selection, pick):
+    return [int(line.split()[0]) for line in picked(unspared(found(selection)), pick)]
 
 
 def send(pids, number, echo):
@@ -216,10 +273,9 @@ def send(pids, number, echo):
 if tool == "pgrep":
     if not has_criteria(args):
         refuse("give a pattern or a selection")
-    spared = {{str(pid) for pid in ancestors()}}
-    lines = [line for line in found(args) if line.split()[0] not in spared]
-    for line in lines:
-        print(line)
+    selection, shape = shaping(args)
+    lines = picked(unspared(found(selection)), shape["pick"])
+    print(len(lines) if shape["count"] else shape["delimiter"].join(lines), end="\\n" if shape["count"] or lines else "")
     sys.exit(0 if lines else 1)
 number, echo, quiet, selection = signal.SIGTERM, False, False, []
 rest = list(args)
@@ -244,13 +300,17 @@ while rest:
 if tool == "pkill":
     if not has_criteria(selection):
         refuse("give a pattern or a selection")
-    sys.exit(0 if send(matching(selection), number, echo) else 1)
+    selection, shape = shaping(selection)
+    sent = send(matching(selection, shape["pick"]), number, echo)
+    if shape["count"]:
+        print(sent)
+    sys.exit(0 if sent else 1)
 if not selection or any(name.startswith("-") for name in selection):
     refuse("only `killall [-SIGNAL | -s SIGNAL] [-q] NAME...` is supported")
 missed = 0
 for name in selection:
     # The kernel keeps 15 characters of a name, and pgrep -x matches no longer one.
-    if not send(matching(["-x", re.escape(name[:15])]), number, False):
+    if not send(matching(["-x", re.escape(name[:15])], None), number, False):
         missed += 1
         if not quiet:
             print(f"{{name}}: no process found", file=sys.stderr)
