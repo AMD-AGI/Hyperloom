@@ -31,7 +31,8 @@ Script = Callable[[Path, dict[str, Any]], VariantResult]
 class Clock(Protocol):
     now: float
 
-    def advance(self, seconds: float) -> float: ...
+    def advance(self, seconds: float) -> float:
+        """Let ``seconds`` pass and return the time after them."""
 
 
 class FakeClock:
