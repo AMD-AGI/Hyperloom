@@ -115,6 +115,20 @@ DSPARK_RECIPE_ARGS = [
             {},
             id="vllm-dotted-key-over-the-json",
         ),
+        pytest.param(
+            VLLM_SYNTHETIC,
+            {},
+            _spec_config(enable_adaptive_verification=True),
+            {},
+            id="vllm-adaptive-verification-on",
+        ),
+        pytest.param(
+            _spec_config(enable_adaptive_verification=False),
+            {},
+            VLLM_SYNTHETIC + " --speculative-config.enable_adaptive_verification true",
+            {},
+            id="vllm-adaptive-verification-flipped",
+        ),
     ],
 )
 def test_a_candidate_changing_the_pinned_draft_is_refused(base_args, base_envs, candidate_args, candidate_envs):
