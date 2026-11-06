@@ -6,6 +6,7 @@ policy a confinement becomes (no sandbox is made here: ``test_confined_launch.py
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -43,7 +44,7 @@ def home(tmp_path: Path) -> Path:
 @pytest.fixture
 def no_child_python(monkeypatch: pytest.MonkeyPatch) -> None:
     """The child's interpreter adds nothing to the toolchain (it is asked for real in the tests below that need it)."""
-    monkeypatch.setattr(confinement, "interpreter_search_path", lambda _environ: ())
+    monkeypatch.setattr(confinement, "interpreter_search_path", lambda _environ, **_kwargs: ())
 
 
 def _masks(environ: dict[str, str], **kwargs) -> set[Path]:
@@ -164,16 +165,16 @@ def test_the_toolchain_is_the_system_roots_this_interpreter_the_search_paths_and
     ca = _write(tmp_path / "ca.pem")
     model = tmp_path / "models" / "m"
     model.mkdir(parents=True)
-    monkeypatch.setattr(confinement, "interpreter_search_path", lambda _environ: (Path("/from/sys/path"),))
+    monkeypatch.setattr(confinement, "interpreter_search_path", lambda _environ, **_kwargs: (Path("/from/sys/path"),))
     environ = {
         "PATH": f"{bin_dir}:/usr/bin:relative",
-        "LD_LIBRARY_PATH": "/opt/rocm/lib",
+        "LD_LIBRARY_PATH": "/opt/accel/lib",
         "SSL_CERT_FILE": str(ca),
         "HF_HUB_CACHE": str(tmp_path),
         "MODEL_PATH": str(model),
     }
 
-    found = toolchain_paths(environ, "claude")
+    found = toolchain_paths(environ, "claude", writable=())
 
     assert {Path(root) for root in SYSTEM_ROOTS} <= set(found)
     assert {Path(root) for root in interpreter_roots()} <= set(found)
@@ -199,7 +200,7 @@ def test_a_native_installer_binds_only_the_programs_directories_never_all_of_loc
     ]
     environ = {"HOME": str(home), "PATH": f"{home / '.local/bin'}:/usr/bin"}
 
-    found = toolchain_paths(environ, "claude")
+    found = toolchain_paths(environ, "claude", writable=())
 
     assert {home / ".local/bin", home / ".local/share/claude/versions"} <= set(found)
     assert not {home, home / ".local", home / ".local/share", home / ".local/share/claude"} & set(found)
@@ -207,11 +208,29 @@ def test_a_native_installer_binds_only_the_programs_directories_never_all_of_loc
     assert [login for login in logins if not _absent_inside(login, policy)] == []
 
 
+def test_nothing_in_a_writable_tree_is_made_read_only(tmp_path, monkeypatch):
+    """The writable trees already show what lies in them; a read-only bind there would take the child's own files
+    from it, and on bubblewrap before 0.12 refuse the launch."""
+    work = tmp_path / "work"
+    for path in (work / "bin", work / "src", work / "py"):
+        path.mkdir(parents=True)
+    monkeypatch.setattr(
+        confinement, "interpreter_search_path", lambda _environ, **_kwargs: (work / "src", Path("/from/sys/path"))
+    )
+    environ = {"PATH": f"{work / 'bin'}:/usr/bin", "PYTHONPATH": str(work / "py"), "HOME": str(tmp_path / "home")}
+
+    found = toolchain_paths(environ, "sh", writable=(work,))
+
+    assert {Path("/usr/bin"), Path("/from/sys/path")} <= set(found)
+    assert [path for path in found if path == work or work in path.parents] == []
+    assert Confinement(writable=(work,), readable=found).policy().problems((0, 9, 0)) == []
+
+
 def test_a_program_directly_in_a_credential_location_binds_only_itself(tmp_path, no_child_python):
     home = tmp_path / "home"
     tool = _write(home / "tool", "#!/bin/sh\n")
     tool.chmod(0o755)
-    found = toolchain_paths({"HOME": str(home), "PATH": "/usr/bin"}, str(tool))
+    found = toolchain_paths({"HOME": str(home), "PATH": "/usr/bin"}, str(tool), writable=())
     assert tool in found and home not in found and home.parent not in found
 
 
@@ -221,33 +240,123 @@ def test_the_resolvers_target_is_readable_when_it_lies_outside_etc(tmp_path, mon
     link.parent.mkdir()
     link.symlink_to(stub)
     monkeypatch.setattr(confinement, "RESOLV_CONF", link)
-    assert stub in toolchain_paths({"PATH": "/usr/bin"}, "sh")
+    assert stub in toolchain_paths({"PATH": "/usr/bin"}, "sh", writable=())
     monkeypatch.setattr(confinement, "RESOLV_CONF", stub)
-    assert stub not in toolchain_paths({"PATH": "/usr/bin"}, "sh"), "a plain file in /etc is under the /etc bind"
+    assert stub not in toolchain_paths({"PATH": "/usr/bin"}, "sh", writable=()), (
+        "a plain file in /etc is under the /etc bind"
+    )
 
 
-def test_the_childs_interpreter_reports_its_import_path_and_editable_source_trees(tmp_path):
-    """A setuptools editable install names its source tree only in its finder's MAPPING, which sys.path lacks."""
-    bin_dir, site = tmp_path / "bin", tmp_path / "site"
-    bin_dir.mkdir()
-    site.mkdir()
-    (bin_dir / "python3").symlink_to(sys.executable)
-    (site / "__editable___demo_finder.py").write_text("MAPPING = {'demo': '/src/demo/demo'}\n", encoding="ascii")
-    (site / "sitecustomize.py").write_text("import __editable___demo_finder\n", encoding="ascii")
-    environ = {"PATH": str(bin_dir), "PYTHONPATH": str(site)}
-
-    found = interpreter_search_path(environ)
-
-    assert site in found and Path("/src/demo/demo") in found
-    assert interpreter_search_path({"PATH": str(tmp_path / "nowhere")}) == ()
+def _venv(root: Path) -> Path:
+    """A virtual environment at ``root`` on this interpreter's base installation; returns its site directory."""
+    base = Path(os.path.realpath(sys.executable))
+    (root / "bin").mkdir(parents=True)
+    (root / "pyvenv.cfg").write_text(f"home = {base.parent}\ninclude-system-site-packages = false\n", encoding="ascii")
+    (root / "bin" / "python3").symlink_to(base)
+    site = root / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+    site.mkdir(parents=True)
+    return site
 
 
-def test_an_interpreter_that_does_not_answer_gives_no_path(tmp_path):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "python3").write_text("#!/bin/sh\necho not json\n", encoding="ascii")
-    (bin_dir / "python3").chmod(0o755)
-    assert interpreter_search_path({"PATH": str(bin_dir)}) == ()
+def _fake_python(directory: Path, answer: str, seen: Path) -> Path:
+    """A ``python3`` in ``directory`` that records its arguments and environment in ``seen`` and prints ``answer``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "python3"
+    record = f"\"import json, os, sys; json.dump([sys.argv[1:], dict(os.environ)], open({str(seen)!r}, 'w'))\""
+    script.write_text(f"#!/bin/sh\n{sys.executable} -I -S -c {record} \"$@\"\necho '{answer}'\n", encoding="ascii")
+    script.chmod(0o755)
+    return script
+
+
+def test_the_childs_interpreter_reports_its_venvs_site_the_pth_directories_and_editable_trees_running_none(tmp_path):
+    """A setuptools editable install names its source tree only in its finder's MAPPING, which no import path entry
+    has; its .pth file imports that finder. Both are read as data: nothing in them, nor a sitecustomize, runs."""
+    ran = tmp_path / "ran"
+    site = _venv(tmp_path / "venv")
+    extra, other = tmp_path / "extra", tmp_path / "other"
+    extra.mkdir()
+    other.mkdir()
+    (site / "__editable__.demo-1.0.pth").write_text("import __editable___demo_1_0_finder\n", encoding="ascii")
+    (site / "__editable___demo_1_0_finder.py").write_text(
+        f"open({str(ran)!r}, 'a').write('finder ')\nMAPPING: dict[str, str] = {{'demo': '/src/demo/demo'}}\n",
+        encoding="ascii",
+    )
+    (site / "paths.pth").write_text(
+        f"# a comment\n{extra}\n../../../../other\n{tmp_path / 'missing'}\n", encoding="ascii"
+    )
+    pythonpath = tmp_path / "py"
+    pythonpath.mkdir()
+    (pythonpath / "sitecustomize.py").write_text(f"open({str(ran)!r}, 'a').write('site ')\n", encoding="ascii")
+    environ = {"PATH": str(tmp_path / "venv" / "bin"), "PYTHONPATH": str(pythonpath)}
+
+    found = interpreter_search_path(environ, writable=())
+
+    assert {site, extra, other, Path("/src/demo/demo")} <= set(found)
+    assert tmp_path / "missing" not in found and pythonpath not in found
+    assert not ran.exists(), ran.read_text(encoding="ascii")
+    assert interpreter_search_path({"PATH": str(tmp_path / "nowhere")}, writable=()) == ()
+
+
+def test_an_interpreter_in_a_writable_tree_is_never_run_and_its_answer_never_bound(tmp_path):
+    """A ``python3`` the agent could have written runs as the app and names what the agent may read."""
+    work, secret = tmp_path / "work", tmp_path / "home" / ".ssh"
+    secret.mkdir(parents=True)
+    planted = _fake_python(work / "bin", json.dumps({"path": [str(secret)], "site": []}), tmp_path / "planted-ran")
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "python3").symlink_to(planted)
+    honest = _fake_python(tmp_path / "usr" / "bin", json.dumps({"path": ["/honest"], "site": []}), tmp_path / "seen")
+
+    found = interpreter_search_path({"PATH": f"{work / 'bin'}:{linked}:{honest.parent}"}, writable=(work,))
+
+    assert found == (Path("/honest"),)
+    assert not (tmp_path / "planted-ran").exists()
+    assert interpreter_search_path({"PATH": f"{work / 'bin'}:{linked}"}, writable=(work,)) == ()
+    assert not (tmp_path / "planted-ran").exists()
+
+
+def test_the_interpreter_runs_isolated_with_only_the_library_path_outside_the_writable_trees(tmp_path):
+    work, lib = tmp_path / "work", tmp_path / "lib"
+    (work / "lib").mkdir(parents=True)
+    lib.mkdir()
+    seen = tmp_path / "seen"
+    python = _fake_python(tmp_path / "bin", json.dumps({"path": [], "site": []}), seen)
+    environ = {
+        "PATH": str(python.parent),
+        "LD_LIBRARY_PATH": f"{work / 'lib'}:{lib}",
+        "LD_PRELOAD": str(work / "lib" / "x.so"),
+        "PYTHONPATH": str(work),
+        "HOME": str(work),
+        "ANTHROPIC_API_KEY": "sk-not-for-the-probe",
+    }
+
+    interpreter_search_path(environ, writable=(work,))
+
+    argv, env = json.loads(seen.read_text(encoding="ascii"))
+    assert argv[:3] == ["-I", "-S", "-c"]
+    assert {name: value for name, value in env.items() if name not in ("PWD", "SHLVL", "_", "LC_CTYPE")} == {
+        "LD_LIBRARY_PATH": str(lib)
+    }
+
+
+def test_a_site_directory_in_a_writable_tree_is_not_read(tmp_path):
+    work, secret, shown = tmp_path / "work", tmp_path / "secret", tmp_path / "shown"
+    for path in (work / "site", tmp_path / "site", secret, shown):
+        path.mkdir(parents=True)
+    (work / "site" / "planted.pth").write_text(f"{secret}\n", encoding="ascii")
+    (tmp_path / "site" / "image.pth").write_text(f"{shown}\n", encoding="ascii")
+    answer = json.dumps({"path": [], "site": [str(work / "site"), str(tmp_path / "site")]})
+    python = _fake_python(tmp_path / "bin", answer, tmp_path / "seen")
+
+    found = interpreter_search_path({"PATH": str(python.parent)}, writable=(work,))
+
+    assert shown in found and secret not in found
+
+
+@pytest.mark.parametrize("answer", ["not json", "[]", '{"path": "/x", "site": []}', '{"path": []}'])
+def test_an_interpreter_that_does_not_answer_gives_no_path(tmp_path, answer):
+    python = _fake_python(tmp_path / f"bin-{len(answer)}", answer, tmp_path / "seen")
+    assert interpreter_search_path({"PATH": str(python.parent)}, writable=()) == ()
 
 
 # ---- the policy ----
@@ -323,7 +432,7 @@ def test_a_mask_below_another_mask_is_left_out(tmp_path):
 
 def test_a_toolchain_policy_never_binds_proc_or_sys():
     environ = dict(os.environ)
-    policy = Confinement(readable=toolchain_paths(environ, sys.executable)).policy()
+    policy = Confinement(readable=toolchain_paths(environ, sys.executable, writable=())).policy()
     argv = policy.argv(PROBE, ["true"])
     binds = [argv[at + 2] for at, arg in enumerate(argv) if arg in ("--ro-bind-try", "--bind")]
     assert [path for path in binds if path in ("/proc", "/sys") or path.startswith("/proc/")] == ["/sys"]
