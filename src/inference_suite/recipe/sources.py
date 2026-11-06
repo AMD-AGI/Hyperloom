@@ -10,8 +10,8 @@ InferenceX point binds, its acceptance length, its golden overrides and the gold
 InferenceX's own code: they run here once, in an isolated interpreter of a throwaway virtual environment holding
 InferenceX's ``recipes`` dependencies, and their answers are recorded as data that resolving reads.
 
-InferenceX pins the load client of every base, so a session whose InferenceX cannot be read resolves nothing. Any
-other source that cannot be read stops the reading there, and the snapshot names it.
+A source that cannot be read, InferenceX included, stops the reading there, and the snapshot names it. The
+operator's own launch file needs no source read: the load client is pinned in :mod:`inference_suite.pins`.
 """
 
 from __future__ import annotations
@@ -62,6 +62,7 @@ HF_MODELS_API = "https://huggingface.co/api/models"
 SRT_SLURM = f"{PROJECT}/utils/srt-slurm"
 
 _FRAMEWORK_REPOS = {"sglang": SGLANG_REPO, "vllm": VLLM_REPO, "atom": ATOM_REPO}
+_INFERENCEX_SOURCE = "InferenceX"
 _RECIPES_EXTRA = "recipes"
 _OK = 200
 # HF answers 401, not 404, for a repository it does not know when asked anonymously.
@@ -340,7 +341,9 @@ def _latest_releases(framework: str) -> dict[str, str]:
     return {} if release is None else {framework: release}
 
 
-def _cookbook_agentx_requests(query: LaunchQuery, snapshot: SourceSnapshot) -> tuple[GoldenRequest, ...]:
+def _cookbook_agentx_requests(
+    query: LaunchQuery, snapshot: SourceSnapshot, inferencex: InferencexSnapshot
+) -> tuple[GoldenRequest, ...]:
     """What ``golden_length`` is asked so resolving can pair whichever cookbook AgentX launch it takes."""
     if snapshot.sglang_cookbook is not None:
         found = sglang_cookbook_launches(query, snapshot.sglang_cookbook)
@@ -350,30 +353,29 @@ def _cookbook_agentx_requests(query: LaunchQuery, snapshot: SourceSnapshot) -> t
         return ()
     if isinstance(found, SourceMiss):
         return ()
-    return golden_requests(query, found, snapshot.inferencex.bundle, snapshot.base_model)
-
-
-def _with_answers(snapshot: SourceSnapshot, answers: InferencexAnswers) -> SourceSnapshot:
-    inferencex = dataclasses.replace(snapshot.inferencex, selections=answers.selections, rejections=answers.rejections)
-    return dataclasses.replace(snapshot, inferencex=inferencex, golden_lengths=answers.golden_lengths)
+    return golden_requests(query, found, inferencex.bundle, snapshot.base_model)
 
 
 def _with_inferencex_answers(
-    snapshot: SourceSnapshot, query: LaunchQuery, checkout: Checkout, scratch: Path
+    snapshot: SourceSnapshot, query: LaunchQuery, checkout: Checkout, inferencex: InferencexSnapshot, scratch: Path
 ) -> SourceSnapshot:
-    points = served_points(query, snapshot.inferencex.bundle)
-    requests = _cookbook_agentx_requests(query, snapshot) if query.workload is Workload.AGENTX else ()
+    points = served_points(query, inferencex.bundle)
+    requests = _cookbook_agentx_requests(query, snapshot, inferencex) if query.workload is Workload.AGENTX else ()
     if not points and not requests:
         return snapshot
     project = checkout.root / PROJECT
     python = inferencex_python(project, scratch / "venv")
-    return _with_answers(snapshot, inferencex_answers(python, project, points, requests))
+    answers = inferencex_answers(python, project, points, requests)
+    answered = dataclasses.replace(inferencex, selections=answers.selections, rejections=answers.rejections)
+    return dataclasses.replace(snapshot, inferencex=answered, golden_lengths=answers.golden_lengths)
 
 
 _Read = Callable[[SourceSnapshot], SourceSnapshot]
 
 
-def _recipe_reads(query: LaunchQuery, checkout: Checkout, scratch: Path) -> tuple[tuple[str, _Read], ...]:
+def _recipe_reads(
+    query: LaunchQuery, checkout: Checkout, inferencex: InferencexSnapshot, scratch: Path
+) -> tuple[tuple[str, _Read], ...]:
     """What is read after InferenceX's checkout, in order, each with the name of the source it reads."""
     reads: list[tuple[str, _Read]] = []
     if query.workload is Workload.AGENTX:
@@ -389,7 +391,10 @@ def _recipe_reads(query: LaunchQuery, checkout: Checkout, scratch: Path) -> tupl
             lambda snapshot: dataclasses.replace(snapshot, latest_releases=_latest_releases(query.framework)),
         ),
         (f"the {query.framework} cookbook", lambda snapshot: _with_cookbook(snapshot, query, scratch)),
-        ("InferenceX's own code", lambda snapshot: _with_inferencex_answers(snapshot, query, checkout, scratch)),
+        (
+            "InferenceX's own code",
+            lambda snapshot: _with_inferencex_answers(snapshot, query, checkout, inferencex, scratch),
+        ),
     ]
     return tuple(reads)
 
@@ -397,21 +402,20 @@ def _recipe_reads(query: LaunchQuery, checkout: Checkout, scratch: Path) -> tupl
 def fetch_sources(query: LaunchQuery, *, user_file: UserFile | None = None) -> SourceSnapshot:
     """Read every source ``query`` resolves from, at the head of its ``main`` and as of now.
 
-    With the operator's ``user_file``, which is the base, only InferenceX is read: its commit pins the load client.
-    A source after InferenceX that cannot be read is named as the snapshot's ``unread``, and nothing after it is
-    read. Raises :class:`SourceFetchError` when InferenceX itself cannot be read.
+    With the operator's ``user_file``, which is the base, nothing is read. A source that cannot be read is named as
+    the snapshot's ``unread``, and nothing after it is read.
     """
     fetched_unix = int(time.time())
+    if user_file is not None:
+        return SourceSnapshot(None, fetched_unix, user_file=user_file)
     with tempfile.TemporaryDirectory(prefix="inference-suite-sources-") as scratch_dir:
         scratch = Path(scratch_dir)
         try:
             checkout, inferencex = _inferencex(scratch / "inferencex")
         except SourceFetchError as error:
-            raise SourceFetchError(f"InferenceX, which pins the load client, could not be read: {error}") from error
-        snapshot = SourceSnapshot(inferencex, fetched_unix, user_file=user_file)
-        if user_file is not None:
-            return snapshot
-        for source, read in _recipe_reads(query, checkout, scratch):
+            return SourceSnapshot(None, fetched_unix, unread=UnreadSource(_INFERENCEX_SOURCE, str(error)))
+        snapshot = SourceSnapshot(inferencex, fetched_unix)
+        for source, read in _recipe_reads(query, checkout, inferencex, scratch):
             try:
                 snapshot = read(snapshot)
             except SourceFetchError as error:

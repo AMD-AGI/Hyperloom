@@ -29,6 +29,8 @@ from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite import SourceFetchError, SourceSnapshot
 from inference_suite.contracts import BaseLaunch, BaseLaunchError, Redacted, SourceKind, Topology
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
+from inference_suite.recipe import sources
 from inference_suite.recipe.model import InferencexSnapshot, RepoBundle
 from inference_suite.recipe.resolve import UnreadSource
 from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot
@@ -210,13 +212,20 @@ def test_a_fixed_session_whose_recipe_source_cannot_be_read_freezes_the_default_
     assert "WARNING: base launch: the sglang cookbook could not be read" in _banner_err(tmp_path, monkeypatch, capsys)
 
 
-def test_a_session_whose_inferencex_cannot_be_read_exits_2_naming_it(tmp_path, monkeypatch, capsys):
-    def unreachable(query, *, user_file=None):
-        raise SourceFetchError("InferenceX, which pins the load client, could not be read: git clone exited 128")
+def test_a_fixed_session_whose_inferencex_cannot_be_read_freezes_the_default_table_with_the_pinned_client(
+    tmp_path, monkeypatch
+):
+    def unreachable(into):
+        raise SourceFetchError("git clone exited 128: could not resolve host")
 
-    monkeypatch.setattr(bl, "fetch_sources", unreachable)
+    monkeypatch.setattr(sources, "_inferencex", unreachable)
 
-    assert "InferenceX, which pins the load client, could not be read" in _refused(tmp_path, _args(), capsys)
+    base = _resolve(tmp_path, _args())
+
+    frozen = json.loads((tmp_path / BASE_LAUNCH_FILE).read_text())
+    assert base is not None and frozen["source"]["kind"] == "default_table"
+    assert frozen["client"]["commit"] == INFERENCEX_CLIENT_COMMIT
+    assert any(warning.startswith("InferenceX could not be read") for warning in frozen["warnings"])
 
 
 def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_frozen_file(tmp_path, fetched):

@@ -138,7 +138,7 @@ def resolve_base_launch(
 
     The session then runs at the base's TP and EP, so this runs before anything records them. ``None`` when the
     session resolves no base. Exits 2 when the operator's launch file cannot serve as the base, the query is
-    malformed, InferenceX cannot be read, or no source and no default serves the session.
+    malformed, or no source and no default serves the session.
     """
     location = (getattr(args, "reference_script", None) or "").strip()
     if is_scriptable(framework):

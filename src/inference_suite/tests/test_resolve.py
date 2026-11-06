@@ -25,6 +25,7 @@ from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import argv_flag_occurrences
 from inference_suite.contracts import BaseLaunch, LaunchQuery, SourceKind, Topology, VersionBasis, Workload
 from inference_suite.golden import golden_owned_settings
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
 from inference_suite.recipe.defaults import TABLE_PATH, default_table
 from inference_suite.recipe.golden_curve import GoldenLength, golden_requests
 from inference_suite.recipe.image_version import recipe_image_facts, tag_version
@@ -112,7 +113,7 @@ def test_inferencex_wins_and_its_base_round_trips_through_its_document():
     assert base.source.entry == "dsr1-fp8-mi355x-sglang"
     assert (base.topology, base.point.conc, base.point.exact) == (Topology(8), 64, True)
     assert (base.image.framework_version, base.image.version_basis) == ("0.5.22", VersionBasis.TAG)
-    assert (base.client.tool, base.client.commit) == (CLIENT_TOOL, _inferencex("ce35bc935").bundle.commit)
+    assert (base.client.tool, base.client.commit) == (CLIENT_TOOL, INFERENCEX_CLIENT_COMMIT)
     assert base.resolved_unix == _FETCHED
     assert "--served-model-name" in base.runner_owned.args
     assert "HIP_VISIBLE_DEVICES" in base.runner_owned.env
@@ -125,6 +126,15 @@ def test_the_cookbook_serves_what_inferencex_does_not_and_names_the_miss():
 
     assert base.source.kind is SourceKind.VLLM_RECIPES
     assert base.warnings[0].startswith("inferencex holds no launch: no entry serves deepseek-ai/DeepSeek-R1-0528")
+
+
+def test_the_client_commit_is_the_pin_whatever_inferencex_main_is_at():
+    query = _agentx(_GLM53_MXFP4)
+    commits = {_inferencex(commit).bundle.commit for commit in ("ce35bc935", "a1e8f975")}
+    clients = {_base(query, _snapshot(commit)).client.commit for commit in ("ce35bc935", "a1e8f975")}
+
+    assert len(commits) == 2
+    assert clients == {INFERENCEX_CLIENT_COMMIT}
 
 
 def test_a_shell_user_file_wins_over_every_recipe():
@@ -386,7 +396,7 @@ def test_a_fixed_query_whose_source_could_not_be_read_runs_the_default_row_and_r
     base = _base(_fixed(tp=8), _unread_snapshot())
 
     assert (base.source.kind, base.source.path) == (SourceKind.DEFAULT_TABLE, TABLE_PATH)
-    assert base.client.commit == _inferencex("ce35bc935").bundle.commit
+    assert base.client.commit == INFERENCEX_CLIENT_COMMIT
     assert base.warnings == (
         "the sglang cookbook could not be read, so no recipe was consulted (git clone exited 128: could not resolve "
         "host); the default sglang launch for gfx950 runs it",
@@ -398,6 +408,34 @@ def test_an_agentx_query_whose_source_could_not_be_read_is_a_miss_naming_it():
     miss = _miss(_agentx("zai-org/GLM-5.3-FP8"), _unread_snapshot())
 
     assert miss.reasons() == ("the sglang cookbook could not be read: git clone exited 128: could not resolve host",)
+
+
+def _no_inferencex_snapshot() -> SourceSnapshot:
+    return SourceSnapshot(
+        None, _FETCHED, unread=UnreadSource("InferenceX", "git clone exited 128: could not resolve host")
+    )
+
+
+def test_a_fixed_query_whose_inferencex_could_not_be_read_runs_the_default_row_with_the_pinned_client():
+    base = _base(_fixed(tp=8), _no_inferencex_snapshot())
+
+    assert base.source.kind is SourceKind.DEFAULT_TABLE
+    assert (base.client.tool, base.client.commit) == (CLIENT_TOOL, INFERENCEX_CLIENT_COMMIT)
+    assert base.warnings[-1].startswith("InferenceX could not be read, so no recipe was consulted")
+    assert BaseLaunch.from_document(json.loads(json.dumps(base.to_document()))) == base
+
+
+def test_an_agentx_query_whose_inferencex_could_not_be_read_is_a_miss_naming_it():
+    miss = _miss(_agentx("zai-org/GLM-5.3-FP8"), _no_inferencex_snapshot())
+
+    assert miss.reasons() == ("InferenceX could not be read: git clone exited 128: could not resolve host",)
+
+
+def test_a_user_file_is_the_base_with_the_pinned_client_and_no_source_read():
+    user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
+    base = _base(_fixed(), SourceSnapshot(None, _FETCHED, user_file=user_file))
+
+    assert (base.source.kind, base.client.commit) == (SourceKind.USER_FILE, INFERENCEX_CLIENT_COMMIT)
 
 
 def test_a_user_file_is_the_base_whatever_source_could_not_be_read():

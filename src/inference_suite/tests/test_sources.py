@@ -185,23 +185,27 @@ def test_a_source_that_cannot_be_read_is_named_and_stops_the_reading(read_infere
     assert snapshot.sglang_cookbook is None
 
 
-def test_a_user_file_reads_no_source_but_inferencex(read_inferencex, monkeypatch) -> None:
+def test_a_user_file_reads_no_source(monkeypatch) -> None:
+    monkeypatch.setattr(sources, "_inferencex", _never)
     monkeypatch.setattr(sources, "_recipe_reads", _never)
     user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
 
     snapshot = fetch_sources(_QUERY, user_file=user_file)
 
-    assert (snapshot.user_file, snapshot.unread) == (user_file, None)
+    assert (snapshot.user_file, snapshot.inferencex, snapshot.unread) == (user_file, None, None)
 
 
-def test_an_unreadable_inferencex_is_refused(monkeypatch) -> None:
+def test_an_unreadable_inferencex_is_named_and_stops_the_reading(monkeypatch) -> None:
     def unreachable(into):
         raise SourceFetchError("git clone exited 128: could not resolve host")
 
     monkeypatch.setattr(sources, "_inferencex", unreachable)
+    monkeypatch.setattr(sources, "_recipe_reads", _never)
 
-    with pytest.raises(SourceFetchError, match="InferenceX, which pins the load client, could not be read: git clone"):
-        fetch_sources(_QUERY)
+    snapshot = fetch_sources(_QUERY)
+
+    assert snapshot.unread == UnreadSource("InferenceX", "git clone exited 128: could not resolve host")
+    assert snapshot.inferencex is None
 
 
 _STAND_IN = {
