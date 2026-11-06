@@ -381,8 +381,9 @@ async def test_a_fix_whose_fork_is_refused_is_recorded_only_and_its_specialist_t
     await session.new_judge().reconcile()
 
     assert (await session.runtime.record(first)).conclusion is Conclusion.RECORDED_ONLY
-    (notice,) = await session.notices()
-    assert f"{first} fixes a defect of {ROOT}" in notice and "refused" in notice
+    asked, refused = await session.notices()
+    assert asked.startswith(f"rule gate: {first} fixes a defect of {ROOT}; its fork is asked for")
+    assert f"{first} fixes a defect of {ROOT}: its fork was refused (" in refused
 
 
 async def test_a_gain_the_retest_does_not_repeat_is_recorded_only(tmp_path):
