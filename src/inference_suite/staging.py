@@ -5,7 +5,8 @@
 
 The tool cache holds each tool under ``<tool>/<commit>/`` and one manifest, ``staging_manifest.json``, naming every
 staged file with its sha256. A round fetches nothing: :func:`verify` lists what is absent, changed or staged at a
-commit other than its pin, and a round with anything listed refuses with ``staging_missing``. The manifest's own
+commit other than its pin, including a manifest that does not stage the fixed load's client module
+(:data:`CLIENT_MODULE`), and a round with anything listed refuses with ``staging_missing``. The manifest's own
 sha256 is the round's ``tool_manifest_sha256``, so a launch names exactly the bytes it ran.
 
 ``python -m inference_suite.staging stage --source <InferenceX checkout> --tool-cache <dir>`` stages, and ``check
@@ -37,8 +38,14 @@ MANIFEST_FILE = "staging_manifest.json"
 INFERENCEX_PROJECT_DIR = "inferencex-e2e"
 #: The GSM8K task file the eval scores, under the staged InferenceX root.
 GSM8K_TASK = "infx/evals/gsm8k.yaml"
+#: The module the fixed load runs, from the staged InferenceX root.
+CLIENT_MODULE = "infx.bench_serving.benchmark_serving"
+#: The file :data:`CLIENT_MODULE` loads, relative to the staged InferenceX root.
+CLIENT_FILE = f"{CLIENT_MODULE.replace('.', '/')}.py"
 #: What a fixed round and its eval run from InferenceX, relative to its project directory.
-INFERENCEX_SUBSET = ("infx/__init__.py", "infx/bench_serving", GSM8K_TASK)
+INFERENCEX_SUBSET = ("infx/__init__.py", CLIENT_MODULE.rpartition(".")[0].replace(".", "/"), GSM8K_TASK)
+#: The files a staged InferenceX must hold for a round to run, whatever else its subset holds at the pin.
+INFERENCEX_REQUIRED = (CLIENT_FILE, GSM8K_TASK)
 
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _SKIPPED_DIRS = frozenset({"__pycache__"})
@@ -155,6 +162,14 @@ def _unpinned(manifest: StagingManifest) -> Iterator[str]:
             yield f"{name} at its pin {pin} ({found})"
 
 
+def _incomplete(manifest: StagingManifest) -> Iterator[str]:
+    staged = manifest.tools.get(INFERENCEX_TOOL)
+    if staged is not None:
+        for required in INFERENCEX_REQUIRED:
+            if required not in staged.files:
+                yield f"{INFERENCEX_TOOL}'s {required} (not staged)"
+
+
 def _damaged(tool_cache: Path, manifest: StagingManifest) -> Iterator[str]:
     for name, tool in manifest.tools.items():
         root = tool_root(tool_cache, name, tool.commit)
@@ -184,7 +199,9 @@ def verify(tool_cache: Path, manifest_sha256: str) -> StagingReport:
     except ValueError as exc:
         return StagingReport(manifest_sha256, {}, (f"a readable staging manifest at {path} ({exc})",))
     pins = {name: tool.commit for name, tool in manifest.tools.items()}
-    return StagingReport(manifest_sha256, pins, (*_unpinned(manifest), *_damaged(tool_cache, manifest)))
+    return StagingReport(
+        manifest_sha256, pins, (*_unpinned(manifest), *_incomplete(manifest), *_damaged(tool_cache, manifest))
+    )
 
 
 def _checkout_commit(source: Path) -> str:
@@ -195,7 +212,7 @@ def _checkout_commit(source: Path) -> str:
 
 
 def _subset_files(project: Path) -> Iterator[Path]:
-    absent = [entry for entry in INFERENCEX_SUBSET if not (project / entry).exists()]
+    absent = [entry for entry in (*INFERENCEX_SUBSET, CLIENT_FILE) if not (project / entry).exists()]
     if absent:
         raise StagingError(f"{project} has no {', '.join(absent)}")
     for entry in INFERENCEX_SUBSET:
@@ -270,8 +287,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
+    "CLIENT_FILE",
+    "CLIENT_MODULE",
     "GSM8K_TASK",
     "INFERENCEX_PROJECT_DIR",
+    "INFERENCEX_REQUIRED",
     "INFERENCEX_SUBSET",
     "MANIFEST_FILE",
     "STAGING_SCHEMA",

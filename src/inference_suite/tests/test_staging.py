@@ -19,6 +19,8 @@ from inference_suite import staging
 from inference_suite.contracts import FailedStep
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL, PINNED_TOOLS
 from inference_suite.staging import (
+    CLIENT_FILE,
+    CLIENT_MODULE,
     GSM8K_TASK,
     INFERENCEX_PROJECT_DIR,
     MANIFEST_FILE,
@@ -32,6 +34,7 @@ from inference_suite.staging import (
 )
 
 _CLIENT = "infx/bench_serving/benchmark_serving.py"
+_CLIENT_TEXT = "print('client')\n"
 _INSTALL_SH = Path(__file__).resolve().parents[2] / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 _SRC = Path(__file__).resolve().parents[2]
 _SHA = "a" * 64
@@ -49,7 +52,7 @@ def _checkout(tmp_path: Path, *, without: str | None = None) -> tuple[Path, str]
     files = {
         "infx/__init__.py": "",
         "infx/bench_serving/__init__.py": "",
-        _CLIENT: "print('client')\n",
+        _CLIENT: _CLIENT_TEXT,
         "infx/bench_serving/KNOWN_LIMITATION.md": "limits\n",
         GSM8K_TASK: "task: gsm8k\n",
         "infx/evals/gpqa_diamond.yaml": "task: gpqa\n",
@@ -103,7 +106,7 @@ def test_staging_copies_the_client_package_and_the_gsm8k_task_and_nothing_else(s
         _CLIENT,
         GSM8K_TASK,
     }
-    assert (root / _CLIENT).read_text() == "print('client')\n"
+    assert (root / _CLIENT).read_text() == _CLIENT_TEXT
     assert not (root / "infx/bench_serving/__pycache__").exists()
 
 
@@ -169,6 +172,35 @@ def test_staging_refuses_a_checkout_without_the_client(tmp_path: Path, monkeypat
     with pytest.raises(StagingError, match="has no infx/bench_serving"):
         stage(repo, tmp_path / "tools")
     assert not (tmp_path / "tools").exists()
+
+
+def test_staging_refuses_a_checkout_whose_client_package_lacks_the_client_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, commit = _checkout(tmp_path, without=_CLIENT)
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
+
+    with pytest.raises(StagingError, match=f"has no {re.escape(_CLIENT)}$"):
+        stage(repo, tmp_path / "tools")
+    assert not (tmp_path / "tools").exists()
+
+
+def test_the_client_file_is_the_one_the_client_module_loads() -> None:
+    assert (CLIENT_MODULE, CLIENT_FILE) == ("infx.bench_serving.benchmark_serving", _CLIENT)
+
+
+def test_a_manifest_at_the_pin_that_does_not_stage_the_client_is_staging_missing(staged) -> None:
+    cache, commit, _ = staged
+    path = cache / MANIFEST_FILE
+    manifest = StagingManifest.from_document(json.loads(path.read_text()))
+    files = {name: digest for name, digest in manifest.tools[INFERENCEX_TOOL].files.items() if name != _CLIENT}
+    data = StagingManifest({INFERENCEX_TOOL: StagedTool(commit, files)}).to_bytes()
+    path.write_bytes(data)
+
+    report = verify(cache, hashlib.sha256(data).hexdigest())
+
+    assert report.failed_step is FailedStep.STAGING_MISSING
+    assert report.missing == (f"{INFERENCEX_TOOL}'s {_CLIENT} (not staged)",)
 
 
 def test_the_manifest_round_trips_and_refuses_what_it_does_not_know() -> None:
@@ -242,9 +274,11 @@ echo "STALE ${{_STALE_KEYS[*]:-}}"
 
 def _cache_at_the_real_pin(cache: Path) -> str:
     root = tool_root(cache, INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT)
-    (root / "infx/evals").mkdir(parents=True)
-    (root / GSM8K_TASK).write_text("task: gsm8k\n")
-    files = {GSM8K_TASK: hashlib.sha256(b"task: gsm8k\n").hexdigest()}
+    files = {}
+    for relative, text in ((GSM8K_TASK, "task: gsm8k\n"), (_CLIENT, _CLIENT_TEXT)):
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text)
+        files[relative] = hashlib.sha256(text.encode()).hexdigest()
     data = StagingManifest({INFERENCEX_TOOL: StagedTool(INFERENCEX_CLIENT_COMMIT, files)}).to_bytes()
     (cache / MANIFEST_FILE).write_bytes(data)
     return hashlib.sha256(data).hexdigest()
