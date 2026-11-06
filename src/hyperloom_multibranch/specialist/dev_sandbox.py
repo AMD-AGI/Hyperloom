@@ -424,9 +424,11 @@ class DevLeases:
         pending = self._starting.pop(branch, None)
         if pending is None:
             return
+        # A start that finished is no longer starting: a lease it granted is held, and ends only by the held rules.
+        abandoned = not pending.done()
         pending.cancel()
         await asyncio.gather(pending, return_exceptions=True)
-        if branch in self._held:
+        if abandoned and branch in self._held:
             await self._end(branch, "it was abandoned while starting")
 
     async def sweep(self) -> None:
@@ -556,6 +558,7 @@ class DevLeases:
 
     async def _end(self, branch: str, reason: str) -> None:
         held = self._held.pop(branch)
+        self._starting.pop(branch, None)
         del self._slots[branch]
         self._ended[branch] = self._clock()
         self._reclaimed[branch] = reason

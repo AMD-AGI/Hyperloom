@@ -829,6 +829,35 @@ async def test_a_starting_lease_the_runtime_takes_back_is_abandoned_and_frees_it
     assert (await built.server.call("dev_sandbox_lease", branch=B2))["lease_id"] == "lease-1"
 
 
+async def _granted_after_starting(rig, built) -> None:
+    up = asyncio.Event()
+    leasing = rig.toolbox.lease_branch_sandbox
+
+    async def slow(*args, **kwargs):
+        await up.wait()
+        return await leasing(*args, **kwargs)
+
+    rig.toolbox.lease_branch_sandbox = slow
+    assert (await built.server.call("dev_sandbox_lease", term="long", minutes=6 * 60))["state"] == "starting"
+    up.set()
+    await asyncio.sleep(0.01)
+
+
+async def test_a_run_end_keeps_a_busy_long_lease_granted_after_it_answered_starting(rig):
+    built = rig.build(limits=replace(LIMITS, lease_wait_s=0.05))
+    await _granted_after_starting(rig, built)
+    await built.server.call("dev_sandbox_start", command="forge-loop")
+    await built.leases.reclaim_unless_busy(B1, "its specialist's run ended")
+    assert rig.toolbox.released == [] and not rig.sandboxes[B1].stopped and built.leases.busy(B1)
+
+
+async def test_a_lease_granted_after_it_answered_starting_and_released_is_not_granted_again(rig):
+    built = rig.build(limits=replace(LIMITS, lease_wait_s=0.05, cooldown_s=0))
+    await _granted_after_starting(rig, built)
+    await built.server.call("dev_sandbox_release")
+    assert (await built.server.call("dev_sandbox_lease"))["lease_id"] == "lease-2"
+
+
 class _HostedToolbox(_Toolbox):
     """Leases the ``dev`` sandbox of the hosted backend, a sandbox whose commands run on this host."""
 
