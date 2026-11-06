@@ -95,13 +95,15 @@ def test_populate_gpu_arch_json_uses_bundled_spec(tmp_path: Path) -> None:
     bundled = tmp_path / "MI300X.json"
     bundled.write_text("{}", encoding="utf-8")
     with patch.object(tab, "resolve_arch_json_path", return_value=bundled):
-        path = tab.populate_gpu_arch_json(
+        spec = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
             platform="MI300X",
+            fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
             run_command=lambda *_a, **_k: 0,
         )
-    assert path == bundled
+    assert spec == tab.ArchSpec(bundled, tab.ArchSpecSource.BUNDLED)
+    assert spec.health_warning("MI300X") is None
 
 
 def test_populate_gpu_arch_json_runs_microbench_when_missing(
@@ -111,7 +113,7 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
     calls: list[list[str]] = []
     captured_env: dict[str, str] | None = None
 
-    def _run_command(cmd, *, cwd, timeout_s, env=None):
+    def _run_command(cmd, *, cwd, env=None):
         nonlocal captured_env
         captured_env = env
         calls.append(cmd)
@@ -138,16 +140,16 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
         patch.object(tab, "resolve_arch_json_path", return_value=None),
         patch.object(tab, "list_candidate_physical_gpus", return_value=[2]),
     ):
-        path = tab.populate_gpu_arch_json(
+        spec = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
             platform="MI355X",
+            fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
             run_command=_run_command,
-            timeout_s=60,
         )
 
-    assert path == tmp_path / "TraceLens/Agent/Analysis/utils/arch/MI355X.json"
-    assert path.is_file()
+    path = tmp_path / "TraceLens/Agent/Analysis/utils/arch/MI355X.json"
+    assert spec == tab.ArchSpec(path, tab.ArchSpecSource.MEASURED)
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["name"] == "MI355X"
     # 0-valued MAF key is dropped so roofline never divides by zero.
@@ -156,7 +158,6 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
     assert "TraceLens.PerfModel.benchmarking.microbench" in calls[0]
     assert "--warmup" in calls[0] and "20" in calls[0]
     assert "--rep" in calls[0] and "50" in calls[0]
-    assert calls[0][calls[0].index("--output") + 1].endswith("TraceLens/Agent/Analysis/utils/arch/MI355X.json")
     assert captured_env is not None
     assert captured_env["HIP_VISIBLE_DEVICES"] == "2"
     assert captured_env["CUDA_VISIBLE_DEVICES"] == "2"
@@ -166,7 +167,7 @@ def test_populate_gpu_arch_json_skips_busy_gpu(tmp_path: Path) -> None:
     """A GPU the microbench's idle gate rejects (exit 2) is skipped for the next candidate."""
     tried: list[str] = []
 
-    def _run_command(cmd, *, cwd, timeout_s, env=None):
+    def _run_command(cmd, *, cwd, env=None):
         tried.append(env["HIP_VISIBLE_DEVICES"])
         if env["HIP_VISIBLE_DEVICES"] == "4":
             return 2
@@ -182,12 +183,16 @@ def test_populate_gpu_arch_json_skips_busy_gpu(tmp_path: Path) -> None:
         patch.object(tab, "resolve_arch_json_path", return_value=None),
         patch.object(tab, "list_candidate_physical_gpus", return_value=[4, 5]),
     ):
-        path = tab.populate_gpu_arch_json(
-            tracelens_root=tmp_path, platform="MI355X", log=lambda _msg: None, run_command=_run_command
+        spec = tab.populate_gpu_arch_json(
+            tracelens_root=tmp_path,
+            platform="MI355X",
+            fallback_dir=tmp_path / "session",
+            log=lambda _msg: None,
+            run_command=_run_command,
         )
 
     assert tried == ["4", "5"]
-    assert path == tmp_path / "TraceLens/Agent/Analysis/utils/arch/MI355X.json"
+    assert spec.path == tmp_path / "TraceLens/Agent/Analysis/utils/arch/MI355X.json"
 
 
 def test_populate_skips_microbench_when_internal_extension_enabled(
@@ -215,60 +220,67 @@ def test_populate_internal_extension_returns_bundled_spec_without_benchmark(
         patch.object(tab, "resolve_arch_json_path", return_value=bundled),
         patch.object(tab, "list_candidate_physical_gpus") as candidates,
     ):
-        path = tab.internal_extension_arch_json("MI300X", log=lambda _msg: None)
+        spec = tab.internal_extension_arch_json("MI300X", log=lambda _msg: None)
 
-    assert path == bundled
+    assert spec == tab.ArchSpec(bundled, tab.ArchSpecSource.BUNDLED)
     candidates.assert_not_called()
 
 
 def test_populate_external_raises_on_microbench_failure(
     tmp_path: Path,
 ) -> None:
-    """Open-source path surfaces a non-zero microbenchmark exit code when the hyperloom fallback is also unavailable."""
+    """Open-source path surfaces a non-zero microbenchmark exit code when the vendor-peak fallback is also unavailable."""
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
-        patch.object(tab, "write_hyperloom_arch_spec", return_value=None),
+        patch.object(tab, "write_vendor_peak_arch_spec", return_value=False),
         patch.object(tab, "list_candidate_physical_gpus", return_value=[0]),
     ):
         with pytest.raises(RuntimeError, match="exit code 7"):
             tab.populate_gpu_arch_json(
                 tracelens_root=tmp_path,
                 platform="MI355X",
+                fallback_dir=tmp_path / "session",
                 log=lambda _msg: None,
                 run_command=lambda *_a, **_k: 7,
             )
 
 
-def test_populate_falls_back_to_hyperloom_when_microbench_unavailable(
-    tmp_path: Path,
-) -> None:
-    """Every GPU busy -> the hyperloom achievable spec is used instead of raising."""
-    fallback = tmp_path / "MI355X.json"
+def test_populate_falls_back_to_vendor_peaks_in_the_session_not_the_checkout(tmp_path: Path) -> None:
+    """Every GPU busy: the vendor-peak spec lands in the session's fallback dir, never in the TraceLens checkout, and
+    the session's next run reuses it rather than wait on the microbenchmark again."""
+    checkout, session = tmp_path / "TraceLens", tmp_path / "session"
+    runs: list[str] = []
+
+    def _busy(cmd, *, cwd, env=None):
+        runs.append(env["HIP_VISIBLE_DEVICES"])
+        return 2
+
+    def _populate() -> tab.ArchSpec:
+        return tab.populate_gpu_arch_json(
+            tracelens_root=checkout, platform="MI355X", fallback_dir=session, log=lambda _msg: None, run_command=_busy
+        )
 
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
         patch.object(tab, "list_candidate_physical_gpus", return_value=[0, 1]),
-        patch.object(tab, "write_hyperloom_arch_spec", return_value=fallback),
     ):
-        path = tab.populate_gpu_arch_json(
-            tracelens_root=tmp_path,
-            platform="MI355X",
-            log=lambda _msg: None,
-            run_command=lambda *_a, **_k: 2,
-        )
+        first = _populate()
+        second = _populate()
 
-    assert path == fallback
+    assert first == second == tab.ArchSpec(session / "MI355X.json", tab.ArchSpecSource.VENDOR_PEAK)
+    assert json.loads(first.path.read_text(encoding="utf-8")) == tab.build_hyperloom_arch_spec("MI355X")
+    assert runs == ["0", "1"]
+    assert not checkout.exists()
+    warning = first.health_warning("mi355x")
+    assert warning is not None and warning["code"] == "gpu_arch_json_vendor_peak" and "MI355X" in warning["message"]
 
 
-def test_populate_falls_back_to_hyperloom_on_zeroed_measured_spec(
-    tmp_path: Path,
-) -> None:
-    """A measured spec with all-zero MAF falls back to the hyperloom spec."""
-    fallback = tmp_path / "MI355X.json"
+def test_a_rejected_measurement_never_reaches_the_checkout(tmp_path: Path) -> None:
+    """A measured spec with all-zero MAF is not published where later sessions would read it as bundled."""
+    checkout = tmp_path / "TraceLens"
 
-    def _run_command(cmd, *, cwd, timeout_s, env=None):
+    def _run_command(cmd, *, cwd, env=None):
         out = Path(cmd[cmd.index("--output") + 1])
-        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(
             json.dumps(
                 {
@@ -284,16 +296,17 @@ def test_populate_falls_back_to_hyperloom_on_zeroed_measured_spec(
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
         patch.object(tab, "list_candidate_physical_gpus", return_value=[0]),
-        patch.object(tab, "write_hyperloom_arch_spec", return_value=fallback),
     ):
-        path = tab.populate_gpu_arch_json(
-            tracelens_root=tmp_path,
+        spec = tab.populate_gpu_arch_json(
+            tracelens_root=checkout,
             platform="MI355X",
+            fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
             run_command=_run_command,
         )
 
-    assert path == fallback
+    assert spec.source is tab.ArchSpecSource.VENDOR_PEAK
+    assert not checkout.exists()
 
 
 @pytest.mark.parametrize(
@@ -328,10 +341,7 @@ def test_sanitize_drops_zero_maf_keys(tmp_path: Path) -> None:
         "mem_bw_gbps": 5000,
         "max_achievable_tflops": {"matrix_bf16": 900, "matrix_fp8": 0, "matrix_int8": 0.0},
     }
-    changed = tab._sanitize_measured_arch_spec(
-        payload, platform="MI355X", out_path=tmp_path / "MI355X.json", log=lambda _m: None
-    )
-    assert changed is True
+    tab._sanitize_measured_arch_spec(payload, platform="MI355X", out_path=tmp_path / "MI355X.json", log=lambda _m: None)
     assert payload["max_achievable_tflops"] == {"matrix_bf16": 900}
 
 
@@ -341,10 +351,7 @@ def test_sanitize_keeps_spec_with_all_positive(tmp_path: Path) -> None:
         "mem_bw_gbps": 5000,
         "max_achievable_tflops": {"matrix_bf16": 900, "matrix_fp8": 1800},
     }
-    changed = tab._sanitize_measured_arch_spec(
-        payload, platform="MI355X", out_path=tmp_path / "MI355X.json", log=lambda _m: None
-    )
-    assert changed is False
+    tab._sanitize_measured_arch_spec(payload, platform="MI355X", out_path=tmp_path / "MI355X.json", log=lambda _m: None)
     assert payload["max_achievable_tflops"] == {"matrix_bf16": 900, "matrix_fp8": 1800}
 
 
