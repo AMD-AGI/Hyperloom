@@ -24,7 +24,7 @@ from __future__ import annotations
 import errno
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 # Command-line scope outranks every config file. The excludes file defaults to $XDG_CONFIG_HOME/git/ignore even when
@@ -85,6 +85,21 @@ def git_env(**pinned: str) -> dict[str, str]:
     }
 
 
+def leading_options(args: Sequence[str]) -> list[str]:
+    """The ``-c <setting>`` pairs ``args`` starts with, before its subcommand: a ``safe.directory`` among them decides
+    which repository's config git reads, so :func:`blank_filter_drivers` is given them too."""
+    count = 0
+    while count + 1 < len(args) and args[count] == "-c":
+        count += 2
+    return list(args[:count])
+
+
+def trusting(directory: Path) -> tuple[str, str]:
+    """The ``-c`` pair that has git use the repository at ``directory`` whoever owns it (``safe.directory``): a tree on
+    the shared storage may have been made by another account of the group, and no program its config names runs."""
+    return ("-c", f"safe.directory={os.path.realpath(directory)}")
+
+
 def blank_filter_drivers(cwd: Path, env: Mapping[str, str] | None = None, *prefix: str) -> list[str]:
     """The ``-c filter.<name>.<program>=`` pairs that blank every filter driver the config git reads in ``cwd`` under
     ``env`` defines (``prefix`` are the options the command passes before its subcommand, which may name the
@@ -122,4 +137,14 @@ def blank_filter_drivers(cwd: Path, env: Mapping[str, str] | None = None, *prefi
     return [arg for name in sorted(names) for program in FILTER_PROGRAMS for arg in ("-c", f"filter.{name}.{program}=")]
 
 
-__all__ = ["FILTER_PROGRAMS", "INIT", "NO_LAZY_FETCH", "NO_PROGRAMS", "blank_filter_drivers", "git_argv", "git_env"]
+__all__ = [
+    "FILTER_PROGRAMS",
+    "INIT",
+    "NO_LAZY_FETCH",
+    "NO_PROGRAMS",
+    "blank_filter_drivers",
+    "git_argv",
+    "git_env",
+    "leading_options",
+    "trusting",
+]
