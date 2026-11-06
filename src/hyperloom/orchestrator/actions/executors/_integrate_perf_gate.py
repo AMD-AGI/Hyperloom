@@ -17,6 +17,7 @@ from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
+from ...state.failure_evidence import FAILURE_ATTRIBUTION_ENVIRONMENT, classify_failure_attribution
 from ...state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import accuracy_keep_block, eval_probe_summary
@@ -39,6 +40,7 @@ from ._integrate_results import (
     _perf_revert,
     _revert_status,
 )
+from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS
 from ._patch_git import _uncommitted_revert
 from ._patch_sources import _done_field
 
@@ -56,27 +58,16 @@ class PerfGateMixin:
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
     ) -> dict[str, Any]:
-        """Throughput KEEP / REVERT decision, or no verdict when the run stopped it."""
-        specialist_task_id = attempt.specialist_task_id
+        """Throughput KEEP / REVERT decision, or no verdict when the run stopped it or the environment left it unmeasured."""
         shared_state = attempt.shared_state
         assert attempt.output_root is not None
         base_tput = _live_base_tput(params, shared_state)
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
 
-        stopped = stopped_by_the_run_class(bench_result.get("error_class"))
-        if stopped is not None:
-            return {
-                "status": "failed",
-                "error_class": stopped.error_class,
-                "error": stopped.interrupted,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "bench_result": bench_result,
-                "workspace": str(attempt.output_root),
-            }
+        unrated = _unrated_verdict(attempt, bench_result)
+        if unrated is not None:
+            return unrated
 
         verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, _GateBasis(base_tput, keep_threshold_pct))
         measured = verdict.measured
@@ -574,6 +565,44 @@ def _weigh_gate(
         fix_refusals=fix_refusals,
         correctness_fix=correctness_fix,
     )
+
+
+def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -> dict[str, Any] | None:
+    """The failed verdict of a bench the run stopped or the environment kept from measuring; ``None`` otherwise."""
+    bench_class = str(bench_result.get("error_class") or "")
+    stopped = stopped_by_the_run_class(bench_class)
+    if stopped is not None:
+        fields: dict[str, Any] = {"error_class": stopped.error_class, "error": stopped.interrupted}
+    elif _environment_unmeasured(bench_result):
+        fields = {
+            "error_class": BENCH_UNMEASURED_CLASS,
+            "bench_error_class": bench_class,
+            "failure_attribution": FAILURE_ATTRIBUTION_ENVIRONMENT,
+            "error": str(bench_result.get("error") or ""),
+        }
+    else:
+        return None
+    return {
+        "status": "failed",
+        **fields,
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "artifacts_reverted": [],
+        "bench_result": bench_result,
+        "workspace": str(attempt.output_root),
+    }
+
+
+def _environment_unmeasured(bench_result: dict[str, Any]) -> bool:
+    """Whether the bench produced no throughput and its error is evidence of an environment fault."""
+    tput = bench_result.get("output_throughput")
+    if isinstance(tput, (int, float)) and tput > 0:
+        return False
+    attribution = classify_failure_attribution(
+        error_class=bench_result.get("error_class"), error_excerpt=bench_result.get("error")
+    )
+    return attribution == FAILURE_ATTRIBUTION_ENVIRONMENT
 
 
 def _empty_source_evidence() -> dict[str, Any]:
