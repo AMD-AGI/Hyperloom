@@ -376,6 +376,7 @@ def _kept_patch(
         "artifacts_applied": attempt.applied_artifacts,
         "extra_server_args_applied": attempt.extra_server_args_applied,
         "extra_envs_applied": attempt.extra_envs_applied,
+        **attempt.launch_controls,
         **measured.envelope(),
         "workspace": str(attempt.output_root),
         "framework_root": str(attempt.framework_root or ""),

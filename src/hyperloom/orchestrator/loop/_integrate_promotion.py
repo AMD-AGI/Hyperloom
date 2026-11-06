@@ -17,6 +17,7 @@ from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..state.task_registry import Task
 from ._keep_patch_column import _is_patch_column_keep, _lever_for_keep, _source_layer_handles
+from .launch_controls import LAUNCH_CONTROL_KEYS
 from ._promote_outcome import IntegrateRecoveryIncomplete, _PromoteOutcome
 
 log = logging.getLogger(__name__)
@@ -137,14 +138,24 @@ def _integrate_verdict(status: str, *, lifted: bool, kept: bool) -> Verdict:
     return Verdict.FAILED
 
 
-def _patch_recipe_delta(result: Mapping[str, Any], declared: Mapping[str, Any]) -> dict[str, Any]:
+def _patch_recipe_delta(result: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "remove_args": to_str_list(declared.get("remove_args")),
-        "unset_envs": to_str_list(declared.get("unset_envs")),
-        "args_mode": str(result.get("args_mode") or declared.get("args_mode") or "append").strip().lower(),
+        "remove_args": to_str_list(result.get("remove_args")),
+        "unset_envs": to_str_list(result.get("unset_envs")),
+        "args_mode": str(result.get("args_mode") or "append").strip().lower(),
     }
+
+
+def _kept_launch_controls(result: Mapping[str, Any], measurement: Mapping[str, Any]) -> dict[str, Any]:
+    """The removal controls a KEEP launched with and the args the bench composed with them, as an explore KEEP lifts.
+
+    The previous args still hold what was removed, so the lift must not merge the candidate onto them."""
+    controls = {key: result[key] for key in LAUNCH_CONTROL_KEYS if result.get(key)}
+    if not controls:
+        return {}
+    return {**controls, "extra_server_args": str(measurement["effective_config"]["extra_server_args"])}
 
 
 def _integrate_keep_origin(
@@ -192,7 +203,8 @@ def _integrate_keep_variant(
         "task_id": getattr(task, "task_id", "") if task is not None else "",
         "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "candidate_extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "recipe_delta": _patch_recipe_delta(result, task_params),
+        "recipe_delta": _patch_recipe_delta(result),
+        **_kept_launch_controls(result, measurement),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
         "tput": tput,
         **integrate_measurement_fields(measurement),
