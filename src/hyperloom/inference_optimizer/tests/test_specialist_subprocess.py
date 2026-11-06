@@ -2198,3 +2198,27 @@ def test_the_harvest_still_works_on_an_untouched_worktree(tmp_path: Path):
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
     assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt)
     assert len(worktree_head(wt)) == 40
+
+
+def test_the_harvest_does_not_run_git_in_a_repository_a_child_nested_in_the_worktree(tmp_path: Path):
+    """The child's ``.gitmodules`` asks for the nested repository to be checked; its filter must still not run."""
+    _base, wt = _make_git_worktree_pair(tmp_path)
+    marker = tmp_path / "executed"
+    nested = wt / "vendored"
+    nested.mkdir()
+    (nested / "f.txt").write_text("a\n", encoding="utf-8")
+    planted = f"""set -e
+cd {nested}
+git init -q . && git add -A && git -c user.email=a@b -c user.name=t commit -qm nested
+git config filter.inner.clean "sh -c 'touch {marker}; cat'"
+echo '* filter=inner' > .gitattributes
+echo b > f.txt
+printf '[submodule "vendored"]\\n\\tpath = vendored\\n\\turl = ./vendored\\n\\tignore = none\\n' > {wt}/.gitmodules
+"""
+    subprocess.run(["/bin/sh", "-c", planted], check=True, capture_output=True)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+
+    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt)
+
+    assert not marker.exists()
+    assert "+new = 2" in diff

@@ -1239,7 +1239,7 @@ class SpecialistSubprocessDispatcher:
 
         pathspec = SpecialistSubprocessDispatcher._harvest_pathspec(targets)
         _git("add", "-A", "-N", "--", *pathspec)
-        diff = _git("diff", "--no-ext-diff", "--no-textconv", base, "--", *pathspec)
+        diff = _git("diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", base, "--", *pathspec)
         if diff is None or diff.returncode != 0 or not diff.stdout.strip():
             return ""
         if patch_is_annotation_only(diff.stdout, worktree, reverse=True):

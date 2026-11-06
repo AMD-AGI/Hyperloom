@@ -27,7 +27,19 @@ _NO_PROGRAMS = (
     "core.attributesFile=/dev/null",
     "-c",
     "core.pager=cat",
+    "-c",
+    "core.sshCommand=false",
+    "-c",
+    "protocol.ext.allow=never",
+    # A repository nested in the tree is another config: git checks it for local changes by running git in it.
+    "-c",
+    "diff.ignoreSubmodules=dirty",
 )
+# A filter driver has a free-form name that any in-tree .gitattributes can apply to any path, so no fixed pin covers
+# one: each driver the repository's config defines is blanked by name, and git runs no filter whose programs are empty.
+_FILTER_PROGRAMS = ("clean", "smudge", "process")
+_FILTER_KEYS = rf"^filter\..*\.({'|'.join(_FILTER_PROGRAMS)})$"
+_NO_SUCH_KEY = 1  # git config's exit status when no key matches
 
 
 def _app_owned_dir(path: Path) -> None:
@@ -73,11 +85,39 @@ def worktree_head(worktree: Path | None) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
+def _blank_filter_drivers(git: list[str], worktree: Path, env: dict[str, str], timeout: float) -> list[str]:
+    """The ``-c filter.<name>.<program>=`` pairs that blank every filter driver the config ``git`` reads defines.
+
+    Raises:
+        OSError: The config could not be read, or names a driver ``-c`` cannot address (its name holds ``=``).
+    """
+    done = subprocess.run(
+        [*git, "config", "--null", "--name-only", "--get-regexp", _FILTER_KEYS],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    if done.returncode not in (0, _NO_SUCH_KEY):
+        raise OSError(errno.EIO, f"git config: {os.fsdecode(done.stderr).strip()}", str(worktree))
+    names = {os.fsdecode(key).rpartition(".")[0].partition(".")[2] for key in done.stdout.split(b"\0") if key}
+    if any("=" in name for name in names):
+        raise OSError(errno.EINVAL, "a filter driver name holds '=', which git -c cannot override", str(worktree))
+    return [
+        arg for name in sorted(names) for program in _FILTER_PROGRAMS for arg in ("-c", f"filter.{name}.{program}=")
+    ]
+
+
 def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
 
+    No program the repository's config names runs: the pinned options, and every configured filter driver blanked.
+    A ``.gitmodules`` in the tree outranks the ``diff.ignoreSubmodules`` pin, so a ``diff`` or ``status`` over a tree an
+    agent writes also passes ``--ignore-submodules=dirty``.
+
     Raises:
-        OSError: The worktree's git metadata is not the app's (nothing was run).
+        OSError: The worktree's git metadata is not the app's, or its config cannot be neutralized (nothing was run).
     """
     admin = trusted_admin_dir(worktree)
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -87,7 +127,7 @@ def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -
         GIT_ATTR_NOSYSTEM="1",
         GIT_TERMINAL_PROMPT="0",
     )
-    argv = [
+    git = [
         "git",
         "--no-pager",
         "--git-dir",
@@ -99,8 +139,8 @@ def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -
         "-c",
         f"safe.directory={admin}",
         *_NO_PROGRAMS,
-        *args,
     ]
+    argv = [*git, *_blank_filter_drivers(git, worktree, env, timeout), *args]
     return subprocess.run(argv, cwd=worktree, env=env, capture_output=True, text=True, timeout=timeout, check=False)
 
 
