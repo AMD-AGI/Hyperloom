@@ -14,7 +14,7 @@ from hyperloom_common.coerce import first_str, first_text, to_float, to_list, to
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args, merge_server_args
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
-from ..actions.executors._proposal_identity import content_fingerprint, controls_of, normalize_proposal
+from ..actions.executors import controls_of, normalize_proposal
 from ..specialists.profile import is_authoring_specialist
 from ..state.task_registry import TaskSpec
 from .framework_records import (
@@ -386,10 +386,18 @@ class _CandidateDiscoveryMixin:
         Different upstream PRs often reduce to the same server args / envs, so
         the ledger is keyed by content fingerprint rather than by PR.
         """
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+
         try:
             from hyperloom.agents.framework.kb import read_pr_ledger
 
-            fingerprint = content_fingerprint(config_levers)
+            fingerprint = canonical_fingerprint(
+                config_levers.get("extra_server_args"),
+                config_levers.get("extra_envs"),
+                remove_args=config_levers.get("remove_args"),
+                unset_envs=config_levers.get("unset_envs"),
+                args_mode=config_levers.get("args_mode", "append"),
+            )
             for rec in read_pr_ledger():
                 if str(rec.get("applicability") or "") != fingerprint:
                     continue

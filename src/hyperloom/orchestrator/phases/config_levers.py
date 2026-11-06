@@ -12,7 +12,7 @@ from typing import Any
 from hyperloom_common.coerce import to_mapping
 from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 
-from ..actions.executors._proposal_identity import controls_of, normalize_proposal
+from ..actions.executors import controls_of, normalize_proposal
 
 log = logging.getLogger(__name__)
 
