@@ -25,7 +25,9 @@ ARG BWRAP_BUILD_IMAGE=alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfac
 ARG BASE_IMAGE=busybox:1.37
 
 FROM ${BWRAP_BUILD_IMAGE} AS bwrap
-# Upgrading means changing both: the build stops when the tarball does not match the checksum.
+# Upgrading means changing both: the build stops when the tarball does not match the checksum. The build tools
+# come from Alpine's signed package index and are not version-pinned: Alpine drops superseded builds from its
+# mirrors, so a pin would break the build at the next security update.
 ARG BWRAP_VERSION=0.13.1
 ARG BWRAP_SHA256=0e85c8702248b8dd64144f594147553650cdd0e4c951690345faace79c217c4d
 RUN set -eux; \
