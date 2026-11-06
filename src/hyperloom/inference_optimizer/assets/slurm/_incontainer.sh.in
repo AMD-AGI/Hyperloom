@@ -48,8 +48,9 @@ cd "$REPO_ROOT"
 # 4) install optimizer + components on top of the image's /opt/venv ROCm stack.
 #    NOTE: post tree-reform (src-layout) the installer lives under assets/.
 bash src/hyperloom/inference_optimizer/assets/install.sh
-# The file install.sh just wrote, on this container's own disk (runtime_env.sh decides where).
-. "$(. src/hyperloom/inference_optimizer/assets/runtime_env.sh; runtime_env_kernel_agent_env_path)"
+# The file install.sh just wrote, on this container's own disk (runtime_env.sh decides where, and
+# refuses one that is missing or that another account could have written: the job stops there).
+kernel_agent_env_file="$(. src/hyperloom/inference_optimizer/assets/runtime_env.sh; runtime_env_kernel_agent_env_path)" || exit 1; . "$kernel_agent_env_file"
 
 RUN_DIR="$USER_DATA_PATH/optimizer_runs"; mkdir -p "$RUN_DIR"
 LAUNCH_INFO_FILE="$RUN_DIR/launch_${CLAW_SESSION_ID}.json"
