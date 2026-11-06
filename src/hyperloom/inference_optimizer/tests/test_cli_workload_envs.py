@@ -110,6 +110,25 @@ def test_resolve_workload_knobs_resume_explicit_flag_overrides_state():
     assert a.isl == 4096  # unset -> restored from state
 
 
+@pytest.mark.parametrize(
+    ("flags", "env", "state", "expected"),
+    [
+        ({}, {}, None, (None, None)),
+        ({"tp": 8}, {}, None, (8, None)),
+        ({}, {"TP": "4", "EP": "2"}, None, (4, 2)),
+        ({}, {}, SimpleNamespace(tp=8, ep=8), (None, None)),
+    ],
+)
+def test_resolve_workload_knobs_keeps_only_the_operator_topology(monkeypatch, flags, env, state, expected):
+    """A flag or pin is the operator's topology; a default or a recorded value leaves it open for the recipe."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    a = _knob_ns(**flags)
+    _resolve_workload_knobs(a, state)
+    assert (a.operator_tp, a.operator_ep) == expected
+    assert a.tp == (expected[0] or getattr(state, "tp", 1))
+
+
 def test_framework_script_mismatch_fails_fast(tmp_path):
     """vllm framework + sglang script must raise before server boot."""
     src = tmp_path / "cfg.yaml"

@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared model-path resolution: a ``--model`` value -> a local model directory."""
+"""Shared model-path resolution: a ``--model`` value -> a local model directory, or the HF repo id it names."""
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,33 @@ def _is_hf_repo_id(raw: str) -> bool:
     if len(parts) != 2:
         return False
     return all(p and not p.startswith(".") for p in parts)
+
+
+def _config_repo_id(model_dir: Path) -> str | None:
+    try:
+        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    name = config.get("_name_or_path") if isinstance(config, dict) else None
+    return name if isinstance(name, str) and _is_hf_repo_id(name) and not Path(name).exists() else None
+
+
+def hf_repo_id(model: str | Path | None) -> str | None:
+    """The Hugging Face ``org/repo`` id ``model`` names, spelled as it is given; ``None`` when it names none.
+
+    A value that is no local directory names the id itself; a local checkpoint names it in its HF cache path or in
+    its ``config.json``'s ``_name_or_path``.
+    """
+    raw = ("" if model is None else str(model)).strip().rstrip("/")
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_dir():
+        return raw if _is_hf_repo_id(raw) and not raw.startswith("~") else None
+    cached = next((_identity_leaf(part) for part in path.parts if part.startswith("models--")), None)
+    if cached is not None:
+        return cached if _is_hf_repo_id(cached) else None
+    return _config_repo_id(path)
 
 
 def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[str]]:
