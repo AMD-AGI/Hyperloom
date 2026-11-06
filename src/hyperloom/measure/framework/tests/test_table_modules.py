@@ -11,13 +11,24 @@ tables below ``configs`` and a per-model table below ``configs/model_configs``. 
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
+from hyperloom.measure.framework.base import framework_envs
+from hyperloom.measure.framework.copies import private_framework
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
-from hyperloom.measure.framework.table_modules import named_table_modules, stale_table_modules, table_modules
+from hyperloom.measure.framework.table_modules import (
+    _shares_a_key,
+    named_table_modules,
+    stale_table_modules,
+    table_modules,
+)
+from hyperloom.measure.socket import TestCall
 
 A8W8, BPRESHUFFLE = "AITER_CONFIG_GEMM_A8W8", "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"
 GEMM, BLOCK, OPUS, TUNE = (
@@ -138,6 +149,196 @@ def test_a_variable_set_to_the_images_default_and_per_model_tables_by_path_makes
     environment = {BPRESHUFFLE: ":".join(str(path) for path in listed)}
 
     assert stale_table_modules(CONFIG, image, image, [environment]) == frozenset()
+
+
+#: Three more per-model tables of the bpreshuffle variable, so the order they are listed in can differ from the sorted one.
+MODEL_TABLES = {
+    f"configs/model_configs/{name}_a8w8_blockscale_bpreshuffle_tuned_gemm.csv": f"M,N,K,kernelName\n{m},5,6,bp_{name}\n"
+    for m, name in ((7, "glm5"), (8, "kimi"), (9, "qwen"))
+}
+
+
+def _listing(paths: list[Path]) -> str:
+    return os.pathsep.join(str(path) for path in paths)
+
+
+def test_the_images_tables_listed_in_another_order_make_nothing_stale(tmp_path) -> None:
+    image = _package(tmp_path / "image" / "aiter", MODEL_TABLES)
+    copies = tmp_path / "copies"
+    shutil.copytree(image / "configs", copies)
+    tuned = (copies / "model_configs").glob("*_a8w8_blockscale_bpreshuffle_tuned_gemm.csv")
+    models = sorted((path for path in tuned if "untuned" not in path.name), reverse=True)
+    reordered = {BPRESHUFFLE: _listing([copies / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv", *models])}
+    one_left_out = {BPRESHUFFLE: _listing([copies / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv", *models[1:]])}
+
+    assert stale_table_modules(CONFIG, image, image, [reordered]) == frozenset()
+    assert stale_table_modules(CONFIG, image, image, [one_left_out]) == {BLOCK, OPUS}, "other content stays stale"
+
+
+def test_the_private_copies_a_test_is_redirected_to_make_nothing_stale_whatever_order_the_directory_lists(
+    tmp_path, monkeypatch
+) -> None:
+    """The real redirect: the session's snapshot of the image's tables, and the value ``private_framework`` gives the
+    server for a variable the test leaves unset, its private copies in the order the shared directory listed them."""
+    for name in [name for name in os.environ if name.startswith(("AITER_CONFIG_", "HYPERLOOM_FRAMEWORK_"))]:
+        monkeypatch.delenv(name)
+    image = _package(tmp_path / "image" / "aiter", MODEL_TABLES)
+    for name, value in framework_envs(tmp_path / "framework", str(image / "configs")).items():
+        monkeypatch.setenv(name, value)
+    manifest = tmp_path / "framework" / "snapshot.json"
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["model_order"] = sorted(document["model_order"], reverse=True)  # as an ext4 or overlay directory may list
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    point = tmp_path / "point.yaml"
+    point.write_text(yaml.safe_dump({"benchmark": {"envs": {"TP": 1}}}), encoding="utf-8")
+    call = TestCall(
+        points=(point,), output_dir=tmp_path / "out", timeout_sec=60, cwd=str(tmp_path), magpie_python="", task_id="t1"
+    )
+
+    with private_framework(call) as private:
+        served = dict(private.call.env_overrides)
+        listed = [Path(part).name for part in served[BPRESHUFFLE].split(os.pathsep)]
+        judged = stale_table_modules(CONFIG, image, image, [served])
+
+    assert listed[1:] == sorted(listed[1:], reverse=True), "the server is told the copies in the directory's order"
+    assert judged == frozenset()
+
+
+def _merge_order(models: Path, pattern: str) -> list[Path]:
+    """The per-model tables below ``models`` that ``pattern`` matches, in the order the directory lists them."""
+    return [path for path in models.glob(pattern) if "untuned" not in path.name]
+
+
+def test_the_images_tables_with_one_changed_under_its_own_name_are_other_tables(tmp_path) -> None:
+    """The same names and as many files, one of them holding another kernel: compared by content, not by name."""
+    image = _package(tmp_path / "image" / "aiter", MODEL_TABLES)
+    copies = tmp_path / "copies"
+    shutil.copytree(image / "configs", copies)
+    models = sorted(_merge_order(copies / "model_configs", "*_a8w8_blockscale_bpreshuffle_tuned_gemm.csv"))
+    environment = {BPRESHUFFLE: _listing([copies / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv", *models])}
+    unchanged = stale_table_modules(CONFIG, image, image, [environment])
+    kimi = copies / "model_configs" / "kimi_a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+    kimi.write_text(kimi.read_text(encoding="utf-8").replace("bp_kimi", "bp_kimx"), encoding="utf-8")
+
+    assert unchanged == frozenset()
+    assert stale_table_modules(CONFIG, image, image, [environment]) == {BLOCK, OPUS}, "same names, same count"
+
+
+def test_the_same_table_listed_twice_is_not_the_table_listed_once(image) -> None:
+    default = image / "configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+    dsv3 = image / "configs/model_configs/dsv3_a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+
+    assert stale_table_modules(CONFIG, image, image, [{BPRESHUFFLE: _listing([default, dsv3, dsv3])}]) == {BLOCK, OPUS}
+
+
+def test_a_listed_table_that_is_not_a_file_is_left_out_as_aiter_leaves_it_out(tmp_path, image) -> None:
+    default = image / "configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+    dsv3 = image / "configs/model_configs/dsv3_a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+    environment = {BPRESHUFFLE: _listing([default, tmp_path / "missing.csv", dsv3])}
+
+    assert stale_table_modules(CONFIG, image, image, [environment]) == frozenset()
+
+
+#: A GEMM table's columns: the shape a generator keys a row by, ``q_dtype_w`` that aiter's merge keys a row by as well,
+#: the libtype a generator may keep the rows of, and the kernel.
+SHAPE_HEADER = "gfx,cu_num,M,N,K,q_dtype_w,libtype,kernelId,kernelName\n"
+
+
+def _one_shape(variable: str, tuned: str, kinds: tuple[str, str]) -> dict[str, str | None]:
+    """``variable``'s default table (``tuned``) and two per-model tables (glm5, kimi) holding one shape with another
+    ``q_dtype_w`` and kernel, of the libtypes ``kinds``: aiter's merge takes both rows, and a generator that keys by the
+    shape compiles the kernel of the row merged last."""
+    first, second = kinds
+    return {
+        f"configs/{tuned}.csv": SHAPE_HEADER + f"gfx950,256,16,1536,5120,torch.float8_e4m3fn,{first},2,{variable}_k2\n",
+        f"configs/model_configs/glm5_{tuned}.csv": SHAPE_HEADER
+        + f"gfx950,256,64,1536,5120,torch.float8_e4m3fn,{first},0,{variable}_k0\n",
+        f"configs/model_configs/kimi_{tuned}.csv": SHAPE_HEADER
+        + f"gfx950,256,64,1536,5120,torch.float8_e4m3fnuz,{second},1,{variable}_k1\n",
+    }
+
+
+#: The bpreshuffle variable's per-model table of the shared fixture, left out where the key matters: of its columns it has
+#: only M, N and K, and a key is cut to the columns every table with rows has.
+DSV3 = "configs/model_configs/dsv3_a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+
+
+def test_tables_that_hold_one_shape_count_in_the_order_aiter_merges_them(tmp_path, monkeypatch) -> None:
+    """The image's directory lists its per-model tables against their names here; aiter merges them in that order."""
+    listing = Path.glob
+    monkeypatch.setattr(Path, "glob", lambda self, *a, **k: iter(sorted(listing(self, *a, **k), reverse=True)))
+    tables = _one_shape("bp", "a8w8_blockscale_bpreshuffle_tuned_gemm", ("ck", "ck"))
+    image = _package(tmp_path / "image" / "aiter", {**tables, DSV3: None})
+    default = image / "configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+    glm5, kimi = (
+        image / "configs/model_configs" / f"{name}_a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+        for name in ("glm5", "kimi")
+    )
+    as_the_image = {BPRESHUFFLE: _listing([default, kimi, glm5])}
+    by_name = {BPRESHUFFLE: _listing([default, glm5, kimi])}
+
+    assert stale_table_modules(CONFIG, image, image, [as_the_image]) == frozenset()
+    assert stale_table_modules(CONFIG, image, image, [by_name]) == {BLOCK, OPUS}, "the other row is merged last"
+
+
+@pytest.mark.parametrize("content", ["", "\n", "M,N,K,kernelName\n"], ids=["empty", "blank-line", "short-header"])
+def test_a_table_without_rows_shares_no_key_whatever_its_header(tmp_path, content) -> None:
+    """aiter merges a header-only table with fewer columns than the others; its missing key columns hold no row."""
+    header = "gfx,cu_num,M,N,K,libtype,kernelName\n"
+    first, second, bare = tmp_path / "first.csv", tmp_path / "second.csv", tmp_path / "bare.csv"
+    first.write_text(header + "gfx950,256,64,1536,5120,ck,a\n")
+    second.write_text(header + "gfx950,256,128,1536,5120,ck,b\n")
+    bare.write_text(content)
+    key = ("gfx", "cu_num", "M", "N", "K", "libtype")
+
+    assert _shares_a_key([str(first), str(second), str(bare)], [key]) is False
+    second.write_text(header + "gfx950,256,64,1536,5120,ck,b\n")
+    assert _shares_a_key([str(first), str(bare), str(second)], [key]) is True
+
+
+def test_rows_of_another_libtype_hold_no_shape_of_a_generator_that_keeps_one_libtype(tmp_path) -> None:
+    """``ck_gemm_a8w8_blockscale_bpreshuffle`` keeps the ``ck`` rows; ``ck_gemm_a8w8`` keeps every row."""
+    tables = {
+        **_one_shape("bp", "a8w8_blockscale_bpreshuffle_tuned_gemm", ("ck", "cktile")),
+        **_one_shape("a8w8", "a8w8_tuned_gemm", ("ck", "cktile")),
+    }
+    image = _package(tmp_path / "image" / "aiter", {**tables, DSV3: None})
+    configs = image / "configs"
+    reversed_bp = [
+        configs / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
+        *reversed(_merge_order(configs / "model_configs", "*a8w8_blockscale_bpreshuffle_tuned_gemm*.csv")),
+    ]
+    reversed_a8w8 = [
+        configs / "a8w8_tuned_gemm.csv",
+        *reversed(_merge_order(configs / "model_configs", "*a8w8_tuned_gemm*.csv")),
+    ]
+
+    assert stale_table_modules(CONFIG, image, image, [{BPRESHUFFLE: _listing(reversed_bp)}]) == frozenset()
+    assert stale_table_modules(CONFIG, image, image, [{A8W8: _listing(reversed_a8w8)}]) == {GEMM}
+
+
+def test_tables_a_generator_not_known_reads_count_in_their_order_whatever_rows_they_hold(tmp_path) -> None:
+    config = {
+        **CONFIG,
+        "module_new": {
+            "blob_gen_cmd": "f'{AITER_CSRC_DIR}/new_gemm/gen_instances.py --working_path {{}} "
+            "--tune_file {AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE}'"
+        },
+    }
+    image = _package(tmp_path / "image" / "aiter", MODEL_TABLES)
+    configs = image / "configs"
+    models = _merge_order(configs / "model_configs", "*a8w8_blockscale_bpreshuffle_tuned_gemm*.csv")
+    default = configs / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+
+    assert stale_table_modules(config, image, image, [{BPRESHUFFLE: _listing([default, *models])}]) == frozenset()
+    assert stale_table_modules(config, image, image, [{BPRESHUFFLE: _listing([default, *reversed(models)])}]) == {
+        BLOCK,
+        OPUS,
+        "module_new",
+    }
+    assert stale_table_modules(CONFIG, image, image, [{BPRESHUFFLE: _listing([default, *reversed(models)])}]) == (
+        frozenset()
+    ), "the generators known here hold no shape of these tables twice"
 
 
 def test_a_patch_to_a_default_table_makes_the_modules_of_its_variable_stale(tmp_path, image) -> None:
