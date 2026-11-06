@@ -61,9 +61,9 @@ LAYER_PROBE = BwrapProbe("/opt/layer/bin/bwrap", (0, 13, 1), ())
 SPECIALIST_WHY = (f"running them as an account: {SPECIALIST_USER_ENV} is not set", "no bwrap")
 #: A shell line that prints whether it can read this test process's environment, as an unconfined command can.
 REACHES = "if cat /proc/{pid}/environ >/dev/null 2>&1; then echo reached; else echo fenced; fi"
-#: Why an agent or dev sandbox on this host runs unconfined, as the sandbox chooser says it.
+#: Why a sandbox on this host runs unconfined, as the choosers say it.
 SANDBOX_WHY = ("running them as an account: an agent sandbox runs its commands as the app's own account", "no bwrap")
-#: Why a test on this host runs unconfined, as the test chooser says it.
+#: Why a test on this host runs unconfined, as the choosers say it.
 TEST_WHY = ("running them as an account: a test sandbox runs as the app's own account", "no bwrap")
 
 

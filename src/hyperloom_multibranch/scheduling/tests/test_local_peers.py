@@ -68,10 +68,7 @@ from hyperloom_multibranch.scheduling.hosted_peers import HostedSandboxes
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
 from hyperloom_multibranch.scheduling import local_peers as local_peers_module
-from hyperloom_multibranch.scheduling.launch_isolation import (
-    HOSTED,
-    launch_isolation,
-)
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, launch_isolation
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
     AGENTX_OUTSIDE_TRACE_SEC,
