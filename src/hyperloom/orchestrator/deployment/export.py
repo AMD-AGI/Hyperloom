@@ -220,7 +220,9 @@ def _build(session: Path, state: dict, dest: Path) -> dict:
         # Fail closed: the module is the whole deliverable, so exporting it unverified
         # would ship bytes nothing proves were benchmarked.
         if scope.file.name not in _verify_accepted_source(state, root):
-            raise ValueError(f"No accepted source snapshot covers {scope.file.name}; nothing proves what was benchmarked")
+            raise ValueError(
+                f"No accepted source snapshot covers {scope.file.name}; nothing proves what was benchmarked"
+            )
         return build_single_file(state, root, scope, dest)
     contract = _read_contract(root)
     best = state.get("current_best") or {}
