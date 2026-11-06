@@ -230,7 +230,7 @@ end-to-end validation of every stack.
      - Notes
    * - Operating System
      - Ubuntu 24.04
-     - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1``) or use ``docker`` mode instead.
+     - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1 VLLM_ROCM_VARIANT=rocm723``) or use ``docker`` mode instead.
    * - ROCm
      - 7.2.x or 10.0 (bare metal) / 10.0 (docker)
      - Patch levels differ by framework and setup mode. On ROCm 7.2.x, vLLM installs the ROCm 7.2 wheel (``rocm72``); on ROCm 10.0, vLLM is built from source. On a ROCm 7.2.x bare-metal host, SGLang resolves ``SGLANG_ROCM_EXTRA=rocm724`` (ROCm 7.2.4 layer). The validated ``docker`` stacks use ROCm 10.0 user space (``rocm10`` images above), not the 7.2.x bare-metal wheel paths.

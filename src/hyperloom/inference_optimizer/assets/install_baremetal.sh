@@ -1133,10 +1133,10 @@ assert_vllm_glibc_compatible() {
   vllm_version_requires_glibc_239 || return 0
   local glibc="${1:-$(host_glibc_version)}"
   if [ -z "$glibc" ]; then
-    die "cannot detect host glibc; vLLM ${VLLM_VERSION} requires glibc >= 2.39. Use docker mode or set VLLM_VERSION=0.27.1 on older hosts."
+    die "cannot detect host glibc; vLLM ${VLLM_VERSION} requires glibc >= 2.39. Use docker mode or set VLLM_VERSION=0.27.1 and VLLM_ROCM_VARIANT=rocm723 on older hosts."
   fi
   if ! _version_ge "$glibc" "2.39"; then
-    die "vLLM ${VLLM_VERSION} requires glibc >= 2.39 (host has ${glibc}). Use docker mode or set VLLM_VERSION=0.27.1 before running setup."
+    die "vLLM ${VLLM_VERSION} requires glibc >= 2.39 (host has ${glibc}). Use docker mode or set VLLM_VERSION=0.27.1 and VLLM_ROCM_VARIANT=rocm723 before running setup."
   fi
 }
 
