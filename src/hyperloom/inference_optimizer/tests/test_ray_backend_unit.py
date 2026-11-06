@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 import yaml
 
+from hyperloom.common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors import _ray_backend as rb
 from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 from hyperloom.orchestrator.actions.executors import _ray_serving as rs
@@ -743,6 +744,40 @@ def test_a_round_left_running_by_a_dead_actor_is_stopped_before_the_lease_report
         if orphaning.spawned is not None and orphaning.spawned.poll() is None:
             orphaning.spawned.kill()
             orphaning.spawned.wait()
+
+
+class _RunsTheRound(_FakeMethod):
+    """The actor's real round body, run in this process."""
+
+    def remote(self, *a, **kw):
+        super().remote(*a, **kw)
+        return rb._run_subprocess_worker(a[0])
+
+
+def test_a_server_a_round_leaves_running_outlives_the_round(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """A ``cleanup: false`` round leaves its setsid'd server up for the next round of the same arm to reuse."""
+    monkeypatch.setitem(sys.modules, "ray", _LeaseFakeRay())
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor(None)
+    lease._actor.run_blocking = _RunsTheRound(None)
+    pidfile = tmp_path / "server.pid"
+    launch = (
+        "import subprocess; p = subprocess.Popen(['sleep', '60'], start_new_session=True); "
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))"
+    )
+    env = {k: v for k, v in os.environ.items() if k != REAP_MARK_ENV}
+
+    rc, _out, _err = lease.run_session_kill(rb.SessionKillRound([sys.executable, "-c", launch], env=env, timeout=30))
+
+    server = int(pidfile.read_text())
+    try:
+        time.sleep(0.5)
+        assert rc == 0
+        stat = Path(f"/proc/{server}/stat")
+        assert stat.exists() and stat.read_text().split()[2] != "Z", "the round's teardown reaped the server"
+    finally:
+        with suppress(ProcessLookupError):
+            os.kill(server, signal.SIGKILL)
 
 
 def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pytest.MonkeyPatch):
