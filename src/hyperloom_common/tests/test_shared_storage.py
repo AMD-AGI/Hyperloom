@@ -239,32 +239,47 @@ try:
     os.chown(made, -1, {group})
 except OSError as exc:
     seen["chgrp"] = errno.errorcode[exc.errno]
-seen["probe"] = writable_problems({{"SHARED": shared, "THEIRS": shared / "theirs"}})
+seen["probe"] = writable_problems({{"SHARED": shared, "THEIRS": shared / "theirs", "CLOSED": shared / "closed"}})
 print(json.dumps(seen))
 """
 
+_OTHER_ACCOUNTS_DIRECTORIES = """
+from pathlib import Path
+from hyperloom_common.shared_storage import make_shared_dirs
+make_shared_dirs(Path({theirs!r}))
+Path({closed!r}).mkdir()
+"""
 
-def test_in_a_single_id_user_namespace_the_helper_still_makes_the_groups_2775_and_664(tmp_path):
+
+@pytest.mark.parametrize("container", ["maps written from outside", "unshare --user --map-root-user"])
+def test_in_a_single_id_user_namespace_the_helper_still_makes_the_groups_2775_and_664(tmp_path, container):
+    """The container's root is one host account and nothing else is mapped: the maps a container runtime writes for an
+    account, or the ones ``unshare --user --map-root-user`` writes for root."""
     with other_accounts() as accounts:
         shared = accounts.shared_dir("shared")
-        theirs = shared / "theirs"
-        accounts.run(
-            accounts.second,
-            f"from hyperloom_common.shared_storage import make_shared_dirs\nmake_shared_dirs({str(theirs)!r})",
-        )
+        theirs, closed = shared / "theirs", shared / "closed"
+        accounts.run(accounts.second, _OTHER_ACCOUNTS_DIRECTORIES.format(theirs=str(theirs), closed=str(closed)))
 
         code = _IN_THE_CONTAINER.format(shared=str(shared), group=accounts.group)
-        seen = json.loads(accounts.run_in_single_id_namespace(accounts.first, code, umask=0o022))
+        if container == "maps written from outside":
+            host_uid, root_seen_as = accounts.first, 65534
+            seen = json.loads(accounts.run_in_single_id_namespace(accounts.first, code, umask=0o022))
+        else:
+            host_uid, root_seen_as = 0, 0
+            seen = json.loads(accounts.run_as_root_in_single_id_namespace(code, umask=0o022))
 
         overflow = 65534
         assert seen["ids"] == [0, 0, [overflow]], "the container's root, its group unmapped"
-        assert seen["root"] == [overflow, overflow], "every other account's directory shows as the overflow ids"
+        assert seen["root"] == [root_seen_as, overflow], "an unmapped owner or group shows as the overflow id"
         assert seen["inside"] == [[0, overflow], [0, overflow]]
         assert seen["chgrp"] == "EINVAL", "the group cannot even be named inside: only a setgid parent can give it"
-        assert seen["probe"] == [], "another account's directory is written by a real write, not judged by its owner"
+        assert seen["probe"] == [f"CLOSED {closed}: EACCES (owner {overflow}:{overflow} 2755)"], (
+            "another account's directory is judged by a real write, not by its owner: the group's one is written, the "
+            "one without group write is refused even to the container's root"
+        )
         made = shared / "from-the-container"
         for path, mode in ((made, 0o2775), (made / "x", 0o2775), (made / "x" / "f.txt", 0o664)):
-            assert (_mode(path), path.stat().st_uid, path.stat().st_gid) == (mode, accounts.first, accounts.group)
+            assert (_mode(path), path.stat().st_uid, path.stat().st_gid) == (mode, host_uid, accounts.group)
 
 
 def test_the_helper_needs_nothing_but_the_standard_library():
