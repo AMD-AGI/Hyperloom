@@ -8,23 +8,28 @@ from __future__ import annotations
 import enum
 
 __all__ = [
+    "DEAD_HOLDER_ERROR_CLASS",
     "SpecialistFailureType",
     "classify_specialist_failure",
 ]
+
+#: ``error_class`` of a run whose holder process died before it reported a result.
+DEAD_HOLDER_ERROR_CLASS = "dead_holder_reaped"
 
 
 class SpecialistFailureType(str, enum.Enum):
     """Coarse failure taxonomy for a finished specialist run.
 
     Only the transient infrastructure members (``TIMEOUT`` /
-    ``STALE_HEARTBEAT`` / ``CRASH``) are retry-eligible; semantic outcomes are
-    left for the orchestrator to act on.
+    ``STALE_HEARTBEAT`` / ``CRASH`` / ``HOLDER_DIED``) are retry-eligible;
+    semantic outcomes are left for the orchestrator to act on.
     """
 
     NONE = "none"  # succeeded
     TIMEOUT = "timeout"  # subprocess wall-clock kill
     STALE_HEARTBEAT = "stale_heartbeat"  # heartbeat went silent (hang)
     CRASH = "crash"  # nonzero exit / backend error
+    HOLDER_DIED = "holder_died"  # holder process gone before the runner returned
     NO_OUTPUT = "no_output"  # ran clean but emitted no done / empty
     CONFIG = "config"  # unknown domain / no workspace
     UNKNOWN = "unknown"
@@ -33,6 +38,8 @@ class SpecialistFailureType(str, enum.Enum):
 def classify_specialist_failure(
     runner_status: str,
     error: str,
+    *,
+    error_class: str = "",
 ) -> tuple[SpecialistFailureType, bool]:
     """Map a :class:`SpecialistRunResult` ``(status, error)`` to a failure
     type + retry-eligibility flag.
@@ -46,10 +53,14 @@ def classify_specialist_failure(
     Args:
         runner_status: The :class:`SpecialistRunResult` status string.
         error: The associated error string (drives sub-classification).
+        error_class: The result's machine-readable failure category; a dead
+            holder has no runner status to classify.
 
     Returns:
         A ``(failure_type, retry_eligible)`` tuple.
     """
+    if error_class == DEAD_HOLDER_ERROR_CLASS:
+        return SpecialistFailureType.HOLDER_DIED, True
     status = (runner_status or "").strip().lower()
     err = (error or "").strip().lower()
     if status == "succeeded":

@@ -416,7 +416,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         Returns ``True`` when a retry was scheduled (the caller must then skip
         this attempt's delegated_result + bookkeeping). Only infra failures
-        (timeout / crash / stale-heartbeat, per ``classify_specialist_failure``)
+        (timeout / crash / stale-heartbeat / dead holder, per ``classify_specialist_failure``)
         are retried, capped at :data:`SPECIALIST_AUTO_RETRY_MAX`; the failure
         reason is injected into the retry prompt. Disabled when
         ``INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY`` is set to ``0``.
@@ -440,7 +440,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # The specialist executor never raises, so the reason lives in the
         # result envelope rather than on SubAgentResult.
         error = str(result.error or result_dict.get("error") or "")
-        ftype, retry_eligible = classify_specialist_failure(runner_status, error)
+        ftype, retry_eligible = classify_specialist_failure(runner_status, error, error_class=result.error_class)
         if not retry_eligible:
             return False
         params = task.params or {}
