@@ -22,6 +22,7 @@ from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
     _QueuedBackend,
     _StaticBackend,
     _context,
+    _critic_answer,
     _definitions,
     _dispatch_payload,
 )
@@ -62,7 +63,7 @@ async def test_plan_revision_turn_cap_uses_non_executable_fallback(
         ),
         definitions={"memory": _definitions()["memory"]},
         plan_critic=PlanCriticAgent(
-            backend=_StaticBackend("VERDICT: REVISE\n\nAdd a canonical comparison."),
+            backend=_StaticBackend(_critic_answer("REVISE", "Add a canonical comparison.")),
             timeout_sec=1,
         ),
     )
@@ -158,7 +159,7 @@ async def test_plan_revision_failure_preserves_critic_in_fallback() -> None:
         ),
         definitions={"memory": _definitions()["memory"]},
         plan_critic=PlanCriticAgent(
-            backend=_StaticBackend("VERDICT: REVISE\n\nAdd a canonical comparison."),
+            backend=_StaticBackend(_critic_answer("REVISE", "Add a canonical comparison.")),
             timeout_sec=1,
         ),
     )
@@ -186,7 +187,7 @@ async def test_synthesis_failure_skips_critic_and_stays_non_executable() -> None
             ),
         ]
     )
-    critic_backend = _StaticBackend("VERDICT: REVISE\n\nThis must not run.")
+    critic_backend = _StaticBackend(_critic_answer("REVISE", "This must not run."))
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -257,8 +258,8 @@ async def test_non_api_format_failure_still_produces_implementer_plan() -> None:
     # One plan, and that is what keeps a round nobody could synthesize out of lane recovery: the loop only recovers a
     # published set of two or more, so a recovered set is always one a synthesis produced.
     assert len(result.optimization_plans) == 1
-    assert orchestration_backend.calls == 2
-    assert any("invalid dispatch JSON" in note for note in result.dispatch_plan.normalization_notes)
+    assert orchestration_backend.calls == 1
+    assert any("dispatch answer unusable" in note for note in result.dispatch_plan.normalization_notes)
 
 
 @pytest.mark.asyncio

@@ -22,14 +22,17 @@ _HOSTED = (
     "hyperloom.hosted",
     "hyperloom.sandbox",
     "hyperloom.measure.hosted",
+    "hyperloom.measure.hosted_log",
+    "hyperloom.measure.jit.publish",
     "hyperloom.measure.sandboxes",
     "hyperloom.measure.consistency",
-    "hyperloom.measure.archive",
+    "hyperloom.measure.consistency_resume",
+    "hyperloom.measure.local",
+    "hyperloom.measure.local_templates",
+    "hyperloom.measure.ruppell_stage",
     "hyperloom.measure.runner",
     "hyperloom_multibranch",
 )
-# Packages that exist only on the multibranch development branch; main must stay self-contained.
-_DEV_ONLY: tuple[str, ...] = ()
 _E2B_OWNER = "hyperloom/sandbox/e2b.py"
 
 
@@ -109,15 +112,6 @@ def test_rule_1_guard_accepts_the_two_sanctioned_imports() -> None:
 def test_rule_2_no_module_imports_a_hosted_implementation_outside_its_owners() -> None:
     problems = [m for p in _main_modules() for m in _hosted_import_violations(str(p.relative_to(_SRC)), p.read_text())]
     assert problems == []
-
-
-def test_rule_2_main_imports_no_package_that_exists_only_on_the_dev_branch() -> None:
-    offenders = []
-    for path in _main_modules():
-        for line, module in _imports(ast.parse(path.read_text())):
-            if _under(module, _DEV_ONLY):
-                offenders.append(f"{path.relative_to(_SRC)}:{line}: {module}")
-    assert offenders == []
 
 
 def test_rule_2_guard_names_the_hosted_module_a_plug_module_imports() -> None:

@@ -91,6 +91,10 @@ def _load_model_max_position_embeddings(model_path: str) -> int | None:
     return None
 
 
+#: Public name for packages outside ``inference_optimizer`` (export only).
+load_model_max_position_embeddings = _load_model_max_position_embeddings
+
+
 def _model_has_dual_chunk_attention(model_path: str) -> bool:
     """Best-effort detect a ``dual_chunk_attention_config`` in config.json."""
     data = load_model_config_dict(model_path)

@@ -5,17 +5,19 @@
 
 from __future__ import annotations
 
+import csv
+import importlib.util
 import logging
 import os
 import re
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from ..evidence import MOE_KEY_FIELDS, MOE_TABLE
-from .referee import CaptureFailed
+from .referee import CaptureFailed, Judgement
 
 log = logging.getLogger(__name__)
 
@@ -43,11 +45,17 @@ MOE_CORRECTNESS_TRIALS = 4
 # rather than approximated.
 SUPPORTED_TABLES = ("bf16_tuned_gemm.csv", MOE_TABLE)
 
+_CSV_ENCODING = "utf-8"
+
+#: Backends whose name is also the ``libtype`` aiter's bf16 table selects them by.
+TORCH = "torch"
+HIPBLASLT = "hipblaslt"
+
 #: The single source for both mandate vocabulary and dispatch validation.
 #: Keeping them together prevents advertised and accepted backends from drifting.
 DENSE_BF16_BACKENDS: dict[str, str] = {
-    "torch": "the unmodified path, `torch.matmul(a, b.t())`. No config. Propose it only as a control.",
-    "hipblaslt": (
+    TORCH: "the unmodified path, `torch.matmul(a, b.t())`. No config. Propose it only as a control.",
+    HIPBLASLT: (
         "`solidx=<int>` (required). Must be an index hipBLASLt itself offers for these exact "
         "operands -- `aiter.hipb_findallsols` after `aiter.hipb_create_extension` is the "
         "authoritative list. An invented index is refused, because running one kills the process."
@@ -191,6 +199,34 @@ def adapters_for(table: str) -> Any | None:
     return None
 
 
+def aiter_table_header(table: str) -> list[str]:
+    """Columns of the installed aiter's own ``configs/<table>``; aiter's reader indexes them by name."""
+    spec = importlib.util.find_spec("aiter")
+    if spec is None or not spec.submodule_search_locations:
+        raise FileNotFoundError(f"aiter is not installed, so the schema of {table} is unknown")
+    path = Path(next(iter(spec.submodule_search_locations))) / "configs" / table
+    with path.open(newline="", encoding=_CSV_ENCODING) as fh:
+        header = [h.strip() for h in next(csv.reader(fh), [])]
+    if not header:
+        raise ValueError(f"{path} has no header")
+    return header
+
+
+def write_aiter_rows(path: Path, header: Sequence[str], rows: list[dict[str, Any]]) -> int:
+    """Write ``rows`` under ``header``, refusing any row that does not fill exactly those columns."""
+    for row in rows:
+        missing = [c for c in header if c not in row]
+        extra = [c for c in row if c not in header]
+        if missing or extra:
+            raise ValueError(f"row does not match {path.name}'s schema: missing {missing}, unexpected {extra}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding=_CSV_ENCODING) as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(header))
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
 def parse_config(cfg: Any) -> dict[str, Any]:
     """``a=1;b=True;c=x`` into a dict, recovering ints and bools."""
     out: dict[str, Any] = {}
@@ -270,7 +306,7 @@ class _FusedMoeAdapter:
         self._in_play: dict[str, dict[str, Any]] = {}
         self._workdir = Path(tempfile.mkdtemp(prefix="forge_tier3_fmoe_"))
         self._baseline_csv = self._workdir / "baseline.csv"
-        self._baseline_csv.write_text(",".join(self._CSV_COLUMNS) + "\n", encoding="utf-8")
+        self._baseline_csv.write_text(",".join(self._CSV_COLUMNS) + "\n", encoding=_CSV_ENCODING)
         self._restore = os.environ.get("AITER_CONFIG_FMOE")
 
     # -- torch and aiter are imported lazily so this stays importable off-GPU --
@@ -458,8 +494,27 @@ class _FusedMoeAdapter:
         return self._torch().cuda.synchronize
 
     # ------------------------------------------------------------ internals --
+    def write_table(self, judgements: list[Judgement], demand_shapes: list[dict[str, Any]], path: Path) -> int:
+        """Write each improved shape's winner as the same row the referee dispatched it through."""
+        rows = []
+        for j in judgements:
+            built = self._candidate_row(j.shape, j.best) if j.improved and j.best else None
+            if built is not None:
+                rows.append(built[0])
+        return write_aiter_rows(path, self._CSV_COLUMNS, rows) if rows else 0
+
     def _candidate_csv(self, shape: str, cand: dict[str, Any]) -> tuple[Path, str, str] | None:
         """Write the candidate as the one row of a tuned-config file."""
+        built = self._candidate_row(shape, cand)
+        if built is None:
+            return None
+        row, kn1, kn2 = built
+        path = self._workdir / "candidate.csv"
+        write_aiter_rows(path, self._CSV_COLUMNS, [row])
+        return path, kn1, kn2
+
+    def _candidate_row(self, shape: str, cand: dict[str, Any]) -> tuple[dict[str, Any], str, str] | None:
+        """The candidate as a row of the tuned-config table, with its kernel pair, or None when it is refused."""
         if str(cand.get("backend", "")) not in FUSED_MOE_BACKENDS:
             log.info("tier3: unknown backend %r in a fused-MoE candidate", cand.get("backend"))
             return None
@@ -501,20 +556,13 @@ class _FusedMoeAdapter:
             "tflops": 0,
             "bw": 0,
         }
-        path = self._workdir / "candidate.csv"
-        path.write_text(
-            ",".join(self._CSV_COLUMNS) + "\n" + ",".join(str(row[c]) for c in self._CSV_COLUMNS) + "\n",
-            encoding="utf-8",
-        )
-        return path, kn1, kn2
+        return row, kn1, kn2
 
     def _gfx(self) -> str:
-        from aiter.jit.core import get_gfx
-
-        return get_gfx()
+        return _device_gfx()
 
     def _cu_num(self) -> int:
-        return int(self._torch().cuda.get_device_properties(0).multi_processor_count)
+        return _device_cu_num()
 
     def _build(self, shape: str, cand: dict[str, Any]) -> Callable[[], Any] | None:
         written = self._candidate_csv(shape, cand)
@@ -640,6 +688,49 @@ def _flydsl_hgemm_call(a: Any, b: Any, cfg: dict[str, Any]) -> Callable[[], Any]
     )
 
 
+def _device_gfx() -> str:
+    from aiter.jit.core import get_gfx
+
+    return get_gfx()
+
+
+def _device_cu_num() -> int:
+    import torch
+
+    return int(torch.cuda.get_device_properties(0).multi_processor_count)
+
+
+#: The only lookup key the dense referee's operands exercise. A row filed under any other key would serve a choice
+#: that was never timed or checked for those dtypes, and a hipBLASLt index valid for one output dtype can kill the
+#: process under another.
+BF16_REFEREE_KEY = {
+    "dtype": "torch.bfloat16",
+    "otype": "torch.bfloat16",
+    "bias": "False",
+    "scaleAB": "False",
+    "bpreshuffle": "False",
+}
+
+
+def bf16_table_solution(cand: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``libtype``/``solidx``/``splitK``/``kernelName`` that make aiter dispatch what ``_build`` timed.
+
+    None for ``aiter_flydsl``: aiter resolves a FlyDSL row by its catalog ``kernelName``, which a tile config does
+    not name.
+    """
+    backend = str(cand.get("backend", ""))
+    cfg = parse_config(cand.get("config", ""))
+    if backend == HIPBLASLT and "solidx" in cfg:
+        return {"libtype": HIPBLASLT, "solidx": int(cfg["solidx"]), "splitK": 0, "kernelName": ""}
+    if backend == "aiter_asm" and cfg.get("kernelName"):
+        return {"libtype": "asm", "solidx": 0, "splitK": cfg.get("splitK", 0), "kernelName": cfg["kernelName"]}
+    if backend == "aiter_opus" and "kernelId" in cfg:
+        return {"libtype": "opus", "solidx": int(cfg["kernelId"]), "splitK": cfg.get("splitK", 1), "kernelName": ""}
+    if backend == TORCH:
+        return {"libtype": TORCH, "solidx": 0, "splitK": 0, "kernelName": ""}
+    return None
+
+
 class _Bf16DenseAdapter:
     """Dispatch, baseline and correctness for row-major bf16 A[M,K] x B[N,K]^T."""
 
@@ -730,6 +821,56 @@ class _Bf16DenseAdapter:
     def sync(self) -> Callable[[], Any]:
         return self._torch().cuda.synchronize
 
+    def write_table(self, judgements: list[Judgement], demand_shapes: list[dict[str, Any]], path: Path) -> int:
+        """Write each improved shape's winner as rows of the installed aiter's ``bf16_tuned_gemm.csv``."""
+        gfx, cu_num = self._gfx(), self._cu_num()
+        rows: list[dict[str, Any]] = []
+        for j in judgements:
+            if not j.improved or j.best is None or j.best_timing is None:
+                continue
+            solution = bf16_table_solution(j.best)
+            if solution is None:
+                log.warning("tier3: %s improved with %s, which no bf16 table row can select", j.shape, j.best)
+                continue
+            m, n, k = shape_key(j.shape)
+            # The referee timed one graph replay of GRAPH_INNER calls; aiter's ``us`` is one call.
+            us = j.best_timing.candidate_us / GRAPH_INNER
+            for demand in demand_shapes:
+                if (int(demand["M"]), int(demand["N"]), int(demand["K"])) != (m, n, k):
+                    continue
+                if any(str(demand.get(f)) != v for f, v in BF16_REFEREE_KEY.items()):
+                    log.warning("tier3: %s won for bf16 operands only; not filing it under %s", j.shape, demand)
+                    continue
+                rows.append(
+                    {
+                        "gfx": gfx,
+                        "cu_num": cu_num,
+                        "M": m,
+                        "N": n,
+                        "K": k,
+                        "bias": demand["bias"],
+                        "dtype": demand["dtype"],
+                        "outdtype": demand["otype"],
+                        "scaleAB": demand["scaleAB"],
+                        "bpreshuffle": demand["bpreshuffle"],
+                        **solution,
+                        "us": us,
+                        # Not measured per element: the row passed the referee's whole-tensor screen instead.
+                        "err_ratio": 0.0,
+                        "tflops": round(2 * m * n * k / us / 1e6, 2),
+                        "bw": round((m * k + n * k + m * n) * 2 / us / 1e3, 2),
+                    }
+                )
+        if not rows:
+            return 0
+        return write_aiter_rows(path, aiter_table_header("bf16_tuned_gemm.csv"), rows)
+
+    def _gfx(self) -> str:
+        return _device_gfx()
+
+    def _cu_num(self) -> int:
+        return _device_cu_num()
+
     # ------------------------------------------------------------ internals --
     def _hipb_solutions(self, key: tuple[int, int, int], a, bt) -> set[int]:
         """Return hipBLASLt solution indices valid for these operands.
@@ -768,10 +909,10 @@ class _Bf16DenseAdapter:
         a, b = self._ops(key)
 
         try:
-            if backend == "torch":
+            if backend == TORCH:
                 return lambda: torch.matmul(a, b.t())
 
-            if backend == "hipblaslt":
+            if backend == HIPBLASLT:
                 sol = cfg.get("solidx")
                 if sol is None:
                     return None

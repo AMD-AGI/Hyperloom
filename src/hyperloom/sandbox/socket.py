@@ -4,7 +4,7 @@
 """The sandbox socket: the protocol every sandbox implementation must satisfy.
 
 The socket is implementation-neutral. The local implementation
-(:mod:`hyperloom.sandbox.local`, which arrives in a later PR) and a hosted one both speak these types, and
+(:mod:`hyperloom.sandbox.local`) and a hosted one both speak these types, and
 callers classify failures by the five exception classes below without knowing
 which implementation is underneath.
 """
