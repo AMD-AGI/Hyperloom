@@ -38,6 +38,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     tokenize_server_args_preserving_json,
     validate_server_args_shell_safe,
 )
+from hyperloom_common.contract_fields import ContractFields
 
 RECIPE_SCHEMA_VERSION = 1
 PATCH_ROOT = "patch"
@@ -96,17 +97,15 @@ class KernelKind(str, Enum):
 
 # --- validation --------------------------------------------------------------------------------------------------
 
-
-def _matching(pattern: re.Pattern[str], value: object, what: str) -> str:
-    if not isinstance(value, str) or not pattern.fullmatch(value):
-        raise RecipeError(f"{what} must match {pattern.pattern}, got {value!r}")
-    return value
-
-
-def _text(value: object, what: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
-        raise RecipeError(f"{what} must be a non-empty string without surrounding whitespace, got {value!r}")
-    return value
+_FIELDS = ContractFields(RecipeError)
+_matching = _FIELDS.matching
+_text = _FIELDS.text
+_string_map = _FIELDS.string_map
+_strings = _FIELDS.strings
+_items = _FIELDS.items
+_mapping = _FIELDS.mapping
+_known = _FIELDS.known
+_unique = _FIELDS.unique
 
 
 def _path(value: object, root: str) -> str:
@@ -136,18 +135,6 @@ def _env_names(names: Iterable[object]) -> None:
             raise RecipeError(f"{name} carries framework arguments; put them in the server arguments")
 
 
-def _string_map(value: object, what: str) -> Mapping[str, str]:
-    if not isinstance(value, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
-        raise RecipeError(f"{what} must map strings to strings, got {value!r}")
-    return value
-
-
-def _strings(value: object, what: str) -> tuple[str, ...]:
-    if isinstance(value, str) or not isinstance(value, Sequence) or not all(isinstance(item, str) for item in value):
-        raise RecipeError(f"{what} must be a list of strings, got {value!r}")
-    return tuple(value)
-
-
 def _option_names(names: Sequence[str], what: str) -> tuple[str, ...]:
     """``names`` as bare long options, sorted and each once, so one launch has one digest."""
 
@@ -157,36 +144,6 @@ def _option_names(names: Sequence[str], what: str) -> tuple[str, ...]:
     if list(names) != sorted(set(names)):
         raise RecipeError(f"{what} must be sorted and unique, got {list(names)!r}")
     return tuple(names)
-
-
-def _items(value: object, what: str) -> tuple[object, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise RecipeError(f"{what} must be a list, got {value!r}")
-    return tuple(value)
-
-
-def _mapping(value: object, what: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise RecipeError(f"{what} must be an object, got {value!r}")
-    return value
-
-
-def _known(value: object, keys: tuple[str, ...], what: str) -> Mapping[str, object]:
-    """``value`` as a mapping of ``keys`` only: a key a writer misspelt would otherwise drop its change unseen."""
-
-    fields = _mapping(value, what)
-    unknown = sorted(str(key) for key in fields if key not in keys)
-    if unknown:
-        plural = "s" if len(unknown) > 1 else ""
-        named = ", ".join(repr(key) for key in unknown)
-        raise RecipeError(f"unknown key{plural} {named} in {what}; known: {', '.join(keys)}")
-    return fields
-
-
-def _unique(values: Sequence[object], what: str) -> None:
-    duplicates = sorted({str(value) for value in values if values.count(value) > 1})
-    if duplicates:
-        raise RecipeError(f"duplicate {what}: {', '.join(duplicates)}")
 
 
 def _unexpressed(entries: tuple[str, ...]) -> None:
