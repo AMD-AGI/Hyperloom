@@ -881,6 +881,48 @@ def test_withheld_cards_come_back_once_what_outlived_the_reap_is_gone(make, monk
     assert provider.release_freed_cards() == (), "cards come back once"
 
 
+def test_withheld_cards_of_a_launcher_that_outlived_its_wait_come_back_through_its_popen(make, monkeypatch) -> None:
+    """A launcher still there after the kill keeps the cards; once it exits they come back, and its ``Popen`` collects
+    it with the status SIGKILL left, never the wait for the zombies of what a reap named."""
+    monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    sb.run("sleep 600", background=True)
+    popens: list[subprocess.Popen[bytes]] = []
+    waited: list[proctree.ProcessId] = []
+    kill_launchers, reap_exited_children = reaper.kill_launchers, proctree.reap_exited_children
+
+    def _kill_launchers(procs, **kw) -> reaper.Leftovers:
+        popens.extend(procs)
+        _immortal(monkeypatch, procs[0].pid)  # it outlives its wait and the sweep, as while the kernel tears it down
+        return kill_launchers(procs, **kw)
+
+    def _reap_exited_children(processes) -> int:
+        processes = list(processes)
+        waited.extend(processes)
+        return reap_exited_children(processes)
+
+    monkeypatch.setattr(reaper, "kill_launchers", _kill_launchers)
+    monkeypatch.setattr(proctree, "reap_exited_children", _reap_exited_children)
+    try:
+        with pytest.raises(SandboxUnavailable, match="its GPUs stay leased"):
+            sb.kill()
+        [launcher] = popens
+        assert provider.release_freed_cards() == (), "the launcher still runs"
+        _mortal(monkeypatch)
+        os.kill(launcher.pid, signal.SIGKILL)
+        _wait(lambda: _state(launcher.pid) == "Z")
+        assert provider.release_freed_cards() == (0,)
+        assert launcher.returncode == -signal.SIGKILL, "its Popen collected it, with its own exit status"
+        assert launcher.pid not in {pid for pid, _ in waited}
+        assert provider.pool.free_cards() == (0, 1)
+    finally:
+        _mortal(monkeypatch)
+        for proc in popens:
+            proc.kill()
+            proc.wait()
+
+
 def test_withheld_cards_stay_while_a_process_with_the_sandbox_tag_runs(make, monkeypatch) -> None:
     provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0])
     sb = _create(provider, "dev", "dev")
