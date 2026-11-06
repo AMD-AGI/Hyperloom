@@ -374,6 +374,9 @@ ignore_imports =
     hyperloom.**.tests.** -> **
     hyperloom_multibranch.tests.** -> **
     hyperloom_multibranch.**.tests.** -> **
+    # The round gate's KV recorder until run_round owns telemetry and unit 5.05a deletes _build_kv_recorder.
+    hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_poll
+    hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_record
 unmatched_ignore_imports_alerting = none
 
 

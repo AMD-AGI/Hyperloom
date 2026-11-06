@@ -5,7 +5,7 @@
 
 The engine is the only thing that knows how full its KV pool is, and until now nothing read it: a run could spend its
 whole budget retracting requests and the breakdown would show only "throughput low". This module is the reader; the
-round-level recorder that tags its samples with phases and writes ``kv_metrics.json`` is :mod:`._kv_record`.
+round-level recorder that tags its samples with phases and writes ``kv_metrics.json`` is :mod:`.kv_record`.
 
 ``/metrics`` is the primary source rather than ``server.log`` because it wins on every axis that matters here -- full
 float precision instead of the log's two decimals, stable metric names instead of names that branch on the model's pool
@@ -13,7 +13,7 @@ type, explicit units, and ``kv_evictable_tokens``, which the log cannot express 
 separate the two occupancy readings this module reports (see :class:`KvSample`). On an AgentX round aiperf scrapes the
 same endpoint and exports what it read; :func:`read_aiperf_server_metrics` brings that export into the same shape.
 
-Two rules run through everything below and through :mod:`._kv_record`:
+Two rules run through everything below and through :mod:`.kv_record`:
 
 * **Never raise.** This samples a benchmark that is being measured; a scrape failure must cost the run nothing. Every
   entry point returns a value.
