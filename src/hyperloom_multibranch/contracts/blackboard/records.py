@@ -193,7 +193,8 @@ class LineageEvent:
     its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit. The ``OPEN`` of a
     repair branch names in ``repairs`` the test whose blocked gain it was opened to repair. Only an ``OPEN`` names a
     ``driver`` other than the specialist: an autonomous branch's, written before its agent starts, so a branch whose
-    start fails is known for one too.
+    start fails is known for one too. Only an ``OPEN`` names the ``focus`` the scheduler briefed the branch on, empty
+    when it named none.
 
     ``REROOT`` moves a running branch's head from ``from_commit`` onto ``commit_id``, an integration commit; the
     branch's runtime records it for its own branch once it has moved the branch in the repository. From then on only a
@@ -216,6 +217,7 @@ class LineageEvent:
     repairs: str = ""
     driver: BranchDriver = BranchDriver.SPECIALIST
     tests: int = 0
+    focus: str = ""
 
 
 @dataclass(frozen=True)
@@ -560,7 +562,8 @@ class Probation:
 
 @dataclass(frozen=True)
 class BranchNode:
-    """A branch of the tree; ``probations`` are the stalls it was held through, in the order they began."""
+    """A branch of the tree; ``probations`` are the stalls it was held through, in the order they began, and
+    ``focus`` the one its ``OPEN`` names."""
 
     branch: str
     origin: LineageKind
@@ -573,6 +576,7 @@ class BranchNode:
     repairs: str = ""
     driver: BranchDriver = BranchDriver.SPECIALIST
     probations: tuple[Probation, ...] = ()
+    focus: str = ""
 
 
 @dataclass(frozen=True)
