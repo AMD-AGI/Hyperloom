@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import RUN_AFTER_MOE_RUNNER_FAILURE, RUN_INITIAL
-from .._subprocess_kill import server_log_death_excerpt
+from inference_suite.server_log import death_excerpt
 from .records import (
     _DOUBLE_RUN_ROUND_DIRS,
     _is_double_run_accuracy_handoff,
@@ -222,9 +222,9 @@ class _BaselineAccuracyMixin:
         path = str(result.get("server_log_path") or "").strip()
         if not path:
             return ""
-        # ``server_log_death_excerpt`` already answers ``None`` for a log it cannot read,
+        # ``death_excerpt`` already answers ``None`` for a log it cannot read,
         # so an unreadable path is simply "no death on record" -- no guard of our own.
-        return server_log_death_excerpt(path) or ""
+        return death_excerpt(path) or ""
 
     def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
         """Whether an eval failure should route into enablement this run."""

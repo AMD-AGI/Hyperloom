@@ -24,7 +24,7 @@ from hyperloom_common.env import env_flag
 from hyperloom_common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
 from inference_suite.contracts.layout import ReadyStamp, RunLayout
-from inference_suite.server_log import LogCursor, LogScan, death_excerpt, round_start_offsets
+from inference_suite.server_log import LogCursor, LogScan, round_start_offsets
 
 from ..cancel_channel import CancelScope, cancel_scope_listener
 
@@ -779,13 +779,6 @@ def _communicate_with_watchdog(
         recorders.close(aborted=not completed)
 
 
-# Transitional: the old names stay importable from here until 2.07a2 moves their importers onto
-# ``inference_suite.server_log`` and deletes these two lines. Consumers: ``_geak_sweep`` (``_LogCursor``);
-# ``benchmark_run.accuracy``, ``benchmark_run.bringup``, ``report`` and ``_grid_runner`` (``server_log_death_excerpt``).
-server_log_death_excerpt = death_excerpt
-_LogCursor = LogCursor
-
-
 __all__ = [
     "AGENTX_PREFLIGHT_ERROR_CLASS",
     "AGENTX_PREFLIGHT_RETURNCODE",
@@ -805,7 +798,6 @@ __all__ = [
     "post_ready_runtime_sec",
     "resolve_benchmark_timeouts",
     "run_with_session_kill",
-    "server_log_death_excerpt",
     "session_deadline_to_remaining_sec",
     "session_remaining_to_deadline_sec",
     "stamp_server_ready",

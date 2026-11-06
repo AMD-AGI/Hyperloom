@@ -14,9 +14,9 @@ from datetime import datetime
 from pathlib import Path
 
 from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
+from inference_suite.server_log import death_excerpt
 from ....state.failure_evidence import KV_CACHE_OOM_MARKERS, SERVER_INIT_DEAD, SUBPROCESS_NONZERO
 from .._aiter_jit import is_aiter_jit_registry_mismatch
-from .._subprocess_kill import server_log_death_excerpt
 from .records import _BenchProcess
 
 log = logging.getLogger(__name__)
@@ -311,7 +311,7 @@ def _classify_subprocess_error(elapsed_sec: float, stderr_tail: str) -> str:
 
 
 def _boot_failure(finished: _BenchProcess, server_log: Path) -> tuple[str, str] | None:
-    death = server_log_death_excerpt(str(server_log))
+    death = death_excerpt(str(server_log))
     error = death if death is not None else (finished.stderr or finished.stdout)[-2000:]
     texts = (finished.server_log_text, finished.stderr, finished.stdout)
     if is_aiter_jit_registry_mismatch(*texts):

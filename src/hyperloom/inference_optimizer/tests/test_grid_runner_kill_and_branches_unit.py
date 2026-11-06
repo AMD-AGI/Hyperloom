@@ -385,7 +385,7 @@ async def test_run_grid_fails_when_the_run_recorded_no_request_count(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
-    """server_log_death_excerpt is used when a seeded server.log exists."""
+    """death_excerpt is used when a seeded server.log exists."""
     base = tmp_path / "base.yaml"
     write_benchmark_yaml(base)
     out_root = tmp_path / "out"

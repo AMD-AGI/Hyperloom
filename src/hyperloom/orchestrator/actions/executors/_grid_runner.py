@@ -20,6 +20,7 @@ from typing import Any, Callable, NamedTuple, NoReturn
 
 import yaml
 from inference_suite.contracts import FailedStep
+from inference_suite.server_log import death_excerpt
 
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom.common.perf_metric import constraint_fields
@@ -59,7 +60,6 @@ from ._subprocess_kill import (
     RoundWatch,
     resolve_benchmark_timeouts,
     run_with_session_kill,
-    server_log_death_excerpt,
     session_deadline_to_remaining_sec,
     sync_agentx_phase_wait,
 )
@@ -1160,8 +1160,7 @@ async def _warmup_throughput(
     warmup_server_log = warmup_slot / "server.log"
     report_path = workspace / "benchmark_report.json"
     warmup_error = (
-        server_log_death_excerpt(str(warmup_server_log))
-        or redact_secret_values((pass_.proc.stderr or pass_.proc.stdout)[-2000:])
+        death_excerpt(str(warmup_server_log)) or redact_secret_values((pass_.proc.stderr or pass_.proc.stdout)[-2000:])
         if returncode != 0
         else "warmup benchmark_report missing valid throughput/completed requests"
     )
@@ -1398,7 +1397,7 @@ def _abort_without_workspace(
         )
     else:
         found = _RoundError(
-            server_log_death_excerpt(str(server_log))
+            death_excerpt(str(server_log))
             or (
                 redact_secret_values((proc.stderr or proc.stdout)[-2000:])
                 if returncode != 0
@@ -1451,7 +1450,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
     found = _invalid_measurement_error(
         outcome.measured.round.proc,
         report=outcome.report,
-        death_excerpt=server_log_death_excerpt(str(server_log)),
+        death_excerpt=death_excerpt(str(server_log)),
         workspace=workspace,
         slot=at.path,
     )
