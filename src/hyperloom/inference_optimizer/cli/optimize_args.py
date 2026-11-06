@@ -263,14 +263,15 @@ def add_workload_arguments(opt: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         help=(
-            "Reference launch recipe (.sh path or http(s) URL). Its serve "
-            "flags plus the exports the denylist allows seed the baseline "
-            "server args at lowest priority (the config arm can override); shell-unsafe, "
-            "credential-shaped and optimizer-owned workload variables are "
-            "dropped. The recipe is applied as given — there is no model gate "
-            "and no auto-discovery — so a path that cannot be read, or that "
-            "yields neither a flag nor an export, exits 2 instead of falling "
-            "back. Omit the flag to leave the baseline unchanged."
+            "The session's base launch (path or http(s) URL): a shell launch "
+            "script, or a base_launch.json frozen by an earlier session. It "
+            "wins over every recipe source; omitted, the base comes from "
+            "InferenceX, then the framework's cookbook, then the default "
+            "table. A script must fix every flag in its text: a flag set from "
+            "a shell variable, or a '# hyperloom-launch-controls:' line, exits "
+            "2, as does a file that cannot be read or does not launch the "
+            "session's framework. The base is resolved once, at launch, and "
+            "frozen as <session>/base_launch.json; a resume reads that file."
         ),
     )
     opt.add_argument("--precision", type=str, default=None, help=f"Model precision (default {DEFAULT_PRECISION})")

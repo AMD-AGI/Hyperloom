@@ -43,6 +43,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
 )
 from ..session.paths import _SESSION_SKELETON
+from .base_launch import reference_launch_fields, resolve_base_launch
 from .executors import _build_specialist_executor, _register_executors
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
@@ -813,9 +814,6 @@ def _seed_shared_state(
     # The only read of the backend choice; every later decision reads the persisted record.
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
-    # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
-    _ref_args, _ref_envs, _ref_model, _ref_controls = _resolve_reference_recipe(args, framework)
-
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "synthetic"
@@ -827,6 +825,20 @@ def _seed_shared_state(
         benchmark_mode = "agentx"
         agentx_backend = agentic_backend()
         agentx_epoch = AGENTX_MEASUREMENT_EPOCH
+    workload = _workload_fields(args)
+    # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each rung is a 3600s window and the session
+    # grades at a fixed CONC. Pass --enable-conc-sweep explicitly to override.
+    conc_sweep_enabled = (
+        not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
+    )
+    conc_sweep_concs = _parse_conc_sweep_concs(args, benchmark_mode)
+    base = resolve_base_launch(
+        args,
+        session_dir,
+        framework=framework,
+        benchmark_mode=benchmark_mode,
+        concurrencies=(workload["conc"], *(conc_sweep_concs if conc_sweep_enabled else ())),
+    )
     state = SharedState(
         session_id=session_id,
         claw_session_id=os.environ.get("CLAW_SESSION_ID", "").strip(),
@@ -838,17 +850,14 @@ def _seed_shared_state(
         **constraint_budgets_from_args(args),
         gpu_power_settings=dict(platform.gpu_power_settings),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
-        **_workload_fields(args),
+        **workload,
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
         # AgentX corpus shape: seeded from canonical constants if AgentX is on.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,
-        reference_server_args=_ref_args,
-        reference_envs=_ref_envs,
-        reference_launch_controls=_ref_controls,
-        reference_model=_ref_model,
+        **reference_launch_fields(base),
         # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
         # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
@@ -866,17 +875,12 @@ def _seed_shared_state(
         gpu_specialist_capacity=max(0, int(args.gpu_specialist_capacity)),
         plateau_overrides=plateau_overrides,
         **_phase_toggle_fields(args),
-        # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
-        # rung is a 3600s window and the session grades at a fixed CONC.
-        # Pass --enable-conc-sweep explicitly to override.
-        conc_sweep_enabled=(
-            not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
-        ),
+        conc_sweep_enabled=conc_sweep_enabled,
         benchmark_mode=benchmark_mode,
         agentx_epoch=agentx_epoch,
         agentx_backend=agentx_backend,
         grading=seed_grading(framework, benchmark_mode),
-        conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
+        conc_sweep_concs=conc_sweep_concs,
         conc_sweep_total_budget_sec=int(getattr(args, "conc_sweep_total_budget_sec", 9000)),
     )
     state.save(session_dir)
@@ -1112,35 +1116,3 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
         return None
     fs = data.get("failure_summary") if isinstance(data, dict) else None
     return fs if isinstance(fs, dict) else None
-
-
-def _resolve_reference_recipe(
-    args: argparse.Namespace,
-    framework: str,
-) -> tuple[str, dict[str, str], str, dict[str, Any]]:
-    """Resolve the reference launch recipe for a fresh launch."""
-    source = (getattr(args, "reference_script", None) or "").strip()
-    if not source:
-        return ("", {}, "", {})
-
-    from http.client import HTTPException
-
-    from ..baseline_comparison.inferencex_client import InferenceXFetchError
-    from ..reference_script import parse_reference_script
-
-    try:
-        recipe = parse_reference_script(source, framework=framework)
-    except (OSError, ValueError, InferenceXFetchError, HTTPException) as exc:
-        print(f"ERROR: --reference-script {source!r} could not be parsed: {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
-
-    controls = getattr(recipe, "launch_controls", {})
-    if not recipe.server_args and not recipe.envs and not controls:
-        print(
-            f"ERROR: --reference-script {source!r} lifted no server flags and no env exports",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
-    print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
-    return (recipe.server_args, dict(recipe.envs), recipe.model or "", dict(controls))
