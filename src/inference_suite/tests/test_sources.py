@@ -26,15 +26,21 @@ from pathlib import Path
 
 import pytest
 
+from inference_suite.contracts import LaunchQuery, Workload
+from inference_suite.recipe import sources
 from inference_suite.recipe.golden_curve import GoldenLength, GoldenRequest
 from inference_suite.recipe.inferencex import INFERENCEX_REPO, PROJECT, InferencexPoint, Scenario, inferencex_points
 from inference_suite.recipe.model import InferencexSelection, InferencexSnapshot
+from inference_suite.recipe.resolve import UnreadSource
+from inference_suite.recipe.user_file import parse_user_file
 from inference_suite.recipe.sources import (
     MAIN,
     SRT_SLURM,
+    Checkout,
     SourceFetchError,
     checkout_main,
     fetch_response,
+    fetch_sources,
     inferencex_answers,
     inferencex_python,
     latest_release,
@@ -147,6 +153,55 @@ def test_an_unreachable_site_is_refused() -> None:
 
     with pytest.raises(SourceFetchError, match="could not be fetched"):
         fetch_response(f"http://127.0.0.1:{port}/recipe.json")
+
+
+_QUERY = LaunchQuery("deepseek-ai/DeepSeek-R1-0528", "sglang", "mi355x", Workload.FIXED, (64,), isl=8192, osl=1024)
+
+
+@pytest.fixture
+def read_inferencex(monkeypatch, tmp_path: Path) -> None:
+    """InferenceX reads as the main fixture; a test makes a later source unreadable."""
+    fixture = _main_fixture()
+    checkout = Checkout(INFERENCEX_REPO, fixture.bundle.commit, tmp_path)
+    monkeypatch.setattr(sources, "_inferencex", lambda into: (checkout, fixture))
+
+
+def _unreachable(*args, **kwargs):
+    raise SourceFetchError("git ls-remote exited 128: could not resolve host")
+
+
+def _never(*args, **kwargs):
+    raise AssertionError("a source after the unreadable one was read")
+
+
+def test_a_source_that_cannot_be_read_is_named_and_stops_the_reading(read_inferencex, monkeypatch) -> None:
+    monkeypatch.setattr(sources, "_latest_releases", _unreachable)
+    monkeypatch.setattr(sources, "_with_cookbook", _never)
+
+    snapshot = fetch_sources(_QUERY)
+
+    assert snapshot.unread == UnreadSource("the sglang releases", "git ls-remote exited 128: could not resolve host")
+    assert snapshot.inferencex == _main_fixture()
+    assert snapshot.sglang_cookbook is None
+
+
+def test_a_user_file_reads_no_source_but_inferencex(read_inferencex, monkeypatch) -> None:
+    monkeypatch.setattr(sources, "_recipe_reads", _never)
+    user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
+
+    snapshot = fetch_sources(_QUERY, user_file=user_file)
+
+    assert (snapshot.user_file, snapshot.unread) == (user_file, None)
+
+
+def test_an_unreadable_inferencex_is_refused(monkeypatch) -> None:
+    def unreachable(into):
+        raise SourceFetchError("git clone exited 128: could not resolve host")
+
+    monkeypatch.setattr(sources, "_inferencex", unreachable)
+
+    with pytest.raises(SourceFetchError, match="InferenceX, which pins the load client, could not be read: git clone"):
+        fetch_sources(_QUERY)
 
 
 _STAND_IN = {

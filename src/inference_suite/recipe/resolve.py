@@ -6,7 +6,9 @@
 The sources are read in priority order -- the operator's launch file, InferenceX, the framework's cookbook (the
 sglang cookbook, the vLLM recipes site or ATOM's catalog), then, for a fixed workload only, the default table -- and
 the first that holds a launch for the query gives the base. An AgentX query no recipe serves is a :class:`Miss`.
-Whatever needed the network or upstream code was done when the snapshot was taken; resolving only reads it.
+Whatever needed the network or upstream code was done when the snapshot was taken; resolving only reads it. A
+snapshot that names a source it could not read consults no recipe: a fixed query runs the default table, and an
+AgentX query is a :class:`Miss`.
 
 A source may hold several launches for one query, one per arm. The base runs the one with the largest TP the GPUs
 fit, an arm that offloads no KV cache before one that does, and records the others as alternatives. A cookbook
@@ -91,6 +93,18 @@ _SGLANG_METHOD, _SGLANG_TOKEN_MODE = _SGLANG_SIMULATION[1:]
 
 
 @dataclass(frozen=True)
+class UnreadSource:
+    """A source the snapshot could not read, and why."""
+
+    source: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        _FIELDS.text(self.source, "the unread source")
+        _FIELDS.text(self.reason, "why the source could not be read")
+
+
+@dataclass(frozen=True)
 class SourceSnapshot:
     """Everything resolving reads, recorded once when the session starts.
 
@@ -99,7 +113,8 @@ class SourceSnapshot:
     for the cookbook's AgentX launches (see :func:`~inference_suite.recipe.golden_curve.golden_requests`) and
     ``base_model`` the model's HF ``cardData.base_model``. ``latest_releases`` maps a framework to its latest release
     tag, which stands for a recipe image that names no version. ``user_file``, when the operator gave one, is the
-    base. ``fetched_unix`` is when the snapshot was taken, and so when the base was resolved.
+    base. ``fetched_unix`` is when the snapshot was taken, and so when the base was resolved. ``unread`` names the
+    source reading stopped at, when one could not be read; what it and every later source hold is missing.
     """
 
     inferencex: InferencexSnapshot
@@ -111,6 +126,7 @@ class SourceSnapshot:
     golden_lengths: Mapping[str, GoldenLength] = field(default_factory=dict)
     base_model: str | None = None
     latest_releases: Mapping[str, str] = field(default_factory=dict)
+    unread: UnreadSource | None = None
 
     def __post_init__(self) -> None:
         _FIELDS.integer(self.fetched_unix, "the snapshot's fetch time", minimum=0)
@@ -120,12 +136,15 @@ class SourceSnapshot:
 
 @dataclass(frozen=True)
 class Miss:
-    """No source holds a launch for the query: why each one read does not, in the order they were read."""
+    """No source holds a launch for the query: the source that could not be read, if one could not, and why each one
+    read holds none, in the order they were read."""
 
     misses: tuple[SourceMiss, ...]
+    unread: UnreadSource | None = None
 
     def reasons(self) -> tuple[str, ...]:
-        return tuple(f"{miss.kind.value}: {miss.reason}" for miss in self.misses)
+        unread = () if self.unread is None else (f"{self.unread.source} could not be read: {self.unread.reason}",)
+        return (*unread, *(f"{miss.kind.value}: {miss.reason}" for miss in self.misses))
 
 
 @dataclass(frozen=True)
@@ -363,11 +382,14 @@ def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[So
     row = None if board is None else default_table().row(query.framework, board.gfx)
     if board is None or row is None:
         named = query.board if board is None else f"{query.board} ({board.gfx})"
-        return Miss((*misses, SourceMiss(SourceKind.DEFAULT_TABLE, f"it has no {query.framework} row for {named}")))
+        missing = SourceMiss(SourceKind.DEFAULT_TABLE, f"it has no {query.framework} row for {named}")
+        return Miss((*misses, missing), snapshot.unread)
     topology = Topology(tp=query.tp or 1, ep=query.ep or 1)
     topology_args = _TOPOLOGY[query.framework].argv(topology)
     if isinstance(topology_args, str):
-        return Miss((*misses, SourceMiss(SourceKind.DEFAULT_TABLE, f"{query.framework} {topology_args}")))
+        return Miss(
+            (*misses, SourceMiss(SourceKind.DEFAULT_TABLE, f"{query.framework} {topology_args}")), snapshot.unread
+        )
     return BaseLaunch(
         query=query,
         source=LaunchSource(kind=SourceKind.DEFAULT_TABLE, path=TABLE_PATH, locator=row.origin),
@@ -384,9 +406,15 @@ def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[So
         runner_owned=_runner_owned(query.framework),
         warnings=(
             *_miss_warnings(misses),
-            f"no recipe serves {query.model_id}; the default {query.framework} launch for {board.gfx} runs it",
+            f"{_why_default(query, snapshot)}; the default {query.framework} launch for {board.gfx} runs it",
         ),
     )
+
+
+def _why_default(query: LaunchQuery, snapshot: SourceSnapshot) -> str:
+    if snapshot.unread is None:
+        return f"no recipe serves {query.model_id}"
+    return f"{snapshot.unread.source} could not be read, so no recipe was consulted ({snapshot.unread.reason})"
 
 
 def _golden_table(snapshot: SourceSnapshot) -> GoldenTable:
@@ -396,12 +424,16 @@ def _golden_table(snapshot: SourceSnapshot) -> GoldenTable:
 def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> BaseLaunch | Miss:
     """The base launch of a session asking ``query`` on ``gpus`` visible GPUs, read from ``snapshot`` alone.
 
-    A :class:`Miss` names why each source holds no launch: always for an AgentX query no recipe serves, and for a
-    fixed one the default table has no row for either.
+    A :class:`Miss` names why each source holds no launch: always for an AgentX query no recipe serves or whose
+    snapshot could not read a source, and for a fixed one the default table has no row for either.
     """
     _FIELDS.integer(gpus, "the visible GPU count", minimum=1)
     if snapshot.user_file is not None:
         return _user_file_base(query, snapshot, snapshot.user_file)
+    if snapshot.unread is not None:
+        if query.workload is Workload.AGENTX:
+            return Miss((), snapshot.unread)
+        return _default_base(query, snapshot, ())
     misses: list[SourceMiss] = []
     for read in _readers(query.framework):
         found = read(query, snapshot)
@@ -418,4 +450,4 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
     return _default_base(query, snapshot, tuple(misses))
 
 
-__all__ = ["CLIENT_TOOL", "Miss", "SourceSnapshot", "resolve_base"]
+__all__ = ["CLIENT_TOOL", "Miss", "SourceSnapshot", "UnreadSource", "resolve_base"]

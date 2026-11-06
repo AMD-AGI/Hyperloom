@@ -36,7 +36,7 @@ from inference_suite.recipe.model import (
     RecipeSourceError,
     RepoBundle,
 )
-from inference_suite.recipe.resolve import CLIENT_TOOL, Miss, SourceSnapshot, resolve_base
+from inference_suite.recipe.resolve import CLIENT_TOOL, Miss, SourceSnapshot, UnreadSource, resolve_base
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import parse_user_file
 from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, rendering_url
@@ -370,6 +370,39 @@ def test_no_default_row_or_no_topology_is_a_miss():
 
     split_experts = _miss(_fixed("Qwen/Qwen3-8B", framework="vllm", isl=1024, osl=1024, tp=4, ep=2))
     assert "its experts span all 4 TP ranks, so it runs no ep 2" in split_experts.reasons()[-1]
+
+
+def _unread_snapshot() -> SourceSnapshot:
+    return SourceSnapshot(
+        _inferencex("ce35bc935"),
+        _FETCHED,
+        unread=UnreadSource("the sglang cookbook", "git clone exited 128: could not resolve host"),
+    )
+
+
+def test_a_fixed_query_whose_source_could_not_be_read_runs_the_default_row_and_records_why():
+    base = _base(_fixed(tp=8), _unread_snapshot())
+
+    assert (base.source.kind, base.source.path) == (SourceKind.DEFAULT_TABLE, TABLE_PATH)
+    assert base.client.commit == _inferencex("ce35bc935").bundle.commit
+    assert base.warnings == (
+        "the sglang cookbook could not be read, so no recipe was consulted (git clone exited 128: could not resolve "
+        "host); the default sglang launch for gfx950 runs it",
+    )
+    assert BaseLaunch.from_document(json.loads(json.dumps(base.to_document()))).warnings == base.warnings
+
+
+def test_an_agentx_query_whose_source_could_not_be_read_is_a_miss_naming_it():
+    miss = _miss(_agentx("zai-org/GLM-5.3-FP8"), _unread_snapshot())
+
+    assert miss.reasons() == ("the sglang cookbook could not be read: git clone exited 128: could not resolve host",)
+
+
+def test_a_user_file_is_the_base_whatever_source_could_not_be_read():
+    user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
+    snapshot = dataclasses.replace(_unread_snapshot(), user_file=user_file)
+
+    assert _base(_fixed(), snapshot).source.kind is SourceKind.USER_FILE
 
 
 @pytest.mark.parametrize(

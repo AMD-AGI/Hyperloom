@@ -25,9 +25,10 @@ import inference_suite
 from hyperloom.inference_optimizer.cli import base_launch as bl
 from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE, read_base_launch, shared_state_fields
 from hyperloom.orchestrator.state.shared_state import SharedState
-from inference_suite import SourceSnapshot
+from inference_suite import SourceFetchError, SourceSnapshot
 from inference_suite.contracts import BaseLaunch, BaseLaunchError, Redacted, SourceKind, Topology
 from inference_suite.recipe.model import InferencexSnapshot, RepoBundle
+from inference_suite.recipe.resolve import UnreadSource
 from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot
 
 _FIXTURES = Path(inference_suite.__file__).parent / "tests" / "fixtures"
@@ -148,6 +149,35 @@ def test_a_model_no_recipe_serves_runs_the_default_table_and_says_so(tmp_path, f
     assert base is not None and base.source.kind is SourceKind.DEFAULT_TABLE
     assert base.topology == Topology(1)
     assert "no recipe serves Kimi-K2.6; the default sglang launch for gfx942 runs it" in capsys.readouterr().err
+
+
+def test_a_fixed_session_whose_recipe_source_cannot_be_read_freezes_the_default_table_and_says_why(
+    tmp_path, monkeypatch, capsys
+):
+    unread = UnreadSource("the sglang cookbook", "git clone exited 128: could not resolve host")
+    monkeypatch.setattr(
+        bl, "fetch_sources", lambda query, *, user_file=None: dataclasses.replace(_snapshot(), unread=unread)
+    )
+
+    base = _resolve(tmp_path, _args())
+
+    assert base is not None and base.source.kind is SourceKind.DEFAULT_TABLE
+    frozen = json.loads((tmp_path / BASE_LAUNCH_FILE).read_text())
+    assert frozen["source"]["kind"] == "default_table"
+    assert any(
+        "the sglang cookbook could not be read" in warning and unread.reason in warning
+        for warning in frozen["warnings"]
+    )
+    assert "WARNING: base launch: the sglang cookbook could not be read" in capsys.readouterr().err
+
+
+def test_a_session_whose_inferencex_cannot_be_read_exits_2_naming_it(tmp_path, monkeypatch, capsys):
+    def unreachable(query, *, user_file=None):
+        raise SourceFetchError("InferenceX, which pins the load client, could not be read: git clone exited 128")
+
+    monkeypatch.setattr(bl, "fetch_sources", unreachable)
+
+    assert "InferenceX, which pins the load client, could not be read" in _refused(tmp_path, _args(), capsys)
 
 
 def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_frozen_file(tmp_path, fetched):

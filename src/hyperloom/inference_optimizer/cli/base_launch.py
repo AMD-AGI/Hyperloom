@@ -4,8 +4,8 @@
 """Resolve a fresh session's base launch and freeze it as ``base_launch.json``.
 
 The base comes from the operator's ``--reference-script`` when one is given, otherwise from the first recipe source
-that serves the session, otherwise from the default table. Resolving reads every source once, here; a resume reads the
-frozen file instead. Scriptable workloads launch no server and AgentX sessions still take their launch from their
+that serves the session, otherwise from the default table, which also runs a session when a recipe source cannot be
+read. Resolving reads every source once, here; a resume reads the frozen file instead. Scriptable workloads launch no server and AgentX sessions still take their launch from their
 own recipe path, so neither resolves a base.
 """
 
@@ -146,7 +146,7 @@ def resolve_base_launch(
 
     The session then runs at the base's TP and EP, so this runs before anything records them. ``None`` when the
     session resolves no base. Exits 2 when the operator's launch file cannot serve as the base, the query is
-    malformed, a single-node host sees no GPU, a source cannot be read, or no source and no default serves the
+    malformed, a single-node host sees no GPU, InferenceX cannot be read, or no source and no default serves the
     session.
     """
     location = (getattr(args, "reference_script", None) or "").strip()
