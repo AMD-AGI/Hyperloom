@@ -43,6 +43,7 @@ from hyperloom.common.perf_metric import (
     GRADED_OUTPUT,
 )
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
+from hyperloom_multibranch.toolbox.toolbox import CLAIM_TTL_SECONDS
 
 #: z-score of the 90th percentile of a normal distribution.
 _Z90 = 1.2815515655446004
@@ -202,6 +203,8 @@ class FakeToolboxConfig:
     start_time: float = 1_800_000_000.0
     #: Real seconds an attempt waits before it finishes, to let tests overlap in a test of the queue.
     run_delay_s: float = 0.0
+    #: Real seconds a test's claim lives; the toolbox renews the claims every third of it.
+    claim_ttl_seconds: float = CLAIM_TTL_SECONDS
 
     def __post_init__(self) -> None:
         if not self.nodes or self.gpu_count < 1 or self.measure_rounds < 1 or self.max_infra_retries < 0:

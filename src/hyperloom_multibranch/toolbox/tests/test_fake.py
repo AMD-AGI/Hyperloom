@@ -648,6 +648,39 @@ async def test_a_renewal_that_fails_for_a_reason_not_the_blackboards_is_raised()
         await box.renew_claims()
 
 
+class RenewalFailsOnce:
+    """Claims handed to tests as asked; the first renewal raises an error that is not the blackboard's."""
+
+    def __init__(self) -> None:
+        self.calls, self.renewed = 0, asyncio.Event()
+
+    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
+        return None
+
+    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            raise TypeError("renew() got an unexpected keyword argument")
+        self.renewed.set()
+
+
+async def test_the_renewal_loop_logs_an_unexpected_error_and_renews_again_at_the_next_round(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ending the loop at the first such error would let every live test's claim lapse at its TTL, with nothing said."""
+    claims = RenewalFailsOnce()
+    config = FakeToolboxConfig(claim_ttl_seconds=0.03)  # a round every 10 ms
+    box = FakeToolbox(config, autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
+    try:
+        await box.submit_test(_request(intent_fingerprint="intent-1"))
+        await asyncio.wait_for(claims.renewed.wait(), timeout=5)
+    finally:
+        await box.close()
+
+    (logged,) = [record for record in caplog.records if record.exc_info and record.exc_info[0] is TypeError]
+    assert logged.levelname == "ERROR" and "unexpected keyword" in str(logged.exc_info[1])  # type: ignore[index]
+
+
 async def test_a_lost_claim_whose_withdrawal_cannot_be_written_leaves_no_request_waiting() -> None:
     book = UnwritableWithdrawals()
     box = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(claims=LostClaims()))  # type: ignore[arg-type]

@@ -197,6 +197,37 @@ async def test_a_failure_to_record_leaked_cards_that_is_not_the_blackboards_is_r
         await toolbox.close()
 
 
+async def test_the_renewal_loop_logs_an_unexpected_failure_to_record_leaked_cards_and_records_them_next_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The renewal loop's round also records leaked cards: an error there must not end the loop that renews claims."""
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _local_toolbox(tmp_path, blackboard)
+    monkeypatch.setattr(toolbox, "_ttl", 0.03)  # the loop runs a round every third of the claim TTL: every 10 ms
+    real, calls = toolbox._quarantine.add_cards, []
+
+    async def broken_once(*args: Any, **kwargs: Any) -> Any:
+        calls.append(args)
+        if len(calls) == 1:
+            raise TypeError("add_cards() takes 3 positional arguments")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(toolbox._quarantine, "add_cards", broken_once)
+    try:
+        await toolbox.start()
+        toolbox.provider.quarantined.add(4)
+        for _ in range(500):
+            if await _gpu_events(blackboard):
+                break
+            await asyncio.sleep(0.01)
+        assert [e.gpu_ids for e in await _gpu_events(blackboard)] == [(4,)]
+    finally:
+        await toolbox.close()
+
+    (logged,) = [record for record in caplog.records if record.exc_info and record.exc_info[0] is TypeError]
+    assert logged.levelname == "ERROR" and "positional arguments" in str(logged.exc_info[1])  # type: ignore[index]
+
+
 async def test_cards_leaked_during_a_test_are_reported_when_it_settles(tmp_path: Path) -> None:
     blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     toolbox = _local_toolbox(tmp_path, blackboard)
