@@ -27,7 +27,10 @@ that grace. Without a grant the spec's ``budget.max_hours`` alone bounds it.
 
 A hosted run's agents must be isolated: they run with the application's credentials in reach otherwise. Its start
 marks the process so (:func:`~hyperloom.common.agent_isolation.require_agent_isolation`), with the hosting layer's
-bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names (:func:`layer_bwrap`), and no other.
+bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names (:func:`layer_bwrap`), and no other, and
+refuses a run that would launch anything unconfined on this host, as the path that launches it would
+(:func:`require_hosted_isolation`): with ``local``, its agent and dev sandboxes and its tests run here, so a host where
+they run unconfined measures no spec ``local``.
 
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
@@ -53,12 +56,7 @@ from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom_common.shared_storage import make_shared_dirs, ownership, setgid_warnings, writable_problems
-from hyperloom.common.agent_isolation import (
-    IsolationRefused,
-    announce_agent_isolation,
-    choose_sandbox_isolation,
-    require_agent_isolation,
-)
+from hyperloom.common.agent_isolation import IsolationRefused, require_agent_isolation
 from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
@@ -66,6 +64,7 @@ from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
+from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import RunSettings
@@ -234,25 +233,27 @@ def layer_bwrap(env: Mapping[str, str]) -> str | None:
 
 
 def require_hosted_isolation(spec: CampaignSpec, env: Mapping[str, str]) -> None:
-    """Mark this process as a hosted run's, whose agents are launched isolated, with the hosting layer's bubblewrap
-    (:func:`layer_bwrap`) and no other, and refuse now a host where they cannot be: the specialists always, and the
-    agent and dev sandboxes of a spec measured on this container's cards, which then run here (in the grant's ``dev``
-    sandboxes otherwise). Says once how they are isolated.
+    """Mark this process as a hosted run's, whose agents must be isolated, with the hosting layer's bubblewrap
+    (:func:`layer_bwrap`) and no other, and refuse now a run that would launch one unconfined on this host, as the path
+    that launches it would (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its
+    specialists always, and the agent and dev sandboxes and the tests of a spec measured on this container's cards,
+    which then run here (in the grant's sandboxes otherwise).
 
     Raises:
-        PeersUnavailable: Neither an account nor bubblewrap can isolate them here, naming why; the run ends for good.
+        PeersUnavailable: A launch on this host would run unconfined or be refused, naming which and why; the run ends
+            for good.
         TimeoutError: Bubblewrap gave no answer in time; a later start of the run may find it.
     """
 
     try:
         require_agent_isolation(bwrap=layer_bwrap(env))
-        if spec.measurement == MEASUREMENT_LOCAL:
-            choose_sandbox_isolation()
     except IsolationRefused as refused:
         if refused.transient:
             raise TimeoutError(str(refused)) from refused
         raise PeersUnavailable(str(refused)) from refused
-    announce_agent_isolation()
+    problems = launch_isolation(local=spec.measurement == MEASUREMENT_LOCAL).problems()
+    if problems:
+        raise PeersUnavailable(f"a hosted run launches nothing unconfined beside its credentials, and here {problems}")
 
 
 def _multibranch_section(section: object) -> dict[str, Any]:
