@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.io import atomic_write_json
+from hyperloom_common.io import SHARED, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver
@@ -352,6 +352,7 @@ class Roster:
                 "held_slots": self._held,
                 "entries": [_entry_record(entry) for entry in self._entries.values()],
             },
+            options=SHARED,
         )
 
 

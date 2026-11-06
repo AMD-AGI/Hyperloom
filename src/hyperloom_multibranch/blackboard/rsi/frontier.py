@@ -48,10 +48,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from hyperloom_common.shared_storage import make_shared_dirs, open_shared_append
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.blackboard.interfaces import ProgressQuery, SnapshotQuery
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
@@ -588,8 +590,8 @@ class FrontierScoring(ProgressQuery):
     def _append(path: Path, data: bytes) -> None:
         # Losing a round of the log costs the record one round; the scheduler's decision must not wait on it.
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("ab") as handle:
+            make_shared_dirs(path.parent)
+            with os.fdopen(open_shared_append(path), "ab") as handle:  # 664: a later leg's final-only appends to it
                 handle.write(data)
         except OSError as exc:
             log.warning("could not append the frontier scores to %s: %s", path, exc)
