@@ -575,11 +575,13 @@ def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | 
     if not server_log_path or gpu_power_sampling_unavailable():
         return None
     try:
-        from hyperloom.common.gpu_power_settings import GpuPowerSettingsError, visible_gpu_indices
+        from hyperloom_common.amd_smi import AmdSmiError
+
+        from hyperloom.common.gpu_power_settings import visible_gpu_indices
 
         try:
             gpus = visible_gpu_indices(env or {})
-        except GpuPowerSettingsError as exc:
+        except AmdSmiError as exc:
             # Serving cards are still found by the VRAM they hold, as on a host with no mask.
             log.warning("gpu_power: %s; sampling every card", exc)
             gpus = None

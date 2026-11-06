@@ -25,6 +25,7 @@ import subprocess  # nosec B404 - fixed amd-smi invocations.
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
+from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom_common.env import env_flag
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
@@ -105,8 +106,8 @@ def gpu_power_sampling_unavailable() -> str:
     return ""
 
 
-class GpuPowerSettingsError(RuntimeError):
-    """``amd-smi`` could not be run or its output could not be read."""
+class GpuPowerSettingsError(AmdSmiError):
+    """A power setting could not be read, checked or applied."""
 
 
 def normalize_perf_level(value: Any) -> str:
