@@ -789,11 +789,11 @@ def test_the_gemm_attention_and_fusion_directions_carry_the_strongest_kernel_exa
     assert "scales from its epilogue" in attention
 
 
-def test_the_role_retests_a_lesson_or_a_peer_s_flat_result_on_the_current_head_before_closing_on_it():
+def test_the_role_does_not_ask_for_a_peer_s_flat_result_to_be_retested_on_another_head():
     prompt = role_prompt(WORKLOAD)
 
-    assert "A lesson, a learning or another branch's flat result closes nothing on a different head" in prompt
-    assert "retest it on your current head before you call it closed" in prompt
+    assert "flat result closes nothing" not in prompt
+    assert "retest it on your current head" not in prompt
 
 
 def test_the_role_says_a_blocked_or_missing_capability_exhausted_names_the_path_tried():
