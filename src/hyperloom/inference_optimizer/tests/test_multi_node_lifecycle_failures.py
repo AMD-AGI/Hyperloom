@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 
 import httpx
@@ -195,3 +196,71 @@ def test_a_crashed_worker_of_any_lws_rank_fails_fast(tmp_path, monkeypatch: pyte
 
     assert crash is not None and "unrecognized arguments: --bogus-flag" in crash
     assert wedge is not None and "10.0.0.3" in wedge
+
+
+_PD_WORKERS = {
+    "backend": "sglangrouter",
+    "prefill_pods": [{"podIP": "10.0.0.1", "podId": "p0", "enginePort": 8010}],
+    "decode_pods": [{"podIP": "10.0.0.2", "podId": "d0", "enginePort": 8020}],
+}
+
+
+def test_pd_worker_health_dials_the_engine_port_of_each_role(serve, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.url.host}:{request.url.port}")
+        return _OK
+
+    serve({"health": [_OK]}, _PD_WORKERS)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(life, "_pd_engines_not_running", lambda _state: [])
+    _workers()
+    assert seen == ["10.0.0.1:8010", "10.0.0.2:8020"]
+
+
+def test_pd_worker_wait_fails_when_the_launched_engine_was_replaced(serve, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(life, "_pd_engines_not_running", lambda _state: ["decode 10.0.0.2"])
+    serve({"health": [_OK]}, _PD_WORKERS)
+    with pytest.raises(life.ServerRestartFailed, match="decode 10.0.0.2"):
+        _workers()
+
+
+def test_pd_engine_profile_dials_the_engine_port_of_each_pod(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(life, "is_multi_node", lambda: True)
+    monkeypatch.setattr(life, "_read_state", lambda: _PD_WORKERS)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+
+    asyncio.run(life.trigger_pd_engine_profile("stop"))
+
+    assert seen == ["http://10.0.0.1:8010/stop_profile", "http://10.0.0.2:8020/stop_profile"]
+
+
+def test_pd_engine_profile_uses_engine_urls_without_pods(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    seen: list[tuple[str, dict]] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), json.loads(request.content or b"{}")))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(life, "is_multi_node", lambda: True)
+    monkeypatch.setattr(life, "_read_state", lambda: {"backend": "sglangrouter", "prefill_pods": [], "decode_pods": []})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_PREFILL_URL", "http://p-svc:8010/")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_DECODE_URL", "http://d-svc:8020")
+
+    asyncio.run(life.trigger_pd_engine_profile("start", {"output_dir": str(tmp_path)}))
+
+    assert seen == [
+        ("http://p-svc:8010/start_profile", {"output_dir": str(tmp_path / "prefill")}),
+        ("http://d-svc:8020/start_profile", {"output_dir": str(tmp_path / "decode")}),
+    ]

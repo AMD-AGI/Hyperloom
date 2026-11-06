@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -15,12 +16,15 @@ import pytest
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.inference_optimizer.multi_node._internal import topology_file as topo
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import (
+    drop_unsupported_baseline_flags,
     engine_command,
+    pods_for,
     record_profile_paths,
     router_command,
 )
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import LaunchSpec
 from hyperloom.inference_optimizer.multi_node._internal.process_image import replace_process_image
+from hyperloom.inference_optimizer.multi_node.commands import pd_cluster as pd_cmds
 from hyperloom.inference_optimizer.multi_node.state_paths import bind_state_file_to_session
 
 
@@ -61,6 +65,60 @@ def test_router_and_engine_commands_match_the_platform_entrypoints() -> None:
     sglang_router = router_command(_spec(backend="sglangrouter"))
     assert sglang_router.startswith("python3 -m sglang_router.launch_router ")
     assert "atomesh" not in sglang_router
+
+
+def test_engine_listens_on_the_port_of_its_role_url() -> None:
+    spec = _spec(
+        prefill_url="http://w-prefill.ns.svc.cluster.local:8010",
+        decode_url="http://w-decode.ns.svc.cluster.local:8020",
+    )
+    assert "--port 8010 " in engine_command("prefill", spec)
+    assert "--port 8020 " in engine_command("decode", spec)
+    assert "--port 8000 " in router_command(spec)
+    no_port = _spec(prefill_url="http://w-prefill", decode_url="")
+    assert "--port 8000 " in engine_command("prefill", no_port)
+    assert "--port 8000 " in engine_command("decode", no_port)
+
+
+_SPLIT_FLAGS = frozenset(
+    {"--cuda-graph-bs-decode", "--cuda-graph-bs-prefill", "--cuda-graph-max-bs-decode", "--cuda-graph-max-bs-prefill"}
+)
+
+
+def test_engine_uses_split_cuda_graph_flags_when_the_engine_has_no_legacy_flag() -> None:
+    spec = _spec(
+        prefill_extra="--cuda-graph-bs 1 2 4 --mem-fraction-static 0.8",
+        decode_extra="--cuda-graph-bs 1 2 --cuda-graph-max-bs=64",
+        engine_flags=_SPLIT_FLAGS,
+    )
+    prefill = engine_command("prefill", spec)
+    decode = engine_command("decode", spec)
+    assert "--cuda-graph-bs" not in prefill
+    assert "--cuda-graph-max-bs" not in prefill
+    assert "--mem-fraction-static 0.8" in prefill
+    assert "--cuda-graph-bs-decode 1 2 " in decode
+    assert "--cuda-graph-max-bs-decode=64" in decode
+    for flags in (frozenset(), _SPLIT_FLAGS | {"--cuda-graph-bs", "--cuda-graph-max-bs"}):
+        legacy = _spec(decode_extra="--cuda-graph-bs 1 2", prefill_extra="--cuda-graph-bs 1 2", engine_flags=flags)
+        assert "--cuda-graph-bs 1 2" in engine_command("prefill", legacy)
+        assert "--cuda-graph-bs 1 2" in engine_command("decode", legacy)
+
+
+def test_baseline_flags_the_engine_lacks_are_dropped_and_variant_flags_kept() -> None:
+    words = "--load-balance-method round_robin --prefill-round-robin-balance --cuda-graph-bs 1 2 --bogus x".split()
+    baseline = "--prefill-round-robin-balance --load-balance-method round_robin --cuda-graph-bs 1 2".split()
+    engine = frozenset({"--load-balance-method", "--cuda-graph-bs-decode"})
+    kept, dropped = drop_unsupported_baseline_flags(words, baseline, engine)
+    assert kept == "--load-balance-method round_robin --cuda-graph-bs 1 2 --bogus x".split()
+    assert dropped == ["--prefill-round-robin-balance"]
+    assert drop_unsupported_baseline_flags(words, baseline, frozenset()) == (words, [])
+
+
+def test_pods_record_the_engine_port_of_their_role() -> None:
+    spec = _spec(prefill_url="http://p-svc:8010", decode_url="http://d-svc:8020")
+    pods = pods_for(["10.0.0.9"], ["10.0.0.1"], ["10.0.0.2"], 29000, spec)
+    ports = {pod["role"]: pod.get("enginePort") for pod in pods}
+    assert ports == {"router": None, "prefill": 8010, "decode": 8020}
 
 
 def test_atom_handoff_keeps_ssh_env_and_uses_one_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -172,3 +230,79 @@ def test_replace_process_image_keeps_the_pid_and_applies_env(tmp_path: Path) -> 
         except OSError:
             pass
     assert marker.read_text(encoding="utf-8") == "kept"
+
+
+class _FakeCli:
+    """Records SSH scripts per IP and answers with a scripted stdout."""
+
+    def __init__(self, replies: dict[str, str]) -> None:
+        self.replies = replies
+        self.calls: list[tuple[str, str]] = []
+
+    def _infera_ssh_bash_with_env(self, state, ip, script, *, timeout, port=None):
+        self.calls.append((ip, script))
+        return subprocess.CompletedProcess(["ssh"], 0, stdout=self.replies.get(ip, ""), stderr="")
+
+
+_PD_STATE = {
+    "backend": "sglangrouter",
+    "ssh_port": 29000,
+    "prefill_pods": [{"role": "prefill", "podIP": "10.0.0.1", "sshPort": 29000}],
+    "decode_pods": [{"role": "decode", "podIP": "10.0.0.2", "sshPort": 29000}],
+}
+
+
+def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_GONE\n"})
+    monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
+    assert pd_cmds.engines_not_running(dict(_PD_STATE)) == ["decode 10.0.0.2"]
+    assert "/tmp/hyperloom-mn-decode.pid" in dict(fake.calls)["10.0.0.2"]
+
+
+def test_engine_flags_are_probed_once_and_only_for_legacy_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({"10.0.0.1": "--cuda-graph-bs-decode\n--cuda-graph-bs-prefill\n--port\n"})
+    monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
+    state = dict(_PD_STATE)
+    assert pd_cmds.probe_engine_flags(state, _spec(), timeout=30) == frozenset()
+    assert fake.calls == []
+    spec = _spec(decode_extra="--cuda-graph-bs 1 2")
+    flags = pd_cmds.probe_engine_flags(state, spec, timeout=30)
+    assert flags == frozenset({"--cuda-graph-bs-decode", "--cuda-graph-bs-prefill", "--port"})
+    assert pd_cmds.probe_engine_flags(state, spec, timeout=30) == flags
+    assert len(fake.calls) == 1
+    inferencex = dict(_PD_STATE, baseline_args_source="inferencex", baseline_decode_args="--port 1")
+    assert pd_cmds.probe_engine_flags(inferencex, _spec(), timeout=30) == flags
+    assert len(fake.calls) == 2
+
+
+def test_engine_flag_probe_runs_with_the_container_environment(tmp_path: Path) -> None:
+    """The probe resolves python3 from PID 1's PATH, not the SSH session's."""
+    bin_dir = tmp_path / "venv-bin"
+    bin_dir.mkdir()
+    fake_python = bin_dir / "python3"
+    fake_python.write_text("#!/bin/sh\necho 'usage: [--from-container-env]'\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    environ = tmp_path / "environ"
+    environ.write_bytes(f"PATH={bin_dir}:/usr/bin:/bin\0HOME=/root\0".encode())
+    script = pd_cmds._flag_probe_script(str(environ))
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+    assert out.stdout.split() == ["--from-container-env"]
+
+
+def test_restart_spec_drops_inferencex_baseline_flags_the_engine_lacks() -> None:
+    state = dict(
+        _PD_STATE,
+        baseline_args_source="inferencex",
+        baseline_decode_args="--prefill-round-robin-balance --load-balance-method round_robin",
+        baseline_prefill_args="--load-balance-method round_robin",
+    )
+    spec = _spec(
+        decode_extra="--prefill-round-robin-balance --load-balance-method round_robin",
+        prefill_extra="--load-balance-method round_robin",
+        engine_flags=frozenset({"--load-balance-method"}),
+    )
+    out = pd_cmds.without_unsupported_baseline_flags(state, spec)
+    assert out.decode_extra == "--load-balance-method round_robin"
+    assert out.prefill_extra == "--load-balance-method round_robin"
+    manual = pd_cmds.without_unsupported_baseline_flags(dict(state, baseline_args_source="manual"), spec)
+    assert manual == spec

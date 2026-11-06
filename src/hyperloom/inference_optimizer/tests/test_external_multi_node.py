@@ -373,6 +373,25 @@ def test_pd_leg_urls_carry_over_within_the_same_handoff(_external_env: Path) -> 
     assert state["pd_decode_url"] == "http://10.32.17.185:30001"
 
 
+def test_baseline_record_and_engine_flags_carry_over_within_the_same_handoff(_external_env: Path) -> None:
+    """The restart path reads the session baseline and the probed engine flags back from disk."""
+    _write_disk_state(
+        baseline_args_source="inferencex",
+        baseline_prefill_args="--load-balance-method round_robin",
+        baseline_decode_args="--prefill-round-robin-balance",
+        baseline_transfer_backend="mori",
+        engine_cli_flags=["--load-balance-method"],
+    )
+
+    state = ext.load_multi_node_state()
+
+    assert state["baseline_args_source"] == "inferencex"
+    assert state["baseline_prefill_args"] == "--load-balance-method round_robin"
+    assert state["baseline_decode_args"] == "--prefill-round-robin-balance"
+    assert state["baseline_transfer_backend"] == "mori"
+    assert state["engine_cli_flags"] == ["--load-balance-method"]
+
+
 def test_pd_leg_urls_are_dropped_when_the_cluster_was_replaced(_external_env: Path) -> None:
     """Same identity guard as the bookkeeping: a replacement cluster's legs differ."""
     _write_disk_state(

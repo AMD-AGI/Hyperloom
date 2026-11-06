@@ -11,6 +11,7 @@ Prefill and decode receive ``SGLANG_TORCH_PROFILER_DIR``; the router does not.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import shlex
@@ -20,15 +21,18 @@ from pathlib import Path
 from typing import Any
 
 from .._internal import process_image
-from .._internal.log import err, info
+from .._internal.log import err, info, warn
 from .._internal.pd_cluster import (
     ENGINE_PORT,
     LaunchSpec,
     cmdline_needle,
+    drop_unsupported_baseline_flags,
     launch_script,
     pods_for,
     spec_from_restart,
+    uses_split_role_flags,
 )
+from .._internal.baseline_args import SOURCE_INFERENCEX
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 
 _REMOTE_DRIVER = r"""
@@ -144,6 +148,11 @@ def _remote_program() -> str:
     return Path(process_image.__file__).read_text(encoding="utf-8") + "\n" + _REMOTE_DRIVER
 
 
+def _pidfile(role: str) -> str:
+    """Pod-local file holding the pid of the server this restart launched."""
+    return f"/tmp/hyperloom-mn-{role}.pid"
+
+
 def _bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
     """Bash that writes the launch script and runs the in-place restart helper."""
     marker = uuid.uuid4().hex
@@ -158,7 +167,7 @@ def _bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
             "chmod +x \"$launch\"",
             f"export HL_LAUNCH_PATH=\"$launch\"",
             f"export HL_NEEDLE={shlex.quote(needle)}",
-            f"export HL_PIDFILE=/tmp/hyperloom-mn-{role}.pid",
+            f"export HL_PIDFILE={_pidfile(role)}",
             f"export HL_ACTION={shlex.quote(action)}",
             f"python3 - << '{py_end}'",
             _remote_program().rstrip("\n"),
@@ -238,6 +247,97 @@ def _ssh_pod(
     return record
 
 
+def _engine_pods(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Prefill then decode pod records that carry an IP."""
+    pods = list(state.get("prefill_pods") or []) + list(state.get("decode_pods") or [])
+    return [pod for pod in pods if isinstance(pod, dict) and pod.get("podIP")]
+
+
+def _flag_probe_script(environ_path: str = "/proc/1/environ") -> str:
+    """Bash that lists ``sglang.launch_server --help`` options under the container environment in ``environ_path``."""
+    return (
+        "while IFS= read -r -d '' kv; do case \"$kv\" in PATH=*|PYTHONPATH=*|VIRTUAL_ENV=*|LD_LIBRARY_PATH=*) "
+        f'export "$kv";; esac; done < {shlex.quote(environ_path)}\n'
+        "python3 -m sglang.launch_server --help 2>/dev/null | grep -oE -- '--[a-z][a-z0-9-]*' | sort -u"
+    )
+
+
+def probe_engine_flags(state: dict[str, Any], spec: LaunchSpec, *, timeout: int) -> frozenset[str]:
+    """Option strings of the pod's ``sglang.launch_server``, cached in ``state``.
+
+    Probed only when the round carries a ``SPLIT_ROLE_FLAGS`` flag or the
+    baseline comes from InferenceX. Empty when the probe fails, which leaves
+    the launch args unchanged.
+    """
+    cached = state.get("engine_cli_flags")
+    if isinstance(cached, list):
+        return frozenset(str(flag) for flag in cached)
+    words = shlex.split(" ".join((spec.server_args, spec.prefill_extra, spec.decode_extra)))
+    pods = _engine_pods(state)
+    needed = uses_split_role_flags(words) or _inferencex_baseline(state)
+    if not needed or not pods:
+        return frozenset()
+    pod = pods[0]
+    ip = str(pod["podIP"])
+    port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
+    script = _flag_probe_script()
+    try:
+        completed = _cli()._infera_ssh_bash_with_env(state, ip, script, timeout=timeout, port=port)
+    except subprocess.TimeoutExpired:
+        warn(f"engine flag probe timed out on {ip}:{port}")
+        return frozenset()
+    flags = frozenset(line.strip() for line in (completed.stdout or "").splitlines() if line.startswith("--"))
+    if not flags:
+        warn(f"engine flag probe on {ip}:{port} listed no options; launch args are used as given")
+        return frozenset()
+    state["engine_cli_flags"] = sorted(flags)
+    return flags
+
+
+def _inferencex_baseline(state: dict[str, Any]) -> bool:
+    """True when the session baseline args came from InferenceX."""
+    return str(state.get("baseline_args_source") or "") == SOURCE_INFERENCEX
+
+
+def without_unsupported_baseline_flags(state: dict[str, Any], spec: LaunchSpec) -> LaunchSpec:
+    """``spec`` minus InferenceX baseline flags that the probed engine does not list."""
+    if not _inferencex_baseline(state) or not spec.engine_flags:
+        return spec
+    baseline = shlex.split(f"{state.get('baseline_prefill_args') or ''} {state.get('baseline_decode_args') or ''}")
+    changes: dict[str, str] = {}
+    for name in ("server_args", "prefill_extra", "decode_extra"):
+        kept, dropped = drop_unsupported_baseline_flags(shlex.split(getattr(spec, name)), baseline, spec.engine_flags)
+        if dropped:
+            warn(f"engine does not list baseline flag(s) {dropped}; dropped from {name}")
+            changes[name] = shlex.join(kept)
+    return dataclasses.replace(spec, **changes) if changes else spec
+
+
+def engines_not_running(state: dict[str, Any], *, timeout: int = 30) -> list[str]:
+    """``"<role> <ip>"`` of each engine pod whose launched server is no longer running.
+
+    A pod whose container restarted has lost the pidfile and runs its platform
+    entrypoint instead of the launched command. Unreachable pods are not listed.
+    """
+    gone: list[str] = []
+    for pod in _engine_pods(state):
+        role = str(pod.get("role") or "")
+        ip = str(pod["podIP"])
+        port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
+        needle = shlex.quote(cmdline_needle(role, str(state.get("backend") or "atom")))
+        script = (
+            f'pid=$(cat {_pidfile(role)} 2>/dev/null) && kill -0 "$pid" 2>/dev/null '
+            f"&& tr '\\0' ' ' < /proc/\"$pid\"/cmdline | grep -qF -- {needle} && echo HL_ALIVE || echo HL_GONE"
+        )
+        try:
+            completed = _cli()._infera_ssh_bash_with_env(state, ip, script, timeout=timeout, port=port)
+        except subprocess.TimeoutExpired:
+            continue
+        if "HL_GONE" in (completed.stdout or ""):
+            gone.append(f"{role} {ip}")
+    return gone
+
+
 def _ordered_pods(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Engines first, then the router, so the router restarts against live workers."""
     pods = [pod for pod in (state.get("pods") or []) if isinstance(pod, dict)]
@@ -257,9 +357,11 @@ def restart_pd_cluster(args: argparse.Namespace) -> int:
     if not spec.model:
         err("restart-server: model is empty")
         return _cli().EXIT_CONFIG_ERROR
+    timeout = int(getattr(args, "poll_timeout", 180) or 180)
+    spec = dataclasses.replace(spec, engine_flags=probe_engine_flags(state, spec, timeout=timeout))
+    spec = without_unsupported_baseline_flags(state, spec)
     _refresh_pods(state, spec)
     extra_env = _forward_env()
-    timeout = int(getattr(args, "poll_timeout", 180) or 180)
     results = [
         _ssh_pod(state, pod, action="restart", extra_env=extra_env, timeout=timeout) for pod in _ordered_pods(state)
     ]

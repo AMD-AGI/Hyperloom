@@ -14,8 +14,9 @@ from __future__ import annotations
 import json
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from ..state_paths import resolve_state_file, state_file_safe_to_read
 
@@ -23,6 +24,8 @@ PD_ROUTER_BACKENDS = ("atom", "sglangrouter")
 ENGINE_PORT = 8000
 PREFILL_BOOTSTRAP_PORT = 8998
 DECODE_BOOTSTRAP_PORT = 9098
+# Engine flags that newer SGLang splits into ``<flag>-decode`` and ``<flag>-prefill``.
+SPLIT_ROLE_FLAGS = ("--cuda-graph-bs", "--cuda-graph-max-bs")
 
 Lookup = Callable[[str], str]
 
@@ -44,6 +47,8 @@ class LaunchSpec:
     decode_extra: str
     prefill_url: str
     decode_url: str
+    # Option strings the pod's ``sglang.launch_server --help`` lists; empty when not probed.
+    engine_flags: frozenset[str] = field(default_factory=frozenset)
 
 
 def _words(raw: str) -> list[str]:
@@ -55,6 +60,86 @@ def _words(raw: str) -> list[str]:
 def _join(argv: list[str]) -> str:
     """Shell-quote an argv into one command line."""
     return " ".join(shlex.quote(part) for part in argv)
+
+
+def engine_port(role: str, spec: LaunchSpec) -> int:
+    """Listen port of a prefill or decode engine: the port of its role URL, else ENGINE_PORT."""
+    url = spec.prefill_url if role == "prefill" else spec.decode_url
+    try:
+        port = urlsplit((url or "").strip()).port
+    except ValueError:
+        port = None
+    return port or ENGINE_PORT
+
+
+def _flag_end(words: list[str], i: int) -> int:
+    """Index just past the flag at ``i`` and its space-separated values."""
+    j = i + 1
+    if "=" not in words[i]:
+        while j < len(words) and not words[j].startswith("--"):
+            j += 1
+    return j
+
+
+def drop_unsupported_baseline_flags(
+    words: list[str], baseline_words: list[str], engine_flags: frozenset[str]
+) -> tuple[list[str], list[str]]:
+    """Remove flags that the baseline supplied and the engine does not list.
+
+    Returns the kept words and the dropped flag names. ``SPLIT_ROLE_FLAGS`` and
+    flags absent from the baseline are kept; nothing is dropped without
+    ``engine_flags``.
+    """
+    if not engine_flags:
+        return words, []
+    baseline = {word.split("=", 1)[0] for word in baseline_words if word.startswith("--")}
+    out: list[str] = []
+    dropped: list[str] = []
+    i = 0
+    while i < len(words):
+        name = words[i].split("=", 1)[0]
+        j = _flag_end(words, i) if name.startswith("--") else i + 1
+        if name in baseline and name not in engine_flags and name not in SPLIT_ROLE_FLAGS:
+            if name not in dropped:
+                dropped.append(name)
+        else:
+            out.extend(words[i:j])
+        i = j
+    return out, dropped
+
+
+def uses_split_role_flags(words: list[str]) -> bool:
+    """True when ``words`` carries a flag from ``SPLIT_ROLE_FLAGS``."""
+    return any(word.split("=", 1)[0] in SPLIT_ROLE_FLAGS for word in words)
+
+
+def adapt_split_role_flags(role: str, words: list[str], engine_flags: frozenset[str]) -> list[str]:
+    """Map ``SPLIT_ROLE_FLAGS`` onto an engine that only has the per-role variants.
+
+    Decode takes ``<flag>-decode`` with the same values. Prefill drops the flag:
+    its per-role variant counts tokens, not decode batch sizes.
+    """
+    split = {
+        flag
+        for flag in SPLIT_ROLE_FLAGS
+        if engine_flags and flag not in engine_flags and f"{flag}-decode" in engine_flags
+    }
+    if not split:
+        return words
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        name, sep, value = words[i].partition("=")
+        if name not in split:
+            out.append(words[i])
+            i += 1
+            continue
+        j = _flag_end(words, i)
+        if role == "decode":
+            out.append(f"{name}-decode{sep}{value}")
+            out.extend(words[i + 1 : j])
+        i = j
+    return out
 
 
 def engine_command(role: str, spec: LaunchSpec) -> str:
@@ -72,7 +157,7 @@ def engine_command(role: str, spec: LaunchSpec) -> str:
         "--host",
         "0.0.0.0",
         "--port",
-        str(ENGINE_PORT),
+        str(engine_port(role, spec)),
         "--tp-size",
         str(tp),
         "--disaggregation-mode",
@@ -86,7 +171,7 @@ def engine_command(role: str, spec: LaunchSpec) -> str:
         argv.extend(["--disaggregation-ib-device", spec.ib.strip()])
     if spec.ep > 1:
         argv.extend(["--ep-size", str(spec.ep)])
-    argv.extend(extra)
+    argv.extend(adapt_split_role_flags(role, extra, spec.engine_flags))
     return _join(argv)
 
 
@@ -256,13 +341,16 @@ def spec_from_restart(args: Any, state: dict[str, Any]) -> LaunchSpec:
 
 
 def _pod(role: str, index: int, ip: str, port: int | None, spec: LaunchSpec) -> dict[str, Any]:
-    return {
+    pod: dict[str, Any] = {
         "role": role,
         "podIP": ip,
         "podId": f"external-{role}-{index}",
         "sshPort": port,
         "launch_command": command_for(role, spec),
     }
+    if role != "router":
+        pod["enginePort"] = engine_port(role, spec)
+    return pod
 
 
 def pods_for(

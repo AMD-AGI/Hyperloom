@@ -29,6 +29,11 @@ _SESSION_KEY_PREFIX = "last_"
 _HANDOFF_CARRIED_KEYS = (
     "pd_prefill_url",
     "pd_decode_url",
+    "baseline_args_source",
+    "baseline_prefill_args",
+    "baseline_decode_args",
+    "baseline_transfer_backend",
+    "engine_cli_flags",
 )
 
 # The fields that identify *which* cluster a state describes.

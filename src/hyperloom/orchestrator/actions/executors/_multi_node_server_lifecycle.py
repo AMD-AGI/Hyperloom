@@ -659,22 +659,26 @@ def select_pd_role_traces(root: str, since_unix: float) -> dict[str, str]:
 async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
     """POST /start_profile or /stop_profile on every atom/sglangrouter prefill and decode pod.
 
-    The router does not write GPU traces. Each engine listens on the worker port
-    (8000 for these backends). Only ``output_dir`` is sent; step-window fields
-    crash disaggregated SGLang.
+    The router does not write GPU traces. Each engine listens on its pod's
+    ``enginePort``, else the worker port. A role with no pods in state is reached through
+    ``HYPERLOOM_MN_EXT_<ROLE>_URL``. Only ``output_dir`` is sent; step-window
+    fields crash disaggregated SGLang.
     """
     if not is_multi_node():
         return
     state = _read_state() or {}
     if str(state.get("backend") or "").strip().lower() not in ("atom", "sglangrouter"):
         return
-    pods: list[tuple[str, dict]] = []
+    port = str(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "8000") or "8000").strip() or "8000"
+    targets: list[tuple[str, str]] = []
     for role in PD_PROFILE_ROLES:
-        pods.extend(
-            (role, pod) for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict) and pod.get("podIP")
-        )
-    if not pods:
-        log.warning("trigger_pd_engine_profile(%s): no prefill/decode pods in state", action)
+        role_pods = [pod for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict) and pod.get("podIP")]
+        targets.extend((role, f"http://{pod['podIP']}:{pod.get('enginePort') or port}") for pod in role_pods)
+        engine_url = os.environ.get(f"HYPERLOOM_MN_EXT_{role.upper()}_URL", "").strip().rstrip("/")
+        if not role_pods and engine_url:
+            targets.append((role, engine_url))
+    if not targets:
+        log.warning("trigger_pd_engine_profile(%s): no prefill/decode pods or engine URLs", action)
         return
     try:
         import httpx as _httpx
@@ -682,15 +686,14 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
         log.warning("httpx unavailable; cannot trigger pd-cluster profiling")
         return
     route = "start_profile" if action == "start" else "stop_profile"
-    port = str(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "8000") or "8000").strip() or "8000"
     output_dir = str((body or {}).get("output_dir") or "").strip() if action == "start" else ""
     if action == "start":
         client_timeout = 30.0
     else:
         client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
     async with _httpx.AsyncClient(timeout=client_timeout) as client:
-        for role, pod in pods:
-            url = f"http://{pod['podIP']}:{port}/{route}"
+        for role, base_url in targets:
+            url = f"{base_url}/{route}"
             payload: dict = {}
             if output_dir:
                 # Each role writes under <output_dir>/<role> so its traces stay attributable.
@@ -818,19 +821,39 @@ def _worker_startup_crashed(tail: str) -> str | None:
     return None
 
 
-def _worker_health_targets(state: dict) -> list[tuple[str, str, str]]:
-    seen: set[str] = set()
-    targets: list[tuple[str, str, str]] = []
+def _worker_health_targets(state: dict, default_port: int) -> list[tuple[str, str, int]]:
+    """``(role, ip, port)`` per worker; a pod's ``enginePort`` overrides ``default_port``."""
+    seen: set[tuple[str, int]] = set()
+    targets: list[tuple[str, str, int]] = []
     for role_key in ("prefill_pods", "decode_pods", "worker_pods"):
         for pod in state.get(role_key) or []:
             if not isinstance(pod, dict):
                 continue
             ip = str(pod.get("podIP") or "").strip()
-            if not ip or ip in seen:
+            port = int(pod.get("enginePort") or default_port)
+            if not ip or (ip, port) in seen:
                 continue
-            seen.add(ip)
-            targets.append((role_key.replace("_pods", ""), ip, str(pod.get("podId") or ip)))
+            seen.add((ip, port))
+            targets.append((role_key.replace("_pods", ""), ip, port))
     return targets
+
+
+def _pd_engines_not_running(state: dict) -> list[str]:
+    """Atom/sglangrouter engine pods whose launched server is gone; empty for other backends."""
+    if str(state.get("backend") or "").strip().lower() not in ("atom", "sglangrouter"):
+        return []
+    from hyperloom.inference_optimizer.multi_node.commands.pd_cluster import engines_not_running
+
+    return engines_not_running(state)
+
+
+def _pd_launch_lost_reason(gone: list[str]) -> str:
+    return (
+        "launched engine exited on "
+        + str(gone)
+        + "; the container restarted with its platform entrypoint, so /health no longer reflects this round's "
+        "launch args (the engine's error is in the pod's previous container log)"
+    )
 
 
 def _worker_fastfail_reason(
@@ -877,11 +900,13 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     import httpx as _httpx
 
     port = settings.worker_port
-    targets = _worker_health_targets(_read_state())
+    state = _read_state()
+    targets = _worker_health_targets(state, port)
     if not targets:
         return
     started = _t.monotonic()
     ready: set[str] = set()
+    launch_checked = False
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
     wedge_grace = settings.worker_wedge_grace_s
     fastfail = env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True)
@@ -892,17 +917,24 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     async with _httpx.AsyncClient(timeout=10.0) as client:
         while True:
             elapsed = int(_t.monotonic() - started)
-            for role, ip, _pid in targets:
+            for role, ip, worker_port in targets:
                 if ip in ready:
                     continue
                 try:
-                    resp = await client.get("http://" + ip + ":" + str(port) + "/health")
+                    resp = await client.get("http://" + ip + ":" + str(worker_port) + "/health")
                 except _httpx.HTTPError:
                     continue
                 if resp.status_code == 200:
                     ready.add(ip)
                     log.info("worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets))
             pending = [ip for _r, ip, _p in targets if ip not in ready]
+            # A pod that restarted its container serves its platform entrypoint: check once past the crash grace
+            # and again before declaring the workers ready.
+            if not pending or (not launch_checked and elapsed > crash_grace):
+                launch_checked = True
+                gone = await asyncio.to_thread(_pd_engines_not_running, state)
+                if gone:
+                    raise ServerRestartFailed(_pd_launch_lost_reason(gone))
             if not pending:
                 log.info(
                     "all %d worker(s) /health-ready after %ds; proceeding to frontend probe", len(targets), elapsed
