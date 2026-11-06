@@ -11,7 +11,8 @@ from typing import Any, Mapping
 
 from hyperloom_common.coerce import optional_positive_float, to_float
 from hyperloom_common.env import is_truthy
-from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
+from hyperloom.common.gain_math import accuracy_meets_floor
+from hyperloom.common.perf_metric import constraint_fields, graded_axes_of, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
@@ -24,26 +25,12 @@ from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
     ENABLEMENT_REVALIDATION_REASON,
     EVAL_KIND_ACCURACY_UNAVAILABLE,
-    accuracy_meets_floor,
 )
 from ..state.round_store import FAILED
 from ._promote_outcome import _PromoteOutcome
 from ..state.task_registry import Task
 
 log = logging.getLogger(__name__)
-
-
-def _baseline_perf_axes(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not snapshot:
-        return {}
-    axes: dict[str, Any] = {
-        "total_throughput": snapshot["total_throughput"],
-        "e2e_norm_intvty_p90": snapshot["e2e_norm_intvty_p90"],
-    }
-    for name in ("input_throughput", "tpot_p90_ms", "e2e_norm_intvty_p50", "duration_seconds", "request_error_rate"):
-        if snapshot.get(name) is not None:
-            axes[name] = snapshot[name]
-    return axes
 
 
 # task.params fields fingerprinted by the self-loop guard.
@@ -435,7 +422,7 @@ class BaselinePromotionMixin:
             "request_error_rate": result.get("request_error_rate"),
             "output_tput_per_gpu": result.get("output_tput_per_gpu"),
             "workspace": result.get("workspace"),
-            **_baseline_perf_axes(self.shared_state.baseline_perf),
+            **graded_axes_of(self.shared_state.baseline_perf),
         }
         self.shared_state.current_best = current_best
         # Reads the current_best just assigned, so it has to follow it.

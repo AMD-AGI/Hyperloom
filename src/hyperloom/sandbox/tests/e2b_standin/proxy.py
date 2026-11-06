@@ -66,10 +66,13 @@ def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
             pass
 
         def _answer(self, status: int, message: str) -> None:
+            """Refuse the request and close the connection: a body the router never read would otherwise be parsed as
+            the next request on it."""
             body = json.dumps(
                 {"sandboxId": self.headers.get(_SANDBOX_HEADER), "message": message, "code": status}
             ).encode()
             self.send_response(status)
+            self.send_header("Connection", "close")  # also sets close_connection
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -83,7 +86,6 @@ def serve_proxy(plane: ControlPlane) -> ThreadingHTTPServer:
                 return
             path = self.path
             if not _PATH_ONLY.fullmatch(path):
-                self.close_connection = True
                 self._answer(400, "The request target is not a path on the sandbox")
                 return
             conn = http.client.HTTPConnection(_UPSTREAM_HOST, box.port, timeout=3600)

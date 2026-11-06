@@ -71,42 +71,30 @@ Each iteration:
    Critic is given 10 minutes **per plan it has to read**, capped by the
    Orchestration session timeout, because a round of several plans is several
    times the reading. A turn cap, timeout, SDK truncation, or empty answer is
-   never published as a complete plan. Empty or failed Critic calls fail open to
-   the draft and record the verdict `NOT_REVIEWED`, which is what the artifact,
-   the diagnostics, and the next round are all given. Review diagnostics record
-   duration and whether the verdict was explicit or inferred. Shorter sessions publish the synthesized plan directly.
+   never published as a complete plan. Empty or failed Critic calls, and answers
+   not in the shape the review is held to, fail open to the draft and record the
+   verdict `NOT_REVIEWED`, which is what the artifact, the diagnostics, and the
+   next round are all given. Review diagnostics record duration.
+   Shorter sessions publish the synthesized plan directly.
    A multi-lane round is reviewed once, with its division in view, and the one
    verdict reaches every lane.
-4. How wide the round runs is a separate answer, given per lane, and it is the
-   one part of the review a machine reads. A multi-lane review stays prose and
-   ends with one JSON object —
-   `{"lane_narrowing": [{"lane_id": 2, "reason": "..."}]}` — naming the lanes it
-   judges not worth an Implementer session (ground the evidence does not
-   support, or another lane's change in different words). Those lanes are not
-   published, so the round spends fewer sessions than it planned. A review that
-   wants the round whole ends with `{"lane_narrowing": []}`: an empty list and a
-   missing block are different answers, and only the first means "run every
-   lane". The reason travels with the lane into `structured_output.json`,
-   dropping happens before the revision so no revision turn is spent on a lane
-   that will not run, and three rules bound it: at least one lane always runs, a
-   drop naming a lane the round does not have or carrying no readable reason
-   keeps its lane and is reported, and a round carrying a challenger for a
+4. How wide the round runs is a separate answer, given per lane. The review is
+   one structured answer -- `verdict`, the prose `review`, and `lane_narrowing`,
+   the lanes it judges not worth an Implementer session (ground the evidence does
+   not support, or another lane's change in different words), each with its
+   reason. Those lanes are not published, so the round spends fewer sessions
+   than it planned; an empty list runs every lane. The reason travels with the
+   lane into `structured_output.json`, dropping happens before the revision so
+   no revision turn is spent on a lane that will not run, and three rules bound
+   it: at least one lane always runs, a drop naming a lane the round does not
+   have keeps its lane and is reported, and a round carrying a challenger for a
    pending `REPLACE` refuses narrowing whole because which lane is the
    challenger was never written down. A lane the partition widened to joint
    ground is dropped like any other — the review is shown its `joint` flag and
    its fallback and rules with them in view — and the round records under
-   `dropped_joint` that it spent that width without measuring it. A review that
-   ends with no readable block
-   is asked once more for it — one call, no tools, two turns, two minutes, and
-   only when the alternative is running a lane the review said was not worth its
-   session. Every refusal, and everything the round could not read, is recorded
-   under `lane_narrowing`: `status` says what happened to the ruling and `block`
-   says whether it was `answered`, `repaired`, `absent`, `malformed`, or
-   `not_asked` (a one-lane round, which is never held to a block). A `notes`
-   entry says only what was seen while reading the block and leaves the outcome
-   to `status` and `dropped`, so the record cannot contradict itself, and the
-   warning that a narrowing was not applied is logged where that is what
-   happened rather than wherever a note exists.
+   `dropped_joint` that it spent that width without measuring it. Every refusal
+   is recorded under `lane_narrowing`, where `status` says what happened to the
+   ruling.
 5. A `REPLACE` verdict is spent on the round *after* the one it judged. It says
    the implementation route itself is dominated, which the round already
    synthesized cannot act on, so the ruling is carried forward: the next round's

@@ -32,6 +32,7 @@ from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
     _QueuedBackend,
     _StaticBackend,
     _assignment,
+    _critic_answer,
     _compute_and_memory_round,
     _context,
     _coverage,
@@ -71,7 +72,7 @@ async def test_plan_critic_triggers_exactly_one_revision(verdict) -> None:
     revised = "# Optimization plan\nBenchmark the existing GEMM path."
     orchestration_backend = _QueuedBackend([_dispatch_payload(), draft, revised])
     specialist_backend = _StaticBackend("Algorithm analysis")
-    critic_backend = _StaticBackend(f"VERDICT: {verdict}\n\nCompare the existing GEMM path.")
+    critic_backend = _StaticBackend(_critic_answer(verdict, "Compare the existing GEMM path."))
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -150,7 +151,7 @@ async def test_plan_revision_resumes_the_synthesis_session() -> None:
         ),
         definitions={"memory": _definitions()["memory"]},
         plan_critic=PlanCriticAgent(
-            backend=_StaticBackend("VERDICT: REVISE\n\nCompare the existing GEMM path."),
+            backend=_StaticBackend(_critic_answer("REVISE", "Compare the existing GEMM path.")),
             timeout_sec=1,
         ),
     )

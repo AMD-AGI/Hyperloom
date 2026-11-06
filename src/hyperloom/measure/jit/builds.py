@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import posixpath
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
@@ -25,6 +25,8 @@ __all__ = ["COMPILED_REGISTRY_MARKER", "BuildLog", "scan_builds", "server_logs"]
 
 SERVER_LOG = "server.log"
 _MAX_LOG_BYTES = 256 * 1024**2
+#: The longest line read; no build line comes near it, so a longer one is skipped whole, read in pieces of this size.
+_MAX_LINE_BYTES = 1024**2
 _MAX_LOGS = 64
 _NAME = r"(?:\[([A-Za-z0-9_.-]+)\]|(\S+?))"
 _START = re.compile(rf"start build {_NAME}(?:\s|$)")
@@ -92,13 +94,10 @@ def scan_builds(logs: Iterable[Path]) -> BuildLog:
 def _scan(
     handle: BinaryIO, seconds: dict[str, float], started: set[str], failed: dict[str, str], missing: dict[str, str]
 ) -> None:
-    budget = _MAX_LOG_BYTES
+    """Read the lines of ``handle``. A failed-build record still open where the reading stops (the log was cut inside
+    it) names its module with what it said so far: its opening tag already says the build failed."""
     record: _FailedBuild | None = None
-    for raw in handle:
-        budget -= len(raw)
-        if budget < 0:
-            return
-        line = raw.decode("utf-8", errors="replace")
+    for line in _lines(handle):
         if record is not None:
             if record.take(line):
                 failed.setdefault(record.module, record.excerpt())
@@ -120,6 +119,29 @@ def _scan(
         if done:
             name = _module(done)
             seconds[name] = max(seconds.get(name, 0.0), float(done.group(3)))
+    if record is not None:
+        failed.setdefault(record.module, record.excerpt())
+
+
+def _lines(handle: BinaryIO) -> Iterator[str]:
+    """The lines of ``handle`` up to the budget, which bounds what is read whether or not the log breaks its lines.
+
+    A line longer than :data:`_MAX_LINE_BYTES`, or cut by the budget, is skipped whole: matched piece by piece, a build
+    line cut at a piece boundary would name a module by half its name, or lose its record.
+    """
+    budget = _MAX_LOG_BYTES
+    skipping = False
+    while budget > 0:
+        size = min(budget, _MAX_LINE_BYTES)
+        raw = handle.readline(size)
+        if not raw:
+            return
+        budget -= len(raw)
+        ended = raw.endswith(b"\n")
+        if skipping or (len(raw) == size and not ended):
+            skipping = not ended
+            continue
+        yield raw.decode("utf-8", errors="replace")
 
 
 class _FailedBuild:

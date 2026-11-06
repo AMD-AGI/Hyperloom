@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
+from hyperloom.common.gain_math import ACCURACY_THRESHOLD
 from hyperloom.common.prompt_safety import flatten_for_prompt
-from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_THRESHOLD
 from hyperloom.orchestrator.predictor.mandate import open_mandate
 from hyperloom.orchestrator.predictor.rows import PROVENANCE
 from hyperloom.orchestrator.predictor.view import SessionView
