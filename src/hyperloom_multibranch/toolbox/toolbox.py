@@ -29,6 +29,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
+    BlackboardError,
     ClaimLost,
     ClaimService,
     ConflictingWrite,
@@ -258,10 +259,8 @@ class RealToolbox:
         entry = self._log.get(request_id)
         if entry is None or entry.aborted:
             raise UnknownTestRequest(request_id)
-        if entry.outcome is not None:
-            return CancelOutcome.WITHDRAWN if "withdrawal" in entry.outcome else CancelOutcome.FINISHED
         await self._withdraw(entry, "cancelled by the submitter")
-        return CancelOutcome.WITHDRAWN
+        return CancelOutcome.WITHDRAWN if "withdrawal" in (entry.outcome or {}) else CancelOutcome.FINISHED
 
     async def queue_state(self) -> QueueState:
         return replace(self._queue.state(), builds=self._builds.ledger())
@@ -415,10 +414,10 @@ class RealToolbox:
         return tests
 
     async def _withdraw_tests(self, wanted: Callable[[LogEntry], bool], reason: str) -> tuple[str, ...]:
+        """Withdraw the waiting tests ``wanted`` picks; the ids of those withdrawn, not of those whose result landed
+        while the ones before them were withdrawn."""
         pending = [e for e in self._log.entries() if e.waiting and wanted(e)]
-        for entry in pending:
-            await self._withdraw(entry, reason)
-        return tuple(entry.request_id for entry in pending)
+        return tuple([entry.request_id for entry in pending if await self._withdraw(entry, reason)])
 
     def cancel_tool_jobs(self, branch_id: str) -> int:
         """Cancel the tool jobs (profile, roofline, build, kernel_tune, ...) ``branch_id`` started or joined and that have
@@ -545,8 +544,9 @@ class RealToolbox:
                 continue
             try:
                 await self._claims.renew(self._key(item.request), ttl_seconds=self._ttl)
-            except Exception:
-                logger.warning("could not renew the claim of %s", item.request_id, exc_info=True)
+            except (BlackboardError, OSError):  # the blackboard refused or was not reached: the next tick retries
+                message = "could not renew the claim of %s; it lapses at its TTL unless a later renewal lands"
+                logger.warning(message, item.request_id, exc_info=True)
 
     # --- accepting and recovering --------------------------------------------------------------------------------
 
@@ -594,8 +594,9 @@ class RealToolbox:
             if self._claims is not None and accepted.intent_fingerprint is not None:
                 await self._claims.attach_request(self._key(accepted), entry.request_id, ttl_seconds=self._ttl)
         except ClaimLost as error:
-            await self._sink.write_withdrawal(Withdrawal(entry.request_id, f"claim lost: {error}"))
+            # Aborted before the withdrawal is written: a write that fails must not leave the entry waiting in no queue.
             self._log.abort(entry.request_id)
+            await self._sink.write_withdrawal(Withdrawal(entry.request_id, f"claim lost: {error}"))
             raise RequestRejected(f"the claim of this request is not held: {error}") from error
         except BaseException:
             self._log.abort(entry.request_id)
@@ -703,7 +704,15 @@ class RealToolbox:
     async def _notify_build(self, notice: BuildNotice) -> None:
         await self._sink.notify_build(notice)
 
-    async def _withdraw(self, entry: LogEntry, reason: str) -> None:
+    async def _withdraw(self, entry: LogEntry, reason: str) -> bool:
+        """Withdraw ``entry`` unless it has an outcome; whether this call withdrew it.
+
+        The outcome is read again after the test's task is cancelled: a result, or another withdrawal, that landed while
+        this call waited is kept, never written over (the log, a restart's replay and the blackboard would say
+        withdrawn of a measured test).
+        """
+        if not entry.waiting:
+            return False
         self._queue.remove(entry.request_id)
         self._builds.forget(entry.request_id)
         task = self._tasks.pop(entry.request_id, None)
@@ -711,8 +720,11 @@ class RealToolbox:
             self._executor.withdraw(entry.request_id)  # the task's cancel cannot reach the thread that measures
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        await self._record_and_write(entry, {"withdrawal": reason})
+        withdrawn = entry.waiting
+        if withdrawn:
+            await self._record_and_write(entry, {"withdrawal": reason})
         self._pump()
+        return withdrawn
 
     async def _record_and_write(self, entry: LogEntry, outcome: dict[str, object]) -> None:
         self._log.record_outcome(entry.request_id, outcome)

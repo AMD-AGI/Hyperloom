@@ -43,11 +43,11 @@ from hyperloom_multibranch.tests.fakes import (
     ReproToolbox,
     quick_polls,  # noqa: F401
 )
-from hyperloom_multibranch.toolbox import fake as fake_toolbox
+from hyperloom_multibranch.toolbox.tests import fake as fake_toolbox
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.acceptance import AcceptanceSetup
-from hyperloom_multibranch.toolbox.fake import FakeToolbox
-from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
 ROOT, BRANCH, CONC = "c0", "s1", 64
 RECIPE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))

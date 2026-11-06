@@ -89,6 +89,7 @@ _NARROW = "tpl-narrow"  # a 1-card runner template that accepts the commit but n
 _DEVS = ("tpl-dev-a", "tpl-dev-b")
 _RUNNER_MAP = {"1": _RUNNERS[0], "2": _RUNNERS[1]}
 _DEV_MAP = {"1": _DEVS[0], "2": _DEVS[1]}
+#: The run's source the hosted session fetches to build its runner cache; the toolbox itself does not take it.
 _SOURCE_REPO, _SOURCE_SHA = "https://source.invalid/hyperloom.git", "ab" * 20
 _MANIFEST = "cd" * 32  # the SHA-256 of the manifest file of a runner cache entry
 #: What the runner no longer reads: the repository its start-up script once fetched from. The host may still send it.
@@ -232,7 +233,6 @@ def _inputs(service: Service | None, tmp_path: Path, **changed: Any) -> HostedTo
         "measurement_key": keys["measurement"],
         "dev_key": keys["dev"],
         "sandbox_templates": {"measurement": _RUNNER_MAP, "dev": _DEV_MAP, "subrun": {"1": "x-sub"}},
-        "source_repo": _SOURCE_REPO,
         "source_sha": _SOURCE_SHA,
         "tp": 1,
         "grant_limits": _GRANT,
@@ -322,8 +322,7 @@ def test_inputs_that_cannot_describe_a_session_are_refused(
 
 
 #: What the host entry builds the inputs from: a plain dict whose keys are these names (``HostedToolboxInputs(**d)``).
-#: Fields are only ever added, and only with a default, so the required names are fixed. ``source_repo`` was required
-#: until the runner stopped fetching from a repository: a host may still send it, and one may leave it out.
+#: Fields are only ever added, and only with a default, so the required names are fixed.
 _REQUIRED_FIELDS = (
     "run_id",
     "session_dir",
@@ -333,7 +332,7 @@ _REQUIRED_FIELDS = (
     "sandbox_templates",
     "source_sha",
 )
-_OPTIONAL_FIELDS = ("source_repo", "tp", "dev_key", "grant_limits", "runner_cache_manifest_sha256", "sandbox_workspace")
+_OPTIONAL_FIELDS = ("tp", "dev_key", "grant_limits", "runner_cache_manifest_sha256", "sandbox_workspace")
 
 
 def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: Path) -> None:
@@ -344,7 +343,6 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
         "sandbox_url": "http://sandboxes.invalid",
         "measurement_key": "m-key",
         "sandbox_templates": {"measurement": {"1": _RUNNERS[0]}, "dev": {"1": _DEVS[0]}},
-        "source_repo": _SOURCE_REPO,
         "source_sha": _SOURCE_SHA,
         "tp": 1,
         "dev_key": "d-key",
@@ -365,14 +363,10 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
     "left_out",
     [
         ("runner_cache_manifest_sha256",),  # a host that predates the manifest pin
-        ("source_repo",),  # a host that no longer has a repository to name
-        ("source_repo", "runner_cache_manifest_sha256"),
         _OPTIONAL_FIELDS,
     ],
 )
-def test_a_plain_dict_without_the_newer_or_the_retired_keys_still_builds_the_inputs(
-    tmp_path: Path, left_out: tuple[str, ...]
-) -> None:
+def test_a_plain_dict_without_the_newer_keys_still_builds_the_inputs(tmp_path: Path, left_out: tuple[str, ...]) -> None:
     plain = {**vars(_inputs(None, tmp_path)), "runner_cache_manifest_sha256": _MANIFEST}
     fewer = {name: value for name, value in plain.items() if name not in left_out}
     assert set(left_out) < set(plain) and set(fewer) >= set(_REQUIRED_FIELDS)
@@ -381,16 +375,6 @@ def test_a_plain_dict_without_the_newer_or_the_retired_keys_still_builds_the_inp
         assert getattr(inputs, name) == {"tp": 1}.get(name), f"{name} falls back to its default"
     pinned = {} if "runner_cache_manifest_sha256" in left_out else {MANIFEST_PIN_ENV: _MANIFEST}
     assert inputs.create_envs() == {SOURCE_SHA_ENV: _SOURCE_SHA, **pinned}
-
-
-@pytest.mark.parametrize("source_repo", [None, "", "  ", _SOURCE_REPO])
-def test_the_source_repository_is_accepted_whatever_it_is_and_never_reaches_the_runner(
-    tmp_path: Path, source_repo: str | None
-) -> None:
-    inputs = _inputs(None, tmp_path, source_repo=source_repo)
-    assert inputs.source_repo == source_repo, "the field is kept as given"
-    assert inputs.create_envs() == {SOURCE_SHA_ENV: _SOURCE_SHA}, "and the runner is not told of it"
-    assert _toolbox(None, tmp_path, source_repo=source_repo).backend._config.create_envs == inputs.create_envs()
 
 
 def test_a_refused_manifest_digest_is_never_in_the_message(tmp_path: Path) -> None:
