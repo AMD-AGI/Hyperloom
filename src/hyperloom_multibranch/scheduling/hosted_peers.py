@@ -198,7 +198,7 @@ def private_copy(source: Path, private: Path, sha: str) -> Path:
 
     copy = private / "source.git"
     object_format = ["--object-format=sha256"] if len(sha) == 64 else []
-    env = git_env()
+    env = git_env(GIT_ALLOW_PROTOCOL="file")
     _git(git_argv(*INIT, _QUIET, "--bare", *object_format, str(copy)), f"creating {copy}", env)
     fetch = ["--git-dir", str(copy), "-c", "protocol.version=2", _FETCH, _QUIET, "--no-tags", "--depth", "1"]
     _git(git_argv(*fetch, str(source), sha), f"copying {sha} from {source}", env)
