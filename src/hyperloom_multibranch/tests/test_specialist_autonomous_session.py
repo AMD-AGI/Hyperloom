@@ -391,6 +391,103 @@ async def test_an_agent_whose_source_changes_cannot_land_is_told_so_and_the_bran
         assert specs[0].source_unkept in noted[0]
 
 
+#: The toolbox's refusal of a source change to vLLM on a recipe that does not carry it, given without its upstream.
+UNLABELLED = RequestRejected(
+    "the delta does not fit the parent recipe: vllm is a new component; give its upstream repository and commit",
+    "delta_not_applicable",
+)
+#: A start commit that does not carry vLLM, whose source changes then add it to the recipe.
+WITHOUT_VLLM = Recipe(ROOT.base_image_digest, ROOT.launch)
+
+
+def _from_a_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """vLLM installed from a wheel whose upstream commit nothing resolves."""
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: WHEEL)
+    monkeypatch.setattr(worktree_module, "installed_upstream", lambda _package: None)
+    monkeypatch.setattr(autonomous_session, "installed_component_upstream", lambda _component: None)
+
+
+async def test_an_agent_told_its_source_changes_cannot_land_that_keeps_one_ends_its_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    rig = await _rig(tmp_path, Agent(tail=30.0), start=WITHOUT_VLLM)
+    rig.toolbox.refusals = [UNLABELLED]
+
+    await rig.session.preflight()
+    with pytest.raises(SessionRefused, match="kept a source change to vllm after being told it cannot land"):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    await rig.session.release()
+
+    notices = await rig.notices()
+    assert notices[-1].startswith(f"{NOTICE} keep 1 was refused: the delta does not fit the parent recipe")
+    assert "the agent kept a source change to vllm after being told it cannot land" in notices[-1]
+    assert rig.toolbox.requests == [] and rig.toolbox.released == ["L1"]
+
+
+async def test_an_agent_not_told_its_source_changes_cannot_land_goes_on_past_their_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    monkeypatch.setattr(autonomous_session, "source_unkept", lambda _component, _recipe: "")
+    rig = await _rig(tmp_path, start=WITHOUT_VLLM)
+    rig.toolbox.refusals = [UNLABELLED]
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the keep after the refused one")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished) as finished:
+        await asyncio.wait_for(running, 10)
+
+    assert not isinstance(finished.value, SessionRefused)
+    notices = await rig.notices()
+    assert any(note.startswith(f"{NOTICE} keep 1 was refused: the delta does not fit") for note in notices)
+    assert not any("after being told" in note for note in notices)
+
+
+async def test_a_launch_keep_of_an_agent_told_its_source_changes_cannot_land_is_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    rig = await _rig(
+        tmp_path, Agent(keeps=(128,), args="--max-num-seqs 64", config_source=CONFIG_SOURCE), start=WITHOUT_VLLM
+    )
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the launch keep")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished) as finished:
+        await asyncio.wait_for(running, 10)
+
+    assert not isinstance(finished.value, SessionRefused)
+    [request] = rig.toolbox.requests
+    assert request.delta.components == () and "--max-num-seqs 64" in request.delta.config.server_args
+
+
+async def test_an_agent_told_its_source_changes_cannot_land_is_held_to_it_after_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    rig = await _rig(tmp_path, Agent(exit=3, resume="sleep 30"), start=WITHOUT_VLLM)
+
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    rig.toolbox.refusals = [UNLABELLED]
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionRefused, match="after being told it cannot land"):
+        await asyncio.wait_for(running, 10)
+    await resumed.stop()
+
+    assert len(rig.toolbox.requests) == 1
+
+
 async def test_a_keep_after_one_the_branch_committed_imports_only_its_own_change_on_top(tmp_path: Path) -> None:
     rig = await _rig(tmp_path)
 
