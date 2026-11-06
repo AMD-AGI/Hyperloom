@@ -19,6 +19,7 @@ import yaml
 from hyperloom.common import rocm_smi
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.ports import pick_server_port
 from hyperloom.common.proctree import TERM_GRACE_SEC, group_members, leader_exited, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
 
@@ -67,32 +68,6 @@ REUSE_PORT_DEFAULT = 8888
 SERVER_READY_TIMEOUT_SEC = 7200
 
 
-def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port."""
-    import socket
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("", 0))
-        return int(s.getsockname()[1])
-    finally:
-        s.close()
-
-
-def _assign_free_port(current_port: int) -> int:
-    """Return a per-session free ephemeral port for the persistent server."""
-    try:
-        return _pick_free_port()
-    except OSError as exc:
-        log.warning(
-            "server_lifecycle: free-port pick failed (%s); keeping port %d",
-            exc,
-            current_port,
-        )
-        return current_port
-
-
 def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     """Inspect the materialized YAML for server_lifecycle eligibility."""
     info: dict[str, Any] = {
@@ -133,12 +108,12 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         info["reason"] = "torch_profiler enabled (incompatible with reuse)"
         return info
 
-    # Use a per-session free ephemeral port for the persistent server instead of a fixed default: a stale/leaked
+    # Use a per-session free port for the persistent server instead of a fixed default: a stale/leaked
     # server from a prior baseline attempt (round 1 uses cleanup=false and leaves the server running) or a co-tenant
     # job holding the fixed port makes Magpie abort every warmup with "Reuse metadata mismatch ... server on PORT=...
     # is incompatible", so the baseline never records an accuracy and the run wrongly stops with
     # baseline_accuracy_failed.
-    info["port"] = _assign_free_port(info["port"])
+    info["port"] = pick_server_port()
 
     info["eligible"] = True
     return info
