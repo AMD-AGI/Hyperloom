@@ -94,7 +94,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
-from hyperloom_multibranch.specialist.arbor_adapter import refused_reasons
+from hyperloom_multibranch.specialist.arbor_adapter import EXIT_REFUSED, exit_reason, refused_reasons
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -154,8 +154,6 @@ START_TABLES_FILE = "agent-start-tables.json"
 SETTLE_SECONDS = 120.0
 #: The toolbox's refusal of a delta it cannot compile, among them a launch the measurement's launcher overrides.
 LAUNCH_REFUSED = "delta_not_applicable"
-#: The exit code of an agent run as a component that refused its config, saying why on stderr and in its refusal file.
-REFUSED_CONFIG = 2
 #: The deadline of an agent run as a component when EXPLORE has none, which it refuses to run without; MB stops it
 #: long before.
 NO_DEADLINE_SECONDS = 365 * 24 * 3600.0
@@ -592,7 +590,7 @@ class AutonomousSession:
         """End the run of an agent that exited: for good when it refused its config, a crash when it failed, else once
         what it kept last settled."""
 
-        if process.returncode == REFUSED_CONFIG and manifest.snapshots is not None:
+        if process.returncode == EXIT_REFUSED and manifest.snapshots is not None:
             why = refused_reasons(self._agent_dir / SOURCE_DIR / manifest.snapshots_refused)
             refused = f"the agent refused its config: {why or tail(await process.output())}"
             await self._note(refused)
@@ -611,17 +609,7 @@ class AutonomousSession:
         raise SessionFinished(finished)
 
     def _exit_reason(self, manifest: AgentManifest) -> str:
-        """Why the agent run as a component says it ended, as the exit file it writes before an exit 0 has it."""
-
-        path = self._agent_dir / SOURCE_DIR / manifest.snapshots_exit
-        if not path.exists():
-            return "it wrote no exit reason"
-        try:
-            document = read_json(path)
-        except KeptChangeError as error:
-            return f"its exit reason cannot be read: {error}"
-        reason = document.get("reason") if isinstance(document, dict) else None
-        return reason if isinstance(reason, str) and reason else f"its exit file names no reason: {document!r}"
+        return exit_reason(self._agent_dir / SOURCE_DIR / manifest.snapshots_exit)
 
     async def _observe(self, manifest: AgentManifest, watch: KeepWatch) -> None:
         """Read the agent's state the moment its keep file shows a new keep: by the time an import can go, the agent
