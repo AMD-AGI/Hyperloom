@@ -260,7 +260,7 @@ def read_json(path: Path) -> object:
     """The JSON ``path`` holds; raise :class:`KeptChangeError` when it cannot be read."""
     try:
         return json.loads(path.read_text(encoding=_ENCODING))
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         raise KeptChangeError(f"{path.name} cannot be read: {error}") from error
 
 
@@ -520,8 +520,12 @@ def _copied_parts(directory: Path, name: str, value: str, files: object, copies:
     """The texts of the copies ``files`` lists of the parts of ``value`` that carry rows, in its order; the image's
     tables are not read."""
 
-    if not isinstance(files, list) or not all(isinstance(item, Mapping) for item in files):
-        raise KeptChangeError(f"{KEEP_FILE} lists the files of the table {name} loads as no list of objects")
+    if not isinstance(files, list) or not all(
+        isinstance(item, Mapping) and isinstance(item.get("path"), str) for item in files
+    ):
+        raise KeptChangeError(
+            f"{KEEP_FILE} lists the files of the table {name} loads as no list of objects with a path"
+        )
     by_path = {item.get("path"): item for item in files}
     texts = []
     for part in _own_parts(name, value, copies):
