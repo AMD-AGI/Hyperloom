@@ -82,3 +82,11 @@ path = [
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
 SPDX-License-Identifier = "Apache-2.0"
+
+# Snapshots recorded from InferenceX (configs, recipes and golden curves, and what its code answered for them), which
+# the InferenceX recipe source is tested against.
+[[annotations]]
+path = "src/inference_suite/tests/fixtures/inferencex/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2025 SemiAnalysis LLC, Advanced Micro Devices, NVIDIA CORPORATION"
+SPDX-License-Identifier = "Apache-2.0"
