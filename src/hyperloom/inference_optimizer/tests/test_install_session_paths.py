@@ -555,6 +555,13 @@ def _assert_every_documented_line_stops(checkout: Path, shell: dict[str, str], *
         assert not any(value in err for value in _PLANTED_VALUES), where
 
 
+def _give_another_group(entry: Path) -> None:
+    """Give ``entry`` a group other than this account's own where this account may: as root, or as a member of one."""
+    others = [65534] if os.geteuid() == 0 else [gid for gid in os.getgroups() if gid != os.getegid()]
+    if others:
+        os.chown(entry, -1, others[0])
+
+
 def _plant(env_file: Path, plant: str) -> str:
     """Put what another account could leave at the derived place; return the refusal every reader must give."""
     directory = env_file.parent
@@ -584,9 +591,17 @@ def _plant(env_file: Path, plant: str) -> str:
     if plant == "world-writable-directory":
         directory.chmod(0o777)
         return f"{directory} can be written by its group or others (mode 777)"
+    if plant == "group-writable-directory":
+        directory.chmod(0o775)
+        _give_another_group(directory)
+        return f"{directory} can be written by its group or others (mode 775)"
     if plant == "file-of-another-owner":
         os.chown(env_file, 65534, 65534)
         return f"{env_file} belongs to uid 65534, not to this account (uid {uid})"
+    if plant == "group-writable-file":
+        env_file.chmod(0o620)
+        _give_another_group(env_file)
+        return f"{env_file} can be written by its group or others (mode 620)"
     assert plant == "world-writable-file"
     env_file.chmod(0o666)
     return f"{env_file} can be written by its group or others (mode 666)"
@@ -610,16 +625,19 @@ def _shell_reader(checkout: Path, shell: dict[str, str], script: str) -> subproc
     [
         "directory-of-another-owner",
         "world-writable-directory",
+        "group-writable-directory",
         "directory-is-a-link",
         "file-of-another-owner",
         "world-writable-file",
+        "group-writable-file",
         "file-is-a-link",
     ],
 )
 def test_a_planted_env_file_is_refused_by_every_reader(tmp_path, sessions, capsys, plant):
     """Another account that works out the predictable path cannot get its file sourced: the documented source lines,
     the slurm job and preflight all refuse it, name the entry and why, and never show what it holds; install.sh
-    refuses to write into a planted directory."""
+    refuses to write into a planted directory. The group-writable cases hold the check to the group as well as to
+    others: a 0775 directory or 0620 file passes a check narrowed to others' write bit."""
     checkout, workspace, _ = sessions
     shell = {"USER_DATA_PATH": str(workspace)}
     refusal = _plant(_kernel_env(workspace), plant)
