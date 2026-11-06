@@ -150,21 +150,42 @@ def _resolved_trees(paths: Iterable[str | os.PathLike[str]]) -> tuple[Path, ...]
 
 
 def _agent_trees(writable: Iterable[Path], scratch: Scratch | None) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
-    """The writable paths to bind, and the trees the agent writes (resolved). A writable path below another as given
-    is left out (the one above shows it, writable; resolving it would follow what the agent left there), and so is
-    one reached through any of the rest or ``scratch`` (a link into one of them). The trees are the paths kept and
-    ``scratch``: where a path left out points is the agent's choice, and it is not bound."""
+    """The writable paths to bind, and the trees the agent writes or may have written (resolved).
+
+    A writable path below another as given is left out (the one above shows it, writable; resolving it would follow
+    what the agent left there), and so is one reached through ``scratch``, through where it points itself, or through
+    the tree of another path kept: a link into a tree, whose target the agent decides. Such a target must decide
+    nothing: pointed at ``/``, or at the directory that holds the app's link to a tree, it would have every path
+    reached through it, the trees the agent wrote included. So which paths are kept is settled from both sides
+    until neither moves: ``surely`` (reached through no tree of a path ``maybe`` kept) and ``maybe`` (reached
+    through no tree of a path ``surely`` kept). The paths surely kept are bound; the trees are those of every path
+    maybe kept, and ``scratch``. The two agree unless paths are reached through each other's trees, which takes a
+    link in one of them (one the agent may have left there): then no path in doubt is bound, and each still counts
+    as a tree, so one the agent wrote at an earlier launch is never taken for the app's."""
     given = list(
         dict.fromkeys(Path(os.path.normpath(path)) if os.path.isabs(path) else Path(path) for path in writable)
     )
     top = [path for path in given if not any(other in path.parents for other in given if other.is_absolute())]
-    scratches = (scratch.tmp, scratch.shm) if scratch else ()
-    own = tuple(path for path in top if not _reached(path, _resolved_trees((*top, *scratches))))
-    return own, _resolved_trees((*own, *scratches))
+    scratches = _resolved_trees((scratch.tmp, scratch.shm) if scratch else ())
+    candidates = [path for path in top if not _reached(path, (*scratches, *_resolved_trees((path,))))]
+
+    def unreached(kept: list[Path]) -> list[Path]:
+        roots = (*_resolved_trees(kept), *scratches)
+        return [path for path in candidates if not _reached(path, roots)]
+
+    surely: list[Path] = []
+    maybe = candidates
+    for _ in range(len(candidates) + 1):  # each round that does not end keeps one more path surely
+        maybe = unreached(surely)
+        settled = unreached(maybe)
+        if settled == surely:
+            break
+        surely = settled
+    return tuple(surely), _resolved_trees((*maybe, *scratches))
 
 
 def _trees(writable: Iterable[Path]) -> tuple[Path, ...]:
-    """The trees an agent writing ``writable`` writes, resolved (:func:`_agent_trees`)."""
+    """The trees an agent writing ``writable`` writes or may have written, resolved (:func:`_agent_trees`)."""
     return _agent_trees(writable, None)[1]
 
 
@@ -241,9 +262,10 @@ class Confinement:
         masks at every bound path that shows them. ``scratch`` is bound at ``/tmp`` and ``/dev/shm`` (else each is
         a fresh tmpfs); ``chdir`` is the working directory inside.
 
-        Nothing is resolved through the trees the agent writes (the writable paths bound and ``scratch``): a writable
-        path below another, or reached through one, is left out (the one above shows it, writable), and a readable one
-        is refused, since its target would be the agent's choice and its read-only bind could not hold.
+        Nothing is resolved through the trees the agent writes (the writable paths bound and ``scratch``), or may have
+        written (:func:`_agent_trees`): a writable path below another, or reached through one, is left out (the one
+        above shows it, writable), and a readable one is refused, since its target would be the agent's choice and its
+        read-only bind could not hold.
 
         Raises:
             BwrapPolicyError: A readable path is reached through a tree the agent writes.
@@ -388,19 +410,20 @@ def credential_paths(
     and Hugging Face's login files, each read from ``app_environ`` (default: this process's environment) and from
     ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`. A location of the child's in a tree
     it writes (``writable``, its scratch too when that is on the host: a home or tool directory re-pointed there) is
-    its own, and is not masked.
+    its own, and is not masked; one in a tree only in doubt (:func:`_agent_trees`, not bound) is.
 
     A source that holds an ``allowed`` path (the policy's writable and readable paths) or a ``given`` one (handed to
     the child on purpose, so it stays readable) is not masked whole: its other entries are, down to :data:`HOME_DEPTH`
     levels. ``given`` paths themselves are never masked, nor is ``/``. :meth:`Confinement.policy` keeps only the masks
-    a bind shows. An ``allowed`` or ``given`` path reached through a tree the child writes counts for nothing here:
-    the agent decides where it points (a link to a credential in a readable tree, left for the next launch), and the
-    tree shows it already.
+    a bind shows. An ``allowed`` or ``given`` path reached through a tree the child writes, or may have written,
+    counts for nothing here: the agent decides where it points (a link to a credential in a readable tree, left for
+    the next launch), and the tree shows it already.
     """
     app = os.environ if app_environ is None else app_environ
-    agent = _trees(writable)
+    own, agent = _agent_trees(writable, None)
+    written = _resolved_trees(own)
     sources = [*_sources(app, _app_home(app), PRIVATE_PATHS.paths()), _passwd_home()]
-    sources += [path for path in _sources(environ, _app_home(environ), ()) if not _agents(path, agent)]
+    sources += [path for path in _sources(environ, _app_home(environ), ()) if not _agents(path, written)]
     shown = tuple(dict.fromkeys(_real(path) for path in (*allowed, *given) if not _reached(path, agent)))
     masks: dict[Path, None] = {}
     for source in dict.fromkeys(source for source in sources if source is not None):
