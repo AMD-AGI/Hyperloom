@@ -44,7 +44,7 @@ from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS
@@ -70,9 +70,9 @@ from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox, forwarded_env
 from hyperloom_multibranch.specialist.tools import WorktreeFor
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
+from hyperloom_multibranch.toolbox.mcp_tools import on_home_loop
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T")
 
 #: The cache variables a sandbox command gets, each a directory below the lease root's ``cache``.
 CACHE_DIRS = {"TRITON_CACHE_DIR": "triton", "AITER_JIT_DIR": "aiter-jit", "TORCH_EXTENSIONS_DIR": "torch-extensions"}
@@ -855,18 +855,12 @@ def _release_tool(leases: DevLeases) -> _DevTool:
 
 def _handler(home: asyncio.AbstractEventLoop | None, call: _DevCall) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        done = asdict(await _at_home(home, call(ctx.principal.branch, arguments)))
+        done = asdict(await on_home_loop(home, call(ctx.principal.branch, arguments)))
         if "output" in done:
             done["output"] = "\n".join(done["output"].splitlines()[-arguments.get("lines", LINES) :])
         return done
 
     return handle
-
-
-async def _at_home(home: asyncio.AbstractEventLoop | None, call: Coroutine[Any, Any, T]) -> T:
-    if home is None or asyncio.get_running_loop() is home:
-        return await call
-    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(call, home))
 
 
 __all__ = [
