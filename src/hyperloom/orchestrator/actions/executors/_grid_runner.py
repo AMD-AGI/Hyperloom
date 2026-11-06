@@ -31,7 +31,6 @@ from hyperloom.common.env_safety import (
 )
 
 from ...phases import machine_state as _phase_state
-from ...state.failure_evidence import engine_capacity_cause
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ..stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -80,8 +79,10 @@ from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._grid_base import (
     GridVariant,
+    RoundError,
     VariantResult,
     apply_variant_env,
+    death_error,
     importable_overlay_dir,
     pin_xdit_tool_path,
     runnable_moe_backend_args,
@@ -616,13 +617,6 @@ class _RoundProcess(NamedTuple):
     stderr: str
 
 
-class _RoundError(NamedTuple):
-    """Why a grid round measured nothing, and under which class it is recorded."""
-
-    summary: str
-    error_class: str
-
-
 def _invalid_measurement_error(
     proc: _RoundProcess,
     *,
@@ -630,17 +624,17 @@ def _invalid_measurement_error(
     death_excerpt: str,
     workspace: Any,
     slot: Any,
-) -> _RoundError:
+) -> RoundError:
     if proc.returncode != 0:
         error = death_excerpt or redact_secret_values((proc.stderr or proc.stdout)[-2000:])
         if not error.strip():
             error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
         if not error.strip():
             error = redact_secret_values(_report_errors_summary(report))
-        return _RoundError(error, "magpie_nonzero_invalid_measurement")
+        return death_error(error, "magpie_nonzero_invalid_measurement")
     if not report:
-        return _RoundError(death_excerpt or "benchmark_report missing", "benchmark_report_missing")
-    return _RoundError(
+        return RoundError(death_excerpt or "benchmark_report missing", "benchmark_report_missing")
+    return RoundError(
         death_excerpt or "benchmark_report missing valid throughput/completed requests",
         "benchmark_report_invalid_metric",
     )
@@ -1373,21 +1367,19 @@ def _abort_without_workspace(
     preflight_abort = returncode == AGENTX_PREFLIGHT_RETURNCODE
     server_log = at.path / "server.log"
     if preflight_abort:
-        found = _RoundError(
+        found = RoundError(
             redact_secret_values((proc.stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round",
             AGENTX_PREFLIGHT_ERROR_CLASS,
         )
     else:
-        death = server_log_death_excerpt(str(server_log))
-        found = _RoundError(
-            death
+        found = death_error(
+            server_log_death_excerpt(str(server_log))
             or (
                 redact_secret_values((proc.stderr or proc.stdout)[-2000:])
                 if returncode != 0
                 else "no benchmark_* workspace produced"
             ),
-            # The card holds less than the launch settings ask for: a config limit, not a missing workspace.
-            "engine_capacity" if death and engine_capacity_cause(death) else "no_benchmark_workspace",
+            "no_benchmark_workspace",
         )
     log.warning(
         "grid_runner: variant %s aborted: %s (rc=%s)",

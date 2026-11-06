@@ -496,10 +496,7 @@ def _exception_lines(window: list[str], *, room: int) -> list[str]:
     """Return the lines of ``window`` that name an exception, nearest first, within ``room`` characters."""
     causes: list[str] = []
     used = 0
-    for line in window:
-        if not _EXCEPTION_LINE.search(line):
-            continue
-        text = line.strip()
+    for text in (line.strip() for line in window if _EXCEPTION_LINE.search(line)):
         if used + len(text) + 1 > room:
             break
         causes.append(text)
