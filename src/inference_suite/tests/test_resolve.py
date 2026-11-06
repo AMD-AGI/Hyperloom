@@ -28,7 +28,14 @@ from inference_suite.golden import golden_owned_settings
 from inference_suite.recipe.defaults import TABLE_PATH, default_table
 from inference_suite.recipe.golden_curve import GoldenLength, golden_requests
 from inference_suite.recipe.image_version import recipe_image_facts, tag_version
-from inference_suite.recipe.model import InferencexSnapshot, RecipeSourceError, RepoBundle
+from inference_suite.recipe.model import (
+    ATOM_TOPOLOGY,
+    SGLANG_TOPOLOGY,
+    VLLM_TOPOLOGY,
+    InferencexSnapshot,
+    RecipeSourceError,
+    RepoBundle,
+)
 from inference_suite.recipe.resolve import CLIENT_TOOL, Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import parse_user_file
@@ -366,16 +373,17 @@ def test_no_default_row_or_no_topology_is_a_miss():
 
 
 @pytest.mark.parametrize(
-    ("framework", "args", "topology"),
+    ("spelling", "args", "topology"),
     [
-        ("sglang", ("--tp-size", "4", "--ep-size", "2"), Topology(4, 2)),
-        ("vllm", ("-tp", "4", "--data-parallel-size", "2", "--enable-expert-parallel"), Topology(4, 8)),
-        ("atom", ("-tp", "8", "--enable-expert-parallel"), Topology(8, 8)),
-        ("vllm", ("--max-num-seqs", "8"), Topology(1, 1)),
+        (SGLANG_TOPOLOGY, ("--tp-size", "4", "--ep-size", "2"), Topology(4, 2)),
+        (VLLM_TOPOLOGY, ("-tp", "4", "--data-parallel-size", "2", "--enable-expert-parallel"), Topology(4, 8)),
+        (VLLM_TOPOLOGY, ("-tp", "4", "-ep"), Topology(4, 4)),
+        (ATOM_TOPOLOGY, ("-tp", "8", "--enable-expert-parallel"), Topology(8, 8)),
+        (VLLM_TOPOLOGY, ("--max-num-seqs", "8"), Topology(1, 1)),
     ],
 )
-def test_each_framework_reads_its_topology_spellings(framework, args, topology):
-    assert default_table().topology[framework].read(args) == topology
+def test_each_framework_reads_its_topology_spellings(spelling, args, topology):
+    assert spelling.read(args) == topology
 
 
 def test_a_snapshot_missing_the_framework_cookbook_is_refused():

@@ -7,19 +7,6 @@
 # backend (the host computes them from the model), the MoE runner (a Hyperloom guard), and the
 # runner's own environment (HSA_*, HIP renumbering, PYTORCH_ROCM_ARCH).
 
-# How each framework spells its topology on the command line; the first spelling is the one written.
-topology:
-  sglang:
-    tp: [--tensor-parallel-size, --tp-size, --tp]
-    ep: [--ep-size, --expert-parallel-size, --ep]
-  vllm:
-    tp: [--tensor-parallel-size, -tp]
-    dp: [--data-parallel-size, -dp]
-    ep_switch: [--enable-expert-parallel, -ep]
-  atom:
-    tp: [-tp, --tensor-parallel-size]
-    ep_switch: [--enable-expert-parallel]
-
 rows:
   - framework: sglang
     gfx: [gfx942]

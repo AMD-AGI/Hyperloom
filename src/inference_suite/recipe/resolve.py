@@ -59,10 +59,13 @@ from inference_suite.recipe.inferencex import inferencex_launches
 from inference_suite.recipe.model import (
     ATOM_ENTRYPOINT,
     ATOM_RUNNER_OWNED,
+    ATOM_TOPOLOGY,
     SGLANG_ENTRYPOINT,
     SGLANG_RUNNER_OWNED,
+    SGLANG_TOPOLOGY,
     VLLM_ENTRYPOINT,
     VLLM_RUNNER_OWNED,
+    VLLM_TOPOLOGY,
     InferencexSnapshot,
     RecipeSourceError,
     RepoBundle,
@@ -82,6 +85,7 @@ _T = TypeVar("_T")
 
 _ENTRYPOINTS = {"sglang": SGLANG_ENTRYPOINT, "vllm": VLLM_ENTRYPOINT, "atom": ATOM_ENTRYPOINT}
 _RUNNER_OWNED = {"sglang": SGLANG_RUNNER_OWNED, "vllm": VLLM_RUNNER_OWNED, "atom": ATOM_RUNNER_OWNED}
+_TOPOLOGY = {"sglang": SGLANG_TOPOLOGY, "vllm": VLLM_TOPOLOGY, "atom": ATOM_TOPOLOGY}
 _NO_KV_OFFLOADING = "none"
 _SGLANG_METHOD, _SGLANG_TOKEN_MODE = _SGLANG_SIMULATION[1:]
 
@@ -325,7 +329,7 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
     if isinstance(user_file.launch, BaseLaunch):
         return dataclasses.replace(user_file.launch, query=query)
     shell = user_file.launch
-    flags = _carried(default_table().topology.get(query.framework), f"{query.framework} topology spellings")
+    spelling = _carried(_TOPOLOGY.get(query.framework), f"{query.framework} topology spellings")
     unresolved = ()
     if shell.unresolved_env:
         unresolved = (
@@ -342,7 +346,7 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
         framework=query.framework,
         entrypoint=_entrypoint(query.framework),
         model_id=query.model_id,
-        topology=flags.read(shell.args),
+        topology=spelling.read(shell.args),
         args=shell.args,
         env=shell.env,
         client=_client(snapshot, {}),
@@ -356,13 +360,12 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
 def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[SourceMiss, ...]) -> BaseLaunch | Miss:
     """The default table's launch for a fixed ``query`` no recipe serves, or why the table has none."""
     board = AMD_GPU_BOARDS.get(query.board)
-    table = default_table()
-    row = None if board is None else table.row(query.framework, board.gfx)
+    row = None if board is None else default_table().row(query.framework, board.gfx)
     if board is None or row is None:
         named = query.board if board is None else f"{query.board} ({board.gfx})"
         return Miss((*misses, SourceMiss(SourceKind.DEFAULT_TABLE, f"it has no {query.framework} row for {named}")))
     topology = Topology(tp=query.tp or 1, ep=query.ep or 1)
-    topology_args = table.topology[query.framework].argv(topology)
+    topology_args = _TOPOLOGY[query.framework].argv(topology)
     if isinstance(topology_args, str):
         return Miss((*misses, SourceMiss(SourceKind.DEFAULT_TABLE, f"{query.framework} {topology_args}")))
     return BaseLaunch(
