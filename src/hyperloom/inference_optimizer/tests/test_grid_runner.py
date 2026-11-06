@@ -1209,9 +1209,8 @@ async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatc
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_overlay", [False, True])
 async def test_exported_reference_controls_reimport_requires_static_settings(tmp_path, monkeypatch, with_overlay):
-    from types import SimpleNamespace
 
-    from hyperloom.inference_optimizer.cli.bootstrap import _resolve_reference_recipe
+    from hyperloom.inference_optimizer.reference_script import parse_reference_script
     from hyperloom.inference_optimizer.session.session_binding import session_scope
     from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -1234,13 +1233,11 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
     state.save(session)
     monkeypatch.setenv("FRAMEWORK", "sglang")
     if with_overlay:
-        with pytest.raises(SystemExit) as exc:
-            _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")), "sglang")
-        assert exc.value.code == 2
+        with pytest.raises(ValueError, match="overlay_pythonpath"):
+            parse_reference_script(str(session / "current_setting.sh"), framework="sglang")
         return
-    args, envs, model, controls = _resolve_reference_recipe(
-        SimpleNamespace(reference_script=str(session / "current_setting.sh")), "sglang"
-    )
+    recipe = parse_reference_script(str(session / "current_setting.sh"), framework="sglang")
+    args, envs, model, controls = recipe.server_args, recipe.envs, recipe.model or "", recipe.launch_controls
     assert "PYTHONPATH" not in envs
     assert "overlay_pythonpath" not in controls
     imported = SharedState(

@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The session's frozen base launch, ``base_launch.json``.
+
+A fresh launch resolves the base once and writes it here; every later read, a resume's included, takes it from this
+file and never resolves it again. Reading refuses a file whose content no longer matches its recorded digest.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from hyperloom_common.io import atomic_write_json
+from inference_suite.contracts import BaseLaunch
+
+BASE_LAUNCH_FILE = "base_launch.json"
+
+
+def base_launch_path(session_dir: Path) -> Path:
+    return Path(session_dir) / BASE_LAUNCH_FILE
+
+
+def write_base_launch(session_dir: Path, base: BaseLaunch) -> Path:
+    """Freeze ``base`` as the session's base launch; returns the file written."""
+    path = base_launch_path(session_dir)
+    atomic_write_json(path, base.to_document())
+    return path
+
+
+def read_base_launch(session_dir: Path) -> BaseLaunch | None:
+    """The session's frozen base, or ``None`` for a session that froze none (a scriptable or AgentX workload)."""
+    try:
+        text = base_launch_path(session_dir).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return BaseLaunch.from_document(json.loads(text))
+
+
+__all__ = ["BASE_LAUNCH_FILE", "base_launch_path", "read_base_launch", "write_base_launch"]
