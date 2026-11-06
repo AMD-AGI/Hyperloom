@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
 from hyperloom_common.env import env_flag
-from hyperloom.common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
+from hyperloom_common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
 from .bypass_analysis import parse_server_log_throughput
 

@@ -17,7 +17,7 @@ from hyperloom.common.deadline import Deadline
 from hyperloom_common.env import is_truthy
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom_common.llm.llm_attribution import current_action_scope
-from hyperloom.common.proctree import TERM_GRACE_SEC
+from hyperloom_common.proctree import TERM_GRACE_SEC
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
     REQUEST_KIND_TO_OWNED_ACTION,
