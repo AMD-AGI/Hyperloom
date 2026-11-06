@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from typing import Any
 
+from inference_suite.contracts import FailedStep
+
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 FAILURE_STAGE_WARMUP: str = "warmup"
 FAILURE_STAGE_DECISION: str = "decision"
@@ -43,6 +47,40 @@ SUBPROCESS_NONZERO: str = "subprocess_nonzero"
 # measurement behind: the round ran to the end, so the nonzero exit came from the harness
 # around it. The grid runner already names this shape the same way.
 MAGPIE_NONZERO_INVALID_MEASUREMENT: str = "magpie_nonzero_invalid_measurement"
+SERVER_INIT_DEAD: str = "server_init_dead"
+DETOKENIZER_STALL: str = "detokenizer_stall"
+BENCHMARK_REPORT_MISSING: str = "benchmark_report_missing"
+MAGPIE_TIMEOUT: str = "magpie_timeout"
+YAML_BUILD_ERROR: str = "yaml_build_error"
+
+# The class each inference_suite failed step is recorded under. A step that replaces a
+# failure Hyperloom already names keeps that class, so readers of the ledgers see one
+# class per cause whichever runner measured the round; a new step is its own class.
+# The steps whose class an action module owns (the run's own stops, the speculative
+# pin) are mapped beside that owner in the grid runner.
+FAILED_STEP_ERROR_CLASSES: Mapping[FailedStep, str] = {
+    FailedStep.CONFIG_INVALID: YAML_BUILD_ERROR,
+    FailedStep.BASE_DIGEST_MISMATCH: FailedStep.BASE_DIGEST_MISMATCH.value,
+    FailedStep.FRAMEWORK_VERSION_TOO_OLD: FailedStep.FRAMEWORK_VERSION_TOO_OLD.value,
+    FailedStep.FRAMEWORK_VERSION_UNKNOWN: FailedStep.FRAMEWORK_VERSION_UNKNOWN.value,
+    FailedStep.REUSE_NOT_OWNED: FailedStep.REUSE_NOT_OWNED.value,
+    FailedStep.EVAL_CONTEXT_TOO_SHORT: FailedStep.EVAL_CONTEXT_TOO_SHORT.value,
+    FailedStep.STAGING_MISSING: FailedStep.STAGING_MISSING.value,
+    FailedStep.SOURCE_FILES_CHANGED: FailedStep.SOURCE_FILES_CHANGED.value,
+    FailedStep.FLAG_UNKNOWN: ARGV_INVALID,
+    FailedStep.PORT_IN_USE: FailedStep.PORT_IN_USE.value,
+    FailedStep.SERVER_EXITED_BEFORE_READY: SERVER_INIT_DEAD,
+    FailedStep.SERVER_SILENT_BEFORE_READY: FailedStep.SERVER_SILENT_BEFORE_READY.value,
+    FailedStep.SERVER_BOOT_TIMEOUT: FailedStep.SERVER_BOOT_TIMEOUT.value,
+    FailedStep.SERVER_STALLED: DETOKENIZER_STALL,
+    FailedStep.SERVER_DIED: FailedStep.SERVER_DIED.value,
+    FailedStep.CLIENT_FAILED: MAGPIE_NONZERO_INVALID_MEASUREMENT,
+    FailedStep.CLIENT_OUTPUT_MISSING: BENCHMARK_REPORT_MISSING,
+    FailedStep.EVAL_FAILED: FailedStep.EVAL_FAILED.value,
+    FailedStep.ROUND_TIMEOUT: MAGPIE_TIMEOUT,
+    FailedStep.DISK_FULL: FailedStep.DISK_FULL.value,
+    FailedStep.TEARDOWN_INCOMPLETE: FailedStep.TEARDOWN_INCOMPLETE.value,
+}
 
 # Matches every character replaced by ``_`` in a variant-name slug.
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")
@@ -53,22 +91,37 @@ _CANDIDATE_ERROR_CLASSES = frozenset(
         "unsupported_config",
     }
 )
-_ENVIRONMENT_ERROR_CLASSES = frozenset({"mn_server_restart_failed"})
+_ENVIRONMENT_ERROR_CLASSES = frozenset(
+    {
+        "mn_server_restart_failed",
+        FailedStep.DISK_FULL.value,
+        FailedStep.FRAMEWORK_VERSION_TOO_OLD.value,
+        FailedStep.FRAMEWORK_VERSION_UNKNOWN.value,
+        FailedStep.PORT_IN_USE.value,
+        FailedStep.REUSE_NOT_OWNED.value,
+        FailedStep.SERVER_SILENT_BEFORE_READY.value,
+        FailedStep.TEARDOWN_INCOMPLETE.value,
+    }
+)
 _HARNESS_ERROR_CLASSES = frozenset(
     {
         "benchmark_cap_error",
         "benchmark_report_invalid_metric",
-        "benchmark_report_missing",
+        BENCHMARK_REPORT_MISSING,
         "eval_probe_unpatchable",
         "inferencex_checkout_invalid",
         "magpie_nonzero_after_valid_measurement",
         MAGPIE_NONZERO_INVALID_MEASUREMENT,
-        "magpie_timeout",
+        MAGPIE_TIMEOUT,
         "no_benchmark_workspace",
         "warmup_magpie_timeout",
         "warmup_round_failed",
         "warmup_yaml_build_error",
-        "yaml_build_error",
+        YAML_BUILD_ERROR,
+        FailedStep.BASE_DIGEST_MISMATCH.value,
+        FailedStep.EVAL_CONTEXT_TOO_SHORT.value,
+        FailedStep.SOURCE_FILES_CHANGED.value,
+        FailedStep.STAGING_MISSING.value,
     }
 )
 _ENVIRONMENT_EVIDENCE_RE = re.compile(
@@ -198,7 +251,7 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
     if error_class == "timeout" or "benchmark exceeded" in blob:
         return "benchmark_timeout"
     if (
-        error_class == "server_init_dead"
+        error_class == SERVER_INIT_DEAD
         or "engine core" in blob
         or "enginecore" in blob
         or "workerproc" in blob

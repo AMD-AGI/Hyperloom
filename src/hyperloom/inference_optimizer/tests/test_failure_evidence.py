@@ -204,3 +204,68 @@ class TestRenderFailureLine:
         }
         line = render_failure_line(fe, excerpt_chars=40)
         assert "AssertionError: batch == 1" in line
+
+
+class TestFailedStepClasses:
+    def test_every_failed_step_has_a_class(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._grid_runner import failed_step_error_class
+
+        classes = {step: failed_step_error_class(step) for step in FailedStep}
+        assert all(classes.values())
+        assert len(set(classes.values())) == len(FailedStep)
+
+    def test_action_owned_steps_are_not_mapped_twice(self):
+        from hyperloom.orchestrator.actions.executors import _grid_runner
+        from hyperloom.orchestrator.state.failure_evidence import FAILED_STEP_ERROR_CLASSES
+
+        assert not set(_grid_runner._ACTION_OWNED_STEP_CLASSES) & set(FAILED_STEP_ERROR_CLASSES)
+
+    def test_replaced_failures_keep_their_class(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+        from hyperloom.orchestrator.actions.executors._grid_runner import failed_step_error_class
+        from hyperloom.orchestrator.actions.executors._spec_decode_pin import SPECULATIVE_DECODING_PINNED
+        from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
+
+        assert failed_step_error_class(FailedStep.FLAG_UNKNOWN) == ARGV_INVALID
+        assert failed_step_error_class(FailedStep.GOLDEN_OWNED_TOUCHED) == SPECULATIVE_DECODING_PINNED
+        assert failed_step_error_class(FailedStep.SERVER_EXITED_BEFORE_READY) == "server_init_dead"
+        assert failed_step_error_class(FailedStep.SERVER_STALLED) == "detokenizer_stall"
+        assert failed_step_error_class(FailedStep.CLIENT_FAILED) == "magpie_nonzero_invalid_measurement"
+        assert failed_step_error_class(FailedStep.CLIENT_OUTPUT_MISSING) == "benchmark_report_missing"
+        assert failed_step_error_class(FailedStep.ROUND_TIMEOUT) == "magpie_timeout"
+        assert failed_step_error_class(FailedStep.CONFIG_INVALID) == "yaml_build_error"
+        for step in (FailedStep.DEADLINE_EXHAUSTED, FailedStep.CANCELLED):
+            assert failed_step_error_class(step) in STOPPED_BY_THE_RUN
+
+    def test_new_step_classes_carry_their_attribution(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._grid_runner import failed_step_error_class
+
+        environment = {
+            FailedStep.DISK_FULL,
+            FailedStep.FRAMEWORK_VERSION_TOO_OLD,
+            FailedStep.FRAMEWORK_VERSION_UNKNOWN,
+            FailedStep.PORT_IN_USE,
+            FailedStep.REUSE_NOT_OWNED,
+            FailedStep.SERVER_SILENT_BEFORE_READY,
+            FailedStep.TEARDOWN_INCOMPLETE,
+        }
+        harness = {
+            FailedStep.BASE_DIGEST_MISMATCH,
+            FailedStep.EVAL_CONTEXT_TOO_SHORT,
+            FailedStep.SOURCE_FILES_CHANGED,
+            FailedStep.STAGING_MISSING,
+        }
+        for step in environment:
+            assert classify_failure_attribution(error_class=failed_step_error_class(step)) == (
+                FAILURE_ATTRIBUTION_ENVIRONMENT
+            )
+        for step in harness:
+            assert (
+                classify_failure_attribution(error_class=failed_step_error_class(step)) == FAILURE_ATTRIBUTION_HARNESS
+            )
