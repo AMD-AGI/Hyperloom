@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.profile_traces import collect_traces, has_step_traces, has_traces, is_trace_file
+from hyperloom.measure.profile_traces import (
+    collect_traces,
+    has_step_traces,
+    has_traces,
+    is_trace_file,
+    round_has_traces,
+)
+from inference_suite.contracts import RunLayout
 
 
 def _file(path: Path, data: bytes = b"x") -> Path:
@@ -124,3 +131,22 @@ def test_a_file_in_one_capture_traces_and_a_directory_of_its_name_in_the_other_a
     kept = sorted(p.read_bytes() for p in destination.rglob("*") if p.is_file())
     assert kept == [b"file", b"file 2", b"nested"], "no trace was lost or overwritten"
     assert not inside.exists() and not beside.exists()
+
+
+def test_a_run_dirs_trace_directories_are_moved_apart_not_flattened(tmp_path: Path) -> None:
+    layout = RunLayout(tmp_path / "round-000")
+    _file(layout.profile_torch_trace / "rank0.pt.trace.json.gz", b"step")
+    _file(layout.profile_dir / "capture_traces" / "bs_1_rank0.json", b"capture")
+    _file(layout.profile_dir / "graph_capture_profile" / "DecodeCudaGraphRunner_bs_8_rank0.json.gz", b"graph")
+    destination = tmp_path / "out" / "profile"
+    assert round_has_traces(layout.root)
+
+    assert collect_traces(layout.root, destination) == 3
+
+    kept = {p.relative_to(destination).as_posix(): p.read_bytes() for p in destination.rglob("*") if p.is_file()}
+    assert kept == {
+        "torch_trace/rank0.pt.trace.json.gz": b"step",
+        "capture_traces/bs_1_rank0.json": b"capture",
+        "graph_capture_profile/DecodeCudaGraphRunner_bs_8_rank0.json.gz": b"graph",
+    }
+    assert has_step_traces(destination)

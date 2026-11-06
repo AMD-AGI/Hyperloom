@@ -33,6 +33,8 @@ from ._inferencex_patcher import (
     ensure_benchmark_serving_patched,
 )
 from .benchmark_result import round_succeeded
+from inference_suite.contracts import RunLayout
+from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS, CAPTURE_TRACES_DIR, TORCH_TRACE_DIR
 from .baseline import BenchmarkRunExecutor
 
 
@@ -52,6 +54,8 @@ _INPUT_DIMS_FRACTION_FLOOR = 0.90
 # Kineto puts the annotation category in ``cat`` and the label the framework wrote in ``name``, so a marker keyed on
 # ``"name": "user_annotation"`` looks for a label no producer emits.
 _USER_ANNOTATION_MARKER = '"user_annotation"'
+# The bare capture dir an unpatched Magpie round leaves; goes with Magpie in 5.03.
+_MAGPIE_GRAPH_CAPTURE_DIR = "graph_capture"
 
 
 def _trace_contains(path: Path, substring: str) -> bool:
@@ -302,12 +306,10 @@ def _certify_trace_dir(trace_dir: Path, trace_input: Path, framework: str) -> di
     )
 
 
+# A Magpie round nests the capture sidecars in ``trace_dir``; a run_dir keeps them beside its ``torch_trace``.
 def _capture_trace_files(trace_dir: Path) -> tuple[Path | None, list[Path]]:
-    capture_dirs = (
-        trace_dir / "capture_traces",
-        trace_dir / "graph_capture_profile",
-        trace_dir / "graph_capture",
-    )
+    names = (*CAPTURE_TRACE_DIRS, _MAGPIE_GRAPH_CAPTURE_DIR)
+    capture_dirs = [base / name for base in (trace_dir, trace_dir.parent) for name in names]
     capture = next((path for path in capture_dirs if path.is_dir()), None)
     if capture is None:
         return None, []
@@ -901,12 +903,9 @@ def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path
 
 
 def _candidate_trace_dirs(workspace: Path) -> list[Path]:
-    """Trace directories to probe for a Magpie profile workspace."""
-    return [
-        workspace / "torch_trace",
-        workspace / "capture_traces",
-        workspace.parent / "capture_traces",
-    ]
+    """Trace directories to probe: a run_dir's, then a Magpie workspace's (which go with Magpie in 5.03)."""
+    magpie = [workspace / TORCH_TRACE_DIR, workspace / CAPTURE_TRACES_DIR, workspace.parent / CAPTURE_TRACES_DIR]
+    return [*RunLayout(workspace).profile_trace_dirs(), *magpie]
 
 
 def _default_profile_config() -> Path:

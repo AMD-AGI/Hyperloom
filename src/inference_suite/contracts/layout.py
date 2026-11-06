@@ -33,8 +33,13 @@ HOST_DERIVED = (GPU_METRICS,)
 CLIENT_DIR = "client"
 EVAL_DIR = "eval"
 PROFILE_DIR = "profile"
-#: The profiler's capture subdirectories, kept apart rather than flattened.
-PROFILE_TRACE_DIRS = ("torch_trace", "capture_traces", "graph_capture_profile")
+TORCH_TRACE_DIR = "torch_trace"
+CAPTURE_TRACES_DIR = "capture_traces"
+GRAPH_CAPTURE_DIR = "graph_capture_profile"
+#: Where TraceLens-patched servers write the CUDA-graph capture sidecars of boot: never a serving step.
+CAPTURE_TRACE_DIRS = (CAPTURE_TRACES_DIR, GRAPH_CAPTURE_DIR)
+#: The profiler's trace subdirectories, kept apart rather than flattened so a reader tells a step from a sidecar.
+PROFILE_TRACE_DIRS = (TORCH_TRACE_DIR, *CAPTURE_TRACE_DIRS)
 _UTF8 = "utf-8"
 
 
@@ -186,6 +191,10 @@ class RunLayout:
     def profile_capture(self) -> Path:
         return self.profile_dir / "capture.json"
 
+    @property
+    def profile_torch_trace(self) -> Path:
+        return self.profile_dir / TORCH_TRACE_DIR
+
     def profile_trace_dirs(self) -> tuple[Path, ...]:
         return tuple(self.profile_dir / name for name in PROFILE_TRACE_DIRS)
 
@@ -211,10 +220,13 @@ class RunLayout:
 
 __all__ = [
     "AGENTX_TIMELINE",
+    "CAPTURE_TRACES_DIR",
+    "CAPTURE_TRACE_DIRS",
     "CLIENT_DIR",
     "CONFIG_FILE",
     "EVAL_DIR",
     "GPU_METRICS",
+    "GRAPH_CAPTURE_DIR",
     "GPU_POWER",
     "GPU_SAMPLES",
     "HOST_DERIVED",
@@ -227,6 +239,7 @@ __all__ = [
     "REPORT_FILE",
     "SERVER_LOG",
     "SERVER_PID",
+    "TORCH_TRACE_DIR",
     "ReadyStamp",
     "RunLayout",
     "format_ready_stamp",
