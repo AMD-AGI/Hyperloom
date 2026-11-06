@@ -88,7 +88,10 @@ def _sorted_strings(value: Mapping[str, str]) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class LaunchQuery:
-    """What a session asked for; ``tp`` and ``ep`` are set only when the operator gave them."""
+    """What a session asked for; ``tp`` and ``ep`` are set only when the operator gave them.
+
+    A fixed workload names its sequence shape (``isl``, ``osl``); an AgentX workload replays a trace and names none.
+    """
 
     model_id: str
     framework: str
@@ -97,6 +100,8 @@ class LaunchQuery:
     concurrencies: tuple[int, ...]
     tp: int | None = None
     ep: int | None = None
+    isl: int | None = None
+    osl: int | None = None
 
     def __post_init__(self) -> None:
         _FIELDS.text(self.model_id, "the query's model id")
@@ -109,6 +114,14 @@ class LaunchQuery:
             _FIELDS.integer(conc, "a query concurrency", minimum=1)
         _FIELDS.optional_integer(self.tp, "the query's tp", minimum=1)
         _FIELDS.optional_integer(self.ep, "the query's ep", minimum=1)
+        _FIELDS.optional_integer(self.isl, "the query's isl", minimum=1)
+        _FIELDS.optional_integer(self.osl, "the query's osl", minimum=1)
+        fixed = self.workload is Workload.FIXED
+        if (self.isl is not None, self.osl is not None) != (fixed, fixed):
+            raise BaseLaunchError(
+                f"a fixed query names its isl and osl and an AgentX query neither, got {self.workload.value} "
+                f"with isl {self.isl!r} and osl {self.osl!r}"
+            )
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -119,11 +132,13 @@ class LaunchQuery:
             "concurrencies": list(self.concurrencies),
             "tp": self.tp,
             "ep": self.ep,
+            "isl": self.isl,
+            "osl": self.osl,
         }
 
     @classmethod
     def from_document(cls, document: object) -> LaunchQuery:
-        keys = ("model_id", "framework", "board", "workload", "concurrencies", "tp", "ep")
+        keys = ("model_id", "framework", "board", "workload", "concurrencies", "tp", "ep", "isl", "osl")
         fields = _FIELDS.known(document, keys, "a launch query")
         return cls(
             model_id=fields.get("model_id"),
@@ -133,6 +148,8 @@ class LaunchQuery:
             concurrencies=_FIELDS.items(fields.get("concurrencies"), "the query's concurrencies"),
             tp=fields.get("tp"),
             ep=fields.get("ep"),
+            isl=fields.get("isl"),
+            osl=fields.get("osl"),
         )
 
 

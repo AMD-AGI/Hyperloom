@@ -111,7 +111,7 @@ def test_round_trip_through_json_keeps_the_base_and_its_digest():
 
 def test_round_trip_without_golden_or_image():
     base = _base(
-        query=replace(_base().query, workload=Workload.FIXED),
+        query=replace(_base().query, workload=Workload.FIXED, isl=8192, osl=1024),
         source=LaunchSource(kind=SourceKind.DEFAULT_TABLE),
         image=ImageFacts(run=None, recipe=None, framework_version=None, version_basis=VersionBasis.NOT_APPLICABLE),
         golden_al=None,
@@ -225,6 +225,15 @@ def test_agentx_refuses_the_default_table_and_frameworks_without_agentx_recipes(
 def test_an_operator_topology_must_be_the_one_launched():
     with pytest.raises(BaseLaunchError, match="asks for tp 8"):
         _base(topology=Topology(tp=4))
+
+
+@pytest.mark.parametrize(
+    ("workload", "isl", "osl"),
+    [(Workload.FIXED, None, None), (Workload.FIXED, 8192, None), (Workload.AGENTX, 8192, 1024)],
+)
+def test_a_fixed_query_names_its_sequence_shape_and_an_agentx_query_none(workload, isl, osl):
+    with pytest.raises(BaseLaunchError, match="a fixed query names its isl and osl"):
+        replace(_base().query, workload=workload, isl=isl, osl=osl)
 
 
 @pytest.mark.parametrize(

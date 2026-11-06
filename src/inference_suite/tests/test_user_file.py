@@ -30,7 +30,13 @@ from inference_suite.recipe.user_file import UserFileError, parse_user_file
 def _base(workload: Workload = Workload.AGENTX) -> BaseLaunch:
     return BaseLaunch(
         query=LaunchQuery(
-            model_id="moonshotai/Kimi-K3", framework="sglang", board="mi355x", workload=workload, concurrencies=(32,)
+            model_id="moonshotai/Kimi-K3",
+            framework="sglang",
+            board="mi355x",
+            workload=workload,
+            concurrencies=(32,),
+            isl=8192 if workload is Workload.FIXED else None,
+            osl=1024 if workload is Workload.FIXED else None,
         ),
         source=LaunchSource(kind=SourceKind.USER_FILE, path="kimi.sh", files={"kimi.sh": "c" * 64}),
         point=LaunchPoint(conc=32, exact=True),
