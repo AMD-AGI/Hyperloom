@@ -20,7 +20,7 @@ import pytest
 from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.phases import SHORT_PROMPTS
-from hyperloom.measure.ports import DEV_SANDBOX_PORTS
+from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom.measure.socket import RoundPlan
 from hyperloom.measure.long_context.held import FLUSHED
 from hyperloom.measure.short_prompts.outputs import FAILED, OK, read_outputs

@@ -11,12 +11,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-__all__ = ["DEV_SANDBOX_PORTS", "pick_port_outside_dev_sandboxes"]
+from hyperloom.common.ports import DEV_SANDBOX_PORTS
 
-#: The ports reserved for dev-sandbox slots: slot ``i`` serves on ``32100 + 10 * i`` up to ``+ 9``, for up to a hundred
-#: slots. The consumer is ``hyperloom_multibranch.specialist.dev_sandbox`` (the ports its leases' commands get), which
-#: reads this one range so that both sides agree; nothing that measures may listen on a port in it.
-DEV_SANDBOX_PORTS = range(32100, 33100)
+__all__ = ["pick_port_outside_dev_sandboxes"]
 
 #: How many ports are asked for before giving up; a source that offers a reserved port this often is not random.
 _ATTEMPTS = 100
