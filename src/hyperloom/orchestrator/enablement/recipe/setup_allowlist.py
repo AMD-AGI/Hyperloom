@@ -29,7 +29,6 @@ SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
     r"(?:python3?|uv)\s+-m\s+venv\b",
     r"apt(?:-get)?\s+(?:install|update)\b",
     r"npm\s+(?:install|i|ci)\b",
-    r"npm\s+install\s+-g\b",
     r"pnpm\s+(?:install|add)\b",
     r"yarn\s+(?:add|install)\b",
     r"conda\s+install\b",

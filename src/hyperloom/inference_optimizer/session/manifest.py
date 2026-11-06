@@ -16,9 +16,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.provenance import build_provenance
-from hyperloom.common.timeutil import now_iso, utc_now_compact
+from hyperloom.common.url_userinfo import strip_url_userinfo
+from hyperloom_common.timeutil import now_iso, utc_now_compact
 
 from . import paths as _paths
 from .session_paths import manifest_path
@@ -51,7 +52,7 @@ def _git_revision_at(path: Path) -> str:
 
 def _git_remote_at(path: Path) -> str:
     """Best-effort ``origin`` remote URL at ``path`` (empty when unset/fails)."""
-    return _git_capture(path, ["config", "--get", "remote.origin.url"])
+    return strip_url_userinfo(_git_capture(path, ["config", "--get", "remote.origin.url"]))
 
 
 # Pod-local, non-persistent roots: a dependency checkout under one of these is erased on pod recycle.

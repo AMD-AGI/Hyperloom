@@ -484,8 +484,8 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
@@ -1102,6 +1102,7 @@ def test_mandate_section_renders_run_status():
         framework="vllm",
         baseline_tput=6232.0,
         current_tput=6848.5,
+        current_launch_args="--moe-backend aiter --kv-cache-dtype fp8_e4m3",
         cumulative_gain_validated=9.89,
         keep_threshold_pct=1.0,
         applied_stack=[{"variant_name": "--kv-cache-dtype fp8_e4m3", "gain_pct": 5.99}],
@@ -1112,6 +1113,7 @@ def test_mandate_section_renders_run_status():
     assert "9.89" in user or "+9.89" in user
     assert "1.00%" in user or "1.0%" in user
     assert "--kv-cache-dtype fp8_e4m3" in user
+    assert "--moe-backend aiter --kv-cache-dtype fp8_e4m3" in user
 
 
 # --------------------------------------------------------------------------- # Stage-3 guard: enablement ladder book

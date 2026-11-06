@@ -12,7 +12,7 @@ from hyperloom.common.deadline import Deadline
 
 from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from ..phases import machine_state as _phase_state
-from ..policy.gate import PolicyDenied
+from ..policy.denial import PolicyDenied
 from ..specialists.profile import resolve_specialist_profile, wall_budget_base_min
 
 if TYPE_CHECKING:

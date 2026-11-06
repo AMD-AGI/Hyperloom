@@ -15,8 +15,8 @@ from pathlib import Path
 
 from hyperloom.common.launch_log_evidence import observed_server_identity_from_log
 from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
-from hyperloom.orchestrator.enablement.recipe import build_recipe_steps, evaluate_replay_sufficiency
-from hyperloom.orchestrator.enablement.recipe.attempts import build_attempt_summary
+from hyperloom.orchestrator.enablement.recipe.steps import build_recipe_steps
+from hyperloom.orchestrator.enablement.recipe.sufficiency import evaluate_replay_sufficiency
 from hyperloom.orchestrator.enablement.recipe.projections import project_launch_evidence
 
 MODEL = "/models/DeepSeek-V4-Pro"
@@ -78,9 +78,7 @@ def _launch_codes(tmp_path: Path, requested: str = REQUESTED, log_text: str = VL
     projected, refused = project_launch_evidence(evidence)
     assert refused is False
     section = {"accepted_config": {"config_path": "c.yaml"}, "launch_evidence": projected}
-    decision = evaluate_replay_sufficiency(
-        {}, steps=build_recipe_steps({}, attempt_summary=build_attempt_summary), section=section
-    )
+    decision = evaluate_replay_sufficiency({}, steps=build_recipe_steps({}), section=section)
     return [
         (r["code"], r["scope"])
         for r in decision["reasons"]

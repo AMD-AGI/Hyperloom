@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import first_str, to_unix, to_mapping
+from hyperloom_common.coerce import first_str, to_unix, to_mapping
 from hyperloom.common.env_safety import redact_secret_env_values
 
 from ...session.sbd_v6 import read_timeline_events

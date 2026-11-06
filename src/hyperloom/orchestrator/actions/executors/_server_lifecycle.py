@@ -170,6 +170,16 @@ def inject_lifecycle(
     envs["PORT"] = int(port)
 
 
+def inject_lifecycle_settings(bench: dict[str, Any], settings: dict[str, Any]) -> None:
+    """Enable the server_lifecycle protocol on ``bench`` from a grid's ``server_lifecycle`` settings."""
+    inject_lifecycle(
+        bench,
+        cleanup=bool(settings.get("cleanup", True)),
+        pid_dir=settings["pid_dir"],
+        port=int(settings["port"]),
+    )
+
+
 def teardown_lifecycle_server(
     *,
     pid_dir: Path | str,
@@ -330,8 +340,7 @@ def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> Serv
             continue
         if not pid_alive and not _group_has_live_member(server_pgid):
             # Stale pidfile from a fully-exited server tree; just clean it up.
-            _unlink_quietly(pid_file)
-            _unlink_quietly(pid_file.with_suffix(".json"))
+            _remove_pidfile(pid_file)
             continue
         if not pid_alive and not _process_group_looks_like_server(server_pgid):
             # The original leader is gone, and the remaining/reused pgid has no server-looking member; do not risk
@@ -368,10 +377,15 @@ def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> Serv
             server_pgid,
             pid_file,
         )
-        _unlink_quietly(pid_file)
-        _unlink_quietly(pid_file.with_suffix(".json"))
+        _remove_pidfile(pid_file)
 
     return reap
+
+
+def _remove_pidfile(pid_file: Path) -> None:
+    """Remove a server pidfile and its JSON sidecar."""
+    _unlink_quietly(pid_file)
+    _unlink_quietly(pid_file.with_suffix(".json"))
 
 
 def _read_pidfile(pid_file: Path) -> tuple[int, int] | None:

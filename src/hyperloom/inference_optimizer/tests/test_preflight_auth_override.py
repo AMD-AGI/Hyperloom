@@ -20,10 +20,10 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from hyperloom.common import claude_oneshot
-from hyperloom.common.env import EnvValueError
-from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES, deepseek_compat_env, resolve_forge_llm_model
-from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom_common.llm import claude_oneshot
+from hyperloom_common.env import EnvValueError
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CHOICES, deepseek_compat_env, resolve_forge_llm_model
+from hyperloom_common.llm.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import framework_probe as cli_framework_probe
@@ -52,6 +52,10 @@ def stub_install_steps(monkeypatch, tmp_path):
         return f"/usr/bin/{name}"
 
     monkeypatch.setattr(cli_preflight.shutil, "which", _fake_which)
+    # The GEAK binary gate needs a GEAK checkout and is orthogonal to the auth block under test.
+    monkeypatch.setattr(
+        cli_preflight, "check_geak_binaries", lambda: {"status": "applied", "skip_reason": None, "target": "GEAK"}
+    )
 
     def _fake_run(cmd, *args, **kwargs):
         stdout = "Claude Code test\n" if cmd[1:] == ["--version"] else ""
@@ -1199,9 +1203,7 @@ def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
     assert len(runner.calls) == 1
     probe = runner.calls[0]
     # Probe validates Ray with the SAME interpreter, not shutil.which on PATH.
-    assert probe[0:2] == ["/opt/venv/bin/python", "-c"]
-    assert "ray.__version__" in probe[2]
-    assert "ray.scripts.scripts" in probe[2]
+    assert probe[0:2] == ["/opt/venv/bin/python", str(cli_preflight._RAY_SMOKE_SCRIPT)]
     assert "ray OK" in capsys.readouterr().out
 
 
@@ -2634,7 +2636,7 @@ def test_ir3_preflight_does_not_inject_recipe_kb_url(marker_path, monkeypatch):
 
 
 def test_ir3_unreachable_local_default_disables_pr_monitor(marker_path, monkeypatch):
-    from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+    from hyperloom_common.pr_monitor_urls import DEFAULT_KB_STORE_URL
 
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
     monkeypatch.delenv("KB_STORE_URL", raising=False)
@@ -2666,7 +2668,7 @@ def test_ir3_unreachable_local_default_disables_pr_monitor(marker_path, monkeypa
 
 
 def test_ir3_real_shell_probes_local_default_url(marker_path, tmp_path, monkeypatch):
-    from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+    from hyperloom_common.pr_monitor_urls import DEFAULT_KB_STORE_URL
 
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
     monkeypatch.delenv("KB_STORE_URL", raising=False)

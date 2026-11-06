@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-from hyperloom.common.coerce import optional_positive_int, to_float
+from hyperloom_common.coerce import optional_positive_int, to_float
 
 #: How many patches one nomination round may land by default. The integrate lane
 #: is serial -- benchmark capacity one, ~25 minutes modelled per patch -- so this

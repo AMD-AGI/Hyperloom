@@ -25,7 +25,7 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import text_or_none as _text_or_none, to_float as _float_or_none, to_mapping as _as_dict
+from hyperloom_common.coerce import text_or_none as _text_or_none, to_float as _float_or_none, to_mapping as _as_dict
 
 from .construct import event_header
 from .event_fields import bool_or_none as _bool_or_none, now_iso_seconds as _now

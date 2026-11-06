@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from . import __version__
 from .models import CompilePassOutcome, Diagnosis, FusionArtifacts, Recipe, ValidationResult
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 # v2 widens the ``verdict`` enum and adds the ``error`` block.
 FUSION_MANIFEST_SCHEMA_VERSION = 2
@@ -102,12 +102,12 @@ def build_manifest(
 def write_manifest(manifest: dict[str, Any], output_dir: str | Path) -> Path:
     """Write the manifest to ``<output_dir>/fusion_manifest.json``; return the path."""
     path = Path(output_dir) / "fusion_manifest.json"
-    atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n", options=DURABLE)
     return path
 
 
 def write_anchor_report(report: Any, output_dir: str | Path) -> Path:
     """Write the resolved anchor to ``<output_dir>/fusion_anchor.json``; return the path."""
     path = Path(output_dir) / ANCHOR_REPORT_NAME
-    atomic_write_text(path, json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", options=DURABLE)
     return path

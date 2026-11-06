@@ -22,6 +22,7 @@ from hyperloom_kb import (
     ObjectiveDeclaration,
     Provenance,
     RepresentativePolicy,
+    ResultShape,
     RetrievalCapability,
     RetrievalConfiguration,
     RetrievalPolicyError,
@@ -92,7 +93,7 @@ def test_configuration_is_content_addressed_and_round_trips() -> None:
         schema.schema_ref,
         "test-policy@v1",
         provider_refs={RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF},
-        representative_policy=RepresentativePolicy.FIRST_MEMBER,
+        shape=ResultShape(representative_policy=RepresentativePolicy.FIRST_MEMBER),
     )
 
     assert RetrievalConfiguration.from_dict(config.to_dict()) == config
@@ -100,33 +101,40 @@ def test_configuration_is_content_addressed_and_round_trips() -> None:
     assert config.configuration_id.startswith("retrieval-config:sha256:")
 
 
+def test_a_configuration_id_is_fixed_by_its_content() -> None:
+    schema_ref = "schema:sha256:" + "0" * 64
+    shape = ResultShape("weighted-signal-sum@v1", max_groups=7, render_budget_chars=None)
+
+    default = RetrievalConfiguration.create(schema_ref, "pin@v1")
+    shaped = RetrievalConfiguration.create(schema_ref, "pin@v1", shape=shape)
+
+    assert default.configuration_id == (
+        "retrieval-config:sha256:0c950abb6dd28a35d40ee6998fd44b2f3f367336ff088f03ac4fec7b17d82aa0"
+    )
+    assert shaped.configuration_id == (
+        "retrieval-config:sha256:591d40ec7aca5a311aba96fc234ff46fbec2d7b8df618fd5e1ed21388fc292cf"
+    )
+
+
 def test_unbounded_render_budget_is_explicit_and_round_trips() -> None:
     schema = _declaration()
     unbounded = RetrievalConfiguration.create(
-        schema.schema_ref,
-        "test-policy@v1",
-        render_budget_chars=None,
+        schema.schema_ref, "test-policy@v1", shape=ResultShape(render_budget_chars=None)
     )
 
     assert unbounded.render_budget_chars is None
     assert RetrievalConfiguration.from_dict(unbounded.to_dict()) == unbounded
     with pytest.raises(RetrievalPolicyError, match="render_budget_chars"):
-        RetrievalConfiguration.create(schema.schema_ref, "test-policy@v1", render_budget_chars=0)
+        RetrievalConfiguration.create(schema.schema_ref, "test-policy@v1", shape=ResultShape(render_budget_chars=0))
 
 
 def test_configuration_cannot_silently_omit_fuzzy() -> None:
     schema = _declaration()
 
+    stored = RetrievalConfiguration.create(schema.schema_ref, "invalid@v1").to_dict()
+
     with pytest.raises(RetrievalPolicyError, match="must enumerate"):
-        RetrievalConfiguration.create(
-            schema.schema_ref,
-            "invalid@v1",
-            capabilities=(
-                RetrievalCapability.EXACT,
-                RetrievalCapability.FILTER,
-                RetrievalCapability.SEMANTIC,
-            ),
-        )
+        RetrievalConfiguration.from_dict({**stored, "capabilities": ["exact", "filter", "semantic"]})
 
 
 def test_fuzzy_finds_an_experience_by_its_notes() -> None:

@@ -47,7 +47,9 @@ def test_configured_installed_ray_avoids_reinstallation(monkeypatch, ray_package
     actual_run = subprocess.run
 
     def probe_only(argv, **kwargs):
-        assert argv[:2] == [sys.executable, "-c"], "An already matching runtime must not be reinstalled"
+        assert argv[:2] == [sys.executable, str(preflight._RAY_SMOKE_SCRIPT)], (
+            "An already matching runtime must not be reinstalled"
+        )
         return actual_run(argv, **kwargs)
 
     monkeypatch.setattr(preflight.subprocess, "run", probe_only)

@@ -73,6 +73,8 @@ forge = [
     "click>=8.0",
     "PyYAML>=6.0",
     "anthropic>=0.40",
+    # The answer shapes agent sessions are held to are pydantic v2 models.
+    "pydantic>=2.0",
     "hyperloom-inference_optimizer[llm]",
 ]
 # ROCm Compute Profiler (rocprof-compute) Python requirements. Nothing in this
@@ -101,8 +103,29 @@ forge-profiling = [
     "textual-fspicker>=0.4.3",
     "tqdm",
 ]
+# Hosted measurement: Ed25519 signing (``cryptography``, imported on first use by ``hyperloom.measure.signing``) and the
+# E2B sandbox SDK, imported only by ``hyperloom.sandbox.e2b``. ``e2b`` 2.53 is the first SDK whose ``connect`` sends the
+# ``E2b-Sandbox-Id`` header the data-plane router needs and whose errors carry a ``status_code``.
+hosted = [
+    "cryptography>=42",
+    "e2b>=2.53.1,<3",
+]
+# The measurement runner inside a sealed sandbox: it reads the YAML config and signs its result manifest. The sealed
+# runner installs ``requirements/runner.lock``, this list compiled with hashes, and never resolves this list itself.
+# The framework stack (torch, triton, sglang, aiter) is the framework image's and must not be listed here.
+#
+# ``lm_eval[api]`` is the accuracy pass's client: 0.4.13, the release that the ref ``inference_optimizer/cli/preflight.py``
+# pins (``_LM_EVAL_PINNED_REF``). It comes from PyPI, not as that ref's GitHub archive, because GitHub does not keep an
+# archive's checksum stable and a hash lock must not depend on one. ``tenacity`` is what its ``api`` models import.
+runner = [
+    "PyYAML>=6.0",
+    "cryptography>=42",
+    "lm_eval[api]==0.4.13",
+    "tenacity",
+]
 test = [
     "hyperloom-inference_optimizer[runtime]",
+    "hyperloom-inference_optimizer[hosted]",
     "hyperloom-inference_optimizer[ci]",
     # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
     "hyperloom-inference_optimizer[kb-service]",
@@ -141,6 +164,15 @@ ast = [
 # Optional ``synthesize --with-llm`` KB-distillation backend.
 claude = [
     "claude-agent-sdk>=0.2.110",
+]
+# InferaSim (Infera) serving projection for EXPLORE's projection router
+# (HYPERLOOM_EXPLORE_PROJECTION=1), lazy-imported by
+# ``orchestrator.actions.executors.explore_prefilter.inferasim_bridge``. Pinned: the
+# bridge imports Infera's internal module paths. A projection also needs Origami,
+# which is not on PyPI (see docs/reference/environment-variables.md).
+# HYPERLOOM_INFERASIM_ROOT, pointing at an Infera checkout, takes precedence.
+inferasim = [
+    "amd-infera[projection]==0.3.3",
 ]
 # Local dev tooling: pre-commit hooks, formatters, type checker.
 dev = [
@@ -207,6 +239,11 @@ exclude = [
     # (``actions/executors/launch_backend.py``) ships as normal.
     "hyperloom.orchestrator.rehearsal",
     "hyperloom.orchestrator.rehearsal.*",
+    # Arbor, vendored as a source tree (src/hyperloom_arbor/VENDOR.md): it runs from
+    # the checkout as `python -m arbor` in its own root, so its `arbor` package is
+    # never imported as `hyperloom_arbor.arbor` and does not ship in the wheel.
+    "hyperloom_arbor",
+    "hyperloom_arbor.*",
 ]
 
 [tool.setuptools.data-files]
@@ -246,6 +283,8 @@ hyperloom = [
     "hosted/*.sh",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
+    # The reference rule pack a session reads when HYPERLOOM_RULE_PACK names no other; importing outside_facts fails without it.
+    "common/outside_facts/packs/*.yaml",
 ]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
@@ -258,6 +297,8 @@ hyperloom = [
     "assets/configs/*.yaml",
     "assets/agentx/*.sh",
     "assets/agentx/*.py",
+    # Workload template for the InferaSim projection EXPLORE pre-filters with.
+    "assets/inferasim/*.yaml",
     # Host-side evidence probe, injected into the benchmark process via a
     # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
     # installs can arm it.
@@ -321,6 +362,11 @@ hyperloom_kb = [
     "declarations/*.yaml",
     "mappings/*.yaml",
 ]
+hyperloom_multibranch = [
+    "contracts/llm_prices.json",
+    "blackboard/knowledge/declarations/*.yaml",
+    "blackboard/knowledge/mappings/*.yaml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -337,6 +383,7 @@ testpaths = [
 pythonpath = ["src", ".", "scripts"]
 markers = [
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
+    "claw_policy: a sandbox contract test of the Claw sandbox service's own policy (sealed paths, signing identity, platform metadata, avoid-nodes); it runs against the local provider and a real Claw service, not against the E2B stand-in.",
 ]
 
 [tool.coverage.run]
@@ -345,9 +392,11 @@ branch = false
 # combine into consistent totals.
 relative_files = true
 source = [
+    "src/hyperloom_common",
     "src/hyperloom",
     "src/kernelforge",
     "src/hyperloom_kb",
+    "src/hyperloom_multibranch",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
@@ -400,6 +449,7 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_inferencex_patcher.py",
     # TraceLens server patcher (git apply / patch --fuzz subprocess pipeline).
     "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
+    "src/hyperloom/orchestrator/actions/executors/_patch_laying.py",
     # Breakdown collectors — exercised end-to-end by the reporter tests.
     "src/hyperloom/inference_optimizer/breakdown/collectors/*",
     # Operator CLIs, not library code.
@@ -514,6 +564,9 @@ exclude = [
     "src/kernelforge/examples",
     "src/kernelforge/knowledge/local_wiki/resources",
     "src/kernelforge/knowledge/kb_store/remote_client.py",
+    # Arbor, vendored at a release tag (src/hyperloom_arbor/VENDOR.md): its style is
+    # Arbor's own, and a change to it is made upstream and vendored again.
+    "src/hyperloom_arbor",
 ]
 # SonarSource CPD defaults: a clone is at least 100 tokens and 10 lines (jscpd).
 duplication-min-tokens = 100
@@ -546,16 +599,17 @@ cyclomatic-complexity = 20
 # a reader has to re-read rather than read.
 cognitive-complexity = 30
 # Lines of code in the body: the ``def`` lines, decorators, blank, comment and
-# docstring lines do not count. Past 50 a function rarely does one thing; split
-# it along its steps.
-function-lines = 50
+# docstring lines do not count. Past 60, about the tree's 98th percentile, a
+# function rarely does one thing; split it along its steps.
+function-lines = 60
 # Past four nested blocks the innermost line depends on five conditions at
 # once; extract the inner loop or invert a condition.
 nested-blocks = 4
 # pylint R0913 default: past five, a call site no longer reads as a sentence and the
 # values travel together anyway -- pass the object they come from, or name them in a
-# dataclass. ``self``/``cls`` and ``*args``/``**kwargs`` do not count; keyword-only
-# parameters do.
+# dataclass. A first parameter named ``self``/``cls`` does not count; every other
+# named parameter does (keyword-only and ``_``-named too), and ``*args`` and
+# ``**kwargs`` count one each.
 function-args = 5
 # Fails above 1200 physical lines: half again the review trigger of 800, the
 # size at which a module almost always holds more than one job.
@@ -591,6 +645,8 @@ exclude_dirs = [
     ".venv",
     "src/kernelforge/examples",
     "src/kernelforge/knowledge/local_wiki/resources",
+    # Arbor, vendored at a release tag (src/hyperloom_arbor/VENDOR.md); scanned upstream.
+    "src/hyperloom_arbor",
 ]
 
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only``.
@@ -613,6 +669,8 @@ extend-exclude = [
     "src/kernelforge/examples",
     "src/kernelforge/knowledge/local_wiki/resources",
     "src/kernelforge/knowledge/kb_store/remote_client.py",
+    # Arbor, vendored at a release tag; linted upstream.
+    "src/hyperloom_arbor",
 ]
 
 [tool.ruff.lint]
@@ -705,7 +763,7 @@ exclude = ["**/*.md", "**/*.rst"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["src/hyperloom"]
+files = ["src/hyperloom_common", "src/hyperloom"]
 exclude = [
     ".*/tests/.*",
     "build",

@@ -80,7 +80,7 @@ def _fake_site(tmp_path: Path, *, ray_version: str, start_options: dict[str, str
 
 def _run_smoke(site: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-c", cli_preflight._RAY_SMOKE],
+        cli_preflight._ray_smoke_command(sys.executable, ""),
         capture_output=True,
         text=True,
         env={"PYTHONPATH": str(site), "PATH": "/usr/bin:/bin"},
@@ -280,3 +280,97 @@ def test_ensure_ray_reports_what_the_repair_really_did(monkeypatch) -> None:
     assert "pip install ray[default]>=2.44.1 succeeded" in message
     assert "ray[default]==2.44.1 failed to install" in message
     assert "ray start does not accept --resources" in message
+
+
+def _sentinel_site(tmp_path: Path, *, ray_version: str = "2.44.1") -> Path:
+    site = _fake_site(tmp_path, ray_version=ray_version)
+    (site / "ray" / "scripts" / "scripts.py").write_text(
+        "raise ValueError('<object object at 0x7f> is not a valid Sentinel')\n"
+    )
+    return site
+
+
+def test_smoke_gives_the_sentinel_import_failure_of_the_pinned_ray_its_own_exit_code(tmp_path: Path) -> None:
+    result = _run_smoke(_sentinel_site(tmp_path))
+
+    assert result.returncode == cli_preflight._RAY_SENTINEL_EXIT
+    assert "is not a valid Sentinel" in result.stderr
+
+
+def test_smoke_keeps_exit_1_for_a_sentinel_failure_on_another_ray(tmp_path: Path) -> None:
+    assert _run_smoke(_sentinel_site(tmp_path, ray_version="2.55.0")).returncode == 1
+
+
+def _completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+
+def _scripted(monkeypatch, smokes: list[subprocess.CompletedProcess], pip_rc: int = 0) -> list[tuple[str, ...]]:
+    """Smoke answers in turn; returns the specs every pip call received."""
+    pips: list[tuple[str, ...]] = []
+    monkeypatch.setattr(cli_preflight, "_ray_smoke", lambda *_a, **_k: smokes.pop(0))
+
+    def pip(_py, _extra, specs):
+        pips.append(tuple(specs))
+        return _completed(pip_rc)
+
+    monkeypatch.setattr(cli_preflight, "_pip_install_ray", pip)
+    return pips
+
+
+def test_the_sentinel_failure_holds_click_and_smokes_again(monkeypatch) -> None:
+    pips = _scripted(monkeypatch, [_completed(cli_preflight._RAY_SENTINEL_EXIT), _completed(0, "2.44.1\n")])
+
+    record = cli_preflight._ensure_ray("python3", [])
+
+    assert pips == [("click<8.3",)]
+    assert record["status"] == "applied"
+    assert record["version_after"] == "2.44.1"
+
+
+def test_the_sentinel_failure_after_a_ray_install_holds_click_too(monkeypatch) -> None:
+    smokes = [
+        _completed(1, stderr="ray import failed: x"),
+        _completed(cli_preflight._RAY_SENTINEL_EXIT),
+        _completed(0, "2.44.1\n"),
+    ]
+    pips = _scripted(monkeypatch, smokes)
+
+    record = cli_preflight._ensure_ray("python3", [])
+
+    assert pips == [("ray[default]==2.44.1",), ("click<8.3",)]
+    assert record["status"] == "applied"
+
+
+@pytest.mark.parametrize("version", ["", "2.45.0"])
+def test_any_other_smoke_failure_never_touches_click(monkeypatch, version) -> None:
+    # UsageError / version mismatch / RAY_VERSION override: the smoke exits 1, and the install fails.
+    if version:
+        monkeypatch.setenv("RAY_VERSION", version)
+    pips = _scripted(
+        monkeypatch,
+        [_completed(1, stderr="ray start does not accept"), _completed(1, stderr="ray start does not accept")],
+    )
+
+    with pytest.raises(RuntimeError, match="smoke test still failed"):
+        cli_preflight._ensure_ray("python3", [])
+
+    assert all("click" not in " ".join(specs) for specs in pips)
+    assert len(pips) == 1
+
+
+def test_a_sentinel_failure_the_hold_does_not_fix_fails_the_install(monkeypatch) -> None:
+    pips = _scripted(
+        monkeypatch,
+        [
+            _completed(cli_preflight._RAY_SENTINEL_EXIT),
+            _completed(cli_preflight._RAY_SENTINEL_EXIT),
+            _completed(cli_preflight._RAY_SENTINEL_EXIT),
+            _completed(cli_preflight._RAY_SENTINEL_EXIT),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="smoke test still failed"):
+        cli_preflight._ensure_ray("python3", [])
+
+    assert ("click<8.3",) in pips

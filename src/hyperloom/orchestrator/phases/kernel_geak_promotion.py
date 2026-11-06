@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from . import geak_rebench as _geak_rebench
-from hyperloom.common.coerce import first_str, to_float
+from hyperloom_common.coerce import first_str, to_float
 from hyperloom.common import gain_math
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FALLBACK_FAILED, REBENCH_NO_PROMOTE
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
@@ -411,7 +411,7 @@ class _GeakPromotionMixin:
         accepted_flags: str,
         parsed_envs: dict[str, str],
     ) -> None:
-        from hyperloom.common.coerce import to_str_list
+        from hyperloom_common.coerce import to_str_list
         from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
         from hyperloom.inference_optimizer.framework_registry import server_args_env_name
         from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args

@@ -23,7 +23,7 @@ from kernelforge.workflows.forge_loop.memory.knowledge_integration import (
     write_experience_to_kb,
 )
 from kernelforge.workflows.forge_loop.campaign.recovery import load_published_best
-from kernelforge.utils.durable_io import atomic_write_json
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.git import git_head
 
 if TYPE_CHECKING:
@@ -171,21 +171,27 @@ class _RunReporter:
 
             select_result(result, self.assembly_preparation)
         if exp_id:
-            try:
-                completed_experiment = self.run.tracker.get(exp_id)
-            except FileNotFoundError:
-                # An incomplete run has no tracker record; the result must still be emitted so callers can reject it.
-                return result
-            result["iteration_count"] = len(completed_experiment.iterations)
-            result["checkpoint"] = completed_experiment.checkpoint
+            self._attach_tracker_record(result, exp_id)
         return result
+
+    def _attach_tracker_record(self, result: dict, exp_id: str) -> None:
+        """Copy the completed experiment's iteration count and checkpoint from the tracker into ``result``."""
+        try:
+            completed_experiment = self.run.tracker.get(exp_id)
+        except FileNotFoundError:
+            # An incomplete run has no tracker record; the result must still be emitted so callers can reject it.
+            return
+        result["iteration_count"] = len(completed_experiment.iterations)
+        result["checkpoint"] = completed_experiment.checkpoint
 
     def write_result_json(self, result: dict) -> None:
         """Persist the result dict to --result-json; a failed write is reported, not raised."""
         if not self.run.request.artifacts.result_json:
             return
         try:
-            atomic_write_json(self.run.request.artifacts.result_json, result)
+            atomic_write_json(
+                self.run.request.artifacts.result_json, result, fmt=JsonFormat(trailing_newline=True), options=DURABLE
+            )
         except (OSError, TypeError, ValueError) as e:
             print(f"  [forge-loop] result-json snapshot skipped ({e})", flush=True)
 

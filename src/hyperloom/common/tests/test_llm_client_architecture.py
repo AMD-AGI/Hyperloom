@@ -24,12 +24,12 @@ _RULES: dict[str, str] = {
 
 _GUIDANCE = (
     "Sanctioned LLM paths:\n"
-    "  * single-shot inference -> hyperloom.common.llm_config: build the client with\n"
+    "  * single-shot inference -> hyperloom_common.llm.llm_config: build the client with\n"
     "    get_openai_client() / get_async_openai_client() and issue the call with\n"
     "    chat_completion() / astream_chat_completion_text().\n"
     "  * agentic work -> an agent runtime: hyperloom.common.codex_session (Codex SDK)\n"
     "    or the Claude Agent SDK backends in hyperloom/orchestrator/roles/.\n"
-    "Provider client construction lives in hyperloom/common/llm_config.py and nowhere else."
+    "Provider client construction lives in hyperloom_common/llm/llm_config.py and nowhere else."
 )
 
 # Top-level packages of provider SDKs.
@@ -57,6 +57,7 @@ _HTTP_ENDPOINT_RULES: tuple[tuple[str, str], ...] = (
 # First-party source trees.
 _SCAN_ROOTS: tuple[str, ...] = (
     "src/hyperloom",
+    "src/hyperloom_common",
     "scripts",
     "docs",
     "examples",
@@ -91,7 +92,7 @@ _TEST_DIR_NAMES = frozenset({"tests", "test", "testing"})
 _ALLOWLISTED_OWNERS = frozenset(
     {
         # Single-shot inference + the sole home of client construction.
-        "src/hyperloom/common/llm_config.py",
+        "src/hyperloom_common/llm/llm_config.py",
         # Codex agent runtime session wrapper.
         "src/hyperloom/common/codex_session.py",
     }
@@ -319,11 +320,14 @@ def test_no_unsanctioned_llm_provider_access() -> None:
         )
 
 
-def test_single_shot_owner_exists() -> None:
-    """The allowlist must not rot: the single-shot inference owner has to exist."""
+def test_allowlisted_owners_are_scannable_paths() -> None:
+    """The allowlist must not rot: an owner that is missing, or outside every scan root, exempts nothing."""
     assert _REPO_ROOT is not None
-    owner = _REPO_ROOT / "src/hyperloom/common/llm_config.py"
-    assert owner.is_file(), f"sanctioned single-shot inference owner is missing: {owner}"
+    for path in sorted(_ALLOWLISTED_OWNERS):
+        assert (_REPO_ROOT / path).is_file(), f"sanctioned LLM owner is missing: {path}"
+        assert any(path.startswith(f"{root}/") for root in _SCAN_ROOTS), (
+            f"sanctioned LLM owner {path} is outside _SCAN_ROOTS, so the scan never reaches its package"
+        )
 
 
 def test_pinned_violations_are_scannable_paths() -> None:
@@ -412,7 +416,7 @@ def test_ignores_sanctioned_and_unrelated_code() -> None:
     # The sanctioned agent runtime is not a raw provider client.
     assert _codes("from claude_agent_sdk import query\n") == []
     # llm_config's streaming helpers are the sanctioned single-shot call path.
-    assert _codes("from hyperloom.common import llm_config\nllm_config.get_openai_client()\n") == []
+    assert _codes("from common import llm_config\nllm_config.get_openai_client()\n") == []
     assert _codes("text, _ = llm_config.astream_chat_completion_text(client, model='m')\n") == []
     # Workload probes POST to the inference server under optimization.
     assert _codes("client.post(front + '/v1/completions', json=body)\n") == []

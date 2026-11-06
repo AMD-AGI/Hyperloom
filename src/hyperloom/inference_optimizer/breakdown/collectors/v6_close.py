@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, to_mapping
+from hyperloom_common.coerce import dict_rows, to_mapping
 
 from ..recorder.close_out import SESSION_BREAKDOWN_PATH
 from ..workflow_contract import workflow_contract

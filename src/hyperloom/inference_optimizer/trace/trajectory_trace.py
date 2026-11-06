@@ -25,10 +25,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import text_or_none, to_int
-from hyperloom.common.io import JsonLineFormat, append_jsonl
-from hyperloom.common.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
-from hyperloom.common.timeutil import elapsed_ms, epoch_iso, now_iso
+from hyperloom_common.coerce import text_or_none, to_int
+from hyperloom_common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.llm.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
+from hyperloom_common.timeutil import elapsed_ms, epoch_iso, now_iso
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
 from .llm_trace import VALID_COMPONENTS as _LLM_COMPONENTS
 
@@ -241,9 +241,12 @@ def _validate_row(row: dict[str, Any]) -> None:
 
 
 @dataclass(frozen=True)
-class EventWindow:
-    """When an event happened: ``ts`` (now when unset) and, for a span's terminal row, the ``start_ts`` it opened at."""
+class EventSpan:
+    """Where a row sits in its span: which span (minted when unset), the status it records, ``ts`` (now when unset)
+    and, for a span's terminal row, the ``start_ts`` it opened at."""
 
+    span_id: str | None = None
+    status: str = STATUS_POINT
     start_ts: str | None = None
     ts: str | None = None
 
@@ -251,31 +254,29 @@ class EventWindow:
 def record_event(
     event_type: str,
     *,
-    status: str = STATUS_POINT,
-    span_id: str | None = None,
-    window: EventWindow = EventWindow(),
+    span: EventSpan = EventSpan(),
     attributes: dict[str, Any] | None = None,
     **context: Any,
 ) -> str | None:
     """Append one event to this process's trajectory shard.
 
-    Pass ``window`` when the event is written after it happened. ``context`` overrides
-    :class:`TrajectoryContext` fields for this row only. A no-op (returning ``None``) when no ``session_dir`` is in
-    scope; otherwise returns the row's ``span_id``, minted when not given.
+    Pass ``span`` to give the row a status, put it in a known span, or date an event written after it happened.
+    ``context`` overrides :class:`TrajectoryContext` fields for this row only. A no-op (returning ``None``) when no
+    ``session_dir`` is in scope; otherwise returns the row's ``span_id``, minted when not given.
     """
     ctx = _overlay(_CONTEXT.get(), context)
     if ctx.session_dir is None:
         return None
-    span_id = span_id or new_span_id()
+    span_id = span.span_id or new_span_id()
     with _WRITER.lock:
         phase, tick = _resolved_phase_tick(ctx)
         row = {
             "schema_version": SCHEMA_VERSION,
             "event_id": uuid.uuid4().hex,
             "event_type": event_type,
-            "status": status,
-            "ts": window.ts or now_iso(),
-            "start_ts": text_or_none(window.start_ts),
+            "status": span.status,
+            "ts": span.ts or now_iso(),
+            "start_ts": text_or_none(span.start_ts),
             "writer": _WRITER.writer,
             "seq": _WRITER.next_seq(),
             "session_id": ctx.session_dir.name,
@@ -361,7 +362,9 @@ def trajectory_span(
     """
     span = TrajectorySpan(span_id or new_span_id())
     start_ts = now_iso()
-    record_event(event_type, status=STATUS_STARTED, span_id=span.span_id, attributes=attributes, **context)
+    record_event(
+        event_type, span=EventSpan(span_id=span.span_id, status=STATUS_STARTED), attributes=attributes, **context
+    )
     status = STATUS_FAILED
     error: dict[str, Any] = {}
     try:
@@ -376,9 +379,9 @@ def trajectory_span(
     finally:
         record_event(
             event_type,
-            status=status if error else (span.status or STATUS_COMPLETED),
-            span_id=span.span_id,
-            window=EventWindow(start_ts=start_ts),
+            span=EventSpan(
+                span_id=span.span_id, status=status if error else (span.status or STATUS_COMPLETED), start_ts=start_ts
+            ),
             attributes={**span.attributes, **error},
             **context,
         )
@@ -394,7 +397,7 @@ def trajectory_shards(session_dir: Path) -> list[Path]:
 
 def load_shard(path: Path) -> list[dict[str, Any]]:
     """Read one shard, skipping a torn trailing line from a live writer."""
-    from hyperloom.common.jsonio import read_jsonl
+    from hyperloom_common.jsonio import read_jsonl
 
     return read_jsonl(path)
 
@@ -437,8 +440,11 @@ def record_gateway_request(record: LLMRequestRecord) -> None:
         attributes["error_message"] = record.error_message
     record_event(
         EVENT_LLM_REQUEST,
-        status=STATUS_FAILED if failed else STATUS_COMPLETED,
-        window=EventWindow(start_ts=epoch_iso(record.start), ts=epoch_iso(record.end)),
+        span=EventSpan(
+            status=STATUS_FAILED if failed else STATUS_COMPLETED,
+            start_ts=epoch_iso(record.start),
+            ts=epoch_iso(record.end),
+        ),
         attributes=attributes,
         **context,
     )
@@ -459,7 +465,7 @@ __all__ = [
     "EVENT_TASK",
     "EVENT_TASK_RETRY",
     "EVENT_TOOL",
-    "EventWindow",
+    "EventSpan",
     "OPEN_STATUSES",
     "SCHEMA_VERSION",
     "STATUS_CANCELLED",

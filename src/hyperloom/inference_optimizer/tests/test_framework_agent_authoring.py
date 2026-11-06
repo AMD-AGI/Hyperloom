@@ -10,11 +10,13 @@ from typing import Any
 import pytest
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.bus.message_bus import MessageBus
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import TaskNotFound
 
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
@@ -931,6 +933,37 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
     params = stub.tasks.created[-1]["params"]
     assert params["source_phase"] == "FRAMEWORK_AGENT"
     assert params["gap_layer"] == "perf_explore"
+
+
+@pytest.mark.asyncio
+async def test_an_authored_patch_that_fails_to_apply_reauthors_its_pr_candidate(tmp_path: Path) -> None:
+    """An apply_failed result names no candidate; the retry re-authors the PR its task params name."""
+    stub = _stub(tmp_path)
+    pr_url = "https://github.com/vllm-project/vllm/pull/60076"
+    _seed_batch(stub, {"pr_url": pr_url, "diff_url": f"{pr_url}.diff"})
+
+    async def _no_such_task(task_id: str) -> Any:
+        raise TaskNotFound(task_id)
+
+    stub.tasks.get = _no_such_task
+    task = SimpleNamespace(
+        task_id="integrate-60076",
+        kind="integrate_patch",
+        params={"framework_agent_authoring": True, "framework_agent_candidate_id": pr_url},
+    )
+    result = SubAgentResult(
+        task_id=task.task_id,
+        state="succeeded",
+        result={"status": "apply_failed", "lane": "perf_framework", "specialist_task_id": "spec-60076"},
+    )
+
+    await stub.phase_framework.on_integrate_patch_settled(task, result, Verdict.FAILED)
+
+    assert stub.shared_state.apply_fail_reauthor_attempts == {pr_url: 1}
+    params = stub.tasks.created[-1]["params"]
+    assert params["framework_agent_candidate_id"] == pr_url
+    assert params["framework_batch_id"] == "b1"
+    assert params["pr_lead"]["diff_url"] == f"{pr_url}.diff"
 
 
 # ── Parallel authoring ───────────────────────────────────────────────────────

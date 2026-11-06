@@ -14,7 +14,8 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.policy import gate as gate_module
 from hyperloom.orchestrator.policy import projection as projection_module
-from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import (
     RULE_GPU_POOL_DISABLED,
     RULE_ROUND_IN_FLIGHT,
@@ -26,7 +27,6 @@ from hyperloom.orchestrator.state.round_store import (
     BOOTED,
     EXCLUDED,
     EXPIRED_REAPED,
-    EXPIRED_UNREAPED,
     RoundRequest,
     RoundStore,
 )
@@ -58,9 +58,9 @@ def _baseline() -> Intent:
     return Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline", "params": {}})
 
 
-async def _reread(store: RoundStore, facts: ResourceFacts, now: float) -> None:
+async def _reread(store: RoundStore, facts: ResourceFacts) -> None:
     """Re-read the facts, as the repair pass does at the top of a tick."""
-    facts.update(SimpleNamespace(tp=0), rounds=await store.excluding(now))
+    facts.update(SimpleNamespace(tp=0), rounds=await store.open_rounds())
 
 
 @pytest.mark.asyncio
@@ -76,7 +76,7 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
     )
     assert opened.ok
 
-    await _reread(store, facts, clock.wall())
+    await _reread(store, facts)
     with pytest.raises(PolicyDenied) as denied:
         gate.validate_intent("orchestration", _baseline())
     assert denied.value.rule == RULE_ROUND_IN_FLIGHT
@@ -88,14 +88,13 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
     )
     assert settled.ok
 
-    await _reread(store, facts, clock.wall())
+    await _reread(store, facts)
     gate.validate_intent("orchestration", _baseline())
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", [EXPIRED_UNREAPED, EXPIRED_REAPED])
-async def test_a_settled_round_denies_nothing_however_it_ended(store, clock, outcome):
-    """Settling releases, whether or not anything confirmed the holder dead."""
+async def test_an_expired_round_denies_nothing_once_settled(store, clock):
+    """Settling an expired round releases the machine."""
     facts = ResourceFacts()
     gate = _gate(facts)
     await store.open(
@@ -106,10 +105,10 @@ async def test_a_settled_round_denies_nothing_however_it_ended(store, clock, out
     )
     clock.advance(_LEASE + 1.0)
     await store.settle(
-        await store.get("round-1"), RoundRequest(now_unix=clock.wall(), request_id="req-settle"), outcome=outcome
+        await store.get("round-1"), RoundRequest(now_unix=clock.wall(), request_id="req-settle"), outcome=EXPIRED_REAPED
     )
 
-    await _reread(store, facts, clock.wall())
+    await _reread(store, facts)
     gate.validate_intent("orchestration", _baseline())
 
     # And the acquire agrees, which is the answer that counts.
@@ -136,13 +135,13 @@ async def test_an_open_round_keeps_denying_after_lease_expiry_until_settled(stor
     )
     assert opened.ok
 
-    await _reread(store, facts, clock.wall())
+    await _reread(store, facts)
     with pytest.raises(PolicyDenied) as denied:
         gate.validate_intent("orchestration", _baseline())
     assert denied.value.rule == RULE_ROUND_IN_FLIGHT
 
     clock.advance(elapsed)
-    await _reread(store, facts, clock.wall())
+    await _reread(store, facts)
     with pytest.raises(PolicyDenied) as denied:
         gate.validate_intent("orchestration", _baseline())
     assert denied.value.rule == RULE_ROUND_IN_FLIGHT
@@ -161,7 +160,7 @@ async def test_an_open_round_keeps_denying_after_lease_expiry_until_settled(stor
     )
     assert settled.ok
 
-    await _reread(store, facts, clock.wall())
+    await _reread(store, facts)
     gate.validate_intent("orchestration", _baseline())
     acquired = await store.open(
         "round-next",
@@ -183,7 +182,7 @@ async def test_a_rule_that_denied_last_attempt_denies_this_one_too(store, clock)
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
     )
-    await _reread(store, facts, clock.wall())
+    await _reread(store, facts)
 
     for _attempt in range(2):
         with pytest.raises(PolicyDenied) as denied:
@@ -206,7 +205,7 @@ async def test_across_ticks_nothing_reaches_open_while_the_round_is_held(store, 
 
     for tick in range(10):
         clock.advance(30.0)
-        await _reread(store, facts, clock.wall())
+        await _reread(store, facts)
         with pytest.raises(PolicyDenied) as denied:
             gate.validate_intent("orchestration", _baseline())
         assert denied.value.rule == RULE_ROUND_IN_FLIGHT
@@ -240,7 +239,7 @@ async def test_the_round_holders_own_bring_up_is_admitted_tick_after_tick(store,
 
     for _tick in range(6):
         clock.advance(30.0)
-        await _reread(store, facts, clock.wall())
+        await _reread(store, facts)
         gate.validate_dispatched_task("baseline", {"reason": "enablement_revalidation"}, task_id="reval-1")
 
     # And every other baseline is still refused while that round holds.
@@ -299,7 +298,7 @@ def test_no_validator_on_the_intent_path_reaches_a_database_call():
         "sqlite3",
         "RoundStore",
         "SqliteConnection",
-        "excluding",
+        "open_rounds",
     }
     for code in _reachable_code(*validators):
         loaded = {instr.argval for instr in dis.get_instructions(code) if isinstance(instr.argval, str)}

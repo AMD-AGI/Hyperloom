@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
 from hyperloom.common.provenance import detect_kineto_backend
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
@@ -60,8 +60,8 @@ _CAPTURE_DIAGNOSIS_WORKLOAD_KEYS = (
 #: Per-source cap on the raw text kept in a capture-failure diagnosis. Generous on purpose: this file is the only
 #: record of the failure, since nothing downstream re-runs the arm to reproduce it.
 _CAPTURE_DIAGNOSIS_SOURCE_BYTES = 32768
-#: Suffixes the live trace resolver will consider. One of these already present in a task's own run directory is
-#: a leftover the resolver can pick instead of what this run produces.
+#: Suffixes trace discovery will consider. One of these already present in a task's own run directory is
+#: a leftover discovery can lead with instead of what this run produces.
 _TRACE_SUFFIXES = (".pt.trace.json.gz", ".pt.trace.json", ".trace.json.gz", ".trace.json")
 #: Enough leftovers to establish the pattern; the preflight record is context, not an inventory.
 _PREFLIGHT_STALE_TRACE_LIMIT = 20
@@ -133,6 +133,24 @@ _AUTO_RETRY_WARNING_CODES = frozenset(
         "steady_state_chunk_low_quality",
     }
 )
+
+# trace_analyze warnings that mark its analysis degraded; kernel work still dispatches on it, labelled.
+_DEGRADING_WARNING_CODES = frozenset(
+    {
+        "trace_quality_poor",
+        "kernel_source_unresolved",
+        "trace_split_phase_unconfirmed",
+        "trace_split_manifest_missing",
+    }
+)
+
+
+def _analysis_degraded(ta_result: dict[str, Any]) -> bool:
+    """Whether trace_analyze recorded a warning that marks its analysis degraded."""
+    return any(
+        isinstance(w, dict) and w.get("code") in _DEGRADING_WARNING_CODES
+        for w in ta_result.get("trace_health_warnings") or []
+    )
 
 
 def _extract_steady_state_retry_mode(
@@ -320,27 +338,25 @@ def _preflight_probe(session_dir: Path, task_id: str, *, reaped: Sequence[int]) 
     except OSError as exc:
         out["disk"] = {"path": str(session_dir), "error": repr(exc)}
 
-    # A trace already under this task's own run directory is what later surfaces as selfcert's
-    # ``production_pick_probe`` disagreement: the live resolver can pick the leftover instead of what this run
+    # A trace already under this task's own run directory can lead trace discovery instead of what this run
     # produces, and by then there is no way to tell which run the numbers came from.
     stale: list[dict[str, Any]] = []
-    if task_id:
-        try:
-            for run_dir in sorted(session_dir.glob(f"runs/*/{task_id}")):
-                for p in sorted(run_dir.rglob("*")):
-                    if len(stale) >= _PREFLIGHT_STALE_TRACE_LIMIT:
-                        break
-                    if p.is_file() and str(p).endswith(_TRACE_SUFFIXES):
-                        info = p.stat()
-                        stale.append(
-                            {
-                                "path": str(p.relative_to(session_dir)),
-                                "size_bytes": info.st_size,
-                                "mtime_iso": _iso_from_epoch(info.st_mtime),
-                            }
-                        )
-        except OSError as exc:
-            out["stale_traces_error"] = repr(exc)
+    try:
+        for run_dir in sorted(session_dir.glob(f"runs/*/{task_id}")) if task_id else []:
+            for p in sorted(run_dir.rglob("*")):
+                if len(stale) >= _PREFLIGHT_STALE_TRACE_LIMIT:
+                    break
+                if p.is_file() and str(p).endswith(_TRACE_SUFFIXES):
+                    info = p.stat()
+                    stale.append(
+                        {
+                            "path": str(p.relative_to(session_dir)),
+                            "size_bytes": info.st_size,
+                            "mtime_iso": _iso_from_epoch(info.st_mtime),
+                        }
+                    )
+    except OSError as exc:
+        out["stale_traces_error"] = repr(exc)
     out["stale_traces"] = stale
     out["stale_trace_count"] = len(stale)
     return out
@@ -1096,7 +1112,8 @@ class RooflineExecutor:
     ) -> _AnalysedProfile | None:
         """Re-profile a host-bound trace once with DP attention stripped; return the pair to adopt, or ``None``.
 
-        Fail-soft: whatever goes wrong, the original analysis stands.
+        A re-profile or re-analysis that returns a failure leaves the original analysis standing; one that raises does
+        not, and the action crashes with its attempt rows already written.
         """
         from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV, _scoped_env
 
@@ -1104,17 +1121,10 @@ class RooflineExecutor:
             "roofline: host-bound trace (0 hot kernels + high GPU idle); "
             "attempting one compute-bound re-profile (DP-attention stripped)"
         )
-        adopted: _AnalysedProfile | None = None
-        outcome = "re-profile produced no usable trace"
         with _scoped_env({_COMPUTE_BOUND_PROFILE_ENV: "1"}):
-            try:
-                adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
-            except Exception as exc:  # isolation boundary: one optional compute-bound re-profile
-                outcome = f"re-profile raised: {exc!r}"
-                log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc, exc_info=True)
-            finally:
-                if recorder is not None:
-                    recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
+            adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
+        if recorder is not None:
+            recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
         return adopted
 
     async def _compute_bound_attempt(
@@ -1163,6 +1173,7 @@ class RooflineExecutor:
         status = "succeeded" if profile.warning is None else "recovered"
         trace_path = str(analysis.payload["trace_input"])
         hot = _hot_kernels(analysis.result)
+        analysis_degraded = _analysis_degraded(analysis.result)
         self.shared_state.last_profile_trace = trace_path
         self.shared_state.last_profile_launch_evidence_path = str(profile.result.get("launch_evidence_path") or "")
         self.shared_state.last_profile_status = status
@@ -1195,6 +1206,7 @@ class RooflineExecutor:
             # True when trace_analyze produced 0 hot kernels because cuda-graph folding stripped per-kernel
             # attribution.
             "kernel_attribution_degraded": attribution_degraded,
+            "degraded": attribution_degraded or analysis_degraded,
             **({"profile_warning": profile.warning} if profile.warning is not None else {}),
         }
         if recorder is not None:
@@ -1204,6 +1216,7 @@ class RooflineExecutor:
                     snapshot_id=cached.get("roofline_snapshot_id"),
                     hot_kernel_count=len(hot),
                     kernel_attribution_degraded=attribution_degraded,
+                    analysis_degraded=analysis_degraded,
                     cached=cached,
                     trace_path=trace_path,
                     # The snapshot this run just appended. Read here rather than in the recorder because the history is

@@ -38,7 +38,7 @@ compilation option requires a separate campaign. The finite GPU test covers both
 frontends, instruction-error rejection and clean patch replay:
 
 ```bash
-pytest -q src/kernelforge/tests/test_assembly_triton_gpu.py
+pytest -q src/kernelforge/tests/kernel_backends/assembly/test_assembly_triton_gpu.py
 ```
 
 This example verifies execution; it does not promise a performance improvement.

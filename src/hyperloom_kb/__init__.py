@@ -99,6 +99,7 @@ from hyperloom_kb.retrieval_policy import (
     RETRIEVAL_POLICY_VERSION,
     LexicalFuzzyProvider,
     RepresentativePolicy,
+    ResultShape,
     RetrievalConfiguration,
     RetrievalPolicyError,
 )
@@ -258,6 +259,7 @@ __all__ = [
     "RepeatAnnotations",
     "RepeatGroup",
     "RepresentativePolicy",
+    "ResultShape",
     "RetrievalCapability",
     "RetrievalConfiguration",
     "RetrievalError",

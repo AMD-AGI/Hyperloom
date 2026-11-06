@@ -96,8 +96,6 @@ _BUILTIN_REQUIRED_INPUTS: tuple[str, ...] = (
     "resolved_sha",
     "gpu_arch",
     "max_jobs",
-    "torch_constraint_mode",
-    "env_digest",
     "ambient_digest",
 )
 
@@ -106,20 +104,9 @@ def _reason(code: str, scope: str = "") -> dict[str, Any]:
     return {"code": code, "blocks": REASON_BLOCKS[code], "scope": scope}
 
 
-def read_status(section: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Return the decision a consumer must read off ``section``.
-
-    An absent key is the one absence that carries meaning: the producer predates
-    this contract, so nothing was judged. An unrecognized code is likewise
-    insufficient -- the vocabulary is closed.
-    """
-    decision = (section or {}).get("replay_sufficiency")
-    if not isinstance(decision, Mapping):
-        return {"schema_version": SCHEMA_VERSION, "status": "insufficient", "reasons": [_reason("not_evaluated")]}
-    reasons = [r for r in decision.get("reasons") or [] if isinstance(r, Mapping)]
-    if any(str(r.get("code")) not in REASON_BLOCKS for r in reasons):
-        return {**dict(decision), "status": "insufficient"}
-    return dict(decision)
+def not_evaluated() -> dict[str, Any]:
+    """Return the decision a recipe carries when nothing judged it."""
+    return {"schema_version": SCHEMA_VERSION, "status": "insufficient", "reasons": [_reason("not_evaluated")]}
 
 
 def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -618,49 +605,35 @@ def _executed_build_ids(enablement: Mapping[str, Any]) -> list[str]:
     return out
 
 
-def _carried_extension_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Name the build's compiled extensions the framework root never received.
+def _tristate_name_reasons(
+    section: Mapping[str, Any],
+    key: str,
+    unverified_code: str,
+    item_code: str,
+) -> list[dict[str, Any]]:
+    """Name each entry of a tri-state name list the section carries under ``key``.
 
-    A build installs nothing by itself; its outputs reach the framework root
-    only as artifacts a specialist declares, one file at a time. Declaring some
-    of them still boots, benchmarks and keeps -- the ones left behind surface
-    much later as an op the loaded extension does not export, on whichever code
-    path first needs it, and a replay of that recipe reproduces the gap exactly.
+    ``build_extensions_not_carried`` names the build's compiled extensions the
+    framework root never received: a build installs nothing by itself, its
+    outputs reach the root only as artifacts a specialist declares, and the ones
+    left behind surface much later as an op the loaded extension does not
+    export. ``levers_without_readers`` names accepted env levers the framework
+    tree has no reader for: setting one on a replay reproduces nothing.
+
+    An absent key predates the observation and yields nothing. ``None`` means
+    the observation could not be read; silence there would be
+    indistinguishable from a clean scan, which is the certification this exists
+    to withhold. Only string names become reasons: one invented from a number or
+    a mapping would refuse a replay over junk.
     """
-    if "build_extensions_not_carried" not in section:
+    if key not in section:
         return []
-    missing = section["build_extensions_not_carried"]
-    if missing is None:
-        # A linked build whose outputs could not be read. Silence here would be
-        # indistinguishable from a scan that found everything carried, which is
-        # the certification this exists to withhold.
-        return [_reason("build_carry_unverified", "build_extensions_not_carried")]
-    if not isinstance(missing, (list, tuple)):
+    names = section[key]
+    if names is None:
+        return [_reason(unverified_code, key)]
+    if not isinstance(names, (list, tuple)):
         return []
-    # Only names: a reason invented from a number or a mapping would refuse a
-    # replay over junk, which is the opposite of what a closed shape is for.
-    return [
-        _reason("build_extensions_not_carried", name.strip())
-        for name in missing
-        if isinstance(name, str) and name.strip()
-    ]
-
-
-def _lever_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Name accepted env levers the framework tree has no reader for.
-
-    Setting one on a replay reproduces nothing: the patch that introduced the
-    knob is not among the ones being replayed, so the recipe carries an
-    instruction with no effect and says nothing about it.
-    """
-    if "levers_without_readers" not in section:
-        return []
-    unread = section["levers_without_readers"]
-    if unread is None:
-        return [_reason("levers_unverified", "levers_without_readers")]
-    if not isinstance(unread, (list, tuple)):
-        return []
-    return [_reason("lever_has_no_reader", name.strip()) for name in unread if isinstance(name, str) and name.strip()]
+    return [_reason(item_code, name.strip()) for name in names if isinstance(name, str) and name.strip()]
 
 
 def _closure_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -686,12 +659,7 @@ def _credential_reasons(
             reasons.append(_reason("credential_required", f"step[{index}]"))
         if step.get("kind") == BUILD_KIND:
             inputs = step.get("build_inputs") or {}
-            command = inputs.get("build_command") or {}
-            if (
-                inputs.get("credential_class")
-                or inputs.get("credential_channels")
-                or (isinstance(command, Mapping) and command.get("credential_class"))
-            ):
+            if inputs.get("credential_class") or inputs.get("credential_channels"):
                 reasons.append(_reason("credential_required", f"step[{index}]"))
     for row in enablement.get("setup_executions") or []:
         if isinstance(row, Mapping) and row.get("credential_channels"):
@@ -739,32 +707,7 @@ def _snapshot_payload_references(section: Mapping[str, Any]) -> list[_PayloadRef
     return refs
 
 
-def _install_payload_references(steps: Sequence[Mapping[str, Any]]) -> list[_PayloadReference]:
-    """Return the recorded input bytes each step's install consumed.
-
-    A digest names the bytes an install consumed; only the delivery makes them
-    obtainable.
-
-    PORT NOTE: ``input_identity`` is not recorded on any step today, so this is
-    inert. It is the enforcement point for install payloads and must be here
-    when the setup ledger records identities again.
-    """
-    refs: list[_PayloadReference] = []
-    for index, step in enumerate(steps):
-        for identity in step.get("input_identity") or ():
-            if not isinstance(identity, Mapping):
-                continue
-            rel = str(identity.get("rel") or "").strip("/")
-            if rel:
-                digest = str(identity.get("sha256") or "")
-                refs.append(_PayloadReference("artifact_not_self_contained", f"step[{index}]", rel, digest))
-    return refs
-
-
-def _payload_references(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-) -> list[_PayloadReference]:
+def _payload_references(section: Mapping[str, Any]) -> list[_PayloadReference]:
     """Return a reference to every byte a replay is handed.
 
     The recipe carries manifests, digests and class names; these name the bytes
@@ -777,19 +720,11 @@ def _payload_references(
     accepted_config = section.get("accepted_config") or {}
     config_path = str(accepted_config.get("config_path") or "").strip("/")
     if config_path:
-        # PORT NOTE: no producer records ``config_digest`` today, so this degrades to a
-        # presence check. The read stays so the reference re-binds to bytes the moment a
-        # recorder writes the digest again.
-        digest = str(accepted_config.get("config_digest") or "")
-        refs.append(_PayloadReference("artifact_not_self_contained", "config_path", config_path, digest))
-    refs.extend(_install_payload_references(steps))
+        refs.append(_PayloadReference("artifact_not_self_contained", "config_path", config_path, ""))
     return refs
 
 
-def referenced_payloads(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-) -> set[tuple[str, str]]:
+def referenced_payloads(section: Mapping[str, Any]) -> set[tuple[str, str]]:
     """Return the ``(path, sha256)`` payloads a delivery must be asked about.
 
     The digest is ``""`` where the recipe recorded none; where it recorded one,
@@ -797,14 +732,10 @@ def referenced_payloads(
     referenced under two digests yields two entries: two occurrences consumed
     different bytes there, and a delivery holding one is not holding the other.
     """
-    return {(ref.path, ref.sha256) for ref in _payload_references(section, steps) if ref.path}
+    return {(ref.path, ref.sha256) for ref in _payload_references(section) if ref.path}
 
 
-def _delivery_reasons(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-    delivered: Iterable[tuple[str, str]],
-) -> list[dict[str, Any]]:
+def _delivery_reasons(section: Mapping[str, Any], delivered: Iterable[tuple[str, str]]) -> list[dict[str, Any]]:
     """Refuse a bundle whose referenced bytes it does not actually carry.
 
     A reference the delivery omits is not a thinner recipe -- it is one an
@@ -816,7 +747,7 @@ def _delivery_reasons(
     """
     packaged = {(str(path).strip("/"), str(digest or "")) for path, digest in delivered}
     reasons: list[dict[str, Any]] = []
-    for ref in _payload_references(section, steps):
+    for ref in _payload_references(section):
         if (ref.path, ref.sha256) not in packaged:
             reasons.append(_reason(ref.code, ref.scope))
     return reasons
@@ -860,12 +791,18 @@ def evaluate_replay_sufficiency(
     reasons.extend(_artifact_reasons(section))
     reasons.extend(_setup_reasons(enablement))
     reasons.extend(_build_reasons(enablement, steps))
-    reasons.extend(_carried_extension_reasons(section))
-    reasons.extend(_lever_reasons(section))
+    reasons.extend(
+        _tristate_name_reasons(
+            section, "build_extensions_not_carried", "build_carry_unverified", "build_extensions_not_carried"
+        )
+    )
+    reasons.extend(
+        _tristate_name_reasons(section, "levers_without_readers", "levers_unverified", "lever_has_no_reader")
+    )
     reasons.extend(_closure_reasons(section))
     reasons.extend(_credential_reasons(enablement, section, steps))
     if delivered_payloads is not None:
-        reasons.extend(_delivery_reasons(section, steps, delivered_payloads))
+        reasons.extend(_delivery_reasons(section, delivered_payloads))
     deduped: list[dict[str, Any]] = []
     for reason in reasons:
         if reason not in deduped:

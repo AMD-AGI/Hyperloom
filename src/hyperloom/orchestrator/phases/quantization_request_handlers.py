@@ -17,7 +17,7 @@ async def run_quantization_prelude_async(
 ) -> str:
     """Quantize ``source_model`` per ``prompt``; return the exported dir."""
     # Import lazily so this module loads without the quantization runtime deps.
-    from hyperloom.agents.quantization import quantize_via_prompt
+    from hyperloom.agents.quantization import QuantSkillRunOptions, quantize_via_prompt
 
     workspace = Path(workspace)
 
@@ -36,7 +36,7 @@ async def run_quantization_prelude_async(
     result = await quantize_via_prompt(
         effective_prompt,
         workspace=workspace,
-        interactive=False,
+        options=QuantSkillRunOptions(interactive=False),
     )
 
     final = result.assessment.final

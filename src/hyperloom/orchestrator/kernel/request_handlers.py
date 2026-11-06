@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
 
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from ..actions.executors.trace_analyze import trace_analyze_handler
-from ._forge_fusion_run import _run_forge_fusion
+from ._forge_fusion_run import run_fusion_handler
 from ._forge_gemm_tuning import _run_forge_gemm_tuning
 from .integrate_accuracy import _integrate_accuracy_verdict
 from ._integrate_outcomes import (
     _applied_patch_result,
+    _FailureVerdict,
     _integrate_failure,
     _integrate_request_refusal,
     _integrate_result,
@@ -39,12 +41,12 @@ from ._integrate_payload import (
     _resolve_integrate_payload,
 )
 from ._integrate_rebaseline import (
+    _IntegrateRebaseline,
     _cpp_itfs_rebuild_check,
     _forced_cpp_itfs_rebuild,
     _integrate_rebaseline,
     _multi_node_restart_failure,
     _run_integrate_rebaseline_with_lock_retry,
-    _sweep_integrate_aiter_locks,
 )
 from ._source_import import _confirm_source_import
 from ._tuning_audit_trace import _trace_gemm_tuning_run
@@ -72,21 +74,6 @@ async def run_gemm_tuning_handler(
     result.setdefault("macro_cycle", payload.get("macro_cycle"))
     _trace_gemm_tuning_run(result, session_dir=session_dir)
     return result
-
-
-async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Run autonomous kernel fusion via forge-fusion (serving-validated).
-
-    Registered as the ``run_fusion`` kernel request. Authors serving-safe fused
-    kernels and returns a source patch + env flags for the integrate gate.
-    """
-    return await _run_forge_fusion(payload, session_dir=session_dir)
-
-
-# TraceLens picks its steady-state window by writing split chunks and selecting
-# one file; the TraceLens-free reader picks a window in memory and never writes
-# chunks. Both answer "is the window this analysis rests on trustworthy", so the
-# event normalizes them onto one shape and keeps the raw form under ``selected``.
 
 
 log = logging.getLogger(__name__)
@@ -122,9 +109,7 @@ async def integrate_handler(
     ``gain_pct`` follows ``graded_objective`` and ``bench_result`` retains the
     E2E measurement.
     """
-    from ..actions.executors._accuracy_gate import EVAL_KIND_CONTEXT_TOO_SMALL
     from ..actions.executors.benchmark_result import is_valid_measurement
-    from ..measurement.integrate_performance import assess_integrate_performance
     from ..state.shared_state import SharedState
 
     requested_controls = _request_overrides_serving_controls(payload)
@@ -145,14 +130,9 @@ async def integrate_handler(
             return missing_inputs
 
     state = SharedState.load_or_init(session_dir)
-    apply_result = _applied_patch_result(payload, session_dir=session_dir, preapplied_git_patch=preapplied_git_patch)
-    if mode == "env_only" and apply_result.get("status") == "skipped":
-        apply_result = {
-            "status": "ok",
-            "reason": "env_only_no_patch_applied",
-            "kernel_id": payload.get("kernel_id"),
-        }
-    log.info("integrate_handler: apply_result=%s", apply_result)
+    apply_result = _apply_for_integrate(
+        payload, session_dir=session_dir, mode=mode, preapplied_git_patch=preapplied_git_patch
+    )
     unapplied = _unapplied_patch_failure(payload, apply_result)
     if unapplied is not None:
         return unapplied
@@ -165,10 +145,6 @@ async def integrate_handler(
     }
     rebaseline = _integrate_rebaseline(payload, state, session_dir=session_dir, performance_policy=performance_policy)
     with _forced_cpp_itfs_rebuild(apply_result):
-        # The sweep runs even when the regular JIT cache is warm: cpp_itfs attention
-        # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
-        # from a timed-out Forge driver.
-        _sweep_integrate_aiter_locks(reason="integrate server startup")
         restart_failure = await _multi_node_restart_failure(rebaseline, payload, apply_result)
         if restart_failure is not None:
             return restart_failure
@@ -182,33 +158,92 @@ async def integrate_handler(
         except Exception as exc:  # isolation boundary: one integrate rebaseline, recorded as a REVERT
             log.warning("integrate_handler: rebaseline failed: %s", exc, exc_info=True)
             return _integrate_failure(
-                payload, apply_result, error_class="rebaseline_exception", error=repr(exc), decision="REVERT"
+                payload, apply_result, _FailureVerdict("rebaseline_exception", repr(exc), "REVERT")
             )
     if not is_valid_measurement(bench_result):
         return _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result)
 
     rebuild_check = _cpp_itfs_rebuild_check(apply_result)
     if not rebuild_check.get("verified", True):
-        return _integrate_failure(
-            payload,
-            apply_result,
-            error_class="cpp_itfs_rebuild_not_verified",
-            error=(
-                "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary"
-            ),
-            decision="NEEDS_REVIEW",
-            rebuild_check=rebuild_check,
-        )
+        return _rebuild_not_verified_failure(payload, apply_result, rebuild_check)
 
     if paired_measurement:
-        return {
+        return _paired_measurement_result(base_tput, bench_result)
+    measured = _MeasuredIntegration(
+        payload=payload,
+        apply_result=apply_result,
+        rebaseline=rebaseline,
+        bench_result=bench_result,
+        rebuild_check=rebuild_check,
+    )
+    return _graded_integration(measured, state, performance_policy, preapplied_git_patch=preapplied_git_patch)
+
+
+def _apply_for_integrate(payload: dict, *, session_dir: Path, mode: str, preapplied_git_patch: bool) -> dict:
+    """Apply the integration's patch; an env-only run with no patch to apply counts as applied."""
+    apply_result = _applied_patch_result(payload, session_dir=session_dir, preapplied_git_patch=preapplied_git_patch)
+    if mode == "env_only" and apply_result.get("status") == "skipped":
+        apply_result = {
             "status": "ok",
-            "decision": "NEEDS_REVIEW",
-            "base_tput": base_tput,
-            "new_tput": float(bench_result.get("output_throughput") or 0.0),
-            "bench_result": bench_result,
-            "workspace": bench_result.get("workspace"),
+            "reason": "env_only_no_patch_applied",
+            "kernel_id": payload.get("kernel_id"),
         }
+    log.info("integrate_handler: apply_result=%s", apply_result)
+    return apply_result
+
+
+def _rebuild_not_verified_failure(payload: dict, apply_result: dict, rebuild_check: HandlerResult) -> HandlerResult:
+    """The failure of a re-baseline that did not run a freshly built cpp_itfs library."""
+    return _integrate_failure(
+        payload,
+        apply_result,
+        _FailureVerdict(
+            "cpp_itfs_rebuild_not_verified",
+            "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary",
+            "NEEDS_REVIEW",
+        ),
+        rebuild_check=rebuild_check,
+    )
+
+
+def _paired_measurement_result(base_tput: float, bench_result: dict) -> HandlerResult:
+    """The ungraded result of a paired GEMM measurement, left for review."""
+    return {
+        "status": "ok",
+        "decision": "NEEDS_REVIEW",
+        "base_tput": base_tput,
+        "new_tput": float(bench_result.get("output_throughput") or 0.0),
+        "bench_result": bench_result,
+        "workspace": bench_result.get("workspace"),
+    }
+
+
+@dataclass(frozen=True)
+class _MeasuredIntegration:
+    """An applied integration whose re-baseline measured a verified build."""
+
+    payload: dict
+    apply_result: dict
+    rebaseline: _IntegrateRebaseline
+    bench_result: dict
+    rebuild_check: HandlerResult
+
+
+def _graded_integration(
+    measured: _MeasuredIntegration,
+    state: Any,
+    performance_policy: dict[str, float],
+    *,
+    preapplied_git_patch: bool,
+) -> HandlerResult:
+    """Grade a measured integration on throughput and accuracy into its KEEP/REVERT result."""
+    from ..actions.executors._accuracy_gate import EVAL_KIND_CONTEXT_TOO_SMALL
+    from ..measurement.integrate_performance import assess_integrate_performance
+
+    payload = measured.payload
+    apply_result = measured.apply_result
+    rebaseline = measured.rebaseline
+    bench_result = measured.bench_result
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
     if performance.graded.degrade_reason:
         log.info("integrate_handler: grading unavailable (%s)", performance.graded.degrade_reason)
@@ -225,9 +260,7 @@ async def integrate_handler(
         return _integrate_failure(
             payload,
             apply_result,
-            error_class=EVAL_KIND_CONTEXT_TOO_SMALL,
-            error=accuracy_gate["reason"],
-            decision="NEEDS_REVIEW",
+            _FailureVerdict(EVAL_KIND_CONTEXT_TOO_SMALL, accuracy_gate["reason"], "NEEDS_REVIEW"),
             gain_pct=performance.gain_pct,
             accuracy_gate=accuracy_gate,
         )
@@ -246,7 +279,7 @@ async def integrate_handler(
             cleanup=_settled_patch(confirmation.decision, apply_result, caller_owns_durability=preapplied_git_patch),
             accuracy_gate=accuracy_gate,
             source_import=confirmation,
-            rebuild_check=rebuild_check,
+            rebuild_check=measured.rebuild_check,
             server_args=rebaseline.server_args,
         )
     )
@@ -261,22 +294,9 @@ KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
 }
 
 
-def get_handler(kind: str) -> HandlerFn | None:
-    """Look up the programmatic handler registered for a request kind.
-
-    Args:
-        kind (str): The kernel request ``kind`` to resolve.
-
-    Returns:
-        HandlerFn | None: The registered handler coroutine function, or
-            ``None`` when no handler is registered for ``kind``.
-    """
-    return KERNEL_REQUEST_HANDLERS.get(kind)
-
-
 __all__ = [
     "KERNEL_REQUEST_HANDLERS",
-    "get_handler",
     "integrate_handler",
+    "run_fusion_handler",
     "run_gemm_tuning_handler",
 ]

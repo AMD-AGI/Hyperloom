@@ -19,6 +19,8 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.outside_facts import ENV_CONC
+
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
 AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
 
@@ -100,7 +102,7 @@ def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
     """
     if not is_mlperf_backend(envs):
         return
-    conc = envs.get("CONC")
+    conc = envs.get(ENV_CONC)
     if conc not in (None, ""):
         envs["AGENTIC_CONCURRENCY"] = str(conc)
 
@@ -138,7 +140,7 @@ def mlperf_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float:
 
 def is_canonical_agentx(env: Mapping[str, str] | None = None) -> bool:
     """True for an AgentX run Magpie replays itself, rather than the MLPerf client."""
-    from hyperloom.common.env import env_bool
+    from hyperloom_common.env import env_bool
 
     runtime = os.environ if env is None else env
     return env_bool("HYPERLOOM_AGENTX", env=runtime) and not is_mlperf_backend(runtime)

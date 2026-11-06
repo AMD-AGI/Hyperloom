@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.orchestrator.phases.exit_predicates import framework_plateau
+
 from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB, is_valid_stop_reason
 from hyperloom.orchestrator.kernel import kernel_decisions
 from hyperloom.orchestrator.lever import LEVER_CONFIG
@@ -16,7 +18,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
-    _config_lever_dry,
+    _config_lever_evidence,
     compute_next_phase,
     kernel_work_pending,
     PhaseFlags,
@@ -29,6 +31,11 @@ from hyperloom.orchestrator.state.shared_state import (
     SharedState,
     is_valid_escalate_hint,
 )
+
+
+def _config_dry(state, overrides):
+    evidence = _config_lever_evidence(state, overrides)
+    return framework_plateau(evidence).config_dry, evidence
 
 
 def test_escalate_hint_vocab_closed():
@@ -48,7 +55,7 @@ def test_is_valid_escalate_hint_accepts_vocab():
 
 def test_config_lever_dry_empty_attempts_returns_false():
     state = SharedState(attempts=[], macro_cycle=0)
-    triggered, ev = _config_lever_dry(state, {})
+    triggered, ev = _config_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
     assert ev["recent_keep_gain_pct"] == 0.0
@@ -65,7 +72,7 @@ def test_config_lever_dry_low_gain_and_streak_triggers():
             ]
         ),
     )
-    triggered, ev = _config_lever_dry(state, {})
+    triggered, ev = _config_dry(state, {})
     assert triggered is True
     assert ev["empty_streak"] == DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK
     assert ev["recent_keep_gain_pct"] < DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT
@@ -83,7 +90,7 @@ def test_config_lever_dry_high_gain_blocks_trigger():
             {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
         ],
     )
-    triggered, _ev = _config_lever_dry(state, {})
+    triggered, _ev = _config_dry(state, {})
     assert triggered is False
 
 
@@ -97,7 +104,7 @@ def test_config_lever_dry_short_empty_streak_blocks_trigger():
             {"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 0.1, "cycle": 0},
         ],
     )
-    triggered, ev = _config_lever_dry(state, {})
+    triggered, ev = _config_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
 
@@ -123,7 +130,7 @@ def _grid_round(round_id: str, *, variants: int, keep_at: int | None = None, gai
 def test_config_lever_dry_counts_a_grid_round_once():
     """A single grid is one attempt, however many variants it benched."""
     state = SharedState(macro_cycle=0, attempts=_grid_round("r1", variants=8))
-    triggered, ev = _config_lever_dry(state, {})
+    triggered, ev = _config_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 1
 
@@ -133,7 +140,7 @@ def test_config_lever_dry_triggers_after_streak_floor_rounds():
     for i in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK):
         rows += _grid_round(f"r{i}", variants=4)
     state = SharedState(macro_cycle=0, attempts=rows)
-    triggered, ev = _config_lever_dry(state, {})
+    triggered, ev = _config_dry(state, {})
     assert triggered is True
     assert ev["empty_streak"] == DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK
 
@@ -145,7 +152,7 @@ def test_config_lever_dry_round_that_kept_is_not_dry():
         rows += _grid_round(f"r{i}", variants=4)
     rows += _grid_round("r-last", variants=8, keep_at=0)
     state = SharedState(macro_cycle=0, attempts=rows)
-    triggered, ev = _config_lever_dry(state, {})
+    triggered, ev = _config_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
 
@@ -158,7 +165,7 @@ def test_config_lever_dry_ignores_prior_macro_cycle_rows():
             for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
     )
-    triggered, ev = _config_lever_dry(state, {})
+    triggered, ev = _config_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
 
@@ -172,10 +179,10 @@ def test_config_lever_dry_supports_threshold_overrides():
         ],
     )
     # Defaults → not triggered (gain too high and streak too short).
-    triggered, _ = _config_lever_dry(state, {})
+    triggered, _ = _config_dry(state, {})
     assert triggered is False
     # Raise threshold above the gain and drop streak to 1 → triggers.
-    triggered, _ = _config_lever_dry(
+    triggered, _ = _config_dry(
         state,
         {"explore_keep_gain_pct": 3.0, "explore_empty_streak": 1},
     )
@@ -388,6 +395,25 @@ def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status, mon
     assert reason == "kernel_no_more_leverage"
 
 
+def test_a_failed_geak_run_exits_kernel_with_its_error():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.kernel_optimizer = "geak"
+    state.geak_result = {
+        "status": "error",
+        "error_class": "workflow_parse_error",
+        "error": "connect ECONNREFUSED 127.0.0.1:4000",
+    }
+
+    target, reason, evidence = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
+    evidence.pop("predicate_inputs")
+
+    assert (target, reason, evidence) == (
+        PHASE_SWEEP,
+        "kernel_geak_failed",
+        {"geak_status": "error", "error_class": "workflow_parse_error", "error": "connect ECONNREFUSED 127.0.0.1:4000"},
+    )
+
+
 def test_kernel_exits_when_every_hot_kernel_is_rejected_or_integrated():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.last_trace_analyze = {"hot_kernels_top15": [_hot("k001", "/repo/a.py"), _hot("k002", "/repo/b.py")]}
@@ -540,7 +566,7 @@ def test_compute_next_phase_advances_on_plateau():
     target, reason, _ = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
     assert target == "KERNEL_AGENT"
     assert reason == "optimize_no_more_leverage"
-    triggered, _ = _config_lever_dry(state, {})
+    triggered, _ = _config_dry(state, {})
     assert triggered is True
 
 

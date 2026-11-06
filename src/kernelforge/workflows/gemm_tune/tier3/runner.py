@@ -16,9 +16,9 @@ from .coverage import CoverageGap
 from .gate import GateDecision
 from .generate import generate_tuner
 from .ledger import TunerUse, record_outcome, script_digest
-from .mandate import build_mandate, write_mandate
+from .mandate import TunerMandate, build_mandate, write_mandate
 from .referee import CaptureFailed, Judgement, ShapeHarness, judge_candidates
-from .sandbox import run_generated_tuner
+from .sandbox import core_dumps_off, run_generated_tuner
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class Tier3Outcome:
     table: str = ""
     script: str = ""
     digest: str = ""
-    #: Explicit verified-row path; callers must not reconstruct this module's layout.
+    #: The verified rows in the target table's own schema, the file the runtime is pointed at; empty when none.
     output_csv: str = ""
     judgements: list[Judgement] = field(default_factory=list)
     #: Avoid "trusted" in this serialized bool's name: CodeQL treats it as secret data.
@@ -73,10 +73,14 @@ class Tier3Target:
 
 @dataclass(frozen=True)
 class Retiming:
-    """How the referee re-times a table's shapes: per-shape baseline, dispatch and correctness, and a device sync."""
+    """How the referee re-times a table's shapes, and how the winners become rows of that table.
+
+    ``write_table(judgements, demand_shapes, path)`` returns how many rows it wrote.
+    """
 
     make_baseline: Callable[[str], Callable[[], Any]]
     make_dispatch: Callable[[str], Callable[[dict], Callable[[], Any] | None]]
+    write_table: Callable[[list[Judgement], list[dict[str, Any]], Path], int]
     make_correctness: Callable[[str], Callable[[Callable[[], Any]], bool]] | None = None
     sync: Callable[[], Any] | None = None
 
@@ -112,17 +116,70 @@ def attempt_generated_tuner(
     shapes = demand_shapes_for(gap)
     mandate = build_mandate(gap, shapes, gpu=target.gpu, framework=target.framework)
     mandate.output_csv = str(work_dir / "out.csv")
-    outcome.output_csv = mandate.output_csv
     mandate.candidates_json = str(work_dir / "candidates.json")
     write_mandate(mandate, work_dir / "mandate.json")
 
+    if not _generate_valid_output(mandate, work_dir, outcome):
+        return outcome
+
+    outcome.stage = "referee"
+    candidates = load_candidates(mandate.candidates_json, mandate)
+    if not candidates:
+        outcome.reason = "the script proposed no candidates to re-time"
+        return outcome
+
+    with core_dumps_off():
+        outcome.judgements.extend(_rejudge_candidates(candidates, retiming))
+
+    best = max(
+        (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
+        default=None,
+    )
+    if not outcome.improved_shapes:
+        outcome.reason = "no shape improved once re-timed"
+    else:
+        _write_table(outcome, retiming, shapes, work_dir / Path(gap.table).name)
+
+    record = record_outcome(
+        work_root / "tier3" / "ledger.json",
+        TunerUse(digest=outcome.digest, table=gap.table, model=target.model_name, improved=outcome.ok, speedup=best),
+    )
+    from .ledger import is_trusted
+
+    outcome.operator_signed = is_trusted(outcome.digest)
+    (work_dir / "outcome.json").write_text(
+        json.dumps({**outcome.to_dict(), "ledger": record.to_dict()}, indent=2),
+        encoding="utf-8",
+    )
+    log.info("tier3: %s -- %s", gap.table, outcome.reason)
+    return outcome
+
+
+def _write_table(outcome: Tier3Outcome, retiming: Retiming, shapes: list[dict[str, Any]], path: Path) -> None:
+    """Write the improved shapes as rows of the target table; only a written table makes the outcome ``ok``."""
+    improved = f"{outcome.improved_shapes} of {len(outcome.judgements)} shape(s) improved"
+    try:
+        written = retiming.write_table(outcome.judgements, shapes, path)
+    except (OSError, ValueError) as exc:
+        outcome.reason = f"{improved}, but they could not be written as rows of {outcome.table}: {exc}"
+        return
+    if not written:
+        outcome.reason = f"{improved}, but none of them is expressible as a row of {outcome.table}"
+        return
+    outcome.ok = True
+    outcome.output_csv = str(path)
+    outcome.reason = f"{improved}; {written} row(s) written to {path.name}"
+
+
+def _generate_valid_output(mandate: TunerMandate, work_dir: Path, outcome: Tier3Outcome) -> bool:
+    """Generate and sandbox a tuner until its output meets the contract, recording each stage on ``outcome``."""
     retry_note = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         outcome.stage = "generate"
         gen = generate_tuner(mandate, work_dir, retry_note=retry_note)
         if not gen.ok or gen.script_path is None:
             outcome.reason = gen.reason
-            return outcome
+            return False
         outcome.script = str(gen.script_path)
         outcome.digest = script_digest(gen.script_path)
 
@@ -141,7 +198,7 @@ def attempt_generated_tuner(
             outcome.reason = retry_note
             if attempt < MAX_ATTEMPTS:
                 continue
-            return outcome
+            return False
 
         outcome.stage = "contract"
         violations = validate_output_csv(mandate.output_csv, mandate)
@@ -150,23 +207,22 @@ def attempt_generated_tuner(
             outcome.reason = retry_note
             if attempt < MAX_ATTEMPTS:
                 continue
-            return outcome
+            return False
         break
+    return True
 
-    outcome.stage = "referee"
-    candidates = load_candidates(mandate.candidates_json, mandate)
-    if not candidates:
-        outcome.reason = "the script proposed no candidates to re-time"
-        return outcome
 
+def _rejudge_candidates(candidates: dict[str, list[dict[str, Any]]], retiming: Retiming) -> list[Judgement]:
+    """Re-time every shape's candidates against its baseline; a shape whose baseline cannot be timed is skipped."""
+    judgements: list[Judgement] = []
     for shape, cands in candidates.items():
         try:
             baseline = retiming.make_baseline(shape)
         except CaptureFailed as exc:
             log.warning("tier3 %s: shape skipped, the baseline cannot be timed: %s", shape, exc)
-            outcome.judgements.append(Judgement(shape=shape, reason=f"baseline not timed: {exc}"))
+            judgements.append(Judgement(shape=shape, reason=f"baseline not timed: {exc}"))
             continue
-        outcome.judgements.append(
+        judgements.append(
             judge_candidates(
                 shape,
                 cands,
@@ -178,28 +234,4 @@ def attempt_generated_tuner(
                 ),
             )
         )
-
-    outcome.ok = outcome.improved_shapes > 0
-    best = max(
-        (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
-        default=None,
-    )
-    outcome.reason = (
-        f"{outcome.improved_shapes} of {len(outcome.judgements)} shape(s) improved"
-        if outcome.ok
-        else "no shape improved once re-timed"
-    )
-
-    record = record_outcome(
-        work_root / "tier3" / "ledger.json",
-        TunerUse(digest=outcome.digest, table=gap.table, model=target.model_name, improved=outcome.ok, speedup=best),
-    )
-    from .ledger import is_trusted
-
-    outcome.operator_signed = is_trusted(outcome.digest)
-    (work_dir / "outcome.json").write_text(
-        json.dumps({**outcome.to_dict(), "ledger": record.to_dict()}, indent=2),
-        encoding="utf-8",
-    )
-    log.info("tier3: %s -- %s", gap.table, outcome.reason)
-    return outcome
+    return judgements

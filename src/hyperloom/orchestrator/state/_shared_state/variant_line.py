@@ -11,7 +11,7 @@ from typing import Any
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 
-# Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
+# Width budget for artifact anchors.
 _ANCHOR_MAX_CHARS = 100
 
 # Anchors are dropped in this order while the set is over the width budget.
@@ -53,8 +53,7 @@ def format_measurement(entry: dict[str, Any]) -> str:
     # The gain column is meaningless without the axis it was taken on.
     graded_obj = str(entry.get("graded_objective") or "").strip()
     graded_obj_s = f" [{graded_obj}]" if graded_obj and graded_obj != GRADED_OUTPUT else ""
-    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
-    tput = entry.get("tput") or entry.get("output_throughput") or result.get("output_throughput")
+    tput = entry.get("tput")
     tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
     return f"{gain_s:>9}{graded_obj_s}{tput_s}"
 
@@ -75,19 +74,16 @@ def format_diagnosis(entry: dict[str, Any]) -> str:
         parts.append(f"err={error_class}")
     reason = str(entry.get("reason") or "").strip()
     if reason and reason not in _REASONS_IMPLIED_BY_GAIN:
-        ratio = entry.get("wall_clock_ratio_vs_baseline")
-        ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
         # error_excerpt on variant rows is tail-1200 (boot assertion at end); flatten+defang prevents
         # section-header injection from untrusted log text.
         body = _flatten_for_prompt(str(entry.get("error_excerpt") or reason))
-        parts.append(f"reason={body[-_REASON_CHARS:]}{ratio_s}")
+        parts.append(f"reason={body[-_REASON_CHARS:]}")
     return "  " + " ".join(parts) if parts else ""
 
 
 def format_anchors(entry: dict[str, Any]) -> str:
     """The row's artifact anchors, dropped lowest-value-first until they fit the width budget."""
     labelled = (
-        ("fid=", str(entry.get("failure_id") or "").strip()),
         ("ws=", _last_path_segments(entry.get("workspace"))),
         ("log=", _last_path_segments(entry.get("server_log_path"))),
     )

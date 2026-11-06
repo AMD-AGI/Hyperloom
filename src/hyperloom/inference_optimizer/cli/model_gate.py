@@ -22,7 +22,7 @@ from .. import framework_registry
 from .. import gpu_types as _gpu_types
 from ...common.model_paths import resolve_local_model_dir
 from ..session import sbd_v6
-from ...common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from ..model_config_utils import (
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _MAXPOS_CONFIG_KEYS,
@@ -1262,7 +1262,7 @@ def _write_model_gate_breakdown(
         from ..breakdown import write_breakdown_json
 
         write_breakdown_json(session_dir)
-    except Exception as exc:  # isolation boundary: the fail-fast session_breakdown.json
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("session_breakdown.json write failed on %s fail-fast", failure_label, exc_info=True)
         print(
             f"WARNING: failed to write session_breakdown.json on {failure_label} fail-fast: {exc!r}",
@@ -1304,7 +1304,7 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
         flush_session(session_dir)
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
-    except Exception as exc:  # outermost telemetry sink: never masks the gate failure
+    except (OSError, ValueError) as exc:
         log.warning("session_breakdown Langfuse push failed on fail-fast", exc_info=True)
         print(
             f"WARNING: failed to emit session_breakdown to Langfuse on fail-fast: {exc!r}",
@@ -1329,7 +1329,7 @@ def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: st
         state.closing_phase = True
         state.save(session_dir)
         write_stop_report(session_dir, state, stop_detail=reason)
-    except Exception as exc:  # isolation boundary: the gate stop report
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("%s stop report persist failed", warning_label, exc_info=True)
         print(
             f"WARNING: failed to persist {warning_label} stop report: {exc!r}",
@@ -1337,78 +1337,43 @@ def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: st
         )
 
 
-def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
-    """Fail fast when ``max_position_embeddings < ISL+OSL+headroom`` (no --context-length stretch by policy)."""
-    isl = int(getattr(args, "isl", 0) or 0)
-    osl = int(getattr(args, "osl", 0) or 0)
-    if isl <= 0 or osl <= 0:
-        _record_model_gate_check(
-            args,
-            session_dir,
-            {
-                "gate_id": "context_window",
-                "order": 3,
-                "status": "skipped",
-                "skip_reason": "isl_osl_unset",
-                "detail": {
-                    "isl": isl,
-                    "osl": osl,
-                    "headroom": _context_headroom_tokens(),
-                    "required": None,
-                    "max_position_embeddings": None,
-                    "fits": None,
-                    "policy": "no_context_length_override",
-                },
+def _record_context_window_unset(args: argparse.Namespace, session_dir: Path, *, isl: int, osl: int) -> None:
+    """Record the context-window gate as skipped because ISL or OSL is unset."""
+    _record_model_gate_check(
+        args,
+        session_dir,
+        {
+            "gate_id": "context_window",
+            "order": 3,
+            "status": "skipped",
+            "skip_reason": "isl_osl_unset",
+            "detail": {
+                "isl": isl,
+                "osl": osl,
+                "headroom": _context_headroom_tokens(),
+                "required": None,
+                "max_position_embeddings": None,
+                "fits": None,
+                "policy": "no_context_length_override",
             },
-        )
-        return False
-    maxpos = _load_model_max_position_embeddings(str(getattr(args, "model", "") or ""))
-    if not maxpos:
-        headroom = _context_headroom_tokens()
-        _record_model_gate_check(
-            args,
-            session_dir,
-            {
-                "gate_id": "context_window",
-                "order": 3,
-                "status": "skipped",
-                "skip_reason": "max_position_unknown",
-                "detail": {
-                    "isl": isl,
-                    "osl": osl,
-                    "headroom": headroom,
-                    "required": isl + osl + headroom,
-                    "max_position_embeddings": None,
-                    "fits": None,
-                    "policy": "no_context_length_override",
-                },
-            },
-        )
-        return False
-    headroom = _context_headroom_tokens()
-    required = isl + osl + headroom
-    if maxpos >= required:
-        _record_model_gate_check(
-            args,
-            session_dir,
-            {
-                "gate_id": "context_window",
-                "order": 3,
-                "status": "passed",
-                "skip_reason": None,
-                "detail": {
-                    "isl": isl,
-                    "osl": osl,
-                    "headroom": headroom,
-                    "required": required,
-                    "max_position_embeddings": maxpos,
-                    "fits": True,
-                    "policy": "no_context_length_override",
-                },
-            },
-        )
-        return False
+        },
+    )
 
+
+@dataclass(frozen=True)
+class _ContextDemand:
+    """A workload's context demand measured against the model's context window."""
+
+    isl: int
+    osl: int
+    headroom: int
+    required: int
+    maxpos: int
+
+
+def _refuse_context_window(args: argparse.Namespace, session_dir: Path, demand: _ContextDemand) -> None:
+    """Record the context-window gate failure, persist its stop report and breakdown, and print the refusal."""
+    isl, osl, headroom, required, maxpos = demand.isl, demand.osl, demand.headroom, demand.required, demand.maxpos
     reason = (
         f"model max_position_embeddings={maxpos} < required {required} "
         f"(ISL={isl} + OSL={osl} + headroom={headroom}). The workload exceeds "
@@ -1459,42 +1424,72 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
-    return True
 
 
-def _preflight_model_config_compat(
-    args: argparse.Namespace,
-    session_dir: Path,
-) -> bool:
-    """Fail fast when the model config is statically known to be incompatible."""
-    model = str(getattr(args, "model", "") or "")
-    framework = (str(getattr(args, "framework", "") or "") or os.environ.get("FRAMEWORK", "")).strip().lower() or None
-    detail = _detect_incompatible_model_config(
-        model,
-        str(getattr(args, "gpu_type", "") or "") or None,
-        framework=framework,
-    )
-    if detail is None:
-        model_dir = resolve_local_model_dir(model) or Path(model)
-        config_path = model_dir / "config.json"
-        absent = not config_path.is_file()
+def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
+    """Fail fast when ``max_position_embeddings < ISL+OSL+headroom`` (no --context-length stretch by policy)."""
+    isl = int(getattr(args, "isl", 0) or 0)
+    osl = int(getattr(args, "osl", 0) or 0)
+    if isl <= 0 or osl <= 0:
+        _record_context_window_unset(args, session_dir, isl=isl, osl=osl)
+        return False
+    maxpos = _load_model_max_position_embeddings(str(getattr(args, "model", "") or ""))
+    if not maxpos:
+        headroom = _context_headroom_tokens()
         _record_model_gate_check(
             args,
             session_dir,
             {
-                "gate_id": "model_config_compat",
-                "order": 2,
-                "status": "skipped" if absent else "passed",
-                "skip_reason": "config_absent_soft_pass" if absent else None,
+                "gate_id": "context_window",
+                "order": 3,
+                "status": "skipped",
+                "skip_reason": "max_position_unknown",
                 "detail": {
-                    "config_path": str(config_path) if config_path.is_file() else None,
-                    "incompatible": False,
-                    "reason": None,
-                    "detector": None,
+                    "isl": isl,
+                    "osl": osl,
+                    "headroom": headroom,
+                    "required": isl + osl + headroom,
+                    "max_position_embeddings": None,
+                    "fits": None,
+                    "policy": "no_context_length_override",
                 },
             },
         )
         return False
+    headroom = _context_headroom_tokens()
+    required = isl + osl + headroom
+    if maxpos >= required:
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "context_window",
+                "order": 3,
+                "status": "passed",
+                "skip_reason": None,
+                "detail": {
+                    "isl": isl,
+                    "osl": osl,
+                    "headroom": headroom,
+                    "required": required,
+                    "max_position_embeddings": maxpos,
+                    "fits": True,
+                    "policy": "no_context_length_override",
+                },
+            },
+        )
+        return False
+
+    _refuse_context_window(
+        args,
+        session_dir,
+        _ContextDemand(isl=isl, osl=osl, headroom=headroom, required=required, maxpos=maxpos),
+    )
+    return True
+
+
+def _refuse_model_config(args: argparse.Namespace, session_dir: Path, *, model: str, detail: str) -> None:
+    """Record the model-config gate failure, persist its stop report and breakdown, and print the refusal."""
     name = Path(model).name or model
     reason = (
         f"Model '{name}' has an incompatible config: {detail} Refusing to run "
@@ -1538,6 +1533,42 @@ def _preflight_model_config_compat(
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
+
+
+def _preflight_model_config_compat(
+    args: argparse.Namespace,
+    session_dir: Path,
+) -> bool:
+    """Fail fast when the model config is statically known to be incompatible."""
+    model = str(getattr(args, "model", "") or "")
+    framework = (str(getattr(args, "framework", "") or "") or os.environ.get("FRAMEWORK", "")).strip().lower() or None
+    detail = _detect_incompatible_model_config(
+        model,
+        str(getattr(args, "gpu_type", "") or "") or None,
+        framework=framework,
+    )
+    if detail is None:
+        model_dir = resolve_local_model_dir(model) or Path(model)
+        config_path = model_dir / "config.json"
+        absent = not config_path.is_file()
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "model_config_compat",
+                "order": 2,
+                "status": "skipped" if absent else "passed",
+                "skip_reason": "config_absent_soft_pass" if absent else None,
+                "detail": {
+                    "config_path": str(config_path) if config_path.is_file() else None,
+                    "incompatible": False,
+                    "reason": None,
+                    "detector": None,
+                },
+            },
+        )
+        return False
+    _refuse_model_config(args, session_dir, model=model, detail=detail)
     return True
 
 

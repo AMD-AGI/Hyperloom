@@ -14,7 +14,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from . import session_paths
 

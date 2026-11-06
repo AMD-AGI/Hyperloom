@@ -121,6 +121,23 @@ class ShadowRepo:
         shutil.rmtree(self.git_dir, ignore_errors=True)
 
 
+def _commit_shadow_baseline(root: Path, indexed: list[str], env: dict[str, str]) -> str:
+    """Commit the indexed entries as the baseline on the shadow branch; return the baseline commit."""
+    for args in (
+        ("config", "user.email", "forge-fuse@localhost"),
+        ("config", "user.name", "forge-fuse"),
+        ("add", "--", *indexed),
+        ("commit", "-q", "-m", "fusion baseline", "--no-gpg-sign"),
+        # After the commit, so the branch points at it and not at an unborn HEAD.
+        ("checkout", "-q", "-b", SHADOW_BRANCH),
+        ("rev-parse", "HEAD"),
+    ):
+        result = _git(str(root), *args, env=env)
+        if result.returncode != 0:
+            raise RuntimeError(f"git {' '.join(args)} failed: {(result.stderr or result.stdout).strip()}")
+    return result.stdout.strip()  # the rev-parse above
+
+
 def ensure_git_workspace(
     repo_root: str,
     source_file: str,
@@ -177,19 +194,7 @@ def ensure_git_workspace(
             _EXCLUDE_HEADER + "".join(f"{_admit(root, entry)}\n" for entry in indexed) + _EXCLUDE_ARTIFACTS,
             encoding="utf-8",
         )
-        for args in (
-            ("config", "user.email", "forge-fuse@localhost"),
-            ("config", "user.name", "forge-fuse"),
-            ("add", "--", *indexed),
-            ("commit", "-q", "-m", "fusion baseline", "--no-gpg-sign"),
-            # After the commit, so the branch points at it and not at an unborn HEAD.
-            ("checkout", "-q", "-b", SHADOW_BRANCH),
-            ("rev-parse", "HEAD"),
-        ):
-            result = _git(str(root), *args, env=env)
-            if result.returncode != 0:
-                raise RuntimeError(f"git {' '.join(args)} failed: {(result.stderr or result.stdout).strip()}")
-        base_commit = result.stdout.strip()  # the rev-parse above
+        base_commit = _commit_shadow_baseline(root, indexed, env)
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         log.error("could not initialize a shadow repo over %s: %s", repo_root, exc)
         if not detached:

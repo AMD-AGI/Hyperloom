@@ -208,15 +208,21 @@ jobs:
             refutations.txt and independent.txt, and prior_verdicts.txt when comments.txt holds an
             earlier card for this PR. Never substitute a shorter review format.
           - The skill's Publishing section is disabled. Never call a GitHub write API. Your final action
-            is writing the card to ${WORK}/card.md; the workflow publishes it.
+            is writing the card to ${WORK}/card.md and running
+            \`bash .claude/skills/review-pr/check-card.sh ${WORK} ${PR} ${HEAD_SHA} ${WORK}/risk.txt\` until it
+            prints nothing; the workflow publishes the card, holding its Risk to the PR's files on GitHub.
           - card.md is exactly the skill's card contract in English, with no LGTM line. Its first line is
-            \`## PR #${PR} -- <title>\`; its summary is one \`What it does: ...\` paragraph. The verdict
+            \`## PR #${PR} -- <title>\`; its summary is one \`What it does: ...\` paragraph, followed by the
+            \`Risk:\` line and, unless the risk is low, the \`Decisions for a human:\` list. The verdict
             line is exactly \`Blocking issues: none\` or \`Blocking issues: N\` with N from 1 to 5.
           - Every finding is \`N. [KEY] summary [verified]\` followed by indented \`Problem:\`, \`Impact:\`
             and \`Action:\` lines. Never use Fix or Files fields and never report an inferred finding.
             The final line is exactly \`Checked: ... | Ran: ... | Skill: ... | Model: ... | Prior: ... |
             Base: ... | Head: ${HEAD_SHA}\` on one line, with Skill and Model exactly as skill.txt gives
             them and Prior only on a re-review (references/re-review.md).
+          - An optional \`Trim in this PR:\` list sits between the findings and the Checked line: one
+            \`- <path>:<line>[-<line>] -- <what to delete> -- <evidence>\` line per deletion, at most 5,
+            never counted in the verdict (references/subtract.md). Omit it when Step 6 found none.
           EOF
           )
           # shellcheck disable=SC2016  # $sub is a jq variable, not a shell one
@@ -258,7 +264,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          sparse-checkout: .github/scripts
+          sparse-checkout: |
+            .github/scripts
+            .claude/skills/review-pr
       - uses: actions/download-artifact@v8
         if: needs.review.result == 'success'
         continue-on-error: true

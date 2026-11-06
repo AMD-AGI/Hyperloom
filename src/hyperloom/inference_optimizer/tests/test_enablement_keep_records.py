@@ -279,14 +279,12 @@ def test_keep_sanitizer_refusal_reaches_activation_verdict_and_resets(
             assert decision["status"] == "insufficient"
 
 
-def test_declared_targets_separate_upserts_from_deletions():
+def test_declared_targets_place_each_artifact_under_its_root():
     targets = declared_targets(
         framework_root="/fr",
-        upserted=["srt/a.py"],
-        deleted=["srt/gone.py"],
-        artifacts=[{"rel_target": "srt/art.py", "root": "/fr"}],
+        artifacts=[{"rel_target": "srt/art.py", "root": "/other"}, {"rel_target": "srt/own.py"}, {"root": "/x"}],
     )
-    assert targets["/fr"] == {"srt/a.py": "upsert", "srt/gone.py": "delete", "srt/art.py": "upsert"}
+    assert targets == {"/other": {"srt/art.py": "upsert"}, "/fr": {"srt/own.py": "upsert"}}
 
 
 def test_snapshot_capture_is_portable_and_records_declared_ops(repo: Path, tmp_path: Path):
@@ -388,7 +386,7 @@ def test_the_captured_stack_is_the_accepted_one_not_this_rounds_installs():
     inherited = [{"target": "/fr/srt/base.py", "rel_target": "srt/base.py", "root": "/fr"}]
     applied = [{"target": "/fr/srt/new.py", "rel_target": "srt/new.py", "root": "/fr"}]
     stack = accepted_stack_artifacts(inherited=inherited, applied=applied)
-    assert declared_targets(framework_root="/fr", upserted=[], deleted=[], artifacts=stack)["/fr"] == {
+    assert declared_targets(framework_root="/fr", artifacts=stack)["/fr"] == {
         "srt/base.py": "upsert",
         "srt/new.py": "upsert",
     }
@@ -419,20 +417,16 @@ def test_undeclared_absent_target_is_recorded_missing_and_incomplete(repo: Path,
 
 
 def test_keep_interpreter_prefers_the_override_then_the_backend():
-    assert (
-        resolve_keep_interpreter({"runtime_python_exe": "/a/py", "framework_python": "/b/py"}, backend_name="bypass")
-        == "/a/py"
-    )
-    assert resolve_keep_interpreter({"framework_python": "/b/py"}, backend_name="magpie") == "/b/py"
-    assert resolve_keep_interpreter({}, backend_name="bypass", backend_interpreter="/c/py") == "/c/py"
+    assert resolve_keep_interpreter({"runtime_python_exe": "/a/py", "framework_python": "/b/py"}) == "/a/py"
+    assert resolve_keep_interpreter({"framework_python": "/b/py"}) == "/b/py"
     # An override naming no interpreter leaves the backend's own as the one that
     # launched the server, on every backend. Restricting this to bypass left an
     # in-place enablement -- which provisions no runtime at all -- with its
     # closure permanently unobserved.
-    assert resolve_keep_interpreter({}, backend_name="magpie", backend_interpreter="/c/py") == "/c/py"
+    assert resolve_keep_interpreter({}, backend_interpreter="/c/py") == "/c/py"
     # A backend that names no interpreter still resolves to nothing rather than
     # to a guess.
-    assert resolve_keep_interpreter({}, backend_name="magpie", backend_interpreter="") == ""
+    assert resolve_keep_interpreter({}, backend_interpreter="") == ""
 
 
 def _installed_dist(root: Path, name: str, version: str) -> str:

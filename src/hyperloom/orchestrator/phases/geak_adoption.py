@@ -65,10 +65,6 @@ def adoption_entry(
             "overlay_loaded": bool(measurement.overlay_loaded),
             "basis": measurement.basis,
             "alignment_status": measurement.alignment_status,
-            # GEAK's own same-config A/B, kept beside the orchestrator number so the two are never confused
-            # for each other.
-            "geak_same_config_delta_pct": spec.get("e2e_delta_pct"),
-            "geak_isolated_speedup": spec.get("isolated"),
             "updated_at": measurement.ts,
         }
     )

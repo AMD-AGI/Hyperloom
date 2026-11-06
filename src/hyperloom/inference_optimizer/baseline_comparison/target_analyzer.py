@@ -11,8 +11,8 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_float
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.coerce import to_float
+from hyperloom_common.timeutil import now_iso
 
 from .inferencex_client import (
     DEFAULT_BASE_URL,

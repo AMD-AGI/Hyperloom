@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.pr_monitor_urls import pr_monitor_base_url, pr_monitor_enabled
+from hyperloom_common.pr_monitor_urls import pr_monitor_base_url, pr_monitor_enabled
 
 log = logging.getLogger(__name__)
 

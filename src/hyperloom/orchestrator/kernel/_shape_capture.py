@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
-from hyperloom.common.env import env_bool
+from hyperloom_common.env import env_bool
 from hyperloom.orchestrator.trace_analysis._capture_shapes import is_capture_fragment as _shared_is_capture_fragment
 
 from ..actions.executors._kernel_agent_tool import HandlerResult
@@ -54,10 +54,10 @@ async def _served_capture_workload(
     return (benchmark_result if isinstance(benchmark_result, dict) else {}), None
 
 
-async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any, payload: dict) -> HandlerResult:
+async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any) -> HandlerResult:
     from ..actions.executors.roofline import RooflineExecutor
 
-    task_params = _capture_task_params(run, state, payload)
+    task_params = _capture_task_params(run, state)
     task_params["workspace_path"] = str(run.capture_dir / "tracelens")
     benchmark_script = state.accepted_baseline_script()
     if benchmark_script:
@@ -81,45 +81,37 @@ async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any, p
             "shapes_json": shapes_json,
             "shape_capture_workspace": str(run.capture_dir),
             "shape_count": shape_count,
-            "capture_mode": "block_fp8_profile",
+            "capture_mode": BLOCK_FP8_PROFILE_CAPTURE,
             "source_profile_trace": steady_state_trace,
         }
     return _shape_capture_failure(
         f"vLLM block-FP8 profile capture produced no structured GEMM shapes{_benchmark_failure_detail(benchmark_result)}",
         run.capture_dir,
         shape_count=shape_count,
-        capture_mode="block_fp8_profile",
+        capture_mode=BLOCK_FP8_PROFILE_CAPTURE,
     )
 
 
-async def _capture_tunableop_recording(run: _ShapeCaptureRun, state: Any, payload: dict) -> HandlerResult:
+async def _capture_tunableop_recording(run: _ShapeCaptureRun, state: Any) -> HandlerResult:
     import copy
 
     from ..actions.executors.baseline import BaselineExecutor
 
-    config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
+    config_path = str(getattr(state, "baseline_config_path", "") or "").strip()
     if not config_path or not Path(config_path).is_file():
         return _shape_capture_failure(
             "vLLM TunableOp shape capture requires an existing baseline_config_path",
             run.capture_dir,
         )
+    capture_port = _pick_shape_capture_port()
     try:
-        capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
-    except ValueError as exc:
-        return _shape_capture_failure(str(exc), run.capture_dir)
-
-    try:
-        timeout_sec = int(
-            payload.get("shape_capture_timeout_sec")
-            or os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC")
-            or _DEFAULT_CAPTURE_TIMEOUT_SEC
-        )
+        timeout_sec = int(os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC") or _DEFAULT_CAPTURE_TIMEOUT_SEC)
     except (TypeError, ValueError):
         timeout_sec = _DEFAULT_CAPTURE_TIMEOUT_SEC
 
     # unset_envs is applied after extra_envs, so any PYTORCH_TUNABLEOP_* name left here strips the recording.
     kept_unset = [name for name in run.unset_envs if not name.startswith("PYTORCH_TUNABLEOP_")]
-    task_params = _capture_task_params(run, state, payload)
+    task_params = _capture_task_params(run, state)
     task_params.update(
         {
             "extra_envs": _tunableop_recording_envs(run.envs, capture_port, run.capture_dir),
@@ -167,6 +159,9 @@ _TUNABLEOP_UNTUNED_NAME = "tunableop_untuned.csv"
 
 _TUNABLEOP_RESULTS_NAME = "tunableop_results.csv"
 
+#: ``capture_mode`` of a block-FP8 profile pass; a capture without it records TunableOp shapes.
+BLOCK_FP8_PROFILE_CAPTURE = "block_fp8_profile"
+
 #: How long a recording pass may serve the workload when nothing else says.
 _DEFAULT_CAPTURE_TIMEOUT_SEC = 1800
 
@@ -201,13 +196,11 @@ def _vllm_block_fp8_profile_capture_required(
     precision: str,
     quant_type: str,
     supplied: SuppliedShapes,
-    dry_run: bool,
 ) -> bool:
     """Return whether block-FP8 needs a profiled runtime-shape capture pass."""
     if (
         framework != "vllm"
         or not _is_vllm_block_fp8(precision, quant_type)
-        or dry_run
         or supplied.shapes_json
         or supplied.tunableop_input
         or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
@@ -306,6 +299,25 @@ def _extract_vllm_block_fp8_profile_shapes(
     return str(out), len(payload)
 
 
+def _analyzed_trace_is_latest_profile(state: Any, last_trace_analyze: dict[str, Any]) -> bool:
+    """Whether the analyzed trace is the latest profile's; logs the Roofline fallback when it is not."""
+    profile_trace = str(getattr(state, "last_profile_trace", "") or "").strip()
+    analyzed_trace = str(last_trace_analyze.get("trace_input") or "").strip()
+    try:
+        profile_trace_id = str(Path(profile_trace).expanduser().resolve(strict=False))
+        analyzed_trace_id = str(Path(analyzed_trace).expanduser().resolve(strict=False))
+    except OSError:
+        profile_trace_id = profile_trace
+        analyzed_trace_id = analyzed_trace
+    if not profile_trace or not analyzed_trace or profile_trace_id != analyzed_trace_id:
+        log.info(
+            "vLLM block-FP8 shape capture: steady-state trace provenance does "
+            "not match the latest profile; running a standard Roofline fallback"
+        )
+        return False
+    return True
+
+
 def _reuse_vllm_block_fp8_roofline_shapes(
     state: Any,
     *,
@@ -323,19 +335,7 @@ def _reuse_vllm_block_fp8_roofline_shapes(
             "steady-state trace; running a standard Roofline fallback"
         )
         return None
-    profile_trace = str(getattr(state, "last_profile_trace", "") or "").strip()
-    analyzed_trace = str(last_trace_analyze.get("trace_input") or "").strip()
-    try:
-        profile_trace_id = str(Path(profile_trace).expanduser().resolve(strict=False))
-        analyzed_trace_id = str(Path(analyzed_trace).expanduser().resolve(strict=False))
-    except OSError:
-        profile_trace_id = profile_trace
-        analyzed_trace_id = analyzed_trace
-    if not profile_trace or not analyzed_trace or profile_trace_id != analyzed_trace_id:
-        log.info(
-            "vLLM block-FP8 shape capture: steady-state trace provenance does "
-            "not match the latest profile; running a standard Roofline fallback"
-        )
+    if not _analyzed_trace_is_latest_profile(state, last_trace_analyze):
         return None
     if not state.profile_trace_usable():
         log.info(
@@ -388,12 +388,10 @@ def _vllm_dense_shape_capture_required(
     framework: str,
     model_path: str,
     supplied: SuppliedShapes,
-    dry_run: bool,
 ) -> bool:
     """Return whether Forge needs an automatic TunableOp recording pass."""
     if (
         framework != "vllm"
-        or dry_run
         or supplied.shapes_json
         or supplied.tunableop_input
         or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
@@ -428,19 +426,6 @@ def _pick_shape_capture_port() -> int:
         if port != 8888:
             return port
     return 18888
-
-
-def _resolve_shape_capture_port(value: Any) -> int:
-    """Resolve an isolated capture port and reject the production port."""
-    if value in (None, ""):
-        return _pick_shape_capture_port()
-    try:
-        port = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"invalid shape_capture_port: {value!r}") from exc
-    if port <= 0 or port > 65535 or port == 8888:
-        raise ValueError(f"shape_capture_port must be 1..65535 and not 8888: {port}")
-    return port
 
 
 def _is_tunableop_untuned_row(line: str) -> bool:
@@ -530,7 +515,7 @@ def _benchmark_failure_detail(benchmark_result: Mapping[str, Any]) -> str:
     return f": {error}" if error else ""
 
 
-def _fill_capture_workload_envs(envs: dict[str, str], state: Any, payload: dict) -> None:
+def _fill_capture_workload_envs(envs: dict[str, str], state: Any) -> None:
     for env_name, state_name in (
         ("TP", "tp"),
         ("CONC", "conc"),
@@ -538,9 +523,7 @@ def _fill_capture_workload_envs(envs: dict[str, str], state: Any, payload: dict)
         ("OSL", "osl"),
         ("MAX_MODEL_LEN", "max_model_len"),
     ):
-        value = payload.get(state_name)
-        if value in (None, ""):
-            value = envs.get(env_name)
+        value = envs.get(env_name)
         if value in (None, ""):
             value = getattr(state, state_name, 0)
         try:
@@ -551,43 +534,37 @@ def _fill_capture_workload_envs(envs: dict[str, str], state: Any, payload: dict)
             envs[env_name] = str(resolved)
 
 
-def _shape_capture_run(state: Any, payload: dict, workspace: Path, session_dir: Path) -> _ShapeCaptureRun:
+def _shape_capture_run(state: Any, workspace: Path, session_dir: Path) -> _ShapeCaptureRun:
     capture_dir = workspace / "shape_capture" / f"attempt-{time.time_ns()}"
     capture_dir.mkdir(parents=True, exist_ok=True)
     current_best = getattr(state, "current_best", None) or {}
 
-    inherited_envs = dict(current_best.get("extra_envs") or {})
-    inherited_envs.update(dict(payload.get("extra_envs") or {}))
-    envs = {str(key): str(value) for key, value in inherited_envs.items()}
-    _fill_capture_workload_envs(envs, state, payload)
+    envs = {str(key): str(value) for key, value in dict(current_best.get("extra_envs") or {}).items()}
+    _fill_capture_workload_envs(envs, state)
 
-    inherited_unset = payload.get("unset_envs", current_best.get("unset_envs")) or []
-    inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
+    inherited_unset = current_best.get("unset_envs") or []
+    inherited_remove = current_best.get("remove_args") or []
     return _ShapeCaptureRun(
         capture_dir=capture_dir,
         session_dir=session_dir,
-        task_id=f"{str(payload.get('task_id') or workspace.name)}-shape-capture",
+        task_id=f"{workspace.name}-shape-capture",
         envs=envs,
-        server_args=(
-            str(payload.get("extra_server_args") or "")
-            if "extra_server_args" in payload
-            else str(current_best.get("extra_server_args") or "")
-        ),
+        server_args=str(current_best.get("extra_server_args") or ""),
         remove_args=[inherited_remove] if isinstance(inherited_remove, str) else [str(arg) for arg in inherited_remove],
         unset_envs=[inherited_unset] if isinstance(inherited_unset, str) else [str(key) for key in inherited_unset],
-        args_mode=str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+        args_mode=str(current_best.get("args_mode") or "append"),
     )
 
 
-def _capture_task_params(run: _ShapeCaptureRun, state: Any, payload: dict) -> dict[str, Any]:
+def _capture_task_params(run: _ShapeCaptureRun, state: Any) -> dict[str, Any]:
     from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
 
     return {
         "output_dir": str(run.capture_dir),
         "framework": "vllm",
-        "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
-        "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
+        "model_path": str(getattr(state, "model_path", "") or ""),
+        "gpu_type": str(getattr(state, "gpu_type", "") or ""),
         "extra_server_args": run.server_args,
         "extra_envs": run.envs,
         "remove_args": run.remove_args,
@@ -625,10 +602,11 @@ async def _capture_vllm_tunableop_shapes(
     *,
     state: Any,
     session_dir: Path,
-    payload: dict,
     workspace: Path,
+    capture_mode: str = "",
 ) -> HandlerResult:
-    run = _shape_capture_run(state, payload, workspace, session_dir)
-    if payload.get("_shape_capture_mode") == "block_fp8_profile":
-        return await _capture_block_fp8_profile_shapes(run, state, payload)
-    return await _capture_tunableop_recording(run, state, payload)
+    """Serve the workload once to record its GEMM shapes; ``capture_mode`` picks a block-FP8 profile pass."""
+    run = _shape_capture_run(state, workspace, session_dir)
+    if capture_mode == BLOCK_FP8_PROFILE_CAPTURE:
+        return await _capture_block_fp8_profile_shapes(run, state)
+    return await _capture_tunableop_recording(run, state)

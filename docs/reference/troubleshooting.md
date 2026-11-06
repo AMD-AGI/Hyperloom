@@ -140,10 +140,14 @@ pip install --quiet 'ray[default]>=2.44.1'
 ray --version
 ```
 
-Where the interpreter's `click` is newer than the pinned Ray's CLI accepts, set
-`RAY_VERSION` to a Ray release built against it: Hyperloom honours it verbatim
-and installs no `click` of its own. Downgrading `click` under a Ray whose CLI
-works is what preflight no longer does, and no longer asks of an operator.
+Hyperloom changes `click` in one case only: Ray 2.44.1 (the default pin) fails to
+import its CLI under `click` 8.3+ with `ValueError: ... is not a valid Sentinel`
+(a fresh `pip install ray[default]==2.44.1` on Python 3.10 resolves `click` 8.5).
+Preflight and the kernel-tools installer then install `click<8.3` once and certify
+the CLI again. Every other failure (a rejected `ray start` argv, a version
+mismatch, another import error, any Ray set through `RAY_VERSION`) leaves
+`click` alone and ends the install; for a `click` that breaks another Ray, set
+`RAY_VERSION` to a release built against it. There is no setting for the hold.
 
 ---
 
@@ -219,6 +223,36 @@ high hard cap is enough; you do not need to set the soft limit yourself.
 Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
 warns that the **hard** cap is below the target, the container was not
 launched with `--ulimit nofile=...` — fix the launch command.
+
+---
+
+## Ray head does not answer a driver
+
+**Symptom**: the log says `Ray head at address 'auto' did not answer a driver`, and
+serving rounds and GPU specialists run on the local subprocess path instead of Ray.
+
+**Cause**: a Ray head is running (`ray status` answers), but its raylet never replies
+to a driver's registration. Connecting in-process would freeze the whole process: Ray
+2.44 waits for that reply with the GIL held and no timeout, so no thread, timer or
+event loop runs again. Hyperloom therefore tries the connect in a child process first,
+bounded by `HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC` (60 s), and keeps the answer until
+it connects in-process again. A head can stop answering after it was probed (a raylet
+reaped after an OOM, say), so the head is probed again before every in-process
+reconnect: after a Ray actor dies, after this process starts or restarts a local head
+(the `serving_slot` repair), and before the retry that follows a Ray version mismatch.
+The round that was reconnecting fails with `ray_ensure_error`; later work runs locally.
+If the process is interrupted while it waits (Ctrl-C, or a SIGTERM its handler turns
+into an exit), the probe's whole process group is killed; a probe whose parent dies
+outright is killed by the kernel.
+
+The installer asks a running head whether it declares `serving_slot` through the same
+kind of connect, under the same bound. A head that does not answer in time is reported
+(`ray head did not answer a driver within 60s`) and replaced like a head without
+`serving_slot`: `ray stop --force` and a fresh `ray start --head`.
+
+**Fix**: run `ray stop --force` before the next session so it starts a fresh head, or
+`export INFERENCE_OPTIMIZER_RAY_EXEC=0` to run without Ray and without the probe. To
+check a head by hand: `timeout 60 python -c "import ray; ray.init(address='auto')"`.
 
 ---
 
@@ -546,6 +580,11 @@ python -m hyperloom session state "$SD"
 
 See [Hyperloom operator scripts](operator-scripts.md) for the full set of
 inspection tools.
+
+If the `hyperloom optimize` process itself looks frozen (no new log lines, no new
+events), `kill -USR1 <pid>` writes every thread's Python stack to its stderr without
+stopping it. It works while the process is stuck in native code that holds the GIL,
+where `py-spy` may be missing and nothing in Python runs.
 
 ---
 

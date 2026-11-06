@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from hyperloom.common.llm_config import AGENT_BACKEND_DEEPSEEK, AGENT_BACKEND_ENV
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_DEEPSEEK, AGENT_BACKEND_ENV
 
 #: Both agent runtimes ship by default: Hyperloom routes every LLM interaction
 #: through one of them, and a deployment may be Anthropic-only, OpenAI-only, or both.

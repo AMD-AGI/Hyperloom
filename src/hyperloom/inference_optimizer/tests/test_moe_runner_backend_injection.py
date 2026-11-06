@@ -29,6 +29,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     MaterializeOptions,
 )
 
+from .conftest import write_benchmark_yaml
+
 _AMD = "mi300x"
 
 
@@ -229,27 +231,6 @@ def test_moe_runner_requires_aiter_missing_config_is_false(tmp_path):
 
 
 # materialize_config_with_envs (the production choke point)
-def _write_yaml(path: Path, *, model: str, framework: str = "sglang") -> None:
-    cfg = {
-        "benchmark": {
-            "framework": framework,
-            "model": model,
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        }
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
-
-
 def _materialize_envs(
     tmp_path: Path,
     *,
@@ -259,7 +240,7 @@ def _materialize_envs(
     drop_moe_runner_backend: bool = False,
 ) -> dict:
     base = tmp_path / "base.yaml"
-    _write_yaml(base, model=model, framework=framework)
+    write_benchmark_yaml(base, model=model, framework=framework, benchmark_script=None)
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(

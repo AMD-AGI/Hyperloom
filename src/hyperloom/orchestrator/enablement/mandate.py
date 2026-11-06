@@ -11,25 +11,23 @@ Two halves of the enablement flow that both build on a
   and rank candidate PR titles by enablement intent ("enable / support / add /
   fix / port to ROCm"). See :func:`build_search_plan` and
   :func:`score_enablement_title`.
-* **Authoring** — turn a request + ranked candidates into the
-  :class:`EnablementMandate` (source roots + task description + patch
-  invariants) handed to the patch-authoring specialist. See
-  :func:`build_mandate`.
+* **Authoring** — turn a framework/model + ranked candidates into the task
+  text (source roots + failure + ladder + patch invariants) handed to the
+  patch-authoring specialist. See :func:`build_mandate`.
 
 Pure-Python and GPU-free: no network or LLM access. :func:`build_mandate` reads
-the local filesystem (source-root probe + installed package version) unless
-``source_root_hints`` is passed explicitly.
+the local filesystem (source-root probe + installed package version).
 """
 
 from __future__ import annotations
 
 import importlib.metadata
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Sequence
 
-from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
+from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.agents.framework.keywords import extract_keywords, score_title_with_anti_signal
 from hyperloom.agents.framework.repo_map import bridge_repo_urls, upstream_repo_urls
 from hyperloom.inference_optimizer.framework_paths import (
@@ -161,8 +159,6 @@ def build_search_plan(
 def score_enablement_title(
     title: str,
     plan: EnablementSearchPlan,
-    *,
-    intent_weight: float = 1.0,
 ) -> float:
     """Rank a candidate PR title for enablement relevance.
 
@@ -173,7 +169,6 @@ def score_enablement_title(
     Args:
         title: The PR title.
         plan: The search plan carrying ranking keywords.
-        intent_weight: Weight per enablement-intent token hit.
 
     Returns:
         float: The combined score (>= 0.0); callers may drop ``0.0``.
@@ -183,7 +178,7 @@ def score_enablement_title(
     base = score_title_with_anti_signal(title, plan.keywords)
     title_tokens = set(re.findall(r"[a-z][a-z0-9_]+", title.lower()))
     intent = len(title_tokens & ENABLEMENT_INTENT_TERMS)
-    return base + intent_weight * float(intent)
+    return base + float(intent)
 
 
 # ---------------------------------------------------------------------------
@@ -510,43 +505,22 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
     return "\n".join(lines)
 
 
-@dataclass(frozen=True)
-class EnablementMandate:
-    """A fully-specified authoring task for the enablement specialist.
-
-    Attributes:
-        framework: Target serving framework.
-        model: Model id/path that must become runnable.
-        signature: The classified failure driving the fix.
-        source_root_hints: Human-readable source-root families to search.
-        candidate_refs: Ranked bridging PR/ref hints (best first).
-        task_description: The rendered specialist mandate (prompt body).
-        invariants: The patch invariants (see :data:`ENABLEMENT_PATCH_INVARIANTS`).
-    """
-
-    framework: str
-    model: str
-    signature: FailureSignature
-    source_root_hints: tuple[str, ...]
-    candidate_refs: tuple[str, ...] = ()
-    task_description: str = ""
-    invariants: tuple[str, ...] = field(default_factory=lambda: ENABLEMENT_PATCH_INVARIANTS)
-
-
-def _render_task_description(
-    req: EnablementRequest,
-    sig: FailureSignature,
-    candidate_refs: Sequence[str],
-    source_root_hints: Sequence[str],
+def build_mandate(
+    framework: str,
+    model: str,
+    signature: FailureSignature,
+    *,
+    candidate_refs: Sequence[str] = (),
     source_context: str = "",
 ) -> str:
-    """Render the specialist mandate text for an enablement failure.
+    """Render the authoring task handed to the enablement specialist.
 
     Args:
-        req: The enablement request (framework/model/opt-in).
-        sig: The classified failure signature.
-        candidate_refs: Ranked bridging refs (best first).
-        source_root_hints: Source-root families to search.
+        framework: Target serving framework.
+        model: Model id/path that must become runnable.
+        signature: The verdict the round was dispatched on. The caller owns it;
+            the mandate never re-derives a signature from prompt text.
+        candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional snippet of source lines near the offending
             site, injected verbatim to ground the authoring sub-agent. Empty
             omits the block.
@@ -554,21 +528,22 @@ def _render_task_description(
     Returns:
         str: A multi-line prompt body for the authoring sub-agent.
     """
+    refs = [r for r in candidate_refs if r]
     lines: list[str] = []
     lines.append(
-        f"GOAL: make model `{req.model}` run correctly under the `{req.framework}` backend. "
+        f"GOAL: make model `{model}` run correctly under the `{framework}` backend. "
         "It currently fails to start, or it starts but fails its accuracy eval."
     )
     lines.append("")
-    lines.append(f"FAILURE CLASS: {sig.kind} (confidence {sig.confidence:.2f}).")
-    if sig.secondary_kinds:
-        lines.append(f"SECONDARY FAILURE CLASSES (also matched): {', '.join(sig.secondary_kinds)}")
-    if sig.offending_file:
-        lines.append(f"OFFENDING FILE (best guess): {sig.offending_file}")
-    if sig.offending_symbol:
-        lines.append(f"OFFENDING SYMBOL: {sig.offending_symbol}")
-    if sig.raw_excerpt:
-        lines.append(f"ERROR EXCERPT: {sig.raw_excerpt}")
+    lines.append(f"FAILURE CLASS: {signature.kind} (confidence {signature.confidence:.2f}).")
+    if signature.secondary_kinds:
+        lines.append(f"SECONDARY FAILURE CLASSES (also matched): {', '.join(signature.secondary_kinds)}")
+    if signature.offending_file:
+        lines.append(f"OFFENDING FILE (best guess): {signature.offending_file}")
+    if signature.offending_symbol:
+        lines.append(f"OFFENDING SYMBOL: {signature.offending_symbol}")
+    if signature.raw_excerpt:
+        lines.append(f"ERROR EXCERPT: {signature.raw_excerpt}")
     if source_context.strip():
         lines.append("")
         lines.append("SOURCE CONTEXT (near offending site):")
@@ -576,61 +551,21 @@ def _render_task_description(
         lines.append(source_context.rstrip("\n"))
         lines.append("```")
     lines.append("")
-    if candidate_refs:
+    if refs:
         lines.append("CANDIDATE BRIDGING PRs / REFS (most relevant first):")
-        for ref in candidate_refs:
+        for ref in refs:
             lines.append(f"  - {ref}")
         lines.append("")
     lines.append("SOURCE ROOTS TO SEARCH (advisory — where this session's code lives):")
-    for hint in source_root_hints:
+    for hint in _resolve_actual_root_hints(framework):
         lines.append(f"  - {hint}")
     lines.append("")
-    lines.append(build_enablement_ladder_book(sig))
+    lines.append(build_enablement_ladder_book(signature))
     lines.append("")
     lines.append("INVARIANTS:")
     for inv in ENABLEMENT_PATCH_INVARIANTS:
         lines.append(f"  - {inv}")
     return "\n".join(lines)
-
-
-def build_mandate(
-    req: EnablementRequest,
-    signature: FailureSignature,
-    *,
-    candidate_refs: Sequence[str] = (),
-    source_context: str = "",
-    source_root_hints: Sequence[str] | None = None,
-) -> EnablementMandate:
-    """Build an :class:`EnablementMandate` from a request + candidates.
-
-    Args:
-        req: The enablement request.
-        signature: The verdict the round was dispatched on. The caller owns it;
-            the mandate never re-derives a signature from prompt text.
-        candidate_refs: Ranked bridging refs to suggest (best first).
-        source_context: Optional source snippet near the offending site to
-            ground the authoring sub-agent (best-effort; empty omits it).
-        source_root_hints: Explicit source-root hints; when ``None`` (default)
-            they are resolved via :func:`_resolve_actual_root_hints`.
-
-    Returns:
-        EnablementMandate: The authoring contract, ready to hand to the
-        specialist runner.
-    """
-    if source_root_hints is not None:
-        hints: list[str] = list(source_root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
-    else:
-        hints = _resolve_actual_root_hints(req.framework)
-    refs = tuple(r for r in candidate_refs if r)
-    task = _render_task_description(req, signature, refs, hints, source_context)
-    return EnablementMandate(
-        framework=req.framework,
-        model=req.model,
-        signature=signature,
-        source_root_hints=tuple(hints),
-        candidate_refs=refs,
-        task_description=task,
-    )
 
 
 __all__ = [
@@ -641,7 +576,6 @@ __all__ = [
     "ENABLEMENT_PROGRESS_GUIDANCE",
     "ENABLEMENT_RUNTIME_REQUEST_GUIDANCE",
     "ENABLEMENT_SETUP_GUIDANCE",
-    "EnablementMandate",
     "EnablementSearchPlan",
     "build_enablement_ladder_book",
     "build_mandate",

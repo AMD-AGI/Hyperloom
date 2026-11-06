@@ -196,32 +196,7 @@ class SweepGrid:
     warmup: int
 
 
-def _generate_sweep_script(work_dir: Path, profile: Any, grid: SweepGrid, gpu_id: str) -> Path:
-    """Generate a standalone Python script that performs the Triton MoE sweep."""
-    script_path = work_dir / "vllm_moe_sweep.py"
-    config_path = work_dir / "sweep_config.json"
-
-    num_experts = profile.num_experts
-    inter_size = profile.effective_moe_intermediate
-    hidden_size = profile.hidden_size
-    topk = profile.num_experts_per_tok
-
-    # Write config to file (avoids f-string injection of paths/values)
-    sweep_config = {
-        "gpu_id": gpu_id,
-        "num_experts": num_experts,
-        "intermediate_size": inter_size,
-        "hidden_size": hidden_size,
-        "topk": topk,
-        "batch_sizes": grid.batch_sizes,
-        "iters": grid.iters,
-        "warmup": grid.warmup,
-        "configs": grid.configs,
-        "output_path": str(work_dir / "sweep_results.json"),
-    }
-    config_path.write_text(json.dumps(sweep_config, indent=2), encoding="utf-8")
-
-    script_content = f'''#!/usr/bin/env python3
+_SWEEP_SCRIPT_TEMPLATE = '''#!/usr/bin/env python3
 """Auto-generated vLLM MoE Triton sweep script."""
 
 import json
@@ -431,6 +406,34 @@ def main():
 if __name__ == "__main__":
     sys.exit(main())
 '''
+
+
+def _generate_sweep_script(work_dir: Path, profile: Any, grid: SweepGrid, gpu_id: str) -> Path:
+    """Generate a standalone Python script that performs the Triton MoE sweep."""
+    script_path = work_dir / "vllm_moe_sweep.py"
+    config_path = work_dir / "sweep_config.json"
+
+    num_experts = profile.num_experts
+    inter_size = profile.effective_moe_intermediate
+    hidden_size = profile.hidden_size
+    topk = profile.num_experts_per_tok
+
+    # Write config to file (avoids f-string injection of paths/values)
+    sweep_config = {
+        "gpu_id": gpu_id,
+        "num_experts": num_experts,
+        "intermediate_size": inter_size,
+        "hidden_size": hidden_size,
+        "topk": topk,
+        "batch_sizes": grid.batch_sizes,
+        "iters": grid.iters,
+        "warmup": grid.warmup,
+        "configs": grid.configs,
+        "output_path": str(work_dir / "sweep_results.json"),
+    }
+    config_path.write_text(json.dumps(sweep_config, indent=2), encoding="utf-8")
+
+    script_content = _SWEEP_SCRIPT_TEMPLATE.format(config_path=config_path)
     script_path.write_text(script_content, encoding="utf-8")
     script_path.chmod(0o755)
     return script_path
@@ -511,6 +514,11 @@ class VllmMoeTritonTuner(BaseTuner):
                 error_class="subprocess_error",
             )
 
+        return self._tuned_result(script_result, batch_sizes)
+
+    def _tuned_result(self, script_result: dict, batch_sizes: list[int]) -> TuneResult:
+        """Publish a successful sweep's winners as a vLLM tuned config folder and report its speedups."""
+        profile = self.ctx.profile
         # Build tuned config folder (VLLM_TUNED_CONFIG_FOLDER format)
         sweep_results_path = self.work_dir / "sweep_results.json"
         if not sweep_results_path.is_file():

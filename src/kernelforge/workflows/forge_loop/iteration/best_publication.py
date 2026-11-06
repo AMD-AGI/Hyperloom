@@ -124,6 +124,28 @@ class BestPublicationMixin:
             checkpoint_metadata=pending,
         )
 
+    def _stored_best_publication(self, best: BestRecord) -> dict:
+        """The stored publication metadata that describes ``best``, or an empty dict when none does."""
+        published: dict = {}
+        publication_paths = [
+            self.best_publisher.manifest_path,
+            (self.best_publisher.best_root / f"iter_{best.iteration:03d}" / "publication.json"),
+        ]
+        for path in publication_paths:
+            try:
+                candidate = json.loads(path.read_text())
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError) as error:
+                raise ValueError(f"invalid best publication metadata: {path}") from error
+            if (
+                int(candidate.get("iteration", 0) or 0) == best.iteration
+                and candidate.get("commit_hash") == best.commit_hash
+            ):
+                published = candidate
+                break
+        return published
+
     def _reconcile_best_publication(self) -> None:
         """Repair manifest and derived best views from the durable run state."""
         best = self.run_state.best
@@ -138,24 +160,7 @@ class BestPublicationMixin:
         ):
             return
         metadata = self.archive.load_meta(best.iteration)
-        published: dict = {}
-        publication_paths = [
-            self.best_publisher.manifest_path,
-            (self.best_publisher.best_root / f"iter_{best.iteration:03d}" / "publication.json"),
-        ]
-        for path in publication_paths:
-            try:
-                candidate = json.loads(path.read_text())
-            except FileNotFoundError:
-                continue
-            except Exception as error:
-                raise ValueError(f"invalid best publication metadata: {path}") from error
-            if (
-                int(candidate.get("iteration", 0) or 0) == best.iteration
-                and candidate.get("commit_hash") == best.commit_hash
-            ):
-                published = candidate
-                break
+        published = self._stored_best_publication(best)
         validation_text = (
             self.archive.read_candidate_file(
                 best.iteration,

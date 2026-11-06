@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.unified_diff import PatchOp, PatchTarget
+from hyperloom_common.unified_diff import PatchOp, PatchTarget
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
 

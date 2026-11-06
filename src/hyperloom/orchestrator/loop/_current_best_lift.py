@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping, NamedTuple
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.grid_server_args import (
     dedupe_extra_server_args,
     merge_cumulative_extra_server_args,
@@ -407,7 +407,15 @@ class CurrentBestLiftMixin:
             # to output grading permanently after the first KEEP.
             **graded_axes_of(cand_source),
         }
-        current_best.update(kept_launch_controls(bv, previous))
+        current_best.update(
+            kept_launch_controls(
+                bv,
+                previous,
+                extra_server_args=launch.full_args,
+                extra_envs=envs,
+                agentx_backend=self.shared_state.agentx_backend,
+            )
+        )
         if bv.get("effective_extra_server_args"):
             current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))

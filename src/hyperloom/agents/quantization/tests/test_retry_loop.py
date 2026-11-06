@@ -9,6 +9,8 @@ import pytest
 
 from hyperloom.agents.quantization.driver.outcomes import OutcomeId
 from hyperloom.agents.quantization.driver.retry import (
+    DEFAULT_QUARK_GIT_URL,
+    QuantSkillRunOptions,
     QuantSkillRunResult,
     _decide_next_step,
     _resolve_interactive,
@@ -75,6 +77,10 @@ async def test_quark_root_missing_fast_path(tmp_path, monkeypatch):
     )
     assert result.status == "failed"
     assert result.assessment.final == OutcomeId.quark_root_missing
+    assert result.assessment.notes == (
+        "quark_root is not configured (set $QUARK_ROOT or pass options=QuantSkillRunOptions(quark_root=...); "
+        f"clone from {DEFAULT_QUARK_GIT_URL})",
+    )
     assert result.quantized_model_dir is None
 
 
@@ -86,11 +92,16 @@ async def test_quark_root_nonexistent_dir_fast_path(tmp_path):
     result = await quantize_via_prompt(
         "do it",
         workspace=tmp_path / "ws",
-        quark_root=tmp_path / "does_not_exist",
+        options=QuantSkillRunOptions(quark_root=tmp_path / "does_not_exist"),
         runner_fn=_never_called,
     )
     assert result.status == "failed"
     assert result.assessment.final == OutcomeId.quark_root_missing
+    assert result.assessment.notes == (
+        f"quark_root path does not exist or is not a directory: {tmp_path / 'does_not_exist'} "
+        "(set $QUARK_ROOT or pass options=QuantSkillRunOptions(quark_root=...); "
+        f"clone from {DEFAULT_QUARK_GIT_URL})",
+    )
 
 
 # ───────────────────────────────────────────────────────────────────────────── happy path — single clean attempt
@@ -107,11 +118,7 @@ async def test_single_clean_attempt_returns_success(tmp_path, quark_root, build_
 
     runner = _StubRunner([populate])
     result = await quantize_via_prompt(
-        "fp8 it",
-        workspace=ws,
-        quark_root=quark_root,
-        runner_fn=runner,
-        interactive=False,
+        "fp8 it", workspace=ws, options=QuantSkillRunOptions(quark_root=quark_root, interactive=False), runner_fn=runner
     )
     assert result.status == "success"
     assert result.assessment.final is None
@@ -143,10 +150,8 @@ async def test_no_retry_without_fix_hypothesis(tmp_path, quark_root, build_works
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=3),
         runner_fn=runner,
-        interactive=False,
-        max_requantize_attempts=3,
     )
     assert len(runner.calls) == 1  # gated; no retry
     assert result.assessment.final == OutcomeId.must_have_weights_missing
@@ -186,10 +191,8 @@ async def test_retry_with_hypothesis_then_recover(tmp_path, quark_root, build_wo
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=2),
         runner_fn=runner,
-        interactive=False,
-        max_requantize_attempts=2,
     )
     assert len(runner.calls) == 2
     assert result.assessment.final is None
@@ -229,10 +232,8 @@ async def test_a_retry_does_not_start_with_the_previous_attempts_end(tmp_path, q
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=1),
         runner_fn=runner,
-        interactive=False,
-        max_requantize_attempts=1,
     )
 
     assert len(runner.calls) == 2
@@ -270,10 +271,8 @@ async def test_a_retry_that_writes_nothing_does_not_pass_on_the_previous_attempt
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=1),
         runner_fn=runner,
-        interactive=False,
-        max_requantize_attempts=1,
     )
 
     assert len(runner.calls) == 2
@@ -317,10 +316,8 @@ async def test_an_unfinished_retry_is_judged_on_what_it_raised_not_on_inherited_
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=1),
         runner_fn=runner,
-        interactive=False,
-        max_requantize_attempts=1,
     )
 
     assert result.assessment.attempts == (OutcomeId.unclassified_failure, expected)
@@ -366,10 +363,8 @@ async def test_a_retry_that_only_marks_the_eval_phase_does_not_pass_on_the_previ
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=1),
         runner_fn=_StubRunner([block_after_validation, mark_eval]),
-        interactive=False,
-        max_requantize_attempts=1,
     )
 
     assert result.assessment.attempts == (OutcomeId.unclassified_failure, OutcomeId.unclassified_failure)
@@ -408,10 +403,8 @@ async def test_a_retry_that_stops_on_opening_eval_is_sent_back_to_finish_it(tmp_
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=1),
         runner_fn=_StubRunner([block_after_validation, stop_on_opening_eval]),
-        interactive=False,
-        max_requantize_attempts=1,
     )
 
     assert result.assessment.attempts == (OutcomeId.unclassified_failure, None)
@@ -428,7 +421,10 @@ async def test_a_rerun_after_a_run_that_wrote_nothing_does_not_pass_on_an_older_
 
     async def run(side_effect):
         return await quantize_via_prompt(
-            "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([side_effect]), interactive=False
+            "fp8 it",
+            workspace=ws,
+            options=QuantSkillRunOptions(quark_root=quark_root, interactive=False),
+            runner_fn=_StubRunner([side_effect]),
         )
 
     first = await run(lambda workspace, attempt: build_workspace(workspace=workspace, last_phase="eval") and None)
@@ -455,7 +451,10 @@ async def test_a_rerun_does_not_read_files_left_directly_in_the_model_workspace(
         return None
 
     result = await quantize_via_prompt(
-        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([succeed]), interactive=False
+        "fp8 it",
+        workspace=ws,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False),
+        runner_fn=_StubRunner([succeed]),
     )
 
     assert finished_at_start == [False]
@@ -472,9 +471,8 @@ async def test_an_attempt_that_writes_no_end_does_not_succeed(tmp_path, quark_ro
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=tmp_path / "ws",
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False),
         runner_fn=_StubRunner([lambda workspace, attempt: None]),
-        interactive=False,
     )
 
     assert result.assessment.attempts == (OutcomeId.unclassified_failure,)
@@ -493,9 +491,8 @@ async def test_an_exported_model_without_an_eval_end_does_not_succeed(tmp_path, 
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=tmp_path / "ws",
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False),
         runner_fn=_StubRunner([export_without_eval]),
-        interactive=False,
     )
 
     assert (result.run_dir / "run_manifest.yaml").is_file()
@@ -525,10 +522,8 @@ async def test_retries_are_capped_per_run_and_a_rerun_gets_its_own(tmp_path, qua
         result = await quantize_via_prompt(
             "fp8 it",
             workspace=ws,
-            quark_root=quark_root,
+            options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=1),
             runner_fn=runner,
-            interactive=False,
-            max_requantize_attempts=1,
             log=logged.append,
         )
         assert len(runner.calls) == 2
@@ -548,16 +543,17 @@ async def test_a_rerun_does_not_retry_on_a_hypothesis_an_earlier_run_wrote(tmp_p
         return None
 
     first = await quantize_via_prompt(
-        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([fail]), interactive=False
+        "fp8 it",
+        workspace=ws,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False),
+        runner_fn=_StubRunner([fail]),
     )
     runner = _StubRunner([fail_without_hypothesis, fail])
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=1),
         runner_fn=runner,
-        interactive=False,
-        max_requantize_attempts=1,
     )
 
     assert len(runner.calls) == 1
@@ -578,10 +574,16 @@ async def test_each_run_quantizes_in_its_own_run_directory(tmp_path, quark_root,
         return None
 
     first = await quantize_via_prompt(
-        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([succeed]), interactive=False
+        "fp8 it",
+        workspace=ws,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False),
+        runner_fn=_StubRunner([succeed]),
     )
     second = await quantize_via_prompt(
-        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([succeed]), interactive=False
+        "fp8 it",
+        workspace=ws,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False),
+        runner_fn=_StubRunner([succeed]),
     )
 
     assert attempt_dirs == [first.run_dir, second.run_dir]
@@ -609,12 +611,14 @@ async def test_a_rerun_does_not_take_the_eval_threshold_an_earlier_prompt_set(tm
     first = await quantize_via_prompt(
         "fp8 it, a 50% gap is fine",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False),
         runner_fn=_StubRunner([accept_a_wide_gap]),
-        interactive=False,
     )
     second = await quantize_via_prompt(
-        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([measure_the_same_gap]), interactive=False
+        "fp8 it",
+        workspace=ws,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False),
+        runner_fn=_StubRunner([measure_the_same_gap]),
     )
 
     assert first.status == "success"
@@ -638,10 +642,8 @@ async def test_max_requantize_attempts_zero_no_retry(tmp_path, quark_root, build
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=0),
         runner_fn=runner,
-        interactive=False,
-        max_requantize_attempts=0,
     )
     assert len(runner.calls) == 1
     assert any("max_attempts_exhausted" in n for n in result.assessment.notes)
@@ -665,10 +667,8 @@ async def test_auto_fail_stops_immediately(tmp_path, quark_root, build_workspace
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=3),
         runner_fn=runner,
-        interactive=False,
-        max_requantize_attempts=3,
     )
     assert len(runner.calls) == 1
     assert result.assessment.final == OutcomeId.must_validate_md5_mismatch
@@ -709,10 +709,8 @@ async def test_eval_gap_exceeded_accepted_by_operator_promotes_to_accepted(
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=True, acceptable_eval_gap=0.03),
         runner_fn=runner,
-        interactive=True,
-        acceptable_eval_gap=0.03,
     )
     assert result.assessment.final == OutcomeId.eval_gap_accepted
     assert result.assessment.attempts[-1] == OutcomeId.eval_gap_accepted
@@ -746,10 +744,8 @@ async def test_eval_gap_exceeded_rejected_stays_partial(tmp_path, quark_root, bu
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=True, acceptable_eval_gap=0.03),
         runner_fn=runner,
-        interactive=True,
-        acceptable_eval_gap=0.03,
     )
     assert result.assessment.final == OutcomeId.eval_gap_exceeded
     assert result.status == "partial"
@@ -776,10 +772,8 @@ async def test_auto_recover_surfaced_does_not_retry(tmp_path, quark_root, build_
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
-        quark_root=quark_root,
+        options=QuantSkillRunOptions(quark_root=quark_root, interactive=False, max_requantize_attempts=3),
         runner_fn=runner,
-        interactive=False,
-        max_requantize_attempts=3,
     )
     assert len(runner.calls) == 1
     assert result.assessment.final == OutcomeId.eval_env_unavailable

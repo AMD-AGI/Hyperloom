@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from hyperloom.common.kernel_source_contract import is_finite_number
+from ._task_group_contract import native_operation_key
 
 _DEVICE_SOURCE_SUFFIXES = (".cuh", ".cu", ".hip", ".h", ".hpp", ".cpp")
 _MAX_SCANNED_FILES = 4000
@@ -21,33 +22,12 @@ _MAX_SCANNED_FILES = 4000
 _METRICS_RELPATH = "category_data/multi_kernel_metrics.json"
 
 
-def _itanium_components(mangled: str) -> list[str]:
-    """Split a nested Itanium-mangled name into symbol components."""
-    if not mangled.startswith("_ZN"):
-        return []
-    out: list[str] = []
-    i = 3
-    while i < len(mangled) and mangled[i].isdigit():
-        j = i
-        while j < len(mangled) and mangled[j].isdigit():
-            j += 1
-        length = int(mangled[i:j])
-        if length <= 0 or j + length > len(mangled):
-            break
-        out.append(mangled[j : j + length])
-        i = j + length
-    return out
-
-
 def collective_symbol(kernel_name: str) -> str:
     """Extract the bare device symbol from a trace name."""
     name = (kernel_name or "").strip()
     if not name:
         return ""
-    components = _itanium_components(name)
-    if components:
-        return components[-1]
-    head = re.split(r"[<(]", name, maxsplit=1)[0]
+    head = re.split(r"[<(]", native_operation_key(name), maxsplit=1)[0]
     return head.rsplit("::", 1)[-1].strip()
 
 
@@ -155,17 +135,11 @@ def _prorated_totals(
     return out
 
 
-def extract_collective_candidates(
-    tracelens_dir: Path | str,
-    source_roots: Sequence[str],
-    *,
-    log_fn: Callable[[str], None] | None = None,
-    diagnostics: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """Build source-resolved candidates from TraceLens NCCL metrics."""
+def _nccl_summary(tracelens_dir: Path | str) -> dict[str, Any] | None:
+    """The metrics file's ``nccl_summary``; ``None`` when there is no file, no summary or no sampled top op."""
     metrics_path = Path(tracelens_dir) / _METRICS_RELPATH
     if not metrics_path.is_file():
-        return []
+        return None
     try:
         metrics = json.loads(metrics_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -174,18 +148,54 @@ def extract_collective_candidates(
         raise ValueError(f"TraceLens metrics must be an object: {metrics_path}")
     summary = metrics.get("nccl_summary")
     if summary is None:
-        return []
+        return None
     if not isinstance(summary, dict):
         raise ValueError("nccl_summary must be an object")
     top_ops = summary.get("top_ops")
     if top_ops in (None, []):
-        return []
+        return None
     if not isinstance(top_ops, list):
         raise ValueError("nccl_summary.top_ops must be a list")
+    return summary
+
+
+def _report_scan_truncated(
+    roots: list[str], log_fn: Callable[[str], None] | None, diagnostics: list[dict[str, Any]] | None
+) -> None:
+    """Log and record that the source-tree scan stopped at its file cap."""
+    message = (
+        f"nccl_summary: source-tree scan stopped at {_MAX_SCANNED_FILES} "
+        f"files under {', '.join(roots)}; an unresolved symbol may lie past "
+        "the cap"
+    )
+    if log_fn is not None:
+        log_fn(message)
+    if diagnostics is not None:
+        diagnostics.append(
+            {
+                "code": "collective_source_scan_truncated",
+                "message": message,
+                "scanned_file_limit": _MAX_SCANNED_FILES,
+                "source_roots": roots,
+            }
+        )
+
+
+def extract_collective_candidates(
+    tracelens_dir: Path | str,
+    source_roots: Sequence[str],
+    *,
+    log_fn: Callable[[str], None] | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build source-resolved candidates from TraceLens NCCL metrics."""
+    summary = _nccl_summary(tracelens_dir)
+    if summary is None:
+        return []
     total_time_raw = summary.get("total_time_ms")
     total_count = summary.get("total_count")
     prorated = _prorated_totals(
-        top_ops,
+        summary["top_ops"],
         total_time_raw,
         total_count,
     )
@@ -195,22 +205,7 @@ def extract_collective_candidates(
     symbols = {name: collective_symbol(name) for name in prorated}
     symbol_index, truncated = index_device_symbols(symbols.values(), roots)
     if truncated:
-        message = (
-            f"nccl_summary: source-tree scan stopped at {_MAX_SCANNED_FILES} "
-            f"files under {', '.join(roots)}; an unresolved symbol may lie past "
-            "the cap"
-        )
-        if log_fn is not None:
-            log_fn(message)
-        if diagnostics is not None:
-            diagnostics.append(
-                {
-                    "code": "collective_source_scan_truncated",
-                    "message": message,
-                    "scanned_file_limit": _MAX_SCANNED_FILES,
-                    "source_roots": roots,
-                }
-            )
+        _report_scan_truncated(roots, log_fn, diagnostics)
     candidates: list[dict[str, Any]] = []
     for name, (duration_us, call_count, stream) in prorated.items():
         symbol = symbols[name]
@@ -232,9 +227,6 @@ def extract_collective_candidates(
                 "bound_type": "communication",
                 "tracelens_category": "collective",
                 "tracelens_pitem_rank": 0,
-                # Feeds the invocation spec that forge-loop's task preparer reads to author run_candidate; the
-                # device source is the only launcher a summary row can attribute.
-                "kernel_path": source_file,
                 "source_file": source_file,
                 "source_line": source_line,
                 "source_function": source_function,

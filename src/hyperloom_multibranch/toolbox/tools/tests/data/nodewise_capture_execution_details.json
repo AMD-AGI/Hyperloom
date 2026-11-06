@@ -1,0 +1,7 @@
+[
+  {
+    "file": "DecodeCudaGraphRunner_bs_64_rank0.json.gz",
+    "batch_size": 64,
+    "mode": "FULL"
+  }
+]

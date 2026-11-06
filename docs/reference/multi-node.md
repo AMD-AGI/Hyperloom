@@ -108,8 +108,10 @@ python -m pip install "ray[default]==2.44.1"
 Pin no `click` version. What the image owes is a Ray whose `ray start` parses
 the argv Hyperloom passes; preflight and the kernel-tools installer certify
 exactly that, by handing a representative argv to Ray's own parser. A `click`
-release that leaves the CLI parsing is no reason to downgrade it; one that
-breaks it calls for a Ray release built against it, through `RAY_VERSION`.
+release that leaves the CLI parsing is no reason to downgrade it. The one
+exception is Ray 2.44.1 failing to import its CLI under `click` 8.3+ (`is not a
+valid Sentinel`): there Hyperloom holds `click<8.3` once. Any other failure calls
+for a Ray release built against your `click`, through `RAY_VERSION`.
 
 The cluster idles through the RayJob submitter: the platform sets its entrypoint
 to `tail -f /dev/null` so the cluster stays up between rounds.
@@ -252,9 +254,9 @@ tokens on some configurations.
 option it dropped, a value it narrowed, or a `click` release that breaks the
 CLI on import.
 
-**Fix**: reinstall Ray at the version Hyperloom pins; where the image's `click`
-is newer than that CLI accepts, set `RAY_VERSION` to a Ray release built
-against it rather than downgrading `click`.
+**Fix**: reinstall Ray at the version Hyperloom pins; Hyperloom itself holds
+`click<8.3` only when 2.44.1's CLI fails with `is not a valid Sentinel`. For any
+other `click` conflict, set `RAY_VERSION` to a Ray release built against it.
 
 ```bash
 pip install --quiet 'ray[default]==2.44.1'

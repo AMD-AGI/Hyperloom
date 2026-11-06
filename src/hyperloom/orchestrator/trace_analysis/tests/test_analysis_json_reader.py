@@ -22,7 +22,6 @@ import json
 from pathlib import Path
 
 from hyperloom.orchestrator.trace_analysis import _analysis_json as aj
-from hyperloom.orchestrator.trace_analysis import _kernel_source as ks
 from hyperloom.orchestrator.trace_analysis import _candidate_assembly as candidate_assembly
 from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
 from hyperloom.orchestrator.trace_analysis._kernel_partition import partition_kernels
@@ -75,7 +74,7 @@ def _member(**overrides) -> dict:
 def test_stage_a_lifts_metrics_and_maps_gpu_pct(tmp_path, monkeypatch):
     """Task scalars + member metrics land on the row; gpu_pct := pct_e2e, no recompute."""
     monkeypatch.setattr(
-        ks,
+        aj,
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(location=None, patchable=False, method="unresolved"),
     )
@@ -102,7 +101,7 @@ def test_stage_a_lifts_metrics_and_maps_gpu_pct(tmp_path, monkeypatch):
 def test_stage_a_reads_a_nan_metric_as_absent(tmp_path, monkeypatch):
     """A NaN TraceLens metric is no reading: gpu_pct stays unset for finalize, the rest read 0."""
     monkeypatch.setattr(
-        ks,
+        aj,
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(location=None, patchable=False, method="unresolved"),
     )
@@ -161,7 +160,7 @@ def test_finalize_stamps_kernel_category_and_carries_device_kernel_names(tmp_pat
     finalize-added seams the deleted golden test used to cover, resolver stubbed.
     """
     monkeypatch.setattr(
-        ks,
+        aj,
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(location=None, patchable=False, method="unresolved"),
     )
@@ -178,7 +177,7 @@ def test_finalize_stamps_kernel_category_and_carries_device_kernel_names(tmp_pat
 def test_resolve_result_fields_map_onto_the_candidate(tmp_path, monkeypatch):
     """The six ResolveResult fields map to the six HL candidate keys (patchable case)."""
     monkeypatch.setattr(
-        ks,
+        aj,
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(
             location=SourceLocation(source_file="/repo/moe.py", line=42, framework="aiter"),
@@ -199,7 +198,7 @@ def test_resolve_result_fields_map_onto_the_candidate(tmp_path, monkeypatch):
 def test_non_patchable_kernel_keeps_its_source(tmp_path, monkeypatch):
     """#1057: a vendor GEMM comes back non-patchable WITH a dispatcher source, not blank."""
     monkeypatch.setattr(
-        ks,
+        aj,
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(
             location=SourceLocation(source_file="/repo/dispatcher.cu", line=None),
@@ -220,7 +219,7 @@ def test_non_patchable_kernel_keeps_its_source(tmp_path, monkeypatch):
 def test_fail_closed_symbol_has_no_source(tmp_path, monkeypatch):
     """An unresolvable symbol: location=None, method=unresolved, blank source_file."""
     monkeypatch.setattr(
-        ks,
+        aj,
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(location=None, patchable=False, method="unresolved", reason="no live match"),
     )
@@ -244,7 +243,7 @@ def test_reader_forwards_symbol_launcher_and_op_name(tmp_path, monkeypatch):
         seen.update(symbol=kernel_name, **kwargs)
         return ResolveResult(location=None, patchable=False, method="unresolved")
 
-    monkeypatch.setattr(ks, "resolve_kernel_source", _spy)
+    monkeypatch.setattr(aj, "resolve_kernel_source", _spy)
     member = _member(kernel_name=["Cijk_Ailk_Bljk"], library="aiter", kernel_launcher_path="tuned_gemm.py(9): g")
     aj.load_report_tasks(_write_report(tmp_path, [member]))
     assert seen == {"symbol": "Cijk_Ailk_Bljk", "kernel_file": "tuned_gemm.py(9): g", "op_name": "aiter::gemm"}
@@ -255,7 +254,7 @@ def test_reader_forwards_symbol_launcher_and_op_name(tmp_path, monkeypatch):
 def test_non_patchable_with_source_partitions_to_skipped_with_a_source(tmp_path, monkeypatch):
     """The #1057 behavior end to end: a resolved-but-non-patchable kernel is skipped, not blank."""
     monkeypatch.setattr(
-        ks,
+        aj,
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(
             location=SourceLocation(source_file="/repo/dispatcher.cu", line=None),
@@ -281,7 +280,7 @@ def test_non_patchable_with_source_partitions_to_skipped_with_a_source(tmp_path,
 def test_fail_closed_symbol_partitions_to_skipped_without_a_source(tmp_path, monkeypatch):
     """A genuine miss is skipped with a blank source_file, never corrupting the routable set."""
     monkeypatch.setattr(
-        ks,
+        aj,
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(location=None, patchable=False, method="unresolved", reason="no live match"),
     )
@@ -298,7 +297,7 @@ def test_fail_closed_symbol_partitions_to_skipped_without_a_source(tmp_path, mon
 
 def test_missing_or_empty_file_returns_no_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        ks,
+        aj,
         "resolve_kernel_source",
         lambda *a, **k: ResolveResult(location=None, patchable=False, method="unresolved"),
     )

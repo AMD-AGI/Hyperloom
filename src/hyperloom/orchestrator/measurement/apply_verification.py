@@ -5,11 +5,10 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-log = logging.getLogger(__name__)
+from kernelforge.workflows.gemm_tune import parse_log_file
 
 # Verdicts that should block a KEEP.
 BLOCKING_VERDICTS = frozenset({"not_merged", "zero_hit"})
@@ -32,7 +31,7 @@ class ApplyVerdict:
 
     @property
     def conclusive(self) -> bool:
-        return self.verdict in {"served", "not_merged", "zero_hit"}
+        return self.verdict in BLOCKING_VERDICTS | {"served"}
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -47,23 +46,6 @@ class ApplyVerdict:
         }
 
 
-def _parse(server_log: Path) -> dict | None:
-    """Parse the serving log with forge's evidence module, if it is installed."""
-    try:
-        from kernelforge.workflows.gemm_tune import parse_log_file
-    except ImportError:
-        # Warning, not info: kernelforge ships in this same wheel, so an ImportError here is a broken install rather
-        # than a supported configuration.
-        log.warning(
-            "kernelforge.workflows.gemm_tune is not importable, so apply verification is "
-            "skipped for this run -- it ships with Hyperloom, so this means an "
-            "incomplete install; reinstall with the forge extra "
-            '(pip install -e ".[forge]")'
-        )
-        return None
-    return parse_log_file(server_log)
-
-
 def verify_applied(
     server_log: Path | str,
     artifact_paths: list[str] | None = None,
@@ -76,10 +58,7 @@ def verify_applied(
     if not path.is_file():
         return ApplyVerdict("unknown", detail=f"no serving log at {path}")
 
-    report = _parse(path)
-    if report is None:
-        return ApplyVerdict("unknown", detail="log parser unavailable")
-
+    report = parse_log_file(path, hit_logging=hit_logging)
     hits = report["apply_verdict"]["hit"]
     misses = report["apply_verdict"]["miss"]
     merged = report["merged_tables"]
@@ -102,39 +81,15 @@ def verify_applied(
                 ),
             )
 
-    if hits > 0:
-        return ApplyVerdict(
-            "served",
-            hits,
-            misses,
-            merged,
-            detail=f"{hits} lookup(s) hit the tuned table",
-        )
-    if misses > 0:
-        if hit_logging:
-            return ApplyVerdict(
-                "zero_hit",
-                hits,
-                misses,
-                merged,
-                detail=(f"{misses} lookup(s) with hit logging on, none matched the tuned table"),
-            )
-        return ApplyVerdict(
-            "inconclusive_no_hit_logging",
-            hits,
-            misses,
-            merged,
-            detail=(
-                "misses logged but hit logging was off or unknown; cannot "
-                "distinguish 'never read' from 'not recorded' -- set "
-                "AITER_LOG_TUNED_CONFIG=1"
-            ),
-        )
-
-    return ApplyVerdict(
-        "no_lookups",
-        hits,
-        misses,
-        merged,
-        detail="the server made no tuned-config lookups at all",
-    )
+    verdict = report["apply_verdict"]["verdict"]
+    details = {
+        "served": f"{hits} lookup(s) hit the tuned table",
+        "zero_hit": f"{misses} lookup(s) with hit logging on, none matched the tuned table",
+        "inconclusive_no_hit_logging": (
+            "misses logged but hit logging was off or unknown; cannot "
+            "distinguish 'never read' from 'not recorded' -- set "
+            "AITER_LOG_TUNED_CONFIG=1"
+        ),
+        "no_lookups": "the server made no tuned-config lookups at all",
+    }
+    return ApplyVerdict(verdict, hits, misses, merged, detail=details[verdict])

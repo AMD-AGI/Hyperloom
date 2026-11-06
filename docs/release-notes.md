@@ -20,6 +20,13 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Bump validated SGLang stack to 0.5.23 (ROCm 10 docker).** Updates
+  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
+  `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, the
+  quick-start `Dockerfile`, and the hosted app image `Dockerfile`. **Upgrade note:** move from
+  `v0.5.22-rocm10-mi30x|mi35x-20261022` to
+  `v0.5.23-rocm10-mi30x|mi35x-20261102` (or match `SGLANG_REF` on bare metal).
+
 - **Bump validated SGLang stack to 0.5.22 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.22-rocm10-*` image tags, `models.tsv`, and the
@@ -55,6 +62,29 @@ it.
   the CLI working no longer triggers a reinstall or a downgrade.
   `RAY_CLI_CLICK_MAX_VERSION` is removed, superseding the 1.1.4 entry that
   introduced it; `RAY_VERSION` is still honoured verbatim.
+- **Ray 2.44.1 installs on images whose `click` is 8.3 or newer.** A fresh
+  `pip install ray[default]==2.44.1` on Python 3.10 resolves `click` 8.5, and Ray's
+  CLI then fails to import (`ValueError: ... is not a valid Sentinel`), which
+  ended the install. Preflight and the kernel-tools installer now hold
+  `click<8.3` once, for that failure on the default 2.44.1 pin only, and certify
+  the CLI again. Every other failure, and any Ray set through `RAY_VERSION`,
+  leaves `click` untouched; this narrows the no-downgrade rule of the entry above
+  and has no setting.
+- **Code Hyperloom and KernelForge share lives in the `hyperloom_common`
+  package.** `aiter_jit_cache`, `checkpoint_quant`, `coerce`, `entry_points`,
+  `env`, `fs_utils`, `git_safety`, `gpu_identity`, `io`, `jsonio`,
+  `pr_monitor_urls`, `timeutil` and `unified_diff` move from `hyperloom.common`
+  to `hyperloom_common`; `llm_config`, `llm_headers`, `llm_attribution`,
+  `llm_request_hooks`, `llm_stability_env`, `token_usage`,
+  `reasoning_effort`, `claude_oneshot` and `deepseek_session` to
+  `hyperloom_common.llm`. `kernelforge.utils.durable_io` is removed:
+  `hyperloom_common.io` writes with `options=DURABLE` and provides
+  `fsync_directory`, `fsync_tree` and `fsync_tree_directories`. Code that
+  imports one of these modules must import it from its new place; no aliases
+  are kept. An atomic write that asks for `fsync` or `fsync_dir` now fails
+  when the flush fails instead of continuing without it. KernelForge
+  recognises R9700 (gfx1201) and Radeon 8060S (gfx1151), and keys their
+  experience-KB records under `r9700` and `radeon8060s`.
 
 ## Hyperloom 1.1.5 release
 

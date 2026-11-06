@@ -22,7 +22,7 @@ from typing import Any, NoReturn
 
 from hyperloom.common.agent_runtime_requirements import agent_runtime_requirements
 from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CODEX,
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,
@@ -30,17 +30,18 @@ from hyperloom.common.llm_config import (
     preferred_agent_backend,
     with_synthesized_anthropic_keys,
 )
-from hyperloom.common.fs_utils import is_network_fs
-from hyperloom.common.llm_headers import expand_env_refs
-from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.env import forge_explicitly_enabled
+from hyperloom_common.fs_utils import is_network_fs
+from hyperloom_common.llm.llm_headers import expand_env_refs
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.platform_probe import probe_cpu_platform
-from hyperloom.common.pr_monitor_urls import kb_store_url
+from hyperloom_common.pr_monitor_urls import kb_store_url
 from hyperloom.common.provenance import (
     RESOLVED_FRAMEWORK_ENV,
     RESOLVED_FRAMEWORK_PYTHON_ENV,
     detect_gfx_arch,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 from hyperloom.common.model_paths import resolve_serving_model_path
 
@@ -55,6 +56,8 @@ from .framework_probe import (
     _resolve_framework_build,
     _setup_install_command,
 )
+from .geak_binaries import check_geak_binaries
+from .ir3_probe import run_ir3_probe_script
 from .preflight_env import (
     _ANTHROPIC_FALLBACK_KEYS,
     _PROVIDER_FALLBACK_KEYS,
@@ -71,7 +74,7 @@ from .credentials import (
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
-    _sync_geak_config_base_url,
+    _sync_geak_config_endpoint,
     _validate_credentials,
 )
 from ..session.paths import (
@@ -156,6 +159,12 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
 # (cp314 postdates it) must be allowed to keep the newer release the
 # kernel-agent installer resolved for them.
 _RAY_MIN_VERSION = "2.44.1"
+# Ray 2.44.1's CLI does not import under click 8.3+ ("ValueError: ... is not a valid Sentinel"). The smoke
+# exits with this code for that failure on that Ray alone, the one failure a fixed click hold repairs;
+# install_kernel_tools.sh applies the same rule.
+_RAY_CLICK_HOLD_VERSION = "2.44.1"
+_RAY_CLICK_HOLD_SPEC = "click<8.3"
+_RAY_SENTINEL_EXIT = 75
 # A representative `ray start` argv of the orchestrator's Ray runtime: every option it passes to the head
 # this step provisions, with values of its kind. Ray's own parser reading this argv is the certification, so
 # a pair whose `ray start` parses what Hyperloom passes is never refused over a version number.
@@ -166,57 +175,7 @@ _RAY_START_ARGV = (
 )
 
 
-_RAY_SMOKE_TEMPLATE = r"""
-import re
-import sys
-
-RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
-RAY_START_ARGV = __RAY_START_ARGV__
-ray_version = sys.argv[1] if len(sys.argv) > 1 else ""
-
-def _version_tuple(version: str) -> tuple[int, int, int]:
-    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-    parts.extend([0] * (3 - len(parts)))
-    return tuple(parts[:3])
-
-try:
-    import ray
-except Exception as exc:
-    print(f"ray import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-if ray_version:
-    if ray.__version__ != ray_version:
-        print(f"ray version mismatch: {ray.__version__} != {ray_version}", file=sys.stderr)
-        raise SystemExit(1)
-elif _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
-    print(f"ray too old: {ray.__version__} < {RAY_MIN_VERSION}", file=sys.stderr)
-    raise SystemExit(1)
-
-try:
-    import click
-    from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
-except Exception as exc:
-    print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-try:
-    _ray_start = _ray_cli.commands["start"]
-    _ray_start.make_context("start", list(RAY_START_ARGV), resilient_parsing=False).close()
-except click.UsageError as exc:
-    print(f"ray start does not accept {' '.join(RAY_START_ARGV)}: {exc.format_message()}", file=sys.stderr)
-    raise SystemExit(1)
-except Exception as exc:
-    print(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-print(ray.__version__)
-"""
-
-
-_RAY_SMOKE = _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION).replace(
-    "__RAY_START_ARGV__", repr(_RAY_START_ARGV)
-)
+_RAY_SMOKE_SCRIPT = Path(__file__).resolve().parent.parent / "assets" / "ray_cli_smoke.py"
 
 
 def _ray_probe_env() -> dict[str, str]:
@@ -232,9 +191,14 @@ def _ray_probe_env() -> dict[str, str]:
     return env
 
 
+def _ray_smoke_command(python_exe: str, ray_version: str) -> list[str]:
+    hold = (_RAY_CLICK_HOLD_VERSION, str(_RAY_SENTINEL_EXIT))
+    return [python_exe, str(_RAY_SMOKE_SCRIPT), _RAY_MIN_VERSION, *hold, *_RAY_START_ARGV, ray_version]
+
+
 def _ray_smoke(python_exe: str, ray_version: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
-        [python_exe, "-c", _RAY_SMOKE, ray_version],
+        _ray_smoke_command(python_exe, ray_version),
         capture_output=True,
         text=True,
         env=_ray_probe_env(),
@@ -244,6 +208,17 @@ def _ray_smoke(python_exe: str, ray_version: str = "") -> subprocess.CompletedPr
 def _pip_install_ray(python_exe: str, pip_extra: list[str], specs: tuple[str, ...]) -> subprocess.CompletedProcess:
     argv = [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs]
     return subprocess.run(argv, capture_output=True, text=True)
+
+
+def _smoke_after_click_hold(
+    python_exe: str, pip_extra: list[str], ray_version: str, check: subprocess.CompletedProcess
+) -> subprocess.CompletedProcess:
+    """Hold click below 8.3 and smoke again, but only for the Sentinel import failure of Ray 2.44.1."""
+    if check.returncode != _RAY_SENTINEL_EXIT:
+        return check
+    print(f"Preflight: ray {_RAY_CLICK_HOLD_VERSION} cannot import under this click; holding {_RAY_CLICK_HOLD_SPEC}")
+    _pip_install_ray(python_exe, pip_extra, (_RAY_CLICK_HOLD_SPEC,))
+    return _ray_smoke(python_exe, ray_version)
 
 
 def _ray_result(status: str, python_exe: str, spec: str, version_after: str, message: str | None) -> dict[str, Any]:
@@ -272,7 +247,7 @@ def _install_ray(python_exe: str, pip_extra: list[str], ray_version: str, ray_sp
     if install.returncode != 0:
         detail = (install.stderr or install.stdout or "no pip output").strip()
         raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
-    check = _ray_smoke(python_exe, ray_version)
+    check = _smoke_after_click_hold(python_exe, pip_extra, ray_version, _ray_smoke(python_exe, ray_version))
     if check.returncode != 0:
         detail = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
         # The floor spec is satisfied by whatever Ray is already installed, so a
@@ -292,6 +267,13 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     ray_version = os.environ.get("RAY_VERSION", "")
     ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
     check = _ray_smoke(python_exe, ray_version)
+    if check.returncode == _RAY_SENTINEL_EXIT:
+        held = _smoke_after_click_hold(python_exe, pip_extra, ray_version, check)
+        if held.returncode == 0:
+            version_after = held.stdout.strip() or ray_version or _RAY_MIN_VERSION
+            reason = "ray CLI Sentinel import failure"
+            return _ray_result("applied", python_exe, _RAY_CLICK_HOLD_SPEC, version_after, reason)
+        check = held
     if check.returncode == 0:
         print("Preflight: ray OK")
         version_after = check.stdout.strip() or ray_version or _RAY_MIN_VERSION
@@ -637,6 +619,11 @@ def _ensure_lm_eval_dep(
             "detail": {"installed": list(missing)},
         }
     # The image already ships lm_eval.
+    return _install_missing_lm_eval_deps(python_exe, pip_extra, missing)
+
+
+def _install_missing_lm_eval_deps(python_exe: str, pip_extra: list[str], missing: list[str]) -> dict[str, Any]:
+    """Install the ``lm_eval[api]`` dependencies an image that ships ``lm_eval`` lacks."""
     targets = missing
     print(f"Preflight: installing {' '.join(targets)} (accuracy gate; missing: {' '.join(missing)}) ...")
     subprocess.run(
@@ -1100,19 +1087,15 @@ def _run_install_step(
     step_id: str,
     category: str,
     action: Callable[[], Any],
-    success_status: str = "applied",
     **success_fields: Any,
 ) -> Any:
     try:
         result = action()
     except BaseException as exc:
-        try:
-            _fail_install_step(event, step_id=step_id, category=category, exc=exc)
-        except Exception:
-            log.warning("failed to record SBD V6 install-step failure", exc_info=True)
+        _fail_install_step(event, step_id=step_id, category=category, exc=exc)
         raise
     outcome = dict(result) if isinstance(result, dict) else {}
-    status = str(outcome.pop("status", success_status) or success_status)
+    status = str(outcome.pop("status", "applied") or "applied")
     skip_reason = outcome.pop("skip_reason", None)
     message = outcome.pop("message", None)
     fields = {**success_fields, **outcome}
@@ -1245,14 +1228,6 @@ def _export_gateway_alias(gateway_url: str) -> None:
             print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
 
 
-def _sync_geak_config_endpoint() -> None:
-    """A supplied GEAK_CONFIG yaml may carry its own endpoint; sync it so an override reaches GEAK."""
-    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
-    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
-    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
-        print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
-
-
 def _ensure_magpie(
     install_event: Any,
     *,
@@ -1268,7 +1243,7 @@ def _ensure_magpie(
         if not magpie_active:
             print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
         else:
-            magpie_ref = os.environ.get("MAGPIE_REF", "6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e")
+            magpie_ref = os.environ.get("MAGPIE_REF", "06b7cf6e185fdd49483a512e350cb3964ba3bf68")
             checker = _ASSETS / "check_magpie.py"
             check = subprocess.run([magpie_python, str(checker), magpie_ref], capture_output=True)
             if check.returncode != 0 and not os.environ.get("MAGPIE_PATH"):
@@ -1467,6 +1442,10 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
             category="check",
             action=_check_kernel_tuning_clis,
         )
+        if not forge_explicitly_enabled():
+            _run_install_step(
+                install_event, step_id="check_geak_binaries", category="check", action=check_geak_binaries
+            )
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _run_install_step(install_event, step_id="check_tracelens_cli", category="check", action=_check_tracelens_cli)
         _run_install_step(
@@ -1517,10 +1496,8 @@ def _validate_explicit_server_limits(args: argparse.Namespace) -> None:
     validate_server_args(effective, resolve_serving_model_path(model, model_base=pins.get("HL_MODEL_BASE")))
 
 
-def _preflight(args: argparse.Namespace) -> tuple[str, str]:
-    """Auto-install missing runtime deps and export auth aliases."""
-    _pin_resumed_session_args(args)
-    install_event = _begin_install_event(args)
+def _normalize_preflight_env(args: argparse.Namespace, install_event: dict[str, Any]) -> None:
+    """Load the operator env files, normalize provider and framework env, and validate credentials."""
     _run_install_step(
         install_event,
         step_id="load_dotenv",
@@ -1565,6 +1542,84 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
         detail={"exit_code": 0},
     )
 
+
+def _check_host_runtime(install_event: dict[str, Any]) -> None:
+    """Normalize the ROCm device env and run the GPU, shm and platform-tuning checks."""
+    # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
+    _normalize_hip_visible_devices()
+    _run_install_step(
+        install_event,
+        step_id="check_gpu_visibility",
+        category="check",
+        action=_check_gpu_visibility,
+    )
+    _run_install_step(
+        install_event,
+        step_id="check_shm_disk",
+        category="check",
+        action=_check_shm_disk,
+    )
+    _run_install_step(
+        install_event,
+        step_id="check_platform_tuning",
+        category="check",
+        action=_check_platform_tuning,
+    )
+
+
+def _install_bench_client_deps(install_event: dict[str, Any], *, benchmark_python: str, pip_extra: list[str]) -> None:
+    """Install the bench-serving and accuracy-gate client deps into the benchmark interpreter."""
+    # 1b.
+    _run_install_step(
+        install_event,
+        step_id="ensure_bench_serving_deps",
+        category="install",
+        action=lambda: _ensure_bench_serving_deps(benchmark_python, pip_extra),
+    )
+
+    # 1c. lm_eval — GSM8K accuracy gate, multi-node only (the helper gates itself).
+    _run_install_step(
+        install_event,
+        step_id="ensure_lm_eval",
+        category="install",
+        action=lambda: _ensure_lm_eval_dep(
+            benchmark_python,
+            pip_extra,
+        ),
+    )
+
+
+def _run_closing_preflight_steps(
+    install_event: dict[str, Any], args: argparse.Namespace, *, magpie_python: str, resolved_urls: tuple[str, str]
+) -> None:
+    """Run the IR-3 PR Monitor probe and emit the preflight diagnostics snapshot."""
+    # --- IR-3: PR Monitor reachability probe (soft degrade) ---
+    _run_install_step(
+        install_event,
+        step_id="ir3_pr_monitor_probe",
+        category="degrade",
+        action=lambda: _run_ir3_preflight(args),
+    )
+
+    # --- Single canonical diagnostics block ---
+    _run_install_step(
+        install_event,
+        step_id="diagnostics_snapshot",
+        category="diagnostic",
+        action=lambda: _emit_preflight_diagnostics(
+            magpie_python=magpie_python,
+            anthropic_base_url=resolved_urls[0],
+            args=args,
+        ),
+    )
+
+
+def _preflight(args: argparse.Namespace) -> tuple[str, str]:
+    """Auto-install missing runtime deps and export auth aliases."""
+    _pin_resumed_session_args(args)
+    install_event = _begin_install_event(args)
+    _normalize_preflight_env(args, install_event)
+
     # --- Resolve install interpreters --- Resolve the ACTIVE benchmark backend first so a bypass-only environment (no
     # Magpie / no /opt/venv) never routes installs through Magpie's interpreter.
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (
@@ -1594,26 +1649,7 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
     resolved_urls = _export_llm_endpoints()
 
-    # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
-    _normalize_hip_visible_devices()
-    _run_install_step(
-        install_event,
-        step_id="check_gpu_visibility",
-        category="check",
-        action=_check_gpu_visibility,
-    )
-    _run_install_step(
-        install_event,
-        step_id="check_shm_disk",
-        category="check",
-        action=_check_shm_disk,
-    )
-    _run_install_step(
-        install_event,
-        step_id="check_platform_tuning",
-        category="check",
-        action=_check_platform_tuning,
-    )
+    _check_host_runtime(install_event)
 
     # --- Runtime dep install --- 1.
     _run_install_step(
@@ -1623,24 +1659,7 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
         action=lambda: _ensure_ray(benchmark_python, pip_extra),
     )
 
-    # 1b.
-    _run_install_step(
-        install_event,
-        step_id="ensure_bench_serving_deps",
-        category="install",
-        action=lambda: _ensure_bench_serving_deps(benchmark_python, pip_extra),
-    )
-
-    # 1c. lm_eval — GSM8K accuracy gate, multi-node only (the helper gates itself).
-    _run_install_step(
-        install_event,
-        step_id="ensure_lm_eval",
-        category="install",
-        action=lambda: _ensure_lm_eval_dep(
-            benchmark_python,
-            pip_extra,
-        ),
-    )
+    _install_bench_client_deps(install_event, benchmark_python=benchmark_python, pip_extra=pip_extra)
 
     # 1d.
     _run_install_step(
@@ -1666,25 +1685,7 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
 
     _check_kernel_and_tracelens_clis(install_event, args)
 
-    # --- IR-3: PR Monitor reachability probe (soft degrade) ---
-    _run_install_step(
-        install_event,
-        step_id="ir3_pr_monitor_probe",
-        category="degrade",
-        action=lambda: _run_ir3_preflight(args),
-    )
-
-    # --- Single canonical diagnostics block ---
-    _run_install_step(
-        install_event,
-        step_id="diagnostics_snapshot",
-        category="diagnostic",
-        action=lambda: _emit_preflight_diagnostics(
-            magpie_python=magpie_python,
-            anthropic_base_url=resolved_urls[0],
-            args=args,
-        ),
-    )
+    _run_closing_preflight_steps(install_event, args, magpie_python=magpie_python, resolved_urls=resolved_urls)
 
     _finish_install_event(
         install_event,
@@ -1725,32 +1726,7 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
     if explicit_pr:
         env["SKIP_PR_PROBE"] = "1"
 
-    try:
-        subprocess.run(
-            ["bash", str(script)],
-            env=env,
-            check=False,
-            timeout=60,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        log.warning("IR-3 preflight script error: %s", exc)
-        marker: dict[str, Any] = {
-            "kb_reachable": False,
-            "pr_reachable": False,
-            "kb_skipped": True,
-            "pr_skipped": explicit_pr,
-        }
-    else:
-        try:
-            marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            log.warning("IR-3 marker unreadable: %s", exc)
-            marker = {
-                "kb_reachable": False,
-                "pr_reachable": False,
-                "kb_skipped": True,
-                "pr_skipped": explicit_pr,
-            }
+    marker = run_ir3_probe_script(script, env, marker_path=marker_path, explicit_pr=explicit_pr)
 
     if not explicit_pr and not marker.get("pr_reachable", False) and not marker.get("pr_skipped", False):
         args.pr_monitor_enabled = False

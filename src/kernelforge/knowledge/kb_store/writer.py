@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import math
 import re
@@ -16,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.unified_diff import touched_paths
+from hyperloom_common.unified_diff import touched_paths
 
 from kernelforge.knowledge.kb_store.errors import (
     kb_store_secrets,
@@ -38,13 +36,8 @@ from kernelforge.knowledge.kb_store.identity.source_resolution import (
 
 log = logging.getLogger(__name__)
 
-_CATEGORIES = {"gemm", "attention", "moe", "communication", "others"}
 _UNKNOWN = "unknown"
 
-# Bound the LLM inputs so a huge trajectory / source file can't blow the prompt.
-_MAX_DIGEST_CHARS = 8000
-_MAX_SOURCE_CHARS = 6000
-_LLM_TIMEOUT_SEC = 150
 
 _C_LIKE_LANGS = {"hip", "cuda", "cpp", "c"}
 
@@ -165,127 +158,6 @@ def extract_input_dtypes(kernel_source: str, func: str, lang: str) -> dict[str, 
         if name:
             out[name] = typ or _UNKNOWN
     return out
-
-
-# --------------------------------------------------------------------------- # LLM summarization (strategy / recipe /
-# lessons / category only) --------------------------------------------------------------------------- #
-_SUMMARY_SYSTEM = (
-    "You analyze the trajectory of an autonomous GPU-kernel optimization run and "
-    "extract a compact, structured summary. You never write code - you only "
-    "report what the winning change did and classify the operator. Answer with a "
-    "single JSON object and nothing else."
-)
-
-
-def _summary_prompt(op: str, digest: str, kernel_source: str) -> str:
-    """Build the user prompt asking for a strict-JSON structured summary."""
-    digest = (digest or "")[:_MAX_DIGEST_CHARS]
-    kernel_source = (kernel_source or "")[:_MAX_SOURCE_CHARS]
-    return f"""\
-Operator under optimization: {op}
-
-## Kernel source (target of the run, possibly truncated)
-{kernel_source or "(unavailable)"}
-
-## Optimization trajectory (attempts, diffs, per-iteration lessons)
-{digest or "(no trajectory recorded)"}
-
-## Your task
-Return ONE JSON object with EXACTLY these keys (use "" when you cannot determine
-a value; never invent):
-{{
-  "category": "one of: GEMM, attention, MOE, communication, others",
-  "strategy": "one sentence: the direction of the WINNING change",
-  "recipe": "concrete, reproducible steps of the winning change",
-  "lessons": "distilled: what worked / what failed / pitfalls for this operator"
-}}
-Output ONLY the JSON object.
-"""
-
-
-def _extract_json(text: str) -> dict[str, Any]:
-    """Pull the first JSON object out of an LLM reply (tolerates code fences)."""
-    if not text:
-        return {}
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    candidate = fence.group(1) if fence else None
-    if candidate is None:
-        start = text.find("{")
-        end = text.rfind("}")
-        candidate = text[start : end + 1] if start != -1 and end > start else ""
-    if not candidate:
-        return {}
-    try:
-        obj = json.loads(candidate)
-        return obj if isinstance(obj, dict) else {}
-    except (ValueError, TypeError):
-        return {}
-
-
-async def _query_llm(config, workspace: str, prompt: str, usage=None) -> str:
-    """Run one no-edit query through the globally configured agent backend."""
-    from kernelforge.agent_backends.base import (
-        AgentRunSpec,
-        AgentToolPolicy,
-    )
-    from kernelforge.agent_backends.registry import (
-        create_registered_backend,
-    )
-    from kernelforge.agent_backends.runtime import agent_runtime
-
-    backend = create_registered_backend(agent_runtime(config))
-
-    result = await backend.run(
-        AgentRunSpec(
-            role="experience summary",
-            system_prompt=_SUMMARY_SYSTEM,
-            user_prompt=prompt,
-            cwd=workspace,
-            writable=False,
-            timeout_sec=_LLM_TIMEOUT_SEC,
-            tool_policy=AgentToolPolicy(
-                read=False,
-                search=False,
-                write=False,
-                shell=False,
-                max_turns=1,
-            ),
-            protected_globs=["*"],
-        ),
-        usage=usage,
-    )
-    return result.text.strip()
-
-
-def _normalize_summary(raw: dict[str, Any]) -> dict[str, Any]:
-    """Coerce the LLM's JSON into the fields we store, with safe fallbacks."""
-
-    def _str(key: str) -> str:
-        val = raw.get(key)
-        return val.strip() if isinstance(val, str) and val.strip() else ""
-
-    category = _str("category").lower()
-    if category not in _CATEGORIES:
-        category = "others"
-    return {
-        "category": category,
-        "strategy": _str("strategy"),
-        "recipe": _str("recipe"),
-        "lessons": _str("lessons"),
-    }
-
-
-def summarize_run(config, workspace: str, prompt: str, usage=None) -> dict[str, Any]:
-    """Summarize a run with one LLM call on ``prompt``; returns normalized fields."""
-    reply = asyncio.run(
-        asyncio.wait_for(
-            _query_llm(config, workspace, prompt, usage=usage),
-            timeout=_LLM_TIMEOUT_SEC,
-        )
-    )
-    parsed = _normalize_summary(_extract_json(reply))
-    log.info("experience summarize: category=%s strategy=%r", parsed["category"], parsed["strategy"][:60])
-    return parsed
 
 
 # --------------------------------------------------------------------------- # page rendering
@@ -438,13 +310,16 @@ def _write_run_experience_impl(
         log.info("experience write skipped: %s", kb.reason or "not_configured")
         return {"written": False, "reason": kb.reason or "not_configured"}
 
+    # Imported here: the MCP servers import this package and must start without the agent runtime.
+    from kernelforge.knowledge.kb_store.run_summary import normalize_summary, summarize_run, summary_prompt
+
     if summary_override is not None:
-        summary = _normalize_summary(summary_override)
+        summary = normalize_summary(summary_override)
     else:
         summary = summarize_run(
             config=config,
             workspace=kernel.workspace,
-            prompt=_summary_prompt(identity.kernel_name, outcome.digest, kernel.kernel_source),
+            prompt=summary_prompt(identity.kernel_name, outcome.digest, kernel.kernel_source),
             usage=usage,
         )
 

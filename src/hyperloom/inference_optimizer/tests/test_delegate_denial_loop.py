@@ -141,7 +141,7 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
     from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
     from hyperloom.inference_optimizer.session.session_binding import session_scope
     from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     coordinator = _silent_coordinator(session_dir)
     coordinator.shared_state.phase = "PRELUDE"
@@ -181,7 +181,7 @@ async def test_policy_denial_streak_records_streak_at_two(session_dir):
     """The denial streak is tracked via ``SharedState.policy_denial_streak`` as a count, not a priority lock."""
     c = _silent_coordinator(session_dir)
     try:
-        from hyperloom.orchestrator.policy.gate import PolicyDenied
+        from hyperloom.orchestrator.policy.denial import PolicyDenied
 
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
@@ -211,7 +211,7 @@ async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir)
     """Long-run continuity: the streak >= 5 auto-prune_family reaction was removed; the family is NOT pruned."""
     c = _silent_coordinator(session_dir)
     try:
-        from hyperloom.orchestrator.policy.gate import PolicyDenied
+        from hyperloom.orchestrator.policy.denial import PolicyDenied
 
         intent = _delegate(action="params", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
@@ -239,7 +239,7 @@ async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
     """Long-run continuity: the streak >= 10 ``policy_loop`` stop was removed; stop_reason stays unset."""
     c = _silent_coordinator(session_dir)
     try:
-        from hyperloom.orchestrator.policy.gate import PolicyDenied
+        from hyperloom.orchestrator.policy.denial import PolicyDenied
 
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
@@ -266,7 +266,7 @@ async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
 async def test_successful_delegate_resets_policy_denial_streak(session_dir):
     c = _silent_coordinator(session_dir)
     try:
-        from hyperloom.orchestrator.policy.gate import PolicyDenied
+        from hyperloom.orchestrator.policy.denial import PolicyDenied
 
         intent = _delegate(key="k-reset")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
@@ -572,7 +572,9 @@ def test_explore_grid_coverage_tells_a_variant_removal_from_the_base_one():
     """On a replacing base the runner applies only the variant's removal, so a removal the base also names is new."""
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors.measured_variants import explore_grid_already_covered
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.measured_variants import (
+        explore_grid_already_covered,
+    )
 
     base = {"base_tput": 800.0, "base_extra_args": "--x 1", "base_remove_args": ["--foo"], "base_args_mode": "replace"}
     kept = {"name": "keeps_foo", "extra_args": "--foo 1 --b 1", "args_mode": "replace"}

@@ -70,7 +70,7 @@ try:
             level_pass = (entry.get("compilation_config") or {}).get("pass_config") or {}
             out["level"] = str(level)
             out["level_api"] = "ok"
-        except Exception as exc:
+        except (AttributeError, TypeError) as exc:
             # The API exists but did not read as expected (shape change, init
             # failure): NOT a benign fallback -- report so every verdict is unknown.
             out["error"] = "optimization level unreadable: %s: %s" % (type(exc).__name__, exc)
@@ -88,7 +88,9 @@ try:
         out["flags"][flag] = item
 except Exception as exc:
     out["error"] = "%s: %s" % (type(exc).__name__, exc)
-print("MARKER" + json.dumps(out))
+    raise
+finally:
+    print("MARKER" + json.dumps(out))
 """.replace("MARKER", _VLLM_PASS_PROBE_MARKER)
 
 # One vLLM import, not an unbounded wait: a hung import must not stall the run.

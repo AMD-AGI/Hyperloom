@@ -15,8 +15,8 @@ from typing import Any
 import pytest
 
 import hyperloom
-from hyperloom.common import llm_config
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm import llm_config
+from hyperloom_common.llm.llm_config import (
     ANTHROPIC_CREDENTIAL_ENV_ORDER,
     DEFAULT_ANTHROPIC_BASE_URL,
     DEFAULT_ANTHROPIC_VERSION,
@@ -43,7 +43,7 @@ from hyperloom.common.llm_config import (
     resolve_forge_llm_model,
     resolve_openai_client_config,
 )
-from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom_common.llm.llm_headers import parse_custom_headers
 
 _LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
 _OPENAI_KEY = "_".join(("OPENAI", "API", "KEY"))
@@ -857,7 +857,7 @@ def test_get_anthropic_client_raises_clearly_without_httpx(monkeypatch):
 
 
 # ---- anthropic_completion / aanthropic_completion over the HTTP transport ----
-# The streamed reply itself is read in src/hyperloom/common/tests/test_anthropic_messages.py.
+# The streamed reply itself is read in src/hyperloom_common/llm/tests/test_anthropic_messages.py.
 _MESSAGE_BODY = {
     "content": [
         {"type": "text", "text": "hello "},
@@ -1128,7 +1128,7 @@ def test_build_http_timeout_takes_explicit_write_and_pool():
 
 def test_build_http_timeout_without_httpx_degrades_to_sdk_defaults(monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, "httpx", None)
-    with caplog.at_level(logging.WARNING, logger="hyperloom.common.llm_config"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom_common.llm.llm_config"):
         assert build_http_timeout(connect=1.0, read=2.0) is None
     assert "httpx unavailable" in caplog.text
 
@@ -1347,7 +1347,7 @@ class _FakeOneShotClient:
 @pytest.fixture
 def fake_one_shot(monkeypatch: pytest.MonkeyPatch) -> type[_FakeOneShotClient]:
     """Replace the Claude CLI client where ``_one_shot_client`` imports it."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     _FakeOneShotClient.instances = []
     monkeypatch.setattr(claude_oneshot, "ClaudeOneShotClient", _FakeOneShotClient)
@@ -1377,7 +1377,7 @@ def test_anthropic_transport_ready_is_false_without_a_credential():
 
 def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(monkeypatch):
     """An API key needs no Claude CLI, so an absent SDK must not disable it."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     def _missing() -> None:
         raise RuntimeError("claude_agent_sdk not installed")
@@ -1388,7 +1388,7 @@ def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(mon
 
 def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
     """The SDK only spawns `claude`; an importable package with no reachable binary still cannot serve a call, and failing here beats failing at the first review."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
     monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: None)
@@ -1398,7 +1398,7 @@ def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
 
 
 def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
     monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: "/usr/bin/claude")
@@ -1409,7 +1409,7 @@ def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
 @pytest.mark.parametrize("binary_name", ["claude", "claude.exe"])
 def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_path, binary_name):
     """The SDK ships the binary under a platform-dependent name."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     bundled = tmp_path / "_bundled"
     bundled.mkdir()
@@ -1425,7 +1425,7 @@ def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_pa
 
 def test_ensure_available_ignores_non_binary_bundled_entries(monkeypatch, tmp_path):
     """A bundle carrying only its .gitignore is not a usable transport."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     bundled = tmp_path / "_bundled"
     bundled.mkdir()
@@ -1444,7 +1444,7 @@ def test_ensure_available_ignores_non_binary_bundled_entries(monkeypatch, tmp_pa
     [(None, True), (RuntimeError("claude_agent_sdk not installed"), False)],
 )
 def test_anthropic_transport_ready_probes_the_sdk_for_a_subscription_token(monkeypatch, sdk_error, expected):
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     def _probe() -> None:
         if sdk_error is not None:

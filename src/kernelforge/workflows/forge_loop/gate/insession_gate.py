@@ -749,6 +749,23 @@ class InSessionGate:
                 errors.append(state.error)
         return out, errors
 
+    def _discard_session_bytecode(self) -> None:
+        """Delete rebuildable bytecode the session added or rewrote under a protected directory.
+
+        The next import, this gate's own validation included, then compiles the protected source instead.
+        """
+        try:
+            paths = self._iter_snapshot_paths()
+        except (OSError, RuntimeError, ValueError):  # the integrity scan that follows reports the failed inventory
+            return
+        baseline = {state.path: state.digest for state in self._protected_baseline.values()}
+        FORGE_PROTECTED_PATHS.discard_rebuildable_bytecode(
+            str(path)
+            for path in paths
+            if FORGE_PROTECTED_PATHS.is_rebuildable_bytecode(path)
+            and baseline.get(path) != self._capture_protected_state(path).digest
+        )
+
     def _protected_changes(self) -> str:
         current, current_errors = self._snapshot_protected_states(
             include_baseline=True,
@@ -762,6 +779,8 @@ class InSessionGate:
         for key in sorted(set(before) | set(current)):
             old = before.get(key)
             new = current.get(key)
+            if FORGE_PROTECTED_PATHS.is_rebuildable_bytecode((new or old).path):
+                continue
             if old is None:
                 if new is not None and new.kind != "missing":
                     added.append(key)
@@ -794,6 +813,7 @@ class InSessionGate:
         """Set the final protected-integrity verdict after an agent session."""
 
         try:
+            self._discard_session_bytecode()
             reason = self._protected_changes()
         except Exception as error:  # noqa: BLE001 - isolation boundary: one session's protected-integrity scan
             reason = f"protected integrity scan failed: {type(error).__name__}: {error}"
@@ -1127,6 +1147,20 @@ class InSessionGate:
         bench["bench_repeat"] = self.bench_repeat
         self.last_bench_result = bench
 
+    def _block_not_faster(self, mean_case_speedup: float, wall, required: float) -> dict:
+        """Block a stop whose correct candidate does not clear the KEEP bar."""
+        speedup_txt = f"{mean_case_speedup:.6f}x"
+        wall_txt = f"{wall:.6f}" if wall is not None else "unmeasured"
+        self._log(
+            f"BLOCK (correct but not faster: mean case speedup {speedup_txt}; required={required:.6f}x; "
+            f"raw mean {wall_txt} ms) edit={self.edit_count}"
+        )
+        return self._block(
+            "The kernel is CORRECT but NOT faster than the current best, so it is not good enough to finish.\n"
+            f"Measured mean case speedup={speedup_txt}; required={required:.6f}x; raw mean={wall_txt} ms.\n"
+            "Keep the kernel correct and try a DIFFERENT optimization to reduce wall time, then continue."
+        )
+
     async def _stop_performance_verdict(self) -> dict:
         """Bench the correct candidate and allow only when it clears the KEEP bar."""
         self.last_wall_ms = None
@@ -1182,17 +1216,7 @@ class InSessionGate:
             )
             return self._allow()
 
-        speedup_txt = f"{mean_case_speedup:.6f}x"
-        wall_txt = f"{wall:.6f}" if wall is not None else "unmeasured"
-        self._log(
-            f"BLOCK (correct but not faster: mean case speedup {speedup_txt}; required={required:.6f}x; "
-            f"raw mean {wall_txt} ms) edit={self.edit_count}"
-        )
-        return self._block(
-            "The kernel is CORRECT but NOT faster than the current best, so it is not good enough to finish.\n"
-            f"Measured mean case speedup={speedup_txt}; required={required:.6f}x; raw mean={wall_txt} ms.\n"
-            "Keep the kernel correct and try a DIFFERENT optimization to reduce wall time, then continue."
-        )
+        return self._block_not_faster(mean_case_speedup, wall, required)
 
     async def _stop_candidate_verdict(self) -> dict:
         """Run in-session correctness (and performance) and allow or block the stop."""
@@ -1254,6 +1278,7 @@ class InSessionGate:
     async def _on_stop(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
         try:
             # Harness protection (security, first).
+            self._discard_session_bytecode()
             protected_delta = self._protected_changes()
             self.integrity_reason = protected_delta
             self.integrity_violation = bool(protected_delta)

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from hyperloom.common import io as _common_io
+from hyperloom_common import io as _common_io
 
 from ._file_lock import best_effort_file_lock
 
@@ -106,6 +106,14 @@ _RUN_LM_EVAL_MERGED_CATCHALL_RE = re.compile(
 # Header of the InferenceX ``run_lm_eval`` shell function; used to scope the merged-case parser patch and the
 # tolerance check to that function's body.
 _RUN_LM_EVAL_FN_MARKER = "run_lm_eval()"
+
+_LM_EVAL_ONCE_SENTINEL = "HYPERLOOM_LM_EVAL_INSTALL_ONCE"
+_LM_EVAL_UNLOCKED_FN = "_hyperloom_install_lm_eval_deps_unlocked"
+_LM_EVAL_DEPS_FN_RE = re.compile(r"^_install_lm_eval_deps\(\) \{\n.*?^\}\n", re.DOTALL | re.MULTILINE)
+_LM_EVAL_REF_RE = re.compile(r'local lm_eval_ref="([^"]+)"')
+#: Succeeds when ``python3`` has the pinned lm-eval and the round's ``_install_lm_eval_deps`` would install nothing.
+LM_EVAL_READY_FN = "_hyperloom_lm_eval_ready"
+_LM_EVAL_SPARE_MARKER_FN = "_hyperloom_lm_eval_spare_marker"
 
 # System-wide lock.
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
@@ -283,6 +291,78 @@ def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
     return True
 
 
+def _lm_eval_once_wrapper(ref: str) -> str:
+    return f"""{LM_EVAL_READY_FN}() {{
+    # {_LM_EVAL_ONCE_SENTINEL}: whether this python3 has lm-eval {ref}: it imports, and the install left its marker,
+    # below sys.prefix or, where this account cannot write there, below /tmp under a name keyed by that prefix.
+    local prefix
+    prefix="$(python3 -c 'import sys; print(sys.prefix)' 2>/dev/null)" || return 1
+    [[ -f "$prefix/.hyperloom-lm-eval-{ref}" || -f "$({_LM_EVAL_SPARE_MARKER_FN} "$prefix")" ]] || return 1
+    python3 -c 'import lm_eval' 2>/dev/null
+}}
+
+{_LM_EVAL_SPARE_MARKER_FN}() {{
+    printf '/tmp/hyperloom-lm-eval-{ref}-%s\\n' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+}}
+
+_install_lm_eval_deps() {{
+    # {_LM_EVAL_ONCE_SENTINEL}: local tests share one Python environment, and a reinstall racing
+    # another test's eval breaks it; install once per environment and lm-eval revision, under a lock.
+    local prefix marker lock
+    prefix="$(python3 -c 'import sys; print(sys.prefix)' 2>/dev/null)" || prefix=unknown
+    marker="$prefix/.hyperloom-lm-eval-{ref}"
+    lock="$marker.lock"
+    touch "$lock" 2>/dev/null || lock="/tmp/hyperloom-lm-eval-{ref}.lock"
+    if ! command -v flock >/dev/null 2>&1; then
+        {_LM_EVAL_UNLOCKED_FN}
+        return 0
+    fi
+    (
+        flock 9
+        if {LM_EVAL_READY_FN}; then
+            echo "hyperloom: $(date -u +%FT%TZ) lm-eval {ref} is installed for $prefix; not installing it again" >&2
+            exit 0
+        fi
+        echo "hyperloom: $(date -u +%FT%TZ) installing lm-eval {ref} for $prefix" >&2
+        {_LM_EVAL_UNLOCKED_FN}
+        if python3 -c 'import lm_eval' 2>/dev/null; then
+            touch "$marker" 2>/dev/null || touch "$({_LM_EVAL_SPARE_MARKER_FN} "$prefix")" 2>/dev/null ||
+                echo "hyperloom: no marker for lm-eval {ref} could be written; the next call installs it again" >&2
+        fi
+        echo "hyperloom: $(date -u +%FT%TZ) the lm-eval install ended" >&2
+    ) 9>"$lock"
+}}
+"""
+
+
+def _apply_lm_eval_install_once_patch_atomic(benchmark_lib: Path) -> bool:
+    """Make InferenceX's ``benchmark_lib.sh::_install_lm_eval_deps`` install once per Python environment, under a
+    lock. Remove once every test runs in a pod of its own."""
+    try:
+        original = benchmark_lib.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", benchmark_lib, e)
+        return False
+    if _LM_EVAL_ONCE_SENTINEL in original:
+        return True
+    found = _LM_EVAL_DEPS_FN_RE.search(original)
+    if found is None:
+        log.warning(
+            "_magpie_patcher: _install_lm_eval_deps not found in %s; parallel local tests may reinstall lm-eval "
+            "under each other's evals",
+            benchmark_lib,
+        )
+        return False
+    ref = _LM_EVAL_REF_RE.search(found.group(0))
+    unlocked = found.group(0).replace("_install_lm_eval_deps() {", f"{_LM_EVAL_UNLOCKED_FN}() {{", 1)
+    wrapper = _lm_eval_once_wrapper(ref.group(1) if ref else "unpinned")
+    patched = original[: found.start()] + unlocked + wrapper + original[found.end() :]
+    if not atomic_write_text(benchmark_lib, patched, log_prefix="_magpie_patcher"):
+        return False
+    log.info("_magpie_patcher: patched %s to install lm-eval once per environment", benchmark_lib)
+    return True
+
+
 def _script_dirs(magpie_dir: Path | str | None, inferencex_dir: Path | str | None) -> Iterator[Path]:
     """The benchmark script directories to patch, each yielded once.
 
@@ -382,13 +462,26 @@ def live_eval_concurrency_flag_scripts(
     return hits
 
 
+def ensure_lm_eval_install_once(inferencex_dir: Path | str | None = None) -> bool:
+    """Patch the InferenceX checkout's lm-eval install to run once per environment; whether it now does."""
+    benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
+    if benchmark_lib is None:
+        return False
+    with best_effort_file_lock(_LOCK_PATH, label="_magpie_patcher"):
+        return _apply_lm_eval_install_once_patch_atomic(benchmark_lib)
+
+
 def ensure_eval_concurrency_compat(
     magpie_dir: Path | str | None = None,
     inferencex_dir: Path | str | None = None,
 ) -> bool:
-    """Public, run-time-safe entry point for the eval-concurrency fixes."""
+    """Public, run-time-safe entry point for the eval-concurrency fixes; on the same sweep it makes the lm-eval
+    install run once per environment, which does not ride on the result."""
     with best_effort_file_lock(_LOCK_PATH, label="_magpie_patcher"):
         applied_ok = _apply_eval_concurrency_fixes(magpie_dir, inferencex_dir)
+        benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
+        if benchmark_lib is not None:
+            _apply_lm_eval_install_once_patch_atomic(benchmark_lib)
         return _eval_concurrency_unblocked(applied_ok, magpie_dir, inferencex_dir)
 
 
@@ -593,6 +686,8 @@ __all__ = [
     "atomic_write_text",
     "client_tokenizer_hook_installed",
     "ensure_eval_concurrency_compat",
+    "ensure_lm_eval_install_once",
+    "LM_EVAL_READY_FN",
     "ensure_client_trust_compat",
     "live_eval_concurrency_flag_scripts",
     "magpie_scripts_patch_status",

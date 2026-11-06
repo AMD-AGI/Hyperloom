@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.env import env_bool
+from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 
 #: Below ``DEBUG`` because every recorder write emits an event.
@@ -182,7 +182,7 @@ def trace_write(write: WriteTrace) -> None:
         if write.error is not None:
             fields.append(f"error={type(write.error).__name__}:{_short(write.error)}")
         _emit(fields)
-    except Exception:
+    except (TypeError, ValueError):
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 
@@ -211,7 +211,7 @@ def trace_skip(
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
         _emit(fields)
-    except Exception:
+    except (TypeError, ValueError):
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 

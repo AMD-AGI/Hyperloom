@@ -50,14 +50,11 @@ def _noop_disk(*a, **kw):
 
 
 class FakeIsolation:
-    """Replaces isolation.prepare_repo_cache + prepare_candidate_workspace."""
+    """Replaces isolation.prepare_candidate_workspace."""
 
     def __init__(self, worktree_dir: Path, venv_dir: Path):
         self.worktree_dir = worktree_dir
         self.venv_dir = venv_dir
-
-    def prepare_repo_cache(self, repo_url, work_dir):
-        return self.worktree_dir
 
     def prepare_candidate_workspace(self, candidate, *, repo_url, work_dir, index):
         self.venv_dir.mkdir(parents=True, exist_ok=True)
@@ -108,7 +105,6 @@ def _patch_aiter_isolation(monkeypatch, tmp_path):
 
     monkeypatch.setattr(iso_mod, "_run_git", lambda *a, **kw: None)
     monkeypatch.setattr(iso_mod, "_run_subprocess", lambda *a, **kw: None)
-    monkeypatch.setattr(iso_mod, "prepare_repo_cache", fake.prepare_repo_cache)
     monkeypatch.setattr(iso_mod, "prepare_candidate_workspace", fake.prepare_candidate_workspace)
     return worktree, venv
 
@@ -207,7 +203,6 @@ def _patch_isolation(monkeypatch, worktree, venv):
     monkeypatch.setattr(iso_mod, "_run_git", lambda *a, **kw: None)
     monkeypatch.setattr(iso_mod, "_run_subprocess", lambda *a, **kw: None)
     fake = FakeIsolation(worktree, venv)
-    monkeypatch.setattr(iso_mod, "prepare_repo_cache", fake.prepare_repo_cache)
     monkeypatch.setattr(iso_mod, "prepare_candidate_workspace", fake.prepare_candidate_workspace)
 
 
@@ -552,7 +547,8 @@ def test_driver_main_missing_plan_writes_error(tmp_path):
 # sgl-kernel
 
 
-def test_sgl_kernel_build_success(monkeypatch, tmp_path):
+def _build_sgl_kernel_on_rocm(monkeypatch, tmp_path):
+    """Build sgl-kernel from a worktree that already holds its extension, on a ROCm host."""
     wt = tmp_path / "worktree"
     (wt / "sgl-kernel").mkdir(parents=True)
     _sglang_python_dir(wt)
@@ -561,13 +557,17 @@ def test_sgl_kernel_build_success(monkeypatch, tmp_path):
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
 
-    result = run_sgl_kernel_build(
+    return run_sgl_kernel_build(
         _sgl_action(),
         str(tmp_path / "attempt"),
         run=_make_rocm_run(),
         git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
+
+
+def test_sgl_kernel_build_success(monkeypatch, tmp_path):
+    result = _build_sgl_kernel_on_rocm(monkeypatch, tmp_path)
     assert result.ok is True
     assert result.failure_class == "ok"
     assert result.installed_versions.get("arch") == "gfx950"
@@ -677,21 +677,7 @@ def test_sgl_kernel_import_probe_gate(monkeypatch, tmp_path):
 
 def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
     """sgl-kernel build must set runtime_python_exe and entrypoint_bin_dir."""
-    wt = tmp_path / "worktree"
-    (wt / "sgl-kernel").mkdir(parents=True)
-    _sglang_python_dir(wt)
-    (wt / "sgl-kernel" / "sgl_kernel_ext.so").write_bytes(b"\x7fELF")
-    venv = tmp_path / "venv"
-    (venv / "bin").mkdir(parents=True)
-    _patch_isolation(monkeypatch, wt, venv)
-
-    result = run_sgl_kernel_build(
-        _sgl_action(),
-        str(tmp_path / "attempt"),
-        run=_make_rocm_run(),
-        git=_make_git(),
-        disk_preflight_fn=_noop_disk,
-    )
+    result = _build_sgl_kernel_on_rocm(monkeypatch, tmp_path)
     assert result.ok is True
     assert result.runtime.runtime_python_exe
     assert result.runtime.entrypoint_bin_dir
@@ -1023,45 +1009,6 @@ def test_driver_main_routes_vllm_source(monkeypatch, tmp_path):
     assert rc == 0
 
 
-def test_driver_main_unknown_component_returns_failure(monkeypatch, tmp_path):
-    """A component not in the driver dispatcher returns failure without a real build."""
-    root = tmp_path / "attempt"
-    root.mkdir()
-    action = _vllm_action()
-    (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")
-
-    from hyperloom.orchestrator.enablement.runtime import targeted_build as tb
-
-    def _patched_driver(argv=None):
-        import argparse
-        from pathlib import Path as _Path
-
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--attempt-root", required=True)
-        args = parser.parse_args(argv)
-        root2 = _Path(args.attempt_root)
-        (root2 / "result.json").write_text(
-            json.dumps(
-                {
-                    "ok": False,
-                    "attempt_root": str(root2),
-                    "failure_class": "compile_error",
-                    "failure_summary": "no recipe for component 'unknown'",
-                    "error": "no recipe for component 'unknown'",
-                }
-            ),
-            encoding="utf-8",
-        )
-        return 1
-
-    monkeypatch.setattr(tb, "_driver_main", _patched_driver)
-
-    rc = tb._driver_main(["--attempt-root", str(root)])
-    assert rc == 1
-    data = json.loads((root / "result.json").read_text())
-    assert data["ok"] is False
-
-
 # Opt-in real ROCm compile (excluded from CI via -m 'not targeted_build_e2e')
 
 
@@ -1086,33 +1033,10 @@ def test_aiter_build_e2e_real_rocm(tmp_path):
         ref="",
         repo_url="https://github.com/ROCm/aiter",
         gpu_arch="gfx950",
-        max_jobs=8,
     )
     result = run_aiter_build(action, str(tmp_path / "e2e_attempt"))
     assert result.ok, f"e2e AITER build failed: {result.failure_class} - {result.failure_summary}"
     assert result.installed_versions.get("aiter_ref")
-
-
-def test_a_provision_result_round_trip_keeps_its_acquisition_identity():
-    """``resolved_ref`` and ``resolved_packages`` ARE the identity, not a cache of it.
-
-    ``to_state`` wrote both and ``from_state`` restored neither, so every
-    serialize/rehydrate cycle -- which is how this crosses a round boundary --
-    silently handed the recipe a pinned runtime it could no longer tell from an
-    unpinned one, and dropped the resolved package artifacts with it.
-    """
-    from hyperloom.orchestrator.enablement.runtime.stack_actions import ProvisionResult
-
-    original = ProvisionResult(
-        ok=True,
-        resolved_ref="c" * 40,
-        resolved_packages={"aiter": {"version": "0.1.4", "artifact_digest": "sha256:ab"}},
-    )
-
-    restored = ProvisionResult.from_state(original.to_state())
-
-    assert restored.resolved_ref == "c" * 40
-    assert restored.resolved_packages == {"aiter": {"version": "0.1.4", "artifact_digest": "sha256:ab"}}
 
 
 def test_a_requirement_string_still_resolves_to_its_distribution():
@@ -1202,7 +1126,7 @@ def _run_recipe(recipe, monkeypatch, tmp_path, *, stage, exc):
     if stage == "disk":
         disk = _raise
     elif stage == "workspace":
-        monkeypatch.setattr(iso_mod, "prepare_repo_cache", _raise)
+        monkeypatch.setattr(iso_mod, "prepare_candidate_workspace", _raise)
     elif stage == "constraints":
         run = _failing_on("named={'torch'", exc, run)
     elif stage == "build_requires":

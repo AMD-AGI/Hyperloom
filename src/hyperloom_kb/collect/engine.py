@@ -335,10 +335,11 @@ def _screen(mapping: CollectMapping, projected: _Projected) -> None:
                 path == item or path.startswith(f"{item}.") for item in free_text
             )
             for ref in value if isinstance(value, tuple) else (value,):
-                if isinstance(ref, FileRef):
-                    finding = find_sensitive_in_file(projected.files[ref.sha256], free_text=prose)
-                    if finding:
-                        raise _Skip(f"sensitive content in {path} file {ref.name}, {finding}")
+                if not isinstance(ref, FileRef):
+                    continue
+                finding = find_sensitive_in_file(projected.files[ref.sha256], free_text=prose)
+                if finding:
+                    raise _Skip(f"sensitive content in {path} file {ref.name}, {finding}")
     for ref in experience.raw_logs:
         finding = find_sensitive_in_file(projected.files[ref.sha256], free_text=True)
         if finding:

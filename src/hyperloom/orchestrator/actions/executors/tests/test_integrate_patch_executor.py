@@ -27,7 +27,7 @@ from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBe
 from hyperloom.orchestrator.actions.executors._patch_git import _git_apply, _git_apply_reverse
 from hyperloom.orchestrator.actions.executors._patch_sources import _resolve_framework_root, _resolve_patch_paths
 from hyperloom.orchestrator.actions.executors._integrate_enablement_gate import _is_git_tree
-from hyperloom.orchestrator.actions.executors._patch_git import _apply_patch_no_git
+from hyperloom.orchestrator.actions.executors._nogit_patch import _apply_patch_no_git
 from hyperloom.orchestrator.actions.executors._integrate_vocabulary import RESULT_BENCHED
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.common.bringup import LadderStage
@@ -139,7 +139,6 @@ def _stub_external_integrate_operations(monkeypatch):
     monkeypatch.setattr(integrate_bench, "run_grid", forbidden)
     monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", forbidden)
     monkeypatch.setattr(github, "pr_patches", forbidden)
-    monkeypatch.setattr(github, "fetch_raw_file", forbidden)
     monkeypatch.setattr(
         adapters,
         "get_adapter",
@@ -2833,7 +2832,7 @@ async def test_executor_refuses_an_unvetted_blob_without_invoking_git(tmp_path: 
         raise AssertionError("git apply was reached with an unvetted patch")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._patch_git._git_apply_collect_feedback",
+        "hyperloom.orchestrator.actions.executors._integrate_apply._git_apply_collect_feedback",
         _explode,
     )
 

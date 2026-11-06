@@ -277,6 +277,11 @@ def agent_dir(session_dir: Path, role: str) -> Path:
     return Path(session_dir) / "agents" / role
 
 
+#: ``<sd>/agents/resources.jsonl``, relative to the session directory: the agent runner's resource readings of each
+#: specialist's run and of the container, one JSON object a line.
+RESOURCES_RELATIVE_PATH = Path("agents") / "resources.jsonl"
+
+
 def agent_prompt_snapshot(session_dir: Path, role: str, *, macro_cycle: int, phase: str = "") -> Path:
     """Compute the path to the per-agent system-prompt snapshot.
 
@@ -366,19 +371,24 @@ def _prune_old_workdirs(root: Path, *, keep: int) -> None:
         return
     for stale in entries[: len(entries) - keep]:
         try:
-            for child in stale.rglob("*"):
-                if child.is_file():
-                    child.unlink(missing_ok=True)
-            for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
-                if child.is_dir():
-                    try:
-                        child.rmdir()
-                    except OSError:
-                        # Best-effort cleanup; the outer rmdir / next sweep retries.
-                        pass
-            stale.rmdir()
+            _remove_workdir(stale)
         except OSError:
             continue
+
+
+def _remove_workdir(stale: Path) -> None:
+    """Remove one workdir tree: its files first, then its directories deepest first."""
+    for child in stale.rglob("*"):
+        if child.is_file():
+            child.unlink(missing_ok=True)
+    for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
+        if child.is_dir():
+            try:
+                child.rmdir()
+            except OSError:
+                # Best-effort cleanup; the outer rmdir / next sweep retries.
+                pass
+    stale.rmdir()
 
 
 def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep: int) -> Path:
@@ -403,6 +413,7 @@ def failure_evidence_path(session_dir: Path, failure_id: str) -> Path:
 
 __all__ = [
     "BREAKDOWN_FILENAME",
+    "RESOURCES_RELATIVE_PATH",
     "allocate_turn_workdir",
     "agent_dir",
     "agent_mcp_setup_path",

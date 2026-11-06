@@ -57,6 +57,6 @@ def test_no_module_aliases_now_iso() -> None:
         found.extend(_bare_now_iso_aliases(path.read_text(encoding="utf-8"), relative.as_posix()))
     if found:
         pytest.fail(
-            "import now_iso from hyperloom.common.timeutil instead of aliasing it:\n  " + "\n  ".join(found),
+            "import now_iso from hyperloom_common.timeutil instead of aliasing it:\n  " + "\n  ".join(found),
             pytrace=False,
         )

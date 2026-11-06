@@ -330,6 +330,41 @@ def test_report_performance_without_validation_stamp_is_diagnostic_only(report_p
     assert "never validated" in rp._format_md(summary)
 
 
+STAR_LINK = "a star on https://github.com/AMD-AGI/Hyperloom"
+
+
+@pytest.mark.parametrize(
+    "stack_len,stored_gain,status,asks",
+    [
+        pytest.param(1, 20.0, "current", 1, id="current"),
+        pytest.param(2, 50.0, "stale", 0, id="stale"),
+        pytest.param(1, 50.0, "inconsistent", 0, id="inconsistent"),
+    ],
+)
+def test_report_asks_for_a_star_only_while_the_validated_gain_holds(
+    report_performance_state, stack_len, stored_gain, status, asks
+):
+    state = report_performance_state
+    state.optimization_stack = [{"action": "integrate"}] * stack_len
+    state.cumulative_gain_validated = stored_gain
+    summary = rp._build_summary_dict(state, {}, [])
+
+    assert summary["cumulative_validation_status"] == status
+    assert rp._format_md(summary).count(STAR_LINK) == asks
+    assert STAR_LINK not in json.dumps(summary)
+
+
+def test_report_without_a_validated_gain_does_not_ask_for_a_star(report_performance_state):
+    state = report_performance_state
+    state.cumulative_gain_validated = 0.0
+    state.cumulative_gain_validated_ts = ""
+    state.cumulative_gain_validated_stack_len = 0
+    summary = rp._build_summary_dict(state, {}, [])
+
+    assert summary["cumulative_validation_status"] == "unavailable"
+    assert STAR_LINK not in rp._format_md(summary)
+
+
 @pytest.mark.parametrize(
     "intvty,total,verdict,gain",
     [

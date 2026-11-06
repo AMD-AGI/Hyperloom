@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from hyperloom_common.timeutil import now_iso
+
 from . import __version__
 from .dense_shapes import MGrid
 from .router import RoutingEvidence, RoutingTarget
@@ -195,7 +197,13 @@ def _attempt_tier3(gaps: list, ctx: "TuneContext") -> "TuneResult | None":
                 output_dir,
                 target=Tier3Target(model_name=model_name, gpu=ctx.gpu_type, framework=ctx.framework),
                 retiming=(
-                    Retiming(adapter.make_baseline, adapter.make_dispatch, adapter.make_correctness, adapter.sync())
+                    Retiming(
+                        adapter.make_baseline,
+                        adapter.make_dispatch,
+                        adapter.write_table,
+                        adapter.make_correctness,
+                        adapter.sync(),
+                    )
                     if adapter
                     else None
                 ),
@@ -640,6 +648,7 @@ class TuneRequest:
     ) -> TuneContext:
         """The context every tuner starts from: this request on the resolved target and the usable shape inputs."""
         from .tuners.base import TuneContext
+        from .utils import visible_gpu_count
 
         return TuneContext(
             profile=profile,
@@ -648,7 +657,7 @@ class TuneRequest:
             conc=self.workload.conc,
             m_grid=MGrid(self.workload.m_grid),
             tokens=tokens,
-            mp=self.mp,
+            mp=self.mp if self.mp > 0 else visible_gpu_count(self.gpus.gpu_ids),
             output_dir=Path(self.output_dir),
             **dataclasses.asdict(self.bench),
             timeout_s=self.timeouts.timeout,
@@ -703,7 +712,7 @@ def run_tuning(request: TuneRequest) -> TuneReport:
 
     output_path = Path(request.output_dir)
     _setup_logging(output_path, request.verbose)
-    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    started_at = now_iso("seconds", z_suffix=True)
     start_time = time.time()
 
     try:

@@ -249,7 +249,6 @@ def test_extended_framework_runtime_lands_in_yaml(tmp_path):
     rt = FrameworkRuntime(
         bin_path="/attempt/bin",
         pythonpath_prefixes=(str(tmp_path / "pkg"),),
-        ld_library_path_prefix=("/attempt/lib",),
         runtime_env={"INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(tmp_path / "jit")},
         entrypoint_bin_dir="/attempt/console",
     )
@@ -264,6 +263,5 @@ def test_extended_framework_runtime_lands_in_yaml(tmp_path):
     with out_yaml.open(encoding="utf-8") as f:
         envs = yaml.safe_load(f)["benchmark"]["envs"]
     assert str(tmp_path / "pkg") in envs["PYTHONPATH"]
-    assert "/attempt/lib" in envs["LD_LIBRARY_PATH"]
     assert envs["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] == str(tmp_path / "jit")
     assert "/attempt/console" in envs["PATH"]

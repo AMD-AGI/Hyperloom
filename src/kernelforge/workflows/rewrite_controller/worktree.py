@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.workflows.rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
 from kernelforge.utils.git import GitError, git
@@ -217,6 +217,7 @@ def record_campaign_baseline(
                 sort_keys=True,
             )
             + "\n",
+            options=DURABLE,
         )
 
 

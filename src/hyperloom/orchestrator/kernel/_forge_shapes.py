@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
 
 from .gemm_shape_coverage import canonical_dtype, traced_gemm_shapes
 
@@ -37,13 +36,7 @@ def _is_forge_compatible_shapes_json(path: Path) -> bool:
         return False
 
 
-def _resolve_forge_shapes(
-    state,
-    session_dir: Path,
-    *,
-    require_fresh_profile: bool = False,
-    precision: str = "",
-) -> str:
+def _resolve_forge_shapes(state, *, precision: str = "") -> str:
     """Find TraceLens shapes JSON if available and in forge-compatible format.
 
     Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
@@ -59,9 +52,10 @@ def _resolve_forge_shapes(
     a bare ``[{M,N,K}]`` list carrying no dtype or provenance, so an artifact
     recorded for another dtype would otherwise be handed to the tuner ahead of
     correctly-scoped shapes. Artifacts stay the fallback for the unscoped case
-    and for when the trace yields nothing for this precision.
+    and for when the trace yields nothing for this precision. A profile that does
+    not match the active workload/config contributes nothing.
     """
-    if require_fresh_profile and not state.profile_trace_matches_workload():
+    if not state.profile_trace_matches_workload():
         log.info(
             "Forge GEMM shapes: latest TraceLens profile does not match the "
             "active workload/config; ignoring its shape artifacts"
@@ -94,11 +88,7 @@ def _resolve_forge_shapes(
     # Extract the GEMM shapes observed by the latest TraceLens analysis. Older
     # traces can describe a backend that is no longer active.
     def _extracted() -> str:
-        return _extract_gemm_shapes_from_candidates(
-            str(last_trace.get("candidates_path") or ""),
-            session_dir,
-            precision=precision,
-        )
+        return _extract_gemm_shapes_from_candidates(str(last_trace.get("candidates_path") or ""), precision=precision)
 
     if canonical_dtype(precision):
         scoped = _extracted()
@@ -113,7 +103,7 @@ def _resolve_forge_shapes(
     return _extracted()
 
 
-def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: Path, *, precision: str = "") -> str:
+def _extract_gemm_shapes_from_candidates(candidates_path_str: str, *, precision: str = "") -> str:
     """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes.
 
     Derives the GEMM dimensions actually observed during serving and writes a
@@ -175,90 +165,3 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
         out_path,
     )
     return str(out_path)
-
-
-def _path_is_existing_file(value: str) -> bool:
-    """Safe ``Path.is_file()`` that never raises on an over-long pathname.
-
-    A caller may hand us inline JSON content instead of a path; ``is_file()``
-    raises ``OSError(ENAMETOOLONG)`` on such input. Treat any OSError as
-    "not a file".
-    """
-    try:
-        return Path(value).is_file()
-    except OSError:
-        return False
-
-
-def _normalize_tokens(value: Any) -> str:
-    """Return a clean comma-separated token string for forge's ``--tokens``.
-
-    forge parses ``--tokens`` as ``int(t) for t in value.split(",")``, so accept
-    lists and bracketed strings and emit a bare comma-separated list.
-    """
-    if value in (None, ""):
-        return ""
-    if isinstance(value, (list, tuple)):
-        items = value
-    else:
-        text = str(value).strip().strip("[](){}")
-        if not text:
-            return ""
-        items = list(text.split(","))
-    out: list[str] = []
-    for it in items:
-        s = str(it).strip().strip("'\"")
-        if not s:
-            continue
-        try:
-            out.append(str(int(float(s))))
-        except (TypeError, ValueError):
-            continue
-    return ",".join(out)
-
-
-def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
-    """Return a usable shapes-JSON *file path*, materializing inline content.
-
-    Callers sometimes pass GEMM shapes as inline JSON in ``shapes_json`` instead
-    of a file path; forge treats it strictly as a path. Normalize here:
-
-    - existing file path -> returned unchanged
-    - list/dict, or a string that parses as JSON -> written to
-      ``<workspace>/forge_shapes.json`` and that path returned
-    - anything else (empty / unparseable / non-existent path) -> ""
-    """
-    if value in (None, ""):
-        return ""
-
-    # Already-parsed inline content.
-    if isinstance(value, (list, dict)):
-        parsed: Any = value
-    else:
-        text = str(value).strip()
-        if not text:
-            return ""
-        if _path_is_existing_file(text):
-            return text
-        # Inline JSON content (possibly Python-repr with single quotes).
-        if text[0] in "[{":
-            try:
-                parsed = json.loads(text)
-            except (json.JSONDecodeError, ValueError):
-                try:
-                    import ast
-
-                    parsed = ast.literal_eval(text)
-                except (ValueError, SyntaxError):
-                    return ""
-        else:
-            # Non-JSON string that is not an existing file.
-            return ""
-
-    try:
-        workspace.mkdir(parents=True, exist_ok=True)
-        out = workspace / "forge_shapes.json"
-        out.write_text(json.dumps(parsed), encoding="utf-8")
-        return str(out)
-    except (OSError, TypeError, ValueError):
-        return ""

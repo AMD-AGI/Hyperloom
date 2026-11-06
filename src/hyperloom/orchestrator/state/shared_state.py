@@ -15,11 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
-from hyperloom.common.coerce import first_text, to_float, to_int, to_str_list
-from hyperloom.common.env import env_bool
+from hyperloom_common.coerce import first_text, to_float, to_int, to_str_list
+from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import atomic_write_json
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
@@ -38,14 +38,16 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     total_tput_of,
 )
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.plugs import progress as _progress
-from hyperloom.common.jsonio import read_json_strict
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
+from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 
 from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from .failure_evidence import tail_excerpt
+from .retest_view import write_retest_view
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.budget import _BudgetStateMixin
 from ._shared_state.enablement_round import EnablementRound
@@ -399,6 +401,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
+    # The live leg's share of ``baseline_failure_streak``; ``begin_leg`` and every reset of the streak zero it.
+    baseline_failures_this_leg: int = 0
     baseline_arg_error_streak: int = 0
     # Signature of the last failure counted in ``baseline_failure_streak``; two in a row that match end the run.
     baseline_last_failure_signature: str = ""
@@ -448,14 +452,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap anchor from which ExploreExecutor derives
     # the overtime-kill deadline.
     baseline_runtime_sec: float = 0.0
-    # Baseline WARM measure-round wall-clock (client-only, no boot); anchors the explore overtime kill
-    # apples-to-apples.
+    # Baseline WARM measure-round wall-clock (client-only, no boot); anchors the explore overtime kill apples-to-apples.
     baseline_warm_runtime_sec: float = 0.0
     # Whether the baseline's hot pass was dropped because the budget could not cover it plus one variant to read
     # against it, leaving the cold pass's depressed figure as the anchor.
     baseline_measure_round_dropped: bool = False
-    # The benchmark's own share of the COLD round above, from the server-ready marker onward.
+    # The COLD round above from the server-ready marker onward (benchmark and accuracy eval), and that eval's own time.
     baseline_post_ready_runtime_sec: float = 0.0
+    baseline_eval_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     # Immutable measurement evidence captured with the current-best promotion.
     current_best_measurement: dict[str, Any] = field(default_factory=dict)
@@ -537,9 +541,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=now_iso)
     max_minutes: int = 0
-    # Absolute unix deadline for a bounded session. Stamped once from
-    # ``start_ts + max_minutes`` so a resume cannot reissue a full budget.
-    # ``0.0`` means unset or unbounded.
+    # Session budget: seconds charged by closed legs, plus the wall instant the live leg opened (``0.0`` between legs).
     elapsed_charged_sec: float = 0.0
     leg_anchor_unix: float = 0.0
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
@@ -1073,25 +1075,36 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         """Serialize this state to a plain JSON-compatible dict."""
         return asdict(self)
 
+    @property
+    def current_best_launch_args(self) -> str | None:
+        """The complete server args the current best was launched with, as a serving recipe.
+
+        Read from the promoted measurement's launch evidence: what the launch path composed from every layer --
+        reference recipe, operator ``--server-args``, the optimizer's delta -- where ``extra_server_args`` holds the
+        delta alone. ``None`` when that launch was not recorded.
+        """
+        evidence = ((self.current_best or {}).get("measurement") or {}).get("launch_evidence") or {}
+        launched = evidence.get("requested_server_args")
+        return None if launched is None else strip_benchmark_harness_flags(launched)
+
     def save(self, session_dir: Path) -> None:
         """Atomically write ``state.json`` (tmp file + ``os.replace``).
 
-        Serializes via :meth:`to_dict` and writes to a temp file in the
-        same directory before an atomic rename, so concurrent readers never
-        observe a partial blob. The temp file is cleaned up on failure.
+        Serializes via :meth:`to_dict` and writes to a temp file in the same directory before an atomic rename, so
+        concurrent readers never observe a partial blob; also writes the group-readable ``retest_view.json``.
 
         Charges the elapsed budget first, so every save is a durable record of
         spend and a leg that dies abruptly loses only the time since the last.
 
         Args:
-            session_dir (Path): The session root directory; created if it
-                does not already exist.
+            session_dir (Path): The session root directory; created if it does not already exist.
         """
         self.charge_elapsed()
         # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput`` so current_best has the latency metric.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
         atomic_write_json(path, self.to_dict())
+        write_retest_view(session_dir, self)
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -1105,10 +1118,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
             if cb:
                 from hyperloom.inference_optimizer import reference_script
 
+                launched = self.current_best_launch_args
                 text = reference_script.render_reference_script(
                     framework=str(self.framework or os.environ.get("FRAMEWORK", "sglang")),
                     launch=reference_script.LaunchSettings(
-                        server_args=str(cb.get("extra_server_args") or ""),
+                        server_args=str(cb.get("extra_server_args") or "") if launched is None else launched,
                         envs=dict(cb.get("extra_envs") or {}),
                         overlay_pythonpath=str(cb.get("final_overlay") or ""),
                         unset_envs=to_str_list(cb.get("unset_envs")),
@@ -1139,7 +1153,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
             from hyperloom.inference_optimizer.trace.langfuse_emitter import record_status as _lf_record_status
 
             _lf_record_status(session_dir, self._langfuse_status_summary())
-        except Exception:
+        except (TypeError, ValueError):
             log.debug("langfuse status mirror failed", exc_info=True)
 
     def _backfill_scriptable_latency(self) -> None:
@@ -1596,10 +1610,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         attempts_attr = f"{action}_attempts"
         last_attr = f"last_{action}"
         result = attempt.result or {}
-        metric_key, metric_kind = _KEY_METRIC_MAP.get(
-            action,
-            ("output_throughput", "output_throughput"),
-        )
+        metric_key, metric_kind = _KEY_METRIC_MAP[action]
         raw_metric = result.get(metric_key)
         try:
             key_metric: float | None = float(raw_metric) if isinstance(raw_metric, (int, float)) else None

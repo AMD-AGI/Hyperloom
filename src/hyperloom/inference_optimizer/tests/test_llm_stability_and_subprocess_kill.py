@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from hyperloom.common.llm_stability_env import apply_llm_stability_env
+from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
 from hyperloom.orchestrator.actions.executors._kernel_agent_tool import _run_subprocess, _tool_label
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 

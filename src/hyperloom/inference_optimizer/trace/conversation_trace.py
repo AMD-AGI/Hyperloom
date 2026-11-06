@@ -12,7 +12,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
 
-from hyperloom.common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import conversations_path
 from ._row_utils import call_key_fields, validate_closed_row
 from .llm_trace import VALID_COMPONENTS
@@ -83,12 +83,9 @@ def append_conversation(
         )
 
     # Second sink (opt-in): mirror conversation text to Langfuse live.
-    try:
-        from .langfuse_emitter import get_emitter
+    from .langfuse_emitter import get_emitter
 
-        get_emitter(session_dir).record_conversation(row)
-    except Exception:
-        log.debug("conversation_trace: langfuse mirror failed", exc_info=True)
+    get_emitter(session_dir).record_conversation(row)
 
 
 # The closed on-disk schema: every record field plus the write-time ``ts``.

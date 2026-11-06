@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import pytest
 
+from .conftest import make_mock_critic_coordinator
+
 # The measured Kimi-K3 numbers, kept as the fixture so a regression reproduces
 # the real false claim rather than an invented one.
 HL_AGENTIC_BASELINE_TOK_S = 168.998
@@ -37,25 +39,8 @@ FALSE_GAIN_PCT = ((GEAK_SYNTHETIC_TOK_S - HL_AGENTIC_BASELINE_TOK_S) / HL_AGENTI
 
 
 @pytest.fixture
-def coordinator(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
-
-    from .conftest import seed_target_analysis_marker
-
-    sd = _msd()
-    seed_target_analysis_marker(sd)
-    backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
-    }
-    return Coordinator(sd, backends=backends)
+def coordinator(session_dir):
+    return make_mock_critic_coordinator(session_dir)
 
 
 def _record(

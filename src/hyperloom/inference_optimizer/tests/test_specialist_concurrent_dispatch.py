@@ -38,7 +38,6 @@ async def _build_coord_with_capacity(
             "ROCR_VISIBLE_DEVICES",
             "HIP_VISIBLE_DEVICES",
             "CUDA_VISIBLE_DEVICES",
-            "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY",
             "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES",
         ):
             monkeypatch.delenv(_var, raising=False)
@@ -334,7 +333,6 @@ def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     from hyperloom.inference_optimizer import cli as cli_mod
     from hyperloom.orchestrator.policy import gate as policy_mod
 
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", raising=False)
     monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 4)
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()

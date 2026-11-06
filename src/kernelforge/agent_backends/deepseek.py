@@ -4,7 +4,7 @@
 """DeepSeek Harness Python SDK backend for Forge implementer sessions.
 
 The runtime layer (SDK loading, gateway environment, handshake, result
-normalization) is :mod:`hyperloom.common.deepseek_session`; this module adds
+normalization) is :mod:`hyperloom_common.llm.deepseek_session`; this module adds
 what Forge needs on top of it: the workspace guard, resumable sessions and a
 cache of live runtimes.
 """
@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import subprocess
 import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.deepseek_session import (
+from hyperloom_common.llm.deepseek_session import (
     DEEPSEEK_RUNTIME_MAPPING,
     DeepSeekSessionUnavailableError,
     HarnessLaunch,
@@ -29,8 +31,8 @@ from hyperloom.common.deepseek_session import (
     sdk_failures,
     start_harness,
 )
-from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL
-from hyperloom.common.reasoning_effort import (
+from hyperloom_common.llm.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL
+from hyperloom_common.llm.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
     harness_reasoning_effort,
@@ -43,7 +45,10 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from kernelforge.agent_backends.structured_output import schema_instruction
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+
+log = logging.getLogger(__name__)
 
 
 class DeepSeekHarnessBackendError(AgentProviderError):
@@ -109,6 +114,13 @@ def _harness_instructions(spec: AgentRunSpec) -> str:
         "that task is complete; do not continue open-ended exploration.\n"
     )
     return f"{runtime}\n## System instructions\n{spec.system_prompt}"
+
+
+def _with_answer_format(prompt: str, spec: AgentRunSpec) -> str:
+    """``prompt``, followed by the answer schema the harness cannot hold the session to itself."""
+    if spec.output_schema is None:
+        return prompt
+    return f"{prompt}\n\n{schema_instruction(spec.output_schema)}"
 
 
 def _normalize_run_result(result: Any, session_id: str) -> AgentRunResult:
@@ -389,8 +401,10 @@ class DeepSeekHarnessBackend:
         except Exception:
             # verify() restores the baseline itself before raising a rejection, so this second call only covers the
             # paths that fail before it gets there.
-            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
+            try:
                 guard.rollback()
+            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
+                log.warning("workspace rollback after a failed verify also failed", exc_info=True)
             raise
         result.file_changes = actual_changes
         result.target_edit_count = guard.count_target_edits()
@@ -404,7 +418,7 @@ class DeepSeekHarnessBackend:
             spec.progress_log.append("progress: not supported by deepseek backend")
         return await self._execute(
             spec=spec,
-            prompt=_harness_instructions(spec) + "\n\n## Task\n" + spec.user_prompt,
+            prompt=_with_answer_format(_harness_instructions(spec) + "\n\n## Task\n" + spec.user_prompt, spec),
             session_id=f"forge-{uuid.uuid4()}",
             usage=usage,
         )
@@ -421,7 +435,7 @@ class DeepSeekHarnessBackend:
             raise DeepSeekHarnessExecutionError("DeepSeek Harness resume requires a session ID")
         return await self._execute(
             spec=spec.resolved(self.runtime),
-            prompt=feedback,
+            prompt=_with_answer_format(feedback, spec),
             session_id=session_id,
             usage=usage,
         )

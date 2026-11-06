@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequenc
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from kernelforge.agent_backends import (
     AgentBackend,
@@ -21,16 +22,17 @@ from kernelforge.agent_backends import (
     watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.runtime import agent_runtime
+from kernelforge.agent_backends.structured_output import AgentAnswer, AnswerT, StructuredOutputError
 from kernelforge.config import Config
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.workflows.forge_loop.roles.agent_response import (
     AgentResponseIncompleteError,
     AgentResponseInfrastructureError,
+    validated_agent_answer,
     validated_agent_text,
 )
 from kernelforge.workflows.forge_loop.roles.contracts import (
     CaseEvidence,
-    DispatchIntent,
     DispatchPlan,
     EvidenceRef,
     LaneGround,
@@ -57,14 +59,17 @@ from kernelforge.workflows.forge_loop.roles.plan_prompts import (
     REVISION_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
 )
+from kernelforge.workflows.forge_loop.roles.plan_requests import (
+    PartitionAnswer,
+    dispatch_answer_model,
+    dispatch_payload,
+    revision_payloads,
+    synthesis_payload,
+)
 from kernelforge.workflows.forge_loop.roles.plan_critic import (
     PLAN_CRITIC_MAX_TURNS,
     PLAN_CRITIC_TIMEOUT_SEC,
     PlanCriticAgent,
-)
-from kernelforge.workflows.forge_loop.roles.structured_output import (
-    build_repair_prompt,
-    extract_json_object,
 )
 
 
@@ -93,18 +98,6 @@ def _phase_timer(
         yield
     finally:
         target[name] = target.get(name, 0.0) + (time.monotonic() - started_at)
-
-
-def _as_bool(value: object) -> tuple[bool, bool]:
-    """Read a JSON field that was asked for as a boolean and may not be one."""
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"true", "yes", "1"}:
-            return True, True
-        return False, text in {"false", "no", "0", ""}
-    if value is None or isinstance(value, bool):
-        return bool(value), True
-    return False, False
 
 
 _GLOBAL_EVIDENCE_KINDS = {
@@ -147,6 +140,14 @@ def _case_evidence_refs(case: CaseEvidence) -> dict[str, EvidenceRef]:
     return refs
 
 
+class _PartitionReading(NamedTuple):
+    """The lanes one partition answer divides the round into, the move it gave a lane, and what reading it found."""
+
+    grounds: list[LaneGround]
+    move: dict
+    notes: list[str]
+
+
 @dataclass(frozen=True)
 class _RevisedPlan:
     """One critic-directed revision plus how its session was obtained."""
@@ -154,6 +155,18 @@ class _RevisedPlan:
     text: str
     mode: str
     duration_sec: float
+
+
+@dataclass(frozen=True)
+class _RoundReview:
+    """What the plan critic made of a synthesized round: the plans it publishes and how they were reached."""
+
+    plans: list[str]
+    draft_plan: str
+    critic_outcome: PlanCriticOutcome
+    plan_revised: bool
+    executable: bool
+    diagnostics: dict
 
 
 @dataclass(frozen=True)
@@ -169,15 +182,15 @@ class _Turn:
     max_reasoning_effort: str = ""
     shared_prompt_prefix: str = ""
     on_response_started: Callable[[], None] | None = None
+    output_schema: type[AgentAnswer] | None = None
 
 
 _DISPATCH_SYSTEM_PROMPT = """\
 You are the read-only orchestration planner for an autonomous GPU-kernel search.
 
 Use only the supplied evidence. Do not edit files, run shell commands, alter
-measurement inputs, or present an inference as a profiler fact. Return one JSON
-object containing the specialist assignments. Do not use Markdown fences or add
-text outside the JSON object.
+measurement inputs, or present an inference as a profiler fact. Answer with the
+specialist assignments the round needs.
 """
 
 
@@ -221,145 +234,57 @@ class OrchestrationAgent:
         *,
         usage=None,
     ) -> DispatchPlan:
-        """Normalize probabilistic role/case intent into canonical assignments."""
+        """Bind the specialist roles and cases the planner asked for into canonical assignments."""
         if not definitions:
             raise ValueError("specialist definitions must not be empty")
-        ruling_guidance = (
-            "The latest Supervisor Ruling is the current planning authority and "
-            "overrides subjective recommendations or conclusions in historical "
-            "lesson records; objective measurements remain authoritative. "
-            if context.supervisor_guidance
-            else ""
+        model = dispatch_answer_model(tuple(sorted(definitions)), tuple(case.case_id for case in context.cases))
+        turn = _Turn(
+            _DISPATCH_SYSTEM_PROMPT,
+            json.dumps(dispatch_payload(context, definitions), indent=2, sort_keys=True),
+            output_schema=model,
         )
-        mode_guidance = (
-            "A latest Supervisor Ruling is present. Use that ruling to decide "
-            "whether this planning cycle should persist or diversify; the "
-            f"recorded search mode ({context.search_mode}) is background state."
-            if context.supervisor_guidance
-            else (
-                "Seek materially different mechanisms across scored cases."
-                if context.search_mode == "DIVERSIFY"
-                else "Target the strongest immediate canonical gain."
-            )
-        )
-        payload = {
-            "task": (
-                "Select the specialist roles needed for the supplied cases. "
-                "Assignments may overlap cases when independent expertise is "
-                "useful. Return role/case intent only; the framework binds "
-                "assignment IDs and exact evidence paths. " + ruling_guidance + mode_guidance
-            ),
-            "context": context.to_prompt_dict(),
-            "available_specialists": [definitions[role_id].to_dict() for role_id in sorted(definitions)],
-            "output_schema": {
-                "assignments": [
-                    {
-                        "role_id": "registered-role-id",
-                        "target_case_ids": ["case-id"],
-                        "reason": "Why this specialist is required",
-                    }
-                ],
-            },
-        }
-        raw_responses: list[str] = []
+        result = await self._run_result(context, turn, usage=usage)
         notes: list[str] = []
-        intents: tuple[DispatchIntent, ...] = ()
-        first = await self._run(
-            context,
-            _Turn(_DISPATCH_SYSTEM_PROMPT, json.dumps(payload, indent=2, sort_keys=True)),
-            usage=usage,
-            allow_incomplete=True,
-        )
-        raw_responses.append(first)
-        intents, parse_notes = self._parse_dispatch_intents(first)
-        notes.extend(parse_notes)
-        if not intents:
-            repair_prompt = build_repair_prompt(
-                label="dispatch intent",
-                original_response=first,
-                validation_error="no usable role/case intent",
-                output_schema=payload["output_schema"],
-            )
-            repaired = await self._run(
-                context, _Turn(_DISPATCH_SYSTEM_PROMPT, repair_prompt), usage=usage, allow_incomplete=True
-            )
-            raw_responses.append(repaired)
-            intents, parse_notes = self._parse_dispatch_intents(repaired)
-            notes.extend(parse_notes)
+        try:
+            requested = self._validated_answer(result, model, role=turn.role).assignments
+        except OrchestrationOutputError as error:
+            requested = []
+            notes.append(f"dispatch answer unusable: {error}")
         plan = self._bind_dispatch(
             context=context,
             definitions=definitions,
-            intents=intents,
+            requested=requested,
             notes=notes,
         )
         self.structured_output_diagnostics["dispatch"] = {
-            "raw_responses": raw_responses,
+            "answer": result.structured_output if result.structured_output is not None else result.text,
             "normalization_notes": list(plan.normalization_notes),
         }
         return plan
-
-    @staticmethod
-    def _parse_dispatch_intents(
-        text: str,
-    ) -> tuple[tuple[DispatchIntent, ...], tuple[str, ...]]:
-        notes: list[str] = []
-        try:
-            payload = extract_json_object(text, "dispatch intent")
-        except ValueError as error:
-            return (), (f"invalid dispatch JSON: {error}",)
-        raw_assignments = payload.get("assignments")
-        if not isinstance(raw_assignments, list):
-            return (), ("dispatch assignments were not a list",)
-        intents = []
-        for index, raw in enumerate(raw_assignments):
-            if not isinstance(raw, dict):
-                notes.append(f"dropped non-object assignment {index}")
-                continue
-            role_id = str(raw.get("role_id") or "").strip().lower()
-            raw_cases = raw.get("target_case_ids")
-            if isinstance(raw_cases, str):
-                raw_cases = [raw_cases]
-            case_ids = tuple(
-                dict.fromkeys(str(case_id).strip() for case_id in (raw_cases or []) if str(case_id).strip())
-            )
-            if not role_id:
-                notes.append(f"dropped assignment {index} without role_id")
-                continue
-            intents.append(
-                DispatchIntent(
-                    role_id=role_id,
-                    target_case_ids=case_ids,
-                    reason=str(raw.get("reason") or "").strip(),
-                )
-            )
-        return tuple(intents), tuple(notes)
 
     def _bind_dispatch(
         self,
         *,
         context: OrchestrationContext,
         definitions: Mapping[str, SpecialistDefinition],
-        intents: Sequence[DispatchIntent],
+        requested: Sequence,
         notes: list[str],
     ) -> DispatchPlan:
         case_evidence = {case.case_id: _case_evidence_refs(case) for case in context.cases}
         case_ids = tuple(case_evidence)
         merged: dict[str, dict[str, object]] = {}
-        for intent in intents:
-            if intent.role_id not in definitions:
-                notes.append(f"dropped unknown role {intent.role_id!r}")
-                continue
-            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in case_evidence]
+        for assignment in requested:
+            selected_cases = list(dict.fromkeys(assignment.target_case_ids))
             if not selected_cases:
                 selected_cases = list(case_ids)
-                notes.append(f"bound role {intent.role_id!r} to all scored cases")
-            if intent.role_id in merged:
-                notes.append(f"merged duplicate role {intent.role_id!r}")
-                current = merged[intent.role_id]["case_ids"]
+                notes.append(f"bound role {assignment.role_id!r} to all scored cases")
+            if assignment.role_id in merged:
+                notes.append(f"merged duplicate role {assignment.role_id!r}")
+                current = merged[assignment.role_id]["case_ids"]
                 selected_cases = list(dict.fromkeys([*current, *selected_cases]))
-            merged[intent.role_id] = {
+            merged[assignment.role_id] = {
                 "case_ids": selected_cases,
-                "reason": (intent.reason or f"Framework-assigned {intent.role_id} analysis"),
+                "reason": (assignment.reason.strip() or f"Framework-assigned {assignment.role_id} analysis"),
             }
 
         required_roles = len(definitions) if context.search_mode == "DIVERSIFY" else self.min_assignments
@@ -381,6 +306,19 @@ class OrchestrationAgent:
             ]
             notes.append(f"added missing cases to {first_role!r}: {', '.join(missing)}")
 
+        return DispatchPlan(
+            analysis_commit=context.analysis_commit,
+            assignments=self._bound_assignments(context, merged, case_evidence),
+            normalization_notes=tuple(notes),
+        )
+
+    @staticmethod
+    def _bound_assignments(
+        context: OrchestrationContext,
+        merged: Mapping[str, Mapping[str, object]],
+        case_evidence: Mapping[str, Mapping[str, EvidenceRef]],
+    ) -> tuple[SpecialistAssignment, ...]:
+        """One assignment per merged role, carrying the global, source-map and per-case evidence it reads."""
         global_refs = {
             reference.path: reference for reference in context.evidence_refs if reference.kind in _GLOBAL_EVIDENCE_KINDS
         }
@@ -404,11 +342,7 @@ class OrchestrationAgent:
                     reason=str(item["reason"]),
                 )
             )
-        return DispatchPlan(
-            analysis_commit=context.analysis_commit,
-            assignments=tuple(assignments),
-            normalization_notes=tuple(notes),
-        )
+        return tuple(assignments)
 
     async def _synthesize_optimization_plan_result(
         self,
@@ -428,58 +362,20 @@ class OrchestrationAgent:
         ]
         if not analyses:
             raise ValueError("no specialist analysis is available for synthesis")
-        failures = [outcome.to_dict() for outcome in specialists.outcomes if outcome.failure is not None]
-        search_guidance = (
-            "Use the latest Supervisor Ruling to choose whether immediate gain "
-            "or mechanism diversity is appropriate for this planning cycle."
-            if context.supervisor_guidance
-            else (
-                "Prioritize mechanisms that can produce the strongest immediate canonical gain."
-                if context.search_mode == "EXPLOIT"
-                else (
-                    "Prioritize meaningful mechanism diversity and cross-case "
-                    "headroom while keeping the resulting plan feasible."
-                )
-            )
+        payload = synthesis_payload(context, specialists, analyses)
+        turn = _Turn(
+            SYNTHESIS_SYSTEM_PROMPT,
+            json.dumps(payload, indent=2, sort_keys=True),
+            role="orchestration synthesis",
         )
-        ruling_guidance = (
-            "Honor the latest Supervisor Ruling over subjective conclusions in "
-            "historical lesson records, while preserving objective validation "
-            "and measurement facts. "
-            if context.supervisor_guidance
-            else ""
-        )
-        payload = {
-            "task": (
-                "Produce the optimization plan that the Implementer should execute. "
-                + ruling_guidance
-                + f"{search_guidance} Reconcile all specialist analyses into one "
-                "decision: select and sequence the most valuable compatible "
-                "work, explain critical trade-offs, and omit ideas that do not "
-                "justify their cost or risk. Do not merely summarize each "
-                "specialist in turn."
-            ),
-            "context": context.to_prompt_dict(),
-            "dispatch_plan": specialists.dispatch_plan.to_dict(),
-            "specialist_coverage": dict(specialists.coverage),
-            "specialist_analyses": analyses,
-            "specialist_failures": failures,
-        }
-        result = await self._run_result(
-            context,
-            _Turn(
-                SYNTHESIS_SYSTEM_PROMPT,
-                json.dumps(payload, indent=2, sort_keys=True),
-                role="orchestration synthesis",
-            ),
-            usage=usage,
-        )
+        result = await self._run_result(context, turn, usage=usage)
         return SynthesizedPlan(
             text=self._validated_text(
                 result,
                 role="orchestration synthesis",
             ),
             session_id=str(result.session_id or "").strip(),
+            system_prompt=turn.system_prompt,
         )
 
     async def synthesize_lane_plan_results(
@@ -509,17 +405,14 @@ class OrchestrationAgent:
 
         async def _lane(index: int, on_response_started: Callable[[], None] | None = None) -> SynthesizedPlan | None:
             prompt, shared = prompts[index]
-            result = await self._run_result(
-                context,
-                _Turn(
-                    LANE_SYNTHESIS_SYSTEM_PROMPT,
-                    prompt,
-                    role=f"orchestration lane {index + 1} synthesis",
-                    shared_prompt_prefix=shared,
-                    on_response_started=on_response_started,
-                ),
-                usage=usage,
+            turn = _Turn(
+                LANE_SYNTHESIS_SYSTEM_PROMPT,
+                prompt,
+                role=f"orchestration lane {index + 1} synthesis",
+                shared_prompt_prefix=shared,
+                on_response_started=on_response_started,
             )
+            result = await self._run_result(context, turn, usage=usage)
             text = self._validated_text(
                 result,
                 role=f"orchestration lane {index + 1} synthesis",
@@ -530,6 +423,7 @@ class OrchestrationAgent:
             return SynthesizedPlan(
                 text=text,
                 session_id=str(result.session_id or "").strip(),
+                system_prompt=turn.system_prompt,
                 ground=grounds[index].ground,
                 joint=grounds[index].joint,
                 fallback=grounds[index].fallback,
@@ -601,103 +495,47 @@ class OrchestrationAgent:
             )
         ]
 
-    def _parse_lane_grounds(self, response: str, *, lanes: int) -> tuple[list[LaneGround], dict, list[str]]:
-        """Read lane grounds and the round's cross-cutting move out of one answer."""
+    @staticmethod
+    def _lane_grounds(answer: PartitionAnswer, *, lanes: int) -> _PartitionReading:
+        """The lane grounds and the round's cross-cutting move one partition answer names."""
         notes: list[str] = []
-        try:
-            payload = extract_json_object(response, "round partition")
-        except ValueError as error:
-            return [], {"status": "unavailable"}, [str(error)]
-        raw = payload.get("lanes")
-        if not isinstance(raw, list):
-            return (
-                [],
-                {"status": "unavailable"},
-                ["partition response carried no lanes list"],
-            )
         grounds: list[LaneGround] = []
-        unreadable_joint: dict[int, object] = {}
-        for entry in raw:
-            if not isinstance(entry, dict):
-                notes.append("dropped a lane that was not an object")
-                continue
-            joint, joint_readable = _as_bool(entry.get("joint"))
+        for entry in answer.lanes:
             try:
                 ground = LaneGround(
                     lane_id=len(grounds) + 1,
-                    ground=str(entry.get("ground") or ""),
-                    reason=str(entry.get("reason") or ""),
-                    joint=joint,
-                    fallback=str(entry.get("fallback") or ""),
+                    ground=entry.ground,
+                    reason=entry.reason,
+                    joint=entry.joint,
+                    fallback=entry.fallback,
                 )
             except ValueError as error:
                 notes.append(f"dropped a lane: {error}")
                 continue
             grounds.append(ground)
-            if not joint_readable:
-                unreadable_joint[ground.lane_id] = entry.get("joint")
         # Before the move is read, so a move can never be recorded as owned by a lane the round is over its ceiling to
         # run.
         grounds = grounds[:lanes]
-        for ground in grounds:
-            if ground.lane_id in unreadable_joint:
-                notes.append(
-                    f"lane {ground.lane_id} answered joint with "
-                    f"{unreadable_joint[ground.lane_id]!r}, which is not a "
-                    "boolean, so it is read as not joint and keeps the narrow "
-                    "ground"
-                )
-            if ground.joint and not ground.fallback:
-                notes.append(
-                    f"lane {ground.lane_id} claims joint ground and named no "
-                    "fallback, so an abandoned joint step leaves it nothing to "
-                    "measure"
-                )
-        move, move_notes = self._parse_cross_cutting_move(payload, grounds)
-        return grounds, move, notes + move_notes
+        notes.extend(
+            f"lane {ground.lane_id} claims joint ground and named no fallback, so an abandoned joint step leaves it "
+            "nothing to measure"
+            for ground in grounds
+            if ground.joint and not ground.fallback
+        )
+        move = answer.cross_cutting_move
+        if not move.move.strip():
+            return _PartitionReading(
+                grounds, {"status": "missing"}, [*notes, "partition named no largest cross-cutting move"]
+            )
+        placed, placement_notes = OrchestrationAgent._placed_move(
+            move.move.strip(), move.lane_id, move.unassigned_reason.strip(), grounds
+        )
+        return _PartitionReading(grounds, placed, notes + placement_notes)
 
     @staticmethod
-    def _parse_cross_cutting_move(
-        payload: Mapping[str, object],
-        grounds: Sequence[LaneGround],
-    ) -> tuple[dict, list[str]]:
-        """Read the largest move that fits no one region, and who owns it."""
+    def _placed_move(move: str, lane_id: int, reason: str, grounds: Sequence[LaneGround]) -> tuple[dict, list[str]]:
+        """Record a named move as owned by the lane it names, or as unassigned with why."""
         notes: list[str] = []
-        raw = payload.get("cross_cutting_move")
-        reason = ""
-        lane_id: object = 0
-        if isinstance(raw, dict):
-            move = str(raw.get("move") or "").strip()
-            reason = str(raw.get("unassigned_reason") or "").strip()
-            lane_id = raw.get("lane_id")
-        elif isinstance(raw, str):
-            move = raw.strip()
-            if move:
-                notes.append("cross-cutting move came back as a string, which names a move and no lane to own it")
-        elif raw is None:
-            move = ""
-        else:
-            return (
-                {
-                    "status": "unreadable",
-                    "field": (
-                        f"cross_cutting_move came back as a {type(raw).__name__}, which no move can be read out of"
-                    ),
-                },
-                notes,
-            )
-        if not move:
-            return {"status": "missing"}, notes + ["partition named no largest cross-cutting move"]
-        if isinstance(lane_id, bool) or not isinstance(lane_id, (int, float, str)):
-            lane_id = 0
-        if isinstance(lane_id, float) and not lane_id.is_integer():
-            notes.append("cross-cutting move named a lane_id that is not a lane number")
-            lane_id = 0
-        try:
-            lane_id = int(lane_id)
-        except ValueError:
-            notes.append("cross-cutting move named a lane_id that is not a lane number")
-            lane_id = 0
         if 1 <= lane_id <= len(grounds):
             return (
                 {
@@ -734,66 +572,12 @@ class OrchestrationAgent:
     ) -> list[LaneGround]:
         """Decide, once and with every analysis in view, what each lane owns."""
         challenged = context.last_critic_verdict == "REPLACE"
-        system_prompt = PARTITION_SYSTEM_PROMPT + (PARTITION_CHALLENGER_BLOCK if challenged else "")
-        payload = {
-            "task": (
-                f"Divide this round into at most {lanes} lanes that would not "
-                "edit the same code. Name each lane's ground in files, "
-                "functions and mechanisms. Name the largest cross-cutting move "
-                "you found and either give it to a lane or say why no lane has "
-                "it."
-                + (" One lane validates the alternative the previous round's critic asked for." if challenged else "")
-            ),
-            "context": context.to_prompt_dict(),
-            "dispatch_plan": specialists.dispatch_plan.to_dict(),
-            "specialist_coverage": dict(specialists.coverage),
-            "specialist_analyses": [
-                {
-                    "assignment_id": outcome.assignment_id,
-                    "role_id": outcome.role_id,
-                    "analysis": outcome.content,
-                }
-                for outcome in specialists.analyses
-            ],
-            "output_schema": {
-                "lanes": [
-                    {
-                        "ground": ("The files, functions and mechanisms this lane owns and may edit"),
-                        "reason": "Why this is one session's worth of work",
-                        "joint": (
-                            "true when this lane owns a change together with "
-                            "the launch configuration that serves it, or a "
-                            "move no single region contains"
-                        ),
-                        "fallback": (
-                            "For a joint lane: the smaller change inside the "
-                            "same ground to land if the main step is abandoned"
-                        ),
-                    }
-                ],
-                "cross_cutting_move": {
-                    "move": ("The largest move the evidence supports that no single region contains"),
-                    "lane_id": ("The 1-based lane that owns it, or 0 if no lane does"),
-                    "unassigned_reason": ("Why no lane owns it, when no lane does"),
-                },
-            },
-        }
+        turn = self._partition_turn(context, specialists, lanes=lanes, challenged=challenged)
         with _phase_timer(self.phase_durations_sec, "partition"):
             try:
-                response = await self._run(
-                    context,
-                    _Turn(
-                        system_prompt,
-                        json.dumps(payload, indent=2, sort_keys=True),
-                        max_turns=ROUND_PARTITION_MAX_TURNS,
-                        timeout_sec=min(self.timeout_sec, ROUND_PARTITION_TIMEOUT_SEC),
-                        tools=False,
-                        max_reasoning_effort=ROUND_PARTITION_EFFORT_CEILING,
-                    ),
-                    usage=usage,
-                    allow_incomplete=True,
-                )
-                grounds, move, notes = self._parse_lane_grounds(response, lanes=lanes)
+                result = await self._run_result(context, turn, usage=usage)
+                answer = self._validated_answer(result, PartitionAnswer, role=turn.role)
+                grounds, move, notes = self._lane_grounds(answer, lanes=lanes)
             except (
                 OrchestrationInfrastructureError,
                 OrchestrationOutputError,
@@ -817,7 +601,7 @@ class OrchestrationAgent:
         elif move["status"] != "assigned":
             log.warning(
                 "round partition gave no lane its largest cross-cutting move: %s",
-                move.get("move") or move.get("field") or "the partition named none",
+                move.get("move") or "the partition named none",
             )
         unbacked = [ground.lane_id for ground in grounds if ground.joint and not ground.fallback]
         if unbacked:
@@ -839,6 +623,42 @@ class OrchestrationAgent:
         }
         return grounds
 
+    def _partition_turn(
+        self, context: OrchestrationContext, specialists: SpecialistRound, *, lanes: int, challenged: bool
+    ) -> _Turn:
+        """The tool-less partition turn asking for at most ``lanes`` lanes over every analysis of the round."""
+        system_prompt = PARTITION_SYSTEM_PROMPT + (PARTITION_CHALLENGER_BLOCK if challenged else "")
+        payload = {
+            "task": (
+                f"Divide this round into at most {lanes} lanes that would not "
+                "edit the same code. Name each lane's ground in files, "
+                "functions and mechanisms. Name the largest cross-cutting move "
+                "you found and either give it to a lane or say why no lane has "
+                "it."
+                + (" One lane validates the alternative the previous round's critic asked for." if challenged else "")
+            ),
+            "context": context.to_prompt_dict(),
+            "dispatch_plan": specialists.dispatch_plan.to_dict(),
+            "specialist_coverage": dict(specialists.coverage),
+            "specialist_analyses": [
+                {
+                    "assignment_id": outcome.assignment_id,
+                    "role_id": outcome.role_id,
+                    "analysis": outcome.content,
+                }
+                for outcome in specialists.analyses
+            ],
+        }
+        return _Turn(
+            system_prompt,
+            json.dumps(payload, indent=2, sort_keys=True),
+            max_turns=ROUND_PARTITION_MAX_TURNS,
+            timeout_sec=min(self.timeout_sec, ROUND_PARTITION_TIMEOUT_SEC),
+            tools=False,
+            max_reasoning_effort=ROUND_PARTITION_EFFORT_CEILING,
+            output_schema=PartitionAnswer,
+        )
+
     async def revise_optimization_plan(
         self,
         context: OrchestrationContext,
@@ -849,27 +669,7 @@ class OrchestrationAgent:
         usage=None,
     ) -> _RevisedPlan:
         """Revise one draft exactly once without rerunning specialists."""
-        revision_task = (
-            "Revise the draft into the final optimization plan. Address the critic's substantive concerns exactly once."
-        )
-        # A resume re-enters the lane's own synthesis session, which already holds the dispatch, every specialist
-        # analysis and the whole synthesis conversation.
-        resumed_payload = {
-            "task": revision_task,
-            "draft_plan": draft.text,
-            "critic_verdict": critic.verdict,
-            "critic_review": critic.review,
-        }
-        # The fresh-session fallback holds no prior context, so it genuinely needs the whole planning bundle to revise
-        # from.
-        fresh_payload = {
-            **resumed_payload,
-            "revision_instructions": REVISION_SYSTEM_PROMPT.strip(),
-            "context": context.to_prompt_dict(),
-            "dispatch_plan": specialists.dispatch_plan.to_dict(),
-            "specialist_coverage": dict(specialists.coverage),
-            "specialist_outcomes": [outcome.to_dict() for outcome in specialists.outcomes],
-        }
+        resumed_payload, fresh_payload = revision_payloads(context, specialists, draft, critic)
         session_id = str(draft.session_id or "").strip()
         timeout_sec = min(self.timeout_sec, PLAN_REVISION_TIMEOUT_SEC)
         started_at = time.monotonic()
@@ -877,7 +677,7 @@ class OrchestrationAgent:
             result = await self._resume_result(
                 context,
                 _Turn(
-                    REVISION_SYSTEM_PROMPT,
+                    draft.system_prompt,
                     "",
                     role="orchestration revision",
                     max_turns=PLAN_REVISION_MAX_TURNS,
@@ -913,28 +713,6 @@ class OrchestrationAgent:
             text=plan,
             mode=mode,
             duration_sec=time.monotonic() - started_at,
-        )
-
-    async def _run(
-        self,
-        context: OrchestrationContext,
-        turn: _Turn,
-        *,
-        usage,
-        allow_incomplete: bool = False,
-    ) -> str:
-        result = await self._run_result(context, turn, usage=usage)
-        text = str(result.text or "")
-        if allow_incomplete and (
-            str(result.end_reason or "").strip() in {"turn_cap", "timeout"}
-            or "[session ended with sdk error:" in text.lower()
-        ):
-            log.warning("orchestration dispatch returned an incomplete response; continuing through JSON repair")
-        return self._validated_text(
-            result,
-            role=turn.role,
-            allow_empty=True,
-            allow_incomplete=allow_incomplete,
         )
 
     async def _run_result(self, context: OrchestrationContext, turn: _Turn, *, usage) -> AgentRunResult:
@@ -1014,6 +792,7 @@ class OrchestrationAgent:
             protected_globs=["*"],
             shared_prompt_prefix=turn.shared_prompt_prefix,
             on_response_started=turn.on_response_started,
+            output_schema=turn.output_schema,
         )
 
     def _backend_supports_resume(self) -> bool:
@@ -1040,6 +819,15 @@ class OrchestrationAgent:
         except AgentResponseIncompleteError as error:
             raise OrchestrationOutputError(str(error)) from error
 
+    @staticmethod
+    def _validated_answer(result: AgentRunResult, model: type[AnswerT], *, role: str) -> AnswerT:
+        try:
+            return validated_agent_answer(result, model, role=role)
+        except AgentResponseInfrastructureError as error:
+            raise OrchestrationInfrastructureError(str(error)) from error
+        except (AgentResponseIncompleteError, StructuredOutputError) as error:
+            raise OrchestrationOutputError(str(error)) from error
+
 
 class OrchestrationService:
     """Coordinate dispatch, parallel specialists, and plan synthesis."""
@@ -1060,6 +848,7 @@ class OrchestrationService:
         self._specialist_pool = specialist_pool
         self._definitions = dict(definitions)
         self._plan_critic = plan_critic
+        self.has_plan_critic = plan_critic is not None
 
     async def run(
         self,
@@ -1073,6 +862,68 @@ class OrchestrationService:
         self._agent.phase_durations_sec = {}
         phase_durations = self._agent.phase_durations_sec
         run_started_at = time.monotonic()
+        specialists, diagnostics = await self._specialist_round(context, phase_durations, usage=usage)
+        dispatch_plan, specialist_outcomes = specialists.dispatch_plan, specialists.outcomes
+        any_succeeded = any(outcome.succeeded for outcome in specialist_outcomes)
+
+        synthesized_plans: list[SynthesizedPlan] = []
+        if any_succeeded:
+            try:
+                synthesized_plans = await self._agent.synthesize_lane_plan_results(
+                    context, specialists, lanes=lanes, usage=usage
+                )
+            except OrchestrationOutputError as error:
+                diagnostics["synthesis"] = {
+                    "status": "unavailable",
+                    "message": f"{type(error).__name__}: {error}",
+                }
+        # Whatever synthesis recorded on the way through, which the snapshot above was taken too early to hold.
+        diagnostics.update(self._agent.structured_output_diagnostics)
+        optimization_plan_executable = bool(synthesized_plans)
+        if synthesized_plans:
+            plans = [plan.text for plan in synthesized_plans]
+        else:
+            plans = [self._render_framework_plan(context, specialists)]
+        planned_lanes = len(plans)
+        draft_plan = ""
+        critic_outcome = None
+        plan_revised = False
+        # A round the loop sends for review is reviewed once a synthesis produced it, at any width.
+        if self._plan_critic is not None and context.review_plan and optimization_plan_executable:
+            review = await self._review_round(context, synthesized_plans, specialists, usage=usage)
+            diagnostics.update(review.diagnostics)
+            plans, draft_plan, critic_outcome = review.plans, review.draft_plan, review.critic_outcome
+            plan_revised, optimization_plan_executable = review.plan_revised, review.executable
+        elif self._plan_critic is not None:
+            status = "skipped_synthesis_unavailable" if context.review_plan else "skipped_not_requested"
+            diagnostics["plan_critic"] = {"status": status}
+        diagnostics["lanes"] = {
+            "requested": int(lanes),
+            "planned": planned_lanes,
+            # What the round actually hands to Implementer sessions, which is the number the round is billed for.
+            "published": len(plans),
+        }
+        diagnostics["phase_durations_sec"] = self._phase_durations(
+            phase_durations,
+            critic_outcome=critic_outcome,
+            revision_diagnostics=diagnostics.get("plan_revision"),
+            run_started_at=run_started_at,
+        )
+        return OrchestrationRunResult(
+            dispatch_plan=dispatch_plan,
+            specialist_outcomes=specialist_outcomes,
+            optimization_plan_executable=optimization_plan_executable,
+            structured_output_diagnostics=diagnostics,
+            optimization_plans=tuple(plans),
+            optimization_plan_draft=draft_plan,
+            plan_critic=critic_outcome,
+            plan_revised=plan_revised,
+        )
+
+    async def _specialist_round(
+        self, context: OrchestrationContext, phase_durations: MutableMapping[str, float], *, usage
+    ) -> tuple[SpecialistRound, dict]:
+        """Dispatch the round and run its specialists, with the diagnostics they recorded."""
         with _phase_timer(phase_durations, "dispatch"):
             dispatch_plan = await self._agent.plan_dispatch(
                 context,
@@ -1103,94 +954,64 @@ class OrchestrationService:
             raise OrchestrationInfrastructureError("specialist infrastructure failed before any analysis was produced")
         coverage = self._round_coverage(context.case_ids, dispatch_plan, specialist_outcomes)
         diagnostics["coverage"] = coverage
-        specialists = SpecialistRound(dispatch_plan, specialist_outcomes, coverage)
+        return SpecialistRound(dispatch_plan, specialist_outcomes, coverage), diagnostics
 
-        synthesized_plans: list[SynthesizedPlan] = []
-        if any_succeeded:
-            try:
-                synthesized_plans = await self._agent.synthesize_lane_plan_results(
-                    context, specialists, lanes=lanes, usage=usage
-                )
-            except OrchestrationOutputError as error:
-                diagnostics["synthesis"] = {
-                    "status": "unavailable",
-                    "message": f"{type(error).__name__}: {error}",
-                }
-        # Whatever synthesis recorded on the way through, which the snapshot above was taken too early to hold.
-        diagnostics.update(self._agent.structured_output_diagnostics)
-        optimization_plan_executable = bool(synthesized_plans)
-        if synthesized_plans:
-            plans = [plan.text for plan in synthesized_plans]
-        else:
-            plans = [self._render_framework_plan(context, specialists)]
-        planned_lanes = len(plans)
-        draft_plan = ""
-        critic_outcome = None
+    async def _review_round(
+        self,
+        context: OrchestrationContext,
+        synthesized_plans: list[SynthesizedPlan],
+        specialists: SpecialistRound,
+        *,
+        usage,
+    ) -> _RoundReview:
+        """Have the plan critic review every synthesized lane, then narrow and revise the round as it rules."""
+        diagnostics: dict = {}
         plan_revised = False
-        # Every round a synthesis produced is reviewed, at any width.
-        if self._plan_critic is not None and optimization_plan_executable:
-            critic_outcome = await self._plan_critic.review(
-                context=context,
-                drafts=synthesized_plans,
-                specialists=specialists,
+        executable = True
+        critic_outcome = await self._plan_critic.review(
+            context=context,
+            drafts=synthesized_plans,
+            specialists=specialists,
+            usage=usage,
+        )
+        diagnostics["plan_critic"] = critic_outcome.to_dict()
+        # Narrowing before revision, so the round does not spend a revision turn on a lane it has already decided
+        # not to run.
+        synthesized_plans, narrowing_diagnostics = self._narrow_round(
+            synthesized_plans,
+            critic_outcome=critic_outcome,
+            challenged=context.last_critic_verdict == "REPLACE",
+        )
+        plans = [plan.text for plan in synthesized_plans]
+        diagnostics["lane_narrowing"] = narrowing_diagnostics
+        # The draft the loop records is one of the plans that will run, so it is read after narrowing and before
+        # revision.
+        draft_plan = plans[0]
+        if critic_outcome.requires_revision:
+            revised, revision_diagnostics = await self._revise_round(
+                context,
+                synthesized_plans,
+                specialists,
+                critic_outcome=critic_outcome,
                 usage=usage,
             )
-            diagnostics["plan_critic"] = critic_outcome.to_dict()
-            # Narrowing before revision, so the round does not spend a revision turn on a lane it has already decided
-            # not to run.
-            synthesized_plans, narrowing_diagnostics = self._narrow_round(
-                synthesized_plans,
-                critic_outcome=critic_outcome,
-                challenged=context.last_critic_verdict == "REPLACE",
-            )
-            plans = [plan.text for plan in synthesized_plans]
-            diagnostics["lane_narrowing"] = narrowing_diagnostics
-            # The draft the loop records is one of the plans that will run, so it is read after narrowing and before
-            # revision.
-            draft_plan = plans[0]
-            if critic_outcome.requires_revision:
-                revised, revision_diagnostics = await self._revise_round(
-                    context,
-                    synthesized_plans,
-                    specialists,
-                    critic_outcome=critic_outcome,
-                    usage=usage,
-                )
-                plans = [plan.text for plan in revised]
-                # A fallback also rewrites the text, so what was revised is read from what the revision did, not from
-                # the text having changed.
-                plan_revised = revision_diagnostics["status"] in {
-                    "revised",
-                    "partially_revised",
-                }
-                if revision_diagnostics["status"] == "framework_fallback":
-                    optimization_plan_executable = False
-                diagnostics["plan_revision"] = revision_diagnostics
-        elif self._plan_critic is not None:
-            diagnostics["plan_critic"] = {
-                "status": "skipped_synthesis_unavailable",
+            plans = [plan.text for plan in revised]
+            # A fallback also rewrites the text, so what was revised is read from what the revision did, not from
+            # the text having changed.
+            plan_revised = revision_diagnostics["status"] in {
+                "revised",
+                "partially_revised",
             }
-        diagnostics["lanes"] = {
-            "requested": int(lanes),
-            "planned": planned_lanes,
-            # What the round actually hands to Implementer sessions, which is the number the round is billed for.
-            "published": len(plans),
-        }
-        diagnostics["phase_durations_sec"] = self._phase_durations(
-            phase_durations,
+            if revision_diagnostics["status"] == "framework_fallback":
+                executable = False
+            diagnostics["plan_revision"] = revision_diagnostics
+        return _RoundReview(
+            plans=plans,
+            draft_plan=draft_plan,
             critic_outcome=critic_outcome,
-            revision_diagnostics=diagnostics.get("plan_revision"),
-            run_started_at=run_started_at,
-        )
-        return OrchestrationRunResult(
-            dispatch_plan=dispatch_plan,
-            specialist_outcomes=specialist_outcomes,
-            optimization_plan_executable=optimization_plan_executable,
-            structured_output_diagnostics=diagnostics,
-            optimization_plans=tuple(plans),
-            optimization_plan_draft=draft_plan,
-            plan_critic=critic_outcome,
             plan_revised=plan_revised,
+            executable=executable,
+            diagnostics=diagnostics,
         )
 
     @staticmethod
@@ -1219,7 +1040,7 @@ class OrchestrationService:
     ) -> tuple[list[SynthesizedPlan], dict]:
         """Apply the review's per-lane width ruling to this round's drafts."""
         requested = list(critic_outcome.lane_drops)
-        notes = list(critic_outcome.narrowing_notes)
+        notes: list[str] = []
 
         joint_lanes = [index + 1 for index, draft in enumerate(drafts) if draft.joint]
 
@@ -1227,7 +1048,6 @@ class OrchestrationService:
             dropped_joint = sorted({drop.lane_id for drop in applied} & set(joint_lanes))
             return {
                 "status": status,
-                "block": critic_outcome.narrowing_status,
                 "planned": len(drafts),
                 "kept": len(drafts) - len(applied),
                 "dropped": [drop.to_dict() for drop in applied],
@@ -1250,7 +1070,7 @@ class OrchestrationService:
                     status,
                     len(drafts),
                 )
-            elif critic_outcome.narrowing_status != "not_asked":
+            elif len(drafts) > 1 and not critic_outcome.fail_open:
                 log.info(
                     "plan critic asked for no narrowing; the round publishes the %d lane(s) it planned",
                     len(drafts),
@@ -1258,8 +1078,7 @@ class OrchestrationService:
             return list(drafts), _diagnostics(status, [])
 
         if not requested:
-            # Nothing to apply.
-            return _kept_whole("not_requested" if not notes else "not_applied")
+            return _kept_whole("not_requested")
         if challenged:
             return _kept_whole(
                 "refused_challenger",
@@ -1394,29 +1213,36 @@ class OrchestrationService:
                 "duration_sec": duration_sec,
             }
         if len(drafts) == 1:
-            log.warning("orchestration revision failed; publishing a non-executable framework fallback")
-            return [
-                replace(
-                    drafts[0],
-                    text=render_critic_fallback(
-                        draft_plan=drafts[0].text,
-                        critic_review=critic_outcome.review,
-                        critic_verdict=critic_outcome.verdict,
-                    ),
-                )
-            ], {
-                "status": "framework_fallback",
-                "critic_verdict": critic_outcome.verdict,
-                "revision_mode": "framework_fallback",
-                "duration_sec": duration_sec,
-                "message": "; ".join(failures),
-            }
+            return self._framework_fallback_round(drafts[0], critic_outcome, duration_sec, failures)
         return revised, {
             "status": "partially_revised",
             "critic_verdict": critic_outcome.verdict,
             "lanes": len(revised),
             "unrevised_lanes": unrevised,
             "revision_mode": revision_mode,
+            "duration_sec": duration_sec,
+            "message": "; ".join(failures),
+        }
+
+    @staticmethod
+    def _framework_fallback_round(
+        draft: SynthesizedPlan, critic_outcome, duration_sec: float, failures: Sequence[str]
+    ) -> tuple[list[SynthesizedPlan], dict]:
+        """Replace a single lane whose revision failed with the non-executable critic fallback."""
+        log.warning("orchestration revision failed; publishing a non-executable framework fallback")
+        return [
+            replace(
+                draft,
+                text=render_critic_fallback(
+                    draft_plan=draft.text,
+                    critic_review=critic_outcome.review,
+                    critic_verdict=critic_outcome.verdict,
+                ),
+            )
+        ], {
+            "status": "framework_fallback",
+            "critic_verdict": critic_outcome.verdict,
+            "revision_mode": "framework_fallback",
             "duration_sec": duration_sec,
             "message": "; ".join(failures),
         }
@@ -1620,21 +1446,26 @@ def make_orchestration_service(
             max_parallel=len(specialist_agents),
         ),
         definitions=resolved_definitions,
-        plan_critic=(
-            PlanCriticAgent(
-                backend=critic_backend,
-                timeout_sec=min(
-                    effective_runtime.timeout_sec,
-                    PLAN_CRITIC_TIMEOUT_SEC,
-                ),
-                # Per plan; a round of several is several times the reading.
-                ceiling_sec=effective_runtime.timeout_sec,
-                max_turns=min(
-                    PLAN_CRITIC_MAX_TURNS,
-                    max(1, config.max_turns),
-                ),
-            )
-            if critic_backend is not None
-            else None
-        ),
+        plan_critic=_plan_critic_agent(critic_backend, effective_runtime.timeout_sec, config.max_turns),
+    )
+
+
+def _plan_critic_agent(critic_backend, timeout_sec: int, max_turns: int) -> PlanCriticAgent | None:
+    """The round's plan critic on its own backend, or None when the critic is disabled."""
+    return (
+        PlanCriticAgent(
+            backend=critic_backend,
+            timeout_sec=min(
+                timeout_sec,
+                PLAN_CRITIC_TIMEOUT_SEC,
+            ),
+            # Per plan; a round of several is several times the reading.
+            ceiling_sec=timeout_sec,
+            max_turns=min(
+                PLAN_CRITIC_MAX_TURNS,
+                max(1, max_turns),
+            ),
+        )
+        if critic_backend is not None
+        else None
     )

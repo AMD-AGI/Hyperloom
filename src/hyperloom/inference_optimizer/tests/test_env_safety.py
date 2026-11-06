@@ -116,6 +116,9 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
         "LLM_PROXY_API_KEY": "proxy-secret",
         "OPENAI_API_KEY": "openai-secret",
         "SAFE_API_KEY": "safe-secret",
+        "KB_STORE_TOKEN": "kb-secret",
+        "INFERENCE_OPTIMIZER_EXTRA_ENV": '{"KB_STORE_TOKEN": "kb-secret", "VLLM_ROCM_USE_AITER": "1"}',
+        "VLLM_ROCM_USE_AITER": "1",
         "HF_TOKEN": "model-download-token",
         "PATH": "/bin",
         "RUN_EVAL": "true",
@@ -123,6 +126,7 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
 
     assert common_env_safety.scrub_benchmark_process_env(env) is env
     assert env == {
+        "VLLM_ROCM_USE_AITER": "1",
         "HF_TOKEN": "model-download-token",
         "PATH": "/bin",
         "RUN_EVAL": "true",

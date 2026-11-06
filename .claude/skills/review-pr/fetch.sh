@@ -24,6 +24,7 @@ WORK="${2:-/tmp/hl-review-$PR}"
 EXPECTED_HEAD="${3:-}"
 EXPECTED_BASE_TIP="${4:-}"
 command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required"
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
 
 REPO="${HL_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}"
 [ -n "$REPO" ] || die "cannot resolve the repository: run inside a checkout or set HL_REPO=owner/name"
@@ -129,6 +130,8 @@ awk '
 ' "$WORK/diff.txt" > "$WORK/numstat.txt"
 cut -f3- "$WORK/numstat.txt" > "$WORK/files.txt"
 [ -s "$WORK/files.txt" ] || die "the diff names no changed path"
+python3 "$SKILL_DIR/risk.py" <(cat "$WORK/files.txt"; sed -n 's/^rename from //p' "$WORK/diff.txt") \
+  > "$WORK/risk.txt" || die "risk.py could not grade the changed paths"
 
 grep -E '(^|/)tests/' "$WORK/files.txt" > "$WORK/testfiles.txt" || : > "$WORK/testfiles.txt"
 
@@ -256,7 +259,7 @@ if [ "$LISTED_PRS" -lt "$OPEN_PRS" ]; then
 fi
 
 for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt netlines.txt commits.txt \
-  base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt skill.txt; do
+  base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt skill.txt risk.txt; do
   printf '%-16s %s line(s)\n' "$artifact" "$(wc -l < "$WORK/$artifact" | tr -d ' ')"
 done
 

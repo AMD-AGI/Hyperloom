@@ -14,8 +14,8 @@ import pytest
 
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.orchestrator.policy import gate as pol
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
-    PolicyDenied,
     PolicyGate,
     research_lane_ceiling,
 )
@@ -92,20 +92,9 @@ def test_gpu_specialist_ceiling_shared_state_invalid() -> None:
     assert gpu_specialist_ceiling(_SS()) == 0
 
 
-def test_gpu_specialist_ceiling_env(monkeypatch) -> None:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "5")
-    assert gpu_specialist_ceiling(None) == 5
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "bad")
-    assert gpu_specialist_ceiling(None) == 0
-
-
 # -- PolicyGate path helpers ----------------------------------------------
 def _gate(session_dir: Path | None = None) -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry(), session_dir=session_dir)
-
-
-def test_path_under_session_disabled_when_no_session_dir() -> None:
-    assert _gate(None)._path_under_session("/anything") is True
 
 
 def test_path_under_session_inside_and_escape(tmp_path: Path) -> None:

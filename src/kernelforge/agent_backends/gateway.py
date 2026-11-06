@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
-from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom_common.llm.llm_headers import parse_custom_headers
 
 __all__ = [
     "LlmGateway",

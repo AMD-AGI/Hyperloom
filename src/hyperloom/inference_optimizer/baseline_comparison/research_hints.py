@@ -14,10 +14,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from hyperloom.common import io as _common_io
-from hyperloom.common.coerce import to_float, to_unix
+from hyperloom_common import io as _common_io
+from hyperloom_common.coerce import to_float, to_unix
 from hyperloom.common.perf_metric import agentx_active
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.session import session_paths
 
 log = logging.getLogger("hyperloom.research_hints")

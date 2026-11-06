@@ -9,7 +9,7 @@ import os
 import sys
 from dataclasses import dataclass
 
-from hyperloom.common.gpu_identity import AMD_GPU_BOARDS, GpuBoard, board_named_in, gpu_board
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS, GpuBoard, board_named_in, gpu_board
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,8 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
     "mi300x": BoardPolicy(_MI300X_RUNNER, names_its_arch=True),
     "mi308x": BoardPolicy(_MI300X_RUNNER),
     "mi325x": BoardPolicy(_MI300X_RUNNER),
+    # The same gfx950 die as mi355x, so it runs mi355x's Magpie scripts; gfx950 alone still names mi355x.
+    "mi350x": BoardPolicy(_MI355X_RUNNER),
     "mi355x": BoardPolicy(_MI355X_RUNNER, names_its_arch=True),
     "r9700": BoardPolicy(_GFX12_RUNNER, targeted_build_validated=False, geak_identity_pinned=True),
     "radeon8060s": BoardPolicy(MagpieRunner("radeon8060s", frozenset())),

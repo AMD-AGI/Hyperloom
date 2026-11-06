@@ -12,8 +12,8 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS, checkpoint_format
-from hyperloom.common.coerce import optional_positive_int, to_int
+from hyperloom_common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS, checkpoint_format
+from hyperloom_common.coerce import optional_positive_int, to_int
 from hyperloom.common.model_paths import resolve_local_model_dir
 
 
@@ -89,6 +89,10 @@ def _load_model_max_position_embeddings(model_path: str) -> int | None:
             if isinstance(val, int) and val > 0:
                 return val
     return None
+
+
+#: Public name for packages outside ``inference_optimizer`` (export only).
+load_model_max_position_embeddings = _load_model_max_position_embeddings
 
 
 def _model_has_dual_chunk_attention(model_path: str) -> bool:

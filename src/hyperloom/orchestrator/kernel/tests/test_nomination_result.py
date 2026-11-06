@@ -39,7 +39,6 @@ def test_reads_every_declared_field() -> None:
                     snapshot_dir="/snap",
                     base_commit="abc123",
                     micro_speedup=1.4,
-                    write_paths=["/repo/a.py", " "],
                     env_flag="ZAYA_FUSED_A",
                 )
             ]
@@ -53,7 +52,6 @@ def test_reads_every_declared_field() -> None:
     assert patch.snapshot_dir == "/snap"
     assert patch.base_commit == "abc123"
     assert patch.micro_speedup == 1.4
-    assert patch.write_paths == ("/repo/a.py",)
     # The env flag gates the fused path; it has to survive parsing or the consumer queues a sibling that integrate
     # measures un-fused.
     assert patch.env_flag == "ZAYA_FUSED_A"
@@ -63,14 +61,6 @@ def test_env_flag_defaults_to_empty_for_a_self_activating_sibling() -> None:
     """A compile-pass sibling flips a default in source and carries no flag."""
     (patch,) = nres.parse_outcome(_envelope([_entry("a")])).patches
     assert patch.env_flag == ""
-
-
-def test_source_file_substitutes_for_target_file() -> None:
-    entry = _entry("a")
-    entry.pop("target_file")
-    entry["source_file"] = "/repo/a.py"
-    (patch,) = nres.parse_outcome(_envelope([entry])).patches
-    assert patch.target_file == "/repo/a.py"
 
 
 @pytest.mark.parametrize(
@@ -109,7 +99,6 @@ def test_duplicate_names_collapse_to_the_stronger_claim() -> None:
     (patch,) = outcome.patches
     assert patch.patch_path == "/out/strong.patch"
     assert [drop.reason for drop in outcome.dropped] == [nres.DROP_DUPLICATE_KERNEL_NAME]
-    assert outcome.dropped[0].raw["patch_path"] == "/out/weak.patch"
 
 
 def test_duplicate_order_does_not_change_the_winner() -> None:
@@ -161,30 +150,6 @@ def test_offering_patches_of_which_none_survive_is_not_a_clean_empty_outcome() -
     assert outcome.patches == ()
     assert len(outcome.dropped) == 2
     assert outcome.schema_error == "every one of the 2 offered patch entries was refused"
-
-
-def test_nomination_summary_is_read_when_present() -> None:
-    outcome = nres.parse_outcome(
-        _envelope([_entry("a")], nomination={"candidates_seen": 40, "resolved": 12, "selected": 1})
-    )
-    assert (outcome.candidates_seen, outcome.resolved, outcome.selected) == (40, 12, 1)
-
-
-def test_absent_summary_counts_as_zero() -> None:
-    outcome = nres.parse_outcome(_envelope([_entry("a")]))
-    assert (outcome.candidates_seen, outcome.resolved, outcome.selected) == (0, 0, 0)
-
-
-def test_unparsable_summary_counts_as_zero() -> None:
-    outcome = nres.parse_outcome(_envelope([_entry("a")], nomination={"candidates_seen": "many"}))
-    assert outcome.candidates_seen == 0
-
-
-def test_an_infinite_or_boolean_summary_count_reads_as_zero() -> None:
-    outcome = nres.parse_outcome(
-        _envelope([_entry("a")], nomination={"candidates_seen": float("inf"), "resolved": True, "selected": 1})
-    )
-    assert (outcome.candidates_seen, outcome.resolved, outcome.selected) == (0, 0, 1)
 
 
 def test_non_finite_speedup_sorts_last_without_crashing() -> None:

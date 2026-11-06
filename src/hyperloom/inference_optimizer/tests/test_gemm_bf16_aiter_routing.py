@@ -353,7 +353,6 @@ class TestForgeFrameworkRouting:
                 framework="vllm",
                 precision="bf16",
                 quant_type="none",
-                tunableop_input="",
                 aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=True),
             )
             == "vllm-aiter"
@@ -365,7 +364,6 @@ class TestForgeFrameworkRouting:
                 framework="vllm",
                 precision="bf16",
                 quant_type="none",
-                tunableop_input="",
                 aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=False),
             )
             == "vllm"
@@ -377,21 +375,8 @@ class TestForgeFrameworkRouting:
                 framework="vllm",
                 precision="fp8",
                 quant_type="blockscale",
-                tunableop_input="",
             )
             == "vllm-aiter"
-        )
-
-    def test_explicit_tunableop_input_wins(self):
-        assert (
-            vllm_aiter_routing._forge_framework_for_vllm(
-                framework="vllm",
-                precision="bf16",
-                quant_type="none",
-                tunableop_input="/tmp/untuned.csv",
-                aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=True),
-            )
-            == "vllm"
         )
 
     def test_sglang_is_untouched(self):
@@ -400,7 +385,6 @@ class TestForgeFrameworkRouting:
                 framework="sglang",
                 precision="bf16",
                 quant_type="none",
-                tunableop_input="",
                 aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=True),
             )
             == "sglang"
@@ -412,7 +396,6 @@ class TestForgeFrameworkRouting:
                 framework="vllm",
                 precision="fp8",
                 quant_type="per_token",
-                tunableop_input="",
                 aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=False),
             )
             == "vllm"
@@ -425,7 +408,6 @@ class TestForgeFrameworkRouting:
                     framework="vllm",
                     precision=precision,
                     quant_type="auto",
-                    tunableop_input="",
                     aiter_routing=vllm_aiter_routing.VllmAiterRouting(fused_moe=True),
                 )
                 == "vllm-aiter"
@@ -437,7 +419,6 @@ class TestForgeFrameworkRouting:
                 framework="vllm",
                 precision="mxfp4",
                 quant_type="auto",
-                tunableop_input="",
                 aiter_routing=vllm_aiter_routing.VllmAiterRouting(fused_moe=False),
             )
             == "vllm"
@@ -451,11 +432,9 @@ class TestTunableOpCaptureIsSkippedWhenRouted:
             framework="vllm-aiter",
             model_path=_model(tmp_path),
             supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-            dry_run=False,
         )
         assert shape_capture._vllm_dense_shape_capture_required(
             framework="vllm",
             model_path=_model(tmp_path),
             supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-            dry_run=False,
         )

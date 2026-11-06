@@ -89,6 +89,7 @@ from code_metrics_collect import (
     Units,
     complexipy_findings,
     directory_findings,
+    function_arg_findings,
     function_line_findings,
     jscpd_command,
     jscpd_findings,
@@ -316,6 +317,7 @@ def per_file_findings(root: Path, files: list[str], limits: dict[str, int], unit
     findings += radon_findings(root, files, limits["cyclomatic-complexity"], units)
     findings += complexipy_findings(root, files, limits["cognitive-complexity"], units)
     findings += function_line_findings(files, limits["function-lines"], units)
+    findings += function_arg_findings(files, limits["function-args"], units)
     findings += module_line_findings(root, files, limits["module-lines"])
     return findings
 

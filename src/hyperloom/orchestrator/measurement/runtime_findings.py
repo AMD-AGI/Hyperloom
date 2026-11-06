@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Pattern
 
 from hyperloom.common.failure_signature import CAPABILITY_DISABLED_PATTERNS
-from hyperloom.common.launch_log_evidence import engine_adjusted_settings_from_log
+from hyperloom.common.launch_log_evidence import LAUNCH_RECORD_FRAMEWORKS, engine_adjusted_settings_from_log
 from hyperloom.common.prompt_safety import flatten_for_prompt
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups
 
@@ -39,8 +39,6 @@ CORRECTNESS_FIX_RULES = frozenset(
     }
 )
 _EVIDENCE_MAX_CHARS = 300
-#: Frameworks whose launch record ``engine_adjusted_settings_from_log`` reads.
-_LAUNCH_RECORD_FRAMEWORKS = frozenset({"sglang", "vllm"})
 _AITER_MISS_MARKER = "not found tuned config"
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
 #: vLLM process, torch ``[rankN]:`` glog and vLLM logger prefixes; one trailing space only, so frames stay indented.
@@ -128,7 +126,7 @@ def _line_rules(framework: str) -> list[_LineRule]:
 
 def _applicable_rules(framework: str) -> list[str]:
     rules = [rule.rule_id for rule in _line_rules(framework)]
-    if framework in _LAUNCH_RECORD_FRAMEWORKS:
+    if framework in LAUNCH_RECORD_FRAMEWORKS:
         rules.append(_ENGINE_ADJUSTED)
     return [*rules, AITER_TUNED_MISS, _RUNTIME_TRACEBACK]
 
@@ -178,6 +176,34 @@ def _status_finding(rule_id: str, status: str, reason: str) -> dict[str, Any]:
     }
 
 
+def _apply_line_rules(line: str, line_rules: list[_LineRule], declared_env: Collection[str], hits: _Hits) -> None:
+    """Record the first matching pattern of every line rule that fires on ``line``."""
+    for rule in line_rules:
+        for pattern in rule.patterns:
+            match = pattern.search(line)
+            if match is not None:
+                subject = rule.subject(match)
+                if not rule.declared_only or subject in declared_env:
+                    hits.add(rule.rule_id, subject, line)
+                break
+
+
+def _track_traceback(line: str, traceback_line: str, hits: _Hits) -> str:
+    """Feed ``line`` to the open traceback, recording its exception line; return the traceback still open."""
+    if _TRACEBACK_MARKER in line:
+        return line
+    if not traceback_line:
+        return traceback_line
+    body = _LOG_PREFIX_RE.sub("", line.rstrip("\n"), count=1)
+    if not body or body[0].isspace():
+        return traceback_line
+    exception = _EXCEPTION_LINE_RE.match(body)
+    name = exception.group(1) if exception is not None else ""
+    if name.rsplit(".", 1)[-1] not in _SHUTDOWN_EXCEPTIONS:
+        hits.add(_RUNTIME_TRACEBACK, name, body)
+    return ""
+
+
 def _scan_lines(path: str, framework: str, declared_env: Collection[str], hits: _Hits) -> None:
     line_rules = _line_rules(framework)
     missed_shapes: set[tuple[int, int, int]] = set()
@@ -185,31 +211,13 @@ def _scan_lines(path: str, framework: str, declared_env: Collection[str], hits: 
     traceback_line = ""
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
-            for rule in line_rules:
-                for pattern in rule.patterns:
-                    match = pattern.search(line)
-                    if match is not None:
-                        subject = rule.subject(match)
-                        if not rule.declared_only or subject in declared_env:
-                            hits.add(rule.rule_id, subject, line)
-                        break
+            _apply_line_rules(line, line_rules, declared_env, hits)
             if _AITER_MISS_MARKER in line:
                 shapes, _ = parse_aiter_shape_lookups(line)
                 if shapes and not first_miss_line:
                     first_miss_line = line
                 missed_shapes |= shapes
-            if _TRACEBACK_MARKER in line:
-                traceback_line = line
-                continue
-            if traceback_line:
-                body = _LOG_PREFIX_RE.sub("", line.rstrip("\n"), count=1)
-                if not body or body[0].isspace():
-                    continue
-                exception = _EXCEPTION_LINE_RE.match(body)
-                name = exception.group(1) if exception is not None else ""
-                if name.rsplit(".", 1)[-1] not in _SHUTDOWN_EXCEPTIONS:
-                    hits.add(_RUNTIME_TRACEBACK, name, body)
-                traceback_line = ""
+            traceback_line = _track_traceback(line, traceback_line, hits)
     if traceback_line:
         hits.add(_RUNTIME_TRACEBACK, "", traceback_line)
     if missed_shapes:
@@ -227,32 +235,28 @@ def scan_server_log(path: str | None, framework: str, *, declared_env: Collectio
         "schema_version": 1,
         "framework": framework,
         "log_path": path or "",
-        "log_mtime": 0.0,
     }
     if not path:
         report["findings"] = [_status_finding(rule_id, UNKNOWN, "no_server_log") for rule_id in rules]
         return report
     hits = _Hits()
     try:
-        report["log_mtime"] = Path(path).stat().st_mtime
         _scan_lines(path, framework, declared_env, hits)
     except OSError as exc:
         reason = f"unreadable: {type(exc).__name__}"
         report["findings"] = [_status_finding(rule_id, UNKNOWN, reason) for rule_id in rules]
         return report
-    if framework in _LAUNCH_RECORD_FRAMEWORKS:
-        for name, change in engine_adjusted_settings_from_log(path, framework).items():
-            hits.add(_ENGINE_ADJUSTED, name, f"{name}: {change['requested']} -> {change['resolved']}")
+    for name, change in engine_adjusted_settings_from_log(path, framework).items():
+        hits.add(_ENGINE_ADJUSTED, name, f"{name}: {change['requested']} -> {change['resolved']}")
     report["findings"] = hits.findings(rules)
     return report
 
 
-def persist_runtime_findings(report: dict[str, Any], *, slot: Path) -> str:
+def persist_runtime_findings(report: dict[str, Any], *, slot: Path) -> None:
     """Write ``runtime_findings.json`` into the measurement slot."""
     slot.mkdir(parents=True, exist_ok=True)
     path = slot / RUNTIME_FINDINGS_FILE
     path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
-    return str(path)
 
 
 def _findings_path(measurement: Mapping[str, Any]) -> Path | None:

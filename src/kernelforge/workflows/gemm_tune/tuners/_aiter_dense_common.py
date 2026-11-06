@@ -13,16 +13,20 @@ import re
 import shutil
 import time
 from collections.abc import Sequence
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._chunks import ChunkBudget
+from ._dense_args import dense_tuner_args
+from ._dense_chunks import DenseRun, run_dense_chunks
+from ._timings import unmeasured_timings
 from .base import TuneContext, TuneResult, micro_metrics
 from ..aiter_graph_retime import RetimeTarget
 from ._graph_retime import retime_table
 from ._row_accuracy import RelNormFn, drop_inaccurate_rows, dropped_row_record
 from ._serve_safe import _SPLITK_FORWARDING_LIBTYPES, _fastest_serve_safe, _serve_safe_candidates, _SplitKLimit
-from ..script_probe import filter_args, probe_script
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess
 from .. import tune_robustness as _tr
 
@@ -98,33 +102,22 @@ def validate_dense_tuner_inputs(ctx: TuneContext, script_key: str, *, script_lab
     )
 
 
-# Mean measured cost of tuning one shape; used to size the shape list against the time budget rather than tuning a
-# list we cannot finish.
+# Mean measured cost of tuning one shape on one card; sizes only the first chunk (see ``_chunks``).
 _DEMAND_PER_SHAPE_COST_S = 74
 _DEMAND_PER_SHAPE_COST_THOROUGH_S = 420
 _DEMAND_RESERVE_S = 120
 _DEMAND_MAX_SHAPES_ENV = "FORGE_DEMAND_MAX_SHAPES"
 
 
-def _demand_budget(ctx: TuneContext) -> int:
-    """Total shapes the time budget affords, decode band included.
-
-    The caller splits this: the decode band is mandatory and is reserved first,
-    the request-ranked prefill tail claims what is left. Overrunning is not a
-    soft failure -- ``ctx.timeout_s`` is the subprocess deadline, and a dense
-    tuner killed at that deadline returns no candidate at all, so an
-    unaffordable shape list costs the prefill rows too.
-    """
+def _demand_budget(ctx: TuneContext) -> int | None:
+    """The operator's cap on the shapes to tune, decode band included; without one the deadline decides, chunk by chunk,
+    and the decode band is kept whole by the chunking instead (``_chunks.decode_band_units``)."""
     raw = os.environ.get(_DEMAND_MAX_SHAPES_ENV, "").strip()
     try:
         override = int(raw)
     except ValueError:
         override = 0
-    if override > 0:
-        return override
-    cost = _DEMAND_PER_SHAPE_COST_THOROUGH_S if getattr(ctx, "thorough", False) else _DEMAND_PER_SHAPE_COST_S
-    usable = max(int(getattr(ctx, "timeout_s", 0)) - _DEMAND_RESERVE_S, cost)
-    return max(1, usable // cost)
+    return override if override > 0 else None
 
 
 def _demand_input_csv(
@@ -158,7 +151,8 @@ def _demand_input_csv(
     if not ranked:
         return None
     budget = _demand_budget(ctx)
-    shapes = _demand_shapes_within_budget(ranked, compute_decode_m_values(ctx.conc, ctx.m_grid), budget)
+    decode_m = compute_decode_m_values(ctx.conc, ctx.m_grid)
+    shapes = ranked if budget is None else _demand_shapes_within_budget(ranked, decode_m, budget)
 
     out = work_dir / f"untuned_{tuner_name}_demand.csv"
     header = "M,N,K,q_dtype_w" if needs_q_dtype_w else "M,N,K"
@@ -172,12 +166,12 @@ def _demand_input_csv(
             fh.write(row + "\n")
     log.info(
         "%s: %d of %d ranked padded-M demand shapes (of %d distinct keys), leaving the decode band its share of "
-        "the %d-shape budget -> %s",
+        "the shape cap (%s) -> %s",
         tuner_name,
         len(shapes),
         len(ranked),
         entry.get("distinct_keys", 0),
-        budget,
+        budget or "none",
         out,
     )
     return _ensure_decode_m_coverage(out, ctx, work_dir, needs_q_dtype_w=needs_q_dtype_w)
@@ -259,6 +253,29 @@ def _decode_band_buckets(groups: Sequence[set[int]], decode_m: Sequence[int]) ->
     return [[m for m in decode_m if m not in tuned] for tuned in groups]
 
 
+def _decode_band_rows(
+    header: list[str],
+    idx: dict[str, int],
+    q_idx: int | None,
+    group_order: list[tuple[int, int, str]],
+    plan: list[list[int]],
+) -> tuple[list[str], int]:
+    """The CSV rows that fill each group's missing decode-band M, and how many groups needed any."""
+    additions: list[str] = []
+    uncovered = 0
+    for (n, k, q), buckets in zip(group_order, plan):
+        if not buckets:
+            continue
+        uncovered += 1
+        for bucket in buckets:
+            row = [""] * len(header)
+            row[idx["M"]], row[idx["N"]], row[idx["K"]] = str(bucket), str(n), str(k)
+            if q_idx is not None:
+                row[q_idx] = q
+            additions.append(",".join(row))
+    return additions, uncovered
+
+
 def _ensure_decode_m_coverage(
     csv: Path,
     ctx: TuneContext,
@@ -307,18 +324,7 @@ def _ensure_decode_m_coverage(
 
     decode_m = compute_decode_m_values(ctx.conc, ctx.m_grid)
     plan = _decode_band_buckets([group_m[key] for key in group_order], decode_m)
-    additions: list[str] = []
-    uncovered = 0
-    for (n, k, q), buckets in zip(group_order, plan):
-        if not buckets:
-            continue
-        uncovered += 1
-        for bucket in buckets:
-            row = [""] * len(header)
-            row[idx["M"]], row[idx["N"]], row[idx["K"]] = str(bucket), str(n), str(k)
-            if q_idx is not None:
-                row[q_idx] = q
-            additions.append(",".join(row))
+    additions, uncovered = _decode_band_rows(header, idx, q_idx, group_order, plan)
 
     if not additions:
         return csv
@@ -683,21 +689,25 @@ def _invoke_tuner(
     invocation: _tr.TunerInvocation,
     ctx: TuneContext,
     tuner_name: str,
-) -> tuple[int, str, str, Path | None]:
-    """Run the aiter tuner, per shape under isolation or once for the whole file.
+) -> DenseRun:
+    """Run the aiter tuner, per shape under isolation or in chunks the deadline sizes.
 
     Either way ``--timeout`` is injected so a faulting candidate is isolated by
     aiter instead of hanging the run.
     """
     if not _tr.is_isolation_enabled():
-        rc, stdout, stderr = run_subprocess(
-            invocation.command(),
-            cwd=invocation.aiter_root,
-            timeout_s=ctx.timeout_s,
-            log_file=invocation.work_dir / "tune.log",
-            env_override=_tr.compare_temp_env(),
+        from ..dense_shapes import compute_decode_m_values
+
+        thorough = getattr(ctx, "thorough", False)
+        budget = ChunkBudget(
+            time.time() + ctx.timeout_s,
+            ctx.mp,
+            _DEMAND_PER_SHAPE_COST_THOROUGH_S if thorough else _DEMAND_PER_SHAPE_COST_S,
+            _DEMAND_RESERVE_S,
+            time.time,
         )
-        return rc, stdout, stderr, None
+        decode_m = compute_decode_m_values(ctx.conc, ctx.m_grid)
+        return run_dense_chunks(invocation, budget, decode_m, run_subprocess)
     # Per-shape process isolation + provenance-keyed fault blocklist.
     blocklist = _tr.FaultBlocklist(
         getattr(ctx, "faulted_blocklist_path", None),
@@ -708,13 +718,15 @@ def _invoke_tuner(
             "tuner": tuner_name,
         },
     )
-    return _tr.run_isolated(
-        invocation,
-        _tr.IsolationGuard(
-            outer_timeout_s=ctx.timeout_s,
-            gpu_ids=_gpu_ids(ctx),
-            blocklist=blocklist,
-        ),
+    return DenseRun(
+        *_tr.run_isolated(
+            invocation,
+            _tr.IsolationGuard(
+                outer_timeout_s=ctx.timeout_s,
+                gpu_ids=_gpu_ids(ctx),
+                blocklist=blocklist,
+            ),
+        )
     )
 
 
@@ -845,65 +857,38 @@ class DenseTunerSpec:
     extra_args: tuple[str, ...] = ()
 
 
+def _failed_result(tuner_name: str, error: str, error_class: str) -> TuneResult:
+    """A failed run of ``tuner_name``."""
+    return TuneResult(tuner_name=tuner_name, status="failed", error=error, error_class=error_class)
+
+
 def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path) -> TuneResult:
     """Run an aiter dense GEMM tuner subprocess."""
     tuner_name, script_key = spec.tuner_name, spec.script_key
     script = find_tuner_script(script_key)
     if script is None:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=f"Tuner script not found for {script_key}",
-            error_class="script_missing",
-        )
+        return _failed_result(tuner_name, f"Tuner script not found for {script_key}", "script_missing")
 
-    # a8w8 and bpreshuffle need q_dtype_w column in CSV
     needs_q_dtype_w = tuner_name in ("a8w8", "a8w8_bpreshuffle")
     # Demand outranks every other shape source: it is the set of keys the runtime asked for and did not have.
     input_csv = _demand_input_csv(ctx, work_dir, tuner_name, needs_q_dtype_w=needs_q_dtype_w) or _resolve_input_csv(
         ctx, work_dir, needs_q_dtype_w=needs_q_dtype_w
     )
     if input_csv is None:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error="No input CSV or shapes JSON available",
-            error_class="input_missing",
-        )
+        return _failed_result(tuner_name, "No input CSV or shapes JSON available", "input_missing")
 
     tuned_csv = work_dir / f"tuned_{tuner_name}.csv"
     profile_csv = work_dir / f"profile_{tuner_name}.csv"
 
-    # Flags shared by every shape (everything except -i/-o). aiter --timeout is injected below to activate mp_tuner's
-    # per-candidate GPU-fault isolation.
-    base_args = [
-        "-o2",
-        str(profile_csv),
-        "--mp",
-        str(ctx.mp),
-        "--compare",
-        "--iters",
-        str(ctx.iters),
-        "--warmup",
-        str(ctx.warmup),
-        "--min_improvement_pct",
-        str(ctx.min_improvement_pct),
-        "-v",
-    ]
-    if spec.extra_args:
-        base_args.extend(spec.extra_args)
-
-    # Check the script's argparse surface before spending minutes on it.
-    filtered = filter_args(base_args, probe_script(script))
+    filtered = dense_tuner_args(script, ctx, profile_csv, spec.extra_args)
     if not filtered.ok:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=(
+        return _failed_result(
+            tuner_name,
+            (
                 f"{script} does not accept {', '.join(filtered.rejected_required)}; "
                 "without it the tuner has no candidates to search"
             ),
-            error_class="unsupported_argument",
+            "unsupported_argument",
         )
     base_args = filtered.args
 
@@ -911,27 +896,18 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
     run_start_time = time.time()
     deadline = run_start_time + ctx.timeout_s
 
-    rc, stdout, stderr, iso_candidate = _invoke_tuner(
+    run = _invoke_tuner(
         _tr.TunerInvocation(script, base_args, input_csv, tuned_csv, work_dir, aiter_root),
         ctx,
         tuner_name,
     )
+    rc, stdout, stderr, iso_candidate = run.rc, run.stdout, run.stderr, run.candidate
 
     if rc == 124:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=f"Tuning timed out after {ctx.timeout_s}s",
-            error_class="timeout",
-        )
+        return _failed_result(tuner_name, f"Tuning timed out after {ctx.timeout_s}s", "timeout")
 
     if rc != 0:
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=f"Tuner exited with code {rc}: {stderr[-500:]}",
-            error_class="subprocess_error",
-        )
+        return _failed_result(tuner_name, f"Tuner exited with code {rc}: {stderr[-500:]}", "subprocess_error")
 
     candidate = iso_candidate if iso_candidate is not None else _find_latest_candidate(tuner_name, run_start_time)
     artifact = str(candidate) if candidate else str(tuned_csv)
@@ -940,15 +916,43 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
         dest = work_dir / f"candidate_{tuner_name}.csv"
         shutil.copy2(candidate, dest)
         artifact = str(dest)
+    unmeasured = unmeasured_timings(profile_csv, Path(artifact))
+    if unmeasured:
+        return _failed_result(tuner_name, unmeasured, "unmeasured_timings")
 
+    output = _TunerRunOutput(
+        stdout, stderr, artifact, profile_csv, run_start_time, deadline, run.expected_shapes, run.shortfall
+    )
+    return _tuned_result(spec, ctx, work_dir, output)
+
+
+@dataclass(frozen=True)
+class _TunerRunOutput:
+    """What one tuner run left: its output streams, the artifact to deploy, its timing window, and the shapes it was
+    given with why part of them never got a finished chunk."""
+
+    stdout: str
+    stderr: str
+    artifact: str
+    profile_csv: Path
+    run_start_time: float
+    deadline: float
+    expected_shapes: int
+    shortfall: str
+
+
+def _tuned_result(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path, run: _TunerRunOutput) -> TuneResult:
+    """Cap, accuracy-filter and summarize the run's artifact into the tuner's result."""
+    tuner_name, script_key = spec.tuner_name, spec.script_key
+    artifact, profile_csv = run.artifact, run.profile_csv
     limit = _serve_safe_limit(script_key, ctx)
     force_candidate = _apply_splitk_cap(artifact, profile_csv, limit, script_key=script_key)
 
     shape_results = _shape_results_for_run(
-        stdout,
-        stderr,
+        run.stdout,
+        run.stderr,
         tuner_name=tuner_name,
-        run_start_time=run_start_time,
+        run_start_time=run.run_start_time,
         work_dir=work_dir,
     )
 
@@ -957,11 +961,10 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
     accuracy = drop_inaccurate_rows(Path(artifact), limit.rel_norm)
     if not accuracy.completed:
         # An unfiltered table is a table whose wrong rows are still in it, and this artifact is what gets deployed.
-        return TuneResult(
-            tuner_name=tuner_name,
-            status="failed",
-            error=f"aiter's accuracy figures were not applied to {artifact}: {accuracy.reason}",
-            error_class="accuracy_filter_incomplete",
+        return _failed_result(
+            tuner_name,
+            f"aiter's accuracy figures were not applied to {artifact}: {accuracy.reason}",
+            "accuracy_filter_incomplete",
         )
     if accuracy.dropped:
         shape_results = _forget_shapes_that_lost_their_row(shape_results, accuracy.dropped)
@@ -977,9 +980,10 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
 
     summary = _summarize_shape_results(shape_results)
 
-    return TuneResult(
+    result = TuneResult(
         tuner_name=tuner_name,
         status=summary["status"],
+        expected_shapes=run.expected_shapes,
         artifact_path=artifact,
         env_var=spec.env_var,
         env_value=artifact,
@@ -991,8 +995,19 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
         candidate=force_candidate,
         shape_results=shape_results,
         dropped_inaccurate=[dropped_row_record(r) for r in accuracy.dropped],
-        graph_retime=retime_table(artifact, profile_csv, limit, RetimeTarget(script_key, _gpu_ids(ctx), deadline)),
+        graph_retime=retime_table(artifact, profile_csv, limit, RetimeTarget(script_key, _gpu_ids(ctx), run.deadline)),
     )
+    return _with_shortfall(result, run.shortfall)
+
+
+def _with_shortfall(result: TuneResult, shortfall: str) -> TuneResult:
+    """A run that left shapes without a finished chunk is partial, whatever the shapes it did tune show."""
+    if not shortfall:
+        return result
+    log.warning(
+        "%s: %d of %d shape(s) tuned; %s", result.tuner_name, result.total_shapes, result.expected_shapes, shortfall
+    )
+    return dataclasses.replace(result, status="partial_output", error=shortfall, error_class="partial_output")
 
 
 def _forget_shapes_that_lost_their_row(
@@ -1187,6 +1202,12 @@ def _cap_splitk_to_serve_safe(
     if changed:
         with artifact_csv.open("w", newline="") as f:
             csv.writer(f).writerows(out)
+    _warn_unforwarded_splitk(dropped_unforwarded, forwarding_libtypes)
+    return changed, has_splitk
+
+
+def _warn_unforwarded_splitk(dropped_unforwarded: int, forwarding_libtypes: frozenset[str]) -> None:
+    """Say how many rows lost a splitK their libtype's production wrapper cannot forward."""
     if dropped_unforwarded:
         log.warning(
             "splitK forwarding: %d row(s) carried splitK>0 on a libtype whose "
@@ -1196,7 +1217,6 @@ def _cap_splitk_to_serve_safe(
             dropped_unforwarded,
             sorted(forwarding_libtypes),
         )
-    return changed, has_splitk
 
 
 def _stem_matches(tuner_name: str, filename: str) -> bool:

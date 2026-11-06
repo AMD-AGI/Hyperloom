@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 from kernelforge.workflows.gemm_tune import moe_tuple
 
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
@@ -204,10 +204,9 @@ def canonical_dtype(raw: str) -> str:
 
     Both sides of the comparison spell the same dtype many ways: a tuning
     precision arrives as ``fp8`` / ``mxfp4``, while TraceLens renders whatever
-    the framework reported -- ``fp8_e4m3``, ``e4m3fnuz``, ``fp4x2``, and
-    ``_TRACE_DTYPE_SUFFIX`` in this repo emits ``f16`` for float16. Matching the
-    raw strings drops shapes that do belong to the tuned precision, so both are
-    folded onto a family first.
+    the framework reported -- ``fp8_e4m3``, ``e4m3fnuz``, ``fp4x2``,
+    ``torch.float16``. Matching the raw strings drops shapes that do belong to
+    the tuned precision, so both are folded onto a family first.
 
     Returns "" for anything unrecognised, which callers treat as "do not scope".
     """

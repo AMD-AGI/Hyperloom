@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.common.gain_math import incremental_gain_pct
-from hyperloom.common.coerce import (
+from hyperloom_common.coerce import (
     text_or_none as _text,
     to_float as _float_or_none,
     to_int as _int_or_none,

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common import entry_points as ep
+from hyperloom_common import entry_points as ep
 from hyperloom.plugs import Implementation, PlugError, PlugRegistry, Socket
 from hyperloom.plugs.builtin import builtin_registry
 

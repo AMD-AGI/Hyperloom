@@ -27,17 +27,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _silent_backends() -> dict[str, object]:
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {
-        "orchestration": MockBackend(silent, name="o"),
-        "critic": MockBackend(silent, name="c"),
-    }
+from .conftest import silent_backends
 
 
 @pytest.fixture
@@ -76,7 +66,7 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypatch, tmp_path):
     """Successful trace_analyze caches; an identical request short-circuits the handler."""
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
@@ -111,7 +101,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
             payload={
                 "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
-                "params": {"trace_input": "/tmp/trace-A.json.gz"},
+                "params": {"trace_input": str(session_dir / "trace-A.json.gz")},
             },
         )
         await c.router.handle_intent("orchestration", intent)
@@ -119,7 +109,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
 
         assert call_count["n"] == 1, "second identical request must hit the cache"
         cached = c.shared_state.last_trace_analyze
-        assert cached["trace_input"] == "/tmp/trace-A.json.gz"
+        assert cached["trace_input"] == str(session_dir / "trace-A.json.gz")
         assert cached["candidates_path"] == str(candidates_path)
         assert cached["hot_kernels_top15"][0]["kernel_id"] == "k001"
         assert "k001" in cached["reusable_native_kernel_ids"]
@@ -131,7 +121,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
                 payload={
                     "target_agent": "kernel_agent",
                     "kind": "trace_analyze",
-                    "params": {"trace_input": "/tmp/trace-B.json.gz"},
+                    "params": {"trace_input": str(session_dir / "trace-B.json.gz")},
                 },
             ),
         )
@@ -145,7 +135,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
 @pytest.mark.asyncio
 async def test_profile_promotion_records_args_and_clears_select_cache(session_dir):
     """A new profile clears the trace_analyze cache and stamps the server config."""
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         from hyperloom.orchestrator.state.task_registry import Task
 
@@ -181,7 +171,7 @@ async def test_profile_promotion_records_args_and_clears_select_cache(session_di
 
 @pytest.mark.asyncio
 async def test_profile_promotion_writes_last_profile_trace(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.save(session_dir)
@@ -207,7 +197,7 @@ async def test_profile_promotion_writes_last_profile_trace(session_dir):
 
 @pytest.mark.asyncio
 async def test_profile_trace_appears_in_prompt_summary(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         c.shared_state.last_profile_trace = "/abs/path/to/trace.json.gz"
         summary = c.shared_state.to_prompt_summary()
@@ -219,7 +209,7 @@ async def test_profile_trace_appears_in_prompt_summary(session_dir):
 @pytest.mark.asyncio
 async def test_profile_trace_dir_without_json_not_promoted(session_dir):
     """Empty trace_dir without .trace.json.gz must NOT be promoted."""
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         await c.writeback.promote_to_shared_state(
             "profile",
@@ -236,7 +226,7 @@ async def test_profile_trace_dir_without_json_not_promoted(session_dir):
 
 
 def _orchestration_turn(turn: MockTurn) -> dict[str, object]:
-    backends = _silent_backends()
+    backends = silent_backends()
     backends["orchestration"] = MockBackend(ScriptedPlan(turns=[turn]), name="o")
     return backends
 
@@ -252,7 +242,11 @@ async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch)
     monkeypatch.setitem(krh.KERNEL_REQUEST_HANDLERS, "trace_analyze", fake_handler)
     request = Intent(
         type=IntentType.REQUEST,
-        payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/t.json"}},
+        payload={
+            "target_agent": "kernel_agent",
+            "kind": "trace_analyze",
+            "params": {"trace_input": str(session_dir / "t.json")},
+        },
     )
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(intents=[request])))
     try:
@@ -311,7 +305,7 @@ async def test_failing_backend_keeps_each_inbox_page_within_budget(session_dir, 
     """Every failed turn adds to the unread inbox, yet each prompt renders one budgeted page of it."""
     monkeypatch.setattr(conversation, "_INBOX_PROMPT_CHARS", 1_000)
     failing = ScriptedPlan(turns=[MockTurn(raise_error=BackendError("Prompt is too long"))], loop_last=True)
-    backends = _silent_backends()
+    backends = silent_backends()
     backends["orchestration"] = MockBackend(failing, name="o")
     c = Coordinator(session_dir, backends=backends)
     try:
@@ -350,7 +344,7 @@ async def test_turn_consumes_only_the_inbox_page_it_rendered(session_dir, monkey
 @pytest.mark.asyncio
 async def test_failed_kernel_request_recorded_in_last_action_failures(session_dir):
     """A failed kernel request lands in the log the FAILURE RECOVERY block reads."""
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     try:
         await c.router.handle_intent(
             "orchestration",
@@ -370,7 +364,7 @@ async def test_integrate_deferred_when_lanes_busy(session_dir, monkeypatch):
     """An integrate request returns deferred (not failed) when the benchmark lanes are held."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     c.shared_state.baseline_tput = 800.0  # satisfy the execution_order gate
     try:
         # Hold the integrate lanes with an external holder.
@@ -391,7 +385,7 @@ async def test_integrate_deferred_when_lanes_busy(session_dir, monkeypatch):
                 payload={
                     "target_agent": "kernel_agent",
                     "kind": "integrate",
-                    "patch_path": "/tmp/fake.patch",
+                    "patch_path": str(session_dir / "fake.patch"),
                 },
             ),
         )
@@ -415,7 +409,7 @@ async def test_integrate_executes_and_releases_lanes_when_free(session_dir, monk
     """An integrate request acquires lanes, runs, and releases them."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
-    c = Coordinator(session_dir, backends=_silent_backends())
+    c = Coordinator(session_dir, backends=silent_backends())
     c.shared_state.baseline_tput = 800.0  # satisfy the execution_order gate
     try:
         lanes = list(ACTION_CATALOGUE["integrate"].requires_lanes)

@@ -117,6 +117,13 @@ class AttemptVerdictMixin:
                 kept=False,
             )
 
+        bench_result = await self._bench_attempt(benchmark_measurement)
+        self._observe_measurement(measurement_started)
+        self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
+        return await self._decide_iteration_keep(iteration, iter_start, report, bench_result)
+
+    async def _bench_attempt(self, benchmark_measurement: dict | None) -> dict:
+        """Reuse the session's own three-measurement benchmark when it still describes the tree, else measure it."""
         if benchmark_measurement is not None and self._can_reuse_insession_benchmark(
             benchmark_measurement,
             attempt_diff=self._working_tree_diff(),
@@ -131,9 +138,7 @@ class AttemptVerdictMixin:
                 measurements=KEEP_MEASUREMENT_COUNT,
                 timeout_sec=self.ic.bench_timeout_sec,
             )
-        self._observe_measurement(measurement_started)
-        self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
-        return await self._decide_iteration_keep(iteration, iter_start, report, bench_result)
+        return bench_result
 
     def _rule_on_attempt(
         self,
@@ -202,7 +207,6 @@ class AttemptVerdictMixin:
         iteration or not at all.
         """
         iteration, session_sink, best_before = frame.iteration, frame.session_sink, frame.best_before
-        merge_pair, merge_diff = frame.merge
         pending_keep, keep_checkpoint_finalized, commit_hash = ruling
         # Remote/external work belongs outside the SIGTERM deferral window but still precedes potentially long
         # post-KEEP profiling.
@@ -217,16 +221,7 @@ class AttemptVerdictMixin:
             callbacks.on_best_ready(result)
 
         if self.experiment:
-            self.tracker.log_iteration(
-                self.experiment.experiment_id,
-                config={"iteration": iteration, "kept": result.kept},
-                snr_db=result.snr_db,
-                wall_ms=result.wall_ms,
-                mean_case_speedup=result.mean_case_speedup,
-                vgpr=result.vgpr,
-                decision="KEEP" if result.kept else "REVERT",
-                notes=session_sink.get("plan", ""),
-            )
+            self._track_iteration(result, frame)
 
         self.results.append(result)
 
@@ -240,23 +235,7 @@ class AttemptVerdictMixin:
         # The verdict is now known, so ask the just-finished implementer session to record what it explored, then
         # stamp the measured outcome onto the same document.
         decision_label = _decision_label(result)
-        if merge_diff and merge_pair is not None:
-            print(
-                f"  [merge] iterations {merge_pair[0].iteration}+"
-                f"{merge_pair[1].iteration} measured stacked: {decision_label}"
-            )
-            if decision_label == "KEEP":
-                # How often the mechanism changed an outcome, which is the other of the two numbers
-                # ``merge_attempt_staged`` carries.
-                self.state_store.append_event(
-                    make_event(
-                        "merge_attempt_kept",
-                        iteration,
-                        first_iteration=merge_pair[0].iteration,
-                        second_iteration=merge_pair[1].iteration,
-                        mean_case_speedup=result.mean_case_speedup,
-                    )
-                )
+        self._report_merge_outcome(result, frame, decision_label)
         iteration_diff_summary = (
             self._diff_summary(commit_hash) if commit_hash else self._diff_summary_from_diff(attempt.attempt_diff)
         )
@@ -301,6 +280,40 @@ class AttemptVerdictMixin:
         # A KEEP makes the prior evidence stale but does not discard its paths.
         if result.kept:
             self._analysis_bundle = None
+
+    def _track_iteration(self, result: IterationResult, frame: _IterationFrame) -> None:
+        """Log this iteration's measurements and verdict to the experiment tracker."""
+        self.tracker.log_iteration(
+            self.experiment.experiment_id,
+            config={"iteration": frame.iteration, "kept": result.kept},
+            snr_db=result.snr_db,
+            wall_ms=result.wall_ms,
+            mean_case_speedup=result.mean_case_speedup,
+            vgpr=result.vgpr,
+            decision="KEEP" if result.kept else "REVERT",
+            notes=frame.session_sink.get("plan", ""),
+        )
+
+    def _report_merge_outcome(self, result: IterationResult, frame: _IterationFrame, decision_label: str) -> None:
+        """Say how a stacked merge of two earlier iterations measured, recording it when it was kept."""
+        merge_pair, merge_diff = frame.merge
+        if merge_diff and merge_pair is not None:
+            print(
+                f"  [merge] iterations {merge_pair[0].iteration}+"
+                f"{merge_pair[1].iteration} measured stacked: {decision_label}"
+            )
+            if decision_label == "KEEP":
+                # How often the mechanism changed an outcome, which is the other of the two numbers
+                # ``merge_attempt_staged`` carries.
+                self.state_store.append_event(
+                    make_event(
+                        "merge_attempt_kept",
+                        frame.iteration,
+                        first_iteration=merge_pair[0].iteration,
+                        second_iteration=merge_pair[1].iteration,
+                        mean_case_speedup=result.mean_case_speedup,
+                    )
+                )
 
     async def _decide_iteration_keep(
         self,

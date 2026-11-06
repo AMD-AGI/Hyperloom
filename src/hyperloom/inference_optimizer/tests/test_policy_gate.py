@@ -24,7 +24,8 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES, allowed_actions_for
-from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.prompts.prompt_builder import _section_phase_semantics
 from hyperloom.orchestrator.roles.agent_role import default_role_registry

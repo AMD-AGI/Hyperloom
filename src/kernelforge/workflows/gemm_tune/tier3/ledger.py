@@ -10,9 +10,10 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom_common.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class TunerUse:
 
 def record_outcome(ledger_path: Path, use: TunerUse) -> TunerRecord:
     """Add one use to a script's history and return the updated record."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_iso("auto")
     data = _load(ledger_path)
     raw = data.get(use.digest) or {}
     record = TunerRecord(

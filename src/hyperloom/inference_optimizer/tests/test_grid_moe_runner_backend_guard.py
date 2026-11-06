@@ -15,6 +15,8 @@ from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
+from ._baseline_fakes import write_sglang_yaml
+
 
 def _write_model_config(dir_path: Path, config: dict) -> str:
     dir_path.mkdir(parents=True, exist_ok=True)
@@ -50,30 +52,8 @@ def plain_moe_model(tmp_path) -> str:
     )
 
 
-def _base_yaml(path: Path, model: str) -> Path:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": model,
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        }
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
-    return path
-
-
 def _variant_args(tmp_path: Path, *, model: str, base_extra_args: str, variant_args: str = "") -> str:
-    base = _base_yaml(tmp_path / "base.yaml", model)
+    base = write_sglang_yaml(tmp_path / "base.yaml", model)
     out = _build_variant_yaml(
         GridRecipe(
             base_yaml_path=base,

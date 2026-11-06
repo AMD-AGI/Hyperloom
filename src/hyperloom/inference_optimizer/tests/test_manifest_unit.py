@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.timeutil import utc_now_compact
+from hyperloom_common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session import manifest as mf
 
 
@@ -231,3 +231,10 @@ def test_write_and_load_manifest_roundtrip(monkeypatch, tmp_path):
 def test_load_manifest_missing_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         mf.load_manifest(tmp_path / "no-session")
+
+
+def test_git_remote_userinfo_is_stripped(monkeypatch):
+    monkeypatch.setattr(mf, "_git_capture", lambda path, args: "https://user:tok3n@github.com/x/y.git")
+    remote = mf._git_remote_at(Path("/repo"))
+    assert "tok3n" not in remote and "user" not in remote
+    assert remote == "https://github.com/x/y.git"

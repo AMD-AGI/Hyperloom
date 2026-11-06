@@ -14,9 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
 
-from hyperloom.common.coerce import to_float
+from hyperloom_common.coerce import to_float
 
-from hyperloom.common.coerce import first_text, optional_positive_int
+from hyperloom_common.coerce import first_text, optional_positive_int
+from hyperloom.common.env_safety import (
+    ENV_FILE_LIST_SEP,
+    env_file_list_elements,
+    is_file_referencing_env_name,
+)
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedupe_extra_server_args,
@@ -30,6 +35,7 @@ from hyperloom.orchestrator.lever import (
     patch_lever_kind,
     patch_owner_phase,
 )
+from ._vendor.kb_store_client import KBStoreError
 from .models import (
     CONFIG_SECTION,
     KERNEL_SECTION,
@@ -370,6 +376,47 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
     }
 
 
+def _externalize_env_file_value(value: str, files: DraftArtifactSink, category: str) -> str:
+    """Return a config-file env value with every path it names replaced by the ref that holds that file."""
+    refs: list[str] = []
+    for element in env_file_list_elements(value):
+        ref = files.add(element, category=category, kind="artifacts")
+        if not ref and not Path(element).is_absolute():
+            # Already a ref: this row was carried forward from the publish that staged the file.
+            ref = element
+        if ref and ref not in refs:
+            refs.append(ref)
+    return ENV_FILE_LIST_SEP.join(refs)
+
+
+def _externalize_env_files(value: Any, files: DraftArtifactSink, category: str) -> Any:
+    """Replace every config-file env value in a record with refs a loading session can re-ground.
+
+    An env var that names config files is as much a file handle as ``tuned_file`` is: the loading session sets it
+    verbatim on its server, so an absolute path from this host means a file that session cannot read. Env mappings
+    sit under several keys (``extra_envs``, ``candidate_extra_envs``, ``recipe_delta.extra_envs``, per-tuner
+    ``env_var``/``env_value`` pairs), so match on the env name wherever it appears rather than on a fixed list of
+    containers.
+    """
+    if isinstance(value, Mapping):
+        out = {key: _externalize_env_files(item, files, category) for key, item in value.items()}
+        names = [key for key, item in out.items() if is_file_referencing_env_name(key) and isinstance(item, str)]
+        if is_file_referencing_env_name(out.get("env_var")) and isinstance(out.get("env_value"), str):
+            names.append("env_value")
+        for name in names:
+            grounded = _externalize_env_file_value(out[name], files, category)
+            if grounded:
+                out[name] = grounded
+            else:
+                # Nothing it names can be staged; drop it so the loading session uses its default config table
+                # instead of pointing its server at files that exist only here.
+                out.pop(name, None)
+        return out
+    if isinstance(value, list):
+        return [_externalize_env_files(item, files, category) for item in value]
+    return value
+
+
 def _externalize_record(
     record: Mapping[str, Any],
     files: DraftArtifactSink,
@@ -415,6 +462,7 @@ def _externalize_record(
             )
         ]
         out[key] = refs
+    out = _externalize_env_files(out, files, category)
     out.setdefault("phase", "KERNEL_AGENT")
     return out
 
@@ -441,6 +489,27 @@ def build_kernel_gemm_value(state: Any, files: DraftArtifactSink) -> dict[str, A
             )
         )
     return {"optimizations": optimizations}
+
+
+def _fusion_e2e_record(integrated: dict[str, Any], files: DraftArtifactSink) -> dict[str, Any]:
+    """The fusion integrate E2E result as published, with its local source paths dropped."""
+    integrated_for_publish = dict(integrated)
+    for key in (
+        "target_file",
+        "target_files",
+        "source_file",
+        "source_files",
+        "artifact_files",
+    ):
+        integrated_for_publish.pop(key, None)
+    e2e_record = _externalize_record(
+        integrated_for_publish,
+        files,
+        "kernel/fusion",
+    )
+    e2e_record.pop("target_file", None)
+    e2e_record.pop("target_files", None)
+    return e2e_record
 
 
 def build_kernel_fusion_value(state: Any, files: DraftArtifactSink) -> dict[str, Any]:
@@ -477,26 +546,10 @@ def build_kernel_fusion_value(state: Any, files: DraftArtifactSink) -> dict[str,
         )
         files.discard(patch_ref)
         return {"items": []}
-    integrated_for_publish = dict(integrated)
-    for key in (
-        "target_file",
-        "target_files",
-        "source_file",
-        "source_files",
-        "artifact_files",
-    ):
-        integrated_for_publish.pop(key, None)
-    e2e_record = _externalize_record(
-        integrated_for_publish,
-        files,
-        "kernel/fusion",
-    )
-    e2e_record.pop("target_file", None)
-    e2e_record.pop("target_files", None)
     record = {
         **result,
         **stack_rows[-1],
-        "e2e": e2e_record,
+        "e2e": _fusion_e2e_record(integrated, files),
         "phase": str(stack_rows[-1].get("phase") or "KERNEL_AGENT"),
         "patch": patch_ref,
         **_kernel_host_origin(apply_root),
@@ -785,7 +838,14 @@ def _remap_artifact_refs(value: Any, refs: Mapping[str, str]) -> Any:
     if isinstance(value, tuple):
         return tuple(_remap_artifact_refs(item, refs) for item in value)
     if isinstance(value, str):
-        return refs.get(value, value)
+        if value in refs:
+            return refs[value]
+        # A config-file env value carries a list of refs in one string, so rename its elements too; a value that
+        # holds no ref comes back unchanged because every element maps to itself.
+        elements = env_file_list_elements(value) if ENV_FILE_LIST_SEP in value else []
+        if any(element in refs for element in elements):
+            return ENV_FILE_LIST_SEP.join(refs.get(element, element) for element in elements)
+        return value
     return value
 
 
@@ -936,7 +996,7 @@ def merge_staged_sections(
             merged[name] = dict(staged.knowledge)
         except RemoteRecipeValidationError:
             raise
-        except Exception as exc:
+        except (KBStoreError, OSError, ValueError) as exc:
             raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} is invalid: {exc}") from exc
     return merged
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
@@ -16,12 +17,14 @@ import pytest
 
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel_gemm_tuning as kernel_gemm_tuning_mod
-from hyperloom.common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
+from hyperloom.orchestrator.actions.executors import _aiter_serving_once as serving_once
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
+import hyperloom.orchestrator.phases.machine_state as machine_state_mod
 from hyperloom.orchestrator.phases.machine_state import LifecycleMark, record_lifecycle_event
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -97,20 +100,20 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
     assert coord.shared_state.baseline_eager_fallback is False
 
 
-def test_sync_unions_lifecycle_instead_of_overwriting(tmp_path):
+def test_sync_unions_lifecycle_instead_of_overwriting(tmp_path, monkeypatch):
     """Neither the live state's nor the inline Roofline's rows may be dropped."""
     coord = _coord(tmp_path)
-    record_lifecycle_event(coord.shared_state, LifecycleMark(step="explore", status="END"), ts="2026-01-01T00:00:00Z")
+    stamps = iter(["2026-01-01T00:00:00Z", "2026-01-01T00:00:05Z", "2026-01-01T00:00:03Z"])
+    monkeypatch.setattr(machine_state_mod, "_now_iso", lambda: next(stamps))
+    record_lifecycle_event(coord.shared_state, LifecycleMark(step="explore", status="END"))
     coord.shared_state.save(tmp_path)
     # Recorded on the live state only; never persisted before the sync.
-    record_lifecycle_event(
-        coord.shared_state, LifecycleMark(step="live_only", status="START"), ts="2026-01-01T00:00:05Z"
-    )
+    record_lifecycle_event(coord.shared_state, LifecycleMark(step="live_only", status="START"))
 
     selected_trace = str(tmp_path / "mixed_steady_state.trace.json.gz")
     persisted = SharedState.load_or_init(tmp_path)
     persisted.last_trace_analyze = {"steady_state_trace": selected_trace}
-    record_lifecycle_event(persisted, LifecycleMark(step="profile", status="END"), ts="2026-01-01T00:00:03Z")
+    record_lifecycle_event(persisted, LifecycleMark(step="profile", status="END"))
     persisted.save(tmp_path)
 
     result = {
@@ -973,7 +976,7 @@ class TestBf16DenseFallbackIsInternalToForge:
 
         coord.bus = type("Bus", (), {})()
         coord.bus.append_and_seq = _append_and_seq
-        coord.phase_machine.kernel_enabled = lambda: True
+        coord.shared_state.kernel_enabled = True
         coord.phase_kernel.geak_enabled = lambda: False
         coord.phase_kernel._gemm_tuning_required_before_kernel_opt = lambda: True
         coord.phase_machine.record_phase_entry_evidence = lambda **_kwargs: None
@@ -1488,8 +1491,7 @@ class TestKernelE2EMeasurementPromotion:
         )
         monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", unexpected)
         monkeypatch.setattr(integrate_outcomes, "_maybe_finalize_kernel_patch", unexpected)
-        for _module in (krh_mod, integrate_rebaseline):
-            monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
+        monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
         monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "/usr/bin/python3")
         monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
         return krh_mod.integrate_handler
@@ -2145,13 +2147,22 @@ class TestValidateForgeGemmTuningE2E:
         candidate.write_text("kernelName\nnew_k\n", encoding="utf-8")
         prepared: list[dict] = []
         dropped: list[dict] = []
+        holders: list[str] = []
+        host = tmp_path / "host"
+        monkeypatch.setattr(serving_once, "HOST_DIR", host)
+
+        def _holder() -> str:
+            said = json.loads((host / "preflight.lock").read_text(encoding="utf-8"))
+            return f"{said['pid']}: {said['doing']}"
 
         def _prepare(envs, backup_dir=None):
             prepared.append(dict(envs))
+            holders.append(_holder())
             return {"action": "skip"}
 
         def _drop(envs=None, backup_dir=None):
             dropped.append(dict(envs or {}))
+            holders.append(_holder())
             return {"action": "invalidate"}
 
         monkeypatch.setattr(
@@ -2186,6 +2197,8 @@ class TestValidateForgeGemmTuningE2E:
         assert prepared
         assert prepared[0]["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"] == str(candidate)
         assert dropped
+        lane = f"{os.getpid()}: the GEMM tuning lane's move of serving modules"
+        assert holders == [lane] * (len(prepared) + len(dropped)), "each move holds this host's preflight lock"
 
 
 class TestForgeGemmE2EApplyGate:
