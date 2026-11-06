@@ -2222,3 +2222,27 @@ printf '[submodule "vendored"]\\n\\tpath = vendored\\n\\turl = ./vendored\\n\\ti
 
     assert not marker.exists()
     assert "+new = 2" in diff
+
+
+def test_the_harvest_does_not_run_git_in_a_repository_the_worktree_tracks(tmp_path: Path):
+    """A submodule of the base is a gitlink; an ``add -A`` over it runs ``git status`` in whatever repository is there."""
+    _base, wt = _make_git_worktree_pair(tmp_path)
+    marker = tmp_path / "executed"
+    nested = wt / "third_party"
+    identity = ("-c", "user.email=a@b", "-c", "user.name=t")
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "f.txt").write_text("a\n", encoding="utf-8")
+    for repo in (nested, wt):
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), *identity, "commit", "-qm", "c"], check=True)
+    subprocess.run(
+        ["git", "-C", str(nested), "config", "filter.inner.clean", f"sh -c 'touch {marker}; cat'"], check=True
+    )
+    (nested / ".gitattributes").write_text("* filter=inner\n", encoding="utf-8")
+    (nested / "f.txt").write_text("b\n", encoding="utf-8")
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+
+    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt)
+
+    assert not marker.exists()
+    assert "+new = 2" in diff

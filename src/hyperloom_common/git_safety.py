@@ -1,7 +1,29 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``safe.directory`` handling for git subprocesses."""
+"""``safe.directory`` handling for git subprocesses, and the app's git over a tree it does not trust.
+
+``app_git`` starts no program a repository's config names, nor one a file that config includes names. The config
+keys git runs as a program were derived from git's own key list (``git help --config``) and documentation
+(``Documentation/config``, git 2.53), and each is handled one of three ways:
+
+* pinned on the command line, which outranks every config file (``NO_PROGRAMS``);
+* blanked by name, for a key that carries a free-form driver name (``_DRIVER_PROGRAMS``);
+* unreachable, because the environment allows no transport (``NO_TRANSPORT``): ssh and ``core.sshCommand``, git://
+  and ``core.gitProxy``, ``ext::``, remote helpers, ``remote.<name>.uploadpack``/``receivepack``, and the
+  credential helpers and askpass an http fetch would start.
+
+The rest run only in commands the app does not run (an alias, which only a subcommand git lacks reaches; difftool,
+mergetool, send-email, imap-send, instaweb, help, ``archive`` with ``tar.<format>.command``, ``submodule update``
+with an ``update`` command, ``add -p`` with ``interactive.diffFilter``, an explicit ``gc``/``repack``/``prune`` with
+``gc.recentObjectsHook``), or are read only from the system and global files the app skips
+(``uploadpack.packObjectsHook``).
+
+A repository nested in the tree is another config, which no pin here reaches: git checks one for local changes by
+running git in it. So a ``diff`` or ``status`` passes ``--ignore-submodules=dirty`` (a ``.gitmodules`` in the tree
+outranks the pin), and an ``add`` names only untracked paths, since ``add`` checks every nested repository the index
+already tracks and no option turns that off; ``app_git_diff`` does both.
+"""
 
 from __future__ import annotations
 
@@ -9,37 +31,73 @@ import errno
 import os
 import stat
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
+from types import MappingProxyType
 from hyperloom_common.fs_utils import read_text_nofollow
 
 
 _GITFILE = ".git"
 _DEFAULT_TIMEOUT_SEC = 120.0
-# Command-line scope outranks every file: nothing a repository's config says can start a program through these.
-_NO_PROGRAMS = (
+#: Options that keep git from starting a program a repository's config names: command-line scope outranks every
+#: config file, and git hands these on to the git it runs in a submodule.
+NO_PROGRAMS = (
+    "--no-pager",  # core.pager, pager.<cmd>
     "-c",
     "core.fsmonitor=false",
     "-c",
-    "core.hooksPath=/dev/null",
+    "core.hooksPath=/dev/null",  # every hook, those in the hooks directory too
     "-c",
-    "diff.external=",
+    "core.editor=:",  # git starts no editor named ':'
+    "-c",
+    "sequence.editor=:",
+    "-c",
+    "diff.external=",  # cannot start: a diff without --no-ext-diff fails rather than run one
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
-    "core.pager=cat",
+    "core.alternateRefsCommand=false",
+    # Signing and verification. gpg.program and gpg.openpgp.program set the same program, so one pin holds both.
     "-c",
-    "core.sshCommand=false",
+    "gpg.program=false",
     "-c",
-    "protocol.ext.allow=never",
-    # A repository nested in the tree is another config: git checks it for local changes by running git in it.
+    "gpg.ssh.program=false",
+    "-c",
+    "gpg.x509.program=false",
+    "-c",
+    "gpg.ssh.defaultKeyCommand=false",
+    "-c",
+    "log.showSignature=false",
+    "-c",
+    "commit.gpgSign=false",
+    "-c",
+    "tag.gpgSign=false",
+    "-c",
+    "tag.forceSignAnnotated=false",
+    "-c",
+    "merge.verifySignatures=false",
+    "-c",
+    "maintenance.auto=false",  # the gc after a commit, merge, rebase or am runs gc.recentObjectsHook
+    "-c",
+    "help.autoCorrect=0",  # a mistyped subcommand never becomes the alias it resembles
+    # A submodule is another repository with its own drivers: git runs git in it, under its config, not this one.
+    "-c",
+    "submodule.recurse=false",
+    "-c",
+    "diff.submodule=short",
     "-c",
     "diff.ignoreSubmodules=dirty",
 )
-# A filter driver has a free-form name that any in-tree .gitattributes can apply to any path, so no fixed pin covers
-# one: each driver the repository's config defines is blanked by name, and git runs no filter whose programs are empty.
-_FILTER_PROGRAMS = ("clean", "smudge", "process")
-_FILTER_KEYS = rf"^filter\..*\.({'|'.join(_FILTER_PROGRAMS)})$"
+#: The environment that allows git no transport, so a fetch (a promisor remote's lazy one too) starts nothing.
+NO_TRANSPORT = MappingProxyType({"GIT_ALLOW_PROTOCOL": ""})
+# A driver has a free-form name that any in-tree .gitattributes can apply to any path, so no fixed pin covers one:
+# each such key the repository's config defines is blanked by name. Git runs no filter whose program is empty; for an
+# empty diff, merge or trailer program it starts nothing and that step fails instead.
+_DRIVER_PROGRAMS = (
+    r"^(filter\..+\.(clean|smudge|process)|diff\..+\.(command|textconv)|merge\..+\.driver|trailer\..+\.(command|cmd))$"
+)
 _NO_SUCH_KEY = 1  # git config's exit status when no key matches
+_ADD_BATCH = 256  # paths per add: at PATH_MAX each, 1 MiB, inside the kernel's 2 MiB for arguments
 
 
 def _app_owned_dir(path: Path) -> None:
@@ -85,14 +143,14 @@ def worktree_head(worktree: Path | None) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
-def _blank_filter_drivers(git: list[str], worktree: Path, env: dict[str, str], timeout: float) -> list[str]:
-    """The ``-c filter.<name>.<program>=`` pairs that blank every filter driver the config ``git`` reads defines.
+def _blank_driver_programs(git: list[str], worktree: Path, env: dict[str, str], timeout: float) -> list[str]:
+    """The ``-c <key>=`` pairs that blank every driver program the config ``git`` reads defines, includes followed.
 
     Raises:
         OSError: The config could not be read, or names a driver ``-c`` cannot address (its name holds ``=``).
     """
     done = subprocess.run(
-        [*git, "config", "--null", "--name-only", "--get-regexp", _FILTER_KEYS],
+        [*git, "config", "--null", "--name-only", "--get-regexp", _DRIVER_PROGRAMS],
         cwd=worktree,
         env=env,
         capture_output=True,
@@ -101,20 +159,17 @@ def _blank_filter_drivers(git: list[str], worktree: Path, env: dict[str, str], t
     )
     if done.returncode not in (0, _NO_SUCH_KEY):
         raise OSError(errno.EIO, f"git config: {os.fsdecode(done.stderr).strip()}", str(worktree))
-    names = {os.fsdecode(key).rpartition(".")[0].partition(".")[2] for key in done.stdout.split(b"\0") if key}
-    if any("=" in name for name in names):
-        raise OSError(errno.EINVAL, "a filter driver name holds '=', which git -c cannot override", str(worktree))
-    return [
-        arg for name in sorted(names) for program in _FILTER_PROGRAMS for arg in ("-c", f"filter.{name}.{program}=")
-    ]
+    keys = sorted({os.fsdecode(key) for key in done.stdout.split(b"\0") if key})
+    if any("=" in key for key in keys):
+        raise OSError(errno.EINVAL, "a driver name holds '=', which git -c cannot override", str(worktree))
+    return [arg for key in keys for arg in ("-c", f"{key}=")]
 
 
 def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
 
-    No program the repository's config names runs: the pinned options, and every configured filter driver blanked.
-    A ``.gitmodules`` in the tree outranks the ``diff.ignoreSubmodules`` pin, so a ``diff`` or ``status`` over a tree an
-    agent writes also passes ``--ignore-submodules=dirty``.
+    No program the repository's config names runs: the ``NO_PROGRAMS`` pins, every configured driver program blanked,
+    and no transport. A repository nested in the tree is the caller's to keep out (see the module docstring).
 
     Raises:
         OSError: The worktree's git metadata is not the app's, or its config cannot be neutralized (nothing was run).
@@ -126,10 +181,10 @@ def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -
         GIT_CONFIG_GLOBAL="/dev/null",
         GIT_ATTR_NOSYSTEM="1",
         GIT_TERMINAL_PROMPT="0",
+        **NO_TRANSPORT,
     )
     git = [
         "git",
-        "--no-pager",
         "--git-dir",
         str(admin),
         "--work-tree",
@@ -138,13 +193,53 @@ def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -
         f"safe.directory={worktree}",
         "-c",
         f"safe.directory={admin}",
-        *_NO_PROGRAMS,
+        *NO_PROGRAMS,
     ]
-    argv = [*git, *_blank_filter_drivers(git, worktree, env, timeout), *args]
-    return subprocess.run(argv, cwd=worktree, env=env, capture_output=True, text=True, timeout=timeout, check=False)
+    argv = [*git, *_blank_driver_programs(git, worktree, env, timeout), *args]
+    # Decoded as file names are, so a path git prints goes back to git unchanged.
+    return subprocess.run(
+        argv,
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="surrogateescape",
+        timeout=timeout,
+        check=False,
+    )
 
 
-__all__ = ["app_git", "repo_root", "safe_directory_args", "trusted_admin_dir", "worktree_head"]
+def app_git_diff(worktree: Path, base: str, pathspec: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """``git diff <base>`` over ``pathspec`` in ``worktree`` by ``app_git``, untracked paths shown as created.
+
+    The untracked paths are marked intent-to-add by name, never by ``add -A``: an ``add`` over a path the index
+    tracks checks a repository nested there for local changes by running git in it, under that repository's own
+    config, and no option turns that off. Marking is best effort, as it always was. The diff runs no external diff
+    or textconv, and checks no nested repository: ``--ignore-submodules=dirty`` outranks a ``.gitmodules`` in the tree.
+
+    Raises:
+        OSError: As ``app_git``.
+        subprocess.SubprocessError: As ``app_git``.
+    """
+    listed = app_git(worktree, "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec)
+    untracked = [path for path in listed.stdout.split("\0") if path] if listed.returncode == 0 else []
+    for start in range(0, len(untracked), _ADD_BATCH):
+        app_git(worktree, "--literal-pathspecs", "add", "-N", "--", *untracked[start : start + _ADD_BATCH])
+    return app_git(
+        worktree, "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", base, "--", *pathspec
+    )
+
+
+__all__ = [
+    "NO_PROGRAMS",
+    "NO_TRANSPORT",
+    "app_git",
+    "app_git_diff",
+    "repo_root",
+    "safe_directory_args",
+    "trusted_admin_dir",
+    "worktree_head",
+]
 
 
 def repo_root(target: str | Path) -> str | None:
