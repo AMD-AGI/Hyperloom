@@ -95,7 +95,7 @@ def open_shared_append(path: Path) -> int:
     next account of the group appends to it too, and opened as it is when it exists. One another account made without
     group write fails ``EACCES``: a file that is appended to cannot be replaced by rename."""
     try:
-        descriptor = os.open(path, _APPEND | os.O_CREAT | os.O_EXCL, SHARED_FILE_MODE)
+        descriptor = os.open(path, _APPEND | os.O_CREAT | os.O_EXCL, 0o600)  # the umask never decides it: fchmod below
     except FileExistsError:
         return os.open(path, _APPEND)
     try:
