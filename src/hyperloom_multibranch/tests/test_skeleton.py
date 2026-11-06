@@ -190,7 +190,7 @@ from hyperloom_multibranch.scheduling.tests.model_checkout import model_checkout
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH
 from hyperloom_multibranch.tests.fakes import RecordingVerifier, RefusingCritic
 from hyperloom_multibranch.toolbox.attempts import TestJob
-from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, Fate
+from hyperloom_multibranch.toolbox.tests.fake_model import DEFAULT_BASELINE, Fate
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.scheduling.agent_plans import (
     DOSSIER_ENDED,
