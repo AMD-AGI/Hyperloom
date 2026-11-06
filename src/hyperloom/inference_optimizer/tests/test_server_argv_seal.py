@@ -19,7 +19,6 @@ from hyperloom.orchestrator.actions.executors._server_argv import (
     add_server_arg_unless_pinned,
     config_launch_env,
     config_server_argv,
-    reseal_config_argv,
     seal_server_argv,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs, LaunchLayer
@@ -43,7 +42,7 @@ _COMPOSERS = (
 #: The functions allowed to write the argument env: the phases a composer delegates
 #: to -- each source merged in turn, the profiler flags, the caller's removals and the
 #: final guards -- all of which run above the seal, plus the composer that still writes
-#: the env itself, the seal, and the re-seal a repair is written back through.
+#: the env itself, and the seal.
 _WRITERS = frozenset(
     {
         "_seed_base_launch",
@@ -55,7 +54,6 @@ _WRITERS = frozenset(
         "_finalize_framework_server_args",
         "_build_variant_yaml",
         "seal_server_argv",
-        "reseal_config_argv",
         "_apply_vllm_profile",
         "_apply_sglang_profile",
         "apply_atom_profile_caps",
@@ -293,32 +291,6 @@ def test_an_explicit_empty_argument_string_stays_authoritative():
     assert envs["EXTRA_VLLM_ARGS"] == ""
 
 
-def test_the_digest_is_the_argv_and_the_framework_and_nothing_else():
-    """Two spellings of one argument list key the same repair; two frameworks do not."""
-    tight = seal_server_argv({"EXTRA_SGLANG_ARGS": "--tp 8"}, "sglang")
-    loose = seal_server_argv({"EXTRA_SGLANG_ARGS": "  --tp   8  "}, "sglang")
-    other = seal_server_argv({"EXTRA_VLLM_ARGS": "--tp 8"}, "vllm")
-    assert tight.digest == loose.digest
-    assert tight.digest != other.digest
-
-
-def test_a_repaired_argv_reaches_the_launch_through_the_rendered_config(tmp_path):
-    """A repair that is not written back to the YAML is a repair the server never sees."""
-    config = tmp_path / "bench.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {"benchmark": {"framework": "sglang", "model": "/m", "envs": {"EXTRA_SGLANG_ARGS": "--tp 8 --bogus x"}}}
-        ),
-        encoding="utf-8",
-    )
-    assert config_server_argv(config).argv == ("--tp", "8", "--bogus", "x")
-
-    resealed = reseal_config_argv(config, "--tp 8")
-    assert resealed.argv == ("--tp", "8")
-    # Read back off disk, because the file is what the launch opens.
-    assert config_server_argv(config).argv == ("--tp", "8")
-
-
 def _seal_with_ep(framework: str, args: str, ep: object) -> ServerArgv:
     """Seal ``args`` for ``framework`` with ``ep`` in the envs; ``None`` leaves EP unset."""
     envs: dict[str, object] = {server_args_env_name(framework): args}
@@ -375,20 +347,6 @@ def test_sealing_twice_adds_the_expert_parallel_flag_once():
     assert seal_server_argv(envs, "sglang").argv == ("--tp", "8", "--ep-size", "8")
 
 
-def test_a_resealed_argv_keeps_the_expert_parallel_flag(tmp_path):
-    """A repair rewrites the argument string, not the run's EP."""
-    config = tmp_path / "bench.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {"benchmark": {"framework": "sglang", "model": "/m", "envs": {"EP": 4, "EXTRA_SGLANG_ARGS": "--bogus x"}}}
-        ),
-        encoding="utf-8",
-    )
-
-    assert reseal_config_argv(config, "--tp 4").argv == ("--tp", "4", "--ep-size", "4")
-    assert config_server_argv(config).argv == ("--tp", "4", "--ep-size", "4")
-
-
 @pytest.mark.parametrize(("variant_mode", "base_mode"), [("replace", "append"), ("append", "replace")])
 def test_a_replacing_grid_variant_keeps_the_expert_parallel_flag(tmp_path, variant_mode, base_mode):
     """Replacing the argument string does not replace the run's EP."""
@@ -418,25 +376,6 @@ def test_a_replacing_grid_variant_keeps_the_expert_parallel_flag(tmp_path, varia
     argv = config_server_argv(config).argv
     assert "--block-size" not in argv
     assert argv.count("--enable-expert-parallel") == 1
-
-
-@pytest.mark.parametrize(
-    ("nodes", "tp", "ep"),
-    [("1", 8, 3), ("2", 16, 16)],
-    ids=["ep-does-not-divide-tp", "multi-node"],
-)
-def test_a_resealed_argv_gets_no_expert_parallel_flag_the_launch_cannot_take(tmp_path, monkeypatch, nodes, tp, ep):
-    """A repair goes through the same EP rule as the first seal."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", nodes)
-    config = tmp_path / "bench.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {"benchmark": {"framework": "sglang", "model": "/m", "envs": {"TP": tp, "EP": ep, "EXTRA_SGLANG_ARGS": ""}}}
-        ),
-        encoding="utf-8",
-    )
-
-    assert reseal_config_argv(config, "--mem-fraction-static 0.9").argv == ("--mem-fraction-static", "0.9")
 
 
 def test_a_grid_variant_ep_that_does_not_divide_tp_adds_no_flag(tmp_path, caplog):

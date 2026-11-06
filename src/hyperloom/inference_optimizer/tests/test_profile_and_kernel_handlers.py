@@ -1728,11 +1728,10 @@ def test_profile_argv_preflight_includes_inferencex_vllm_profiler_args(tmp_path,
 
     def _capture(**kwargs):
         seen.update(kwargs)
-        return SimpleNamespace(status=OK, reason="parsed", detail="", argv=tuple(kwargs["argv"]), dropped=())
+        return SimpleNamespace(status=OK, reason="parsed", detail="", argv=tuple(kwargs["argv"]), unknown_flags=())
 
     monkeypatch.setattr("hyperloom.orchestrator.bringup.check_server_argv", _capture)
-    state = SimpleNamespace(enablement=SimpleNamespace(argv_repairs=[]))
-    executor = BaselineExecutor(session_dir=tmp_path, shared_state=state)
+    executor = BaselineExecutor(session_dir=tmp_path)
 
     round_ = _BenchmarkRound(
         config_path=config_path,

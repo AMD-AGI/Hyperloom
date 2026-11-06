@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
@@ -41,13 +40,6 @@ class ServerArgv:
     text: str
     argv: tuple[str, ...]
     tokenized: bool
-
-    @property
-    def digest(self) -> str:
-        """str: Identity of this argv -- the framework and the tokens, nothing
-        per-run -- for keying a one-shot repair."""
-        body = "\x1f".join((self.framework, *self.argv))
-        return hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()
 
 
 def _sealed(framework: str | None, text: str) -> ServerArgv:
@@ -231,37 +223,11 @@ def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[
     return merged
 
 
-def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
-    """Replace a materialised config's server argv, through the same seal.
-
-    Args:
-        config_path: Path to the materialised YAML, rewritten in place.
-        text: The replacement argument string.
-
-    Returns:
-        ServerArgv: The re-sealed argv.
-
-    Raises:
-        ConfigUnreadable: When the config cannot be read.
-        ValueError: When the replacement carries shell control syntax.
-    """
-    path = Path(config_path)
-    cfg = _load_config(path)
-    bench = cfg.setdefault("benchmark", {})
-    envs = bench.setdefault("envs", {})
-    envs[server_args_env_name(bench.get("framework"))] = text.strip()
-    sealed = seal_server_argv(envs, bench.get("framework"))
-    with path.open("w", encoding="utf-8") as handle:
-        yaml.safe_dump(cfg, handle, sort_keys=False)
-    return sealed
-
-
 __all__ = [
     "ConfigUnreadable",
     "ServerArgv",
     "add_server_arg_unless_pinned",
     "config_launch_env",
     "config_server_argv",
-    "reseal_config_argv",
     "seal_server_argv",
 ]

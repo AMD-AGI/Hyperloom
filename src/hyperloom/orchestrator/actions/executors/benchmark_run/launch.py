@@ -298,8 +298,8 @@ class _BenchmarkLaunchMixin:
         if native_config(round_.config_path):
             return None
         from ....bringup import check_server_argv
-        from ....bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE, ArgvRepair
-        from .._server_argv import config_launch_env, config_server_argv, reseal_config_argv
+        from ....bringup.argv_preflight import INVALID, UNAVAILABLE
+        from .._server_argv import config_launch_env, config_server_argv
 
         sealed = config_server_argv(round_.config_path)
         if not sealed.tokenized or not sealed.argv:
@@ -316,21 +316,7 @@ class _BenchmarkLaunchMixin:
                 *probe_argv,
             )
 
-        # ``_resolve_shared_state`` is typed loosely and callers inject partial
-        # doubles, so the round's repair ledger may not be present at all.
-        enablement = getattr(self._resolve_shared_state(), "enablement", None)
-        spent: list[str] = enablement.argv_repairs if enablement is not None else []
-        verdict = check_server_argv(
-            framework=round_.framework,
-            argv=probe_argv,
-            text=sealed.text,
-            launch_env=effective_launch_env,
-            repair=ArgvRepair(
-                digest=sealed.digest,
-                spent=spent,
-            ),
-        )
-
+        verdict = check_server_argv(framework=round_.framework, argv=probe_argv, launch_env=effective_launch_env)
         if verdict.status == UNAVAILABLE:
             log.info(
                 "argv preflight unavailable (%s): %s; the launch remains the only verdict",
@@ -338,14 +324,9 @@ class _BenchmarkLaunchMixin:
                 verdict.detail,
             )
             return None
-        if verdict.status == OK:
-            if verdict.reason == PARSED_AFTER_DROP:
-                reseal_config_argv(round_.config_path, verdict.text)
-                if verdict.repaired_digest:
-                    spent.append(verdict.repaired_digest)
-                round_.capture_meta["server_argv_dropped"] = list(verdict.dropped)
-            return None
-        return self._argv_refusal(round_, attempt, verdict)
+        if verdict.status == INVALID:
+            return self._argv_refusal(round_, attempt, verdict)
+        return None
 
     def _argv_refusal(self, round_: _BenchmarkRound, attempt: int, verdict: ArgvVerdict) -> dict[str, Any]:
         """Record the boot observation of a refused server argv and return the round's terminal failure."""
@@ -371,6 +352,7 @@ class _BenchmarkLaunchMixin:
             "output_dir": str(round_.output_dir),
             "enablement_launch_log": excerpt.text if excerpt is not None else "",
             "server_argv": list(verdict.argv),
+            "server_argv_unknown_flags": list(verdict.unknown_flags),
             **round_.capture_meta,
         }
 

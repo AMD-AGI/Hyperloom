@@ -110,69 +110,41 @@ def atom_serving(tmp_path, monkeypatch, request):
 
 @pytest.mark.parametrize(("atom_serving", "flag"), _ATOM_KV_CACHE_FLAGS, indirect=("atom_serving",))
 @pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
-@pytest.mark.parametrize("digest", ("", "atom-fp8"), ids=("no-repair", "repair-available"))
-def test_atom_kv_cache_dtype_spellings_are_preserved(atom_serving, flag, equals, digest):
-    """A valid FP8 request must not be repaired into the BF16 default."""
+def test_atom_kv_cache_dtype_spellings_are_preserved(atom_serving, flag, equals):
+    """A valid FP8 request is accepted as written."""
     argv = (f"{flag}=fp8",) if equals else (flag, "fp8")
-    text = " ".join(argv)
-    verdict = pf.check_server_argv(
-        framework="atom", argv=argv, text=text, launch_env=atom_serving, repair=pf.ArgvRepair(digest=digest)
-    )
+    verdict = pf.check_server_argv(framework="atom", argv=argv, launch_env=atom_serving)
     assert verdict.status == pf.OK
     assert verdict.argv == argv
-    assert verdict.text == text
     assert verdict.reason == pf.PARSED
-    assert verdict.dropped == ()
-    assert verdict.repaired_digest == ""
+    assert verdict.unknown_flags == ()
 
 
 @pytest.mark.parametrize(("atom_serving", "flag"), _ATOM_KV_CACHE_FLAGS, indirect=("atom_serving",))
 @pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
-def test_atom_invalid_kv_cache_dtype_is_never_repaired(atom_serving, flag, equals):
-    """Alias support does not turn rejected values into droppable unknown flags."""
+def test_atom_invalid_kv_cache_dtype_is_a_rejected_value(atom_serving, flag, equals):
+    """Alias support does not turn rejected values into unknown flags."""
     argv = (f"{flag}=invalid",) if equals else (flag, "invalid")
-    text = " ".join(argv)
-    verdict = pf.check_server_argv(
-        framework="atom", argv=argv, text=text, launch_env=atom_serving, repair=pf.ArgvRepair(digest="atom-invalid")
-    )
+    verdict = pf.check_server_argv(framework="atom", argv=argv, launch_env=atom_serving)
     assert verdict.status == pf.INVALID
     assert verdict.reason == pf.VALUE_REJECTED
     assert verdict.argv == argv
-    assert verdict.text == text
-    assert verdict.dropped == ()
-    assert verdict.repaired_digest == ""
+    assert verdict.unknown_flags == ()
     assert "invalid choice" in verdict.detail
 
 
 @pytest.mark.parametrize(("atom_serving", "flag"), _ATOM_KV_CACHE_FLAGS, indirect=("atom_serving",))
 @pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
-def test_atom_unknown_flag_is_dropped_once_without_losing_kv_cache_dtype(atom_serving, flag, equals):
-    """Only a genuinely unknown flag may consume the one drop-only repair."""
+def test_atom_unknown_flag_is_refused_not_dropped(atom_serving, flag, equals):
+    """An unknown flag beside a valid one is named, and the argv is left as written."""
     kv_argv = (f"{flag}=fp8",) if equals else (flag, "fp8")
     argv = (*kv_argv, "--unknown-option", "value")
-    text = " ".join(argv)
-    verdict = pf.check_server_argv(
-        framework="atom", argv=argv, text=text, launch_env=atom_serving, repair=pf.ArgvRepair(digest="atom-unknown")
-    )
-    assert verdict.status == pf.OK
-    assert verdict.reason == pf.PARSED_AFTER_DROP
-    assert verdict.argv == kv_argv
-    assert verdict.text == " ".join(kv_argv)
-    assert verdict.dropped == ("--unknown-option",)
-    assert verdict.repaired_digest == "atom-unknown"
-
-    repeated = pf.check_server_argv(
-        framework="atom",
-        argv=argv,
-        text=text,
-        launch_env=atom_serving,
-        repair=pf.ArgvRepair(digest="atom-unknown", spent=(verdict.repaired_digest,)),
-    )
-    assert repeated.status == pf.INVALID
-    assert repeated.reason == pf.REPAIR_SPENT
-    assert repeated.argv == argv
-    assert repeated.dropped == ("--unknown-option",)
-    assert repeated.repaired_digest == ""
+    verdict = pf.check_server_argv(framework="atom", argv=argv, launch_env=atom_serving)
+    assert verdict.status == pf.INVALID
+    assert verdict.reason == pf.UNKNOWN_FLAG
+    assert verdict.argv == argv
+    assert verdict.unknown_flags == ("--unknown-option",)
+    assert "--unknown-option" in verdict.detail.splitlines()[0]
 
 
 @pytest.mark.parametrize("atom_serving", (None,), ids=("module-absent",), indirect=True)
@@ -180,14 +152,11 @@ def test_atom_unknown_flag_is_dropped_once_without_losing_kv_cache_dtype(atom_se
 def test_atom_legacy_parser_does_not_invent_kebab_aliases(atom_serving, equals):
     """A plain argparse server only accepts the flags its EngineArgs registers."""
     argv = ("--kv-cache-dtype=fp8",) if equals else ("--kv-cache-dtype", "fp8")
-    text = " ".join(argv)
-    verdict = pf.check_server_argv(framework="atom", argv=argv, text=text, launch_env=atom_serving)
+    verdict = pf.check_server_argv(framework="atom", argv=argv, launch_env=atom_serving)
     assert verdict.status == pf.INVALID
-    assert verdict.reason == pf.REPAIR_SPENT
+    assert verdict.reason == pf.UNKNOWN_FLAG
     assert verdict.argv == argv
-    assert verdict.text == text
-    assert verdict.dropped == ("--kv-cache-dtype",)
-    assert verdict.repaired_digest == ""
+    assert verdict.unknown_flags == ("--kv-cache-dtype",)
     assert "unrecognized arguments" in verdict.detail
 
 
@@ -221,21 +190,12 @@ def test_atom_legacy_parser_does_not_invent_kebab_aliases(atom_serving, equals):
 def test_atom_broken_native_parser_is_unavailable_not_legacy(atom_serving, detail):
     """A broken modern parser must not be mistaken for a legacy installation."""
     argv = ("--kv_cache_dtype", "fp8")
-    text = " ".join(argv)
-    verdict = pf.check_server_argv(
-        framework="atom",
-        argv=argv,
-        text=text,
-        launch_env=atom_serving,
-        repair=pf.ArgvRepair(digest="atom-parser-error"),
-    )
+    verdict = pf.check_server_argv(framework="atom", argv=argv, launch_env=atom_serving)
     assert verdict.status == pf.UNAVAILABLE
     assert verdict.reason == pf.PROBE_FAILED
     assert detail in verdict.detail
     assert verdict.argv == argv
-    assert verdict.text == text
-    assert verdict.dropped == ()
-    assert verdict.repaired_digest == ""
+    assert verdict.unknown_flags == ()
 
 
 @pytest.mark.parametrize("atom_serving", (_ATOM_ARG_PARSER, None), ids=("native", "legacy"), indirect=True)
@@ -266,33 +226,24 @@ def test_atom_engine_args_errors_are_unavailable(atom_serving, engine_source, de
     engine_module = Path(atom_serving["PYTHONPATH"]) / "atom" / "model_engine" / "arg_utils.py"
     engine_module.write_text(engine_source, encoding="utf-8")
     argv = ("--kv_cache_dtype", "fp8")
-    text = " ".join(argv)
-    verdict = pf.check_server_argv(
-        framework="atom",
-        argv=argv,
-        text=text,
-        launch_env=atom_serving,
-        repair=pf.ArgvRepair(digest="atom-engine-error"),
-    )
+    verdict = pf.check_server_argv(framework="atom", argv=argv, launch_env=atom_serving)
     assert verdict.status == pf.UNAVAILABLE
     assert verdict.reason == pf.PROBE_FAILED
     assert detail in verdict.detail
     assert verdict.argv == argv
-    assert verdict.text == text
-    assert verdict.dropped == ()
-    assert verdict.repaired_digest == ""
+    assert verdict.unknown_flags == ()
 
 
-def _check(argv, env, **kwargs):
-    """Run the preflight over ``argv`` written as an argument string."""
-    return pf.check_server_argv(framework="sglang", argv=argv, text=" ".join(argv), launch_env=env, **kwargs)
+def _check(argv, env):
+    """Run the sglang preflight over ``argv``."""
+    return pf.check_server_argv(framework="sglang", argv=argv, launch_env=env)
 
 
 def test_an_argv_the_installed_parser_accepts_is_ok(serving):
     """The accepting case has to be cheap and quiet, or the check gets turned off."""
     verdict = _check(["--tp", "8", "--moe-runner-backend", "triton"], serving)
     assert verdict.status == pf.OK
-    assert verdict.dropped == ()
+    assert verdict.unknown_flags == ()
 
 
 @pytest.mark.parametrize(
@@ -305,50 +256,22 @@ def test_an_argv_the_installed_parser_accepts_is_ok(serving):
     ),
 )
 def test_the_parser_refuses_an_argument_it_does_not_have(serving, argv, flag):
-    """Both failures are named by the installed parser, with no rule added here."""
-    verdict = _check(argv, serving, repair=pf.ArgvRepair(digest=""))
+    """The installed parser names the flag, and the argv it judged is not rewritten."""
+    verdict = _check(argv, serving)
     assert verdict.status == pf.INVALID
-    assert verdict.dropped == (flag,)
+    assert verdict.reason == pf.UNKNOWN_FLAG
+    assert verdict.unknown_flags == (flag,)
+    assert verdict.argv == tuple(argv)
     assert flag in verdict.detail
-
-
-def test_one_unrecognised_flag_is_dropped_and_the_argv_revalidated(serving):
-    """The single allowed repair removes the flag and asks the parser again."""
-    verdict = _check(["--tp", "8", "--moe-backend", "triton"], serving, repair=pf.ArgvRepair(digest="argv-1"))
-    assert verdict.status == pf.OK
-    assert verdict.reason == pf.PARSED_AFTER_DROP
-    assert verdict.dropped == ("--moe-backend",)
-    assert verdict.argv == ("--tp", "8")
-    # The caller is handed the key it must record, or the argv gets a second repair.
-    assert verdict.repaired_digest == "argv-1"
-
-
-def test_the_same_argv_does_not_get_a_second_repair(serving):
-    """A recomposed argv that failed once has spent its repair; it is terminal."""
-    verdict = _check(
-        ["--tp", "8", "--moe-backend", "triton"], serving, repair=pf.ArgvRepair(digest="argv-1", spent=("argv-1",))
-    )
-    assert verdict.status == pf.INVALID
-    assert verdict.reason == pf.REPAIR_SPENT
-    assert verdict.repaired_digest == ""
 
 
 def test_a_rejected_value_is_terminal_and_never_rewritten(serving):
     """The harness does not know what value the framework meant, so it does not guess."""
-    verdict = _check(["--attention-backend", "fa4"], serving, repair=pf.ArgvRepair(digest="argv-2"))
+    verdict = _check(["--attention-backend", "fa4"], serving)
     assert verdict.status == pf.INVALID
     assert verdict.reason == pf.VALUE_REJECTED
-    assert verdict.dropped == ()
+    assert verdict.unknown_flags == ()
     assert "invalid choice" in verdict.detail
-
-
-def test_a_drop_that_does_not_fix_the_argv_is_terminal(serving):
-    """Two walls behind one flag is not a repair; it is a second guess."""
-    verdict = _check(
-        ["--moe-backend", "triton", "--attention-backend", "fa4"], serving, repair=pf.ArgvRepair(digest="argv-3")
-    )
-    assert verdict.status == pf.INVALID
-    assert verdict.reason in (pf.REPAIR_FAILED, pf.VALUE_REJECTED)
 
 
 def test_a_probe_interpreter_holding_another_version_yields_unavailable(tmp_path, monkeypatch):
@@ -422,6 +345,6 @@ def test_a_parser_that_raises_is_unavailable_with_its_traceback(serving):
 
 def test_a_framework_with_no_adapter_parser_is_unavailable(serving):
     """xDiT exposes no parser here; that is an absent check, not a passing one."""
-    verdict = pf.check_server_argv(framework="xdit", argv=("--x",), text="--x", launch_env=serving)
+    verdict = pf.check_server_argv(framework="xdit", argv=("--x",), launch_env=serving)
     assert verdict.status == pf.UNAVAILABLE
     assert verdict.reason == pf.NO_PARSER
