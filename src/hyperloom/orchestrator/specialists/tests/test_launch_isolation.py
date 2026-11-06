@@ -12,13 +12,20 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from hyperloom_common.bwrap import BwrapProbe
-from hyperloom.common.agent_isolation import AccountIsolation, BwrapIsolation, NoIsolation
+from hyperloom_common.git_safety import recorded_admin_dir, trusted_admin_dir
+from hyperloom.common.agent_isolation import (
+    AccountIsolation,
+    BwrapIsolation,
+    IsolationRefused,
+    NoIsolation,
+)
 from hyperloom.common.env_safety import RunAs
 from hyperloom.common.proctree import REAP_MARK_ENV, running
 from hyperloom.orchestrator.specialists import launch_env
@@ -156,14 +163,21 @@ def test_an_older_bubblewrap_gets_a_fresh_tmp_when_something_is_mounted_below_it
         shutil.rmtree(root)
 
 
+def _linked_worktree(repo: Path, worktree: Path) -> Path:
+    """Make ``repo`` with one commit and ``worktree`` a linked worktree of it; return its admin dir as ``repo`` records
+    it."""
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "base"], check=True, env=_git_env())
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(worktree)], check=True)
+    return recorded_admin_dir(repo, worktree)
+
+
 def test_the_confinement_reads_the_model_and_the_worktrees_git_and_writes_only_its_trees(tmp_path):
     repo, model = tmp_path / "repo", tmp_path / "models" / "llama"
     model.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "base"], check=True, env=_git_env())
     place = LaunchPlace(tmp_path / "ws", tmp_path / "ws" / "worktree", readable=(model, tmp_path / "ws" / "x"))
     place.workspace.mkdir()
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(place.worktree)], check=True)
+    place = replace(place, git_admin=_linked_worktree(repo, place.worktree))
 
     confinement = specialist_confinement(place, sys.executable, _env())
 
@@ -171,6 +185,33 @@ def test_the_confinement_reads_the_model_and_the_worktrees_git_and_writes_only_i
     assert model in confinement.readable and (repo / ".git") in confinement.readable
     assert not any(path == place.workspace / "x" for path in confinement.readable)
     assert confinement.devices == ()
+
+
+def test_the_sandbox_shows_the_git_metadata_the_repository_records_never_what_the_worktrees_git_names(tmp_path):
+    """An agent of the app's uid can point ``.git`` at a repository it made, ownership and back pointer and all."""
+    repo, other = tmp_path / "repo", tmp_path / "other"
+    place = LaunchPlace(tmp_path / "ws", tmp_path / "ws" / "worktree")
+    place.workspace.mkdir()
+    admin = _linked_worktree(repo, place.worktree)
+    forged = _linked_worktree(other, tmp_path / "other-worktree")
+    (forged / "gitdir").write_text(f"{place.worktree / '.git'}\n", encoding="utf-8")
+    (place.worktree / ".git").write_text(f"gitdir: {forged}\n", encoding="utf-8")
+    assert trusted_admin_dir(place.worktree) == forged  # every ownership check passes for the app's own uid
+
+    pinned = specialist_confinement(replace(place, git_admin=admin), sys.executable, _env()).readable
+    unpinned = specialist_confinement(place, sys.executable, _env()).readable
+
+    assert repo / ".git" in pinned and not any(other in path.parents or path == other for path in pinned)
+    assert not any(path.name == ".git" for path in unpinned)
+
+
+def test_a_repository_in_a_tree_the_sandbox_writes_is_refused_not_bound(tmp_path):
+    place = LaunchPlace(tmp_path / "ws", tmp_path / "ws" / "worktree")
+    place.workspace.mkdir()
+    place = replace(place, git_admin=_linked_worktree(place.workspace / "repo", place.worktree))
+
+    with pytest.raises(IsolationRefused, match="reached through a tree the agent writes"):
+        prepare_launch(_bwrap(), place, ["claude"], _env())
 
 
 def _git_env() -> dict[str, str]:

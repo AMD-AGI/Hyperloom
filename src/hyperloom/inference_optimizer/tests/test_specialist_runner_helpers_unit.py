@@ -16,6 +16,7 @@ import pytest
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.specialists import runner as sr
+from hyperloom.orchestrator.specialists import worktrees
 from hyperloom.orchestrator.specialists.runner import (
     SpecialistFailureType,
     SpecialistRunner,
@@ -371,7 +372,7 @@ def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
     r = _runner(subprocess_config=cfg)
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"mode": "research"}))
     profile = resolve_specialist_profile(ctx.task.params)
-    assert r._maybe_setup_worktree(ctx, workspace=tmp_path, profile=profile) == (None, None, "")
+    assert r._maybe_setup_worktree(ctx, workspace=tmp_path, profile=profile) == (None, None, "", None)
 
 
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
@@ -399,7 +400,8 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
         seen["base"] = base
         return worktree_path, ""
 
-    monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "recorded_admin_dir", lambda base, worktree: base / "worktrees" / "w")
     ctx = SimpleNamespace(
         task=SimpleNamespace(
             task_id="t",
@@ -407,10 +409,11 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
         )
     )
 
-    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    _wt, source, err, admin = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
     assert err == ""
     assert source.root == worldplay and seen["base"] == worldplay, f"specialist would patch {seen.get('base')}"
+    assert admin == worldplay / "worktrees" / "w"
 
 
 def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_path, monkeypatch):
@@ -429,10 +432,11 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
         seen["base"] = base
         return worktree_path, ""
 
-    monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "recorded_admin_dir", lambda base, worktree: base / "worktrees" / "w")
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "custom"}))
 
-    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    _wt, source, err, _admin = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
     assert err == ""
     assert source.root == package and not source.checkout
@@ -452,9 +456,7 @@ def test_maybe_setup_worktree_has_nothing_to_isolate_without_a_named_tree(tmp_pa
         task=SimpleNamespace(task_id="t", params={"framework": "custom", "domain": "framework_rewrite_specialist"})
     )
 
-    wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
-
-    assert (wt, source, err) == (None, None, sr.NO_GIT_FRAMEWORK_SOURCE_ROOT)
+    assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, sr.NO_GIT_FRAMEWORK_SOURCE_ROOT, None)
 
 
 def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):

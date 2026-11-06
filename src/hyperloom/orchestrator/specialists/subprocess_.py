@@ -88,6 +88,7 @@ from .reap_watch import PROCESS_LOG_NAME, ReapWatch, cli_alive
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
 from hyperloom_common.git_safety import app_git_diff, worktree_head
+from .worktrees import PinnedGit
 from ..delivery.deliverable import declared_targets
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
@@ -208,63 +209,6 @@ class SpecialistSubprocessResult:
 #: Directories a specialist writes for its own use inside the worktree, never
 #: part of a deliverable.
 _SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", ".hyperloom")
-
-
-# Worktree management
-def _setup_worktree(
-    base: Path,
-    worktree_path: Path,
-    branch: str,
-) -> tuple[Path | None, str]:
-    """Create a fresh git worktree at ``worktree_path`` branched off
-    ``base``'s HEAD.
-
-    Best-effort: on git error returns ``(None, err)`` so the caller can
-    proceed without isolation or hard-fail.
-
-    Args:
-        base: Git checkout the worktree is branched off of.
-        worktree_path: Destination path for the new worktree.
-        branch: Branch name to create for the worktree.
-
-    Returns:
-        A ``(worktree_path, "")`` tuple on success, or ``(None, error)`` on
-        git failure.
-    """
-    if worktree_path.exists():
-        # Resume / retry: reuse an existing worktree.
-        log.warning(
-            "specialist worktree already exists at %s; reusing",
-            worktree_path,
-        )
-        return worktree_path, ""
-    worktree_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "git",
-        "-C",
-        str(base),
-        "worktree",
-        "add",
-        "-b",
-        branch,
-        str(worktree_path),
-    ]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-            # The ref, gitfile and admin dir git makes here must stay readable by a demoted specialist,
-            # whatever umask a launch set on the app.
-            umask=0o022,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, f"git worktree add failed to spawn: {exc!r}"
-    if cp.returncode != 0:
-        return None, (f"git worktree add rc={cp.returncode}: stderr={cp.stderr.strip()[:400]!r}")
-    return worktree_path, ""
 
 
 # How often to poll a PENDING GPU-specialist Ray actor for its pid.
@@ -396,6 +340,9 @@ class SpecialistSpawn:
             Exceptions from it never affect the run.
         readable: Paths besides its toolchain the specialist reads (a local
             model): bound read-only when it runs in a bubblewrap sandbox.
+        worktree_admin: The admin directory of ``worktree`` as its repository
+            records it (:mod:`.worktrees`): the app's git over the worktree goes
+            through it alone (``None``: no git, only ``patches/`` is scanned).
     """
 
     task_id: str
@@ -410,6 +357,7 @@ class SpecialistSpawn:
     gpu_lease: Any = None
     progress_cb: Any = None
     readable: tuple[Path, ...] = ()
+    worktree_admin: Path | None = None
 
 
 def _launch_failure(process_log: Path, error: str) -> SpecialistSubprocessResult:
@@ -470,7 +418,8 @@ class SpecialistSubprocessDispatcher:
         clear_wall_budget_extension(request.task_id)
         # The pre-image the harvest diffs against, so it must be read before
         # the specialist can commit anything.
-        worktree_base_commit = worktree_head(request.worktree)
+        admin = request.worktree_admin
+        pinned = PinnedGit(admin, worktree_head(request.worktree, admin=admin)) if admin is not None else None
         request.workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = request.workspace / "prompt.md"
         # A reused workspace may hold a link the previous run's account planted at this name.
@@ -523,7 +472,7 @@ class SpecialistSubprocessDispatcher:
                 finally:
                     self._release_task(backend, request)
 
-        return self._harvest_result(request, watch, backend, outcome, worktree_base_commit=worktree_base_commit)
+        return self._harvest_result(request, watch, backend, outcome, pinned=pinned)
 
     async def _ready(
         self, request: SpecialistSpawn, prompt_file: Path, process_log: Path
@@ -539,7 +488,9 @@ class SpecialistSubprocessDispatcher:
         backend = ""
         gpu = bool(request.gpu_ids) or request.gpu_lease is not None
         private, mcp = (prompt_file, process_log), self.config.mcp_config_path
-        place = LaunchPlace(request.workspace, request.worktree, private, request.readable, gpu, mcp)
+        place = LaunchPlace(
+            request.workspace, request.worktree, private, request.readable, gpu, mcp, request.worktree_admin
+        )
         try:
             backend = self._agent_backend()
             cmd = self._build_launch(backend, request, env, isolation)
@@ -647,7 +598,7 @@ class SpecialistSubprocessDispatcher:
         backend: str,
         outcome: dict[str, Any],
         *,
-        worktree_base_commit: str,
+        pinned: PinnedGit | None,
     ) -> SpecialistSubprocessResult:
         """Read the reaped specialist's done payload, patches and agent trace into its result."""
         process_log = watch.workspace / PROCESS_LOG_NAME
@@ -676,7 +627,7 @@ class SpecialistSubprocessDispatcher:
             request.worktree,
             request.workspace,
             request.worktree_base,
-            worktree_base_commit=worktree_base_commit,
+            pinned=pinned,
             targets=declared_targets(done_payload),
         )
 
@@ -1207,7 +1158,7 @@ class SpecialistSubprocessDispatcher:
         ]
 
     @staticmethod
-    def _harvest_worktree_diff(worktree: Path, *, base: str = "HEAD", targets: Sequence[str] = ()) -> str:
+    def _harvest_worktree_diff(worktree: Path, *, admin: Path, base: str = "HEAD", targets: Sequence[str] = ()) -> str:
         """Return the worktree's edits as one ``-p1`` diff, or ``""``.
 
         The comparison is ``base``-against-working-tree, since a specialist is
@@ -1218,7 +1169,8 @@ class SpecialistSubprocessDispatcher:
         comment-only edits produce no installable patch at all.
 
         Args:
-            worktree: Per-task worktree holding a ``.git`` marker.
+            worktree: Per-task worktree.
+            admin: Its admin directory as its repository records it.
             base: The recorded pre-round commit to diff against.
             targets: Worktree-relative paths the round declared.
 
@@ -1230,7 +1182,7 @@ class SpecialistSubprocessDispatcher:
         from .patch_safety import patch_is_annotation_only
 
         try:
-            diff = app_git_diff(worktree, base, SpecialistSubprocessDispatcher._harvest_pathspec(targets))
+            diff = app_git_diff(worktree, base, SpecialistSubprocessDispatcher._harvest_pathspec(targets), admin=admin)
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning("specialist: git diff in %s failed: %r", worktree, exc)
             return ""
@@ -1246,7 +1198,7 @@ class SpecialistSubprocessDispatcher:
         workspace: Path,
         worktree_base: Path | None = None,
         *,
-        worktree_base_commit: str = "",
+        pinned: PinnedGit | None,
         targets: Sequence[str] = (),
     ) -> tuple[list[str], dict[str, str]]:
         """Harvest the specialist's edits, else collect the patch files it wrote.
@@ -1264,20 +1216,19 @@ class SpecialistSubprocessDispatcher:
             worktree_base: The tree the worktree stands for -- the checkout it
                 was branched off, or the directory it holds a snapshot of --
                 which is the apply root of anything harvested from it.
-            worktree_base_commit: The commit recorded when the worktree was
-                created, so the harvest stays anchored to the pre-round state
-                even if the specialist committed.
+            pinned: The worktree's admin directory as its repository records
+                it, and the commit recorded before the round, so the harvest
+                stays anchored there even if the specialist committed; ``None``
+                harvests nothing by git.
             targets: Worktree-relative paths the round declared, which scope the
                 harvest pathspec.
 
         Returns:
             ``(patch_paths, patch_roots)``; the latter is empty for scanned files.
         """
-        if worktree is not None and (worktree / ".git").exists():
+        if worktree is not None and pinned is not None:
             harvested_diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(
-                worktree,
-                base=worktree_base_commit or "HEAD",
-                targets=targets,
+                worktree, admin=pinned.admin, base=pinned.start or "HEAD", targets=targets
             )
             if harvested_diff:
                 try:
@@ -1354,5 +1305,4 @@ __all__ = [
     "SpecialistSubprocessConfig",
     "SpecialistSubprocessDispatcher",
     "SpecialistSubprocessResult",
-    "_setup_worktree",
 ]
