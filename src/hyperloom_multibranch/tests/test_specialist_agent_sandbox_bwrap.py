@@ -414,8 +414,8 @@ async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_o
     assert SECRET not in json.dumps(env) and "GH_TOKEN" not in env and "HYPERLOOM_TEST_APP_VALUE" not in env
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/gateway" and env["HF_HOME"] == str(hf)
     assert (env["HOME"], env["CLAUDE_CONFIG_DIR"], env["TMPDIR"]) == (str(home), str(home / ".claude"), "/tmp")
-    assert env["AITER_JIT_DIR"].startswith(f"{home}/") and env["TRITON_CACHE_DIR"].startswith(f"{home}/")
-    assert env["FLYDSL_RUNTIME_CACHE_DIR"].startswith(f"{home}/") and env["PIP_USER"] == "1"
+    assert "AITER_JIT_DIR" not in env and "FLYDSL_RUNTIME_CACHE_DIR" not in env, "aiter's own, in its writable tree"
+    assert env["TRITON_CACHE_DIR"].startswith(f"{home}/") and env["PIP_USER"] == "1"
     assert env["PATH"].split(os.pathsep)[:2] == [str(sandbox.root / "bin"), str(home / ".local" / "bin")]
     assert env[MARKER] == str(sandbox.root) and env[PROCESS_MARKER].startswith(f"{sandbox.root}/")
 

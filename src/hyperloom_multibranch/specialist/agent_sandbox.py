@@ -45,8 +45,9 @@ sandbox's processes only, and the sandbox's one private ``/tmp`` and full-size `
 leaves there is the next one's to read. The launcher runs inside, its subreaper in the sandbox's pid namespace, and
 the markers are set inside only, so the kills and the watch reach the command's processes, never bubblewrap's. The
 environment is no longer the app's: only what a command needs (:func:`confined_env`), with a home, Claude config,
-user site and JIT caches of the sandbox's own. A sandbox whose paths bubblewrap cannot bind safely runs unconfined, as
-before, with a WARNING; in a hosted run it is refused. Where bubblewrap cannot sandbox an agent at all, commands run
+user site and Triton cache of the sandbox's own; aiter keeps its JIT modules and FlyDSL cache in its own tree, where
+the image's prebuilt ones are. A sandbox whose paths bubblewrap cannot bind safely runs unconfined, as before, with a
+WARNING; in a hosted run it is refused. Where bubblewrap cannot sandbox an agent at all, commands run
 as before, said once at start-up.
 """
 
@@ -944,9 +945,11 @@ def confined_env(environ: Mapping[str, str], home: Path, forwarded: Mapping[str,
     search paths, locale, terminal and the models and benchmark checkout it names (:data:`BASIC_NAMES`), the framework
     image's own settings (:func:`~hyperloom.measure.local_templates.image_env`), and ``forwarded`` (the LLM gateway,
     its credentials and models, proxies and CA bundle); with ``home`` as the home, Claude config, cache, pip's user
-    site and the JIT caches of aiter, Triton and FlyDSL, as the installed frameworks are read-only. No other variable
-    of the app's: not its other credentials, nor its home or tools' configuration. Without a Hugging Face location of
-    its own, the hub cache is the app's, which a model id resolves in."""
+    site and Triton's cache, which the image's settings may name in the app's home. aiter's JIT directory and FlyDSL's
+    cache are left to aiter: its own tree, which a confined command writes, where the image's prebuilt modules and
+    FlyDSL kernels are, which a directory of the home would hide. No other variable of the app's: not its other
+    credentials, nor its home or tools' configuration. Without a Hugging Face location of its own, the hub cache is
+    the app's, which a model id resolves in."""
     kept = {name: value for name, value in environ.items() if name in BASIC_NAMES or name.startswith(BASIC_PREFIXES)}
     kept.update(image_env(environ))
     kept.update(forwarded)
@@ -960,9 +963,7 @@ def confined_env(environ: Mapping[str, str], home: Path, forwarded: Mapping[str,
             "XDG_CACHE_HOME": str(home / ".cache"),
             "PIP_USER": "1",
             "PYTHONUSERBASE": str(home / USER_BASE),
-            "AITER_JIT_DIR": str(home / ".aiter" / "jit"),
             "TRITON_CACHE_DIR": str(home / ".triton" / CACHE_DIR),
-            "FLYDSL_RUNTIME_CACHE_DIR": str(home / ".flydsl" / CACHE_DIR),
             # The inner user is the app's, root in a container, which the Claude CLI accepts only in a sandbox.
             "IS_SANDBOX": "1",
         }
