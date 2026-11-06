@@ -214,7 +214,7 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
     register_specialist_tools(server, toolbox=toolbox, blackboards=blackboard_for)
     register_worktree_tools(server, repo=repo, worktrees=sessions.worktrees)
     gate = RuleGate(gate_blackboard, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
-    judging = Judging(gate, toolbox, InferenceXRule(reader, CONC))
+    judging = Judging(gate, toolbox, InferenceXRule(reader, CONC), blobs)
     runtime = SpecialistRuntime(blackboard_for, judging, sessions.factory, pacing=RuntimePacing(poll_seconds=0.05))
     workspace = tmp_path / "MB-branches" / BRANCH / SESSION_DIR
     started = False

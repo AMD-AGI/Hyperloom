@@ -182,7 +182,8 @@ async def test_a_retraction_of_a_keep_that_landed_is_imported_with_both_checks_a
 
     [attachment] = retraction.attachments
     assert attachment.id == RETRACTION_ID
-    assert json.loads(rig.toolbox.attachments[attachment.sha256]) == {**FINDING, "made_on": 1, "beyond": ""}
+    landed = (await rig.toolbox_blackboard.record(first.request_id or "")).commit_id
+    assert json.loads(rig.toolbox.attachments[attachment.sha256]) == {**FINDING, "retracted_commit": landed}
     assert (retraction.consistency_check, retraction.long_context_check) == (True, True)
     assert first.attachments == ()
     named = "the agent's iteration 7 (its keep 1), found invalid by iter7-agentx-283-selection-invalid"

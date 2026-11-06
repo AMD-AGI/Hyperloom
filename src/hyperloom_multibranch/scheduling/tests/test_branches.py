@@ -125,13 +125,14 @@ class Bench:
         self.desk = ForkDesk(self.roster, DecisionLog(tmp_path / "MB-decisions.jsonl", clock), clock)
         self.reserved = RecordedReservations()
         self.repo_path = tmp_path / "repo"
-        self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
+        blobs = LocalBlobStore(tmp_path / "blobs")
+        self.repo = GitExperimentRepo(self.repo_path, blobs)
         self.toolbox = RecordingToolbox(
             LocalBlackboard(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now), repo=self.repo
         )
         self.sessions = RecordedSessions(self.toolbox, self.repo, self.blackboard, steps=steps)
         self.runtime = specialist_runtime(
-            tmp_path / "nb", self.toolbox, self.repo, self.sessions, now=clock.now, runtime=runtime
+            tmp_path / "nb", self.toolbox, self.repo, self.sessions, blobs, now=clock.now, runtime=runtime
         )
         self.runtime.refusing = refusing
         self.root = ""

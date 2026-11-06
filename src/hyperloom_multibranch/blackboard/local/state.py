@@ -34,6 +34,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     OpShares,
     QuarantineEvent,
     RegressionCase,
+    RetractionRef,
     SessionProfile,
     TestRecord,
     ToolResultPointer,
@@ -55,6 +56,7 @@ class JudgementWrite:
     conclusion: Conclusion
     commit_id: str | None = None
     recipe_digest: str | None = None
+    retracts: RetractionRef | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +248,7 @@ class BlackboardState:
             judged_at=self.judged_at.get(request_id),
             withdrawn_at=self.withdrawn_at.get(request_id),
             withdrawal_reason=withdrawal.reason if withdrawal is not None else "",
+            retracts=write.retracts if write is not None else None,
         )
 
     def records(self) -> list[TestRecord]:

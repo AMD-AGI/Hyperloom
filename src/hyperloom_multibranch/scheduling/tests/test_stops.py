@@ -116,13 +116,14 @@ class Stage:
         self.blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
         self.repo_path = tmp_path / "repo"
         self.root = ""
-        self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
+        blobs = LocalBlobStore(tmp_path / "blobs")
+        self.repo = GitExperimentRepo(self.repo_path, blobs)
         self.toolbox = toolbox_type(
             LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now), repo=self.repo
         )
         self.sessions = RecordedSessions(self.toolbox, self.repo, self.blackboard, hanging=hanging)
         self.runtime = specialist_runtime(
-            tmp_path / "blackboard", self.toolbox, self.repo, self.sessions, now=clock.now
+            tmp_path / "blackboard", self.toolbox, self.repo, self.sessions, blobs, now=clock.now
         )
         self.runtime.refusing = refusing
         self.desk = ForkDesk(self.roster, decisions, clock)

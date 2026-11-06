@@ -58,7 +58,7 @@ from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
-from hyperloom_multibranch.contracts.blackboard.records import TestRecord
+from hyperloom_multibranch.contracts.blackboard.records import RetractionRef, TestRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LearningKind, LeaseKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
@@ -811,7 +811,7 @@ class AutonomousSession:
         request = TestRequest(TestKind.TEST, Purpose.EXPLORE, self._start.branch, head, delta)
         held = "" if kept.retracts is None else await self._speed_held(kept.retracts, watch)
         if kept.retracts is not None and not held:
-            request = await self._retraction(request, kept.retracts)
+            request = await self._retraction(request, kept.retracts, watch)
         request_id = await self._setup.toolbox.submit_test(request)
         watch.imported[str(kept.seq)] = request_id
         await self._note(f"keep {kept.seq} imported as {request_id}: {kept.summary or 'no summary'}")
@@ -835,12 +835,17 @@ class AutonomousSession:
             return f"not every import since keep {retraction.keep} landed"
         return ""
 
-    async def _retraction(self, request: TestRequest, retraction: Retraction) -> TestRequest:
-        """``request`` as the test of a retraction: it carries what it retracts (``RETRACTION_ID``), so the judge holds
-        it to the rule's errors, guards and accuracy and, under a rule whose tests can run them, its consistency
-        checks, and not to its speed; it asks for both consistency checks."""
+    async def _retraction(self, request: TestRequest, retraction: Retraction, watch: KeepWatch) -> TestRequest:
+        """``request`` as the test of a retraction: it carries what it retracts (``RETRACTION_ID``, a
+        :class:`RetractionRef` naming the commit of the first import that carried the retracted keep), so the judge
+        holds it to the rule's errors, guards and accuracy and, under a rule whose tests can run them, its consistency
+        checks, and not to its speed, and the gate records what it undoes; it asks for both consistency checks."""
 
-        data = json.dumps(asdict(retraction), sort_keys=True).encode(ENCODING)
+        first = min((int(seq) for seq in watch.imported if int(seq) >= retraction.keep))
+        snapshot = await self._place.blackboard.snapshot()
+        landed = next(record for record in snapshot.records if record.request_id == watch.imported[str(first)])
+        ref = RetractionRef(retraction.iteration, retraction.keep, retraction.finding, str(landed.commit_id))
+        data = json.dumps(asdict(ref), sort_keys=True).encode(ENCODING)
         attachment = await self._setup.toolbox.put_attachment(RETRACTION_ID, "file", data)
         return replace(
             request,

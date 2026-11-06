@@ -468,6 +468,7 @@ def specialist_runtime(
     toolbox: RecordingToolbox,
     repo: ExperimentRepo,
     sessions: SessionFactory,
+    blobs: BlobStore,
     *,
     now: Callable[[], float],
     desk: ForkAdmissionService | None = None,
@@ -478,7 +479,7 @@ def specialist_runtime(
 ) -> RefusingRuntime:
     """The specialist runtime of the blackboard at ``blackboard`` on the tests' toolbox, judging on ``rule``, by default
     the InferenceX rule at the conc ``toolbox`` measures at, as the session's peers build it; ``desk`` answers its
-    branch requests. Its judges poll every ``poll_seconds`` and its claims renew on ``sleep`` and ``now``."""
+    branch requests; ``blobs`` is the session's blob store. Its judges poll every ``poll_seconds`` and its claims renew on ``sleep`` and ``now``."""
 
     gate_blackboard = LocalBlackboard(blackboard, Writer(Role.GATE, GATE_WRITER), clock=now)
     (conc,) = toolbox.config.main_concurrency
@@ -487,7 +488,8 @@ def specialist_runtime(
         return LocalBlackboard(blackboard, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=now)
 
     gate = RuleGate(gate_blackboard, repo, desk or NoForks(), toolbox)
-    judging = Judging(gate, toolbox, InferenceXRule(gate_blackboard, conc) if rule is None else rule)
+    rule = InferenceXRule(gate_blackboard, conc) if rule is None else rule
+    judging = Judging(gate, toolbox, rule, blobs)
     pacing = RuntimePacing(poll_seconds=poll_seconds, clock=now, sleep=sleep)
     return runtime(blackboard_for, judging, sessions, pacing=pacing)
 

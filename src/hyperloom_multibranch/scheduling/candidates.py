@@ -44,7 +44,6 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, R
 from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, MergeState
 from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.rulegate.rules import landed_retraction
 
 #: How many times a candidate is offered again after a merge test that ended as an infrastructure failure.
 MERGE_INFRA_RETRIES = 2
@@ -164,9 +163,9 @@ class Candidates:
         retracted: set[str] = set()
         for commit in committed:
             if commit.request_id not in self._retractions:
-                self._retractions[commit.request_id] = landed_retraction(
+                self._retractions[commit.request_id] = (
                     await self._blackboard.record(commit.request_id)
-                )
+                ).landed_retraction
             below = by_id.get(commit.parent_commit) if self._retractions[commit.request_id] else None
             while below is not None and below.branch == commit.branch and below.commit_id not in retracted:
                 retracted.add(below.commit_id)
