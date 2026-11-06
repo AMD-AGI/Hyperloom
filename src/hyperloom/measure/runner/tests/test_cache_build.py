@@ -112,7 +112,7 @@ def test_a_build_exports_the_commit_with_its_wheels_and_a_manifest_that_checks_o
     assert manifest["source_archive"] == {"size": archive.stat().st_size, "sha256": _digest(archive)}
     with tarfile.open(archive) as members:
         assert {member.name for member in members if member.isfile()} == files
-    assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.lock"}
+    assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.flock"}
 
 
 def _archive_from_git(repo: Path, sha: str, *settings: str) -> bytes:
@@ -302,7 +302,7 @@ def test_an_entry_that_differs_from_what_a_build_writes_is_refused_and_left_as_i
         ensure_runner_cache(rig.repo, rig.cache.sha, cache.root, rig.build_options())
     assert difference in str(refused.value)
     assert (tree_digest(entry), _digest(entry / MANIFEST_NAME)) == before
-    assert _names(cache.root) == {rig.cache.sha, f".{rig.cache.sha}.lock"}
+    assert _names(cache.root) == {rig.cache.sha, f".{rig.cache.sha}.flock"}
 
 
 #: Runner code of the commit, and code of the same length that an account that can write the cache puts in its place,
@@ -419,7 +419,7 @@ def test_an_unfinished_entry_is_refused_by_the_check_and_replaced_by_a_build(rig
     assert "has no manifest: an unfinished build" in check_cache(cache.root, cache.sha)[0]
     built = ensure_runner_cache(rig.repo, cache.sha, cache.root, rig.build_options())
     assert built.reused is False and check_entry(entry, cache.sha, verify_hash=True) == []
-    assert _names(cache.root) == {cache.sha, f".{cache.sha}.lock"}
+    assert _names(cache.root) == {cache.sha, f".{cache.sha}.flock"}
 
 
 def _assert_nothing_left(cache: Path, sha: str) -> None:
@@ -573,7 +573,7 @@ def _hold(lock: Path) -> int:
 def test_a_builder_that_cannot_get_the_lock_in_time_fails_and_builds_nothing(rig: Rig, tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()
-    descriptor = _hold(cache / f".{rig.cache.sha}.lock")
+    descriptor = _hold(cache / f".{rig.cache.sha}.flock")
     try:
         with pytest.raises(CacheBuildError, match="another build still holds .*after 0 s"):
             ensure_runner_cache(rig.repo, rig.cache.sha, cache, replace(rig.build_options(), lock_timeout_sec=0.3))
@@ -586,7 +586,7 @@ def test_a_builder_that_cannot_get_the_lock_in_time_fails_and_builds_nothing(rig
 def test_a_builder_that_waits_for_another_uses_the_entry_that_one_finished(rig: Rig, tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()
-    descriptor = _hold(cache / f".{rig.cache.sha}.lock")
+    descriptor = _hold(cache / f".{rig.cache.sha}.flock")
     # This builder has no wheels to build from: it can only succeed by using what the first one finishes.
     waiting = subprocess.Popen(
         _command(rig, cache, "--no-index"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -615,7 +615,7 @@ def test_two_builders_started_together_build_once_and_both_get_a_whole_entry(rig
     assert sorted(answer["reused"] for answer in answers) == [False, True]
     assert {answer["manifest_sha256"] for answer in answers} == {_digest(cache / rig.cache.sha / MANIFEST_NAME)}
     assert check_entry(cache / rig.cache.sha, rig.cache.sha, verify_hash=True) == []
-    assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.lock"}
+    assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.flock"}
 
 
 # -- the command line --------------------------------------------------------------------------------------------------
