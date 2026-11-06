@@ -2319,13 +2319,15 @@ async def test_two_arbors_wait_for_a_person_s_review_of_the_map_as_edited_while_
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     assert read == [edited]
-    assert (decided["status"], decided["by"], decided["changed"]) == ("approved", "reviewer", [str(map_file)])
+    assert (decided["status"], decided["by"]) == ("approved", "reviewer")
     assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
     rows = _decisions(stage)
     asked, approved = (next(row for row in rows if row["reason"] == reason) for reason in _review_steps(stage))
     assert (asked["kind"], asked["branch"]) == ("share", "b01") and approved["detail"][
         "paused_seconds"
     ] >= REVIEW_SECONDS
+    # The session says which files the review changed, as it reads them; the person's command does not.
+    assert approved["detail"]["changed"] == [str(map_file)]
     # Only the mapping branch waited: a specialist opened before the review was decided, and no deadline moved.
     assert any(row["kind"] == "open" and row["branch"] != "b01" and row["at"] < approved["at"] for row in rows)
     assert sorted(_shares(stage).values()) == ["/shares/share-1.json", "/shares/share-2.json"]
@@ -2973,9 +2975,9 @@ async def test_a_toolbox_without_cards_for_a_test_ends_explore_as_a_failed_sessi
 
 
 class AnalysingToolbox(LeasingToolbox):
-    """The recording toolbox with an analysis route whose TraceLens job of PRELUDE's root profile ends at once and
-    every later one never does, noting every test taken back; a double for a backend that profiles, not a
-    placeholder."""
+    """The recording toolbox with an analysis route whose TraceLens job of PRELUDE's root profile ends at once, with
+    no shares and no error class, and every later one never does, noting every test taken back; a double for a
+    backend that profiles, not a placeholder."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -2990,6 +2992,9 @@ class AnalysingToolbox(LeasingToolbox):
 
     def tool_status(self, job_id: str) -> JobStatus:
         return JobStatus.SUCCEEDED if job_id == "tracelens-1" else JobStatus.RUNNING
+
+    def tool_result(self, job_id: str) -> Mapping[str, Any]:
+        return {}
 
     async def cancel(self, request_id: str) -> CancelOutcome:
         self.taken_back.append(request_id)

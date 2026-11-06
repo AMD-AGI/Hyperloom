@@ -8,10 +8,12 @@ measured on cards leased from the card pool, and is accepted only as a signed bu
 that sandbox. At most ``8 / TP`` tests run at once on one node.
 
 The shared compiled-code cache is in ``LocalOptions.jit_store``, else in the directory the
-``HYPERLOOM_JIT_STORE`` environment variable of the host process names, else in :data:`DEFAULT_JIT_STORE` below this
-host's temporary directory (``TMPDIR`` honoured), not beside the session root: that lies on the session's shared storage,
-where a CK module build crawls. Tests read the directory's verified snapshots before their server starts, and what an
-accepted test compiled is published to it by this host.
+``HYPERLOOM_JIT_STORE`` environment variable of the host process names, else in :data:`DEFAULT_JIT_STORE` and this
+account's uid below this host's temporary directory (``TMPDIR`` honoured), not beside the session root: that lies on the
+session's shared storage, where a CK module build crawls. Tests read the directory's verified snapshots before their
+server starts, and what an accepted test compiled is published to it by this host. The runners load what it holds as
+compiled code, so the build refuses a link there, and a directory that is not this account's own or that its group or
+others can write: another account could otherwise put snapshots of its own there.
 
 The short-prompt consistency check is on by default: ``LocalOptions.short_prompts``, or the key named by
 ``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given (``off`` turns it off), else the set
@@ -30,6 +32,7 @@ server.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -67,7 +70,9 @@ from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.templates import LocalTemplate
+from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
@@ -98,12 +103,14 @@ __all__ = [
     "DEFAULT_JIT_STORE",
     "HOST_TOOL_REPO_ENVS",
     "JIT_STORE_ENV",
+    "JitStoreNotPrivate",
     "LocalHostedToolbox",
     "LocalOptions",
     "LocalSession",
     "MAX_CARDS_PER_NODE",
     "build_local_toolbox",
     "host_tool_repos",
+    "private_jit_store",
 ]
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once.
@@ -111,7 +118,7 @@ MAX_CARDS_PER_NODE = 8
 #: The host environment variable that names the shared compiled-code cache when ``LocalOptions.jit_store`` is not given.
 JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
 #: The shared compiled-code cache below this host's temporary directory when neither the options nor the environment
-#: name one.
+#: name one, followed by ``-<uid>``: each account on the host keeps its own.
 DEFAULT_JIT_STORE = "hyperloom-jit-store"
 #: The variables that name where a runner clones the tools its tests run (InferenceX, Magpie) from. A local runner starts
 #: from an emptied environment, so :func:`host_tool_repos` carries them from this host's.
@@ -121,6 +128,7 @@ _BRANCH_SANDBOXES = "branch-sandboxes"
 _RULE_PACK = "rule-pack"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
+FREED_CARDS_REASON = "nothing of the sandbox that held them runs any more"
 #: A running test's files below its sandbox's directory: a local sandbox's root is its ``fs`` directory.
 _LIVE_FILES = Path("fs") / FILES_ROOT.lstrip("/")
 logger = logging.getLogger(__name__)
@@ -130,8 +138,9 @@ class LocalHostedToolbox(LeasedToolbox):
     """A :class:`RealToolbox` that also owns its hosted backend and local sandbox provider; ``close`` releases them.
 
     ``sandboxes`` is the provider's directory, where a running test's live files are read for :meth:`progress`. The
-    cards tests can run on are the provider's pool less the cards it lost for good (``provider.quarantined``) and the
-    leases; node quarantine does not reduce them.
+    cards tests can run on are the provider's pool less the cards it lost (``provider.quarantined``) and the leases;
+    node quarantine does not reduce them. A card lost by a sandbox of this process comes back once nothing of that
+    sandbox runs; one an earlier process lost stays lost.
     """
 
     backend: HostedMeasurementBackend
@@ -178,21 +187,48 @@ class LocalHostedToolbox(LeasedToolbox):
         return frozenset(self.provider.quarantined)
 
     async def _housekeeping(self) -> None:
-        """Tell the blackboard about cards the provider lost since last time: one event for all the new ones.
+        """Take back the cards the provider freed, then tell the blackboard about cards it lost since last time: one
+        event for all the new ones.
 
         The provider only grows a plain set; this polls it after each settled test and on every tick, so the sandbox
         layer knows nothing of the blackboard. A refused write is retried at the next poll.
         """
 
+        await self._take_back_freed_cards()
         new = self._leaked() - self._reported_cards
         if not new:
             return
         try:
             await self._quarantine.add_cards(self.provider.hostname, new, LEAKED_CARDS_REASON)
-        except Exception:
+        except (BlackboardError, OSError):  # the blackboard refused or was not reached: the next poll retries
             logger.warning("could not record leaked cards in the blackboard", exc_info=True)
             return
         self._reported_cards |= new
+
+    async def _take_back_freed_cards(self) -> None:
+        """Put back in the pool the cards of ended sandboxes nothing of which runs any more
+        (:meth:`~hyperloom.sandbox.local.LocalSandboxProvider.release_freed_cards`), lift their record in the blackboard
+        and start the tests they let run.
+
+        A refused lift is not retried: the blackboard keeps the cards recorded as lost, which is read back only by a
+        restart into this session, and keeps them out of the pool there.
+        """
+
+        freed = frozenset(await asyncio.to_thread(self.provider.release_freed_cards))
+        if not freed:
+            return
+        logger.info("cards %s are back in the pool: %s", sorted(freed), FREED_CARDS_REASON)
+        recorded = freed & self._reported_cards
+        if recorded:
+            try:
+                await self._quarantine.return_cards(self.provider.hostname, recorded, FREED_CARDS_REASON)
+            except (BlackboardError, OSError):  # refused or not reached: the cards stay recorded lost
+                logger.warning(
+                    "could not record in the blackboard that cards %s are back", sorted(recorded), exc_info=True
+                )
+            else:
+                self._reported_cards -= recorded
+        self._pump_soon()
 
     async def close(self) -> None:
         await super().close()
@@ -262,8 +298,9 @@ class LocalOptions:
     none (the tests then share the tables). ``jit_store`` is the directory of the shared compiled-code cache: the
     runners read it (``HYPERLOOM_JIT_CACHE`` in their template, which therefore wins over the same name in
     ``runner_envs``) and this host publishes into it; ``None`` takes ``HYPERLOOM_JIT_STORE`` of the host environment,
-    and without either :data:`DEFAULT_JIT_STORE` below this host's temporary directory. ``card_guard`` is what is done
-    about a process that holds a card of a test or of a lease: observed
+    and without either :data:`DEFAULT_JIT_STORE` and this account's uid below this host's temporary directory; the
+    build refuses a link there, and one that is not this account's own or that its group or others can write.
+    ``card_guard`` is what is done about a process that holds a card of a test or of a lease: observed
     (kept and recorded) or enforced (the test refused and retried, the card not handed out); ``None`` takes
     ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard enforces. The runners get the same
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
@@ -307,15 +344,39 @@ def card_guard_of(options: LocalOptions, environ: Mapping[str, str] | None = Non
     return options.card_guard or card_guard(os.environ if environ is None else environ)
 
 
+class JitStoreNotPrivate(ValueError):
+    """The compiled-code cache is not a directory of this account's that only it can write."""
+
+
 def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = None) -> Path:
     """The absolute directory of the shared compiled-code cache: the one ``options`` (or ``HYPERLOOM_JIT_STORE``) names,
-    else :data:`DEFAULT_JIT_STORE` below this host's temporary directory.
+    else :data:`DEFAULT_JIT_STORE` and this account's uid below this host's temporary directory.
 
-    The runner starts in a directory of its own, so a relative path is made absolute here, once.
+    The runner starts in a directory of its own, so a relative path is made absolute here, once. A link is not resolved:
+    :func:`private_jit_store` judges what stands under the name, and a link there is refused, never followed.
     """
     source = os.environ if environ is None else environ
-    named = options.jit_store or source.get(JIT_STORE_ENV, "").strip() or Path(tempfile.gettempdir(), DEFAULT_JIT_STORE)
-    return Path(named).expanduser().resolve()
+    default = Path(tempfile.gettempdir(), f"{DEFAULT_JIT_STORE}-{os.getuid()}")
+    named = options.jit_store or source.get(JIT_STORE_ENV, "").strip() or default
+    return Path(named).expanduser().absolute()
+
+
+def private_jit_store(root: Path) -> Path:
+    """``root``, made (mode 0700) when nothing stands under its name.
+
+    Raises:
+        JitStoreNotPrivate: ``root`` is not a directory of this account's (a link to one is refused too), or its group or
+            others can write it: the runners load what it holds as compiled code, and the snapshots prove only their own
+            content. Another account can plant the default name, which stops the build here but feeds it nothing.
+    """
+    with contextlib.suppress(FileExistsError):  # what already stands there, a link included, is judged below
+        root.mkdir(mode=0o700, parents=True)
+    if not is_private_dir(root):
+        raise JitStoreNotPrivate(
+            f"the compiled-code cache {root} is not a directory of this account's that only it can write (nor may it "
+            f"be a link to one); name one that is with {JIT_STORE_ENV}"
+        )
+    return root
 
 
 def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
@@ -438,6 +499,8 @@ def build_local_toolbox(
         options: Everything else, see :class:`LocalOptions`.
 
     Raises:
+        JitStoreNotPrivate: The compiled-code cache is not this account's own directory that only it can write; nothing
+            has been started.
         ShortPromptsNotStaged: The short-prompt check is asked for (the option or ``HYPERLOOM_SHORT_PROMPTS``) and its
             set is not staged in this host's runner cache; nothing has been started.
         LongContextNotStaged: The same for the long-context check (the option or ``HYPERLOOM_LONG_CONTEXT``).
@@ -446,7 +509,7 @@ def build_local_toolbox(
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
     parallel = max_parallel_tests(len(cards), tp)
-    jit_root = jit_store_root(options)
+    jit_root = private_jit_store(jit_store_root(options))
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
     acceptance = with_native_plan(acceptance, native)

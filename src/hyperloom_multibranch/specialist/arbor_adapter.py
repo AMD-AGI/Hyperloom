@@ -351,12 +351,11 @@ def _flag_word(word: str) -> str:
 
 @dataclass(frozen=True)
 class ArborCheckout:
-    """Arbor at ``commit`` of ``source``, checked out at ``path``, run with ``env``."""
+    """Arbor at ``commit`` of ``source``, checked out at ``path``."""
 
     source: str
     commit: str
     path: Path
-    env: Mapping[str, str] = field(default_factory=lambda: os.environ)
 
 
 @dataclass(frozen=True)
@@ -432,7 +431,7 @@ def arbor_manifest(spec: AgentSpec, checkout: ArborCheckout, run: ArborRun) -> A
     if spec.dossier:
         carry_dossier(path, Path(spec.dossier))
     config = arbor_config(spec, path, run)
-    reasons = [*_launch_refusals(spec), *refusals(config, checkout.env, declared_keys(path))]
+    reasons = [*_launch_refusals(spec), *refusals(config, declared_keys(path))]
     if reasons:
         raise ArborRefused(reasons)
     (path / run.session_dir).mkdir(parents=True, exist_ok=True)
@@ -753,11 +752,10 @@ def _client_value(client: str, flag: str) -> str:
     return ""
 
 
-def refusals(
-    config: Mapping[str, Any], env: Mapping[str, str] = os.environ, declared: frozenset[str] | None = None
-) -> list[str]:
-    """Why Arbor would refuse ``config`` at its start, run with ``env``, as far as this side can tell; ``[]`` when it
-    would not. ``declared`` is the component keys the pinned Arbor takes (:func:`declared_keys`), when known.
+def refusals(config: Mapping[str, Any], declared: frozenset[str] | None = None) -> list[str]:
+    """Why Arbor would refuse ``config`` at its start, run with this process's environment, as far as this side can
+    tell; ``[]`` when it would not. ``declared`` is the component keys the pinned Arbor takes (:func:`declared_keys`),
+    when known.
 
     These are the refusals of Arbor's ``docs/hosts.md`` that a config written from the spec can meet: no session, no
     deadline, a container other than the host, ``ARBOR_ROLL=1``, a component block with a key Arbor does not have, a
@@ -770,7 +768,7 @@ def refusals(
     return [
         *_block_refusals(component),
         *_pin_refusals(component, declared),
-        *_host_refusals(config, env),
+        *_host_refusals(config),
         *_path_refusals(config),
         *_root_refusals(component.get("root"), Path(str(config.get("workspace_root") or ""))),
         *_plan_refusals(component.get("plan")),
@@ -804,13 +802,13 @@ def _pin_refusals(component: Mapping[str, Any], declared: frozenset[str] | None)
     ]
 
 
-def _host_refusals(config: Mapping[str, Any], env: Mapping[str, str]) -> list[str]:
+def _host_refusals(config: Mapping[str, Any]) -> list[str]:
     reasons = []
     if not config.get("session_root"):
         reasons.append("no session_root: the snapshots, the heartbeat and the exit file are written there")
     if config.get("docker_container") != "@host":
         reasons.append(f"docker_container is {config.get('docker_container')!r}, not @host")
-    if env.get("ARBOR_ROLL") == "1":
+    if os.environ.get("ARBOR_ROLL") == "1":
         reasons.append("ARBOR_ROLL=1 is set: a component's clock is its host's")
     if not str(config.get("server_flags") or "").strip():
         reasons.append("no server_flags: Arbor serves the launch MB measures, and an empty one serves defaults")

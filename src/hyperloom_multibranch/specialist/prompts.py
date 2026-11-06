@@ -103,8 +103,8 @@ Claims you held may have lapsed meanwhile; a tool that refuses one says so.
 {arrived}"""
 _KEPT = "Your worktree {worktree} is as you left it, at your branch head {head}, uncommitted edits included."
 _RESET = (
-    "Your branch head moved while you were down: your worktree {worktree} was reset to your branch head {head}, and "
-    "its uncommitted edits were dropped."
+    "Your branch head is no longer the one of your last worktree_sync: your worktree {worktree} was reset to your "
+    "branch head {head}, and its uncommitted edits were dropped."
 )
 _ARRIVED = "While you were down, this arrived for your branch:\n{items}"
 _NOTHING_ARRIVED = "Nothing arrived for your branch while you were down."
@@ -378,8 +378,8 @@ correctness fix with its case, and also made that kernel faster.
 dropped it on that result and took the next operator the profile ranked.
 
 How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. A \
-gain must clear the session's bar, set from the spread of the baseline measurements, and hold when it is measured \
-again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
+gain must clear the session's bar, set on InferenceX from the spread of the baseline measurements and on AgentX a \
+fixed threshold on the P50, and hold when it is measured again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
 branch head is still the parent it was measured against: submit on your current head.
 
 A test that failed as hip_runtime_error quotes the HIP error, and it is not a missing kernel: an illegal memory \
@@ -508,15 +508,18 @@ _HOLDS = {
 }
 
 
+_REFERENCES = """
+Reference material for this session, read-only and copied in when it started, one directory per source: {listed}. \
+Before you guess at a kernel, a tuning step or a setting, read what it says about this model's operators and your \
+direction, and name the file you used in your branch log.
+"""
+
+
 def _references(references: Mapping[str, Path]) -> str:
     if not references:
         return ""
     listed = "; ".join(f"{name} at {path}{_HOLDS.get(name, '')}" for name, path in sorted(references.items()))
-    return (
-        "\nReference material for this session, read-only and copied in when it started, one directory per source: "
-        f"{listed}. Before you guess at a kernel, a tuning step or a setting, read what it says about this model's "
-        "operators and your direction, and name the file you used in your branch log.\n"
-    )
+    return _REFERENCES.format(listed=listed)
 
 
 def launch_prompt(
@@ -651,7 +654,11 @@ def prompt_versions() -> dict[str, str]:
     role = _ROLE.format(
         workload="{workload}", fake_gains=_fake_gains(), directions=_direction_names(), gpu_rule=_NO_GPU
     )
-    texts = {"specialist_role": role, "specialist_launch": "\n".join(_LAUNCH)}
+    settings = (_DEV_SANDBOX, _NATIVE, _REFERENCES, *_HOLDS.values())
+    texts = {
+        "specialist_role": "\n".join((role, *settings)),
+        "specialist_launch": "\n".join((*_LAUNCH, _LEASE_WAKE, _WAIT_WAKE)),
+    }
     return {name: hashlib.sha256(text.encode()).hexdigest()[:VERSION_HEX] for name, text in texts.items()}
 
 

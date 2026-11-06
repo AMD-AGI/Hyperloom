@@ -20,6 +20,9 @@ every head costs a test each time. The session's base image is fixed, and
 :func:`~hyperloom_multibranch.repo.merge.carry` refuses a candidate that moves it, so an image is never one of the
 things a change names here.
 
+A commit that a retraction on its branch was committed on top of is never offered: the retraction undoes a change one
+of those commits made, the agent found that change invalid, and merging the retraction carries what the rest changed.
+
 The asymmetry with a merged or already-on-head commit is deliberate: its change is on the head, and a later merge
 that overrode a value it set was itself judged an improvement over a head that held the old value, so the old value
 has been measured and beaten.
@@ -41,6 +44,7 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, R
 from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, MergeState
 from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.rulegate.rules import landed_retraction
 
 #: How many times a candidate is offered again after a merge test that ended as an infrastructure failure.
 MERGE_INFRA_RETRIES = 2
@@ -137,17 +141,37 @@ class Candidates:
         self._recipes: dict[str, Recipe] = {}
         self._patched: dict[str, frozenset[str]] = {}
         self._infra_ended: dict[str, set[str]] = {}
+        self._retractions: dict[str, bool] = {}
 
     async def offered_on(self, head: str) -> tuple[CommittedCommit, ...]:
         """The committed commits to test on ``head``, in the order the blackboard gives them."""
 
         committed = await self._blackboard.committed()
         unmerged = {commit.commit_id: commit for commit in committed if commit.merged_into is None}
+        retracted = await self._retracted(committed)
         offered = []
         for commit in committed:
-            if await self._offered(commit, head, unmerged):
+            if commit.commit_id not in retracted and await self._offered(commit, head, unmerged):
                 offered.append(commit)
         return tuple(offered)
+
+    async def _retracted(self, committed: tuple[CommittedCommit, ...]) -> set[str]:
+        """The commits a retraction on their branch was committed on top of. The retraction undoes a change one of them
+        made, and merging it carries what the others changed; any of them merged alone could carry the change its own
+        agent found invalid into the integration head."""
+
+        by_id = {commit.commit_id: commit for commit in committed}
+        retracted: set[str] = set()
+        for commit in committed:
+            if commit.request_id not in self._retractions:
+                self._retractions[commit.request_id] = landed_retraction(
+                    await self._blackboard.record(commit.request_id)
+                )
+            below = by_id.get(commit.parent_commit) if self._retractions[commit.request_id] else None
+            while below is not None and below.branch == commit.branch and below.commit_id not in retracted:
+                retracted.add(below.commit_id)
+                below = by_id.get(below.parent_commit)
+        return retracted
 
     async def _offered(self, commit: CommittedCommit, head: str, unmerged: Mapping[str, CommittedCommit]) -> bool:
         last = commit.last_merge

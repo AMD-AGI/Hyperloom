@@ -13,9 +13,13 @@ Under ``ROOT`` (on storage the runners share) it makes the build store ``store/`
 ``trust.json`` with its public key, the checkout of each upstream the image installs at its commit,
 ``sources/<component>/<commit>`` (``sgl_kernel`` from the image's ``sglang`` or its checkout ``/sgl-workspace/sglang``,
 or ``--sglang-ref``; ``vllm`` from the checkout the image's ``vllm`` was installed from, where it keeps one) and
-``build.env``, the ``HYPERLOOM_BUILD_*`` variables. It then reports every path user 65534 cannot reach and every one
-another user (such as the specialists') could change, and exits 1 if there is one (or the existing key, trust file or
-checkout is not usable). Running it again changes nothing that is in place.
+``build.env``, the ``HYPERLOOM_BUILD_*`` variables. ``--sglang-ref`` may be a full commit id, or a tag, branch or short
+id the local checkout ``--sglang-repo`` (or the image's) resolves; anything else is refused before anything is made. The
+commit of an override is recorded in ``build.env`` (``HYPERLOOM_BUILD_SGLANG_REF``), where the toolbox's check reads it
+for an image that names no commit of its own. It then reports what the toolbox's check at start would refuse: a checkout
+of a commit other than the image's, every path user 65534 cannot reach and every one another user (such as the
+specialists') could change, and exits 1 if there is one (or the existing key, trust file or checkout is not usable).
+Running it again changes nothing that is in place.
 
 A launcher turns native builds on by sourcing the file (``export`` lines) before it starts the session::
 
@@ -33,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -52,15 +57,19 @@ from hyperloom_multibranch.toolbox.build_preflight import (
     image_upstreams,
     reach_problems,
     signing_key_problem,
+    site_upstreams,
+    sources_problems,
     tamper_problems,
 )
 from hyperloom_multibranch.toolbox.native_builds import (
     BUILD_GFX_ENV,
     BUILD_IMAGE_ROOT_ENV,
     BUILD_PYTHON_ENV,
+    BUILD_SGLANG_REF_ENV,
     BUILD_SIGNING_KEY_ENV,
     BUILD_SOURCES_ENV,
     BUILDER_IMAGE_ENV,
+    named_commits,
 )
 
 __all__ = ["BuildSetup", "SetupError", "main", "host_problems", "set_up"]
@@ -74,6 +83,8 @@ _ENV_FILE = "build.env"
 #: What each step says of what it found: made now, or already in place and left as it is.
 _CREATED, _KEPT = "created", "kept"
 _SGL_KERNEL = "sgl_kernel"
+_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
+_QUIET = "--quiet"
 
 
 class SetupError(Exception):
@@ -84,8 +95,9 @@ class SetupError(Exception):
 @dataclass(frozen=True)
 class BuildSetup:
     """What to set up: under ``root``, for the image whose packages are ``image_root``, built for ``gfx`` with the image
-    interpreter ``python``; ``sglang_ref`` and ``sglang_repo`` override what is read from the image, and
-    ``image_checkouts`` are where the image keeps its upstream checkouts (by default where the framework image does)."""
+    interpreter ``python``; ``sglang_ref`` (a full commit id, or a name the local checkout ``sglang_repo`` resolves) and
+    ``sglang_repo`` override what is read from the image, and ``image_checkouts`` are where the image keeps its
+    upstream checkouts (by default where the framework image does)."""
 
     root: Path
     image_root: Path
@@ -138,7 +150,7 @@ def _write_public(path: Path, text: str) -> None:
     os.replace(staged, path)
 
 
-def _git(*args: str) -> None:
+def _git(*args: str) -> str:
     done = subprocess.run(
         ["git", "-c", "safe.directory=*", "-c", "advice.detachedHead=false", *args],
         capture_output=True,
@@ -148,6 +160,30 @@ def _git(*args: str) -> None:
     )
     if done.returncode != 0:
         raise SetupError(f"git {' '.join(args)} exited {done.returncode}: {done.stderr.strip()[-500:]}")
+    return done.stdout.strip()
+
+
+def _full_commit(ref: str, repo: str | None) -> str:
+    """The full commit id ``ref`` names: ``ref`` when it is one, else what the local checkout ``repo`` resolves it to.
+    It names the checkout's directory and is what a later run finds that checkout at, so it is never a short name.
+
+    Raises:
+        SetupError: ``repo`` is not a local checkout to resolve ``ref`` in, or ``ref`` names no commit there.
+    """
+    if _FULL_COMMIT.fullmatch(ref):
+        return ref
+    if repo is None or not Path(repo).is_dir():
+        raise SetupError(
+            f"--sglang-ref {ref!r} is not a full commit id and {repo or 'no repository'} is not a local checkout to "
+            "resolve it in: pass the full commit id"
+        )
+    try:
+        full = _git("-C", repo, "rev-parse", "--verify", _QUIET, "--end-of-options", f"{ref}^{{commit}}")
+    except SetupError:
+        full = ""
+    if not _FULL_COMMIT.fullmatch(full):
+        raise SetupError(f"--sglang-ref {ref!r} names no commit of {repo}")
+    return full
 
 
 @dataclass(frozen=True)
@@ -169,9 +205,10 @@ def _clones(setup: BuildSetup) -> list[_Clone]:
         for up in image_upstreams(setup.image_root, own)
     }
     found = clones.get(_SGL_KERNEL)
-    ref = setup.sglang_ref or (found.ref if found else None)
+    repo = setup.sglang_repo or (found.repo if found else None)
+    ref = _full_commit(setup.sglang_ref, repo) if setup.sglang_ref else (found.ref if found else None)
     if ref is not None:
-        clones[_SGL_KERNEL] = _Clone(_SGL_KERNEL, ref, setup.sglang_repo or (found.repo if found else None))
+        clones[_SGL_KERNEL] = _Clone(_SGL_KERNEL, ref, repo)
     if not any(clone.repo for clone in clones.values()):
         raise SetupError(
             f"no upstream commit with a checkout to clone it from can be read from {setup.image_root} or "
@@ -189,8 +226,8 @@ def _ensure_checkout(sources: Path, clone: _Clone) -> str:
         _directory(checkout.parent)
         staged = checkout.with_name(f".{ref}.tmp")
         shutil.rmtree(staged, ignore_errors=True)
-        _git("clone", "--quiet", "--no-checkout", clone.repo, str(staged))
-        _git("-C", str(staged), "checkout", "--quiet", ref)
+        _git("clone", _QUIET, "--no-checkout", clone.repo, str(staged))
+        _git("-C", str(staged), "checkout", _QUIET, ref)
         staged.rename(checkout)
         return _CREATED
     head = git_head(checkout)
@@ -199,8 +236,9 @@ def _ensure_checkout(sources: Path, clone: _Clone) -> str:
     return _KEPT
 
 
-def _environment(setup: BuildSetup) -> dict[str, str]:
-    """The variables ``build.env`` exports for ``setup``."""
+def _environment(setup: BuildSetup, clones: Sequence[_Clone]) -> dict[str, str]:
+    """The variables ``build.env`` exports for ``setup`` and its ``clones``: with an sglang override, the commit it
+    checked out, which the toolbox's check reads for an image that names none."""
     root = setup.root.resolve()
     variables = {
         BUILD_STORE_ENV: str(root / "store"),
@@ -213,6 +251,9 @@ def _environment(setup: BuildSetup) -> dict[str, str]:
     }
     if setup.builder_image:
         variables[BUILDER_IMAGE_ENV] = setup.builder_image
+    overridden = [clone.ref for clone in clones if clone.component == _SGL_KERNEL]
+    if overridden and (setup.sglang_ref or setup.sglang_repo):
+        variables[BUILD_SGLANG_REF_ENV] = overridden[0]
     return variables
 
 
@@ -233,14 +274,15 @@ def set_up(setup: BuildSetup) -> list[str]:
     """
     previous = os.umask(_UMASK)
     try:
-        variables = _environment(setup)
+        clones = _clones(setup)
+        variables = _environment(setup, clones)
         root = _directory(setup.root.resolve())
         key, trust = Path(variables[BUILD_SIGNING_KEY_ENV]), Path(variables[BUILD_TRUST_ENV])
         done = [f"store {_directory(Path(variables[BUILD_STORE_ENV]))}"]
         done.append(f"signing key {key}: {_ensure_key(key)}")
         done.append(f"trust file {trust}: {_ensure_trust(trust, key)}")
         sources = Path(variables[BUILD_SOURCES_ENV])
-        done += [f"{c.component} checkout of {c.ref}: {_ensure_checkout(sources, c)}" for c in _clones(setup)]
+        done += [f"{c.component} checkout of {c.ref}: {_ensure_checkout(sources, c)}" for c in clones]
         _write_public(root / _ENV_FILE, _env_file(variables))
         done.append(f"environment {root / _ENV_FILE}")
     finally:
@@ -249,9 +291,13 @@ def set_up(setup: BuildSetup) -> list[str]:
 
 
 def host_problems(setup: BuildSetup) -> list[str]:
-    """Each path of ``setup`` user 65534 must reach and cannot, and each one another user could change (the toolbox
-    refuses to start on the same, see :mod:`~hyperloom_multibranch.toolbox.build_preflight`)."""
-    variables = {name: Path(value) for name, value in _environment(setup).items()}
+    """What the toolbox's check at start refuses of ``setup``'s host (see
+    :mod:`~hyperloom_multibranch.toolbox.build_preflight`): the sources without a checkout of the commit the image (or
+    the recorded override) names, each path user 65534 must reach and cannot, and each one another user could
+    change."""
+    clones = _clones(setup)
+    environment = _environment(setup, clones)
+    variables = {name: Path(value) for name, value in environment.items()}
     site = PreflightSite(
         variables[BUILD_STORE_ENV],
         variables[BUILD_TRUST_ENV],
@@ -259,10 +305,12 @@ def host_problems(setup: BuildSetup) -> list[str]:
         variables[BUILD_SOURCES_ENV],
         setup.image_root,
         setup.python,
+        named_commits(environment),
     )
-    checkouts = [site.sources / clone.component / clone.ref for clone in _clones(setup)]
+    checkouts = [site.sources / clone.component / clone.ref for clone in clones]
     checkouts = [checkout for checkout in checkouts if checkout.is_dir()]
-    return [*reach_problems(site, checkouts), *tamper_problems(site, checkouts)]
+    found = sources_problems(site, site_upstreams(site))
+    return [*found, *reach_problems(site, checkouts), *tamper_problems(site, checkouts)]
 
 
 def _default_python(image_root: Path) -> str:
@@ -278,7 +326,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--gfx", required=True, help="the GPU architecture to build for, such as gfx950")
     parser.add_argument("--python", help="the image's interpreter (default: bin/python3 of the image root's prefix)")
     parser.add_argument("--builder-image", help="the digest of the image the build runs in (default: the session's)")
-    parser.add_argument("--sglang-ref", help="the image's sglang commit (default: read from the image)")
+    parser.add_argument(
+        "--sglang-ref",
+        help="the image's sglang commit: a full id, or a name the local checkout resolves (default: read from the image)",
+    )
     parser.add_argument("--sglang-repo", help=f"where to clone sglang from (default: {IMAGE_SGLANG_CHECKOUT})")
     return parser
 

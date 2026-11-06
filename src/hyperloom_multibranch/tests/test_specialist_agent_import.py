@@ -3,7 +3,7 @@
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hyperloom.contracts.recipe import (
@@ -23,6 +23,7 @@ from hyperloom_multibranch.specialist.agent_import import (
     KeepStores,
     KeptChange,
     KeptChangeError,
+    Retraction,
     added_at,
     import_delta,
     read_kept_change,
@@ -619,3 +620,191 @@ def test_a_keep_s_patch_is_read_byte_for_byte_with_a_lone_carriage_return_in_an_
     _arbor_keep(tmp_path, "", {})
     (tmp_path / "0001" / "change.patch").write_bytes(patch.encode())
     assert _read(tmp_path, ()).source_patch == patch
+
+
+async def test_a_source_only_snapshot_keeps_the_evaluation_settings_the_recipe_sets(tmp_path: Path) -> None:
+    # MB starts Arbor with the recipe's GSM8K_MIN in its config; the snapshot runs with it too.
+    launch = LaunchConfig(ROOT.launch.server_args, {**ROOT.launch.envs, "GSM8K_MIN": "0.8"})
+    recipe = replace(ROOT, launch=launch)
+    _arbor_keep(tmp_path, "", {})
+    config = {"server_flags": launch.server_args, "server_env": dict(launch.envs)}
+    (tmp_path / "0001" / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    (tmp_path / "0001" / "change.patch").write_text("diff\n", encoding="utf-8")
+
+    kept = read_snapshot(tmp_path, 1, ROOT_COMMIT, "".join, ComponentStart(launch, config, ()))
+    delta = await import_delta(kept, root=recipe, head=recipe, component="sglang", stores=_stores(Store()))
+
+    assert delta is not None and delta.config.unset_envs == () and delta.config.envs == {}
+
+
+def test_a_snapshot_whose_json_nests_too_deep_to_parse_is_refused(tmp_path: Path) -> None:
+    _arbor_keep(tmp_path, "", {})
+    (tmp_path / "0001" / "config.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+
+    with pytest.raises(KeptChangeError, match="config.json"):
+        _read(tmp_path, ())
+
+
+def test_a_snapshot_listing_a_table_file_whose_path_is_no_string_is_refused(tmp_path: Path) -> None:
+    defaults, start, own = _start_files(tmp_path)
+    value = ":".join(map(str, (*defaults, own)))
+    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, own)})
+    keep_file = tmp_path / "outbox" / "0001" / "keep.json"
+    keep = json.loads(keep_file.read_text(encoding="utf-8"))
+    keep["tables"][TABLE_ENV]["files"][-1]["path"] = [str(own)]
+    keep_file.write_text(json.dumps(keep), encoding="utf-8")
+
+    with pytest.raises(KeptChangeError, match=TABLE_ENV):
+        _read(tmp_path / "outbox", tuple(map(str, defaults)))
+
+
+@dataclass(frozen=True)
+class Keep:
+    """One snapshot of :func:`_outbox`: the files its change sets (to :data:`GONE` to delete one), its launch, the
+    tables it lists and what its ``keep.json`` says it retracts (``None``: no ``retracts``); a ``served`` one was made
+    on the root after the commit of the keep before it was gone, its ``files`` the whole tree."""
+
+    files: dict[str, str] = field(default_factory=dict)
+    envs: dict[str, str] = field(default_factory=dict)
+    flags: str = ""
+    tables: dict[str, object] = field(default_factory=dict)
+    retracts: object = None
+    served: bool = False
+
+
+GONE = "<deleted>"
+
+
+def _outbox(tmp_path: Path, *keeps: Keep) -> Path:
+    """Snapshots 1, 2, ... of an outbox, each made on the one before."""
+
+    outbox = tmp_path / "keeps"
+    for number, kept in enumerate(keeps, start=1):
+        directory = outbox / f"{number:04d}"
+        directory.mkdir(parents=True)
+        keep = {"number": number, "previous": number - 1 or None, "root": ROOT_COMMIT,
+                "parent": ROOT_COMMIT if number == 1 or kept.served else f"{number - 1}" * 40,
+                "commit": f"{number}" * 40, "change": f"keep {number}", "tables": kept.tables}  # fmt: skip
+        if kept.served:
+            keep["notes"] = f"the commit of keep {number - 1} is gone; this change is against the root"
+        if kept.retracts is not None:
+            keep["retracts"] = kept.retracts
+        (directory / "keep.json").write_text(json.dumps(keep), encoding="utf-8")
+        patch = "".join(f"diff --git a/{name} b/{name}\n{text}\n" for name, text in kept.files.items())
+        (directory / ("served.patch" if kept.served else "change.patch")).write_text(patch, encoding="utf-8")
+        launch = {"server_flags": kept.flags, "server_env": kept.envs}
+        (directory / "config.json").write_text(json.dumps(launch), encoding="utf-8")
+    return outbox
+
+
+def _applied(patches: list[str]) -> str:
+    """What the patches of :func:`_outbox` make of the root, as one patch from it: each file as the last sets it."""
+    files: dict[str, str] = {}
+    for patch in patches:
+        for section in patch.split("diff --git a/")[1:]:
+            header, text = section.split("\n", 1)
+            files[header.split(" b/", 1)[-1]] = text
+    return "".join(f"diff --git a/{name} b/{name}\n{text}" for name, text in files.items() if text != f"{GONE}\n")
+
+
+def _read_newest(outbox: Path) -> KeptChange:
+    newest = max(int(directory.name) for directory in outbox.iterdir())
+    return read_snapshot(outbox, newest, ROOT_COMMIT, _applied, ComponentStart(LaunchConfig(""), {}, ()))
+
+
+FINDING = {"iteration": 7, "keep": 2, "finding": "iter7-agentx-283-selection-invalid"}
+TOPK = Keep({"vllm/topk.py": "v1"}, {"TOPK": "1"}, "--kv-cache-dtype fp8", {"T": {"sha256": "1" * 64}})
+
+
+def test_a_snapshot_that_undoes_only_the_keep_it_retracts_names_it_and_nothing_beyond(tmp_path: Path) -> None:
+    outbox = _outbox(
+        tmp_path,
+        Keep({"vllm/a.py": "v1"}),
+        TOPK,
+        replace(TOPK, files={"vllm/b.py": "v1"}),
+        Keep({"vllm/topk.py": GONE}, retracts=FINDING),
+    )
+
+    assert _read_newest(outbox).retracts == Retraction(7, 2, "iter7-agentx-283-selection-invalid", 3, "")
+
+
+@pytest.mark.parametrize(
+    ("retraction", "beyond"),
+    [
+        (Keep({"vllm/topk.py": GONE, "vllm/b.py": "v1"}), "vllm/b.py"),
+        (Keep({"vllm/topk.py": "v2"}), "vllm/topk.py"),
+        (Keep({"vllm/topk.py": GONE}, {"TOPK": "8"}), "TOPK"),
+        (Keep({"vllm/topk.py": GONE}, flags="--quantization fp8"), "--quantization"),
+        (Keep({"vllm/topk.py": GONE}, tables={"U": {"sha256": "2" * 64}}), "U"),
+    ],
+    ids=["another-file", "another-content", "another-value", "another-flag", "another-table"],
+)
+def test_a_snapshot_that_does_more_than_undo_the_keep_it_retracts_names_what_else_it_changes(
+    tmp_path: Path, retraction: Keep, beyond: str
+) -> None:
+    outbox = _outbox(tmp_path, Keep({"vllm/a.py": "v1"}), TOPK, replace(retraction, retracts=FINDING))
+
+    kept = _read_newest(outbox).retracts
+
+    assert kept is not None and kept.beyond == beyond
+
+
+@pytest.mark.parametrize(
+    "retracts",
+    [7, {"iteration": 7, "keep": 4}, {"iteration": "7", "keep": 4, "finding": "f"}, {**FINDING, "keep": True}],
+)
+def test_a_snapshot_whose_retraction_names_no_iteration_keep_and_finding_is_refused(
+    tmp_path: Path, retracts: object
+) -> None:
+    outbox = _outbox(tmp_path, Keep({"vllm/topk.py": "v1"}, retracts=retracts))
+
+    with pytest.raises(KeptChangeError, match="retracts"):
+        _read_newest(outbox)
+
+
+def test_a_malformed_retraction_of_an_earlier_snapshot_does_not_refuse_the_keeps_made_on_it(tmp_path: Path) -> None:
+    outbox = _outbox(tmp_path, Keep({"vllm/topk.py": "v1"}, retracts=7), Keep({"vllm/b.py": "v1"}))
+
+    assert _read_newest(outbox).retracts is None
+
+
+def test_a_retraction_of_a_keep_made_on_the_root_counts_only_what_that_keep_changed_not_its_whole_tree(
+    tmp_path: Path,
+) -> None:
+    rebased = Keep({"vllm/a.py": "v1", "vllm/topk.py": "v1"}, {"TOPK": "1"}, served=True)
+    undone = Keep({"vllm/topk.py": GONE}, retracts=FINDING)
+    also = Keep({"vllm/topk.py": GONE, "vllm/a.py": "v2"}, retracts=FINDING)
+
+    clean = _read_newest(_outbox(tmp_path / "clean", Keep({"vllm/a.py": "v1"}), rebased, undone)).retracts
+    more = _read_newest(_outbox(tmp_path / "more", Keep({"vllm/a.py": "v1"}), rebased, also)).retracts
+
+    assert clean is not None and clean.beyond == ""
+    assert more is not None and more.beyond == "vllm/a.py"
+
+
+def test_a_retraction_whose_undo_would_erase_a_later_keep_s_change_to_the_same_entry_names_it(tmp_path: Path) -> None:
+    outbox = _outbox(
+        tmp_path,
+        Keep({"vllm/a.py": "v1"}),
+        Keep({"vllm/topk.py": "v1"}, {"TOPK": "1"}),
+        Keep({"vllm/topk.py": "v2"}, {"TOPK": "1"}),
+        Keep({"vllm/topk.py": GONE}, retracts=FINDING),
+    )
+
+    retraction = _read_newest(outbox).retracts
+
+    assert retraction is not None and retraction.beyond == "vllm/topk.py"
+
+
+def test_a_retraction_of_a_keep_before_the_one_its_chain_restarts_from_is_out_of_scope(tmp_path: Path) -> None:
+    outbox = _outbox(
+        tmp_path,
+        Keep({"vllm/a.py": "v1"}),
+        Keep({"vllm/topk.py": "v1"}, {"TOPK": "1"}),
+        Keep({"vllm/a.py": "v1"}, served=True),
+        Keep({}, retracts=FINDING),
+    )
+
+    retraction = _read_newest(outbox).retracts
+
+    assert retraction is not None and retraction.beyond == "keep 2 is not among the keeps it was made on"

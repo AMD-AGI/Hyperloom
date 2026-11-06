@@ -10,13 +10,16 @@ other than a letter or a digit written as ``-``. The agent works under its branc
 no other run of the session shares, so the transcripts of those directories are its own; the onboarding CLI keeps
 none. Each read takes what the transcripts gained since the last one, counts each message id once and records it as
 the branch's spend, one record per CLI session; what was read is kept in a file of the branch's, so a restarted run
-counts nothing twice. An agent on another backend keeps no such transcript, and its spend stays unrecorded.
+counts nothing twice. The file moves past a session's messages only once their record is written: a failed record is
+tried again at the next read, and a ledger write that fails after it counts that record twice rather than never. An
+agent on another backend keeps no such transcript, and its spend stays unrecorded.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -48,14 +51,39 @@ class _Ledger:
 
     @classmethod
     def load(cls, path: Path) -> _Ledger:
+        """The ledger ``path`` holds, empty when there is none; raise ``ValueError`` when it holds no ledger, which
+        starting afresh would count every call again."""
+
         if not path.exists():
             return cls()
-        document = json.loads(path.read_text(encoding=ENCODING))
-        return cls(dict(document["offsets"]), set(document["counted"]))
+        try:
+            document = json.loads(path.read_text(encoding=ENCODING))
+            return cls(dict(document["offsets"]), set(document["counted"]))
+        except (ValueError, KeyError, TypeError) as error:
+            raise ValueError(f"{path} holds no spend ledger: {error!r}") from error
 
     def save(self, path: Path) -> None:
         document = {"offsets": self.offsets, "counted": sorted(self.counted)}
-        path.write_text(json.dumps(document), encoding=ENCODING)
+        written = path.with_name(f"{path.name}.tmp")
+        written.write_text(json.dumps(document), encoding=ENCODING)
+        os.replace(written, path)
+
+
+@dataclass
+class _Session:
+    """What one CLI session's messages new to a read used, by model, and their ids."""
+
+    by_model: dict[str, TokenCounts] = field(default_factory=dict)
+    ids: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class _Read:
+    """One read: the ledger as saved, the offsets past what the transcripts hold now, and each session's new spend."""
+
+    ledger: _Ledger
+    offsets: dict[str, int]
+    sessions: dict[str, _Session]
 
 
 @dataclass(frozen=True)
@@ -73,24 +101,31 @@ class AgentSpend:
     async def record(self) -> None:
         """Record what the agent's calls since the last read used."""
 
-        sessions = await asyncio.to_thread(self._read)
-        for session, by_model in sessions.items():
-            total = sum(by_model.values(), TokenCounts())
-            cost = launch_cost(by_model, self.model)
+        read = await asyncio.to_thread(self._read)
+        ledger = read.ledger
+        for session, spent in read.sessions.items():
+            total = sum(spent.by_model.values(), TokenCounts())
+            cost = launch_cost(spent.by_model, self.model)
             await self.usage.record_llm_usage(LlmUsage(self.branch, UsageSource.SPECIALIST, cost, total, session))
+            ledger.counted |= spent.ids
+            await asyncio.to_thread(ledger.save, self.ledger)
+        ledger.offsets = read.offsets
+        await asyncio.to_thread(ledger.save, self.ledger)
 
-    def _read(self) -> dict[str, dict[str, TokenCounts]]:
+    def _read(self) -> _Read:
         ledger = _Ledger.load(self.ledger)
-        sessions: dict[str, dict[str, TokenCounts]] = {}
+        offsets = dict(ledger.offsets)
+        sessions: dict[str, _Session] = {}
+        seen = set(ledger.counted)
         for transcript in self._transcripts():
-            for session, message_id, model, tokens in _messages(transcript, ledger):
-                if message_id in ledger.counted:
+            for session, message_id, model, tokens in _messages(transcript, offsets):
+                if message_id in seen:
                     continue
-                ledger.counted.add(message_id)
-                by_model = sessions.setdefault(session, {})
-                by_model[model] = by_model.get(model, TokenCounts()) + tokens
-        ledger.save(self.ledger)
-        return sessions
+                seen.add(message_id)
+                spent = sessions.setdefault(session, _Session())
+                spent.ids.add(message_id)
+                spent.by_model[model] = spent.by_model.get(model, TokenCounts()) + tokens
+        return _Read(ledger, offsets, sessions)
 
     def written_at(self) -> float | None:
         """When the agent's CLI last wrote a transcript; ``None`` when it keeps none."""
@@ -117,15 +152,15 @@ def newest_write(paths: Iterable[Path]) -> float | None:
     return max(times, default=None)
 
 
-def _messages(transcript: Path, ledger: _Ledger) -> Iterable[tuple[str, str, str, TokenCounts]]:
-    """The assistant messages of ``transcript``'s whole lines past its offset in ``ledger``, which moves past them."""
+def _messages(transcript: Path, offsets: dict[str, int]) -> Iterable[tuple[str, str, str, TokenCounts]]:
+    """The assistant messages of ``transcript``'s whole lines past its offset in ``offsets``, which moves past them."""
 
     key = str(transcript)
     with transcript.open("rb") as handle:
-        handle.seek(ledger.offsets.get(key, 0))
+        handle.seek(offsets.get(key, 0))
         chunk = handle.read()
     whole = chunk[: chunk.rfind(b"\n") + 1]
-    ledger.offsets[key] = ledger.offsets.get(key, 0) + len(whole)
+    offsets[key] = offsets.get(key, 0) + len(whole)
     for line in whole.decode(ENCODING, errors="replace").splitlines():
         row = _row(line)
         message = row.get("message")

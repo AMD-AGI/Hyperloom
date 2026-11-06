@@ -61,8 +61,9 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
    steps 4 to 6 happen only without `--agent-directions`: for two or more Arbors, or for one with the review on, which
    then takes the map whole. With `--agent-directions`, the session instead pauses before EXPLORE for the review (step
    6), and the deadline moves by the pause.
-   - **The wait:** up to 10 min, for the profile job.
-   - **What it takes:** the root's op shares; or, when TraceLens degraded, the kernel shares from the job's result.
+   - **The wait:** up to 10 min, for the profile job and then for its shares to reach the blackboard.
+   - **What it takes:** the root's op shares as the toolbox recorded them; on a CUDA-graph trace, those come from the
+     report's kernel table.
    - **Code:** `scheduling/root_shares.py`, `specialist/map_session.py`.
 4. **The dossier pass,** on the mapping branch. It runs on MB's side and inside Arbor.
    - **MB sets it up:**
@@ -172,8 +173,6 @@ before the Arbor branches open </how-to/multibranch-review-gate>`.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
   removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `b9d65167d` and
   after). Only on AgentX, though: there Magpie applies it; on InferenceX such a removal is refused.
-- **No profile on CUDA-graph runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens
-  degraded, the branches get none, though the dossier pass got kernel shares.
 - **One Arbor without the review:** with `--no-review-gate` and no `--agent-directions`, a lone Arbor gets no
   dossier pass and makes its own dossier inside its branch.
 - **Each Arbor measures the root itself:** one server boot and the full GSM8K per Arbor session. For a large model,

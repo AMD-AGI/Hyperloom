@@ -319,6 +319,13 @@ def test_the_role_says_a_cross_image_lead_is_measured_here_and_its_left_out_file
     assert "never replay it as is" in prompt
 
 
+def test_the_role_names_each_workload_s_bar_as_its_gate_sets_it():
+    role = role_prompt(WORKLOAD)
+
+    assert "on InferenceX from the spread of the baseline measurements" in role
+    assert "on AgentX a fixed threshold on the P50" in role
+
+
 def test_a_resumed_cli_hears_why_it_stopped_its_worktree_and_what_arrived_meanwhile():
     item = InboxItem(InboxKind.RESULT, "s1", "r7", "r7 has its result", 0.0)
     notice = _record(9, "the specialist crashed")
@@ -329,6 +336,8 @@ def test_a_resumed_cli_hears_why_it_stopped_its_worktree_and_what_arrived_meanwh
     assert "the agent CLI exited 1" in kept and "same conversation" in kept
     assert "/wt/s1 is as you left it" in kept and "- result r7: r7 has its result" in kept and "[e9]" in kept
     assert "reset to your branch head c4" in reset and "uncommitted edits were dropped" in reset
+    # The worktree is compared with its last sync: a head that moved while the CLI ran is reset all the same.
+    assert "your last worktree_sync" in reset and "while you were down" not in reset.split("\n")[1]
     assert "Nothing arrived for your branch" in reset
 
 
@@ -592,6 +601,25 @@ def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
     edited = prompt_versions()
     assert edited["specialist_role"] != versions["specialist_role"]
     assert edited["specialist_launch"] == versions["specialist_launch"]
+
+
+@pytest.mark.parametrize(
+    ("name", "edit", "version"),
+    [
+        ("_DEV_SANDBOX", lambda text: text + " One more rule.", "specialist_role"),
+        ("_NATIVE", lambda text: text + " One more rule.", "specialist_role"),
+        ("_REFERENCES", lambda text: text + " One more rule.", "specialist_role"),
+        ("_HOLDS", lambda holds: {**holds, "geak": holds["geak"] + " more"}, "specialist_role"),
+        ("_LEASE_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
+        ("_WAIT_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
+    ],
+)
+def test_a_text_sent_only_under_some_settings_still_changes_its_prompt_s_version(monkeypatch, name, edit, version):
+    # A session with dev leases, native trees or references is told these texts, so they belong to its fingerprint.
+    before = prompt_versions()
+    monkeypatch.setattr(prompts, name, edit(getattr(prompts, name)))
+
+    assert prompt_versions()[version] != before[version]
 
 
 def test_a_launch_shows_the_latest_entries_cut_to_size_and_how_the_last_session_ended():

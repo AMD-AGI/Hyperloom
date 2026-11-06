@@ -24,7 +24,12 @@ from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVerdict, Verdict
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
-from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
+from hyperloom_multibranch.contracts.blackboard.vocab import (
+    INTEGRATION_BRANCH,
+    BranchDriver,
+    Conclusion,
+    LineageKind,
+)
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import delta, intent, judgement, request
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
@@ -33,9 +38,11 @@ from hyperloom_multibranch.rulegate.inferencex import DROPPED_REQUESTS, GAIN_NOT
 from hyperloom_multibranch.rulegate.critic import CriticVerdict, FixReview
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, pack_case
 from hyperloom_multibranch.rulegate.regression import ReproRunner
-from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.rulegate.rules import RETRACTION_ID, InferenceXRule
 from hyperloom_multibranch.specialist.fix_check import FixChecking, declares_fix
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, Judging
+from hyperloom.contracts.tests.long_context_checks import long_context_check
+from hyperloom_multibranch.tests.short_prompt_checks import short_prompt_check
 from hyperloom_multibranch.tests.fakes import (
     InMemoryRepo,
     RecordingScheduler,
@@ -44,6 +51,7 @@ from hyperloom_multibranch.tests.fakes import (
     quick_polls,  # noqa: F401
 )
 from hyperloom_multibranch.toolbox import fake as fake_toolbox
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.acceptance import AcceptanceSetup
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
@@ -80,10 +88,22 @@ def _request(
     )
 
 
+class _Checked(LocalBlackboard):
+    """The toolbox's blackboard, every result of which ran both consistency checks to the end."""
+
+    async def write_result(self, result):
+        checked = replace(
+            result, short_prompt_consistency=short_prompt_check(), long_context=long_context_check(64, 64)
+        )
+        return await super().write_result(checked)
+
+
 class _Session:
     """PRELUDE done and s1 open at the root: the fake toolbox measures, the real gate settles, s1's judge acts."""
 
-    def __init__(self, root, **config):
+    def __init__(self, root, driver=BranchDriver.SPECIALIST, checked=False, **config):
+        self.driver = driver
+        toolbox_writer = Writer(Role.TOOLBOX, "toolbox")
         self.toolbox = FakeToolbox(
             FakeToolboxConfig(
                 noise=QUIET,
@@ -92,7 +112,7 @@ class _Session:
                 accuracy_scores={WRONG.fingerprint(): 0.80},
                 **config,
             ),
-            blackboard=LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox")),
+            blackboard=(_Checked if checked else LocalBlackboard)(root, toolbox_writer),
             autorun=False,
         )
         self.scheduler = LocalBlackboard(root, Writer(Role.SCHEDULER, "scheduler"))
@@ -133,7 +153,9 @@ class _Session:
         root_event = LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT, recipe_digest=RECIPE.digest())
         await self.scheduler.record_lineage(root_event)
         await self.repo.create_branch(BRANCH, ROOT)
-        await self.scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=ROOT))
+        await self.scheduler.record_lineage(
+            LineageEvent(LineageKind.OPEN, BRANCH, from_commit=ROOT, driver=self.driver)
+        )
         ids = [await self.toolbox.submit_test(_request(INTEGRATION_BRANCH, Purpose.BASELINE)) for _ in range(3)]
         await self.toolbox.drain()
         baselines = [await self.gate_blackboard.record(request_id) for request_id in ids]
@@ -241,6 +263,68 @@ async def test_a_gain_whose_retest_failed_to_measure_is_left_unjudged(session):
     assert notice.endswith("nothing was judged")
 
 
+async def test_a_candidate_whose_retest_was_refused_stays_unjudged_after_later_results(session):
+    refusals = [RequestRejected("the branch has no quota", code="branch_stopped")]
+    session.toolbox.reject_if(
+        lambda request: refusals.pop() if request.purpose is Purpose.CONFIRM and refusals else None
+    )
+    first = await session.explore(FAST)
+    await session.step()
+    await session.explore(FLAT)
+    await session.step()
+    await session.step()
+
+    assert (await session.runtime.record(first)).judgement is None
+    assert session.retests() == []
+    assert await session.repo.head(BRANCH) == ROOT
+    (notice,) = [notice for notice in await session.notices() if first in notice]
+    assert notice.endswith("nothing was judged")
+
+
+class _CutOff:
+    """Cancels the first branch log write whose content holds ``text``, as a stop landing between a gate step and
+    its notice does."""
+
+    def __init__(self, session: "_Session", text: str) -> None:
+        self.append, self.text, self.fired = session.runtime.append_branch_log, text, False
+        session.runtime.append_branch_log = self
+
+    async def __call__(self, entry):
+        if not self.fired and self.text in entry.content:
+            self.fired = True
+            raise asyncio.CancelledError
+        return await self.append(entry)
+
+
+async def test_a_commit_whose_notice_a_stop_cut_off_is_announced_by_the_next_judge(session):
+    first = await session.explore(FAST)
+    await session.step()
+    _CutOff(session, "landed on your branch")
+    with pytest.raises(asyncio.CancelledError):
+        await session.step()
+    assert (await session.runtime.record(first)).conclusion is Conclusion.COMMITTED
+
+    await session.new_judge().reconcile()
+    await session.new_judge().reconcile()
+
+    (notice,) = await session.notices()
+    assert notice.startswith(f"{NOTICE} {first} landed on your branch at +") and f"% over {ROOT};" in notice
+
+
+async def test_a_fork_whose_notice_a_stop_cut_off_is_announced_by_the_next_judge(session, tmp_path):
+    first = await session.declare(SLOW, session.check_fixes(tmp_path, _Critic()))
+    _CutOff(session, "fixes a defect")
+    with pytest.raises(asyncio.CancelledError):
+        await session.step()
+    assert (await session.runtime.record(first)).conclusion is Conclusion.SPLIT_REQUESTED
+
+    await session.new_judge().reconcile()
+    await session.new_judge().reconcile()
+
+    (notice,) = await session.notices()
+    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch cut at that commit" in notice
+
+
 async def test_a_gain_the_retest_does_not_repeat_is_recorded_only(tmp_path):
     session = _Session(tmp_path / "blackboard", effect_fn=lambda r: 0.05 if r.purpose is Purpose.EXPLORE else 0.0)
     await session.prelude()
@@ -284,6 +368,78 @@ async def test_a_gain_that_drops_requests_on_both_measurements_is_held_for_the_s
     assert f"{first} held its gain on the retest and is held back by {DROPPED_REQUESTS};" in notice
 
 
+RETRACTION = AttachmentRef(RETRACTION_ID, "file", "b" * 64)
+
+
+def _retraction(change: RecipeDelta) -> TestRequest:
+    """An autonomous branch's import of a retraction: marked, with both consistency checks forced."""
+    explore = _request(BRANCH, Purpose.EXPLORE, change)
+    return replace(explore, attachments=(RETRACTION,), consistency_check=True, long_context_check=True)
+
+
+async def _retraction_session(tmp_path, driver=BranchDriver.AUTONOMOUS, **config) -> _Session:
+    session = _Session(tmp_path / "blackboard", driver, checked=True, **config)
+    await session.prelude()
+    return session
+
+
+async def test_a_retraction_slower_than_its_parent_lands_held_to_its_errors_and_consistency_not_its_speed(tmp_path):
+    session = await _retraction_session(tmp_path)
+    first = await session.toolbox.submit_test(_retraction(SLOW))
+    await session.step()
+
+    record = await session.runtime.record(first)
+    assert (record.judgement.verdict, record.judgement.accuracy) == (Verdict.REGRESSED, AccuracyVerdict.PASSED)
+    assert (record.conclusion, record.commit_id) == (Conclusion.COMMITTED, await session.repo.head(BRANCH))
+    assert session.retests() == [] and session.verifier.asked == [first]
+    (notice,) = await session.notices()
+    assert notice.startswith(f"{NOTICE} {first} landed on your branch as a retraction at -")
+
+
+async def test_a_landed_retraction_is_announced_once_as_a_retraction_and_never_as_a_gain(tmp_path):
+    session = await _retraction_session(tmp_path)
+    first = await session.toolbox.submit_test(_retraction(SLOW))
+    await session.step()
+
+    await session.step()
+    await session.new_judge().reconcile()
+
+    (notice,) = await session.notices()
+    assert notice.startswith(f"{NOTICE} {first} landed on your branch as a retraction at -")
+
+
+@pytest.mark.parametrize(
+    ("driver", "request_of"),
+    [
+        (BranchDriver.SPECIALIST, _retraction),
+        (
+            BranchDriver.AUTONOMOUS,
+            lambda change: replace(_request(BRANCH, Purpose.EXPLORE, change), attachments=(RETRACTION,)),
+        ),
+        (BranchDriver.AUTONOMOUS, lambda change: _request(BRANCH, Purpose.EXPLORE, change)),
+    ],
+    ids=["a-specialist-branch-s-test", "checks-not-forced", "no-mark"],
+)
+async def test_a_slower_test_that_is_no_autonomous_branch_s_retraction_is_recorded_only(tmp_path, driver, request_of):
+    session = await _retraction_session(tmp_path, driver)
+    first = await session.toolbox.submit_test(request_of(SLOW))
+    await session.step()
+
+    record = await session.runtime.record(first)
+    assert (record.judgement.verdict, record.conclusion) == (Verdict.REGRESSED, Conclusion.RECORDED_ONLY)
+    assert await session.repo.head(BRANCH) == ROOT
+
+
+async def test_a_retraction_that_drops_requests_is_recorded_only(tmp_path):
+    session = await _retraction_session(tmp_path, error_rates={SLOW.fingerprint(): 1.0})
+    first = await session.toolbox.submit_test(_retraction(SLOW))
+    await session.step()
+
+    record = await session.runtime.record(first)
+    assert DROPPED_REQUESTS in record.judgement.refused_by
+    assert (record.conclusion, await session.repo.head(BRANCH)) == (Conclusion.RECORDED_ONLY, ROOT)
+
+
 class _Critic:
     def __init__(self, reachable: bool = True) -> None:
         self.reachable, self.reviews = reachable, []
@@ -315,7 +471,7 @@ async def test_a_proven_reachable_fix_that_costs_performance_asks_for_its_fork(s
     record = await session.runtime.record(first)
     assert (record.conclusion, await session.repo.head(BRANCH)) == (Conclusion.SPLIT_REQUESTED, ROOT)
     (notice,) = await session.notices()
-    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch, fork-1, cut at that commit" in notice
+    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch cut at that commit" in notice
 
 
 @pytest.mark.parametrize(
