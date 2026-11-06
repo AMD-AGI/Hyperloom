@@ -97,6 +97,16 @@ def _round_replay_client(workspace: Path, *, interpreter: str) -> Path:
     return client
 
 
+def _only_on_path(monkeypatch: pytest.MonkeyPatch, bin_dir: Path, *names: str) -> None:
+    """Make ``bin_dir`` the whole ``PATH``, holding an executable stub for each of ``names``."""
+    bin_dir.mkdir()
+    for name in names:
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\n", encoding="utf-8")
+        stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+
 def _coord(
     tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, metric: str = "e2e_norm_intvty_p50"
 ) -> Coordinator:
@@ -329,6 +339,8 @@ async def test_geak_gets_the_aiperf_the_accepted_round_replayed_with_only_when_i
     coord = _coord(tmp_path)
     interpreter = sys.executable if interpreter_runs else str(tmp_path / "gone" / "python3.11")
     client = _round_replay_client(tmp_path / "accepted_run", interpreter=interpreter)
+    # GEAK falls back to the aiperf on PATH, so a round client that cannot run still lets it launch.
+    _only_on_path(monkeypatch, tmp_path / "bin", "aiperf")
     launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
     _gpus_at_handoff(monkeypatch, _GPUS_FREE)
 
@@ -338,12 +350,15 @@ async def test_geak_gets_the_aiperf_the_accepted_round_replayed_with_only_when_i
     assert env.get("AIPERF_BIN") == (str(client) if interpreter_runs else None)
 
 
+@pytest.mark.parametrize("interpreter_runs", [True, False], ids=["round-client-runs", "round-client-gone"])
 @pytest.mark.asyncio
 async def test_an_operators_aiperf_bin_outranks_the_rounds_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interpreter_runs: bool
 ) -> None:
     coord = _coord(tmp_path)
-    _round_replay_client(tmp_path / "accepted_run", interpreter=sys.executable)
+    interpreter = sys.executable if interpreter_runs else str(tmp_path / "gone" / "python3.11")
+    _round_replay_client(tmp_path / "accepted_run", interpreter=interpreter)
+    _only_on_path(monkeypatch, tmp_path / "bin")
     monkeypatch.setenv("AIPERF_BIN", "/opt/operator/aiperf")
     launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
     _gpus_at_handoff(monkeypatch, _GPUS_FREE)
@@ -352,6 +367,38 @@ async def test_an_operators_aiperf_bin_outranks_the_rounds_client(
 
     [env] = launches
     assert env["AIPERF_BIN"] == "/opt/operator/aiperf"
+
+
+@pytest.mark.asyncio
+async def test_geak_is_skipped_with_a_reason_when_no_aiperf_can_run_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    _round_replay_client(tmp_path / "accepted_run", interpreter=str(tmp_path / "gone" / "python3.11"))
+    _only_on_path(monkeypatch, tmp_path / "bin")
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, _GPUS_FREE)
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert launches == []
+    result = coord.shared_state.geak_result
+    assert (result["status"], result["error_class"]) == ("skipped", "agentx_client_unavailable")
+    assert str(tmp_path / "accepted_run") in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_synthetic_handoff_launches_geak_without_any_aiperf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path, agentx=False)
+    _only_on_path(monkeypatch, tmp_path / "bin")
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, _GPUS_FREE)
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert len(launches) == 1
 
 
 @pytest.mark.parametrize(
@@ -374,6 +421,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     if metric_override is not None:
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", metric_override)
     coord = _coord(tmp_path, metric=expected_metric)
+    _round_replay_client(tmp_path / "accepted_run", interpreter=sys.executable)
     # Seed a DIFFERENT axis so the assertion below proves the handoff overrides the
     # inherited env rather than happening to agree with it.
     monkeypatch.setenv("E2E_METRIC", "total")
@@ -425,6 +473,7 @@ async def test_gpus_that_cannot_be_checked_are_still_handed_to_geak(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     coord = _coord(tmp_path)
+    _round_replay_client(tmp_path / "accepted_run", interpreter=sys.executable)
     launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
     _gpus_at_handoff(
         monkeypatch, GpuHandoff(reaped=[], busy=[], holders=[], unverified="rocm-smi could not report VRAM")

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -748,6 +749,30 @@ class _GeakDispatchMixin:
             handoff=handoff,
         )
 
+    def _refuse_geak_without_replay_client(self, handoff: dict[str, Any]) -> bool:
+        """Skip a GEAK run that would replay AgentX traces with no aiperf that can run in this container.
+
+        GEAK finds the client missing only at its first measurement, after warming a server. The accepted
+        round's client runs only in a container a Magpie round has run in, so a resume that re-enters the
+        delegation first has none.
+        """
+        spec = handoff.get("workload_spec")
+        if not isinstance(spec, Mapping) or spec.get("kind") != "agentx_trace_replay":
+            return False
+        workspace = self._accepted_round_workspace()
+        if "AIPERF_BIN" in os.environ or shutil.which("aiperf") or (workspace and round_replay_client(workspace)):
+            return False
+        error = (
+            f"no aiperf can replay the AgentX traces in this container: the accepted round's client "
+            f"(under {workspace or '<no round workspace>'}) cannot run here, AIPERF_BIN is unset and "
+            "aiperf is not on PATH"
+        )
+        log.warning("GEAK: %s; skipping e2e rather than warming a server it cannot measure.", error)
+        self._finish_geak_skip(
+            {"status": "skipped", "error_class": "agentx_client_unavailable", "error": error}, handoff=handoff
+        )
+        return True
+
     def _settle_geak_runner_exit(
         self, proc: subprocess.CompletedProcess, *, handoff: dict[str, Any], agentx: bool, facts: GeakRunnerFacts
     ) -> dict[str, Any] | None:
@@ -803,6 +828,8 @@ class _GeakDispatchMixin:
         min_run = env_int("GEAK_MIN_RUN_S", default=600)
         if budget_known and runner_timeout < min_run:
             self._refuse_geak_for_budget(handoff, runner_timeout=runner_timeout, min_run=min_run)
+            return GeakRunnerOutcome()
+        if self._refuse_geak_without_replay_client(handoff):
             return GeakRunnerOutcome()
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.monotonic()

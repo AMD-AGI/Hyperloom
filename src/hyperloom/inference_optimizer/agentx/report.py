@@ -23,8 +23,8 @@ from hyperloom.common.launch_log_evidence import (
     operand_digest,
 )
 
-#: Where the AgentX client of Magpie's InferenceX (``runners/srt-slurm/hooks/common.sh``) builds the
-#: round's aiperf, relative to the round's workspace.
+#: Where InferenceX's ``install_agentic_deps`` (``benchmarks/benchmark_lib.sh``) builds the round's aiperf,
+#: relative to the round's workspace: Magpie points ``AIPERF_RUNTIME_DIR`` at ``<workspace>/.agentx-runtime``.
 _ROUND_AIPERF = Path(".agentx-runtime", "venv", "bin", "aiperf")
 
 
