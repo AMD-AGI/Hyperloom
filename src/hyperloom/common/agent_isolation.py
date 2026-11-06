@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -237,12 +238,17 @@ def _account(name: str, allow_account: bool) -> tuple[RunAs | None, str]:
 
 
 def _bwrap(probe: ProbeBwrap) -> BwrapProbe:
-    """The probe of the bubblewrap this process may use: a hosted run's layer one, else the one on ``PATH``."""
+    """The probe of the bubblewrap this process may use: a hosted run's layer one, else the one on ``PATH``. A hosted
+    run whose layer path is empty or relative is refused without a probe, which takes an empty path for the
+    bubblewrap on ``PATH``."""
     if not _STATE.hosted:
         return probe(None)
-    if _STATE.layer_bwrap is None:
+    layer = _STATE.layer_bwrap
+    if not layer:
         return BwrapProbe(None, None, (NO_LAYER_BWRAP,))
-    return probe(_STATE.layer_bwrap)
+    if not os.path.isabs(layer):
+        return BwrapProbe(layer, None, (f"bubblewrap at {layer} is not an absolute path",))
+    return probe(layer)
 
 
 def _bwrap_reasons(found: BwrapProbe) -> tuple[str, ...]:
@@ -303,8 +309,9 @@ def require_agent_isolation(
     *, bwrap: str | None, allow_account: bool = True, probe: ProbeBwrap = bwrap_probe
 ) -> AgentIsolation:
     """At a hosted run's start-up: mark this process as one whose agents must be isolated, with the hosting layer's
-    bubblewrap at ``bwrap`` (an absolute path; ``None`` when the run has none) and no other, and choose now, so a host
-    where neither tier works refuses before anything runs.
+    bubblewrap at ``bwrap`` (an absolute path; ``None`` or empty when the run has none, which refuses every launch
+    bubblewrap would make) and no other, and choose now, so a host where neither tier works refuses before anything
+    runs.
 
     Raises:
         IsolationRefused: Neither tier works here.

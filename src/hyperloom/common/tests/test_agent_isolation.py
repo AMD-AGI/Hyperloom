@@ -130,10 +130,23 @@ def test_a_hosted_run_uses_the_layers_bubblewrap_by_path_for_every_later_launch(
     assert probes.asked == [LAYER, LAYER, LAYER], "never the one on PATH"
 
 
-def test_a_hosted_run_that_names_no_layer_bubblewrap_refuses_without_probing_path():
+@pytest.mark.parametrize("named", [None, ""])
+def test_a_hosted_run_that_names_no_layer_bubblewrap_refuses_without_probing_path(named):
+    """An empty path, as a caller reading an unset setting passes, would send the probe to the one on PATH."""
     with pytest.raises(IsolationRefused) as refused:
-        require_agent_isolation(bwrap=None, probe=_never)
+        require_agent_isolation(bwrap=named, probe=_never)
     assert refused.value.reasons == (NOT_SET, NO_LAYER_BWRAP)
+    for later in (choose_agent_isolation, choose_sandbox_isolation):
+        with pytest.raises(IsolationRefused):
+            later(probe=_never)
+    assert bwrap_isolation(probe=_never) is None
+
+
+@pytest.mark.parametrize("named", ["bwrap", "bin/bwrap"])
+def test_a_hosted_run_given_a_relative_layer_bubblewrap_refuses_without_probing(named):
+    with pytest.raises(IsolationRefused) as refused:
+        require_agent_isolation(bwrap=named, probe=_never)
+    assert refused.value.reasons == (NOT_SET, f"bubblewrap at {named} is not an absolute path")
 
 
 def test_a_hosted_run_where_no_tier_works_refuses_at_start_up_naming_both():
