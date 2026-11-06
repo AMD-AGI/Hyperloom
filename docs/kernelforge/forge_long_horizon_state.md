@@ -191,6 +191,22 @@ and is read before the first iteration of the next process, which measures those
 candidates before it plans a new round. Each entry carries the lesson the lane
 recorded in its round, or in `lesson_reason` why it has none.
 
+A queued candidate whose diff no longer applies to the canonical tree, even
+three-way, because a sibling's KEEP edited the same code, is never measured.
+It is filed under `unmeasured_lanes/round_NNN_lane_K/`: its `change.diff`
+against the commit its round was built on, its `plan.md`, the `lesson.md` its
+session recorded, and a `meta.json` naming that base commit, the iteration that
+dropped it and the canonical commit it no longer applied to.
+`unmeasured_lanes/index.jsonl` lists them, and each drop is logged as a
+`lane_candidate_unmeasured` event. Every later planning context cites the index
+as `unmeasured_lane_candidates`, and the Implementer's retrieval map names the
+directory, so a later round can take an idea up again from the session that
+already built it. The store is kept apart from the candidate archive: merge
+stacking, the history digest, export and the knowledge base read that
+archive's entries as measured ones, and these were not. A candidate rejected for
+changing the measurement surface or the driver is not filed; it is logged as a
+`lane_candidate_rejected` event.
+
 A fan-out round that ends with no candidate to measure -- because planning was
 unavailable, because only one plan came back, because the lane workspaces could
 not be made, or because no lane wrote anything -- hands the iteration to the

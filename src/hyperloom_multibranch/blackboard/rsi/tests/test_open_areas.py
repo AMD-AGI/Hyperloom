@@ -9,7 +9,13 @@ import dataclasses
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer
-from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, BranchNode, CommittedCommit, OpShares
+from hyperloom_multibranch.contracts.blackboard.records import (
+    BlackboardSnapshot,
+    BranchNode,
+    CommittedCommit,
+    MapDirection,
+    OpShares,
+)
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.blackboard.rsi.open_areas import FocusHistory, OpenOp, open_areas
 from hyperloom_multibranch.blackboard.rsi.playbook import H0, replaced
@@ -97,6 +103,49 @@ def test_a_running_branch_opened_without_a_focus_covers_the_ops_of_the_family_it
 
     assert "gemm_a8w8_blockscale" not in [item.op for item in found.ops]
     assert dict(found.covered) == {"gemm_a8w8_blockscale": ("s1",)}
+
+
+def _mapped(snapshot: BlackboardSnapshot, *directions: MapDirection) -> BlackboardSnapshot:
+    """``snapshot`` with Arbor's map of ``directions``, its Arbor branch b7 running beside b3, focused on the
+    activation, and b8 stopped."""
+
+    worked = _worked(
+        snapshot, _focused("b3", ACT_MUL, running=True), _focused("b7", "", running=True), _focused("b8", "")
+    )
+    return dataclasses.replace(worked, agent_map=directions)
+
+
+def test_an_op_a_direction_held_by_a_running_arbor_branch_names_is_left_out_as_worked_on_by_that_branch(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    mapped = _mapped(
+        snapshot,
+        MapDirection("m-3", "Blockscale GEMM tiles", "open", "largest gemm_a8w8_blockscale 10%", holder="b7"),
+        MapDirection("m-4", "Fold the activation into the GEMM", "open", holder="b7", ops=(f"{ACT_MUL}.kd",)),
+    )
+
+    found = open_areas(mapped, seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+    assert [item.op for item in found.ops] == [ALLREDUCE, "paged_attention_ll4mi", "rmsnorm"]
+    assert dict(found.covered) == {ACT_MUL: ("b3", "b7 (Arbor, m-4)"), "gemm_a8w8_blockscale": ("b7 (Arbor, m-3)",)}
+    assert found.render().splitlines()[-1] == (
+        f"Left out: {ACT_MUL}, worked on by b3, b7 (Arbor, m-4); gemm_a8w8_blockscale, worked on by b7 (Arbor, m-3)."
+    )
+
+
+def test_the_ops_of_a_direction_whose_arbor_branch_stopped_or_that_the_map_set_aside_stay_open(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    mapped = _mapped(
+        snapshot,
+        MapDirection("m-5", "Decode attention", "open", "paged_attention_ll4mi is 4%", holder="b8"),
+        MapDirection("m-6", "Fuse rmsnorm", "killed", "rmsnorm is 2% of the profile", holder="b7"),
+    )
+
+    found = open_areas(mapped, seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+    assert "paged_attention_ll4mi" in [item.op for item in found.ops] and "rmsnorm" in [item.op for item in found.ops]
+    assert dict(found.covered) == {ACT_MUL: ("b3",)}
 
 
 def test_an_op_whose_focused_branches_on_the_head_ended_without_a_commit_is_spent_until_the_head_moves(

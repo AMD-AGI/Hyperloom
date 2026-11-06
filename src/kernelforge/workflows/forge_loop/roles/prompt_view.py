@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
 
 # Canonical on-disk locations, shown to the agent so it can Read detail on demand.
@@ -12,6 +14,7 @@ _ARCHIVE_REL = "forge_experiments/candidates"
 _HANDOFFS_REL = "forge_experiments/handoffs"
 _STATE_REL = "forge_experiments/run_state.json"
 _EVENTS_REL = "forge_experiments/events.jsonl"
+_UNMEASURED_REL = "forge_experiments/unmeasured_lanes"
 
 # How many pins the retrieval map names.
 _MAX_RENDERED_PINS = 6
@@ -85,13 +88,21 @@ def _recent_line(event: dict) -> str:
 MAX_RECENT_ATTEMPT_LINES = 6
 
 
+@dataclass(frozen=True)
+class OptionalRecords:
+    """Records a run may not have yet, each named in the retrieval map only once it exists on disk."""
+
+    handoffs: bool = False
+    unmeasured_lanes: bool = False
+
+
 def render_long_horizon_header(
     state: RunState,
     recent_events: list[dict],
     *,
     max_recent: int = MAX_RECENT_ATTEMPT_LINES,
     max_chars: int = 4000,
-    include_handoffs: bool = False,
+    records: OptionalRecords = OptionalRecords(),
 ) -> str:
     """Render the compact long-horizon memory header, or \"\" when state is empty."""
     # Iteration outcomes feed the history check, the pin hint and the recent attempts.
@@ -142,8 +153,15 @@ def render_long_horizon_header(
         + f" — full attempt detail{pin_hint}",
         "- analysis/<commit>/ — evidence",
     ]
-    if include_handoffs:
+    if records.handoffs:
         retrieval.append(f"- {_HANDOFFS_REL}/iter_NNN.json — structured iteration handoffs")
+    if records.unmeasured_lanes:
+        retrieval.append(
+            f"- {_UNMEASURED_REL}/round_NNN_lane_K/"
+            + "{change.diff,plan.md,lesson.md,meta.json}"
+            + " — lane candidates never measured because the tree moved first; the diff applies to the"
+            + " meta.json base_commit"
+        )
 
     # Recent factual attempts — summaries only, never full logs.
     recent_lines = [f"- {_recent_line(e)}" for e in result_events[-max_recent:]]

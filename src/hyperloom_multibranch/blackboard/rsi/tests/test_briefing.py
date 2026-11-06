@@ -32,6 +32,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     Learning,
     LineageEvent,
     BlackboardSnapshot,
+    MapDirection,
     StartupBrief,
     TestRecord,
 )
@@ -71,8 +72,8 @@ from hyperloom_multibranch.blackboard.rsi.briefing import (
 from hyperloom_multibranch.blackboard.rsi.cases import CasePool, PoolEntry
 from hyperloom_multibranch.blackboard.rsi.tests.repos import FakeRepo
 from hyperloom_multibranch.blackboard.tests.factories import START, FakeClock, judgement, profile, request, result
-from hyperloom_multibranch.blackboard.tests.sessions import METRIC, SPLIT_KV, scripted_session
-from hyperloom_multibranch.blackboard.tools import FOCUS_LINE
+from hyperloom_multibranch.blackboard.tests.sessions import METRIC, SPLIT_KV, Writers, scripted_session
+from hyperloom_multibranch.blackboard.tools import FOCUS_LINE, LINE_CHARS, MAP_TITLE, MAX_LINES, render_brief
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
 
 
@@ -747,3 +748,80 @@ async def test_each_branch_keeps_its_focus_and_every_branch_shares_one_index_and
 
     assert (s3.focus, s4.focus) == ("attention", "")
     assert s3.recalls is s4.recalls and s3.identities is s4.identities
+
+
+ACT_MUL = "_act_mul_and_dynamic_fp8_group_quant_kernel"
+
+#: Arbor's map of the scripted session: b7 runs and holds ``m-gemm``; s2, which held ``m-attn``, stopped.
+ARBOR_MAP = (
+    MapDirection("m-gemm", "Dense GEMMs: tuned kernels", "open", holder="b7"),
+    MapDirection("m-act", "Fold the activation mul into the GEMM epilogue", "open", f"root profile: {ACT_MUL} 30%"),
+    MapDirection("m-moe", "MoE routing", "open"),
+    MapDirection("m-fp8", "FP8 weights", "killed", "pays only by changing the precision of record: root is BF16"),
+    MapDirection("m-attn", "Decode attention", "open", holder="s2"),
+    MapDirection("m-norm", "Fuse the norms", "below_floor"),
+)
+
+
+async def test_the_brief_binds_the_branch_to_the_directions_of_arbors_map_on_its_focus_held_or_set_aside(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    scheduler = Writers(tmp_path / "blackboard", clock).as_role(Role.SCHEDULER)
+    for branch, focus in (("b7", ""), ("s9", ACT_MUL)):
+        await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c1", focus=focus))
+    await scheduler.write_agent_map(ARBOR_MAP)
+
+    shown = (await SessionBriefs(blackboard).text("s9", "c1")).splitlines()
+
+    assert shown[1:9] == [
+        MAP_TITLE,
+        "- m-gemm (held by b7): Dense GEMMs: tuned kernels",
+        "- m-act (open, it names your focus): Fold the activation mul into the GEMM epilogue",
+        "- m-fp8 (set aside, killed): FP8 weights",
+        "  why: pays only by changing the precision of record: root is BF16",
+        "- m-norm (set aside, below_floor): Fuse the norms",
+        "  why: not given",
+        "Tried:",
+    ]
+
+
+async def test_a_session_without_arbors_map_briefs_no_map(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+
+    brief = await SessionBriefs(blackboard).for_branch("s1").startup_brief("c1")
+
+    assert (brief.agent_map, dict(brief.map_holders)) == ((), {})
+    assert MAP_TITLE not in render_brief(brief)
+
+
+def test_arbors_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_title_leaves_the_why_whole() -> None:
+    title = "Retune every dense GEMM of the decode path at each batch size " * 4
+    aside = tuple(MapDirection(f"m-{n}", title, "killed", f"reason {n}") for n in range(MAX_LINES))
+
+    shown = render_brief(StartupBrief("c1", (), agent_map=aside)).splitlines()
+
+    listed = shown[shown.index(MAP_TITLE) + 1 :]
+    kept = (MAX_LINES - 1) // 2
+    assert len(listed) == 2 * kept + 1 and listed[-1] == f"... {MAX_LINES - kept} more directions of the map"
+    assert listed[0].startswith("- m-0 (set aside, killed): Retune every") and len(listed[0]) == LINE_CHARS
+    assert listed[1:-1:2] == [f"  why: reason {n}" for n in range(kept)]
+
+
+def test_arbors_map_in_the_brief_puts_the_held_directions_first_and_cuts_only_between_directions() -> None:
+    aside = tuple(MapDirection(f"m-{n}", f"direction {n}", "done", f"reason {n}") for n in range(MAX_LINES))
+    held = (
+        MapDirection("m-gemm", "Dense GEMMs", "open", holder="b7"),
+        MapDirection("m-moe", "MoE routing", "open", holder="b8"),
+    )
+    brief = StartupBrief("c1", (), agent_map=(*aside, *held), map_holders={"m-gemm": "b7", "m-moe": "b8"})
+
+    shown = render_brief(brief).splitlines()
+
+    listed = shown[shown.index(MAP_TITLE) + 1 :]
+    kept = (MAX_LINES - 1 - len(held)) // 2
+    assert listed[: len(held)] == ["- m-gemm (held by b7): Dense GEMMs", "- m-moe (held by b8): MoE routing"]
+    assert listed[len(held) : -1 : 2] == [f"- m-{n} (set aside, done): direction {n}" for n in range(kept)]
+    assert listed[len(held) + 1 : -1 : 2] == [f"  why: reason {n}" for n in range(kept)]
+    assert listed[-1] == f"... {MAX_LINES - kept} more directions of the map"
