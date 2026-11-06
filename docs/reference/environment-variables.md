@@ -257,6 +257,22 @@ optional: unset, the workspace uses only its local KB. See
 
 ---
 
+## Multi-branch RSI archive
+
+A multi-branch session reads its predecessors' search trees, lessons, scheduling playbooks and outcomes from this
+archive, and writes its own into it at CLOSE. `python -m hyperloom_multibranch.blackboard.rsi.lessons` (`list`, `show`,
+`revise`, `retire`, `merge`, `purge`) is a person's look at, and change to, the lesson pool beside it; its `--archive`
+names the archive in place of `HYPERLOOM_RSI_ARCHIVE`. Without `--archive` the command reads the pool as a session
+does, so under `HYPERLOOM_RSI_WRITE_ONLY=1` it finds none and `HYPERLOOM_RSI_AS_OF` hides what was written after it.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_RSI_ARCHIVE` | Unset (no archive) | The archive directory sessions read and write. Operator configuration. |
+| `HYPERLOOM_RSI_AS_OF` | Unset (everything) | An ISO time the archive is read as of, for sessions run as repeats or as pairs: lessons and playbooks by when they were written, a search tree by its session's start plus budget, not by when CLOSE wrote it. A tree that ended by then but is written after it is read by a session that loads the archive after the write and missed by one that loads it before. For experiments. |
+| `HYPERLOOM_RSI_WRITE_ONLY` | Unset (read and write) | `1` reads nothing of the archive, for a run beside the archive runs, while CLOSE still writes the session's outcomes into it. For experiments. |
+
+---
+
 ## PrimaTune predictor
 
 Set by `--primatune-endpoint` and `--primatune-mode`, or directly in the shell. See
@@ -1162,7 +1178,11 @@ default stops the run with exit code 2 before any session is opened or changed.
 A hosted run is configured by the host that launches it. `src/hyperloom/hosted/host_info.py` is the only reader of these variables:
 it checks them once at start-up and names **every** missing or malformed variable in one error (variable names and reasons, never
 values), so a bad input stops the run before it starts. Which variables are required depends on what the run hosts; the run, state
-and input variables are always required, and a variable that is set is checked even when it is not required.
+and input variables are always required except for a session started by hand on a grant handed to it
+(`hyperloom-multibranch run --measurement hosted`, a command that lands with the multi-branch CLI), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
+`HYPERLOOM_GRANT_LIMITS` (all four totals: a multi-branch session refuses a grant that states only some of them),
+`HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
+required.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -1177,10 +1197,9 @@ and input variables are always required, and a variable that is set is checked e
 | `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of template names, for example `{"runner": {"1": "t1", "8": "t8"}, "dev": "t"}`. |
 | `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_SUBRUN`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
-| `HYPERLOOM_SANDBOX_WORKSPACE` | When a SaFE key reaches the sandbox service directly and its user is in more than one workspace; always for a `system-admin` key | The workspace every sandbox is created in, sent on each create as the metadata `agent-sandbox.io/workspace`; a create whose own metadata names a workspace keeps its own. Without it the service refuses such a key's creates with `workspace_required`, reported as `SandboxDenied` naming this variable. A Claw grant's key names its own workspace, so a Claw host leaves it unset and the creates are unchanged. No whitespace; not a credential. |
 | `HYPERLOOM_RESULT_ARCHIVE` | No | Unset means results are archived on the shared storage, in a directory the application chooses. Otherwise `s3://<bucket>/<prefix>`; the prefix may be empty and has no empty, `.` or `..` segment. A local path (`/x`, `file://...`) is refused: local means unset. |
 | `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When `HYPERLOOM_RESULT_ARCHIVE` is `s3://`, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) and `AWS_REGION` (not a credential) are optional. |
-| `HYPERLOOM_GRANT_LIMITS` | No | JSON object of the totals the host granted the run: `max_sandboxes`, `max_gpus`, `max_runtime_sec` (whole numbers) and `gpu_hours` (a number), each at least 0 and each optional; other keys are ignored. The legacy `optimize` flow only logs it. Removed from the environment once read. |
+| `HYPERLOOM_GRANT_LIMITS` | No | JSON object of the totals the host granted the run: `max_sandboxes`, `max_gpus`, `max_runtime_sec` (whole numbers) and `gpu_hours` (a number), each at least 0 and each optional; other keys are ignored. The legacy `optimize` flow only logs it. A multi-branch session needs all four totals or none, and one that lends dev sandboxes or runs autonomous agents needs them. Removed from the environment once read. |
 | `HYPERLOOM_SANDBOX_WORKSPACE` | When a SaFE key reaches the sandbox service directly and its user is in more than one workspace; always for a `system-admin` key | The workspace every sandbox is created in, sent on each create as the metadata `agent-sandbox.io/workspace`; a create whose own metadata names a workspace keeps its own. Without it the service refuses such a key's creates with `workspace_required`, reported as `SandboxDenied` naming this variable. A Claw grant's key names its own workspace, so a Claw host leaves it unset and the creates are unchanged. Checked on every hosted run when set: whitespace or a control character refuses the run. Not a credential; removed from the environment once read, like every host-only input here. |
 | `HYPERLOOM_SOURCE_REPO`<br>`HYPERLOOM_SOURCE_SHA` | When the run starts measurement sandboxes (the application bootstrap always needs them) | The repository (`OWNER/NAME` or a git URL, no whitespace) and the full lowercase 40-hex commit id of the version the run executes; the sandbox runners fetch the same version. Checked when set; removed from the environment once read (the bootstrap script has already used them). |
 | `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id, read when set. |
