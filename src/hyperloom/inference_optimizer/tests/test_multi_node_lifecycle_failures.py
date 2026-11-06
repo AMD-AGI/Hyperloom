@@ -244,6 +244,42 @@ def test_pd_engine_profile_dials_the_engine_port_of_each_pod(monkeypatch: pytest
     assert seen == ["http://10.0.0.1:8010/stop_profile", "http://10.0.0.2:8020/stop_profile"]
 
 
+def test_pd_engine_profile_stops_every_role_without_waiting_on_another(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow trace export on prefill must not keep decode recording."""
+    real_client = httpx.AsyncClient
+    decode_seen = asyncio.Event()
+    order: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.port == 8010:
+            try:
+                await asyncio.wait_for(decode_seen.wait(), timeout=2)
+                order.append("prefill-after-decode")
+            except asyncio.TimeoutError:
+                order.append("prefill-alone")
+        else:
+            decode_seen.set()
+            order.append("decode")
+        return httpx.Response(200)
+
+    monkeypatch.setattr(life, "is_multi_node", lambda: True)
+    monkeypatch.setattr(life, "_read_state", lambda: _PD_WORKERS)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+
+    asyncio.run(life.trigger_pd_engine_profile("stop"))
+
+    assert order == ["decode", "prefill-after-decode"]
+
+
+def test_pd_engines_lost_reason_names_engines_that_are_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(life, "_read_state", lambda: _PD_WORKERS)
+    monkeypatch.setattr(life, "_pd_engines_not_running", lambda _state: ["decode 10.0.0.2"])
+    reason = life.pd_engines_lost_reason()
+    assert reason is not None and "decode 10.0.0.2" in reason
+    monkeypatch.setattr(life, "_pd_engines_not_running", lambda _state: [])
+    assert life.pd_engines_lost_reason() is None
+
+
 def test_pd_engine_profile_uses_engine_urls_without_pods(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     seen: list[tuple[str, dict]] = []
     real_client = httpx.AsyncClient

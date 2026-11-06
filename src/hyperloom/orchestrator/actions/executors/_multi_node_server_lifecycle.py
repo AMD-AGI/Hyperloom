@@ -691,23 +691,28 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
         client_timeout = 30.0
     else:
         client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
-    async with _httpx.AsyncClient(timeout=client_timeout) as client:
-        for role, base_url in targets:
-            url = f"{base_url}/{route}"
-            payload: dict = {}
-            if output_dir:
-                # Each role writes under <output_dir>/<role> so its traces stay attributable.
-                role_dir = pd_role_trace_dir(output_dir, role)
-                try:
-                    Path(role_dir).mkdir(parents=True, exist_ok=True)
-                except OSError as exc:
-                    log.debug("pd-cluster profile: cannot mkdir %s: %s", role_dir, exc)
-                payload["output_dir"] = role_dir
+
+    async def _post(client: Any, role: str, base_url: str) -> None:
+        """Send ``route`` to one engine; a transport error is logged, not raised."""
+        url = f"{base_url}/{route}"
+        payload: dict = {}
+        if output_dir:
+            # Each role writes under <output_dir>/<role> so its traces stay attributable.
+            role_dir = pd_role_trace_dir(output_dir, role)
             try:
-                resp = await client.post(url, json=payload)
-                log.info("pd-cluster profile %s %s -> %s HTTP %d", role, route, url, resp.status_code)
-            except _httpx.HTTPError as exc:
-                log.warning("pd-cluster profile %s -> %s failed (%s); continuing", route, url, exc)
+                Path(role_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log.debug("pd-cluster profile: cannot mkdir %s: %s", role_dir, exc)
+            payload["output_dir"] = role_dir
+        try:
+            resp = await client.post(url, json=payload)
+            log.info("pd-cluster profile %s %s -> %s HTTP %d", role, route, url, resp.status_code)
+        except _httpx.HTTPError as exc:
+            log.warning("pd-cluster profile %s -> %s failed (%s); continuing", route, url, exc)
+
+    # stop_profile returns after the trace export; engines start and stop together so each records the same window.
+    async with _httpx.AsyncClient(timeout=client_timeout) as client:
+        await asyncio.gather(*(_post(client, role, base_url) for role, base_url in targets))
 
 
 async def _probe_health(client: Any, health_url: str) -> tuple[bool, str]:
@@ -845,6 +850,12 @@ def _pd_engines_not_running(state: dict) -> list[str]:
     from hyperloom.inference_optimizer.multi_node.commands.pd_cluster import engines_not_running
 
     return engines_not_running(state)
+
+
+def pd_engines_lost_reason() -> str | None:
+    """Why the atom/sglangrouter engines launched for this round no longer serve it, or None when they do."""
+    gone = _pd_engines_not_running(_read_state() or {})
+    return _pd_launch_lost_reason(gone) if gone else None
 
 
 def _pd_launch_lost_reason(gone: list[str]) -> str:
