@@ -241,6 +241,17 @@ def test_the_prompt_shows_the_open_areas_and_the_playbook_before_the_reply_forma
     assert (system_prompt(played), system_prompt(_view())) == (PLAYBOOK_JUDGE_PROMPT, JUDGE_SYSTEM_PROMPT)
 
 
+def test_the_prompt_shows_arbor_s_map_after_the_open_areas_only_when_the_session_has_one() -> None:
+    areas = "Open areas for a new branch, from the profile of c1:\n- gemm_a8w8 (gemm): 10.0% of GPU time"
+    held = "Arbor's map: the directions ...\n- m-gemm (held by b02): Dense GEMMs"
+    prompt = render_prompt(replace(_view(), open_areas=areas, agent_map=held, playbook=H0.render()))
+
+    assert (
+        prompt.index(areas) < prompt.index(held) < prompt.index("Scheduling playbook h0:") < prompt.index("Reply with")
+    )
+    assert "Arbor's map" not in render_prompt(replace(_view(), open_areas=areas))
+
+
 def test_a_playbook_session_s_prompt_makes_its_stall_evidence_the_one_stop_rule_for_a_stall() -> None:
     playbook, today = (" ".join(text.split()) for text in (PLAYBOOK_JUDGE_PROMPT, JUDGE_SYSTEM_PROMPT))
 
