@@ -726,6 +726,8 @@ _FRAMEWORK_REWRITE_FOCUS_BODY: tuple[str, ...] = (
     "above), `target` (file and symbol), `evidence` (which measured candidate",
     "it addresses), `depends_on` (switches that must also be on for this one",
     "to pay), and `enables` (switches that only pay once this one is on).",
+    "A switch your code reads as a number (`int(os.environ[...])`, `atoi(getenv(...))`)",
+    "must also carry `value`; without one it is dropped, since the default is `1`.",
     "",
     "**Declare `depends_on` / `enables` honestly — this is load-bearing.**",
     "An enabler measured alone shows no gain. If you do not declare the",

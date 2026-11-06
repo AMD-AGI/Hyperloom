@@ -115,6 +115,28 @@ def test_a_zero_value_is_kept_as_zero():
     assert switches[0]["value"] == "0"
 
 
+_NUMERIC_SWITCH_PATCH = """\
++++ b/src.py
++    max_kb = int(os.environ["HL_MAX_KB"])
++    workers = int(os.getenv("HL_WORKERS", "1"))
++    stages = atoi(std::getenv("HL_STAGES"));
++    if os.environ.get("HL_FUSED"):
+"""
+
+
+def test_a_switch_the_patch_reads_as_a_number_needs_an_explicit_value():
+    """A switch the patch reads as a number is not defaulted to "1"."""
+    switches, problems = manifest.parse_manifest(
+        [_entry("HL_MAX_KB"), _entry("HL_WORKERS", value="4"), _entry("HL_STAGES"), _entry("HL_FUSED")],
+        patch_texts=[_NUMERIC_SWITCH_PATCH],
+    )
+    assert [(s["switch"], s["value"]) for s in switches] == [("HL_WORKERS", "4"), ("HL_FUSED", "1")]
+    assert problems == [
+        "dropped 'HL_MAX_KB': the patch reads it as a number, so it needs an explicit value",
+        "dropped 'HL_STAGES': the patch reads it as a number, so it needs an explicit value",
+    ]
+
+
 def test_a_switch_colliding_with_benchmark_config_is_dropped():
     """A switch already set by the config would be toggled by unrelated config."""
     switches, problems = manifest.parse_manifest(
@@ -800,6 +822,24 @@ async def test_a_rewrite_patch_is_benched_with_its_switches_on(tmp_path, monkeyp
     """An applied rewrite patch is inert, so benching it as-is would measure nothing."""
     _, _, benched_envs, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=8.0)
     assert benched_envs == {"HL_HOIST": "1", "HL_CACHE": "1"}
+
+
+@pytest.mark.asyncio
+async def test_a_numeric_switch_without_a_value_is_not_benched_as_one(tmp_path, monkeypatch):
+    """A size switched to "1" benches a value the patch never meant; the rest of the manifest still runs."""
+    patch = _REWRITE_PATCH.replace(
+        "+    return 2\n", '+    max_kb = int(os.environ["HL_MAX_KB"])\n+    return 2\n'
+    ).replace("@@ -1,2 +1,2 @@", "@@ -1,2 +1,3 @@")
+    result, _, benched_envs, _ = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        patch_body=patch,
+        switches=[{"switch": "HL_HOIST"}, {"switch": "HL_MAX_KB"}],
+    )
+    assert result["status"] == "kept"
+    assert benched_envs == {"HL_HOIST": "1"}
+    assert [row["switch"] for row in result["framework_levers"]] == ["HL_HOIST"]
 
 
 @pytest.mark.asyncio
