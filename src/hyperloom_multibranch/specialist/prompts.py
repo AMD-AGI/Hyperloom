@@ -103,8 +103,8 @@ Claims you held may have lapsed meanwhile; a tool that refuses one says so.
 {arrived}"""
 _KEPT = "Your worktree {worktree} is as you left it, at your branch head {head}, uncommitted edits included."
 _RESET = (
-    "Your branch head moved while you were down: your worktree {worktree} was reset to your branch head {head}, and "
-    "its uncommitted edits were dropped."
+    "Your branch head is no longer the one of your last worktree_sync: your worktree {worktree} was reset to your "
+    "branch head {head}, and its uncommitted edits were dropped."
 )
 _ARRIVED = "While you were down, this arrived for your branch:\n{items}"
 _NOTHING_ARRIVED = "Nothing arrived for your branch while you were down."
@@ -378,8 +378,8 @@ correctness fix with its case, and also made that kernel faster.
 dropped it on that result and took the next operator the profile ranked.
 
 How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. A \
-gain must clear the session's bar, set from the spread of the baseline measurements, and hold when it is measured \
-again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
+gain must clear the session's bar, set on InferenceX from the spread of the baseline measurements and on AgentX a \
+fixed threshold on the P50, and hold when it is measured again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
 branch head is still the parent it was measured against: submit on your current head.
 
 A test that failed as hip_runtime_error quotes the HIP error, and it is not a missing kernel: an illegal memory \
