@@ -768,10 +768,17 @@ deployments.
 path and the agent runner) write their workspace and worktree, and a private `/tmp` and `/dev/shm` (directories of
 mode 0700 on the host's `/tmp` and `/dev/shm`; with a bubblewrap older than 0.12, a fresh tmpfs where the workspace
 lies below `/tmp`). `HOME`, and `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME` and the compiler caches
-(`TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`, `AITER_JIT_DIR`) when they name a directory elsewhere, point into the
-workspace, and `TMPDIR` at `/tmp`. They read their toolchain, the worktree's git metadata, the framework source roots,
-the task's model when it is a local path, the programs of the stdio MCP servers they start (each named in one WARNING:
-nothing else such a server reads is bound unless the confinement shows it), and, for an agent runner launch,
+(`TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`, `AITER_JIT_DIR`, `FLYDSL_RUNTIME_CACHE_DIR`) when they name a
+directory elsewhere, point into the workspace, and `TMPDIR` at `/tmp`; `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR`
+are set into the workspace when unset too, since AITER otherwise builds its JIT modules in its installed tree, which
+is read-only there (a GPU specialist so compiles them afresh). With neither `HF_HOME` nor `HF_HUB_CACHE` set, Hugging
+Face's default directory under the app's home (`$XDG_CACHE_HOME/huggingface`, else `~/.cache/huggingface`) becomes the
+child's `HF_HOME`, read-only and with its login files masked, so a model downloaded there stays visible once `HOME` has
+moved. They read their toolchain, the git metadata of the worktree's repository (the one whose admin directory the
+repository records for the worktree, never the one the worktree's `.git` file names: the agent can rewrite that file,
+and runs as the app's own uid, so no ownership check tells a directory it made from the app's), the framework source
+roots, the task's model when it is a local path, the programs of the stdio MCP servers they start (each named in one
+WARNING: nothing else such a server reads is bound unless the confinement shows it), and, for an agent runner launch,
 `AgentLaunchSpec.readable`; a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
 `HYPERLOOM_BUILD_STORE` and `HYPERLOOM_BUILD_TRUST` name are masked wherever a bind would show them. The `claude` CLI
 cannot read its own login there: the launch is refused unless its environment holds `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`
@@ -784,15 +791,22 @@ mark and waits for them, then kills what is left. A sandbox bubblewrap could not
 bubblewrap's line (`specialist sandbox could not be set up: bwrap: ...`) rather than as the agent's exit, read from
 its `--json-status-fd`; an agent killed by signal `n` exits `128 + n`. A Ray GPU actor's sandbox is built from the
 driver's probe and paths, so it is for a single-node Ray cluster only, and its status goes to a file a shell in the
-actor opens for bubblewrap.
+actor opens for bubblewrap. The sandbox keeps the host's network, loopback included, so a specialist on the Ray actor
+path, where a Ray head always runs, can reach the Ray head and dashboard ports on this host, as an unconfined one can.
+
+The app's own git over a specialist's worktree (the commit it starts from and the harvested patch) goes through the
+admin directory the repository recorded when the worktree was made, in every tier; a worktree the repository does not
+record (a directory left at its path, say) is not used, and the specialist runs in its workspace.
 
 Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch in a hosted
 run (its entry calls `require_agent_isolation()` once at start-up, so a host where neither works refuses before
 anything runs), and a specialist's wherever `HYPERLOOM_SPECIALIST_USER` is set. Any other launch runs unconfined as
-before; `announce_agent_isolation()` then logs one WARNING at start-up (`agents run unconfined on this host, as before:
-they can read this account's files and credentials (<reasons>)`), and `agent_isolation_report()` gives the session
-report its line (`agent isolation: specialists <account|bwrap|none|refused>, sandboxes <...> (bubblewrap X.Y.Z
-PATH): <reasons>`).
+before; `announce_agent_isolation()`, which the optimize command calls at start-up, then logs one WARNING
+(`agents run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`), and
+the session report (`reports/final.md` and `final.json`'s `agent_isolation`) carries its line (`agent isolation:
+specialists <account|bwrap|none|refused>, sandboxes <...> (bubblewrap X.Y.Z PATH): <reasons>`). A launch that runs
+unconfined although start-up found bubblewrap usable (its probe gave no answer in time on a loaded host, say) logs that
+WARNING itself, once per process, and the report adds `agent isolation: N agent launches ran unconfined: <reasons>`.
 
 A multi-branch session's local agent sandboxes (autonomous branches, the dossier pass, dev leases) run every command
 of one sandbox in one bubblewrap sandbox whose user and pid namespaces all its commands share, so a server one command
