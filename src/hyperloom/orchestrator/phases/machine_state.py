@@ -1106,6 +1106,7 @@ def workflow_predicate_inputs(
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
     in_flight: WorkInFlight = WorkInFlight(),
+    framework_round_fits: bool = True,
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
     current = (state.phase or "").strip().upper() or PHASE_PRELUDE
@@ -1129,6 +1130,7 @@ def workflow_predicate_inputs(
         }
     elif current == PHASE_FRAMEWORK_AGENT:
         inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(state, now_unix=frozen_now)
+        inputs["budget"]["round_fits"] = framework_round_fits
     elif current == PHASE_KERNEL_AGENT:
         inputs["pending_work"], inputs["plateau"], inputs["budget"] = _kernel_predicate_inputs(
             state,
@@ -1315,9 +1317,12 @@ def compute_next_phase(
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
     in_flight: WorkInFlight = WorkInFlight(),
+    framework_round_fits: bool = True,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
-    inputs = workflow_predicate_inputs(state, flags=flags, now_unix=now_unix, in_flight=in_flight)
+    inputs = workflow_predicate_inputs(
+        state, flags=flags, now_unix=now_unix, in_flight=in_flight, framework_round_fits=framework_round_fits
+    )
     return replay_next_phase(inputs)
 
 

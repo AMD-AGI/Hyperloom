@@ -193,12 +193,25 @@ class MachinePhase(CoordinatorCollaborator):
         if not state.stop_reason:
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
+    async def _framework_round_fits(self) -> bool:
+        """Whether FRAMEWORK_AGENT has a round left: work queued or running, or an action its time gate still admits."""
+        if str(self.shared_state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return True
+        if await self.tasks.queued() or await self.tasks.running():
+            return True
+        dispatcher = self._coord.dispatcher
+        return any(
+            dispatcher.time_budget_denial_for_action(action) is None
+            for action in _phase_state.allowed_actions_for(_phase_state.PHASE_FRAMEWORK_AGENT)
+        )
+
     async def _next_phase(self, *, in_flight: _phase_state.WorkInFlight) -> tuple[str, str, dict[str, Any]] | None:
         """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
         state = self.shared_state
         next_phase = _phase_state.compute_next_phase(
             state,
             in_flight=in_flight,
+            framework_round_fits=await self._framework_round_fits(),
             flags=self.phase_flags(),
         )
         if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
