@@ -79,8 +79,8 @@ from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._grid_base import (
     GridVariant,
-    RoundError,
     VariantResult,
+    _RoundError,
     apply_variant_env,
     death_error,
     importable_overlay_dir,
@@ -624,7 +624,7 @@ def _invalid_measurement_error(
     death_excerpt: str,
     workspace: Any,
     slot: Any,
-) -> RoundError:
+) -> _RoundError:
     if proc.returncode != 0:
         error = death_excerpt or redact_secret_values((proc.stderr or proc.stdout)[-2000:])
         if not error.strip():
@@ -633,8 +633,8 @@ def _invalid_measurement_error(
             error = redact_secret_values(_report_errors_summary(report))
         return death_error(error, "magpie_nonzero_invalid_measurement")
     if not report:
-        return RoundError(death_excerpt or "benchmark_report missing", "benchmark_report_missing")
-    return RoundError(
+        return _RoundError(death_excerpt or "benchmark_report missing", "benchmark_report_missing")
+    return _RoundError(
         death_excerpt or "benchmark_report missing valid throughput/completed requests",
         "benchmark_report_invalid_metric",
     )
@@ -1367,7 +1367,7 @@ def _abort_without_workspace(
     preflight_abort = returncode == AGENTX_PREFLIGHT_RETURNCODE
     server_log = at.path / "server.log"
     if preflight_abort:
-        found = RoundError(
+        found = _RoundError(
             redact_secret_values((proc.stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round",
             AGENTX_PREFLIGHT_ERROR_CLASS,
         )

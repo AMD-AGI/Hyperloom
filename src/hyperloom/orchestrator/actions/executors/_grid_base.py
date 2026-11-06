@@ -164,16 +164,16 @@ class VariantResult:
         }
 
 
-class RoundError(NamedTuple):
+class _RoundError(NamedTuple):
     """Why a grid round measured nothing, and under which class it is recorded."""
 
     summary: str
     error_class: str
 
 
-def death_error(summary: str, error_class: str) -> RoundError:
+def death_error(summary: str, error_class: str) -> _RoundError:
     """A dead server's round error; a capacity error in ``summary`` is a config limit, so it outranks ``error_class``."""
-    return RoundError(summary, "engine_capacity" if engine_capacity_cause(summary) else error_class)
+    return _RoundError(summary, "engine_capacity" if engine_capacity_cause(summary) else error_class)
 
 
 def apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
