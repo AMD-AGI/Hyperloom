@@ -109,6 +109,41 @@ print(json.dumps(seen))
 """
 
 
+#: Arbor's end of a turn (its ``arbor/execute/turns.py``, F9): SIGTERM every process of its own uid, itself aside,
+#: whose environment carries ``ARBOR_TURN=<tag>``, then wait for them; print the pids found, whether each also carries
+#: the variable its command was given, and those still running.
+TURN_END = r"""
+import json, os, signal, sys, time
+from pathlib import Path
+want = ("ARBOR_TURN=" + sys.argv[1]).encode()
+uid, me = os.getuid(), os.getpid()
+def running(pid):
+    try:
+        return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+found, given = [], []
+for entry in Path("/proc").iterdir():
+    if not entry.name.isdigit() or int(entry.name) == me:
+        continue
+    try:
+        if entry.stat().st_uid != uid:
+            continue
+        env = (entry / "environ").read_bytes().split(b"\0")
+    except OSError:
+        continue
+    if want in env:
+        found.append(int(entry.name))
+        given.append(b"HL_TEST_GIVEN=given" in env)
+for pid in found:
+    os.kill(pid, signal.SIGTERM)
+until = time.monotonic() + 20
+while any(map(running, found)) and time.monotonic() < until:
+    time.sleep(0.05)
+print(json.dumps({"found": found, "given": given, "running": [pid for pid in found if running(pid)]}))
+"""
+
+
 #: A session that starts a command in a confined sandbox, says its holder and scratch, then runs until it is killed.
 OWNER = r"""
 import asyncio, json, os, sys
@@ -254,6 +289,45 @@ async def test_a_server_is_stopped_by_its_pid_file_in_the_sandbox_s_own_pid_name
     assert stop.output.split()[0] == "stopped" and int(stop.output.split()[1]) == int(pid_file.read_text())
     assert int(pid_file.read_text()) < 100, "the PID file names the server's pid in the sandbox's own namespace"
     assert server.returncode == -signal.SIGTERM
+
+
+async def test_what_a_turn_left_running_is_found_by_its_tag_and_stopped_by_a_later_command_of_its_sandbox_alone(
+    area: Path, probe: BwrapProbe
+) -> None:
+    """Arbor's F9: a process an agent turn left running, detached, carries the tag a process inside set for its
+    children, and the variables its command was given; a later command of the sandbox (Arbor, at the turn's end)
+    finds it among the processes of its own uid by its environment, and stops it. Another sandbox's Arbor, whose own
+    leftover carries the same tag, finds and stops its own alone."""
+    (area / "other").mkdir()
+    ours, theirs = _sandbox(area, probe), _sandbox(area / "other", probe)
+    name = f"hl-test-{os.getpid()}-{time.monotonic_ns()}"
+    leave = "(ARBOR_TURN=t1 setsid bash -c 'exec -a {} sleep 600' </dev/null >/dev/null 2>&1 &); echo left"
+    for sandbox in (ours, theirs):
+        (sandbox.paths.writable[0] / "turn_end.py").write_text(TURN_END)
+    try:
+        left = [
+            await sandbox.run(leave.format(f"{name}-{part}"), sandbox.paths.writable[0], {"HL_TEST_GIVEN": "given"}, 60)
+            for sandbox, part in ((ours, "ours"), (theirs, "theirs"))
+        ]
+        await _until(lambda: _named(f"{name}-ours") and _named(f"{name}-theirs"))
+        tagged = b"ARBOR_TURN=t1" in _environ(_named(f"{name}-ours")[0]).split(b"\0")
+        end = f"{PYTHON} -I -S turn_end.py t1"
+        their_end = await theirs.run(end, theirs.paths.writable[0], {}, 60)
+        after_theirs = (_named(f"{name}-ours"), _named(f"{name}-theirs"))
+        our_end = await ours.run(end, ours.paths.writable[0], {}, 60)
+        after_ours = _named(f"{name}-ours")
+    finally:
+        await ours.stop()
+        await theirs.stop()
+
+    assert [done.output.strip() for done in left] == ["left", "left"], left
+    assert tagged, "the leftover does not carry the tag its shell set for it"
+    assert their_end.returncode == 0 and our_end.returncode == 0, (their_end.output, our_end.output)
+    theirs_seen, ours_seen = (json.loads(done.output.strip().splitlines()[-1]) for done in (their_end, our_end))
+    assert len(theirs_seen["found"]) == 1 and theirs_seen["given"] == [True] and theirs_seen["running"] == []
+    assert after_theirs[0] and not after_theirs[1], "the other sandbox's Arbor stopped a process of this one"
+    assert len(ours_seen["found"]) == 1 and ours_seen["given"] == [True] and ours_seen["running"] == []
+    assert not after_ours, "the turn's leftover outlived the turn's end"
 
 
 async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_of_the_app(
