@@ -28,8 +28,7 @@ from ._inferencex_patcher import (
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
 from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid
 from ._ray_backend import strip_visible_devices_from_config
-from ._server_lifecycle import REUSE_PORT_DEFAULT, resolve_lifecycle_params, teardown_lifecycle_server
-from ._server_lifecycle import _assign_free_port as assign_free_port
+from ._server_lifecycle import resolve_lifecycle_params, teardown_lifecycle_server
 from ._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -71,7 +70,6 @@ __all__ = [
     "LaunchLayer",
     "MaterializeOptions",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
-    "REUSE_PORT_DEFAULT",
     "RequestedLaunch",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
@@ -79,7 +77,6 @@ __all__ = [
     "SpeculativeDecodingPinnedError",
     "TargetAnalysisExecutor",
     "VariantResult",
-    "assign_free_port",
     "baseline_executor",
     "benchmark_serving_path_in",
     "build_launch_evidence",

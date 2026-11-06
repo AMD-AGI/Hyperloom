@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from hyperloom.common.agentx_workload import find_aiperf_artifact
 from hyperloom.common.outside_facts import AIPERF_PHASE_KEY
 
 log = logging.getLogger(__name__)
@@ -47,10 +48,6 @@ __all__ = [
 
 #: Artifact written beside ``kv_metrics.json``.
 TIMELINE_ARTIFACT_NAME = "agentx_timeline.jsonl"
-
-#: Where aiperf's per-request export lands, relative to the round's own directory. Mirrors how the progress-API address
-#: and the aiperf log are resolved, since an AgentX round may nest its benchmark one level down.
-_EXPORT_RELPATHS = ("aiperf_artifacts/profile_export.jsonl", "*/aiperf_artifacts/profile_export.jsonl")
 
 #: Cap on request-level events written out. A three-hour round at high concurrency produces well over a hundred
 #: thousand requests, and three events each would outweigh every other artifact in the session bundle combined. Over
@@ -86,15 +83,7 @@ class RequestRecord:
 
 def find_profile_export(workspace: Any) -> Path | None:
     """Locate aiperf's per-request export under a round's directory."""
-    try:
-        root = Path(workspace)
-        for pattern in _EXPORT_RELPATHS:
-            for candidate in sorted(root.glob(pattern)):
-                if candidate.is_file():
-                    return candidate
-    except OSError:
-        return None
-    return None
+    return find_aiperf_artifact(workspace, "profile_export.jsonl")
 
 
 def _seconds(raw: Any) -> float | None:
