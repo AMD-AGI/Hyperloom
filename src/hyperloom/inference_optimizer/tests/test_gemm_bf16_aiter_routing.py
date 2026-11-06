@@ -280,7 +280,8 @@ class TestWriteFmoeUntunedCsvFromLog:
             _log(tmp_path, "\n".join(dispatches)), tmp_path / "ws"
         )
 
-        rows = [line for line in open(path, encoding="utf-8").read().splitlines() if line][1:]
+        with open(path, encoding="utf-8") as handle:
+            rows = [line for line in handle.read().splitlines() if line][1:]
         assert sorted(int(row.split(",")[0]) for row in rows) == [1, 8, 64, 512]
         assert report["tunable"] == 1
 
