@@ -118,14 +118,34 @@ VLLM = "vllm"
 VLLM_TP_FLAGS = ("--tensor-parallel-size", "-tp")
 #: The interpreter Arbor runs under, the sandbox's.
 PYTHON = "python3"
+#: Where Arbor imports what pip installed for it, which Arbor puts on its own import path at its import: a sandbox
+#: whose pip installs out of every interpreter's reach (``PIP_TARGET``, as a confined one does) gives that directory
+#: to Arbor's own commands, its driver and the ``arbor.*`` commands its agents run, never to the sandbox's
+#: environment, where an inference server started from Arbor's shell would import the SDK's dependencies ahead of the
+#: image's. An Arbor that does not read it runs as before, and its install's last command says why the SDK does not
+#: import for it.
+SITE_ENV = "ARBOR_SITE"
+#: The Arbor commits that read :data:`SITE_ENV`: on main, and the tag on its v0.9.2 line.
+SITE_SINCE = "545a850 (v0.9.2.1)"
+#: :data:`PYTHON` run as Arbor: given :data:`SITE_ENV` where the sandbox's pip installs out of reach.
+ARBOR_PYTHON = f'env ${{PIP_TARGET:+"{SITE_ENV}=$PIP_TARGET"}} {PYTHON}'
+#: Run once Arbor's imports failed, says so when the cause is an Arbor that does not read :data:`SITE_ENV`: it names a
+#: directory, which is not on the import path Arbor's import left.
+_SITE_UNREAD = (
+    f'import os, sys, arbor; site = os.environ.get("{SITE_ENV}", ""); '
+    "sys.exit(os.path.isdir(site) and os.path.realpath(site) not in map(os.path.realpath, sys.path) and "
+    f'f"this Arbor does not read {SITE_ENV}, so it cannot import what pip installed in {{site}}: '
+    f'pin Arbor {SITE_SINCE} or later")'
+)
 #: What Arbor needs beyond the image (its docs/getting-started.md, and the third-party modules arbor/ imports outside
-#: its tests): Python 3.11, PyYAML and the Claude agent SDK, which brings its CLI. Each is installed only when it does
-#: not import, and the last command checks that both import.
+#: its tests): Python 3.11, PyYAML and the Claude agent SDK, which brings its CLI. Each is installed only when Arbor
+#: cannot import it, and the last command checks that Arbor imports both.
 INSTALL = (
     f"{PYTHON} -c 'import sys; sys.exit(sys.version_info < (3, 11) and \"Arbor needs Python 3.11 or newer\")'",
-    f"{PYTHON} -c 'import yaml' 2>/dev/null || {PYTHON} -m pip install --quiet pyyaml",
-    f"{PYTHON} -c 'import claude_agent_sdk' 2>/dev/null || {PYTHON} -m pip install --quiet claude-agent-sdk",
-    f"{PYTHON} -c 'import yaml, claude_agent_sdk'",
+    f"{ARBOR_PYTHON} -c 'import arbor, yaml' 2>/dev/null || {PYTHON} -m pip install --quiet pyyaml",
+    f"{ARBOR_PYTHON} -c 'import arbor, claude_agent_sdk' 2>/dev/null"
+    f" || {PYTHON} -m pip install --quiet claude-agent-sdk",
+    f"{ARBOR_PYTHON} -c 'import arbor, yaml, claude_agent_sdk' || {{ {ARBOR_PYTHON} -c '{_SITE_UNREAD}'; exit 1; }}",
 )
 #: Arbor's exit code for a config it refuses, and only for that; its session's refusal file says why.
 EXIT_REFUSED = 2
@@ -322,7 +342,7 @@ def arbor_manifest(spec: AgentSpec, checkout: ArborCheckout, run: ArborRun) -> A
         carried = path / PLAN_FILE
         carried.write_bytes(Path(component["plan"]).read_bytes())
         component["plan"] = str(carried)
-    launch = f"{PYTHON} -m arbor run --config {shlex.quote(run.config_file)}"
+    launch = f"{ARBOR_PYTHON} -m arbor run --config {shlex.quote(run.config_file)}"
     return AgentManifest.read(
         {
             "source": checkout.source,
@@ -815,6 +835,7 @@ async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> 
 __all__ = [
     "ACCURACY_FLOOR_ENV",
     "ACCURACY_POLICY",
+    "ARBOR_PYTHON",
     "BLOCK_KEYS",
     "BRANCH_RUN",
     "BUILT",
@@ -834,6 +855,8 @@ __all__ = [
     "REVIEW_HOST",
     "REVIEW_KEY",
     "REVIEW_OFF",
+    "SITE_ENV",
+    "SITE_SINCE",
     "ArborCheckout",
     "ArborRefused",
     "ArborRun",

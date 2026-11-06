@@ -25,7 +25,7 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
 
 | Concern | MB (Hyperloom) | Arbor |
 |---|---|---|
-| **Node, container, image** | Owns them. Starts Arbor on the host as its own user (`docker_container: "@host"`), after installing pyyaml and claude-agent-sdk. | Never calls docker. |
+| **Node, container, image** | Owns them. Starts Arbor on the host as its own user (`docker_container: "@host"`), after installing pyyaml and claude-agent-sdk. In a bubblewrap sandbox pip installs them out of every interpreter's reach, and Arbor's commands get that directory as `ARBOR_SITE`. | Never calls docker. Puts `ARBOR_SITE` on its own import path. |
 | **GPUs** | Leases `--tp` cards per Arbor from its pool. Sets `ROCR_VISIBLE_DEVICES` (absolute ids) and `HIP_VISIBLE_DEVICES`. Kills any process that reaches past the lease. | Serves on the cards it is given. Never sets or passes a mask. |
 | **Ports** | A block of 10 per Arbor, from 31100. | Serves on the config's `port` only. |
 | **Clock** | Owns the session's deadline. Gives each Arbor `component.deadline` = EXPLORE's end minus the time to measure and confirm its last keep on its branch: the tests in flight plus two of the session's longest test (40 min before any test was measured). | Starts an iteration only if it fits, and exits 0 `deadline`. |
