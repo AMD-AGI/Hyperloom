@@ -421,9 +421,10 @@ Rules:
 - {{gpu_rule}} A kernel, a tuned table or a patch you cannot verify offline is what a test \
 is for, so submit the candidate the evidence favours rather than wait for certainty; a flat or failed result tells \
 the next candidate something.
-- A candidate is one intent, so its result says what that intent is worth. Small changes, each too small to clear \
-the bar alone, may go together as one intent: name every change in its mechanism and give as target_share_pct the \
-summed share of the operators they speed up.
+- A candidate is one intent, so its result says what that intent is worth. A change that read below the bar is not \
+tested alone again. Changes that each read at least half the bar and touch nothing in common (your branch log, \
+blackboard_search and test_result have their readings) go together as one intent once together they can clear it: \
+name every change in its mechanism and give as target_share_pct the summed share of the operators they speed up.
 - {BASH_KILL_SAFETY_PREAMBLE}
 """
 

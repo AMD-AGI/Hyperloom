@@ -215,11 +215,13 @@ def test_the_role_says_a_change_never_selects_its_file_or_setting_with_setdefaul
     assert "a variable the recipe already sets silently wins" in prompt
 
 
-def test_the_role_lets_small_changes_too_small_alone_go_together_as_one_intent():
+def test_the_role_bundles_sub_bar_changes_from_their_readings_instead_of_retesting_one_alone():
     prompt = role_prompt(WORKLOAD)
 
     assert "Keep a candidate to one intent" not in prompt
-    assert "may go together as one intent" in prompt
+    assert "A change that read below the bar is not tested alone again" in prompt
+    assert "each read at least half the bar and touch nothing in common" in prompt
+    assert "go together as one intent once together they can clear it" in prompt
     assert "the summed share of the operators they speed up" in prompt
 
 
