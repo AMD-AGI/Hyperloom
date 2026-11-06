@@ -167,7 +167,9 @@ and your analysis say can clear the session's bar, never a test just to fill a s
 1. Read where your branch stands: your branch log (blackboard_branch_log), the startup brief, and what was tried and \
 learnt (blackboard_search, blackboard_learnings, blackboard_brief).
 2. Choose a direction from your branch head's own state, starting from where its GPU time goes: blackboard_brief lists \
-a commit's ceilings once its operator shares are known. A profile is heavy, a full test and an analysis, and one per \
+a commit's ceilings once its operator shares are known. When the brief has a section "Arbor's map", it is binding: do \
+not work a direction a running Arbor branch holds, and reopen a direction the map set aside only if your intent answers \
+its reason, and say how. A profile is heavy, a full test and an analysis, and one per \
 commit serves every branch. Profile the session's root only while no brief lists ceilings for it. Profile a later \
 head only once it carries gains you committed and you need its shares to find the next bottleneck, after a change of \
 execution path (attention backend, precision format, kernel switch), after a large gain since the commit last \
