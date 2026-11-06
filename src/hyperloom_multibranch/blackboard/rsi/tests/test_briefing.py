@@ -927,6 +927,25 @@ def test_arbors_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_titl
     shown = render_brief(StartupBrief("c1", (), agent_map=aside)).splitlines()
 
     listed = shown[shown.index(MAP_TITLE) + 1 :]
-    assert len(listed) == MAX_LINES + 1 and listed[-1] == f"... {MAX_LINES} more"
+    kept = (MAX_LINES - 1) // 2
+    assert len(listed) == 2 * kept + 1 and listed[-1] == f"... {MAX_LINES - kept} more directions of the map"
     assert listed[0].startswith("- m-0 (set aside, killed): Retune every") and len(listed[0]) == LINE_CHARS
-    assert listed[1] == "  why: reason 0"
+    assert listed[1:-1:2] == [f"  why: reason {n}" for n in range(kept)]
+
+
+def test_arbors_map_in_the_brief_puts_the_held_directions_first_and_cuts_only_between_directions() -> None:
+    aside = tuple(MapDirection(f"m-{n}", f"direction {n}", "done", f"reason {n}") for n in range(MAX_LINES))
+    held = (
+        MapDirection("m-gemm", "Dense GEMMs", "open", holder="b7"),
+        MapDirection("m-moe", "MoE routing", "open", holder="b8"),
+    )
+    brief = StartupBrief("c1", (), agent_map=(*aside, *held), map_holders={"m-gemm": "b7", "m-moe": "b8"})
+
+    shown = render_brief(brief).splitlines()
+
+    listed = shown[shown.index(MAP_TITLE) + 1 :]
+    kept = (MAX_LINES - 1 - len(held)) // 2
+    assert listed[: len(held)] == ["- m-gemm (held by b7): Dense GEMMs", "- m-moe (held by b8): MoE routing"]
+    assert listed[len(held) : -1 : 2] == [f"- m-{n} (set aside, done): direction {n}" for n in range(kept)]
+    assert listed[len(held) + 1 : -1 : 2] == [f"  why: reason {n}" for n in range(kept)]
+    assert listed[-1] == f"... {MAX_LINES - kept} more directions of the map"
