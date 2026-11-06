@@ -184,6 +184,17 @@ def _hook(where: str) -> _Plant:
     return plant
 
 
+def _configured_hook(tree: _Tree) -> Sequence[str]:
+    """A hook defined in config (git 2.54 on), which ``core.hooksPath`` does not reach."""
+    tree.config(("hook.evil.command", str(tree.program)), ("hook.evil.event", "pre-commit"))
+    tree.change()
+    _git(tree.worktree, "add", "-A")
+    return ("commit", "-qm", "c")
+
+
+_CONFIG_HOOKS = "hook.<friendly-name>.command" in _git(Path.cwd(), "help", "--config")
+
+
 def _fsmonitor(tree: _Tree) -> Sequence[str]:
     tree.config(("core.fsmonitor", str(tree.program)))
     return ("status", "--porcelain")
@@ -284,6 +295,7 @@ def _auto_gc(tree: _Tree) -> Sequence[str]:
         blob = _git(tree.base, "hash-object", "-w", "--stdin", stdin=f"{n}\n").strip()
         os.utime(objects / blob[:2] / blob[2:], (old, old))
     tree.config(
+        ("maintenance.strategy", "gc"),
         ("gc.auto", "1"),
         ("gc.autoDetach", "false"),
         ("maintenance.autoDetach", "false"),
@@ -404,6 +416,12 @@ _PLANTS = [
     pytest.param(_trailer, "", id="trailer-command"),
     pytest.param(_hook("hooks-dir"), "", id="hook-in-hooks-dir"),
     pytest.param(_hook("hooksPath"), "", id="hook-in-hooksPath"),
+    pytest.param(
+        _configured_hook,
+        "",
+        id="hook-in-config",
+        marks=pytest.mark.skipif(not _CONFIG_HOOKS, reason="this git defines no hooks in config"),
+    ),
     pytest.param(_fsmonitor, "", id="fsmonitor"),
     pytest.param(_editor, None, id="editor"),
     pytest.param(_sequence_editor, "", id="sequence-editor"),
