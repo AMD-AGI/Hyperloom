@@ -69,6 +69,16 @@ class _AcceptedSwitches(NamedTuple):
     problems: list[str]
 
 
+# A value no credential can be: a flag or a count. A token-cache switch reads credential-shaped by name alone.
+_LITERAL_VALUE = re.compile(r"(?i)true|false|on|off|yes|no|-?\d{1,9}")
+
+
+def _declared_value(entry: dict[str, Any]) -> str:
+    """The entry's value as an env string, defaulting only when it gives none."""
+    value = entry.get("value")
+    return str(value).strip() if value not in (None, "") else DEFAULT_SWITCH_VALUE
+
+
 def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _AcceptedSwitches:
     """Keep the entries that name a usable rewrite switch, reporting why the rest were dropped."""
     problems: list[str] = []
@@ -87,7 +97,8 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _Acce
         if upper in BLOCKED_EXTERNAL_ENV_NAMES:
             problems.append(f"dropped {name!r}: reserved benchmark variable, not a rewrite switch")
             continue
-        if is_secret_shaped_env_name(upper):
+        value = _declared_value(entry)
+        if is_secret_shaped_env_name(upper) and not _LITERAL_VALUE.fullmatch(value):
             problems.append(f"dropped {name!r}: credential-shaped name, not a rewrite switch")
             continue
         if upper in reserved:
@@ -104,7 +115,7 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _Acce
             problems.append(f"{name}: unrecognised category {category!r}; recorded as-is")
         accepted[upper] = {
             "switch": upper,
-            "value": str(entry.get("value") or DEFAULT_SWITCH_VALUE),
+            "value": value,
             "category": category,
             "target": str(entry.get("target") or "").strip(),
             "evidence": str(entry.get("evidence") or "").strip(),
