@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+from hyperloom.orchestrator.actions.executors import _subprocess_kill
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -1258,6 +1259,141 @@ def test_run_with_session_kill_detok_stall_compile_logs_keep_it_alive(tmp_path):
         watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     assert cp.returncode == 0
+
+
+#: A server ready and then quiet inside an aiter JIT build (aiter writes nothing between ``start build`` and ``finish
+#: build``), as the first request after ready reaches a module it lacks; ``{seconds}`` is how long the build takes.
+_BUILDING_AFTER_READY = (
+    "import sys, time\n"
+    "f = open(sys.argv[1], 'w')\n"
+    "f.write('Application startup complete\\n'); f.flush()\n"
+    "f.write('[aiter] [pid=7 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /j\\n')\n"
+    "f.flush(); time.sleep({seconds})\n"
+    "f.write('gen throughput (token/s): 250.0, #queue-req: 0\\n'); f.flush()\n"
+    "time.sleep(0.3)\n"
+    "raise SystemExit(0)\n"
+)
+
+
+def test_a_quiet_aiter_build_after_ready_is_not_a_stall_while_its_module_has_time(tmp_path):
+    """The build takes 2.5 s against a 1 s silence window; a CK-tile module is given 2700 s."""
+    log_path = tmp_path / "server.log"
+    cp = run_with_session_kill(
+        [sys.executable, "-c", _BUILDING_AFTER_READY.format(seconds=2.5), str(log_path)],
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == 0
+
+
+def test_an_aiter_build_that_hangs_after_ready_is_a_stall_once_its_module_has_had_its_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(_subprocess_kill, "_aiter_build_limit_sec", lambda module: 1.0)
+    log_path = tmp_path / "server.log"
+    start = time.monotonic()
+    cp = run_with_session_kill(
+        [sys.executable, "-c", _BUILDING_AFTER_READY.format(seconds=60), str(log_path)],
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
+    assert time.monotonic() - start < 15.0, "the build's 1 s and the 1 s window, not the round's 60 s"
+
+
+def test_health_probes_answered_during_the_build_do_not_end_its_excuse(tmp_path):
+    """uvicorn answers a monitor's ``GET /health`` while the engine builds; those lines are neither activity nor news."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "f = open(sys.argv[1], 'w')\n"
+        "f.write('Application startup complete\\n')\n"
+        "f.write('[aiter] start build [module_rmsnorm] under /j\\n'); f.flush()\n"
+        "for _ in range(5):\n"
+        "    time.sleep(0.5)\n"
+        "    f.write('INFO:     127.0.0.1:4 - \"GET /health HTTP/1.1\" 200 OK\\n'); f.flush()\n"
+        "f.write('gen throughput (token/s): 250.0, #queue-req: 0\\n'); f.flush()\n"
+        "raise SystemExit(0)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == 0
+
+
+def test_a_line_after_the_build_line_ends_its_excuse(tmp_path):
+    """A server that went on past ``start build`` (here an import of a built module) is judged by its log again. The two
+    lines arrive in polls of their own (the launcher polls every half second at most): a build line that never ended
+    would otherwise be missed, as the later line replaces it in the one poll."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "f = open(sys.argv[1], 'w')\n"
+        "f.write('Application startup complete\\n')\n"
+        "f.write('[aiter] start build [module_rmsnorm] under /j\\n'); f.flush()\n"
+        "time.sleep(1.5)\n"
+        "f.write('[aiter] import [module_rmsnorm] under /j\\n'); f.flush()\n"
+        "time.sleep(60)\n"
+    )
+    start = time.monotonic()
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
+    assert time.monotonic() - start < 15.0
+
+
+class _Round:
+    """A round's activity tracker over a server log the test writes to, polled at the clock the test names."""
+
+    def __init__(self, log: Path) -> None:
+        self.log = log
+        self.activity = _subprocess_kill._RoundActivity(started_at=0.0, cursor=_LogCursor({}), last_activity_at=0.0)
+
+    def poll(self, now: float, written: str = "") -> float:
+        """The last activity after a poll at ``now`` that finds ``written`` appended to the log."""
+        with open(self.log, "a", encoding="utf-8") as handle:
+            handle.write(written)
+        self.activity.note_log_progress(str(self.log), _subprocess_kill._RecorderFanout([]), _FakeCapture(), now)
+        return self.activity.last_activity_at
+
+
+_READY = "Application startup complete\n"
+_START = "[aiter] [pid=7 pname=Process-1] start build [{module}] under /j\n"
+
+
+def test_a_quiet_build_is_activity_until_its_module_has_had_its_time(tmp_path):
+    light, cktile = _Round(tmp_path / "light.log"), _Round(tmp_path / "cktile.log")
+
+    assert light.poll(100, _READY + _START.format(module="module_rmsnorm")) == 100
+    assert [light.poll(now) for now in (400, 700, 900, 5000)] == [400, 700, 700, 700], "600 s from 100"
+    assert cktile.poll(100, _READY + _START.format(module="module_gemm_a8w8_bpreshuffle_cktile")) == 100
+    assert [cktile.poll(now) for now in (400, 2800, 2900, 9000)] == [400, 2800, 2800, 2800], "2700 s from 100"
+
+
+def test_a_line_after_the_build_line_ends_its_excuse_at_the_poll_it_arrives_in(tmp_path):
+    server = _Round(tmp_path / "server.log")
+    server.poll(100, _READY + _START.format(module="module_rmsnorm"))
+
+    assert server.poll(150, "[aiter] import [module_rmsnorm] under /j\n") == 150
+    assert server.poll(400) == 150, "no build is under way, so the quiet since 150 is no one's excuse"
+
+
+def test_a_second_build_has_its_own_time_from_the_poll_that_names_it(tmp_path):
+    """One module's build ends and another's starts between two polls: the second is not charged the first's time."""
+    server = _Round(tmp_path / "server.log")
+    server.poll(100, _READY + _START.format(module="module_rmsnorm"))
+
+    assert server.poll(500, _START.format(module="module_moe_ck2stages")) == 500
+    assert [server.poll(now) for now in (900, 1100, 1500)] == [900, 1100, 1100], "600 s from 500, not from 100"
+
+
+def test_the_build_limits_the_launcher_copies_equal_the_measurement_layers():
+    from hyperloom.measure.jit import modules
+
+    assert _subprocess_kill._aiter_build_limit_sec("module_gemm_a8w8_bpreshuffle_cktile") == (
+        modules.module_build_limit_sec("module_gemm_a8w8_bpreshuffle_cktile")
+    )
+    assert _subprocess_kill._AITER_BUILD_LIMIT_SEC == modules.MODULE_BUILD_LIMIT_SEC
+    assert _subprocess_kill._AITER_CKTILE_BUILD_LIMIT_SEC == modules.CKTILE_MODULE_BUILD_LIMIT_SEC
 
 
 def test_shared_helper_does_not_enable_silence_without_a_policy(tmp_path):

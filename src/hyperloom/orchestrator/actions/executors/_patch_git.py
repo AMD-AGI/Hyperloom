@@ -6,16 +6,14 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ...delivery.ledger import load_prepared_records, restore_records
-from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
-from ._apply_feedback import ApplyFeedback, PatchApplyResult, PresenceCheck, build_apply_feedback
+from ._apply_feedback import PatchApplyResult, PresenceCheck, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._nogit_patch import _P_LEVELS, _apply_patch_no_git, _is_git_tree, _reverse_probe_levels
+from ._nogit_patch import _P_LEVELS, _is_git_tree, _reverse_probe_levels
 
 log = logging.getLogger(__name__)
 
@@ -215,73 +213,6 @@ def _git_apply_reverse(
             return True, ""
         return False, cp2.stderr.strip()
     return False, f"git apply -R: no matching -p level for {patch_path}"
-
-
-@dataclass(frozen=True)
-class _PatchSeries:
-    """What applying an attempt's patch series did to its framework tree."""
-
-    patches: list[Path]
-    #: The patch that stopped the series, and why; empty when every patch landed.
-    errors: list[dict[str, str]]
-    feedback: tuple[ApplyFeedback, ...]
-    #: One ``{patch, check}`` row per patch the tree already held in full, naming the check that showed it.
-    already_present: list[dict[str, str]]
-
-    @property
-    def changed_nothing(self) -> bool:
-        """Every patch landed and the tree already held each one, so the tree is unchanged."""
-        return bool(self.patches) and len(self.already_present) == len(self.patches)
-
-
-def _apply_patch_series(
-    attempt: IntegrateAttempt,
-    patch_paths: list[Path],
-    *,
-    git_head: str,
-    backup_root: Path,
-) -> _PatchSeries:
-    """Apply each delivered patch to the attempt's tree, stopping at the first one that does not land.
-
-    A patch the tree already holds still lands, so one subset patch inside a larger
-    series does not fail the series. ``attempt.applied`` is appended to in place, so
-    a cancellation mid-series still leaves the undo able to see what reached the tree.
-    """
-    framework_root = attempt.framework_root
-    errors: list[dict[str, str]] = []
-    feedback: list[ApplyFeedback] = []
-    already_present: list[dict[str, str]] = []
-    nogit_backups: list[dict[str, Any]] = []
-    for patch in patch_paths:
-        # ``vet_patches`` runs at authoring time inside the specialist runner, so a
-        # patch from anywhere else -- ``params.patches``, every remotely-fetched
-        # ``upstream_pr`` diff -- arrives unvetted.
-        try:
-            text = patch.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            errors.append({"patch": str(patch), "stderr": f"unreadable: {exc!r}"})
-            break
-        if not is_unified_diff(text):
-            errors.append({"patch": str(patch), "stderr": "not a unified diff"})
-            break
-        escaping = patch_escapes_tree(text)
-        if escaping is not None:
-            errors.append({"patch": str(patch), "stderr": f"path escapes tree: {escaping!r}"})
-            break
-        if git_head:
-            result = _git_apply_collect_feedback(framework_root, patch)
-        else:
-            result = _apply_patch_no_git(framework_root, patch, backup_root, seq_offset=len(nogit_backups))
-            nogit_backups.extend(result.backups)
-        if not result.ok:
-            errors.append({"patch": str(patch), "stderr": result.error})
-            if result.feedback is not None:
-                feedback.append(result.feedback)
-            break
-        if result.present_by is not None:
-            already_present.append({"patch": str(patch), "check": result.present_by.value})
-        attempt.applied.append(patch)
-    return _PatchSeries(patch_paths, errors, tuple(feedback), already_present)
 
 
 def _uncommitted_revert(attempt: IntegrateAttempt, failure: str, what: str, **evidence: Any) -> dict[str, Any]:
