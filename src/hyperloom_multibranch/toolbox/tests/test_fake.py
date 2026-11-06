@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import io
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -30,7 +32,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     Toolbox,
     UnknownTestRequest,
 )
-from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import ClaimKey, ClaimLost, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, intent
@@ -509,6 +511,85 @@ async def test_cancel_of_a_finished_test_changes_nothing_and_unknown_ids_raise()
     assert book.of("withdrawal") == []
     with pytest.raises(UnknownTestRequest):
         await box.cancel("nope")
+
+
+class HeldWithdrawals(Blackboard):
+    """Holds each withdrawal write until ``release`` is set; ``holding`` is set once one waits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.holding, self.release = asyncio.Event(), asyncio.Event()
+
+    async def write_withdrawal(self, withdrawal: Withdrawal) -> None:
+        self.holding.set()
+        await self.release.wait()
+        await super().write_withdrawal(withdrawal)
+
+
+async def _until(done: Callable[[], bool]) -> None:
+    async def poll() -> None:
+        while not done():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout=5)
+
+
+async def test_a_result_that_lands_while_its_branch_is_withdrawn_is_kept_not_withdrawn() -> None:
+    book = HeldWithdrawals()
+    box = _toolbox(blackboard=book, noise=QUIET)
+    box.script(lambda r: True, [Fate.OK])
+    first, second = await box.submit_test(_request()), await box.submit_test(_request())
+    assert (await box.queue_state()).running == 2
+
+    stopping = asyncio.create_task(box.withdraw_branch("b1"))
+    await asyncio.wait_for(book.holding.wait(), timeout=5)  # the first one's withdrawal is being written
+    box.executor.gate.set()  # and meanwhile the second one is measured
+    await _until(lambda: second in box.results)
+    book.release.set()
+
+    assert await stopping == (first,)
+    assert (await box.outcome(second)).validity is Validity.SUCCEEDED
+    assert box.withdrawn == {first: "branch stopped"}
+    assert [w.request_id for w in book.of("withdrawal")] == [first]
+    assert [r.request_id for r in book.of("result")] == [second]
+
+
+async def test_a_test_cancelled_while_its_branch_is_withdrawn_is_withdrawn_once() -> None:
+    book = Blackboard()
+    box = _toolbox(blackboard=book)
+    request_id = await box.submit_test(_request())
+    assert (await box.queue_state()).running == 1
+
+    cancelled, stopped = await asyncio.gather(box.cancel(request_id), box.withdraw_branch("b1"))
+
+    assert (cancelled, stopped) == (CancelOutcome.WITHDRAWN, (request_id,))
+    assert box.withdrawn == {request_id: "branch stopped"}
+    assert [w.request_id for w in book.of("withdrawal")] == [request_id]
+
+
+class LostClaims:
+    """Claims taken by another branch by the time the toolbox hands them to a test."""
+
+    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
+        raise ClaimLost(f"the claim on {key.parent_commit} is another branch's")
+
+
+class UnwritableWithdrawals(Blackboard):
+    async def write_withdrawal(self, withdrawal: Withdrawal) -> None:
+        raise ConnectionError("the blackboard cannot be reached")
+
+
+async def test_a_lost_claim_whose_withdrawal_cannot_be_written_leaves_no_request_waiting() -> None:
+    book = UnwritableWithdrawals()
+    box = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(claims=LostClaims()))  # type: ignore[arg-type]
+
+    with pytest.raises(ConnectionError, match="cannot be reached"):
+        await box.submit_test(_request(intent_fingerprint="intent-1"))
+
+    (written,) = book.of("request")
+    assert box.requests == {} and (await box.queue_state()).queued == 0
+    with pytest.raises(UnknownTestRequest):
+        await asyncio.wait_for(box.outcome(written.request_id), timeout=5)
 
 
 # --- the whole thing ---------------------------------------------------------------------------------------------
