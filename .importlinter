@@ -375,6 +375,8 @@ ignore_imports =
     # The round gate's KV recorder until run_round owns telemetry and unit 5.05a deletes _build_kv_recorder.
     hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_poll
     hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_record
+    # The argv preflight delegates to parser_check until unit 4.01b deletes argv_preflight.
+    hyperloom.orchestrator.bringup.argv_preflight -> inference_suite.parser_check
 unmatched_ignore_imports_alerting = none
 
 
