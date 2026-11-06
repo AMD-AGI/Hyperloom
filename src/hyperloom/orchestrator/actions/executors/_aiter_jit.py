@@ -633,18 +633,31 @@ def _compiled_for(row: dict[str, Any], targets: BuildTargets | None) -> bool:
         return True
 
 
+#: The columns aiter keys a tuned row's dispatch entry by (``build_tune_dict`` / ``build_tune_dict_batched``,
+#: ``aiter/jit/utils/chip_info.py``); a later row of the same key replaces an earlier one, whose kernel is never built.
+_DISPATCH_KEY_COLUMNS = ("gfx", "cu_num", "B", "M", "N", "K")
+
+
+def _dispatch_key(row: dict[str, Any], libtype: str, index: int) -> tuple[str, ...]:
+    """The entry a row lands in within its libtype's dispatch dict; a row with no shape is its own entry."""
+    key = tuple(str(row.get(column) or "").strip() for column in _DISPATCH_KEY_COLUMNS)
+    if not any(key[3:]):
+        return (str(index),)
+    return (libtype, *key)
+
+
 def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> list[tuple[str, str]]:
     """Each ``(kernelName, libtype)`` pair linked into a serving ``module_*.so``, once, in first-seen order; only the
-    rows aiter compiles for ``targets`` when they are given.
+    rows aiter compiles for ``targets`` when they are given, and of the rows sharing a dispatch key only the last.
 
     The tables this reads ship with aiter, so their encoding and field sizes are not
     ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
     ``csv.Error``, and either escaping here would skip the whole coverage check.
     """
-    rows: list[tuple[str, str]] = []
+    by_key: dict[tuple[str, ...], tuple[str, str]] = {}
     try:
         with csv_path.open(newline="", encoding=_UTF8) as handle:
-            for row in csv.DictReader(handle):
+            for index, row in enumerate(csv.DictReader(handle)):
                 name = str(row.get("kernelName") or "").strip()
                 if not name:
                     continue
@@ -654,11 +667,11 @@ def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> 
                 if not libtype and name.startswith("_ZN"):
                     continue
                 if _compiled_for(row, targets):
-                    rows.append((name, libtype))
+                    by_key[_dispatch_key(row, libtype, index)] = (name, libtype)
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         log.warning("aiter_jit: cannot read tuned CSV %s (%s); treating it as covered", csv_path, exc)
         return []
-    return list(dict.fromkeys(rows))
+    return list(dict.fromkeys(by_key.values()))
 
 
 def serving_modules_cover_rows(jit_dir: Path, modules: tuple[str, ...], rows: list[tuple[str, str]]) -> bool:
