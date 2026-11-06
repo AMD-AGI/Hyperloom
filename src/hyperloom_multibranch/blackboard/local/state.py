@@ -30,6 +30,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     LlmUsage,
     LlmUsageRecord,
     ManifestFingerprint,
+    MapDirection,
     MergeAttempt,
     OpShares,
     QuarantineEvent,
@@ -81,6 +82,13 @@ class ClaimDecision:
     holders: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class AgentMapWrite:
+    """Arbor's map as the scheduler wrote it: its directions, in the map's order."""
+
+    directions: tuple[MapDirection, ...] = ()
+
+
 #: The type each kind of entry stores in its detail.
 PAYLOADS: dict[EntryKind, type] = {
     EntryKind.REQUEST: TestRequest,
@@ -103,6 +111,7 @@ PAYLOADS: dict[EntryKind, type] = {
     EntryKind.BUILD: BuildNotice,
     EntryKind.LEASE_START: LeaseStart,
     EntryKind.LEASE_END: LeaseEnd,
+    EntryKind.AGENT_MAP: AgentMapWrite,
 }
 
 
@@ -134,6 +143,7 @@ class BlackboardState:
         self.op_shares: dict[str, OpShares] = {}
         self.profiles: list[SessionProfile] = []
         self.fingerprints: list[ManifestFingerprint] = []
+        self.agent_map: tuple[MapDirection, ...] = ()
         self.requested_at: dict[str, float] = {}
         self.measured_at: dict[str, float] = {}
         self.withdrawn_at: dict[str, float] = {}
@@ -182,6 +192,7 @@ class BlackboardState:
             EntryKind.BUILD: lambda _entry, _notice: None,
             EntryKind.LEASE_START: lambda _entry, value: self.lease_starts.setdefault(value.lease_id, value),
             EntryKind.LEASE_END: lambda _entry, value: self.lease_ends.append(value),
+            EntryKind.AGENT_MAP: self._agent_map,
         }
 
     def _request(self, entry: Entry, request: TestRequest) -> None:
@@ -214,6 +225,9 @@ class BlackboardState:
 
     def _agent_manifest(self, entry: Entry, record: AgentManifestRecord) -> None:
         self.agent_manifests[record.branch] = replace(record, at=entry.at)
+
+    def _agent_map(self, _entry: Entry, write: AgentMapWrite) -> None:
+        self.agent_map = write.directions
 
     def _claim(self, _entry: Entry, decision: ClaimDecision) -> None:
         self.intents.setdefault(decision.intent.fingerprint, decision.intent)
@@ -298,4 +312,4 @@ class BlackboardState:
         return attempt.source_commits if attempt is not None else ()
 
 
-__all__ = ["PAYLOADS", "ClaimDecision", "JudgementWrite", "BlackboardState"]
+__all__ = ["PAYLOADS", "AgentMapWrite", "ClaimDecision", "JudgementWrite", "BlackboardState"]

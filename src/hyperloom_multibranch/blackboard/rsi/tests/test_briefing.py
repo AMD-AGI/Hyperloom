@@ -33,6 +33,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     Learning,
     LineageEvent,
     BlackboardSnapshot,
+    MapDirection,
     StartupBrief,
     TestRecord,
 )
@@ -82,7 +83,15 @@ from hyperloom_multibranch.blackboard.tests.factories import (
     result,
 )
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, SPLIT_KV, Writers, scripted_session
-from hyperloom_multibranch.blackboard.tools import FOCUS_BRANCHES, FOCUS_HISTORY_TITLE, FOCUS_LINE, render_brief
+from hyperloom_multibranch.blackboard.tools import (
+    FOCUS_BRANCHES,
+    FOCUS_HISTORY_TITLE,
+    FOCUS_LINE,
+    LINE_CHARS,
+    MAP_TITLE,
+    MAX_LINES,
+    render_brief,
+)
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
 
 
@@ -865,3 +874,59 @@ async def test_a_focus_that_names_no_op_recalls_only_the_branches_opened_on_the_
     ).startup_brief("c1")
 
     assert [item.branch for item in brief.focus_history] == ["s6"]
+
+
+#: Arbor's map of the scripted session: b7 runs and holds ``m-gemm``; s2, which held ``m-attn``, stopped.
+ARBOR_MAP = (
+    MapDirection("m-gemm", "Dense GEMMs: tuned kernels", "open", holder="b7"),
+    MapDirection("m-act", "Fold the activation mul into the GEMM epilogue", "open", f"root profile: {ACT_MUL} 30%"),
+    MapDirection("m-moe", "MoE routing", "open"),
+    MapDirection("m-fp8", "FP8 weights", "killed", "pays only by changing the precision of record: root is BF16"),
+    MapDirection("m-attn", "Decode attention", "open", holder="s2"),
+    MapDirection("m-norm", "Fuse the norms", "below_floor"),
+)
+
+
+async def test_the_brief_binds_the_branch_to_the_directions_of_arbors_map_on_its_focus_held_or_set_aside(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    scheduler = Writers(tmp_path / "blackboard", clock).as_role(Role.SCHEDULER)
+    for branch, focus in (("b7", ""), ("s9", ACT_MUL)):
+        await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c1", focus=focus))
+    await scheduler.write_agent_map(ARBOR_MAP)
+
+    shown = (await SessionBriefs(blackboard).text("s9", "c1")).splitlines()
+
+    assert shown[1:9] == [
+        MAP_TITLE,
+        "- m-gemm (held by b7): Dense GEMMs: tuned kernels",
+        "- m-act (open, it names your focus): Fold the activation mul into the GEMM epilogue",
+        "- m-fp8 (set aside, killed): FP8 weights",
+        "  why: pays only by changing the precision of record: root is BF16",
+        "- m-norm (set aside, below_floor): Fuse the norms",
+        "  why: not given",
+        "Tried:",
+    ]
+
+
+async def test_a_session_without_arbors_map_briefs_no_map(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+
+    brief = await SessionBriefs(blackboard).for_branch("s1").startup_brief("c1")
+
+    assert (brief.agent_map, dict(brief.map_holders)) == ((), {})
+    assert MAP_TITLE not in render_brief(brief)
+
+
+def test_arbors_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_title_leaves_the_why_whole() -> None:
+    title = "Retune every dense GEMM of the decode path at each batch size " * 4
+    aside = tuple(MapDirection(f"m-{n}", title, "killed", f"reason {n}") for n in range(MAX_LINES))
+
+    shown = render_brief(StartupBrief("c1", (), agent_map=aside)).splitlines()
+
+    listed = shown[shown.index(MAP_TITLE) + 1 :]
+    assert len(listed) == MAX_LINES + 1 and listed[-1] == f"... {MAX_LINES} more"
+    assert listed[0].startswith("- m-0 (set aside, killed): Retune every") and len(listed[0]) == LINE_CHARS
+    assert listed[1] == "  why: reason 0"
