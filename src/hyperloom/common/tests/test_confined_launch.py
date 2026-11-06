@@ -221,3 +221,51 @@ def test_a_credential_an_agent_links_to_from_its_tree_stays_masked_at_the_next_l
     seen = _run(isolation, confinement(), env, paths, work)
 
     assert {name: seen[name] for name in paths} == {"token": "EACCES", "via_link": "EACCES", "model": "ok:weights"}
+
+
+@pytest.mark.parametrize("target", ["root", "parent", "link_holder"])
+def test_a_writable_path_an_agent_re_points_through_another_never_takes_its_tree_away(tmp_path, target):
+    """``into-work/sub`` is not below the worktree as given (``via/work``), but both app links lead to ``work``, so the
+    agent decides what ``sub`` is. The first launch's agent points it at ``/``, at the directory holding ``work``, or
+    at ``via``, the directory holding the app's link to ``work``: each has ``work`` reached through it. It also turns
+    the prompt it was handed into a link to Hugging Face's token, beside the ``python3`` it left on its ``PATH``. The
+    next derivation still takes ``work`` for a tree the agent wrote: it runs no program of it, binds nothing the agent
+    chose, and the token stays masked. Pointed at ``via``, the two paths are reached through each other's trees, and
+    neither is bound: the agent can withhold its own tree, never get another."""
+    isolation = BwrapIsolation(usable_bwrap())
+    hf, work, ran = tmp_path / "hf", tmp_path / "work", tmp_path / "ran"
+    token = _write(hf / "token", "SECRET-HF")
+    model = _write(hf / "hub/model.txt", "weights")
+    python = _write(work / "bin/python3", f"#!/bin/sh\nid > {ran}\n")
+    python.chmod(0o755)
+    (work / "sub").mkdir()
+    prompt = _write(work / "prompt", "the task")
+    (tmp_path / "via").mkdir()
+    (tmp_path / "via/work").symlink_to(work)
+    (tmp_path / "into-work").symlink_to(work)
+    env = {"PATH": f"{work / 'bin'}:/usr/bin:/bin", "HF_HOME": str(hf)}
+    writable = (tmp_path / "via/work", tmp_path / "into-work/sub")
+
+    def confinement() -> Confinement:
+        readable = toolchain_paths(env, sys.executable, writable=writable)
+        allowed = (*readable, *writable)
+        masked = credential_paths(env, given=(prompt,), allowed=allowed, writable=writable)
+        return Confinement(writable=writable, readable=readable, masked=masked)
+
+    chosen = {"root": Path("/"), "parent": tmp_path, "link_holder": tmp_path / "via"}[target]
+    planted = _named({str(work / "sub"): chosen, str(prompt): token})
+    assert _launch(isolation, confinement(), env, [PLANT, planted], work).strip() == "planted"
+    assert (work / "sub").is_symlink() and prompt.is_symlink()
+
+    after = confinement()
+    assert not ran.exists(), "the agent's python3 ran as the app"
+    inside = Path("/") if target == "link_holder" else work
+    assert after.policy(chdir=inside).writable == (() if target == "link_holder" else (str(work),))
+
+    seen = _run(isolation, after, env, {"token": token, "via_prompt": prompt, "model": model}, inside, {})
+
+    assert {name: seen[name] for name in ("token", "via_prompt", "model")} == {
+        "token": "EACCES",
+        "via_prompt": "ENOENT" if target == "link_holder" else "EACCES",
+        "model": "ok:weights",
+    }
