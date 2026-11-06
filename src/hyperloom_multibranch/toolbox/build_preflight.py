@@ -38,9 +38,10 @@ import stat
 import subprocess
 import sys
 import sysconfig
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from os import geteuid
+from os import stat as stat_path
 from pathlib import Path
 from shutil import which
 from urllib.parse import unquote, urlparse
@@ -88,8 +89,6 @@ _OWNER_SHIFT, _GROUP_SHIFT = 6, 3
 _OTHERS_ACCESS = 0o077
 #: Write access by the group or others: what lets another user change a file or a directory's entries.
 _SHARED_WRITE = stat.S_IWGRP | stat.S_IWOTH
-
-StatFn = Callable[[Path], os.stat_result]
 
 
 @dataclass(frozen=True)
@@ -191,27 +190,27 @@ def _describe(path: Path, found: os.stat_result) -> str:
     return f"{path} (mode {stat.S_IMODE(found.st_mode):04o}, owner uid {found.st_uid} gid {found.st_gid})"
 
 
-def unreachable(path: Path, *, run: bool = False, stat_fn: StatFn = os.stat) -> str | None:
+def unreachable(path: Path, *, run: bool = False) -> str | None:
     """Why user 65534 cannot reach ``path`` (list and enter a directory, read a file, and run it when ``run``), naming
     the first directory or file that stops it, on the path as given and as resolved; ``None`` when it can."""
     absolute = Path(os.path.abspath(path))
     for candidate in dict.fromkeys((absolute, Path(os.path.realpath(path)))):
         for directory in reversed(candidate.parents):
-            problem = _blocked(directory, _RUN, stat_fn, "pass through")
+            problem = _blocked(directory, _RUN, "pass through")
             if problem:
                 return problem
     target = Path(os.path.realpath(path))
     try:
-        is_dir = stat.S_ISDIR(stat_fn(target).st_mode)
+        is_dir = stat.S_ISDIR(stat_path(target).st_mode)
     except OSError:
         return f"{target} does not exist"
     wanted = _READ | _RUN if is_dir or run else _READ
-    return _blocked(target, wanted, stat_fn, "read and enter it" if is_dir else "run it" if run else "read it")
+    return _blocked(target, wanted, "read and enter it" if is_dir else "run it" if run else "read it")
 
 
-def _blocked(path: Path, bits: int, stat_fn: StatFn, what: str) -> str | None:
+def _blocked(path: Path, bits: int, what: str) -> str | None:
     try:
-        found = stat_fn(path)
+        found = stat_path(path)
     except OSError:
         return f"{path} does not exist"
     return None if _allows(found, bits) else f"{_describe(path, found)} does not let user {NOBODY} {what}"
