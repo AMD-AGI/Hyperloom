@@ -342,9 +342,9 @@ def _shell_ready_server_args(server_args: Any) -> str:
     text = str(server_args or "").strip()
     if not text:
         return ""
-    from hyperloom.inference_optimizer.grid_server_args import _split_args_preserving_json
+    from inference_suite.argv import split_args_preserving_json
 
-    tokens = _split_args_preserving_json(text)
+    tokens = split_args_preserving_json(text)
     if tokens is None:
         # Unparseable to the canonical splitter: quote it whole rather than
         # guess where it breaks. A single odd operand beats three wrong ones.
