@@ -325,7 +325,6 @@ def enable_profile(config_path: Path) -> None:
     from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 
     from ._profile_setup import (
-        annotations_supported,
         apply_sglang_shape_tool,
         patch_for_profile,
         shape_discovery_enabled,
@@ -359,7 +358,7 @@ def enable_profile(config_path: Path) -> None:
     torch_profiler.setdefault("num_profiles", 1)
     torch_profiler.setdefault("start_seconds", 300)
     torch_profiler.setdefault("interval_seconds", 900)
-    torch_profiler.setdefault("detailed_annotations", annotations_supported(bench["envs"]))
+    torch_profiler.setdefault("detailed_annotations", patch.annotations)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 
