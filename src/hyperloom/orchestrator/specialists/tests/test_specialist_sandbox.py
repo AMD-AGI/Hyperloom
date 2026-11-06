@@ -151,6 +151,7 @@ async def test_the_harvest_of_a_sandboxed_specialist_never_takes_the_git_dir_it_
     result = await _dispatcher(cli).run(_spawn(workspace, worktree=worktree, worktree_base=repo, worktree_admin=admin))
 
     assert trusted_admin_dir(worktree) == workspace / "forged.git" / "worktrees" / "w"
+    assert (workspace / "git_seen").read_text(encoding="utf-8") == f"{head}\n"  # its repository is shown read-only
     assert result.error == "" and result.done_payload["summary"] == "forged"
     assert len(result.patches) == 1 and result.patch_roots == {result.patches[0]: str(repo)}
     patch = Path(result.patches[0]).read_text(encoding="utf-8")

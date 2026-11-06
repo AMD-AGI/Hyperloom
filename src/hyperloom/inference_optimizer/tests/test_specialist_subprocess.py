@@ -185,6 +185,27 @@ async def test_the_runner_hands_the_dispatcher_the_tasks_model_to_read(tmp_path,
     assert all(not path.is_absolute() for path in spawn.readable) is not local
 
 
+async def test_the_runner_hands_the_dispatcher_the_admin_dir_the_repository_records_for_the_worktree(tmp_path):
+    framework = tmp_path / "framework"
+    init_git_repo(framework, seed_file="mod.py", seed_text="old = 1\n")
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path / "session")
+    spawns: list[SpecialistSpawn] = []
+
+    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+        spawns.append(spawn)
+        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+
+    runner.subprocess_dispatcher.run = run
+    ctx = _make_runner_ctx("t-admin")
+    ctx.task.params["session_framework_tree"] = f"{framework}/"
+
+    await runner.run(ctx)
+
+    [spawn] = spawns
+    assert spawn.worktree is not None
+    assert spawn.worktree_admin == recorded_admin_dir(framework, spawn.worktree)
+
+
 def test_denylist_blocks_dangerous_process_tools():
     """KillShell and SlashCommand are in the denylist to enforce the prompt-rule against global process cleanup that could kill the serving / benchmark process."""
     assert "KillShell" in SPECIALIST_TOOL_DENYLIST
