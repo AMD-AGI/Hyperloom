@@ -39,7 +39,7 @@ import pytest
 
 from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
-from hyperloom.common import agent_isolation
+from hyperloom.common import agent_isolation, visible_devices
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
@@ -1749,6 +1749,25 @@ def test_a_spec_measured_locally_whose_tp_this_container_cannot_hold_ends_the_ru
 
     document = host.exit_document()
     assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_measured_locally_on_a_container_given_fewer_cards_than_rocm_smi_shows_ends_the_run_for_good(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES")
+    monkeypatch.setattr(visible_devices, "rocm_smi_gpu_count", lambda: 8)
+    (tmp_path / "dri").mkdir()
+    (tmp_path / "dri" / "renderD128").touch()
+    monkeypatch.setattr(local_peers, "RENDER_NODE_DIR", str(tmp_path / "dri"))
+    host.spec(**LOCAL)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert "rocm-smi shows 8 cards, more than the 1 this machine can open" in str(document["error"])
     assert agent_cli == [] and not any(host.workspace.iterdir())
 
 
