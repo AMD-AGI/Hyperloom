@@ -145,6 +145,8 @@ def _lever_row(entry: dict[str, Any], default_on: bool) -> dict[str, Any]:
         "category": str(entry.get("category") or ""),
         "depends_on": list(entry.get("depends_on") or []),
         "enables": list(entry.get("enables") or []),
+        # Set for a tunable setting: the values explore tries, instead of turning a switch on or off.
+        **({"values": list(entry["values"])} if entry.get("values") else {}),
         "default_on": default_on,
         # Filled in by the explore phase once the lever has been measured on its own; ``None`` means
         # "registered, not yet attributed".

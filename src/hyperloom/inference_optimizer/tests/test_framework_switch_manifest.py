@@ -765,6 +765,7 @@ async def _run_rewrite_integrate(
     parity_tput_missing: bool = False,
     patch_body: str | None = None,
     extra_params: "dict[str, Any] | None" = None,
+    extra_done: "dict[str, Any] | None" = None,
 ):
     """Run integrate_patch on a switch-gated rewrite patch with a faked bench."""
     import json as _json
@@ -792,6 +793,7 @@ async def _run_rewrite_integrate(
                 "patches_written": ["patches/001_rewrite.patch"],
                 "summary": "switch-gated rewrites",
                 manifest.MANIFEST_KEY: list(switches or []),
+                **(extra_done or {}),
             }
         ),
         encoding="utf-8",

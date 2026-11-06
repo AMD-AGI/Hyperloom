@@ -33,6 +33,7 @@ from ...enablement.lane import takes_enablement_round
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ...specialists.patch_safety import patch_targets_missing
 from ...state.gaps import STATIC_RECON_GAP_PREFIX
+from ._framework_switch_manifest import MAX_SETTING_VALUES, SETTINGS_KEY, reserved_env, untunable_values
 from ._patch_sources import _done_field
 
 
@@ -144,6 +145,30 @@ def _unswitched_bridge_refusal(
         return f"it restores {finding}"
     gap = first_text(params.get("gap_canonical_id"), _done_field(done_payload, "gap_canonical_id"))
     return f"it bridges {gap}" if gap.startswith(STATIC_RECON_GAP_PREFIX) else ""
+
+
+UNTUNABLE_VALUE_ADVISORY = (
+    f"Read each tuning value from a new environment variable whose unset default is the value you chose, and list "
+    f"it in {SETTINGS_KEY} as {{setting, values, depends_on, target, evidence}} with up to {MAX_SETTING_VALUES} "
+    f"alternative values for explore to try; depends_on names the switches that must be on for it to matter. Keep "
+    f"TOKEN, KEY, SECRET, PASSWORD and CREDENTIAL out of the name (say _MIN_SEQS, not _MIN_TOKENS): a "
+    f"credential-shaped name is never set."
+)
+
+
+def _untunable_value_refusal(
+    params: Mapping[str, Any], *, patch_paths: list[Path], tunable_settings: list[dict[str, Any]]
+) -> str:
+    """The tuning values the patches fix where explore cannot change them; empty when there are none.
+
+    A threshold or tile size the author picked was measured on one workload; as a setting explore sweeps it on the
+    measured one. Env the benchmark already sets cannot be declared, and an enablement round is judged on
+    runnability alone, so neither is refused here.
+    """
+    if params.get("enablement"):
+        return ""
+    declared = {entry["switch"] for entry in tunable_settings} | reserved_env(params)
+    return ", ".join(untunable_values(patch_paths, declared=declared))
 
 
 _FIX_ACCURACY_UNAVAILABLE = "accuracy result unavailable"

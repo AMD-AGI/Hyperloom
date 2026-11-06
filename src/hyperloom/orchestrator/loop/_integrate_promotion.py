@@ -363,16 +363,22 @@ class IntegratePromotionMixin:
 
     def _record_authored_levers(self, result: Mapping[str, Any]) -> bool:
         levers = result.get("framework_levers")
-        if not (isinstance(levers, list) and levers):
-            return False
-        lever_outcome = str(result.get("framework_lever_outcome") or "")
-        return bool(
-            self.shared_state.record_authored_framework_levers(
-                levers,
-                default_on=(lever_outcome == "default_on"),
-                source_layer=self._dormant_source_layer(result) if result.get("status") == "kept_inert" else None,
+        settings = result.get("tunable_settings")
+        source_layer = self._dormant_source_layer(result) if result.get("status") == "kept_inert" else None
+        changed = False
+        if isinstance(levers, list) and levers:
+            lever_outcome = str(result.get("framework_lever_outcome") or "")
+            changed = self.shared_state.record_authored_framework_levers(
+                levers, default_on=(lever_outcome == "default_on"), source_layer=source_layer
             )
-        )
+        if isinstance(settings, list) and settings:
+            changed = (
+                self.shared_state.record_authored_framework_levers(
+                    settings, default_on=False, source_layer=source_layer
+                )
+                or changed
+            )
+        return bool(changed)
 
     def _dormant_source_layer(self, result: Mapping[str, Any]) -> dict[str, Any] | None:
         """The source layer of a dormant keep, placed after every stack entry committed before it."""
