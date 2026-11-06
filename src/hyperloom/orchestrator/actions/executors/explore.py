@@ -244,9 +244,9 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
     rows = [row for row in getattr(shared_state, "authored_framework_levers", None) or [] if isinstance(row, dict)]
     # Arms are built over every registered lever, so attribution only picks which run, never which envs they set.
     pending = {row["switch"] for row in rows if row.get("attributed_gain_pct") is None}
-    payload: list[dict[str, Any]] = []
-    for variant in _switch_manifest.additive_variants([row for row in rows if not row.get("default_on")]):
-        payload.append({**variant, "framework_lever_source": "additive"})
+    payload = _switch_manifest.setting_variants(rows)
+    for v in _switch_manifest.additive_variants([r for r in rows if not r.get("default_on") and "values" not in r]):
+        payload.append({**v, "framework_lever_source": "additive"})
     for variant in _switch_manifest.leave_one_out_variants([row for row in rows if row.get("default_on")]):
         payload.append({**variant, "framework_lever_source": _LEAVE_ONE_OUT})
     return _switch_manifest.unattributed_arms(payload, pending)
@@ -287,7 +287,7 @@ def _framework_lever_attributions(
                 "outcome": str(row.get("outcome") or ""),
             }
         )
-    return out
+    return _switch_manifest.best_per_setting(out)
 
 
 def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
