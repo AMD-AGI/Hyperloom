@@ -515,8 +515,9 @@ def _operating_point(workload: Mapping[str, object]) -> dict[str, int]:
 
 def host_rules(spec: AgentSpec) -> list[str]:
     """MB's rules for ``spec``'s runs, as Arbor's ``directives`` (:data:`HOST_RULE`): the workload it holds fixed and
-    the variables it owns, how it keeps a change, and its accuracy rule. MB refuses or rejects a change that breaks
-    one, whatever Arbor measured; the dossier lists them among the benchmark's rules."""
+    the variables it owns, how it keeps a change, its accuracy rule and, when the spec says why, that no source change
+    can be kept. MB refuses or rejects a change that breaks one, whatever Arbor measured; the dossier lists them among
+    the benchmark's rules."""
 
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
@@ -537,6 +538,11 @@ def host_rules(spec: AgentSpec) -> list[str]:
             f" at most {ACCURACY_THRESHOLD:g} under the root's score; a numerics change that costs more is never merged."
             f" Arbor's GSM8K reads on another scale, so Arbor holds the change to the same drop against the root it"
             f" measures itself, and to {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} when it could not."
+        )
+    if spec.source_unkept:
+        rules.append(
+            f"{HOST_RULE}: a change to {spec.framework}'s source cannot be kept on this image: {spec.source_unkept}."
+            " Spend the work on launch flags and environment variables."
         )
     return rules
 

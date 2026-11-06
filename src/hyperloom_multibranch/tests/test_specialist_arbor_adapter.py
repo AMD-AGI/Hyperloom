@@ -39,6 +39,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     carry_dossier,
     dossier_notes,
     generate_directions,
+    host_rules,
     is_arbor,
     link_built,
     exit_reason,
@@ -482,6 +483,17 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Pa
     assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
     assert "the root it measures itself" in accuracy
     assert "error rate stays at or under 10%" in agentx_rules[-1]
+
+
+def test_arbor_is_told_its_source_changes_cannot_be_kept_when_the_spec_says_why(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    unkept = replace(spec, source_unkept="vllm is installed from a wheel")
+
+    rules = arbor_config(unkept, tmp_path / "checkout", BRANCH_RUN)["directives"]
+
+    assert rules[:-1] == host_rules(spec)
+    assert rules[-1].startswith(arbor_adapter.HOST_RULE)
+    assert "vllm is installed from a wheel" in rules[-1] and "launch flags" in rules[-1]
 
 
 def test_arbor_s_accuracy_tolerance_is_the_drop_mb_s_rule_allows(tmp_path: Path) -> None:
