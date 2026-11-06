@@ -11,7 +11,6 @@ import os
 import re
 import stat
 import subprocess
-from functools import partial
 from pathlib import Path
 
 import pytest
@@ -21,7 +20,7 @@ from hyperloom.measure.jit.native.config import trust_from_file
 from hyperloom.measure.jit.native.trust import Signer
 from hyperloom_multibranch.toolbox import build_preflight as preflight
 from hyperloom_multibranch.toolbox import build_setup
-from hyperloom_multibranch.toolbox.build_preflight import IMAGE_CHECKOUTS, git_head, unreachable
+from hyperloom_multibranch.toolbox.build_preflight import IMAGE_CHECKOUTS, git_head
 from hyperloom_multibranch.toolbox.build_setup import BuildSetup, SetupError, main, set_up
 from hyperloom_multibranch.toolbox.native_builds import native_builds
 from hyperloom_multibranch.toolbox.tests.test_build_preflight import git_repo, sglang_dist, stat_open_above
@@ -194,7 +193,7 @@ def test_the_command_exits_0_when_65534_reaches_everything_and_reads_the_image_i
             Path(directory).chmod(0o755)
             for name in files:
                 (Path(directory) / name).chmod(0o755)
-    monkeypatch.setattr(preflight, "unreachable", partial(unreachable, stat_fn=stat_open_above(tmp_path)))
+    monkeypatch.setattr(preflight, "stat_path", stat_open_above(tmp_path))
 
     code = main([str(tmp_path / "root"), "--image-root", str(image_root), "--gfx", "gfx950"])
 
@@ -241,7 +240,7 @@ def _open_to_nobody(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *tops: Path
             Path(directory).chmod(0o755)
             for name in files:
                 (Path(directory) / name).chmod(0o644)
-    monkeypatch.setattr(preflight, "unreachable", partial(unreachable, stat_fn=stat_open_above(tmp_path)))
+    monkeypatch.setattr(preflight, "stat_path", stat_open_above(tmp_path))
 
 
 @pytest.fixture
