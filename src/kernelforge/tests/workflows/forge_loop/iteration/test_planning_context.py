@@ -14,10 +14,13 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
+from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.workflows.forge_loop.campaign.run_state import BestRecord, LoopStateStore, RoundCost, RunState
 from kernelforge.workflows.forge_loop.campaign.unmeasured_lanes import UnmeasuredLane, UnmeasuredLaneArchive
 from kernelforge.evaluation.scoring import GateScoring
+from kernelforge.workflows.forge_loop.roles.analysis import AnalysisBundle
 from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef, PlanCriticOutcome
+from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 from kernelforge.workflows.forge_loop.search.search_policy import (
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
     SEARCH_MODE_DIVERSIFY,
@@ -460,6 +463,151 @@ def test_planning_is_handed_the_search_policy_this_iteration_decided(tmp_path, m
     assert context.review_plan is True
     reviews = [event for event in loop.state_store.read_events() if event["type"] == "plan_review"]
     assert [(event["review"], event["reason"]) for event in reviews] == [(True, "search_mode_diversify")]
+
+
+def _planned_result():
+    return SimpleNamespace(
+        optimization_plans=("# Optimization plan\nTry a new decomposition.",),
+        optimization_plan_draft="",
+        optimization_plan_executable=True,
+        dispatch_plan=None,
+        specialist_outcomes=(),
+        structured_output_diagnostics={},
+        plan_critic=None,
+        plan_revised=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["# Supervisor Ruling\n\nThe hard-floor conclusion is unsupported. Try a different decomposition.", ""],
+    ids=["new-ruling", "no-ruling"],
+)
+def test_planning_is_handed_the_ruling_the_supervisor_left_this_iteration(tmp_path, monkeypatch, reply):
+    """Analysis resolves before the Supervisor reviews a stall; the round planned after it still plans under its outcome.
+
+    A review expires the ruling of the stall before it, whether or not it returns a new one.
+    """
+    loop, workspace = _make_loop(tmp_path, monkeypatch, supervise_after=1, session_count=2)
+    loop.config = SimpleNamespace(experiments_dir=workspace / "forge_experiments", gpu_target="gfx942")
+    ruling_path = latest_supervisor_ruling_path(str(workspace))
+    expired = "Continue the memory-only direction."
+    planned = []
+
+    class AnalysisService:
+        profiling_enabled = False
+
+        async def ensure_bundle(self, context, **_kwargs):
+            return SimpleNamespace(
+                analysis_commit=context.analysis_commit,
+                root=workspace / "analysis",
+                manifest={"status": "READY"},
+                outcome=None,
+                apply=lambda applied: applied,
+            )
+
+        def apply_checkpoint(self, context):
+            return context
+
+    class OrchestrationService:
+        has_plan_critic = False
+
+        async def run(self, context, **_kwargs):
+            planned.append(context)
+            return _planned_result()
+
+    async def supervisor(**_kwargs):
+        return reply
+
+    async def editing_agent(kernel_path, _history, session_sink):
+        if len(planned) == 1:
+            loop._supervisor_ruling = expired
+            ruling_path.parent.mkdir(parents=True, exist_ok=True)
+            ruling_path.write_text(expired)
+        session_sink["plan"] = "continue the memory path"
+        Path(kernel_path).write_text("def kernel():\n    return 2\n")
+        return "candidate"
+
+    async def reverted_iteration(iteration, plan=""):
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=0.01,
+            validation_passed=True,
+            validation_summary="passed",
+            wall_ms=1.1,
+            mean_case_speedup=0.9,
+            kept=False,
+            bench_detail={"case_times": {"case": 1.1}},
+        )
+
+    monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
+    asyncio.run(
+        loop.run(
+            runner_module.LoopAgents(
+                agent_fn=editing_agent,
+                analysis_service=AnalysisService(),
+                orchestration_service=OrchestrationService(),
+                supervisor_fn=supervisor,
+            )
+        )
+    )
+
+    assert len(planned) == 2
+    reviewed = planned[1]
+    assert reviewed.supervisor_guidance == reply
+    ruling_refs = [ref.path for ref in reviewed.evidence_refs if ref.kind == "supervisor_guidance"]
+    assert ruling_refs == ([str(ruling_path.resolve())] if reply else [])
+    round_root = workspace / "forge_experiments" / "orchestration" / "iter_002"
+    assert json.loads((round_root / "context.json").read_text())["supervisor_guidance"] == reply
+
+
+def test_planning_keeps_the_critic_ruling_when_analysis_publishes_a_bundle(tmp_path, monkeypatch):
+    """A published bundle rebuilds the evidence context; the round after a REPLACE is still handed that verdict."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = LoopStateStore(str(workspace))
+    head = loop._git("rev-parse", "HEAD").splitlines()[0]
+    loop.run_state = RunState(head_commit=head, best=BestRecord(iteration=1, plan="lane plan"))
+    loop.run_state.round_costs.recent = [RoundCost(iteration=1, lanes=1, planning_sec=600.0, total_sec=1800.0)]
+    loop.config = SimpleNamespace(experiments_dir=workspace / "forge_experiments", gpu_target="gfx942")
+    review = "VERDICT: REPLACE\n\nA CK GEMM already exists for this shape."
+    loop._last_critic_verdict = "REPLACE"
+    loop._last_critic_review = review
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "artifact_catalog.json").write_text(json.dumps({"artifacts": []}))
+    planned = []
+
+    class AnalysisService:
+        profiling_enabled = False
+
+        async def ensure_bundle(self, context, **_kwargs):
+            return AnalysisBundle(
+                analysis_commit=context.analysis_commit,
+                root=bundle_root,
+                manifest={"status": "READY"},
+                cases=context.cases,
+            )
+
+        def apply_checkpoint(self, context):
+            return context
+
+    class OrchestrationService:
+        has_plan_critic = True
+
+        async def run(self, context, **_kwargs):
+            planned.append(context)
+            return _planned_result()
+
+    asyncio.run(loop._resolve_analysis_context(AnalysisService(), iteration=2))
+    supervisor_view = json.loads(loop._build_supervisor_evidence_context(2))["orchestration_context"]
+    asyncio.run(loop._run_orchestration(iteration=2, orchestration_service=OrchestrationService()))
+
+    (context,) = planned
+    assert (context.last_critic_verdict, context.last_critic_review) == ("REPLACE", review)
+    assert supervisor_view["last_plan_critic"] == {"verdict": "REPLACE", "review": review}
+    # The previous round kept a candidate, so only the verdict sends this round's plans to review.
+    reviews = [event for event in loop.state_store.read_events() if event["type"] == "plan_review"]
+    assert [(event["review"], event["reason"]) for event in reviews] == [(True, "challenge_requested")]
 
 
 def test_framework_fallback_plan_does_not_complete_diversify_cycle(

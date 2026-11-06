@@ -21,7 +21,8 @@ from kernelforge.workflows.forge_loop.search.search_policy import (
     SearchPolicyDecision,
     SearchState,
 )
-from kernelforge.workflows.forge_loop.roles.contracts import OrchestrationContext
+from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef, OrchestrationContext
+from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 
 
 class RoundAdmissionMixin:
@@ -287,19 +288,37 @@ class RoundAdmissionMixin:
             print(f"  [search-policy] {decision.mode}: " + ", ".join(decision.reason_codes))
         return decision
 
-    def _with_search_policy(self, context: OrchestrationContext) -> OrchestrationContext:
-        """``context`` carrying the search policy this iteration decided.
+    def _with_loop_state(self, context: OrchestrationContext) -> OrchestrationContext:
+        """``context`` carrying the active Supervisor ruling, the last Plan Critic ruling and the search policy.
 
-        The Analysis context is resolved before the Supervisor runs and the policy is decided after it, since the
-        policy reads what the Supervisor resolved, so a context taken from Analysis still carries the previous
-        iteration's mode.
+        Each is read from its owner as it stands now. The Analysis context is resolved before the Supervisor runs and
+        the policy is decided after it, so a context taken from Analysis carries none of them.
         """
+        ruling_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
+        ruling_refs = (
+            (
+                EvidenceRef(
+                    kind="supervisor_guidance",
+                    path=str(ruling_path.resolve()),
+                    summary=(
+                        "Latest free-form Supervisor Ruling. It overrides subjective conclusions in historical "
+                        "lesson records but not objective measurements."
+                    ),
+                ),
+            )
+            if self._supervisor_ruling and ruling_path.is_file()
+            else ()
+        )
         return replace(
             context,
+            supervisor_guidance=self._supervisor_ruling,
+            last_critic_verdict=self._last_critic_verdict,
+            last_critic_review=self._last_critic_review,
             search_mode=self.run_state.search_mode,
             search_reason_codes=tuple(self.run_state.search_reason_codes),
             search_objective=self.run_state.search_objective,
             search_mode_residence_remaining=self.run_state.search_mode_residence_remaining,
+            evidence_refs=(*context.evidence_refs, *ruling_refs),
         )
 
     def _previous_round_kept(self) -> bool | None:
