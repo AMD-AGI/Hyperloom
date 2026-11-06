@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
-import functools
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -16,8 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import id_map
+from hyperloom.common.tests._id_map_helpers import HOST_MAP, ONE_ID_MAP, use_id_maps
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
+from hyperloom.measure.runner.native import isolated
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
 from hyperloom_multibranch.toolbox import build_preflight as preflight
 from hyperloom_multibranch.toolbox.build_preflight import (
@@ -247,21 +248,26 @@ def test_a_tracelens_that_is_not_importable_is_named() -> None:
 # --- the whole preflight --------------------------------------------------------------------------------------------
 
 
-#: The map of a host's initial user namespace, as the kernel writes it: every id is mapped.
-HOST_MAP = "         0          0 4294967295\n"
-#: A user namespace that maps one id, its root, onto the account that started the container.
-ONE_ID_MAP = "         0       1234          1\n"
-
-
-def _use_id_maps(monkeypatch: pytest.MonkeyPatch, where: Path, uid_map: str, gid_map: str | None = None) -> Path:
-    """Point the preflight at stand-in uid and gid maps under ``where`` (the gid map is the uid map unless given)."""
-    maps = where / "id-maps"
-    maps.mkdir(exist_ok=True)
-    (maps / "uid_map").write_text(uid_map)
-    (maps / "gid_map").write_text(uid_map if gid_map is None else gid_map)
-    checked = functools.partial(id_map.unmapped_ids, uid_map=maps / "uid_map", gid_map=maps / "gid_map")
-    monkeypatch.setattr(preflight, "unmapped_ids", checked)
-    return maps
+def _isolation_as(
+    monkeypatch: pytest.MonkeyPatch,
+    where: Path,
+    *,
+    euid: int = 0,
+    setpriv: bool = True,
+    maps: tuple[str, str | None] = (HOST_MAP, None),
+) -> Path:
+    """Have the preflight judge isolation for real (``isolation_problem``) as a process of uid ``euid``, with or without
+    ``setpriv``, in a user namespace of these uid and gid maps (written under ``where``; the gid map is the uid map
+    unless given); returns the maps' directory."""
+    monkeypatch.setattr(preflight, "isolation_problem", isolated.isolation_problem)
+    monkeypatch.setattr(isolated.os, "geteuid", lambda: euid)
+    found = shutil.which
+    tool = "/usr/bin/setpriv" if setpriv else None
+    monkeypatch.setattr(isolated.shutil, "which", lambda name: tool if name == "setpriv" else found(name))
+    written = where / "id-maps"
+    written.mkdir(exist_ok=True)
+    use_id_maps(monkeypatch, written, *maps)
+    return written
 
 
 @pytest.fixture
@@ -283,7 +289,7 @@ def ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PreflightSite:
             Path(directory).chmod(0o755)
     monkeypatch.setattr(preflight, "geteuid", lambda: 0)
     monkeypatch.setattr(preflight, "which", lambda name: f"/usr/bin/{name}")
-    _use_id_maps(monkeypatch, tmp_path, HOST_MAP)
+    monkeypatch.setattr(preflight, "isolation_problem", lambda: None)
     monkeypatch.setattr(preflight, "tracelens_problem", lambda: None)
     monkeypatch.setattr(preflight, "stat_path", stat_open_above(tmp_path))
     return PreflightSite(
@@ -309,15 +315,17 @@ def test_a_ready_host_passes(ready: PreflightSite) -> None:
 @pytest.mark.parametrize(
     ("break_it", "says"),
     [
-        (lambda m: m.setattr(preflight, "geteuid", lambda: 1000), "runs as uid 1000, not root"),
-        (lambda m: m.setattr(preflight, "which", lambda name: None), "setpriv is not on PATH"),
+        (
+            lambda m: m.setattr(preflight, "isolation_problem", lambda: "it runs as uid 1000, not root"),
+            "the build service cannot isolate a native build: it runs as uid 1000, not root",
+        ),
         (lambda m: m.setattr(preflight, "tracelens_problem", lambda: "TraceLens at /x is commit 647cbf2"), "647cbf2"),
         (
             lambda m: m.setattr(preflight, "image_upstreams", lambda root: []),
             "the image's upstream commits cannot be read",
         ),
     ],
-    ids=["not-root", "no-setpriv", "tracelens", "no-image-commit"],
+    ids=["isolation", "tracelens", "no-image-commit"],
 )
 def test_each_host_item_that_is_not_ready_is_refused_by_name(
     ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, break_it, says: str
@@ -330,35 +338,51 @@ def test_each_host_item_that_is_not_ready_is_refused_by_name(
     assert says in problem
 
 
-@pytest.mark.parametrize(
-    ("uid_map", "gid_map", "says"),
-    [
-        (ONE_ID_MAP, ONE_ID_MAP, "uid 65534, gid 65534 are not mapped in this process's user namespace"),
-        (HOST_MAP, ONE_ID_MAP, "gid 65534 is not mapped in this process's user namespace"),
-        ("0 0 65534\n", HOST_MAP, "uid 65534 is not mapped in this process's user namespace"),
-    ],
-    ids=["one-id", "gid-only", "range-ending-below-65534"],
-)
-def test_a_user_namespace_that_does_not_map_65534_is_refused_naming_the_map(
-    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, uid_map: str, gid_map: str, says: str
+def test_a_host_the_build_judges_able_to_isolate_passes(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    maps = _use_id_maps(monkeypatch, tmp_path, uid_map, gid_map)
+    _isolation_as(monkeypatch, tmp_path)
+
+    build_preflight(ready)
+
+
+@pytest.mark.parametrize(
+    ("host", "says"),
+    [
+        ({"euid": 1000}, "it runs as uid 1000, not root, and only root can compile as user 65534"),
+        ({"setpriv": False}, "setpriv (util-linux) is not on PATH, and the compile runs as user 65534 through it"),
+        ({"maps": (ONE_ID_MAP, None)}, "uid 65534, gid 65534 are not mapped in this process's user namespace ({maps}/"),
+        (
+            {"maps": (HOST_MAP, ONE_ID_MAP)},
+            "gid 65534 is not mapped in this process's user namespace ({maps}/gid_map: ",
+        ),
+        (
+            {"maps": ("0 0 65534\n", HOST_MAP)},
+            "uid 65534 is not mapped in this process's user namespace ({maps}/uid_map: ",
+        ),
+    ],
+    ids=["not-root", "no-setpriv", "one-id", "gid-only", "range-ending-below-65534"],
+)
+def test_a_host_that_cannot_isolate_a_build_is_refused_naming_why_as_the_build_would(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: dict, says: str
+) -> None:
+    maps = _isolation_as(monkeypatch, tmp_path, **host)
 
     problem = _refusal(ready)
 
-    assert says in problem and str(maps) in problem, problem
-    assert "the build service cannot compile as user 65534 (setpriv fails there, or under a fakeroot preload" in problem
+    assert f"the build service cannot isolate a native build: {says.format(maps=maps)}" in problem, problem
 
 
 def test_a_user_namespace_map_that_cannot_be_read_is_refused_naming_the_file(
     ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    maps = _use_id_maps(monkeypatch, tmp_path, HOST_MAP)
+    maps = _isolation_as(monkeypatch, tmp_path)
     (maps / "gid_map").unlink()
 
     problem = _refusal(ready)
 
-    assert f"cannot read {maps / 'gid_map'}: FileNotFoundError" in problem, problem
+    unread = f"cannot read {maps / 'gid_map'}: FileNotFoundError"
+    assert f"the build service cannot isolate a native build: {unread}" in problem, problem
 
 
 def test_sources_without_the_image_commit_are_refused_naming_what_they_have(

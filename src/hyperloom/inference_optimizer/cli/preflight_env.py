@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import os
@@ -157,6 +158,7 @@ _HOST_PYTHON_ENV_KEYS = frozenset({"PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER
 # caller names its own workspace these come from that root, not from whichever workspace last wrote .env (mirrors
 # RUNTIME_ENV_WORKSPACE_DERIVED_KEYS in assets/runtime_env.sh). The kernel-agent.env.sh loaded next carries them.
 _WORKSPACE_DERIVED_ENV_KEYS = frozenset({"HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV", "HYPERLOOM_ROOT"})
+_KERNEL_AGENT_ENV_NAME = "kernel-agent.env.sh"
 
 
 def _load_missing_env_vars(file_vars: dict[str, str]) -> int:
@@ -370,23 +372,31 @@ def _workspace_selection() -> Mapping[str, str]:
 
 
 def _kernel_agent_env_candidate() -> str | None:
-    """The kernel-agent env file path, derived the way install.sh writes it.
+    """The kernel-agent env file path, derived as ``runtime_env_derive_runtime_paths`` derives it for install.sh.
 
-    ``KERNEL_AGENT_ENV``, else ``HYPERLOOM_RUNTIME_DIR/kernel-agent.env.sh``, else
-    ``USER_DATA_PATH/runtime/kernel-agent.env.sh`` (install.sh's ``KERNEL_AGENT_ENV`` default), each as
-    ``_workspace_selection`` has it.
+    ``KERNEL_AGENT_ENV``, unless it names the file's legacy place in the user's directory (``_legacy_kernel_agent_env``);
+    else ``${TMPDIR:-/tmp}/hyperloom-<uid>-<first 16 hex of sha256(runtime dir)>/kernel-agent.env.sh``, the runtime dir
+    being ``HYPERLOOM_RUNTIME_DIR``, else ``USER_DATA_PATH/runtime``, each as ``_workspace_selection`` has it.
     """
     selection = _workspace_selection()
+    user_data = selection.get("USER_DATA_PATH") or ""
+    runtime_dir = selection.get("HYPERLOOM_RUNTIME_DIR") or (f"{user_data}/runtime" if user_data else "")
     explicit = selection.get("KERNEL_AGENT_ENV")
-    if explicit:
+    if explicit and explicit not in _legacy_kernel_agent_env(runtime_dir, user_data):
         return explicit
-    runtime_dir = (selection.get("HYPERLOOM_RUNTIME_DIR") or "").strip()
-    if runtime_dir:
-        return str(Path(runtime_dir).expanduser() / "kernel-agent.env.sh")
-    user_data = (selection.get("USER_DATA_PATH") or "").strip()
+    if not runtime_dir:
+        return None
+    key = hashlib.sha256(runtime_dir.encode()).hexdigest()[:16]
+    tmp = os.environ.get("TMPDIR") or "/tmp"  # nosec B108 - install.sh makes the directory below 0700 and checks it
+    return f"{tmp}/hyperloom-{os.getuid()}-{key}/{_KERNEL_AGENT_ENV_NAME}"
+
+
+def _legacy_kernel_agent_env(runtime_dir: str, user_data: str) -> set[str]:
+    """Where install.sh wrote the file before it left the user's directory, which every pod of the user can write."""
+    places = {f"{runtime_dir}/{_KERNEL_AGENT_ENV_NAME}"} if runtime_dir else set()
     if user_data:
-        return str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
-    return None
+        places.add(f"{user_data}/runtime/{_KERNEL_AGENT_ENV_NAME}")
+    return places
 
 
 def _kernel_agent_env_path() -> Path:
@@ -406,11 +416,11 @@ def _kernel_agent_env_path() -> Path:
     if not env_path.is_file():
         print(
             f"Preflight: ERROR — kernel-agent env file not found at "
-            f"{env_path}. USER_DATA_PATH must be the workspace root "
-            f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
-            f"is workspace-shared, not per-session. Either "
+            f"{env_path}. install.sh writes it into this container's "
+            f"temporary directory, never onto shared storage, so it does "
+            f"not outlive the container. Either "
             f"(a) re-run src/hyperloom/inference_optimizer/assets/install.sh from this checkout in "
-            f"this environment (it writes the file where this check looks), or "
+            f"this container with the same USER_DATA_PATH (it writes the file where this check looks), or "
             f"(b) set $KERNEL_AGENT_ENV to point at an existing file. "
             f"Aborting now (was: silently warning and "
             f"letting trace_analyze fail 10h in).",

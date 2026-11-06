@@ -49,7 +49,7 @@ _runtime_env_read_quoted_value() {
   done
 }
 
-# Which workspace a run uses, and so where its kernel-agent.env.sh lands, is decided here and nowhere else:
+# Which workspace a run uses, and so which kernel-agent.env.sh it gets, is decided here and nowhere else:
 # install.sh sets its paths through runtime_env_forget_stale_workspace and runtime_env_derive_runtime_paths, and
 # preflight (cli/preflight_env.py) asks runtime_env_kernel_agent_env_path for the file install.sh wrote.
 #
@@ -70,11 +70,50 @@ runtime_env_forget_stale_workspace() {
 }
 
 # Fill the runtime paths from USER_DATA_PATH; call once the workspace is selected.
+#
+# kernel-agent.env.sh carries credentials and is sourced, so it never lives under USER_DATA_PATH, which every pod of
+# the user shares and can write: by default it is in a directory of this account's own on the container's disk,
+# one per runtime dir so the workspaces of one container keep apart. The temporary directory is the one place every
+# container has that is its own.
 runtime_env_derive_runtime_paths() {
   HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
-  KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+  runtime_env_forget_legacy_kernel_agent_env
+  if [ -z "${KERNEL_AGENT_ENV:-}" ]; then
+    local key
+    key="$(printf '%s' "$HYPERLOOM_RUNTIME_DIR" | sha256sum)"
+    KERNEL_AGENT_ENV="${TMPDIR:-/tmp}/hyperloom-$(id -u)-${key:0:16}/kernel-agent.env.sh"
+  fi
   # Legacy variable kept for compatibility; open-source checkouts use install.sh's _open_source_root.
   HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
+}
+
+# Where kernel-agent.env.sh was written before it left the user's directory: the runtime dir, and the default one.
+runtime_env_legacy_kernel_agent_env_paths() {
+  [ -z "${HYPERLOOM_RUNTIME_DIR:-}" ] || printf '%s\n' "${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh"
+  [ -z "${USER_DATA_PATH:-}" ] || [ "${HYPERLOOM_RUNTIME_DIR:-}" = "${USER_DATA_PATH}/runtime" ] ||
+    printf '%s\n' "${USER_DATA_PATH}/runtime/kernel-agent.env.sh"
+}
+
+# A KERNEL_AGENT_ENV that names one of those places is what an older install left in .env or in a shell that sourced
+# the file; the path is derived again rather than written to or read from there.
+runtime_env_forget_legacy_kernel_agent_env() {
+  local legacy
+  [ -n "${KERNEL_AGENT_ENV:-}" ] || return 0
+  while IFS= read -r legacy; do
+    [ "${KERNEL_AGENT_ENV:-}" != "$legacy" ] || unset KERNEL_AGENT_ENV
+  done < <(runtime_env_legacy_kernel_agent_env_paths)
+}
+
+# Remove the copy an older install left in those places, which other accounts' pods can rewrite; one that cannot be
+# removed is named, never read.
+runtime_env_remove_legacy_kernel_agent_env() {
+  local legacy
+  while IFS= read -r legacy; do
+    [ -e "$legacy" ] || [ -L "$legacy" ] || continue
+    rm -f -- "$legacy" 2>/dev/null ||
+      printf '[runtime-env WARN] cannot remove the old shared copy of the kernel-agent env file %s; it is not read\n' \
+        "$legacy" >&2
+  done < <(runtime_env_legacy_kernel_agent_env_paths)
 }
 
 load_dotenv_no_clobber() {
@@ -146,6 +185,7 @@ runtime_env_kernel_agent_env_path() {
     runtime_env_forget_stale_workspace
     load_dotenv_no_clobber || return 1
   fi
+  runtime_env_forget_legacy_kernel_agent_env
   if [ -z "${KERNEL_AGENT_ENV:-}" ]; then
     [ -n "${HYPERLOOM_RUNTIME_DIR:-}${USER_DATA_PATH:-}" ] || return 0
     runtime_env_derive_runtime_paths
