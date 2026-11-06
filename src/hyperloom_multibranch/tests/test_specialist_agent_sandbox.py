@@ -225,6 +225,51 @@ def test_pgrep_lists_no_process_outside_the_sandbox_whatever_it_selects(tmp_path
     assert done.output.strip() == "exit=1"
 
 
+def test_pgrep_and_pkill_count_join_and_pick_newest_or_oldest_among_the_sandboxs_processes(tmp_path: Path) -> None:
+    marker = f"shape{uuid.uuid4().hex}"
+    argv = [sys.executable, "-c", "import time; time.sleep(100)", marker]
+    pids = tmp_path / "pids"
+    # The oldest and the newest of the host's matching processes are outside the sandbox.
+    older = subprocess.Popen(argv, start_new_session=True)
+    sleeper = f"{shlex.join(argv)} & echo $! >> {pids}; sleep 0.1"
+    newer: list[subprocess.Popen[bytes]] = []
+
+    async def scenario() -> tuple[list[int], dict[str, str], int, list[bool]]:
+        sandbox = _sandbox(tmp_path)
+        time.sleep(0.1)
+        process = await sandbox.start(f"{sleeper}; {sleeper}; sleep 100", tmp_path, {})
+        try:
+            await _until(lambda: pids.exists() and len(pids.read_text().split()) == 2)
+            await asyncio.sleep(0.1)
+            newer.append(subprocess.Popen(argv, start_new_session=True))
+            answers = {}
+            for query in ("-c", "-d,", "-n", "-o", "-cn"):
+                done = await sandbox.run(f"pgrep {query} -f {marker}", tmp_path, {}, 5)
+                answers[query] = done.output.strip()
+            nothing = await sandbox.run(f"pgrep -c -f none{marker}", tmp_path, {}, 5)
+            answers["none"] = f"{nothing.output.strip()} rc={nothing.returncode}"
+            killed = await sandbox.run(f"pkill -n -f {marker}", tmp_path, {}, 5)
+            first, second = (int(pid) for pid in pids.read_text().split())
+            await asyncio.sleep(0.5)
+            return [first, second], answers, killed.returncode, [_alive(first), _alive(second)]
+        finally:
+            await process.kill()
+
+    try:
+        (first, second), answers, killed, alive = asyncio.run(scenario())
+        assert answers["-c"] == "2"
+        assert answers["-d,"] == f"{first},{second}"
+        assert answers["-n"] == str(second) and answers["-cn"] == "1"
+        assert answers["-o"] == str(first)
+        assert answers["none"] == "0 rc=1"
+        assert killed == 0 and alive == [True, False]
+        assert older.poll() is None and newer[0].poll() is None
+    finally:
+        for outside in (older, *newer):
+            outside.kill()
+            outside.wait()
+
+
 def test_killall_kills_by_name_within_the_session(tmp_path: Path) -> None:
     async def scenario() -> tuple[object, object]:
         sandbox = _sandbox(tmp_path)
