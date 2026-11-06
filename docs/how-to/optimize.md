@@ -128,6 +128,39 @@ implementation, a malformed or missing manifest, an unset `${VAR}` without a def
 leaves `state.json` and the rest of the session exactly as they were, so it can be retried with the flag fixed.
 Fix or remove a damaged `plugs.resolved.json` to resume.
 
+## Choose the base launch
+
+Every server a fixed-workload session starts begins from one base launch: the
+framework's flags and environment that the optimizer's own changes sit on top
+of. A fresh session resolves it once, at launch, from the first source that
+serves the model on your GPU board:
+
+1. `--reference-script PATH_OR_URL`, when given.
+2. InferenceX `main`.
+3. The framework's cookbook `main` (SGLang cookbook, vLLM recipes, ATOM).
+4. A built-in default table, with a warning.
+
+When another source cannot be read, the session runs on the default table and
+the warning names that source; when InferenceX itself cannot be read, the
+launch exits 2. When `--tp` or `--ep` is omitted, the session runs at the
+topology the base chose. The base is frozen as `$SESSION_DIR/base_launch.json`
+and its warnings print in the startup banner; `--resume-from` reads that file
+and never refetches. A session whose state predates `base_launch.json` cannot
+be resumed: start a new one.
+
+`--reference-script` takes a shell launch script or a `base_launch.json` from
+an earlier session. A script must name the session's framework entrypoint and
+fix every flag in its text. These exit 2:
+
+- a flag whose value is a shell variable, such as `--tp $TP`;
+- a `# hyperloom-launch-controls:` line;
+- a file that cannot be read or launches another framework.
+
+`--host`, `--port`, `--served-model-name` and `--result-*` are dropped and
+recorded under `stripped`, because the runner sets them every round.
+`$SESSION_DIR/current_setting.sh` re-feeds as a launch file unless it carries
+launch controls (an overlay, unset envs, removed args or replaced args).
+
 ---
 
 ## Output and artifacts

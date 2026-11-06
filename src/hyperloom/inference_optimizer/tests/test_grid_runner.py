@@ -1207,8 +1207,8 @@ async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatc
 
 
 def test_an_exported_setting_with_an_overlay_cannot_be_reimported(tmp_path):
-    from hyperloom.inference_optimizer.reference_script import parse_reference_script
     from hyperloom.orchestrator.state.shared_state import SharedState
+    from inference_suite import UserFileError, parse_user_file
 
     overlay = tmp_path / "overlay ' literal"
     overlay.mkdir()
@@ -1219,8 +1219,8 @@ def test_an_exported_setting_with_an_overlay_cannot_be_reimported(tmp_path):
     state.current_best = {"extra_server_args": "--max-running-requests 4", "final_overlay": str(overlay)}
     state.save(session)
 
-    with pytest.raises(ValueError, match="overlay_pythonpath"):
-        parse_reference_script(str(session / "current_setting.sh"), framework="sglang")
+    with pytest.raises(UserFileError, match="hyperloom-launch-controls"):
+        parse_user_file("current_setting.sh", (session / "current_setting.sh").read_bytes(), framework="sglang")
 
 
 # Section: dedup_vllm_server_args  — vLLM/atom single-value flag collapse

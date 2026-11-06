@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, ServerBase, session_server_base
@@ -95,6 +96,44 @@ def test_the_server_base_carries_the_argv_and_the_env_a_launch_may_set(session):
 
     assert base.args == '--kv-cache-dtype fp8_e4m3 --speculative-config {"method":"mtp"}'
     assert dict(base.env) == {"SGLANG_USE_AITER": "1"}
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Credentials.
+        "SOME_SECRET",
+        "HF_TOKEN",
+        "TOKENIZER_API_KEY",
+        "MY_TOKENIZER_SECRET",
+        # Interpreter hijacks and traffic redirects.
+        "PYTHONUSERBASE",
+        "NODE_OPTIONS",
+        "PERL5OPT",
+        "GIT_SSH_COMMAND",
+        "HTTPS_PROXY",
+        "HF_ENDPOINT",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "TMPDIR",
+        "LD_LIBRARY_PATH",
+        "PYTHONPATH",
+        "PATH",
+        # Device selection.
+        *sorted(GPU_MASK_ENV_NAMES),
+        # Workload keys the optimizer owns.
+        "TP",
+        "MODEL",
+        "CONC",
+        "RUN_EVAL",
+        "RESULT_DIR",
+    ],
+)
+def test_a_launch_file_export_a_launch_may_not_set_never_reaches_the_server(session, name):
+    tuning = {"VLLM_ROCM_USE_AITER": "1", "TOKENIZERS_PARALLELISM": "false", "VLLM_CACHE_ROOT": "/workspace/cache"}
+    freeze_session_base(session, env={**tuning, name: "value"})
+
+    assert dict(session_server_base().env) == tuning
 
 
 def test_a_base_file_the_session_did_not_record_is_refused(session):

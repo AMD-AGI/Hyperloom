@@ -331,7 +331,7 @@ def test_a_state_written_before_base_launch_digest_without_a_reference_launch_re
 
 
 def test_save_renders_current_setting_sh(tmp_path, monkeypatch):
-    """save() emits a re-parseable current_setting.sh from current_best."""
+    """save() emits a current_setting.sh that re-feeds as a --reference-script launch file."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
     sd = tmp_path / "session"
     sd.mkdir()
@@ -343,12 +343,11 @@ def test_save_renders_current_setting_sh(tmp_path, monkeypatch):
     s.save(sd)
     out = sd / "current_setting.sh"
     assert out.exists()
-    from hyperloom.inference_optimizer.reference_script import parse_reference_script
+    from inference_suite import parse_user_file
 
-    r = parse_reference_script(str(out), framework="vllm")
-    assert "--block-size 128" in r.server_args
-    assert "TRITON_ATTN" in r.server_args
-    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
+    launch = parse_user_file(str(out), out.read_bytes(), framework="vllm").launch
+    assert launch.args == ("--block-size", "128", "--attention-backend", "TRITON_ATTN")
+    assert launch.env.get("VLLM_ROCM_USE_AITER") == "1"
 
 
 @pytest.mark.parametrize(
@@ -372,10 +371,11 @@ def test_current_setting_carries_the_args_the_best_was_launched_with(tmp_path, m
     }
     state.save(tmp_path)
 
-    from hyperloom.inference_optimizer.reference_script import parse_reference_script
+    from inference_suite import parse_user_file
 
-    recipe = parse_reference_script(str(tmp_path / "current_setting.sh"), framework="vllm")
-    assert recipe.server_args == (
+    script = tmp_path / "current_setting.sh"
+    launch = parse_user_file(str(script), script.read_bytes(), framework="vllm").launch
+    assert " ".join(launch.args) == (
         '--moe-backend aiter --speculative-config {"method":"dspark","num_speculative_tokens":5} --max-num-seqs 128'
     )
 

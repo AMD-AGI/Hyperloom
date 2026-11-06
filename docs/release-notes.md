@@ -20,6 +20,20 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A fixed-workload session resolves its base launch once and freezes it
+  as `base_launch.json`.** The base comes from `--reference-script`, else
+  InferenceX `main`, else the framework's cookbook `main`, else a default
+  table (with a warning); omitted `--tp` / `--ep` follow the base. Resume
+  reads the frozen file and never refetches. A `--reference-script` flag set
+  from a shell variable, which used to be dropped silently, now exits 2, as
+  does a `# hyperloom-launch-controls:` line; `--host`, `--port`,
+  `--served-model-name` and `--result-*` are recorded as stripped. A JSON
+  `base_launch.json` from an earlier session is accepted as the launch file.
+  **Upgrade note:** a session whose state predates `base_launch.json`
+  cannot be resumed; start a new one. A `current_setting.sh` that records
+  launch controls no longer re-feeds as `--reference-script`. See
+  [Choose the base launch](how-to/optimize.md#choose-the-base-launch).
+
 - **Bump validated SGLang stack to 0.5.23 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, the
