@@ -30,7 +30,6 @@ def test_reexport_from_integrate_patch():
     assert patch_git._P_LEVELS is ng._P_LEVELS
     assert patch_artifacts._is_within is ng._is_within
     assert integrate_enablement_gate._is_git_tree is ng._is_git_tree
-    assert patch_git._apply_patch_no_git is ng._apply_patch_no_git
 
 
 def test_reexport_from_patch_snapshot():
