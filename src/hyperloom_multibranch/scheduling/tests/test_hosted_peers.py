@@ -3,23 +3,28 @@
 
 """What a hosted session measures on: the runner cache of the run's commit, built readable by the sandbox's account
 whatever umask the entry runs under from the session's own clone of the run's source, which a restart finds again,
-failing the run when it cannot be had and pinning every runner sandbox to it otherwise, and the peers refused as on
-one machine. The peers built on the service's sandboxes are pinned in ``test_local_peers``."""
+on another account of the group too, failing the run when it cannot be had and pinning every runner sandbox to it
+otherwise, and the peers refused as on one machine. The peers built on the service's sandboxes are pinned in
+``test_local_peers``."""
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import zlib
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+import hyperloom_multibranch
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.hosted.host_info import HostInfo, read_host_info
 from hyperloom.measure.runner.cache_build import RUNNER_TARGET_ENV, CacheBuildError, runner_wheel_target
 from hyperloom.measure.runner.cache_layout import manifest_from_json
@@ -297,6 +302,68 @@ def test_an_object_planted_in_the_clone_under_the_id_of_one_of_the_commits_fails
         PinnedToolboxInputs(_host(tmp_path, rig.repo, sha), cache)(layout, 2)
 
     assert not (cache / sha).exists()
+
+
+def _as_account(accounts: Accounts, uid: int, call: str) -> dict[str, object]:
+    """``call``, an expression of this module's, evaluated by ``uid`` in a process of its own under umask ``022``: its
+    JSON result."""
+
+    source = Path(hyperloom_multibranch.__file__).parents[1]
+    code = (
+        f"import json, sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        "from hyperloom_multibranch.scheduling.tests import test_hosted_peers\n"
+        f"print(json.dumps(test_hosted_peers.{call}))"
+    )
+    return json.loads(accounts.run(uid, code).splitlines()[-1])
+
+
+def _clone_as_first_leg(session: str, origin: str, sha: str) -> dict[str, object]:
+    """The session's clone of commit ``sha`` of ``origin``, made by the account this process is."""
+    return {"clone": str(runner_source(SessionLayout(Path(session)).runner_source, origin, sha))}
+
+
+def _pin_as_next_leg(session: str, state: str, origin: str, sha: str, cache: str) -> dict[str, object]:
+    """The toolbox inputs of the session, had by the account this process is: their runner cache pin."""
+    inputs = PinnedToolboxInputs(_host(Path(state), Path(origin), sha), Path(cache))(SessionLayout(Path(session)), 2)
+    return {"pin": inputs.runner_cache_manifest_sha256}
+
+
+def test_a_leg_on_another_account_of_the_group_builds_the_runner_cache_from_the_clone_an_earlier_leg_made(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The accounts' processes start in a directory they cannot read: no git command may look for a repository there.
+    monkeypatch.chdir(tmp_path)
+    with other_accounts() as accounts:
+        source = Path(hyperloom_multibranch.__file__).parents[1]
+        if any(not directory.stat().st_mode & stat.S_IXOTH for directory in (source, *source.parents)):
+            pytest.skip(f"another account cannot reach this checkout's {source}")
+        if accounts.python != sys.executable:
+            pytest.skip(f"another account cannot run {sys.executable}, whose environment holds the project's packages")
+        sha = rig.cache.sha
+        # The run's source is the first account's own, and the wheels are where both accounts read them.
+        origin, wheelhouse = accounts.root / "origin", accounts.root / "wheelhouse"
+        shutil.copytree(rig.repo, origin, symlinks=True)
+        for path in (origin, *origin.rglob("*")):
+            os.lchown(path, accounts.first, accounts.group)
+        shutil.copytree(rig.wheelhouse, wheelhouse)
+        monkeypatch.setenv("PIP_NO_INDEX", "1")
+        monkeypatch.setenv("PIP_FIND_LINKS", str(wheelhouse))
+        monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
+        session, state, cache = (accounts.shared_dir(name) for name in ("MB-session", "state", "runner-cache"))
+        clone = _as_account(
+            accounts, accounts.first, f"_clone_as_first_leg({str(session)!r}, {str(origin)!r}, {sha!r})"
+        )
+
+        pinned = _as_account(
+            accounts,
+            accounts.second,
+            f"_pin_as_next_leg({str(session)!r}, {str(state)!r}, {str(origin)!r}, {sha!r}, {str(cache)!r})",
+        )
+
+        assert Path(str(clone["clone"])).stat().st_uid == accounts.first
+        entry = cache / sha
+        assert pinned["pin"] == hashlib.sha256((entry / MANIFEST_NAME).read_bytes()).hexdigest()
+        assert entry.stat().st_uid == accounts.second, "the second account built the entry from its copy of the clone"
 
 
 @pytest.mark.parametrize(("run_id", "named"), [("run-1", "run-1"), (None, "MB-session")])
