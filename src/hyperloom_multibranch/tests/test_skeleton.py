@@ -465,6 +465,7 @@ class Stage:
             toolbox,
             repo,
             self.sessions,
+            setup.blobs,
             now=self.time.now,
             desk=setup.desk,
             runtime=self.runtime_type,
