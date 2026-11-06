@@ -14,11 +14,13 @@ and announces what landed from the recorded judgement; a fix check interrupted b
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
 from hyperloom.contracts.measurement import Purpose, TestRequest, Validity
+from hyperloom.measure.compile import BlobStore
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
 from hyperloom_multibranch.contracts.gate import ResultUnverified
@@ -30,13 +32,20 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import (
     NotRecorded,
     SnapshotQuery,
 )
-from hyperloom_multibranch.contracts.blackboard.records import TestRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind
+from hyperloom_multibranch.contracts.blackboard.records import RetractionRef, TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver, Conclusion, InboxKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, Toolbox
 from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
-from hyperloom_multibranch.rulegate.rules import Rule, repeats, retest_request
+from hyperloom_multibranch.rulegate.rules import (
+    RETRACTION_ID,
+    Rule,
+    lands_as_retraction,
+    repeats,
+    retest_request,
+    retracts,
+)
 from hyperloom_multibranch.specialist.fix_check import FixCheck, FixChecking, check_fix, declares_fix
 
 #: Opens every branch log entry the runtime writes, so the specialist tells them from its own.
@@ -55,12 +64,13 @@ class JudgeBlackboard(Inbox, SnapshotQuery, BranchLogStore, CommitQuery, Protoco
 @dataclass(frozen=True)
 class Judging:
     """What every branch's judge settles candidates with: the workload's rule, the gate that lands what clears it, the
-    toolbox a retest goes to, and how a declared correctness fix is checked (``None``: a declared fix is judged on its
+    toolbox a retest goes to, the blob store a retraction's attachment is read from, and how a declared correctness fix is checked (``None``: a declared fix is judged on its
     performance alone, and its specialist told so)."""
 
     gate: RuleGate
     toolbox: Toolbox
     rule: Rule
+    blobs: BlobStore
     fixes: FixChecking | None = None
 
 
@@ -70,11 +80,12 @@ class BranchJudge:
     def __init__(self, branch: str, blackboard: JudgeBlackboard, judging: Judging) -> None:
         self._branch = branch
         self._blackboard = blackboard
-        self._gate, self._toolbox, self._rule = judging.gate, judging.toolbox, judging.rule
+        self._gate, self._toolbox, self._rule, self._blobs = judging.gate, judging.toolbox, judging.rule, judging.blobs
         self._fixes = judging.fixes
         self._finishing = False
         self._finished = False
         self._submitted = False
+        self._autonomous = False
 
     async def run(self, poll_seconds: float, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Judge what waits, then again whenever the inbox brings a result, until cancelled or, once :meth:`finish`
@@ -97,19 +108,14 @@ class BranchJudge:
         # Only a snapshot read after finish() can show that nothing of the branch is left to arrive.
         finishing, self._submitted = self._finishing, False
         snapshot = await self._blackboard.snapshot()
+        self._autonomous = any(
+            node.branch == self._branch and node.driver is BranchDriver.AUTONOMOUS for node in snapshot.lineage.branches
+        )
         records = [record for record in snapshot.records if record.request.branch_id == self._branch]
         logged = {record.entry for record in snapshot.branch_logs.get(self._branch, ())}
-        closed = {
-            request_id
-            for entry in logged
-            if entry.content.startswith(NOTICE) and left_unjudged(entry.content)
-            for request_id in entry.request_ids
-        }
+        closed = _closed_unjudged(logged)
         guarded = {case.fix_commit for case in snapshot.regressions}
-        retests: dict[str, list[TestRecord]] = {}
-        for record in records:
-            if record.request.retest_of is not None:
-                retests.setdefault(record.request.retest_of, []).append(record)
+        retests = _retests_by_candidate(records)
         for record in records:
             if _awaits_judgement(record) and record.request_id not in closed:
                 await self._judge(record, retests.get(record.request_id, []), logged)
@@ -148,6 +154,9 @@ class BranchJudge:
         await self._settle(first, judgement, logged)
 
     async def _settle(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
+        if self._autonomous and retracts(first, self._rule) and lands_as_retraction(first, judgement, self._rule):
+            await self._retract(first, judgement, logged)
+            return
         fix = None
         if declares_fix(first.request, judgement):
             checked = await self._check_fix(first, judgement, logged)
@@ -167,9 +176,7 @@ class BranchJudge:
                 admission = await self._gate.fork(first.request, judgement, reason, fix=fix)
                 await self._notice(logged, _forked(first.request, admission), *judgement.request_ids)
         except ResultUnverified as error:
-            unverified = "a result behind it did not re-verify against its signed bundle"
-            content = f"{first.request_id} {_NOT_COMMITTED} {unverified} ({error.request_id}: {error.reason})"
-            await self._notice(logged, content, *judgement.request_ids)
+            await self._unverified(logged, first, judgement, error)
             return
         if action is Action.COMMIT:
             await self._notice(logged, _landed(first.request, judgement, fix is not None), *judgement.request_ids)
@@ -184,6 +191,29 @@ class BranchJudge:
         elif action is Action.RECORD_ONLY and decide(judgement) is Action.COMMIT:
             moved = f"{first.request_id} improved on {first.request.parent_commit}, but the branch has moved on"
             await self._notice(logged, f"{moved}; submit it again on the head as a new test", *judgement.request_ids)
+
+    async def _retract(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
+        try:
+            landed = await self._gate.retract(first.request, judgement, self._retraction_ref(first))
+        except ResultUnverified as error:
+            await self._unverified(logged, first, judgement, error)
+            return
+        if landed:
+            content = _retracted(first.request, judgement)
+        else:
+            content = f"{first.request_id} retracts a change, but the branch has moved on; it is recorded only"
+        await self._notice(logged, content, *judgement.request_ids)
+
+    def _retraction_ref(self, first: TestRecord) -> RetractionRef:
+        attachment = next(item for item in first.request.attachments if item.id == RETRACTION_ID)
+        return RetractionRef(**json.loads(self._blobs.get(attachment.sha256)))
+
+    async def _unverified(
+        self, logged: set[BranchLogEntry], first: TestRecord, judgement: Judgement, error: ResultUnverified
+    ) -> None:
+        unverified = "a result behind it did not re-verify against its signed bundle"
+        content = f"{first.request_id} {_NOT_COMMITTED} {unverified} ({error.request_id}: {error.reason})"
+        await self._notice(logged, content, *judgement.request_ids)
 
     async def _check_fix(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> FixCheck:
         if self._fixes is None:
@@ -206,6 +236,25 @@ def left_unjudged(notice: str) -> bool:
     """Whether the judge's ``notice`` closes its candidate without a judgement; a notice such as a fix judged on its
     performance alone or a diagnosis precedes the gate's judgement and commit."""
     return _NOTHING_JUDGED in notice or _CANNOT_BE_JUDGED in notice or _NOT_COMMITTED in notice
+
+
+def _closed_unjudged(logged: set[BranchLogEntry]) -> set[str]:
+    """The request ids of the candidates a notice of the judge in ``logged`` closed without a judgement."""
+    return {
+        request_id
+        for entry in logged
+        if entry.content.startswith(NOTICE) and left_unjudged(entry.content)
+        for request_id in entry.request_ids
+    }
+
+
+def _retests_by_candidate(records: Sequence[TestRecord]) -> dict[str, list[TestRecord]]:
+    """The retests among ``records``, keyed by the request id of the candidate each retests."""
+    retests: dict[str, list[TestRecord]] = {}
+    for record in records:
+        if record.request.retest_of is not None:
+            retests.setdefault(record.request.retest_of, []).append(record)
+    return retests
 
 
 def _awaits_judgement(record: TestRecord) -> bool:
@@ -237,6 +286,8 @@ def _failed_retest(first: Judgement, retest: TestRecord) -> Judgement:
 def _announced(record: TestRecord, judgement: Judgement, guarded: bool) -> str:
     """The notice of a commit or fork the gate recorded for a judged candidate, "" for any other conclusion; the same
     text :meth:`BranchJudge._settle` writes after the step, so the one written there is not written twice."""
+    if record.landed_retraction:
+        return _retracted(record.request, judgement)
     if record.conclusion in (Conclusion.COMMITTED, Conclusion.COMMITTED_WITH_REPRO):
         return _landed(record.request, judgement, guarded)
     if record.conclusion in (Conclusion.SPLIT_REQUESTED, Conclusion.SPLIT_COMMITTED):
@@ -251,6 +302,14 @@ def _landed(request: TestRequest, judgement: Judgement, guarded: bool) -> str:
     if guarded:
         landed = f"{landed} with its repro case, which now guards every later commit"
     return f"{landed}; your next candidates go on the new head"
+
+
+def _retracted(request: TestRequest, judgement: Judgement) -> str:
+    retraction = f"{request.request_id} landed on your branch as a retraction at {judgement.gain_pct:+.2f}%"
+    return (
+        f"{retraction} over {request.parent_commit}, held to the rule's errors, guards, accuracy and, where its tests "
+        "run them, consistency checks, not its speed"
+    )
 
 
 def _forked(request: TestRequest, admission: ForkAdmission) -> str:

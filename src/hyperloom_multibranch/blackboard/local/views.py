@@ -257,16 +257,21 @@ def regression_cases_for(state: BlackboardState, view: LineageView, commit_id: s
 
 
 def judged_since_commit(records: Sequence[TestRecord], view: LineageView, branch: str, until: float = math.inf) -> int:
-    """The tests of ``branch`` judged by ``until`` and after its last commit by then, or since it opened before any.
+    """The tests of ``branch`` judged by ``until`` and after its last commit by then, or since it opened before any; a
+    retraction is no progress, so its commit is no last commit.
 
     A test counts once it was measured and judged; a withdrawn or failed measurement, or a result that did not
     re-verify, never does.
     """
 
+    retractions = {record.commit_id for record in records if record.landed_retraction}
     commits = [
         node.at
         for node in view.commits
-        if node.branch == branch and node.origin is not CommitOrigin.ROOT and node.at <= until
+        if node.branch == branch
+        and node.origin is not CommitOrigin.ROOT
+        and node.at <= until
+        and node.commit_id not in retractions
     ]
     since = max(commits, default=-math.inf)
     return sum(
