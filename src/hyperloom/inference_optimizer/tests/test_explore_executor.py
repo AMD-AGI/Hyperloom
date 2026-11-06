@@ -3618,6 +3618,34 @@ async def test_explore_executor_measures_and_attributes_authored_levers(
     assert all(row["outcome"] == "KEEP" and row["source"] == "additive" for row in attributions)
 
 
+def test_a_leave_one_out_arm_that_regressed_attributes_its_lever():
+    """Dropping a kept switch and getting slower is a REVERT, and it is the reading that says the switch pays."""
+    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions, _outcome_row
+
+    row = _outcome_row(
+        {"name": "fwlever_drop_hl_a", "outcome": "REVERT", "gain_pct": None, "graded_gain_pct": -4.0}, "fp", "", "t"
+    )
+    seed = {"name": "fwlever_drop_hl_a", "framework_lever": "HL_A", "framework_lever_source": "leave_one_out"}
+
+    attributions = _framework_lever_attributions([row], [seed])
+
+    assert [(a["switch"], a["gain_pct"], a["outcome"]) for a in attributions] == [("HL_A", 4.0, "REVERT")]
+
+
+def test_a_lever_attribution_arm_runs_after_the_candidates_that_could_keep():
+    """Additive lever arms may KEEP and run first; leave-one-out arms only attribute and run last."""
+    from hyperloom.orchestrator.actions.executors.explore import _lever_seeded_payload
+
+    levers = [
+        {"name": "fwlever_drop_hl_a", "framework_lever": "HL_A", "framework_lever_source": "leave_one_out"},
+        {"name": "fwlever_hl_b", "framework_lever": "HL_B", "framework_lever_source": "additive"},
+    ]
+
+    payload = _lever_seeded_payload([{"name": "llm_proposal"}], levers)
+
+    assert [v["name"] for v in payload] == ["fwlever_hl_b", "llm_proposal", "fwlever_drop_hl_a"]
+
+
 @pytest.mark.asyncio
 async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
     sub_agent_runner,

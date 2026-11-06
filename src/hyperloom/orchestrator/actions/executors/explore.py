@@ -125,6 +125,8 @@ ROUND_DUP: str = "round_dup"
 
 #: The provenance of a grid row that names none: the model proposed it directly.
 _DIRECT_PROVENANCE = "llm_direct"
+# ``framework_lever_source`` of an arm that switches one active lever off.
+_LEAVE_ONE_OUT = "leave_one_out"
 
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
@@ -242,20 +244,14 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
     if shared_state is None:
         return []
     rows = list(getattr(shared_state, "authored_framework_levers", None) or [])
-    if not rows:
-        return []
     pending = [row for row in rows if isinstance(row, dict) and row.get("attributed_gain_pct") is None]
-    if not pending:
-        return []
     dormant = [row for row in pending if not row.get("default_on")]
     active = [row for row in pending if row.get("default_on")]
     payload: list[dict[str, Any]] = []
-    if dormant:
-        for variant in _switch_manifest.additive_variants(dormant):
-            payload.append({**variant, "framework_lever_source": "additive"})
-    if active:
-        for variant in _switch_manifest.leave_one_out_variants(active):
-            payload.append({**variant, "framework_lever_source": "leave_one_out"})
+    for variant in _switch_manifest.additive_variants(dormant):
+        payload.append({**variant, "framework_lever_source": "additive"})
+    for variant in _switch_manifest.leave_one_out_variants(active):
+        payload.append({**variant, "framework_lever_source": _LEAVE_ONE_OUT})
     return payload
 
 
@@ -278,11 +274,13 @@ def _framework_lever_attributions(
         seed = by_name.get(str(row.get("variant_name") or ""))
         if seed is None:
             continue
-        measured = (row.get("metrics") or {}).get("gain_pct")
+        # A REVERT keeps its measured movement in ``graded_gain_pct``; a regressed leave-one-out arm is that case.
+        metrics = row.get("metrics") or {}
+        measured = metrics.get("gain_pct", metrics.get("graded_gain_pct"))
         if not isinstance(measured, (int, float)):
             continue
         source = str(seed.get("framework_lever_source") or "")
-        gain = -float(measured) if source == "leave_one_out" else float(measured)
+        gain = -float(measured) if source == _LEAVE_ONE_OUT else float(measured)
         out.append(
             {
                 "switch": str(seed["framework_lever"]),
@@ -541,7 +539,9 @@ def _lever_seeded_payload(payload: list[Any], levers: list[dict[str, Any]]) -> l
     if not fresh:
         return payload
     log.info("explore: seeding %d framework-rewrite lever variant(s) for attribution", len(fresh))
-    return fresh + list(payload)
+    # A leave-one-out arm only attributes a switch already on, so the arms that could KEEP run before it.
+    attribution = [v for v in fresh if v.get("framework_lever_source") == _LEAVE_ONE_OUT]
+    return [v for v in fresh if v not in attribution] + list(payload) + attribution
 
 
 def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[str, Any]) -> list[Any]:
@@ -615,7 +615,7 @@ def runnable_grid_variants(params: Mapping[str, Any] | None, shared_state: Any) 
 # The numbers a measured variant produced. ``base_tput`` is carried verbatim rather than left to be back-solved
 # from the gain: each KEEP advances the round anchor, so a consumer dividing the gain out of the final throughput
 # reconstructs whichever anchor happens to be current, and a FAILED variant has no gain to divide.
-_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "base_tput")
+_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "graded_gain_pct", "base_tput")
 
 # The ledgers' views of the row the round records for a variant.
 _VARIANT_FIELDS: tuple[str, ...] = (
