@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
 )
+from inference_suite.argv import remove_server_args
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +61,6 @@ def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
     legacy_envs, extra_flags = _split_env_and_flags(str(cfg.get("env") or ""))
     if cfg.get("env_unparsed"):
         log.warning("GEAK accepted_config.env_unparsed reports discarded source text")
-        from hyperloom.inference_optimizer.grid_server_args import remove_server_args
-
         extra_flags = remove_server_args(extra_flags, cfg["env_unparsed"])
     if extra_flags:
         log.warning("GEAK accepted_config.env contains server flags; retaining them alongside accepted_config.flags")
