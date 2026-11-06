@@ -40,6 +40,7 @@ from time import monotonic
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
+from hyperloom_multibranch.repo.isolated_git import trusting
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
 from hyperloom_multibranch.specialist.agent_spec import ROOT_PROFILE_SOURCE, AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import (
@@ -358,12 +359,14 @@ async def fetch_source(source: str, checkout: Path) -> str:
         if done.returncode != 0:
             raise AttemptFailed(f"fetching {url}: {tail(done.output)}")
         if ref:
-            checked = await _git([GIT, "checkout", QUIET, ref], checkout)
+            checked = await _checkout_git([GIT, "checkout", QUIET, ref], checkout)
             if checked.returncode != 0:
                 # Left in place, the clone would pass the next attempt on its default branch.
                 shutil.rmtree(checkout)
                 raise AttemptFailed(f"checking out {ref}: {tail(checked.output)}")
-    head = await _git([GIT, REV_PARSE, "HEAD"], checkout)
+    head = await _checkout_git([GIT, REV_PARSE, "HEAD"], checkout)
+    if head.returncode != 0:
+        raise AttemptFailed(f"reading the commit of {checkout}: {tail(head.output)}")
     return head.output.strip()
 
 
@@ -392,11 +395,17 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
         [GIT, "add", "--all"],
         [*commit, "commit", QUIET, "--no-verify", "--message", f"Copy of {tree}{at}"],
     ):
-        done = await _git(argv, checkout)
+        done = await _checkout_git(argv, checkout)
         if done.returncode != 0:
             # Left in place, the partial repository would pass the next attempt as fetched.
             shutil.rmtree(checkout)
             raise AttemptFailed(f"committing a copy of {tree}: {tail(done.output)}")
+
+
+async def _checkout_git(argv: list[str], checkout: Path) -> CommandResult:
+    """:func:`_git` in the agent's checkout, used whoever owns it: an earlier attempt may have been another account."""
+
+    return await _git([argv[0], *trusting(checkout), *argv[1:]], checkout)
 
 
 async def _git(argv: list[str], cwd: Path) -> CommandResult:

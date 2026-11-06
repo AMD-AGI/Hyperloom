@@ -30,7 +30,7 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
-from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
+from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env, trusting
 
 #: The file in a base's git directory that names the paths each worktree links rather than holds.
 LINKED_PATHS = "hyperloom-third-party"
@@ -113,9 +113,11 @@ def installed_upstream(package: PackageBase) -> Upstream | None:
 
 
 def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
+    """``git <args>`` in ``cwd``. The tree is trusted whoever owns it (``safe.directory``), as an earlier leg that made
+    it may have been another account: nothing its config names runs."""
     pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
     done = subprocess.run(
-        git_argv(*_FIXED_CONFIG, *args),
+        git_argv(*trusting(cwd), *_FIXED_CONFIG, *args),
         cwd=cwd,
         env=git_env(**pinned),
         input=stdin,

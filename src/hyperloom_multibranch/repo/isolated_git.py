@@ -12,6 +12,7 @@ files could drop or hide a file's change.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 # Command-line scope outranks every config file. The excludes file defaults to $XDG_CONFIG_HOME/git/ignore even when
 # no global config is read.
@@ -45,4 +46,10 @@ def git_env(**pinned: str) -> dict[str, str]:
     }
 
 
-__all__ = ["INIT", "git_argv", "git_env"]
+def trusting(directory: Path) -> tuple[str, str]:
+    """The ``-c`` pair that has git use the repository at ``directory`` whoever owns it (``safe.directory``): a tree may
+    have been made by another account, and no program its config names runs."""
+    return ("-c", f"safe.directory={os.path.realpath(directory)}")
+
+
+__all__ = ["INIT", "git_argv", "git_env", "trusting"]

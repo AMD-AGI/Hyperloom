@@ -19,6 +19,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     GATEWAY_PAUSE_SECONDS,
     RETRY_SECONDS,
     AgentSpec,
+    AttemptFailed,
     CommandResult,
     ModelRefused,
     OnboardingSetup,
@@ -380,3 +381,37 @@ def test_the_docker_shim_reads_a_device_mask_the_agent_gives_as_indices_into_its
     assert visible("CUDA_VISIBLE_DEVICES", "").stdout.strip() == "0,1/5,7"
     refused = visible("ROCR_VISIBLE_DEVICES", "2")
     assert refused.returncode != 0 and "card" in refused.stderr
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a checkout of another owner needs root to chown")
+async def test_a_checkout_another_account_of_the_group_made_is_read_with_no_program_of_its_config_run(
+    tmp_path: Path,
+) -> None:
+    checkout, source = tmp_path / "agent" / "src", str(_agent_repo(tmp_path))
+    commit = await fetch_source(source, checkout)
+    ran = tmp_path / "ran"
+    program = tmp_path / "recording-filter"
+    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
+    program.chmod(0o755)
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n')
+    (checkout / ".gitattributes").write_text("* filter=own\n")
+    (checkout / "README.md").unlink()
+    # An earlier attempt, or the run's earlier leg, was another account of the group.
+    for path in (checkout, *checkout.rglob("*")):
+        os.lchown(path, 65534, 65534)
+
+    again = await fetch_source(source, checkout)
+    checked = await agent_onboarding._checkout_git(["git", "checkout", "--", "README.md"], checkout)
+
+    assert again == commit
+    assert checked.returncode == 0, checked.output
+    assert not ran.exists(), ran.read_text()
+
+
+async def test_a_checkout_whose_commit_cannot_be_read_fails_the_attempt_naming_it(tmp_path: Path) -> None:
+    checkout = tmp_path / "agent" / "src"
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)  # an attempt cut short before its clone fetched
+
+    with pytest.raises(AttemptFailed, match=f"reading the commit of {checkout}"):
+        await fetch_source(str(_agent_repo(tmp_path)), checkout)

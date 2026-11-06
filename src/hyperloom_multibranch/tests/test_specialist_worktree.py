@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -282,3 +284,56 @@ def test_the_operator_s_git_config_changes_nothing_a_worktree_builds_or_patches(
     assert ("b/vllm/config.py" in kept, "b/vllm/lpm.py" in kept, outside) == (True, True, ())
     worktree.sync("c1", [patch.encode()])
     assert (worktree.head(), (worktree.path / "vllm" / "lpm.py").exists()) == ("c1", True)
+
+
+def _recording_filter(where: Path, ran: Path) -> Path:
+    """A program that notes it ran in ``ran`` and passes its input through, as a filter or a text conversion would."""
+    program = where / "recording-filter"
+    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
+    program.chmod(0o755)
+    return program
+
+
+def _plant_programs(base_git: Path, tree: Path, ran: Path) -> None:
+    """What a sandbox that writes the worktree and its repository can plant: a config naming a program for every hook
+    of git it can name -- filter drivers under names of its own, an fsmonitor, a text conversion, a signing program on
+    commit, a pager -- an attributes file that applies them to every path, and executable hooks."""
+    program = _recording_filter(base_git.parent.parent, ran)
+    marker = f"#!/bin/sh\necho ran >> {ran}\n"
+    with (base_git / "config").open("a") as config:
+        config.write(
+            f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n'
+            f'[filter "other.name"]\n\tprocess = {program}\n'
+            f"[core]\n\tfsmonitor = {base_git / 'hooks' / 'fsmonitor'}\n\tpager = {program}\n"
+            f'[diff "own"]\n\ttextconv = {program}\n\tcommand = {program}\n'
+            f"[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = {base_git / 'hooks' / 'fsmonitor'}\n"
+        )
+    (base_git / "hooks").mkdir(exist_ok=True)
+    for hook in ("fsmonitor", "pre-commit", "post-commit", "post-checkout", "reference-transaction"):
+        (base_git / "hooks" / hook).write_text(marker)
+        (base_git / "hooks" / hook).chmod(0o755)
+    (tree / ".gitattributes").write_text("* filter=own diff=own\n*.py filter=other.name\n")
+
+
+def _as_another_accounts(*trees: Path) -> None:
+    for path in (path for tree in trees for path in (tree, *tree.rglob("*"))):
+        os.lchown(path, 65534, 65534)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_no_program_of_it_run(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    _plant_programs(base.path / ".git", worktree.path, ran)
+    # The run's earlier leg, another account of the group, made the base and the worktree.
+    _as_another_accounts(base.path, worktree.path)
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    patch = worktree.diff("vllm")
+    worktree.sync("c1", [patch.encode()])
+
+    assert "+max_num_seqs = 256" in patch
+    assert worktree.head() == "c1"
+    assert base.worktree("s2", tmp_path / "s2").head() is None
+    assert not ran.exists(), ran.read_text()
