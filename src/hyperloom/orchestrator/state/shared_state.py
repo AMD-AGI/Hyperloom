@@ -699,8 +699,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     research_scout_seen_pr_ids: list[str] = field(default_factory=list)
     # Round id of last scout dispatch so K-round re-dispatch fires once per qualifying round.
     research_scout_last_round: int = -1
-    # Static-recon specialist bookkeeping (explore-opt-5 capability A); master switch ``--no-static-recon``.
-    static_recon_enabled: bool = True
+    static_recon_enabled: bool = True  # master switch ``--no-static-recon``
+    static_recon_bridge_findings: list[str] = field(default_factory=list)  # ``rule_id:subject`` its bridges clear
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
