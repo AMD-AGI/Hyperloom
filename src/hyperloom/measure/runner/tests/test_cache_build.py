@@ -556,8 +556,8 @@ def test_the_entry_is_built_out_of_the_cache_and_appears_whole_in_one_step(
         assert not (wheels.parent / MANIFEST_NAME).exists()
         return download(lock, wheels, pins, options)
 
-    def watching_copy(source: Path, directory: int, last: str = "") -> None:
-        copy(source, directory, last)
+    def watching_copy(source: Path, parent: int, name: str, last: str = "") -> None:
+        copy(source, parent, name, last)
         if last:
             (pending,) = cache.glob(f".{rig.cache.sha}.tmp-*")
             copied.append(({path.name for path in pending.iterdir()}, final.exists()))
