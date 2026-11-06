@@ -149,13 +149,18 @@ def _patch_recipe_delta(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _kept_launch_controls(result: Mapping[str, Any], measurement: Mapping[str, Any]) -> dict[str, Any]:
-    """The removal controls a KEEP launched with and the args the bench composed with them, as an explore KEEP lifts.
+    """The removal controls a KEEP launched with and the args it keeps, as an explore KEEP lifts them.
 
-    The previous args still hold what was removed, so the lift must not merge the candidate onto them."""
+    A persisted KEEP replaces the launch with the argv its bench ran; a native one keeps the stack relative to the
+    recipe. Either way the previous args still hold what was removed, so the lift must not merge onto them.
+    """
     controls = {key: result[key] for key in LAUNCH_CONTROL_KEYS if result.get(key)}
     if not controls:
         return {}
-    return {**controls, "extra_server_args": str(measurement["effective_config"]["extra_server_args"])}
+    launched = result.get("effective_extra_server_args")
+    if launched is None:
+        return {**controls, "extra_server_args": str(measurement["effective_config"]["extra_server_args"])}
+    return {**controls, "extra_server_args": launched, "effective_extra_server_args": launched}
 
 
 def _integrate_keep_origin(

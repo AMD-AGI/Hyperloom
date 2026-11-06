@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
-from hyperloom.common.benchmark_config import is_magpie_agentx
 import functools
 import logging
 import os
@@ -62,7 +61,13 @@ from ._accuracy_gate import parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
 from .bypass_scriptable import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
+from ._proposal_identity import (
+    BaseControls,
+    controls_of,
+    effective_fingerprint,
+    keeps_effective_args,
+    normalize_proposal,
+)
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
 from .benchmark_result import double_run_requested
@@ -181,17 +186,6 @@ def _carry_variant_metadata(src: Any, dst: Any) -> Any:
 def _variant_fingerprint(variant: Any) -> str:
     """The canonical fingerprint stamped on a variant before the round launched it."""
     return str(getattr(variant, "canonical_fp", "") or "")
-
-
-def _keep_uses_effective_args(
-    benchmark: dict[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
-) -> bool:
-    """Native KEEP edits remain relative to the verified recipe unless explicitly replaced."""
-    return (
-        base_mode == "replace"
-        or variant_mode == "replace"
-        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
-    )
 
 
 def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
@@ -1479,9 +1473,7 @@ class _ExploreRound:
             effective["remove_args"] = list(run_remove_args)
         if run_gv.unset_envs:
             effective["unset_envs"] = list(run_gv.unset_envs)
-        persist = _keep_uses_effective_args(
-            self.bench, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs
-        )
+        persist = keeps_effective_args(self.bench, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs)
         if persist:
             effective["args_mode"] = "replace"
         # The variant KEEPs on the round that graded it.

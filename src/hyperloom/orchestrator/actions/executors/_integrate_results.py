@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import now_iso
 
 from . import _framework_switch_manifest as _switch_manifest
@@ -22,7 +23,8 @@ from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _FIX_ACCURACY_UNAVAILABLE, _derive_lane, _preflight_missing_targets
 from ._patch_artifacts import _ArtifactSpec, _resolve_artifact_specs, _validate_aiter_gemm_artifacts
 from ._patch_sources import _read_patch_texts, _resolve_patch_paths, resolved_explicit_root
-from ._proposal_identity import controls_of, normalize_proposal
+from ._proposal_identity import controls_of, keeps_effective_args, normalize_proposal
+from .magpie_agentx import load_benchmark
 
 log = logging.getLogger(__name__)
 
@@ -352,6 +354,26 @@ def _perf_revert(
     }
 
 
+def _kept_launch(controls: dict[str, Any], bench_result: dict[str, Any]) -> dict[str, Any]:
+    """The round's own launch controls, and the argv its bench launched where the KEEP persists as a snapshot of it.
+
+    The argv is the grid runner's own composition, the recipe's inherited args included, as an explore KEEP records it.
+    """
+    if not controls:
+        return {}
+    persists = keeps_effective_args(
+        load_benchmark(Path(bench_result["materialized_config"])),
+        bench_result["effective_config"]["args_mode"],
+        str(controls.get("args_mode") or "append"),
+        to_str_list(controls.get("remove_args")),
+        to_str_list(controls.get("unset_envs")),
+    )
+    if not persists:
+        return dict(controls)
+    launched = str(bench_result["launch_evidence"]["requested_server_args"])
+    return {**controls, "args_mode": "replace", "effective_extra_server_args": launched}
+
+
 def _kept_patch(
     attempt: IntegrateAttempt,
     measured: _PatchMeasurement,
@@ -376,7 +398,7 @@ def _kept_patch(
         "artifacts_applied": attempt.applied_artifacts,
         "extra_server_args_applied": attempt.extra_server_args_applied,
         "extra_envs_applied": attempt.extra_envs_applied,
-        **attempt.launch_controls,
+        **_kept_launch(attempt.launch_controls, measured.bench_result),
         **measured.envelope(),
         "workspace": str(attempt.output_root),
         "framework_root": str(attempt.framework_root or ""),

@@ -10,10 +10,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
 from hyperloom.orchestrator.actions.executors import _ray_serving
-from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+from hyperloom.orchestrator.actions.executors._grid_runner import (
+    GridRecipe,
+    GridVariant,
+    VariantResult,
+    _build_variant_yaml,
+)
+from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
 from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.loop._integrate_promotion import _integrate_keep_variant
@@ -24,14 +32,42 @@ from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.orchestrator.tests._helpers import integrate_extra
 
 
+_INHERITED_ARGS = "--tensor-parallel-size 8"
+_BASELINE_VLLM = Path(__file__).parents[4] / "inference_optimizer" / "assets" / "configs" / "baseline_vllm.yaml"
+
+
+def _baseline_config(tmp_path: Path) -> Path:
+    """The shipped vLLM baseline with server args the recipe itself inherits, as an operator's --server-args leaves."""
+    cfg = yaml.safe_load(_BASELINE_VLLM.read_text(encoding="utf-8"))
+    cfg["benchmark"].setdefault("envs", {})["EXTRA_VLLM_ARGS"] = _INHERITED_ARGS
+    path = tmp_path / "baseline.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return path
+
+
+def _launched_args(recipe: GridRecipe, variant: GridVariant, slot: Path) -> tuple[Path, str]:
+    path = _build_variant_yaml(recipe, variant, output_subdir=slot)
+    return path, yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]["envs"].get("EXTRA_VLLM_ARGS", "")
+
+
 def _fake_grid(monkeypatch, config_path: Path, *, tput: float | None = None) -> list:
     grids: list = []
 
-    async def fake_run_grid(*, grid, **_kwargs):
+    async def fake_run_grid(*, grid, recipe, output_root, **_kwargs):
         grids.append(grid)
-        status = "failed" if tput is None else "succeeded"
+        slot = output_root / grid[0].name
+        launched, _ = _launched_args(recipe, grid[0], slot)
         return [
-            VariantResult(name=grid[0].name, extra_server_args="", extra_envs={}, status=status, output_throughput=tput)
+            VariantResult(
+                name=grid[0].name,
+                extra_server_args="",
+                extra_envs={},
+                status="failed" if tput is None else "succeeded",
+                output_throughput=tput,
+                launch_evidence=build_launch_evidence(
+                    RequestedLaunch(launched, "vllm"), actual_server_log=None, slot=slot
+                ),
+            )
         ]
 
     monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
@@ -42,8 +78,7 @@ def _fake_grid(monkeypatch, config_path: Path, *, tput: float | None = None) -> 
 
 @pytest.mark.asyncio
 async def test_the_bench_launches_without_what_the_round_removes(tmp_path: Path, monkeypatch):
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    config_path = _baseline_config(tmp_path)
     grids = _fake_grid(monkeypatch, config_path)
 
     bench, _ = await IntegratePatchExecutor(session_dir=tmp_path)._bench_patch(
@@ -81,8 +116,7 @@ async def _removal_only_round(tmp_path: Path, monkeypatch, *, tput: float | None
     workspace = session_dir / "runs" / "specialist" / "t-spec"
     workspace.mkdir(parents=True)
     (workspace / "specialist_done.json").write_text(json.dumps({"proposal_set": [], "patches_written": []}))
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    config_path = _baseline_config(tmp_path)
     grids = _fake_grid(monkeypatch, config_path, tput=tput)
     params = {
         "specialist_task_id": "t-spec",
@@ -136,8 +170,18 @@ async def test_a_removal_only_keep_lifts_a_launch_without_the_removed_flag(tmp_p
     variant = _integrate_keep_variant(result, None if replayed else task, result["bench_result"], 120.0, "")
 
     assert coord.writeback.lift_to_current_best("integrate_patch", 120.0, variant) is True
-    launch = coord.writeback.current_best_launch_config()
-    assert (launch["extra_server_args"], launch["remove_args"]) == ("--max-num-seqs 64", ["--enable-foo"])
     params: dict = {}
     inject_stack_base_params(params, coord.shared_state)
-    assert "--enable-foo" not in params["base_extra_args"]
+    next_base = LaunchLayer(
+        extra_server_args=params.get("base_extra_args", ""),
+        remove_args=params.get("base_remove_args"),
+        unset_envs=params.get("base_unset_envs"),
+        args_mode=params.get("base_args_mode", "append"),
+    )
+    _, next_round = _launched_args(
+        GridRecipe(base_yaml_path=Path(result["bench_result"]["materialized_config"]), base=next_base),
+        GridVariant(name="next"),
+        tmp_path / "next",
+    )
+    assert next_round == f"{_INHERITED_ARGS} --max-num-seqs 64"
+    assert coord.writeback.current_best_launch_config()["remove_args"] == ["--enable-foo"]
