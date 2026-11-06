@@ -30,10 +30,15 @@ These are set in the app container's environment.
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`): what a session publishes there is readable by the others (`0644`) in folders they write (`2775`), and an entry a session cannot read is named in a warning with its owner and mode. |
 | `INFERENCEX_PATH` | yes, unless `install.sh` left a checkout | A writable InferenceX checkout at the commit Hyperloom pins. Without one the session refuses to start, naming `INFERENCEX_PATH`. |
-| `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as (and then still for local measurement) | The hosting layer's directory. A hosted run launches agents isolated, and with no bubblewrap but the layer's `bin/bwrap` there, never one on `PATH` (the framework image may carry its own). Where neither that account nor that bubblewrap can isolate the specialists, and with local measurement the agent and dev sandboxes too, the run ends before anything starts, naming both reasons; a bubblewrap that gives no answer within 10 s leaves the host to start the run again. |
+| `HYPERLOOM_HOST_LAYER` | no | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own); unset, nothing the run launches uses bubblewrap. |
 
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
+
+A hosted run starts nothing unconfined in the app container, beside its credentials: its specialists run as the account
+`HYPERLOOM_SPECIALIST_USER` names, and where they would run unconfined, or that account cannot be used, the run ends
+before anything starts, naming why (exit code 1). Where no account and no bubblewrap can isolate them, it says so
+naming both; a bubblewrap that gives no answer within 10 s leaves the host to start the run again.
 
 Each leg of a run may be another host account of one group (the `dev` sandboxes too, which write the session
 directory). Before a session starts, `hyperloom-multibranch hosted run` creates and removes a file in
@@ -91,8 +96,9 @@ run in the app container, so the run needs no measurement or `dev` template, no 
 - `HYPERLOOM_GRANT_LIMITS` is optional. Without it the spec's `budget.max_hours` bounds the session; with a
   `max_runtime_sec`, the earlier of the two does. Its other totals are not read.
 - `HYPERLOOM_RUNNER_CACHE` is still required: the session stages its prompt sets there.
-- The agent and dev sandboxes run in this container, so they must be isolated as the specialists are
-  (`HYPERLOOM_HOST_LAYER` above).
+- The agent and dev sandboxes and the tests run in this container, beside the run's credentials, so the run starts only
+  where they run isolated, as the specialists must. Where they would run as the app's own account, which they do in
+  this version, it ends before anything starts, naming them (exit code 1).
 
 ## Example: clusters with an NFS share
 

@@ -25,6 +25,8 @@ from hyperloom.common import agent_isolation
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, read_host_info
+from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
+from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.hosted_run import (
     GRANT_MARGIN_SECONDS,
@@ -42,6 +44,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     run_argv,
     write_final_exit,
 )
+from hyperloom_multibranch.scheduling.launch_isolation import LOCAL_SANDBOX, LOCAL_TEST, NO_ACCOUNT, LaunchIsolation
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 
 CREATED = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
@@ -194,13 +197,18 @@ class Probes:
 
 
 @pytest.fixture
-def probes(monkeypatch: pytest.MonkeyPatch) -> Callable[..., Probes]:
-    """A process no hosted run has marked and no specialist account is configured for, whose bubblewrap probe is the
-    stand-in the test sets."""
+def unmarked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A process no hosted run has marked and no specialist account is configured for, its bubblewrap probes asked
+    afresh."""
 
     monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
     monkeypatch.setattr(bwrap, "_PROBES", {})
     monkeypatch.delenv(SPECIALIST_USER_ENV, raising=False)
+
+
+@pytest.fixture
+def probes(unmarked: None, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Probes]:
+    """An :func:`unmarked` process whose bubblewrap probe is the stand-in the test sets."""
 
     def install(answers: dict[str, tuple[str, ...]], **options: bool) -> Probes:
         stand_in = Probes(answers, **options)
@@ -211,31 +219,90 @@ def probes(monkeypatch: pytest.MonkeyPatch) -> Callable[..., Probes]:
 
 
 @pytest.fixture
-def account(probes: Callable[..., Probes], monkeypatch: pytest.MonkeyPatch) -> None:
-    """``HYPERLOOM_SPECIALIST_USER`` names an account this process can start a child as and signal."""
+def account(unmarked: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``HYPERLOOM_SPECIALIST_USER`` names an account this process can start a child as and signal: the chooser takes
+    it, and the agent runner starts every specialist as it."""
 
     monkeypatch.setenv(SPECIALIST_USER_ENV, ACCOUNT.user)
     monkeypatch.setattr(agent_isolation, "resolve_run_as", lambda name: ACCOUNT if name == ACCOUNT.user else None)
     monkeypatch.setattr(agent_isolation, "missing_launch_capabilities", list)
+    monkeypatch.setattr(launch_isolation_module, "resolve_launch_user", lambda gpu_lease: ACCOUNT)
 
 
-@pytest.mark.parametrize("measurement", ["local", "hosted"])
-def test_a_hosted_run_isolates_its_agents_with_the_layers_bubblewrap_and_no_other(
-    measurement: str, probes: Callable[..., Probes], caplog: pytest.LogCaptureFixture
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_marks_its_process_with_the_layers_bubblewrap_and_no_other(
+    probes: Callable[..., Probes], caplog: pytest.LogCaptureFixture
 ) -> None:
     probed = probes({LAYER_BWRAP: ()})
 
-    with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
+    with caplog.at_level(logging.INFO):
+        require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert caplog.records == [], "the session says how it launches its agents once, when its peers are built"
+    assert probed.asked == [], "the specialists run as the account: no bubblewrap is needed to start"
+    assert agent_isolation.isolation_required(), "every later launch of this process must be isolated"
+    later = agent_isolation.choose_sandbox_isolation()
+    assert isinstance(later, agent_isolation.BwrapIsolation) and probed.asked == [LAYER_BWRAP], (
+        "a later launch under bubblewrap uses the layer's, never one on PATH, maybe the image's own"
+    )
+
+
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_measured_in_the_grants_sandboxes_needs_only_its_specialists_isolated_here(
+    probes: Callable[..., Probes],
+) -> None:
+    probes({LAYER_BWRAP: (DENIED,)})
+
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
+
+
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_measured_here_is_refused_while_its_sandboxes_and_tests_run_unconfined_here(
+    probes: Callable[..., Probes],
+) -> None:
+    probes({LAYER_BWRAP: ()})
+
+    with pytest.raises(PeersUnavailable) as refused:
+        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert str(refused.value) == (
+        "a hosted run launches nothing unconfined beside its credentials, and here agent and dev sandboxes and tests"
+        f" run unconfined on this host ({LOCAL_SANDBOX}; {LOCAL_TEST})"
+    )
+
+
+@pytest.mark.parametrize("measurement", ["local", "hosted"])
+def test_a_hosted_run_whose_runner_would_start_its_specialists_unconfined_is_refused_though_bubblewrap_works(
+    measurement: str, probes: Callable[..., Probes]
+) -> None:
+    probes({LAYER_BWRAP: ()})
+
+    with pytest.raises(PeersUnavailable) as refused:
         require_hosted_isolation(_spec(measurement), {HOST_LAYER_ENV: str(LAYER)})
 
-    assert set(probed.asked) == {LAYER_BWRAP}, "the bubblewrap on PATH, maybe the image's own, is never probed"
-    assert agent_isolation.isolation_required(), "every later launch of this process must be isolated"
-    said = [record for record in caplog.records if record.name == agent_isolation.__name__]
-    assert [record.levelno for record in said] == [logging.INFO]
-    assert said[0].getMessage() == (
-        f"agent isolation: specialists bwrap, sandboxes bwrap (bubblewrap 0.13.1 {LAYER_BWRAP}): running them as an"
-        f" account: {SPECIALIST_USER_ENV} is not set; running them as an account: {agent_isolation.SANDBOX_ACCOUNT}"
+    assert str(refused.value).startswith("a hosted run launches nothing unconfined beside its credentials, and here ")
+    assert f"specialists{' and agent and dev sandboxes and tests' * (measurement == 'local')} run unconfined" in str(
+        refused.value
     )
+    assert NO_ACCOUNT in str(refused.value)
+
+
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_measured_here_starts_once_every_launch_here_is_isolated(
+    probes: Callable[..., Probes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probes({LAYER_BWRAP: ()})
+    asked: list[bool] = []
+
+    def isolated(*, local: bool) -> LaunchIsolation:
+        asked.append(local)
+        return LaunchIsolation(agent_isolation.ACCOUNT, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ())
+
+    monkeypatch.setattr(hosted_run_module, "launch_isolation", isolated)
+
+    require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert asked == [True]
 
 
 @pytest.mark.parametrize("measurement", ["local", "hosted"])
@@ -254,26 +321,16 @@ def test_a_hosted_run_whose_host_names_no_layer_is_refused_and_probes_no_bubblew
     assert probed.asked == []
 
 
-@pytest.mark.usefixtures("account")
-def test_agents_measured_in_the_grants_sandboxes_need_only_the_specialists_isolated(
-    probes: Callable[..., Probes],
-) -> None:
-    probes({LAYER_BWRAP: (DENIED,)})
-
-    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
-
-
-@pytest.mark.usefixtures("account")
-def test_agents_measured_here_run_their_sandboxes_here_and_need_bubblewrap_for_them(
+def test_a_hosted_run_where_no_tier_can_isolate_a_specialist_is_refused_naming_both(
     probes: Callable[..., Probes],
 ) -> None:
     probes({LAYER_BWRAP: (DENIED,)})
 
     with pytest.raises(PeersUnavailable) as refused:
-        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
+        require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
     assert str(refused.value) == (
-        f"agents cannot be isolated on this host: running them as an account: {agent_isolation.SANDBOX_ACCOUNT}; "
+        f"agents cannot be isolated on this host: running them as an account: {SPECIALIST_USER_ENV} is not set; "
         f"bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}"
     )
 
@@ -288,45 +345,35 @@ def test_a_bubblewrap_that_gives_no_answer_in_time_leaves_the_run_to_be_started_
 
 
 def _layer(tmp_path: Path, bwrap_target: str | None) -> Path:
-    """A hosting layer directory whose ``bin/bwrap`` links to ``bwrap_target`` (none when ``None``), and ``PATH`` a
-    directory whose ``bwrap`` cannot run a sandbox, as a framework image's own might be."""
+    """A hosting layer directory whose ``bin/bwrap`` links to ``bwrap_target`` (none when ``None``), and a directory
+    ``image-bin`` whose ``bwrap`` cannot run a sandbox, as a framework image's own might be."""
 
     layer = tmp_path / "layer"
     (layer / "bin").mkdir(parents=True)
     if bwrap_target is not None:
         (layer / "bin" / "bwrap").symlink_to(bwrap_target)
-    return layer
-
-
-@pytest.fixture
-def unmarked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A process no hosted run has marked, with no account configured, whose ``PATH`` holds only a ``bwrap`` that
-    fails every probe."""
-
-    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
-    monkeypatch.setattr(bwrap, "_PROBES", {})
-    monkeypatch.delenv(SPECIALIST_USER_ENV, raising=False)
     image_bin = tmp_path / "image-bin"
     image_bin.mkdir()
     (image_bin / "bwrap").write_text("#!/bin/sh\necho 'not the layer bubblewrap' >&2\nexit 1\n")
     (image_bin / "bwrap").chmod(0o755)
+    return layer
 
 
 @pytest.mark.agent_isolation
-@pytest.mark.usefixtures("unmarked")
-def test_a_hosted_run_isolates_its_agents_with_a_real_layer_bubblewrap_and_never_the_one_on_path(
+@pytest.mark.usefixtures("account")
+def test_a_hosted_runs_later_launches_use_a_real_layer_bubblewrap_and_never_the_one_on_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     real = usable_bwrap()
     layer = _layer(tmp_path, str(real.path))
     monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
 
-    require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(layer)})
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(layer)})
 
-    report = agent_isolation.agent_isolation_report()
-    assert (report.specialists, report.sandboxes, report.required) == ("bwrap", "bwrap", True)
+    later = agent_isolation.choose_sandbox_isolation()
+    assert isinstance(later, agent_isolation.BwrapIsolation), later
     version = ".".join(map(str, real.version or ()))
-    assert report.bwrap == f"{version} {layer / 'bin' / 'bwrap'}"
+    assert later.shown == f"{version} {layer / 'bin' / 'bwrap'}"
 
 
 @pytest.mark.usefixtures("unmarked")
