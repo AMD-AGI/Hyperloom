@@ -317,7 +317,8 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied, start:
         raise KeptChangeError(f"{_directory(number)}/{LAUNCH_FILE} holds no server_flags string or server_env object")
     named, dropped = _without_measurement(launch[1])
     base = start.launch
-    since = _component_launch(start.config) or (base.server_args, base.envs)
+    since_args, since_envs = _component_launch(start.config) or (base.server_args, base.envs)
+    since = since_args, _without_measurement(since_envs)[0]
     args, named = _over((base.server_args, base.envs), since, launch[0], named)
     # The flags the launch the framework resolves gives the agent, which the start commit's own arguments lack.
     resolved, runs = _flags(since[0]) - _flags(base.server_args), _flags(launch[0])
