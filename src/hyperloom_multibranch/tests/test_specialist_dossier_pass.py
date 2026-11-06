@@ -10,11 +10,12 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.measure.compile import PackageBase
 from hyperloom.sandbox import SandboxUnavailable
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import LeaseCharge
-from hyperloom_multibranch.specialist import arbor_adapter, dossier_pass
+from hyperloom_multibranch.specialist import arbor_adapter, dossier_pass, worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE
 from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_PASS, MAPPED
@@ -188,6 +189,22 @@ async def test_the_pass_is_asked_for_the_start_s_launch_with_the_resolved_flags_
 
     assert outcome.reason == MAPPED
     assert (specs[0].server_args, specs[0].remove_args) == ("--max-num-seqs 128", ("--enforce-eager",))
+
+
+async def test_a_pass_on_a_framework_whose_source_changes_cannot_land_is_told_to_map_launch_and_env_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = PackageBase("vllm", tmp_path / "site-packages" / "vllm", "vllm", "0.33.0rc1.dev711+gdd4e40142.rocm100")
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: wheel)
+    monkeypatch.setattr(worktree_module, "installed_upstream", lambda _package: None)
+
+    outcome, _toolbox, checkout, _setup = await _pass(
+        tmp_path, "mapped", root=Recipe(ROOT.base_image_digest, ROOT.launch)
+    )
+
+    assert outcome.reason == MAPPED
+    [told] = [rule for rule in json.loads((checkout / "seen-config.json").read_text())["directives"] if "wheel" in rule]
+    assert told.startswith(arbor_adapter.HOST_RULE) and "launch flags" in told
 
 
 async def test_a_mapping_branch_s_pass_leases_its_cards_as_the_branch_and_charges_them_to_it(tmp_path: Path) -> None:

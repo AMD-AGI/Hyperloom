@@ -21,7 +21,7 @@ from hyperloom.contracts.recipe import (
     RecipeDelta,
     apply,
 )
-from hyperloom.measure.compile import LocalBlobStore, kernel_rows_only
+from hyperloom.measure.compile import LocalBlobStore, PackageBase, kernel_rows_only
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
@@ -32,7 +32,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, T
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import result
-from hyperloom_multibranch.specialist import autonomous_session
+from hyperloom_multibranch.specialist import autonomous_session, worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_onboarding import OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
@@ -47,6 +47,7 @@ from hyperloom_multibranch.specialist.autonomous_session import (
 )
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, transcript_dir
+from hyperloom_multibranch.specialist.arbor_adapter import host_rules
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import (
     PreflightFailed,
@@ -55,6 +56,7 @@ from hyperloom_multibranch.specialist.runtime import (
     SessionRefused,
     SessionStart,
 )
+from hyperloom_multibranch.specialist.worktree import Upstream
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
     BRANCH,
@@ -344,6 +346,49 @@ async def test_an_agent_s_keeps_are_imported_one_at_a_time_against_the_branch_he
     notices = await rig.notices()
     assert any(note.startswith(f"{NOTICE} keep 2") and "seqs 512" in note for note in notices)
     assert notices[-1] == f"{NOTICE} the agent finished its run"
+
+
+#: vLLM as the image installs it from a wheel: its version names an abbreviated commit, and no checkout holds it.
+WHEEL = PackageBase("vllm", Path("/usr/lib/python3/site-packages/vllm"), "vllm", "0.33.0rc1.dev711+gdd4e40142.rocm100")
+
+
+@pytest.mark.parametrize(
+    ("start", "upstream", "unkept"),
+    [
+        (Recipe(ROOT.base_image_digest, ROOT.launch), None, True),
+        (
+            Recipe(ROOT.base_image_digest, ROOT.launch),
+            Upstream("https://github.com/vllm-project/vllm", "d" * 40),
+            False,
+        ),
+        (ROOT, None, False),
+    ],
+    ids=["new-component-from-a-wheel", "new-component-with-its-upstream", "component-in-the-recipe"],
+)
+async def test_an_agent_whose_source_changes_cannot_land_is_told_so_and_the_branch_log_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: Recipe, upstream: Upstream | None, unkept: bool
+) -> None:
+    specs: list[AgentSpec] = []
+    make_ready = autonomous_session.make_ready
+
+    async def recorded(source: str, spec: AgentSpec, *args):
+        specs.append(spec)
+        return await make_ready(source, spec, *args)
+
+    monkeypatch.setattr(autonomous_session, "make_ready", recorded)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: WHEEL)
+    monkeypatch.setattr(worktree_module, "installed_upstream", lambda package: upstream if package == WHEEL else None)
+    rig = await _rig(tmp_path, start=start)
+
+    await rig.session.preflight()
+    await rig.session.stop()
+
+    told = [rule for rule in host_rules(specs[0]) if "cannot be kept" in rule]
+    noted = [note for note in await rig.notices() if "only launch and env changes can" in note]
+    assert bool(specs[0].source_unkept) is bool(told) is bool(noted) is unkept
+    if unkept:
+        assert "0.33.0rc1.dev711+gdd4e40142.rocm100" in specs[0].source_unkept and "wheel" in specs[0].source_unkept
+        assert specs[0].source_unkept in noted[0]
 
 
 async def test_a_keep_after_one_the_branch_committed_imports_only_its_own_change_on_top(tmp_path: Path) -> None:
