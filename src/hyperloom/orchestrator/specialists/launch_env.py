@@ -40,7 +40,6 @@ from typing import Any, Mapping, Sequence
 
 from hyperloom_common.bwrap import NESTED_SAFE, BwrapPolicy, BwrapPolicyError, BwrapStatus, Scratch
 from hyperloom_common.fs_utils import read_bytes_nofollow, read_text_nofollow, write_text_nofollow
-from hyperloom_common.git_safety import trusted_admin_dir
 from hyperloom.common.agent_isolation import (
     AccountIsolation,
     AgentIsolation,
@@ -71,7 +70,6 @@ log = logging.getLogger(__name__)
 _GPU_IDS_ENV = "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"
 _AITER_JIT_ENV = "INFERENCE_OPTIMIZER_AITER_JIT_DIR"
 _MCP_FLAG = "--mcp-config"
-_GIT_NAME = ".git"
 _CACHE_DIR = ".cache"
 _AITER_JIT_DIR = "aiter_jit"
 
@@ -231,7 +229,9 @@ class LaunchPlace:
     ``workspace`` holds its prompt, log and CLI state; ``worktree`` is the tree it works in (``None``: the workspace);
     ``private_files`` are the app's files in the workspace another account must not read; ``readable`` the other
     paths it reads (a local model, references); ``gpu`` whether it gets the GPU devices; ``mcp_config`` the operator's
-    MCP configuration, whose stdio servers it starts.
+    MCP configuration, whose stdio servers it starts; ``git_admin`` the worktree's admin directory as its repository
+    records it (:func:`~hyperloom_common.git_safety.recorded_admin_dir`), whose repository a sandbox shows read-only
+    (``None``: no git metadata is shown; what the worktree's ``.git`` names never is).
     """
 
     workspace: Path
@@ -240,6 +240,7 @@ class LaunchPlace:
     readable: tuple[Path, ...] = ()
     gpu: bool = False
     mcp_config: str | None = None
+    git_admin: Path | None = None
 
     @property
     def cwd(self) -> Path:
@@ -620,7 +621,7 @@ def specialist_confinement(place: LaunchPlace, argv0: str, env: Mapping[str, str
     given = bedrock_files(env)
     readable = [
         *toolchain_paths(env, argv0, writable=writable),
-        *_git_dirs(place.worktree),
+        *_git_dirs(place.git_admin),
         *_readable_extras(place),
         *given,
     ]
@@ -649,17 +650,14 @@ def _readable_extras(place: LaunchPlace) -> list[Path]:
     ]
 
 
-def _git_dirs(worktree: Path | None) -> tuple[Path, ...]:
-    """What git in a linked worktree reads besides the tree: its repository's git directory, which holds the
-    worktree's admin directory, and the object stores its ``alternates`` file names. Nothing when ``worktree`` is
-    not a linked worktree the app made (:func:`~hyperloom_common.git_safety.trusted_admin_dir`)."""
-    if worktree is None or not (worktree / _GIT_NAME).is_file():
+def _git_dirs(admin: Path | None) -> tuple[Path, ...]:
+    """What git in a linked worktree whose admin directory is ``admin`` reads besides the tree: its repository's git
+    directory, which holds ``admin``, and the object stores its ``alternates`` file names. Nothing without ``admin``:
+    where the agent runs as the app's uid, the directory the worktree's ``.git`` names may be one it made, ownership
+    and all, so that file decides nothing here."""
+    if admin is None:
         return ()
-    try:
-        common = trusted_admin_dir(worktree).parent.parent
-    except OSError:
-        log.warning("specialist: %s is not a linked worktree of the app's; its git metadata is not bound", worktree)
-        return ()
+    common = admin.parent.parent
     try:
         alternates = read_text_nofollow(common / "objects" / "info" / "alternates").splitlines()
     except (OSError, UnicodeDecodeError):

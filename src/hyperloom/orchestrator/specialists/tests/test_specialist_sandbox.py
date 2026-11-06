@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common.git_safety import recorded_admin_dir, trusted_admin_dir, worktree_head
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom.common.agent_isolation import BwrapIsolation
 from hyperloom.common.deadline import Deadline
@@ -29,7 +30,14 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
 )
-from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec, wait_finished
+from hyperloom.orchestrator.specialists.tests._agent_fixtures import (
+    FORGES_ITS_GIT,
+    make_runner,
+    make_spec,
+    wait_finished,
+)
+from hyperloom.orchestrator.specialists.worktrees import _setup_worktree
+from hyperloom.orchestrator.tests._helpers import init_git_repo
 
 pytestmark = pytest.mark.agent_isolation
 
@@ -122,6 +130,31 @@ async def test_a_sandboxed_specialist_writes_its_workspace_reads_its_model_and_r
         "model": "weights-config",
     }
     assert int(reach["pids"]) < 10
+
+
+async def test_the_harvest_of_a_sandboxed_specialist_never_takes_the_git_dir_it_points_its_worktree_at(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    """In the sandbox the agent is the app's own uid and writes its worktree's ``.git``: the admin dir it makes there
+    passes every ownership check, so the app's git goes through the one the repository records."""
+    repo, workspace = tmp_path / "repo", tmp_path / "ws"
+    init_git_repo(repo, seed_file="mod.py", seed_text="old = 1\n")
+    worktree, err = _setup_worktree(repo, workspace / "worktree", "specialist-t-sandboxed")
+    assert worktree is not None, err
+    admin = recorded_admin_dir(repo, worktree)
+    head = worktree_head(worktree, admin=admin)
+    cli = _script(
+        tmp_path / "cli" / "bin" / "claude",
+        FORGES_ITS_GIT.format(workspace=workspace, worktree=worktree, objects=repo / ".git" / "objects", head=head),
+    )
+
+    result = await _dispatcher(cli).run(_spawn(workspace, worktree=worktree, worktree_base=repo, worktree_admin=admin))
+
+    assert trusted_admin_dir(worktree) == workspace / "forged.git" / "worktrees" / "w"
+    assert result.error == "" and result.done_payload["summary"] == "forged"
+    assert len(result.patches) == 1 and result.patch_roots == {result.patches[0]: str(repo)}
+    patch = Path(result.patches[0]).read_text(encoding="utf-8")
+    assert "--- a/mod.py\n+++ b/mod.py\n" in patch and "+new = 2" in patch
 
 
 async def test_a_specialist_killed_at_its_deadline_runs_its_own_stop_first(
