@@ -20,19 +20,6 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 
 log = logging.getLogger(__name__)
 
-# Transitional re-exports of the names that moved to ``inference_suite.argv``, kept until their importers
-# import it directly; the last batch of that migration (dev plan unit 1.03e) deletes this block.
-SPECULATIVE_CONFIG_FLAG = _argv.SPECULATIVE_CONFIG_FLAG
-_reserialize_json_blobs = _argv.reserialize_json_blobs
-_split_args_preserving_json = _argv.split_args_preserving_json
-compact_json_server_args = _argv.compact_json_server_args
-flag_occurrences = _argv.flag_occurrences
-last_alias_value = _argv.last_alias_value
-removal_option_names = _argv.removal_option_names
-remove_server_args = _argv.remove_server_args
-speculative_config = _argv.speculative_config
-tokenize_server_args_preserving_json = _argv.tokenize_server_args_preserving_json
-
 _UNSAFE_SERVER_ARG_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
 #: What the 2nd..nth value of a not-yet-whitelisted multi-value flag may look
 #: like: a batch size, a length, a ratio. Deliberately not a general token.

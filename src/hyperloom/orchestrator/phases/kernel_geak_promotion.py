@@ -414,7 +414,8 @@ class _GeakPromotionMixin:
         from hyperloom_common.coerce import to_str_list
         from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
         from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-        from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
+        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+        from inference_suite.argv import remove_server_args
 
         cb_now = self.shared_state.current_best
         accepted_controls = _accepted_config_controls(accepted_config)
