@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 # Manifest key on the specialist's done payload / the integrate_patch params.
 MANIFEST_KEY = "framework_switches"
 
-# Value of a boolean switch whose manifest entry omits one; a switch read as a number must declare its own.
+# Value of a switch whose manifest entry omits one: "on" for a flag; a size, count or threshold declares its own.
 DEFAULT_SWITCH_VALUE = "1"
 
 # Recognised rewrite categories, mirroring ``_framework_rewrite_evidence`` plus the two that are not host-observable
@@ -72,13 +72,13 @@ class _AcceptedSwitches(NamedTuple):
 _LITERAL_VALUE = re.compile(r"(?i)true|false|on|off|yes|no|-?\d{1,9}")
 
 
-def _declared_value(entry: dict[str, Any]) -> str | None:
-    """The entry's value as an env string, or ``None`` when it gives none."""
+def _declared_value(entry: dict[str, Any]) -> str:
+    """The entry's value as an env string, defaulting only when it gives none."""
     value = entry.get("value")
-    return None if value in (None, "") else str(value).strip()
+    return str(value).strip() if value not in (None, "") else DEFAULT_SWITCH_VALUE
 
 
-def _accept_switches(entries: list[dict[str, Any]], reserved: set[str], numeric: set[str]) -> _AcceptedSwitches:
+def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _AcceptedSwitches:
     """Keep the entries that name a usable rewrite switch, reporting why the rest were dropped."""
     problems: list[str] = []
     accepted: dict[str, dict[str, Any]] = {}
@@ -96,13 +96,9 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str], numeric:
         if upper in BLOCKED_EXTERNAL_ENV_NAMES:
             problems.append(f"dropped {name!r}: reserved benchmark variable, not a rewrite switch")
             continue
-        declared = _declared_value(entry)
-        value = DEFAULT_SWITCH_VALUE if declared is None else declared
+        value = _declared_value(entry)
         if is_secret_shaped_env_name(upper) and not _LITERAL_VALUE.fullmatch(value):
             problems.append(f"dropped {name!r}: credential-shaped name, not a rewrite switch")
-            continue
-        if declared is None and upper in numeric:
-            problems.append(f"dropped {name!r}: the patch reads it as a number, so it needs an explicit value")
             continue
         if upper in reserved:
             problems.append(
@@ -163,9 +159,8 @@ def parse_manifest(
     raw: Any,
     *,
     reserved_env: "frozenset[str] | set[str] | None" = None,
-    patch_texts: "list[str] | tuple[str, ...]" = (),
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Parse and validate a switch manifest against the diff text of the patches it gates."""
+    """Parse and validate a switch manifest."""
     entries = _manifest_entries(raw)
     if entries is None:
         return [], [f"manifest must be a list or dict, got {type(raw).__name__}"]
@@ -178,7 +173,7 @@ def parse_manifest(
         entries = entries[:MAX_SWITCHES]
 
     reserved = {str(k).strip().upper() for k in (reserved_env or set())}
-    accepted = _accept_switches(entries, reserved, _numeric_env_reads(patch_texts))
+    accepted = _accept_switches(entries, reserved)
     switches = accepted.by_name
     problems.extend(accepted.problems)
     problems.extend(_resolve_edge_references(switches))
@@ -258,24 +253,6 @@ def _read_could_default_off(tail: str) -> bool:
 def _env_reads(text: str) -> set[str]:
     """The env names ``text`` reads with no default or a falsy one."""
     return {m.group(1).upper() for m in _ENV_READ_RE.finditer(text) if _read_could_default_off(text[m.end() :])}
-
-
-# A cast ending right before an ``_ENV_READ_RE`` match: the name is read as a number, not as a flag.
-_NUMERIC_CAST_BEFORE_READ_RE = re.compile(
-    r"\b(?:int|float|ato[ilf]|strto(?:u?l|d|f)|(?:std::)?sto[ilfd])\s*\(\s*(?:os\s*\.\s*|std::)?$"
-)
-
-
-def _numeric_env_reads(patch_texts: "list[str] | tuple[str, ...]") -> set[str]:
-    """The env names the patches' added lines read as a number."""
-    return {
-        match.group(1).upper()
-        for text in patch_texts
-        for line in text.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-        for match in _ENV_READ_RE.finditer(line)
-        if _NUMERIC_CAST_BEFORE_READ_RE.search(line[: match.start()])
-    }
 
 
 def _patch_env_reads(patch_text: str) -> tuple[set[str], set[str]]:
