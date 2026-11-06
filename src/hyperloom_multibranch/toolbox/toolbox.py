@@ -587,16 +587,19 @@ class RealToolbox:
         return ClaimKey(request.parent_commit, request.intent_fingerprint or "")
 
     async def _publish(self, entry: LogEntry, accepted: TestRequest) -> None:
-        """Write the request row and hand the claim to the test; undo the acceptance if either is refused."""
+        """Write the request row and hand the claim to the test; undo the acceptance if either is refused.
+
+        A lost claim comes after the request row is written, so the request ends as withdrawn, an outcome logged like any
+        other: the entry waits in no queue, and a withdrawal the blackboard refuses now is written by the next tick or the
+        next start, so the row never reads as in flight for good.
+        """
 
         try:
             await self._sink.write_request(replace(accepted, priority=entry.priority))
             if self._claims is not None and accepted.intent_fingerprint is not None:
                 await self._claims.attach_request(self._key(accepted), entry.request_id, ttl_seconds=self._ttl)
         except ClaimLost as error:
-            # Aborted before the withdrawal is written: a write that fails must not leave the entry waiting in no queue.
-            self._log.abort(entry.request_id)
-            await self._sink.write_withdrawal(Withdrawal(entry.request_id, f"claim lost: {error}"))
+            await self._record_and_write(entry, {"withdrawal": f"claim lost: {error}"})
             raise RequestRejected(f"the claim of this request is not held: {error}") from error
         except BaseException:
             self._log.abort(entry.request_id)
@@ -623,7 +626,8 @@ class RealToolbox:
             prepared = await self._acceptance.prepare(request, replay=True)
             await self._publish(entry, request)
         except RequestRejected as error:
-            await self._record_and_write(entry, {"withdrawal": f"not recoverable: {error}"})
+            if entry.outcome is None:  # a lost claim has recorded its withdrawal already
+                await self._record_and_write(entry, {"withdrawal": f"not recoverable: {error}"})
             return
         self._enqueue(entry, request, prepared.environment, self._builds.plan(request, prepared.environment))
 
