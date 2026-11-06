@@ -78,7 +78,7 @@ def test_a_derived_confinement_runs_the_program_and_shows_no_login_of_the_home(t
         "hf_model": _write(hf / "hub/model.txt", "weights"),
     }
     env = {"HOME": str(home), "PATH": f"{home / '.local/bin'}:/usr/bin:/bin", "HF_HOME": str(hf)}
-    readable = toolchain_paths(env, "tool")
+    readable = toolchain_paths(env, "tool", writable=(work,))
     masked = credential_paths(env, app_home=home, allowed=(*readable, work))
 
     seen = _run(isolation, Confinement(writable=(work,), readable=readable, masked=masked), env, paths, work)
@@ -107,7 +107,7 @@ def test_a_credential_reached_through_a_linked_directory_is_masked_at_both_paths
     }
     link.symlink_to(real)
     env = {"PATH": "/usr/bin:/bin"}
-    readable = (*toolchain_paths(env, sys.executable), link / "data")
+    readable = (*toolchain_paths(env, sys.executable, writable=(work,)), link / "data")
 
     seen = _run(
         isolation, Confinement(writable=(work,), readable=readable, masked=(real / "data/secret",)), env, paths, work

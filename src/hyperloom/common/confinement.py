@@ -13,10 +13,15 @@ credential inside a bound tree. The masked paths come from configuration, never 
 location, Hugging Face's login files, and the files the app registers in :data:`PRIVATE_PATHS` as it creates them. So
 nothing broad under a credential location is bound because a program lives there: :func:`toolchain_paths` binds a
 program's own directory, and its parent only away from those locations.
+
+Deriving the toolchain runs nothing an agent could have written: the child's interpreter is asked where it imports
+from only when it lies outside the agent's writable trees, and with no site processing, ``PYTHON*`` variable or
+startup file; its ``.pth`` files and editable finders are read as data (:func:`interpreter_search_path`).
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import pwd
@@ -305,40 +310,124 @@ def credential_paths(
     return tuple(masks)
 
 
+#: Run by the child's interpreter with no site processing and no ``PYTHON*`` variable (``-I -S``), so no ``.pth``
+#: line, ``sitecustomize`` or startup file runs: its import path without site directories, and its site directories
+#: (a virtual environment's too, which only site processing would add), whose ``.pth`` files are then read as data.
+_SEARCH_PATH = r"""
+import json, os, site, sys
+bin_dir = os.path.dirname(os.path.abspath(sys.executable))
+prefixes = [sys.prefix, sys.exec_prefix]
+if any(os.path.isfile(os.path.join(d, "pyvenv.cfg")) for d in (bin_dir, os.path.dirname(bin_dir))):
+    prefixes.insert(0, os.path.dirname(bin_dir))
+print(json.dumps({"path": sys.path, "site": site.getsitepackages(prefixes)}))
+"""
+#: The module a setuptools editable install's ``.pth`` file imports, whose ``MAPPING`` names the source trees.
+_EDITABLE_FINDERS = "__editable___*_finder.py"
+
+
 @lru_cache(maxsize=16)
-def _search_path(python: str, environ: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
-    script = (
-        "import json, sys\n"
-        "found = list(sys.path)\n"
-        "for name, module in list(sys.modules.items()):\n"
-        "    if name.startswith('__editable__') and isinstance(getattr(module, 'MAPPING', None), dict):\n"
-        "        found.extend(str(p) for p in module.MAPPING.values())\n"
-        "print(json.dumps(found))\n"
-    )
+def _search_path(python: str, library_path: str | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``python``'s import path and site directories (:data:`_SEARCH_PATH`); empty when it does not answer."""
+    env = {} if library_path is None else {"LD_LIBRARY_PATH": library_path}
+    command = [python, "-I", "-S", "-c", _SEARCH_PATH]
     try:
-        done = subprocess.run(
-            [python, "-c", script], env=dict(environ), capture_output=True, text=True, timeout=60, check=True, cwd="/"
-        )
+        done = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60, check=True, cwd="/")
         found = json.loads(done.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError):
+        path, sites = found["path"], found["site"]
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError):
+        return (), ()
+    return _absolute_strings(path), _absolute_strings(sites)
+
+
+def _absolute_strings(values: object) -> tuple[str, ...]:
+    if not isinstance(values, list):
         return ()
-    return tuple(str(entry) for entry in found if isinstance(entry, str) and os.path.isabs(entry))
+    return tuple(entry for entry in values if isinstance(entry, str) and os.path.isabs(entry))
 
 
-def interpreter_search_path(environ: Mapping[str, str]) -> tuple[Path, ...]:
-    """Where the child's ``python3`` (the first on its ``PATH``) imports from: its ``sys.path`` under the child's
-    environment, plus the source trees of setuptools-style editable installs, which no ``sys.path`` entry names.
-    Computed once per interpreter and environment; empty when there is no such interpreter or it does not answer."""
-    python = _which("python3", environ)
+def _pth_entries(site_dir: Path) -> Iterator[Path]:
+    """The directories the ``.pth`` files of ``site_dir`` add to the import path, read as site processing reads them
+    (a line that is not blank, a comment or an ``import`` statement is a path, relative to ``site_dir``), never run."""
+    for pth in sorted(site_dir.glob("*.pth")):
+        try:
+            lines = pth.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if line.strip() and not line.startswith(("#", "import ", "import\t")):
+                entry = Path(os.path.normpath(site_dir / line.rstrip()))
+                if entry.exists():
+                    yield entry
+
+
+def _mapping(node: ast.stmt) -> object:
+    """The literal assigned to ``MAPPING`` by ``node``; ``None`` for any other statement."""
+    target = node.target if isinstance(node, ast.AnnAssign) else None
+    if isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target = node.targets[0]
+    value = getattr(node, "value", None)
+    if not (isinstance(target, ast.Name) and target.id == "MAPPING" and value is not None):
+        return None
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _editable_sources(site_dir: Path) -> Iterator[Path]:
+    """The source trees setuptools editable installs in ``site_dir`` map, read from their finders' ``MAPPING``
+    literal, never imported."""
+    for finder in sorted(site_dir.glob(_EDITABLE_FINDERS)):
+        try:
+            tree = ast.parse(finder.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+            continue
+        for node in tree.body:
+            mapping = _mapping(node)
+            if isinstance(mapping, dict):
+                yield from (Path(path) for path in mapping.values() if isinstance(path, str) and os.path.isabs(path))
+
+
+def _within(path: str | os.PathLike[str], roots: tuple[Path, ...]) -> bool:
+    """Whether ``path``, resolved, is at or below one of ``roots`` (resolved paths)."""
+    real = _real(path)
+    return any(_at_or_under(real, root) for root in roots)
+
+
+def interpreter_search_path(environ: Mapping[str, str], *, writable: Iterable[Path]) -> tuple[Path, ...]:
+    """Where the child's ``python3`` imports from: its import path and site directories, the directories their
+    ``.pth`` files add, and the source trees of setuptools-style editable installs, which no import path entry names.
+    Not ``PYTHONPATH`` (:func:`toolchain_paths` adds it) nor the user site directory (an agent's home is its own).
+
+    Nothing an agent could have written runs here, as the app: ``writable`` names the trees the agent writes, and
+    the interpreter is the first ``python3`` on the child's ``PATH`` outside them, run with no site processing,
+    ``PYTHON*`` variable or startup file and with only the ``LD_LIBRARY_PATH`` entries outside them; a site directory
+    inside them is not read. The interpreter is asked once per path and library path; empty when there is no such
+    interpreter or it does not answer."""
+    agent = tuple(dict.fromkeys(_real(path) for path in writable))
+    python = _which("python3", environ, outside=agent)
     if python is None:
         return ()
-    return tuple(Path(entry) for entry in _search_path(python, tuple(sorted(environ.items()))))
+    libraries = [
+        str(entry) for entry in _absolute_entries(environ.get("LD_LIBRARY_PATH", "")) if not _within(entry, agent)
+    ]
+    path, sites = _search_path(python, os.pathsep.join(libraries) or None)
+    found: dict[Path, None] = dict.fromkeys(Path(entry) for entry in (*path, *sites))
+    for site_dir in map(Path, sites):
+        if site_dir.is_dir() and not _within(site_dir, agent):
+            found.update(dict.fromkeys(_pth_entries(site_dir)))
+            found.update(dict.fromkeys(_editable_sources(site_dir)))
+    return tuple(found)
 
 
-def _which(program: str, environ: Mapping[str, str]) -> str | None:
-    """``program`` on the child's ``PATH`` (never the working directory); ``None`` when it is not there."""
-    search = os.pathsep.join(entry for entry in environ.get("PATH", "").split(os.pathsep) if os.path.isabs(entry))
-    return shutil.which(program, path=search) if search else None
+def _which(program: str, environ: Mapping[str, str], *, outside: tuple[Path, ...] = ()) -> str | None:
+    """``program`` on the child's ``PATH`` (never the working directory): the first that does not resolve into one of
+    ``outside`` (resolved paths); ``None`` when there is none."""
+    for entry in environ.get("PATH", "").split(os.pathsep):
+        found = shutil.which(program, path=entry) if os.path.isabs(entry) else None
+        if found is not None and not _within(found, outside):
+            return found
+    return None
 
 
 def _credential_roots(environ: Mapping[str, str]) -> tuple[Path, ...]:
@@ -377,16 +466,19 @@ def _resolver() -> Iterator[Path]:
             yield target
 
 
-def toolchain_paths(environ: Mapping[str, str], argv0: str) -> tuple[Path, ...]:
+def toolchain_paths(environ: Mapping[str, str], argv0: str, *, writable: Iterable[Path]) -> tuple[Path, ...]:
     """What a child needs to read to run ``argv0`` under ``environ``: the system roots, this interpreter's prefixes,
-    the child's interpreter's import path, every entry of its search-path variables, the program's directory (and
-    parent, away from credential locations), its CA bundles, the model and benchmark trees it names, and the
-    resolver configuration. Not ``/proc`` (the sandbox mounts its own) nor ``/sys`` (:attr:`Confinement.sys_paths`)."""
+    the child's interpreter's import path (:func:`interpreter_search_path`), every entry of its search-path variables,
+    the program's directory (and parent, away from credential locations), its CA bundles, the model and benchmark
+    trees it names, and the resolver configuration. Not ``/proc`` (the sandbox mounts its own), ``/sys``
+    (:attr:`Confinement.sys_paths`), nor what lies in the trees the child writes (``writable``): those show it already,
+    and a read-only bind there would take the child's own files from it."""
+    agent = tuple(dict.fromkeys(_real(path) for path in writable))
     found: list[Path] = [Path(root) for root in SYSTEM_ROOTS]
     found.extend(Path(root) for root in interpreter_roots())
-    found.extend(interpreter_search_path(environ))
+    found.extend(interpreter_search_path(environ, writable=agent))
     for name in (*SEARCH_PATH_VARIABLES, *CA_VARIABLES, *DATA_VARIABLES):
         found.extend(_absolute_entries(environ.get(name, "")))
     found.extend(_program_dirs(argv0, environ))
     found.extend(_resolver())
-    return tuple(dict.fromkeys(path for path in found if path != _ROOT))
+    return tuple(dict.fromkeys(path for path in found if path != _ROOT and not _within(path, agent)))
