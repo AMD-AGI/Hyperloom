@@ -2203,14 +2203,24 @@ async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(sess
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ending", ["cancelled", "succeeded"])
-@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT"])
-async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_unbooked(session_dir, ending, phase):
-    """A cancelled initial analysis, or one that ended before a restart booked it, must not hold the phase.
+@pytest.mark.parametrize(
+    ("phase", "ending", "asks_again"),
+    [
+        ("PRELUDE", "cancelled", True),
+        ("PRELUDE", "succeeded", False),
+        ("ENABLEMENT", "cancelled", False),
+        ("ENABLEMENT", "succeeded", False),
+    ],
+)
+async def test_a_phase_settles_the_initial_analysis_gate_when_its_task_ended_unbooked(
+    session_dir, phase, ending, asks_again
+):
+    """An initial analysis that ended without being booked must not hold the phase on the task that ended.
 
     Neither path reaches the writeback that clears the marker: the dispatcher returns early for a
     cancelled result, and a restart between the runner's terminal write and booking loses the outcome.
-    Both phases that hold for the marker have to release it.
+    Both phases release the marker, except that PRELUDE asks again for an analysis that was cancelled
+    before it ran and holds on that one instead.
     """
     from hyperloom.orchestrator.phases import machine_state as phase_state
 
@@ -2231,7 +2241,12 @@ async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_un
         await c.tasks.transition(task.task_id, ending)
         assert phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
         await c.phase_machine.advance_phase_if_needed()
-        assert c.shared_state.auto_roofline_pending_task_id == ""
+        marker = c.shared_state.auto_roofline_pending_task_id
+        if asks_again:
+            assert marker not in ("", task.task_id)
+            assert (await c.tasks.get(marker)).state == "queued"
+        else:
+            assert marker == ""
     finally:
         await c.stop()
 

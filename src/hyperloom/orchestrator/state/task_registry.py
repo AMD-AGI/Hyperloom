@@ -327,6 +327,30 @@ def create_in_cursor(cur: Any, spec: TaskSpec) -> tuple[Task, bool]:
     return _insert_queued_task(cur, spec), False
 
 
+#: Keys :func:`create_on_free_key` tries: the spec's own, then ``-retry1`` onwards.
+RETRY_KEY_ATTEMPTS: int = 6
+
+
+async def create_on_free_key(tasks: Any, spec: TaskSpec, *, spent: Callable[[Task], bool]) -> tuple[Task, bool] | None:
+    """Create ``spec``, stepping its key to ``<key>-retry<n>`` past every existing task ``spent`` accepts.
+
+    Args:
+        tasks: The registry the task is created in.
+        spec: The task to create under its own key first.
+        spent: Whether an existing task leaves its key to the next attempt.
+
+    Returns:
+        ``(task, was_existing)`` for the first key not spent, or ``None`` once
+        :data:`RETRY_KEY_ATTEMPTS` keys are.
+    """
+    for attempt in range(RETRY_KEY_ATTEMPTS):
+        key = spec.idempotency_key if attempt == 0 else f"{spec.idempotency_key}-retry{attempt}"
+        task, was_existing = await tasks.create_or_return_existing(replace(spec, idempotency_key=key))
+        if not (was_existing and spent(task)):
+            return task, was_existing
+    return None
+
+
 def _is_progress_note(entry: Any) -> bool:
     """Report whether a ``history`` entry is a progress note."""
     return isinstance(entry, dict) and "progress" in entry
@@ -646,6 +670,7 @@ class TaskRegistry:
 
 __all__ = [
     "IllegalTransition",
+    "RETRY_KEY_ATTEMPTS",
     "TASK_STATES",
     "TERMINAL_STATES",
     "Task",
@@ -654,4 +679,5 @@ __all__ = [
     "TaskSpec",
     "TerminalTaskReuse",
     "create_in_cursor",
+    "create_on_free_key",
 ]

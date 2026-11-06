@@ -27,7 +27,6 @@ from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator, HeldLeases
-from hyperloom.orchestrator.bringup.reconcile import ReconcileReport
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 
@@ -57,7 +56,7 @@ def _dispatcher(tmp_path):
         gpu_specialist_pool=stub_gpu_pool(),
         _stop=stop,
         stop_requested=stop.is_set,
-        reconciler=SimpleNamespace(last_report=ReconcileReport()),
+        reconciler=SimpleNamespace(take_failed_tasks=list),
         writeback=writeback_ns,
         recipe_journal=SimpleNamespace(fact_write_hook=AsyncMock()),
         specialist_dispatch=SimpleNamespace(

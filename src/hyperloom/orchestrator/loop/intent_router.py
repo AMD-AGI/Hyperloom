@@ -37,14 +37,10 @@ from ..policy.gate import (
     PRUNE_BRANCH_SCOPE_QUEUED,
 )
 from ..specialists.wall_budget import grant_wall_budget_extension
-from ..state.shared_state import (
-    ESCALATE_HINT_SKIP_TO_KERNEL,
-    inject_stack_base_params,
-    is_valid_escalate_hint,
-)
+from ..state.shared_state import inject_stack_base_params
 from ..state.analysis_failures import remember_trace_failure
 from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
-from ..state.task_registry import IllegalTransition, TaskNotFound, TaskSpec
+from ..state.task_registry import TERMINAL_STATES, IllegalTransition, TaskNotFound, TaskSpec, create_on_free_key
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_INTENT,
     EVENT_PROPOSAL,
@@ -62,6 +58,7 @@ from .kernel_request import (
     remembered_outcome,
     run_kernel_handler,
 )
+from ._escalate_hint import escalate_hint_denial
 from .message_delivery import publish_send_message
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
@@ -849,65 +846,45 @@ class IntentRouter(CoordinatorCollaborator):
 
         Returns None once a live twin, or an exhausted retry budget, policy-denied the delegate.
         """
-        terminal_states = {
-            "succeeded",
-            "failed",
-            "cancelled",
-        }
-        task = None
-        for attempt in range(6):
-            idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
-            lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(request.action_name)
-            if request.action_name == "specialist":
-                from ..specialists.profile import requires_gpu, specialist_lanes
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(request.action_name)
+        if request.action_name == "specialist":
+            from ..specialists.profile import requires_gpu, specialist_lanes
 
-                lanes = tuple(specialist_lanes(request.params, list(lanes)))
-                if requires_gpu(request.params):
-                    ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=request.params)
-            task, was_existing = await self.tasks.create_or_return_existing(
-                TaskSpec(
-                    kind=request.action_name,
-                    params=request.params,
-                    idempotency_key=idempotency_key,
-                    requires_lanes=lanes,
-                    lease_ttl_sec=ttl,
-                    dispatch_class="llm",
-                )
+            lanes = tuple(specialist_lanes(request.params, list(lanes)))
+            if requires_gpu(request.params):
+                ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=request.params)
+        created = await create_on_free_key(
+            self.tasks,
+            TaskSpec(
+                kind=request.action_name,
+                params=request.params,
+                idempotency_key=str(raw_key),
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="llm",
+            ),
+            spent=lambda twin: twin.state in TERMINAL_STATES,
+        )
+        if created is not None and not created[1]:
+            return created[0]
+        action = f"delegate{{action_name={request.action_name!r}}} duplicate"
+        if created is None:
+            denied = PolicyDenied(
+                f"{action} idempotency_key exhausted retries for {raw_key!r}",
+                rule="duplicate_idempotency_key",
+                hint=f"every retry key of {raw_key!r} names a terminated task; send new content or a new key",
             )
-            if not was_existing:
-                return task
-            if task.state not in terminal_states:
-                hint = (
+        else:
+            task = created[0]
+            denied = PolicyDenied(
+                f"{action} idempotency_key={task.idempotency_key!r}",
+                rule="duplicate_idempotency_key_running",
+                hint=(
                     f"task {task.task_id} is still {task.state!r}; wait for the "
                     f"delegated_result event instead of re-emitting the same key."
-                )
-                await self.record_policy_denied(
-                    request.source,
-                    request.intent,
-                    PolicyDenied(
-                        f"delegate{{action_name={request.action_name!r}}} duplicate "
-                        f"idempotency_key={idempotency_key!r}",
-                        rule="duplicate_idempotency_key_running",
-                        hint=hint,
-                    ),
-                    action_name=request.action_name,
-                )
-                return None
-        hint = (
-            f"task {task.task_id if task else '?'} terminated and could not "
-            f"allocate a fresh idempotency_key after 5 retries"
-        )
-        await self.record_policy_denied(
-            request.source,
-            request.intent,
-            PolicyDenied(
-                f"delegate{{action_name={request.action_name!r}}} duplicate "
-                f"idempotency_key exhausted retries for {raw_key!r}",
-                rule="duplicate_idempotency_key",
-                hint=hint,
-            ),
-            action_name=request.action_name,
-        )
+                ),
+            )
+        await self.record_policy_denied(request.source, request.intent, denied, action_name=request.action_name)
         return None
 
     async def _explore_grid_covered(
@@ -1242,7 +1219,7 @@ class IntentRouter(CoordinatorCollaborator):
         )
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Broadcast strategy_change, then defer a closed-vocab hint; drop or deny the rest."""
+        """Broadcast strategy_change, then defer a hint the current phase reads; deny the rest to the sender."""
         payload = dict(intent.payload or {})
         # Always emit the broadcast first.
         await self.bus.append_and_seq(
@@ -1256,20 +1233,9 @@ class IntentRouter(CoordinatorCollaborator):
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint:
             return
-        if not is_valid_escalate_hint(hint):
-            denied = PolicyDenied(
-                f"escalate_strategy_change hint {hint!r} is not accepted",
-                rule="escalate_hint_not_in_vocab",
-                hint="Request a phase advance such as skip_to_kernel; the run closes itself.",
-            )
+        denied = escalate_hint_denial(hint, str(self.shared_state.phase or "").strip().upper())
+        if denied is not None:
             await self.record_policy_denied(source, intent, denied)
-            return
-        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT
-
-        phase = str(self.shared_state.phase or "").strip().upper()
-        if hint == ESCALATE_HINT_SKIP_TO_KERNEL and phase != PHASE_FRAMEWORK_AGENT:
-            # Only the FRAMEWORK_AGENT exit reads it; left pending, it would end that phase on arrival.
-            log.info("escalate_strategy_change: dropped %r emitted in phase %s", hint, phase or "<none>")
             return
         # Deferred: the next compute_next_phase acts on the hint.
         self.shared_state.set_pending_escalate_hint(hint)
