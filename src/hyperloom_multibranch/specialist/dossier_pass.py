@@ -19,7 +19,6 @@ why (:class:`DossierOutcome`), and the session falls back to the generic map.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -49,6 +48,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     EXIT_REFUSED,
     MAP_FILE,
     MAPPED,
+    exit_reason,
     mapped,
     pass_dossier,
     refused_reasons,
@@ -193,18 +193,9 @@ async def _ended(ready: ReadyAgent, start: DossierStart, setup: DossierSetup) ->
         why = refused_reasons(checkout / ready.manifest.snapshots_refused) or tail(await process.output())
         return DossierOutcome(None, None, f"it refused its config: {why}")
     if process.returncode == 0:
-        said = _exit_reason(checkout / ready.manifest.snapshots_exit)
+        said = exit_reason(checkout / ready.manifest.snapshots_exit)
         return DossierOutcome(None, dossier, f"it ended without a map: {said}")
     return DossierOutcome(None, dossier, f"it exited {process.returncode}: {tail(await process.output())}")
-
-
-def _exit_reason(path: Path) -> str:
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return "it wrote no exit reason"
-    reason = document.get("reason") if isinstance(document, dict) else None
-    return reason if isinstance(reason, str) and reason else "its exit file names no reason"
 
 
 __all__ = [
