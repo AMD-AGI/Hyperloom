@@ -23,6 +23,7 @@ from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _FIX_ACCURACY_UNAVAILABLE, _derive_lane, _preflight_missing_targets
 from ._patch_artifacts import _ArtifactSpec, _resolve_artifact_specs, _validate_aiter_gemm_artifacts
 from ._patch_sources import _read_patch_texts, _resolve_patch_paths, resolved_explicit_root
+from ._launch_restatement import handed_server_args
 from ._proposal_identity import controls_of, keeps_effective_args, normalize_proposal
 from .magpie_agentx import load_benchmark
 
@@ -355,9 +356,10 @@ def _perf_revert(
 
 
 def _kept_launch(controls: dict[str, Any], bench_result: dict[str, Any]) -> dict[str, Any]:
-    """The round's own launch controls, and the argv its bench launched where the KEEP persists as a snapshot of it.
+    """The round's own launch controls, and the args its bench handed the launcher where the KEEP persists them.
 
-    The argv is the grid runner's own composition, the recipe's inherited args included, as an explore KEEP records it.
+    Those are Hyperloom's own composition, the recipe's inherited args included, as an explore KEEP records it; a
+    native launch's resolved argv is not, since it spells the options Magpie protects.
     """
     if not controls:
         return {}
@@ -370,7 +372,7 @@ def _kept_launch(controls: dict[str, Any], bench_result: dict[str, Any]) -> dict
     )
     if not persists:
         return dict(controls)
-    launched = str(bench_result["launch_evidence"]["requested_server_args"])
+    launched = handed_server_args(Path(bench_result["launch_evidence"]["materialized_config_path"]))
     return {**controls, "args_mode": "replace", "effective_extra_server_args": launched}
 
 
