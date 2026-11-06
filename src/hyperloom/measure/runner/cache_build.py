@@ -615,7 +615,7 @@ def _publish(made: Path, final: Path) -> None:
     try:
         os.mkdir(pending, _OWN_DIR_MODE, dir_fd=root)
         try:
-            _copy_tree(made, _open_new_directory(root, pending), last=MANIFEST_NAME)
+            _copy_tree(made, root, pending, last=MANIFEST_NAME)
             os.rename(pending, final.name, src_dir_fd=root, dst_dir_fd=root)
         except BaseException:
             shutil.rmtree(final.parent / pending, ignore_errors=True)
@@ -630,13 +630,15 @@ def _open_new_directory(parent: int, name: str) -> int:
     return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
 
 
-def _copy_tree(source: Path, directory: int, last: str = "") -> None:
-    """Fill ``directory``, a descriptor that this call closes, with a copy of what is in ``source`` (``last`` after the
-    rest), then give it ``source``'s mode without the group's and others' write (:func:`_publish`).
+def _copy_tree(source: Path, parent: int, name: str, last: str = "") -> None:
+    """Fill the directory ``name`` that the builder has just made in the directory open as ``parent``
+    (:func:`_open_new_directory`) with a copy of what is in ``source`` (``last`` after the rest), then give it
+    ``source``'s mode without the group's and others' write (:func:`_publish`).
 
     Raises:
         CacheBuildError: For something in ``source`` that is not a directory, a regular file or a link.
     """
+    directory = _open_new_directory(parent, name)
     try:
         for entry in sorted(os.scandir(source), key=lambda item: (item.name == last, item.name)):
             info = entry.stat(follow_symlinks=False)
@@ -644,7 +646,7 @@ def _copy_tree(source: Path, directory: int, last: str = "") -> None:
                 os.symlink(os.readlink(entry.path), entry.name, dir_fd=directory)
             elif stat.S_ISDIR(info.st_mode):
                 os.mkdir(entry.name, _OWN_DIR_MODE, dir_fd=directory)
-                _copy_tree(Path(entry.path), _open_new_directory(directory, entry.name))
+                _copy_tree(Path(entry.path), directory, entry.name)
             elif stat.S_ISREG(info.st_mode):
                 _copy_file(Path(entry.path), directory, entry.name, info.st_mode)
             else:
@@ -657,10 +659,16 @@ def _copy_tree(source: Path, directory: int, last: str = "") -> None:
 def _copy_file(source: Path, directory: int, name: str, mode: int) -> None:
     """Copy the file ``source`` as the new file ``name`` of ``directory``, with ``mode`` but for the group's and others'
     write."""
-    with open(os.open(name, _NEW_FILE_FLAGS, _OWN_FILE_MODE, dir_fd=directory), "wb") as sink:
+    sink = os.open(name, _NEW_FILE_FLAGS, _OWN_FILE_MODE, dir_fd=directory)
+    try:
         with source.open("rb") as content:
-            shutil.copyfileobj(content, sink, _COPY_CHUNK)
-        os.fchmod(sink.fileno(), stat.S_IMODE(mode) & _ENTRY_BITS)
+            for chunk in iter(lambda: content.read(_COPY_CHUNK), b""):
+                written = memoryview(chunk)
+                while written:
+                    written = written[os.write(sink, written) :]
+        os.fchmod(sink, stat.S_IMODE(mode) & _ENTRY_BITS)
+    finally:
+        os.close(sink)
 
 
 def _source_differences(archive: FileDigest, made: Path, manifest: Manifest) -> list[str]:
