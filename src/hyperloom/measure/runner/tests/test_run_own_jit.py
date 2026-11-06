@@ -66,6 +66,8 @@ class _JitServer:
         grid = local.run_grid
 
         async def serve(**kwargs):
+            if kwargs["launch"].server_already_ready:  # the server an earlier round booted builds nothing
+                return await grid(**kwargs)
             jit = Path(os.environ.get("AITER_JIT_DIR") or self.image_jit)
             self.jit_dir = jit
             for module in WANTED:

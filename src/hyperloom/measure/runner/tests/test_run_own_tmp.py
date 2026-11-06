@@ -37,6 +37,8 @@ def test_each_run_of_a_test_writes_below_a_temporary_directory_of_its_own_remove
         grid = local.run_grid
 
         async def serve(**grid_kwargs):
+            if grid_kwargs["launch"].server_already_ready:  # aiter merges its tables as the server boots
+                return await grid(**grid_kwargs)
             own = environ.get("TMPDIR", "")
             if own:  # what aiter would do; never into the machine's own /tmp
                 (Path(own) / MERGED).parent.mkdir(parents=True)

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A graded test evaluates once, in its warmup round, and the result the rule gate reads is made of that evaluation.
+"""A graded test evaluates once, in a round of its own after its measured bench, and the result the rule gate reads is
+made of that evaluation.
 
 The real local backend runs the test with ``run_grid`` replaced by a stand-in that lays out each round's directory
-the way the old flow does (a report in every round, lm-eval's files where the round evaluated); the toolbox then turns
-the outcome into the rounds and accuracy of its result.
+the way the old flow does (a report in every round that benches, lm-eval's files where the round evaluated); the toolbox
+then turns the outcome into the rounds and accuracy of its result.
 """
 
 from __future__ import annotations
@@ -32,7 +33,8 @@ FLEXIBLE = "exact_match,flexible-extract"
 
 
 class _Grid:
-    """``run_grid``: every call is one round with a report in its directory, and lm-eval's files when it evaluates."""
+    """``run_grid``: every call is one round, with a report in its directory when it benches and lm-eval's files when it
+    evaluates."""
 
     def __init__(self, root: Path, score: float, throughputs: dict[str, float]) -> None:
         self.root, self.score, self.throughputs = root, score, throughputs
@@ -46,11 +48,12 @@ class _Grid:
         envs = {**config["benchmark"]["envs"], **(kwargs["recipe"].base.extra_envs or {})}
         workspace = self.root / f"variant_00_{name}" / "benchmark_fake_1"
         workspace.mkdir(parents=True)
-        report = {
-            "success": True,
-            "throughput": {"output_throughput": self.throughputs[name], "completed_requests": 8, "num_prompts": 8},
-        }
-        (workspace / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")
+        if not is_truthy(envs.get("EVAL_ONLY"), default=False):
+            report = {
+                "success": True,
+                "throughput": {"output_throughput": self.throughputs[name], "completed_requests": 8, "num_prompts": 8},
+            }
+            (workspace / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")
         if is_truthy(envs["RUN_EVAL"], default=True):
             self.evaluated.append(name)
             results = workspace / "eval_output"
@@ -96,28 +99,28 @@ def test_a_graded_test_with_a_warmup_runs_one_evaluation_and_its_score_is_the_re
 
     outcome, (rounds, accuracy) = _result_of(call, point)
 
-    assert grid.evaluated == ["warmup"], "one evaluation, in the warmup round, none after the measured bench"
+    assert grid.evaluated == ["eval"], "one evaluation, after the measured bench, none before it"
     assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
     assert [(r.phase, r.metrics["output_throughput"]) for r in rounds] == [("warmup", 1111.0), ("measure", 2222.0)]
-    assert [r.phase for r in outcome.rounds] == ["warmup", "accuracy", "measure"]
+    assert [r.phase for r in outcome.rounds] == ["warmup", "measure", "accuracy"]
 
 
 def test_the_warmup_round_draws_other_prompts_than_the_measured_round(tmp_path, monkeypatch):
-    """With one seed, the measured round reused the warmup's prompts from the prefix cache whenever the evaluation between
-    them did not evict them, and read high at high concurrency."""
+    """With one seed, the measured round reused the warmup's prompts from the prefix cache, and read high at high
+    concurrency."""
     grid, call, point = _graded(tmp_path, monkeypatch, warmup_rounds=1)
 
     _result_of(call, point)
 
-    assert grid.reseeded == {"warmup": True, "test": False}
+    assert grid.reseeded == {"warmup": True, "test": False, "eval": False}
 
 
-def test_a_graded_test_without_a_warmup_still_evaluates_in_its_one_round(tmp_path, monkeypatch):
+def test_a_graded_test_without_a_warmup_still_evaluates_after_its_measured_bench(tmp_path, monkeypatch):
     grid, call, point = _graded(tmp_path, monkeypatch, warmup_rounds=0)
     grid.throughputs["test"] = 3333.0
 
     _, (rounds, accuracy) = _result_of(call, point)
 
-    assert grid.evaluated == ["test"]
+    assert grid.evaluated == ["eval"]
     assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
     assert [(r.phase, r.metrics["output_throughput"]) for r in rounds] == [("measure", 3333.0)]
