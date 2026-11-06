@@ -345,10 +345,9 @@ unmatched_ignore_imports_alerting = none
 [importlinter:contract:is-public-interface]
 name = hyperloom uses inference_suite only through its public modules
 type = forbidden
-# The public surface is the package root, contracts, argv, golden and server_log; frameworks joins
-# it once Hyperloom's framework registry derives from it. Every other module can move without
-# breaking an importer. Plain names, not `.**`: a forbidden module covers its descendants, and
-# `.**` would leave the package module itself importable.
+# The public surface is the package root, contracts, argv, golden, server_log and frameworks.
+# Every other module can move without breaking an importer. Plain names, not `.**`: a forbidden
+# module covers its descendants, and `.**` would leave the package module itself importable.
 source_modules =
     hyperloom
     hyperloom_multibranch
@@ -359,7 +358,6 @@ forbidden_modules =
     inference_suite.eval
     inference_suite.framework_probe
     inference_suite.framework_version
-    inference_suite.frameworks
     inference_suite.load
     inference_suite.parser_check
     inference_suite.pins
