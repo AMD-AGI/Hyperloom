@@ -7,8 +7,9 @@
 :class:`FakeExecutor`. Acceptance, the queue (priorities, per-branch K, global limit, backpressure), the retry rules,
 quarantine, the submit log and the blackboard writes are the real toolbox's own code, so a test written
 against the fake exercises the semantics the hosted executor will have. Only one attempt is faked: the fate drawn for
-it, the node it lands on and the values it measures come from :mod:`hyperloom_multibranch.toolbox.fake_model`, seeded
-by ``FakeToolboxConfig.seed`` and by the request and attempt number, so a run does not depend on the order tests ran in.
+it, the node it lands on and the values it measures come from :mod:`hyperloom_multibranch.toolbox.tests.fake_model`,
+seeded by ``FakeToolboxConfig.seed`` and by the request and attempt number, so a run does not depend on the order tests
+ran in.
 
 Time is virtual: each attempt takes ``attempt_seconds`` on a clock that only attempts advance, so results carry
 timestamps and GPU seconds and nothing sleeps.
@@ -38,7 +39,7 @@ from hyperloom_multibranch.contracts.toolbox import (
 )
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob, carries_request_classes
-from hyperloom_multibranch.toolbox.fake_model import (
+from hyperloom_multibranch.toolbox.tests.fake_model import (
     AttemptOutcome,
     AttemptConstraints,
     FakeMeasurer,
@@ -245,7 +246,8 @@ class FakeWiring:
     empty one, so a delta must give a component's upstream repository and commit. ``parent_exists`` answers whether a
     parent commit is known, ``log_path`` places the submit log, ``claims`` and ``records`` are the blackboard's claim and
     record ports and ``workload_kind`` is the campaign's workload. ``builds`` drives the native builds a test waits
-    for (a :class:`~hyperloom_multibranch.toolbox.fake_builds.FakeBuildDriver`); without one no test needs any.
+    for (a :class:`~hyperloom_multibranch.toolbox.tests.fake_builds.FakeBuildDriver`); without one
+    no test needs any.
     """
 
     parent_exists: Callable[[str], bool] | None = None

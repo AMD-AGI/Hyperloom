@@ -40,8 +40,8 @@ from hyperloom_multibranch.specialist.tools import register_worktree_tools
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
 from hyperloom_multibranch.tests.fakes import RecordingScheduler, RecordingVerifier
-from hyperloom_multibranch.toolbox.fake import FakeExecutor
-from hyperloom_multibranch.toolbox.fake_model import FakeToolboxConfig, NoiseModel
+from hyperloom_multibranch.toolbox.tests.fake import FakeExecutor
+from hyperloom_multibranch.toolbox.tests.fake_model import FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens, register_specialist_tools
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning

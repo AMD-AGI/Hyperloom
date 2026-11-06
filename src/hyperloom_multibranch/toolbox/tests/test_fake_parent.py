@@ -21,8 +21,8 @@ from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.fake_model import FakeToolboxConfig
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests.fake_model import FakeToolboxConfig
 
 IMAGE = "sha256:" + "c" * 64
 VLLM = "https://github.com/vllm-project/vllm"

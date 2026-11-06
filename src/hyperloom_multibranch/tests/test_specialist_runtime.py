@@ -43,8 +43,8 @@ from hyperloom_multibranch.specialist.runtime import (
 )
 from hyperloom_multibranch.specialist.scripted import ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
-from hyperloom_multibranch.toolbox.fake import FakeToolbox
-from hyperloom_multibranch.toolbox.fake_model import FakeToolboxConfig, NoiseModel
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox
+from hyperloom_multibranch.toolbox.tests.fake_model import FakeToolboxConfig, NoiseModel
 
 BRANCH = "s1"
 RECIPE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))

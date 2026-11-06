@@ -23,8 +23,8 @@ from hyperloom_multibranch.rulegate import regression
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.tests.fakes import RecordingVerifier, quick_polls  # noqa: F401
-from hyperloom_multibranch.toolbox.fake import FakeToolbox
-from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
 ROOT, CONC = "c0", 64
 RECIPE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
