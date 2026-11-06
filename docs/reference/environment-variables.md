@@ -739,8 +739,52 @@ deployments.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
-| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0, or its uid, its group or a supplementary group is not mapped in the app's user namespace (`/proc/self/uid_map`, `/proc/self/gid_map`: in a container that maps only its root, a switch to any other id fails with `EINVAL`, or under a fakeroot `LD_PRELOAD` appears to succeed while the child stays root); so does a GPU specialist on the Ray actor path, which cannot be demoted. The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. The multi-branch specialist launcher (`LocalAgentRunner`) demotes the same way, sharing the session's working directory as the worktree; there an unusable account fails the launch with `AgentConfigError`. |
+| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0, or its uid, its group or a supplementary group is not mapped in the app's user namespace (`/proc/self/uid_map`, `/proc/self/gid_map`: in a container that maps only its root, a switch to any other id fails with `EINVAL`, or under a fakeroot `LD_PRELOAD` appears to succeed while the child stays root); so does a GPU specialist on the Ray actor path, which cannot be demoted. The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. The multi-branch specialist launcher (`LocalAgentRunner`) demotes the same way, sharing the session's working directory as the worktree; there an unusable account fails the launch with `AgentConfigError`. For the isolation chooser below, setting the variable also makes a specialist's isolation required (see [Agent isolation](#agent-isolation)). |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
+
+### Agent isolation
+
+`hyperloom.common.agent_isolation` decides how an agent is launched; there is no variable that turns it on or off.
+`choose_agent_isolation()` (a specialist) takes the first tier that works:
+
+1. **Account**: `HYPERLOOM_SPECIALIST_USER` names an account that resolves and passes the checks in the table above,
+   and the process holds `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL`. Never on the Ray GPU actor path, and never for an
+   agent sandbox's commands (`choose_sandbox_isolation()`), which run as the app's own account.
+2. **bubblewrap**: the agent runs in a sandbox that starts from an empty root (`hyperloom_common/bwrap.py`): only the
+   paths its confinement binds exist inside, read-only unless they are its work trees; the credential locations inside
+   a bound tree are masked (the app's home and XDG directories, every path an environment variable with a
+   credential-shaped name points at, Hugging Face's login files, and the files the app registers); it has its own
+   user, pid and IPC namespaces, its own `/proc`, no capability and `no_new_privs`, and shares the app's network
+   (loopback MCP). A program's own directory is bound, and its parent only away from those credential locations, so
+   a native install under `~/.local/bin` does not make the rest of `~/.local` readable. Everything under the readable
+   system roots (`/etc`, `/opt`, `/usr`) is readable: an image must not keep a credential there.
+
+Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch in a hosted
+run (its entry calls `require_agent_isolation()` once at start-up, so a host where neither works refuses before
+anything runs), and a specialist's wherever `HYPERLOOM_SPECIALIST_USER` is set. Any other launch runs unconfined as
+before; `announce_agent_isolation()` then logs one WARNING at start-up (`agents run unconfined on this host, as before:
+they can read this account's files and credentials (<reasons>)`), and `agent_isolation_report()` gives the session
+report its line (`agent isolation: specialists <account|bwrap|none|refused>, sandboxes <...> (bubblewrap X.Y.Z
+PATH): <reasons>`).
+
+A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
+framework image may carry its own); a local run uses the `bwrap` on `PATH`. The probe (`python -I -m
+hyperloom_common.bwrap probe [--bwrap PATH]`) refuses a setuid bubblewrap and one older than 0.5.0, then runs a canary
+sandbox and checks from inside that its masks, read-only binds, pid namespace, capabilities and `no_new_privs` hold. It
+runs once per process for each binary, interpreter, ids, namespaces and user-namespace sysctls; one that gives no
+answer within 10 s is not kept, and refuses a hosted start-up as transient. A failed probe names the step with
+bubblewrap's own line; the usual causes:
+
+| Probe line | Cause |
+|------------|-------|
+| `bwrap: setting up uid map: Permission denied` | The kernel created the user namespace without capabilities: with `kernel.apparmor_restrict_unprivileged_userns=1` it does so for a process without `CAP_SYS_ADMIN`. |
+| `bwrap: Creating new namespace failed: ...` | `user.max_user_namespaces` is 0 or used up, or a seccomp or AppArmor profile denies `unshare`. |
+| `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | The container's `/proc` has entries mounted over it (masked paths). |
+| `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`. |
+
+The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
+for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
+fail instead.
 
 ---
 
