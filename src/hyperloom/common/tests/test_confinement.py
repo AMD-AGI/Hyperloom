@@ -86,9 +86,12 @@ def test_the_apps_home_is_masked_whole_when_nothing_allowed_is_in_it(home):
     assert _masks({"HOME": str(home)}) == {home}
 
 
-def test_an_allowed_path_below_the_home_opens_up_only_its_ancestors(home):
+@pytest.mark.parametrize("written", [False, True], ids=["read", "written"])
+def test_an_allowed_path_below_the_home_opens_up_only_its_ancestors(home, written):
+    """Also when the worktree is the tree the agent writes: a tree is not reached through itself, so it still counts."""
     worktree = home / "scratch" / "a" / "b" / "wt"
-    found = _masks({"HOME": str(home)}, allowed=[worktree, home / ".venv"])
+    writable = [worktree] if written else []
+    found = _masks({"HOME": str(home)}, allowed=[worktree, home / ".venv"], writable=writable)
     assert found == {
         home / ".aws",
         home / ".claude",
@@ -526,6 +529,26 @@ def test_a_nested_writable_path_the_agent_re_points_never_becomes_a_tree_the_age
     assert tools / "bin" in toolchain_paths(environ, "sh", writable=(work, work / ".claude"))
 
 
+def test_a_writable_path_reached_through_another_never_adds_where_it_points_to_the_trees(tmp_path, no_child_python):
+    """``into-work/sub`` is not below ``work`` as given, but ``into-work`` links to ``work``, so the agent decides what
+    ``sub`` is. Pointed at the toolchain, it is left out, and the toolchain is not taken for a tree the agent writes:
+    else its next launch would be refused, and a credential location there left unmasked as the agent's own."""
+    _home, work, _key = _planted(tmp_path)
+    tools = tmp_path / "tools"
+    (tools / "bin").mkdir(parents=True)
+    kube = _write(tools / "kube" / "config")
+    (tmp_path / "into-work").symlink_to(work)
+    (work / "sub").symlink_to(tools)
+    writable = (work, tmp_path / "into-work" / "sub")
+
+    policy = Confinement(writable=writable, readable=(tools / "bin",)).policy()
+
+    assert (policy.writable, policy.read_only) == ((str(work),), (str(tools / "bin"),))
+    environ = {"PATH": f"{tools / 'bin'}:/usr/bin", "KUBECONFIG": str(kube)}
+    assert tools / "bin" in toolchain_paths(environ, "sh", writable=writable)
+    assert kube in credential_paths(environ, app_environ={}, allowed=(tools, work), writable=writable)
+
+
 @pytest.mark.parametrize("planted", [False, True], ids=["directory", "link"])
 def test_a_readable_path_reached_through_a_tree_the_agent_writes_is_refused(tmp_path, planted):
     """Its target would be the agent's choice, and a read-only bind over a tree the agent writes cannot hold."""
@@ -571,15 +594,32 @@ def test_a_path_reached_through_an_app_link_into_the_agents_tree_or_its_scratch_
     )
 
 
-def test_a_program_the_agent_linked_elsewhere_binds_nothing_of_where_it_points(tmp_path, no_child_python):
+def test_a_program_the_agent_linked_elsewhere_binds_nothing_of_where_it_points(tmp_path, monkeypatch, no_child_python):
+    """By name, by absolute path, and by a relative path, which names a program relative to the working directory
+    inside (this process's own one is the agent's tree here)."""
     home, work, key = _planted(tmp_path)
     (work / "bin").mkdir()
     (work / "bin" / "claude").symlink_to(key)
     environ = {"HOME": str(home), "PATH": f"{work / 'bin'}:/usr/bin"}
+    monkeypatch.chdir(work)
 
-    for argv0 in ("claude", str(work / "bin" / "claude")):
+    for argv0 in ("claude", str(work / "bin" / "claude"), "bin/claude", "./bin/claude"):
         found = toolchain_paths(environ, argv0, writable=(work,))
         assert [path for path in found if os.path.realpath(path).startswith(str(home))] == [], argv0
+        assert [path for path in found if not path.is_absolute()] == [], argv0
+
+
+def test_a_relative_program_path_binds_nothing_wherever_it_lies(tmp_path, monkeypatch, no_child_python):
+    """Resolved against this process's working directory, a relative path names a program the child, started in
+    another one, may not run; nothing is bound for it, outside the agent's tree too."""
+    tools = tmp_path / "tools"
+    program = _write(tools / "bin" / "tool", "#!/bin/sh\n")
+    program.chmod(0o755)
+    monkeypatch.chdir(tools)
+
+    assert tools / "bin" in toolchain_paths({"PATH": "/usr/bin"}, str(program), writable=())
+    found = toolchain_paths({"PATH": "/usr/bin"}, "bin/tool", writable=())
+    assert [path for path in found if os.path.realpath(path).startswith(str(tools))] == []
 
 
 def test_masks_are_only_paths_a_bind_shows(tmp_path):

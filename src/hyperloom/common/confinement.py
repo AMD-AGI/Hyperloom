@@ -145,17 +145,22 @@ def _agents(path: str | os.PathLike[str], roots: tuple[Path, ...]) -> bool:
     return _reached(path, roots) or any(_at_or_under(_real(path), root) for root in roots)
 
 
+def _resolved_trees(paths: Iterable[str | os.PathLike[str]]) -> tuple[Path, ...]:
+    return tuple(dict.fromkeys(_real(path) for path in paths if os.path.isabs(path)))
+
+
 def _agent_trees(writable: Iterable[Path], scratch: Scratch | None) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """The writable paths to bind, and the trees the agent writes (resolved). A writable path below another as given
-    is left out (the one above shows it, writable; resolving it would follow what the agent left there); the trees
-    are the rest and ``scratch``; and a writable path reached through one of them (a link into it) is left out too."""
+    is left out (the one above shows it, writable; resolving it would follow what the agent left there), and so is
+    one reached through any of the rest or ``scratch`` (a link into one of them). The trees are the paths kept and
+    ``scratch``: where a path left out points is the agent's choice, and it is not bound."""
     given = list(
         dict.fromkeys(Path(os.path.normpath(path)) if os.path.isabs(path) else Path(path) for path in writable)
     )
     top = [path for path in given if not any(other in path.parents for other in given if other.is_absolute())]
     scratches = (scratch.tmp, scratch.shm) if scratch else ()
-    trees = tuple(dict.fromkeys(_real(path) for path in (*top, *scratches) if os.path.isabs(path)))
-    return tuple(path for path in top if not _reached(path, trees)), trees
+    own = tuple(path for path in top if not _reached(path, _resolved_trees((*top, *scratches))))
+    return own, _resolved_trees((*own, *scratches))
 
 
 def _trees(writable: Iterable[Path]) -> tuple[Path, ...]:
@@ -236,9 +241,9 @@ class Confinement:
         masks at every bound path that shows them. ``scratch`` is bound at ``/tmp`` and ``/dev/shm`` (else each is
         a fresh tmpfs); ``chdir`` is the working directory inside.
 
-        Nothing is resolved through the trees the agent writes (the writable paths and ``scratch``): a writable path
-        below another, or reached through one, is left out (the one above shows it, writable), and a readable one is
-        refused, since its target would be the agent's choice and its read-only bind could not hold.
+        Nothing is resolved through the trees the agent writes (the writable paths bound and ``scratch``): a writable
+        path below another, or reached through one, is left out (the one above shows it, writable), and a readable one
+        is refused, since its target would be the agent's choice and its read-only bind could not hold.
 
         Raises:
             BwrapPolicyError: A readable path is reached through a tree the agent writes.
@@ -382,18 +387,21 @@ def credential_paths(
     of every variable that names a credential location (``:``-separated entries split, only absolute existing paths)
     and Hugging Face's login files, each read from ``app_environ`` (default: this process's environment) and from
     ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`. A location of the child's in a tree
-    it writes (``writable``: a home or tool directory re-pointed there) is its own, and is not masked.
+    it writes (``writable``, its scratch too when that is on the host: a home or tool directory re-pointed there) is
+    its own, and is not masked.
 
     A source that holds an ``allowed`` path (the policy's writable and readable paths) or a ``given`` one (handed to
     the child on purpose, so it stays readable) is not masked whole: its other entries are, down to :data:`HOME_DEPTH`
     levels. ``given`` paths themselves are never masked, nor is ``/``. :meth:`Confinement.policy` keeps only the masks
-    a bind shows.
+    a bind shows. An ``allowed`` or ``given`` path reached through a tree the child writes counts for nothing here:
+    the agent decides where it points (a link to a credential in a readable tree, left for the next launch), and the
+    tree shows it already.
     """
     app = os.environ if app_environ is None else app_environ
     agent = _trees(writable)
     sources = [*_sources(app, _app_home(app), PRIVATE_PATHS.paths()), _passwd_home()]
     sources += [path for path in _sources(environ, _app_home(environ), ()) if not _agents(path, agent)]
-    shown = tuple(dict.fromkeys(_real(path) for path in (*allowed, *given)))
+    shown = tuple(dict.fromkeys(_real(path) for path in (*allowed, *given) if not _reached(path, agent)))
     masks: dict[Path, None] = {}
     for source in dict.fromkeys(source for source in sources if source is not None):
         masks.update(dict.fromkeys(_masks_for(source, shown)))
@@ -530,7 +538,10 @@ def _program_dirs(argv0: str, environ: Mapping[str, str], agent: tuple[Path, ...
     below one. A native installer's ``~/.local/bin/claude`` so binds ``~/.local/bin`` and the version's directory,
     never all of ``~/.local``, where other tools keep their logins. Nothing when the program the child runs is one
     the agent decides (in or reached through ``agent``, the trees it writes, resolved): the tree shows it, and where
-    it points is the agent's choice."""
+    it points is the agent's choice; nor for a relative path, which names a program relative to the child's working
+    directory, not this process's."""
+    if os.sep in argv0 and not os.path.isabs(argv0):
+        return
     found = argv0 if os.sep in argv0 else _which(argv0, environ)
     if found is None or _agents(found, agent):
         return
@@ -557,11 +568,12 @@ def _resolver() -> Iterator[Path]:
 def toolchain_paths(environ: Mapping[str, str], argv0: str, *, writable: Iterable[Path]) -> tuple[Path, ...]:
     """What a child needs to read to run ``argv0`` under ``environ``: the system roots, this interpreter's prefixes,
     the child's interpreter's import path (:func:`interpreter_search_path`), every entry of its search-path variables,
-    the program's directory (and parent, away from credential locations), its CA bundles, the model and benchmark
-    trees it names, and the resolver configuration. Not ``/proc`` (the sandbox mounts its own), ``/sys``
-    (:attr:`Confinement.sys_paths`), nor what lies in the trees the child writes (``writable``; its scratch too, when
-    that is on the host) or is reached through them: those show it already, a read-only bind there would take the
-    child's own files from it, and where a link there points is the agent's choice."""
+    the program's directory (and parent, away from credential locations; for an absolute path or a name on ``PATH``),
+    its CA bundles, the model and benchmark trees it names, and the resolver configuration. Not ``/proc`` (the
+    sandbox mounts its own), ``/sys`` (:attr:`Confinement.sys_paths`), nor what lies in the trees the child writes
+    (``writable``; its scratch too, when that is on the host) or is reached through them: those show it already, a
+    read-only bind there would take the child's own files from it, and where a link there points is the agent's
+    choice."""
     agent = _trees(writable)
     found: list[Path] = [Path(root) for root in SYSTEM_ROOTS]
     found.extend(Path(root) for root in interpreter_roots())
