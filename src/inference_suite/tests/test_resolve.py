@@ -115,6 +115,8 @@ def test_inferencex_wins_and_its_base_round_trips_through_its_document():
     assert (base.client.tool, base.client.commit) == (CLIENT_TOOL, _inferencex("ce35bc935").bundle.commit)
     assert base.resolved_unix == _FETCHED
     assert "--served-model-name" in base.runner_owned.args
+    assert "HIP_VISIBLE_DEVICES" in base.runner_owned.env
+    assert (base.model.id, base.model.path) == (_fixed().model_id, None)
     assert BaseLaunch.from_document(json.loads(json.dumps(base.to_document()))) == base
 
 
@@ -127,7 +129,7 @@ def test_the_cookbook_serves_what_inferencex_does_not_and_names_the_miss():
 
 def test_a_shell_user_file_wins_over_every_recipe():
     script = (
-        b"export SGLANG_USE_AITER=1\nexport HF_TOKEN=$TOKEN\n"
+        b"export SGLANG_USE_AITER=1\nexport HF_TOKEN=$TOKEN\nexport HIP_VISIBLE_DEVICES=0,1,2,3\n"
         b"python3 -m sglang.launch_server --model-path /models/r1 --tp 4 --mem-fraction-static 0.7 --port 30000\n"
     )
     user_file = parse_user_file("launch.sh", script, framework="sglang")
@@ -141,7 +143,7 @@ def test_a_shell_user_file_wins_over_every_recipe():
         Topology(4),
     )
     assert base.image.version_basis is VersionBasis.NOT_APPLICABLE
-    assert "--port" in base.stripped
+    assert {"--port", "HIP_VISIBLE_DEVICES"} <= set(base.stripped)
     assert base.warnings == ("launch.sh exports HF_TOKEN from shell variables; the base carries none of them",)
 
 

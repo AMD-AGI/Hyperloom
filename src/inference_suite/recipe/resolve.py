@@ -35,6 +35,7 @@ from inference_suite.contracts.base_launch import (
     BaseLaunch,
     ClientLaunch,
     GoldenAcceptance,
+    LaunchModel,
     LaunchPoint,
     LaunchQuery,
     LaunchSource,
@@ -87,6 +88,8 @@ _T = TypeVar("_T")
 
 _ENTRYPOINTS = {"sglang": SGLANG_ENTRYPOINT, "vllm": VLLM_ENTRYPOINT, "atom": ATOM_ENTRYPOINT}
 _RUNNER_OWNED = {"sglang": SGLANG_RUNNER_OWNED, "vllm": VLLM_RUNNER_OWNED, "atom": ATOM_RUNNER_OWNED}
+#: The GPU masks the runner sets for each server it starts; a source's own are stripped.
+_RUNNER_OWNED_ENV = frozenset({"CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
 _TOPOLOGY = {"sglang": SGLANG_TOPOLOGY, "vllm": VLLM_TOPOLOGY, "atom": ATOM_TOPOLOGY}
 _NO_KV_OFFLOADING = "none"
 _SGLANG_METHOD, _SGLANG_TOKEN_MODE = _SGLANG_SIMULATION[1:]
@@ -301,7 +304,18 @@ def _golden_warning(launch: SourceLaunch) -> tuple[str, ...]:
 
 
 def _runner_owned(framework: str) -> RunnerOwned:
-    return RunnerOwned(args=tuple(f"--{name}" for name in sorted(_RUNNER_OWNED.get(framework, ()))))
+    return RunnerOwned(
+        args=tuple(f"--{name}" for name in sorted(_RUNNER_OWNED.get(framework, ()))),
+        env=tuple(sorted(_RUNNER_OWNED_ENV)),
+    )
+
+
+def _runner_env(env: Mapping[str, str]) -> tuple[str, ...]:
+    return tuple(sorted(_RUNNER_OWNED_ENV.intersection(env)))
+
+
+def _without_runner_env(env: Mapping[str, str]) -> dict[str, str]:
+    return {name: value for name, value in env.items() if name not in _RUNNER_OWNED_ENV}
 
 
 def _entrypoint(framework: str) -> tuple[str, ...]:
@@ -325,15 +339,15 @@ def _recipe_base(
         image=recipe_image_facts(launch.image, snapshot.latest_releases.get(launch.framework)),
         framework=launch.framework,
         entrypoint=launch.entrypoint,
-        model_id=query.model_id,
+        model=LaunchModel(query.model_id),
         topology=launch.topology,
         args=layers.args,
-        env=layers.env,
+        env=_without_runner_env(layers.env),
         client=_client(snapshot, launch.client_env),
         resolved_unix=snapshot.fetched_unix,
         golden_al=layers.golden,
         runner_owned=_runner_owned(launch.framework),
-        stripped=launch.stripped,
+        stripped=(*launch.stripped, *_runner_env(layers.env)),
         warnings=(
             *_miss_warnings(misses),
             *launch.warnings,
@@ -364,14 +378,14 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
         image=NO_RECIPE_IMAGE,
         framework=query.framework,
         entrypoint=_entrypoint(query.framework),
-        model_id=query.model_id,
+        model=LaunchModel(query.model_id),
         topology=spelling.read(shell.args),
         args=shell.args,
-        env=shell.env,
+        env=_without_runner_env(shell.env),
         client=_client(snapshot, {}),
         resolved_unix=snapshot.fetched_unix,
         runner_owned=_runner_owned(query.framework),
-        stripped=shell.stripped,
+        stripped=(*shell.stripped, *_runner_env(shell.env)),
         warnings=unresolved,
     )
 
@@ -397,7 +411,7 @@ def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[So
         image=NO_RECIPE_IMAGE,
         framework=query.framework,
         entrypoint=_entrypoint(query.framework),
-        model_id=query.model_id,
+        model=LaunchModel(query.model_id),
         topology=topology,
         args=(*row.args, *topology_args),
         env=row.env,

@@ -60,6 +60,10 @@ def _read_user_file(location: str, framework: str) -> UserFile:
     return parse_user_file(location, content, framework=framework)
 
 
+def _model_path(args: argparse.Namespace) -> str | None:
+    return str(getattr(args, "model", "") or "").strip() or None
+
+
 def _model_id(args: argparse.Namespace) -> str:
     """The name every recipe source is asked for the session's model by: its Hugging Face id when it names one.
 
@@ -165,7 +169,7 @@ def resolve_base_launch(
         _refuse(f"the base launch could not be resolved: {exc}")
     if isinstance(found, Miss):
         _refuse("no source serves this session's base launch:\n  " + "\n  ".join(found.reasons()))
-    base = _redacted(found)
+    base = _redacted(dataclasses.replace(found, model=dataclasses.replace(found.model, path=_model_path(args))))
     write_base_launch(session_dir, base)
     _run_at_base_topology(args, base)
     _announce(base)
