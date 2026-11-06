@@ -628,6 +628,22 @@ class LineageView:
             pending.extend([*node.merged_from, node.parent_commit])
         return tuple(seen)
 
+    def built_on(self, commit_id: str) -> frozenset[str]:
+        """``commit_id`` and every commit built on it, through children and the merges that brought it in."""
+
+        children: dict[str, list[str]] = {}
+        for node in self.commits:
+            for source in (node.parent_commit, *node.merged_from):
+                children.setdefault(source, []).append(node.commit_id)
+        found: set[str] = set()
+        pending = [commit_id]
+        while pending:
+            current = pending.pop()
+            if current not in found:
+                found.add(current)
+                pending.extend(children.get(current, ()))
+        return frozenset(found)
+
 
 @dataclass(frozen=True)
 class MergeState:
@@ -994,6 +1010,19 @@ class BlackboardSnapshot:
 
         running = {node.branch for node in self.lineage.branches if node.stopped_at is None}
         return {item.id: item.holder for item in self.agent_map if item.open and item.holder in running}
+
+    def unretracted(self) -> dict[str, tuple[TestRecord, ...]]:
+        """The commits that hold a change a landed retraction undoes and not the retraction, each with those
+        retractions: the commits built on their ``retracted_commit`` and not on their own commit, whose values count a
+        change its agent found invalid."""
+
+        held: dict[str, list[TestRecord]] = {}
+        for record in self.records:
+            if record.retracts is not None:
+                undone = self.lineage.built_on(record.retracts.retracted_commit)
+                for commit_id in undone - self.lineage.built_on(record.commit_id or ""):
+                    held.setdefault(commit_id, []).append(record)
+        return {node.commit_id: tuple(held[node.commit_id]) for node in self.lineage.commits if node.commit_id in held}
 
 
 __all__ = [
