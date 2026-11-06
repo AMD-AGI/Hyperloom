@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,55 @@ def _signal_refused(monkeypatch: pytest.MonkeyPatch, pid: int) -> None:
 
 def test_a_zombie_is_not_running(zombie: subprocess.Popen[bytes]) -> None:
     assert proctree.running(zombie.pid) is False
+
+
+#: Ends the main thread, the thread-group leader, while another thread blocks reading the pipe named in ``argv[1]``.
+_LEADER_EXITS_FIRST = (
+    "import ctypes, os, sys, threading\n"
+    "threading.Thread(target=os.read, args=(int(sys.argv[1]), 1)).start()\n"
+    "ctypes.CDLL(None).pthread_exit(None)\n"
+)
+
+
+def _thread_states(pid: int) -> dict[int, str]:
+    states: dict[int, str] = {}
+    for task in Path(f"/proc/{pid}/task").iterdir():
+        with contextlib.suppress(OSError):
+            states[int(task.name)] = (task / "stat").read_text().rsplit(")", 1)[-1].split()[0]
+    return states
+
+
+def _wait_for(predicate: Callable[[], bool], what: str) -> None:
+    deadline = time.monotonic() + 10
+    while not predicate():
+        assert time.monotonic() < deadline, what
+        time.sleep(0.02)
+
+
+def test_a_process_whose_leader_exited_runs_until_its_last_thread_has() -> None:
+    """``/proc/<pid>/stat`` shows a zombie for the leader alone; the process runs while another thread does."""
+    read_fd, write_fd = os.pipe()
+    child = subprocess.Popen([sys.executable, "-c", _LEADER_EXITS_FIRST, str(read_fd)], pass_fds=(read_fd,))
+    os.close(read_fd)
+    try:
+
+        def _leader_exited_thread_blocked() -> bool:
+            states = _thread_states(child.pid)
+            return states.pop(child.pid, "") == "Z" and list(states.values()) == ["S"]
+
+        _wait_for(_leader_exited_thread_blocked, "the leader did not exit while its other thread blocked")
+        assert _state(child.pid) == "Z"
+        assert proctree.running(child.pid) is True, "a thread of it still runs"
+        os.close(write_fd)
+        write_fd = -1
+        _wait_for(lambda: list(_thread_states(child.pid)) == [child.pid], "the other thread did not exit")
+        assert proctree.running(child.pid) is False, "every thread of it has exited"
+    finally:
+        if write_fd >= 0:
+            os.close(write_fd)
+        child.kill()
+        child.wait()
+    assert child.returncode == 0, "the process ended when its last thread did"
 
 
 def test_a_zombie_this_process_may_not_signal_is_not_running(

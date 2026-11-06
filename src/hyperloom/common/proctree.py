@@ -88,10 +88,15 @@ def boot_unix() -> float:
     return time.time() - float((_PROC / "uptime").read_text(encoding="ascii").split()[0])
 
 
+def _status_text(pid: int) -> str:
+    """``/proc/<pid>/status``; raises ``OSError`` when unreadable."""
+    return (_PROC / str(pid) / "status").read_text(encoding="utf-8", errors="replace")
+
+
 def process_uids(pid: int) -> tuple[int, int] | None:
     """Read ``(real uid, effective uid)`` for one pid from ``/proc/<pid>/status``; ``None`` when it is gone."""
     try:
-        status = (_PROC / str(pid) / "status").read_text(encoding="utf-8", errors="replace")
+        status = _status_text(pid)
         uids = next(line.split()[1:3] for line in status.splitlines() if line.startswith("Uid:"))
         return int(uids[0]), int(uids[1])
     except (OSError, StopIteration, ValueError, IndexError):
@@ -169,7 +174,10 @@ def signal_processes(processes: list[ProcessId], sig: int) -> list[ProcessId]:
 
 
 def running(pid: int) -> bool:
-    """Whether ``pid`` names a process that has not exited: a zombie, or one being released, is not running.
+    """Whether ``pid`` names a process that has not exited: one whose every thread has exited is not running.
+
+    ``/proc/<pid>/stat`` shows the thread-group leader alone, and a leader that has exited stays a zombie while another
+    thread of its process still runs, so a process whose leader has exited is looked at again by its threads.
 
     Args:
         pid: The process to inspect.
@@ -184,7 +192,29 @@ def running(pid: int) -> bool:
     except OSError:
         # Reaped since the signal, or hidden from this account (``hidepid``): only the signal can tell the two apart.
         return _exists(pid)
-    return bool(fields) and fields[0] not in _EXITED_STATES
+    if not fields:
+        return False
+    return fields[0] not in _EXITED_STATES or _threads_left(pid)
+
+
+def _threads_left(pid: int) -> bool:
+    """Whether a process whose thread-group leader has exited still has a thread that has not.
+
+    ``Threads:`` in ``/proc/<pid>/status`` counts every thread not yet released, an exited leader included, and ``State:``
+    beside it is read in the same go, so a pid taken by another process since the stat read is answered for that one.
+    """
+    try:
+        status = _status_text(pid)
+    except OSError:
+        # Reaped since the stat read, or hidden from this account: only the signal can tell the two apart.
+        return _exists(pid)
+    values = {key: value.split() for key, _, value in (line.partition(":") for line in status.splitlines())}
+    try:
+        state, threads = values["State"][0], int(values["Threads"][0])
+    except (KeyError, IndexError, ValueError):
+        # No thread count to go by: as for an unreadable stat, the signal stands.
+        return _exists(pid)
+    return state not in _EXITED_STATES or threads > 1
 
 
 def _exists(pid: int) -> bool:
