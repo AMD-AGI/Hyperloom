@@ -593,18 +593,15 @@ class RealToolbox:
         return ClaimKey(request.parent_commit, request.intent_fingerprint or "")
 
     async def _publish(self, entry: LogEntry, accepted: TestRequest) -> None:
-        """Write the request row and hand the claim to the test; undo the acceptance if either is refused.
-
-        A lost claim comes after the request row is written, so the request ends as withdrawn, an outcome logged like any
-        other: the entry waits in no queue, and a withdrawal the blackboard refuses now is written by the next tick or the
-        next start, so the row never reads as in flight for good.
-        """
+        """Write the request row and hand the claim to the test; undo the acceptance if either is refused."""
 
         try:
             await self._sink.write_request(replace(accepted, priority=entry.priority))
             if self._claims is not None and accepted.intent_fingerprint is not None:
                 await self._claims.attach_request(self._key(accepted), entry.request_id, ttl_seconds=self._ttl)
         except ClaimLost as error:
+            # The row is written, so the request ends as withdrawn, logged like any outcome: it waits in no queue, and a
+            # write the blackboard refuses is retried by the next tick and the next start, never left in flight.
             await self._record_and_write(entry, {"withdrawal": f"claim lost: {error}"})
             raise RequestRejected(f"the claim of this request is not held: {error}") from error
         except BaseException:
@@ -797,17 +794,11 @@ class RealToolbox:
             await self._quarantine.add_suspect(node, reason)
 
     async def _renew_loop(self) -> None:
-        """Run :meth:`tick` every third of the claim TTL until :meth:`close` cancels it.
-
-        A round that raises an error no step of it handles (a programming error, say) is logged with its traceback, and
-        the next round runs as planned: ending the loop would let every live test's claim lapse at its TTL, and
-        :meth:`close` collects the task without a word.
-        """
         while True:
             await asyncio.sleep(self._ttl / 3)
             try:
                 await self.tick()
-            except Exception:
+            except Exception:  # ended, the loop would let every live claim lapse at its TTL, and close() says nothing
                 logger.exception("a renewal round failed; the claims of live tests are renewed again at the next one")
 
 
