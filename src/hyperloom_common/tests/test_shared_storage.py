@@ -301,6 +301,24 @@ def test_io_shared_writes_are_664_whatever_the_umask_and_make_their_parents_2775
     assert (_mode(target.parent), _mode(target)) == (0o2775, 0o664)
 
 
+def test_io_shared_appends_are_664_whatever_the_umask_make_their_parents_2775_and_follow_no_link(tmp_path):
+    shared = _setgid_parent(tmp_path / "shared")
+    log, link = shared / "scheduling" / "decisions.jsonl", shared / "link.jsonl"
+    link.symlink_to(tmp_path / "elsewhere.jsonl")
+    out = _here(
+        "from hyperloom_common.io import append_shared_jsonl\n"
+        f"append_shared_jsonl({str(log)!r}, {{'i': 1}})\n"
+        f"append_shared_jsonl({str(log)!r}, {{'i': 2}}, fsync=True)\n"
+        "try:\n"
+        f"    append_shared_jsonl({str(link)!r}, {{}})\n"
+        "except OSError as exc:\n"
+        "    print(exc.errno)\n",
+        umask=0o077,
+    )
+    assert (_mode(log.parent), _mode(log), log.read_text()) == (0o2775, 0o664, '{"i": 1}\n{"i": 2}\n')
+    assert int(out) == errno.ELOOP and not (tmp_path / "elsewhere.jsonl").exists(), "never through a link"
+
+
 def test_a_file_appended_to_in_turn_is_made_664_whatever_the_umask_and_is_appended_to_not_replaced(tmp_path):
     shared = _setgid_parent(tmp_path / "shared")
     log, link = shared / "events.log", shared / "link.log"

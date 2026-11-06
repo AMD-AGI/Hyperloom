@@ -53,7 +53,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from hyperloom_common.io import append_jsonl
+from hyperloom_common.io import append_shared_jsonl
 from hyperloom_common.jsonio import read_jsonl
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
@@ -703,7 +703,7 @@ class MenuLog:
             "draws": [round(item.draw, 4) for _, item, _ in rows],
         }
         try:
-            append_jsonl(self.path, key_sorted(line), make_parents=True)
+            append_shared_jsonl(self.path, key_sorted(line))
         except OSError as exc:
             log.warning("could not append the menu to %s: %s", self.path, exc)
 

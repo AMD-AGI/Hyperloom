@@ -34,7 +34,7 @@ from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from hyperloom_common.io import atomic_write_json
+from hyperloom_common.io import SHARED, atomic_write_json
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
@@ -200,7 +200,7 @@ class Prelude:
             raise PreludeFailed(f"cannot root the session on the framework checkout it runs on: {exc}") from exc
 
     async def _open_root(self, recipe: Recipe, workload: Workload) -> _OpenedRoot:
-        atomic_write_json(self._layout.root_recipe, recipe.to_document())
+        atomic_write_json(self._layout.root_recipe, recipe.to_document(), options=SHARED)
         root = await self._repo.init_root(recipe)
         await self._blackboard.record_lineage(
             LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root, recipe_digest=recipe.digest())

@@ -20,6 +20,7 @@ stops before the grant ends as ``hosted run`` does.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -1467,6 +1468,25 @@ def test_a_runner_cache_that_cannot_be_built_ends_the_run_for_good(host: Host, m
     document = host.exit_document()
     assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
     assert "is not a commit of the source" in str(document["error"])
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_file(
+    host: Host, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An earlier leg of another account of the group, on a build before the session's records were the group's.
+    roster = tmp_path / "MB-roster.json"
+
+    def refused(*args: object) -> int:
+        raise PermissionError(errno.EACCES, "Permission denied", str(roster))
+
+    monkeypatch.setattr(cli, "run_session", refused)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert document["error"] == f"[Errno 13] Permission denied: '{roster}'"
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
