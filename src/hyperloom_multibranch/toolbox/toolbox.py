@@ -787,9 +787,18 @@ class RealToolbox:
             await self._quarantine.add_suspect(node, reason)
 
     async def _renew_loop(self) -> None:
+        """Run :meth:`tick` every third of the claim TTL until :meth:`close` cancels it.
+
+        A round that raises an error no step of it handles (a programming error, say) is logged with its traceback, and
+        the next round runs as planned: ending the loop would let every live test's claim lapse at its TTL, and
+        :meth:`close` collects the task without a word.
+        """
         while True:
             await asyncio.sleep(self._ttl / 3)
-            await self.tick()
+            try:
+                await self.tick()
+            except Exception:
+                logger.exception("a renewal round failed; the claims of live tests are renewed again at the next one")
 
 
 __all__ = ["AcceptanceSetup", "RealToolbox", "ToolboxStores", "ToolboxTuning"]
