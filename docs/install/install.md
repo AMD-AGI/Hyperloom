@@ -106,7 +106,7 @@ Requirements:
 
 - Ubuntu 24.04 is the recommended host OS for bare-metal setup. vLLM 0.28.0+
   requires Ubuntu 24.04 or newer; on Ubuntu 22.04, downgrade vLLM (for example
-  ``VLLM_VERSION=0.27.1``) or use Docker mode instead.
+  ``VLLM_VERSION=0.27.1 VLLM_ROCM_VARIANT=rocm723``) or use Docker mode instead.
 - ROCm runtime and ROCm torch are already installed. ROCm 7.2.x and ROCm 10.0
   are the validated stacks; on ROCm 10.0, bare-metal vLLM is built from source.
   See {doc}`Compatibility </compatibility>` for the combination the release is
@@ -448,7 +448,7 @@ It is recommended that you use a ROCm image that already ships the serving
 framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
-- `vllm`: `docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
+- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100`
 - `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261102`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261102`
 
@@ -456,7 +456,7 @@ Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:
 
 ```bash
-export HYPERLOOM_IMAGE=docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0
+export HYPERLOOM_IMAGE=docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100
 export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
