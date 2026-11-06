@@ -11,8 +11,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from kernelforge.workflows.forge_fusion import campaign as campaign_module
 from kernelforge.workflows.forge_fusion.campaign import (
+    CLOSING_RESERVE_SEC,
     CampaignBrief,
     CampaignPaths,
     CampaignRuntime,
@@ -21,6 +24,7 @@ from kernelforge.workflows.forge_fusion.campaign import (
     build_forge_loop_command,
     committed_tree_id,
     fused_module_path,
+    recipe_deadline_unix,
     run_recipe_campaign,
 )
 from kernelforge.workflows.forge_fusion.driver_shim import DriverSpec, render_driver
@@ -707,6 +711,39 @@ class TestCampaignCommand:
         assert cmd[cmd.index("--source-files") + 1] == (
             "/sgl/models/lfm2.py,/sgl/models/lfm2_fused_residual_add_rmsnorm.py"
         )
+
+    @pytest.mark.parametrize(("deadline", "told"), [(1792893600.5, True), (0.0, False)])
+    def test_the_loop_finishes_by_its_recipes_deadline(self, deadline, told):
+        """A loop sized on its own default outlived a caller with less time and was killed before exporting a keeper."""
+        cmd = build_forge_loop_command(
+            _recipe(),
+            CampaignPaths(
+                workspace="/fw",
+                driver_path="/out/driver.py",
+                experiments_dir="/out/exp",
+                result_json="/out/r.json",
+                program_md_file="/out/p.md",
+            ),
+            runtime=CampaignRuntime(deadline_unix=deadline),
+        )
+        if told:
+            assert float(cmd[cmd.index("--deadline-unix") + 1]) == deadline
+        else:
+            assert "--deadline-unix" not in cmd
+
+    def test_each_recipe_is_dealt_its_share_of_what_the_run_has_left(self):
+        """Recipes run one after another, so one deadline handed to all lets the first spend every recipe's time."""
+        start = 1792893600.0
+        run_end = start + 1800.0
+        now, deadlines = start, []
+        for recipes_left in (3, 2, 1):
+            deadline = recipe_deadline_unix(run_end, recipes_left, now)
+            deadlines.append(deadline)
+            now = deadline
+
+        assert start < deadlines[0] < deadlines[1] < deadlines[2]
+        assert deadlines[2] <= run_end - CLOSING_RESERVE_SEC
+        assert recipe_deadline_unix(0.0, 3, start) == 0.0, "no run deadline leaves each loop its default budget"
 
     def test_the_campaign_pins_one_lane(self, tmp_path):
         """A lane measures a copy; fusion is measured through the real install."""
