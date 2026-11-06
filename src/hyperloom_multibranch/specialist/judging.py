@@ -20,7 +20,7 @@ from typing import Protocol
 
 from hyperloom.contracts.measurement import Purpose, TestRequest, Validity
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
-from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
+from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
@@ -152,20 +152,25 @@ class BranchJudge:
         if declares_fix(first.request, judgement):
             checked = await self._check_fix(first, judgement, logged)
             judgement, fix = checked.judgement, checked.proof
+        # Before the gate's step: a held or refused candidate is never judged again, and its record cannot tell a
+        # refused fork from a voided one, so a notice lost after the step would never be written.
         if decide(judgement) is Action.DIAGNOSE:
-            # Before the gate holds the candidate: once held, it is never judged again, so a notice lost after that
-            # would never be written.
             held_back_by = ", ".join(judgement.refused_by) or "the accuracy gate"
             content = f"{first.request_id} held its gain on the retest and is held back by {held_back_by}"
             await self._notice(
                 logged, f"{content}; diagnose it, then request_repair or decline_repair", *judgement.request_ids
             )
+        elif decide(judgement) is Action.REQUEST_FORK:
+            content = f"{_fixes(first.request)}; its fork is asked for, and if it is refused it is recorded only"
+            await self._notice(logged, content, *judgement.request_ids)
         try:
             action = await self._gate.settle(first.request, judgement, fix=fix)
             if action is Action.REQUEST_FORK:
                 reason = f"correctness fix of {first.request_id}"
                 admission = await self._gate.fork(first.request, judgement, reason, fix=fix)
-                await self._notice(logged, _forked(first.request, admission), *judgement.request_ids)
+                if admission.status is not AdmissionStatus.REJECTED:
+                    forked = _forked_to(first.request, pending=admission.status is AdmissionStatus.PENDING)
+                    await self._notice(logged, forked, *judgement.request_ids)
         except ResultUnverified as error:
             unverified = "a result behind it did not re-verify against its signed bundle"
             content = f"{first.request_id} {_NOT_COMMITTED} {unverified} ({error.request_id}: {error.reason})"
@@ -182,8 +187,7 @@ class BranchJudge:
                 return
             self._submitted = True
         elif action is Action.RECORD_ONLY and decide(judgement) is Action.COMMIT:
-            moved = f"{first.request_id} improved on {first.request.parent_commit}, but the branch has moved on"
-            await self._notice(logged, f"{moved}; submit it again on the head as a new test", *judgement.request_ids)
+            await self._notice(logged, _moved_on(first.request), *judgement.request_ids)
 
     async def _check_fix(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> FixCheck:
         if self._fixes is None:
@@ -235,10 +239,13 @@ def _failed_retest(first: Judgement, retest: TestRecord) -> Judgement:
 
 
 def _announced(record: TestRecord, judgement: Judgement, guarded: bool) -> str:
-    """The notice of a commit or fork the gate recorded for a judged candidate, "" for any other conclusion; the same
-    text :meth:`BranchJudge._settle` writes after the step, so the one written there is not written twice."""
+    """The notice of a commit, a fork or a gain the moved-on branch kept from landing that the gate recorded for a
+    judged candidate, "" for any other conclusion; the same text :meth:`BranchJudge._settle` writes after the step,
+    so the one written there is not written twice."""
     if record.conclusion in (Conclusion.COMMITTED, Conclusion.COMMITTED_WITH_REPRO):
         return _landed(record.request, judgement, guarded)
+    if record.conclusion is Conclusion.RECORDED_ONLY and decide(judgement) is Action.COMMIT:
+        return _moved_on(record.request)
     if record.conclusion in (Conclusion.SPLIT_REQUESTED, Conclusion.SPLIT_COMMITTED):
         return _forked_to(record.request, pending=False)
     if record.conclusion is Conclusion.SPLIT_PENDING:
@@ -253,15 +260,17 @@ def _landed(request: TestRequest, judgement: Judgement, guarded: bool) -> str:
     return f"{landed}; your next candidates go on the new head"
 
 
-def _forked(request: TestRequest, admission: ForkAdmission) -> str:
-    if admission.status is AdmissionStatus.REJECTED:
-        fix = f"{request.request_id} fixes a defect of {request.parent_commit}"
-        return f"{fix}, but its fork was refused ({admission.reason}); it is recorded only"
-    return _forked_to(request, pending=admission.status is AdmissionStatus.PENDING)
+def _moved_on(request: TestRequest) -> str:
+    moved = f"{request.request_id} improved on {request.parent_commit}, but the branch has moved on"
+    return f"{moved}; submit it again on the head as a new test"
+
+
+def _fixes(request: TestRequest) -> str:
+    return f"{request.request_id} fixes a defect of {request.parent_commit}"
 
 
 def _forked_to(request: TestRequest, *, pending: bool) -> str:
-    fix = f"{request.request_id} fixes a defect of {request.parent_commit}"
+    fix = _fixes(request)
     if pending:
         return f"{fix}: it waits for a branch slot; if the fork is dropped it is recorded only"
     return f"{fix}: it goes to a new branch cut at that commit; you go on on yours"
