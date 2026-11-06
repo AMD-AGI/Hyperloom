@@ -4,15 +4,23 @@
 import asyncio
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.recipe import ConfigDelta
+from hyperloom.contracts.measurement import TestRequest
+from hyperloom.contracts.recipe import ConfigDelta, apply
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.blackboard.tests.factories import result
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import judgement, result
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
+from hyperloom_multibranch.contracts.toolbox import Backpressure
+from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
+from hyperloom_multibranch.specialist.agent_import import KeptChange, Retraction
 from hyperloom_multibranch.specialist import arbor_adapter
-from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, MANIFEST_FILE, START_TABLES_FILE
+from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, MANIFEST_FILE, START_TABLES_FILE, KeepWatch
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionFinished, SessionRefused
 from hyperloom_multibranch.tests.agent_rig import (
@@ -29,7 +37,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     _replayed,
     _until,
 )
-from hyperloom_multibranch.tests.test_specialist_autonomous_session import _imported, _rig
+from hyperloom_multibranch.tests.test_specialist_autonomous_session import Rig, _imported, _rig
 
 
 async def test_an_arbor_run_on_the_adapter_s_config_has_its_keeps_imported_end_to_end(
@@ -127,3 +135,109 @@ async def test_an_arbor_that_refuses_its_config_ends_the_branch_for_good_with_it
     assert str(refused.value) == f"the agent refused its config: {'; '.join(REASONS)}"
     assert isinstance(refused.value, SessionFinished) and not isinstance(refused.value, SessionCrashed)
     assert (await rig.notices())[-1] == f"{NOTICE} {refused.value}"
+
+
+FINDING = {"iteration": 7, "keep": 1, "finding": "iter7-agentx-283-selection-invalid"}
+#: The launch an Arbor branch is started with and keeps, so a revert of a keep's source undoes all of it.
+STEADY = "--tp 1"
+
+
+def _retracting(keeps: tuple[int, ...]) -> Component:
+    """An agent whose keep 2 reverts keep 1's commit and says it retracts keep 1."""
+    started = {"server_flags": STEADY, "server_env": {}}
+    return Component(keeps=keeps, retracts=FINDING, retracting_keep=2, flags=STEADY, started=started, tail=1.0)
+
+
+async def _landed_in_turn(rig: Rig, tmp_path: Path, landed: int) -> list[TestRequest]:
+    """Every import of a component agent's run, each measured once the one before was judged: the first ``landed`` of
+    them committed on the branch, the rest recorded only."""
+
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    while not running.done():
+        count = len(rig.toolbox.requests)
+        await _until(lambda: len(rig.toolbox.requests) > count or running.done(), "the next import")
+        if len(rig.toolbox.requests) > count:
+            request = rig.toolbox.requests[count]
+            request_id = request.request_id or ""
+            await rig.toolbox_blackboard.write_result(result(request_id))
+            made = None
+            if count < landed:
+                recipe = apply(await rig.repo.read_recipe(request.parent_commit), request.delta)
+                made = await rig.repo.commit(BRANCH, request.parent_commit, recipe, request_id)
+            conclusion = Conclusion.COMMITTED if made else Conclusion.RECORDED_ONLY
+            await gate.write_judgement(request_id, judgement(-3.0, (request_id,)), conclusion, made)
+    with pytest.raises(SessionFinished):
+        await running
+    return rig.toolbox.requests
+
+
+async def test_a_retraction_of_a_keep_that_landed_is_imported_with_both_checks_and_names_what_it_retracts(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+
+    first, retraction = await _landed_in_turn(rig, tmp_path, landed=1)
+
+    [attachment] = retraction.attachments
+    assert attachment.id == RETRACTION_ID
+    assert json.loads(rig.toolbox.attachments[attachment.sha256]) == {**FINDING, "made_on": 1, "beyond": ""}
+    assert (retraction.consistency_check, retraction.long_context_check) == (True, True)
+    assert first.attachments == ()
+    named = "the agent's iteration 7 (its keep 1), found invalid by iter7-agentx-283-selection-invalid"
+    assert f"{NOTICE} keep 2 retracts {named}: r2 is not held to the speed gate" in await rig.notices()
+
+
+async def test_a_retraction_that_does_more_than_undo_its_keep_is_held_to_the_speed_gate(tmp_path: Path) -> None:
+    agent = replace(_retracting((256, 512)), flags=f"{STEADY} --max-num-seqs {{seqs}}")
+    rig = await _rig(tmp_path, agent, start_seconds=0.2)
+
+    _, retraction = await _landed_in_turn(rig, tmp_path, landed=1)
+
+    assert (retraction.attachments, retraction.consistency_check) == ((), None)
+    held = "r2 is held to the speed gate: it also changes --max-num-seqs"
+    assert any(note.endswith(held) for note in await rig.notices())
+
+
+async def test_a_retraction_of_a_keep_that_did_not_land_changes_nothing_on_the_head(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+
+    [first] = await _landed_in_turn(rig, tmp_path, landed=0)
+
+    assert first.attachments == ()
+    assert f"{NOTICE} keep 2 changes nothing on the branch head" in await rig.notices()
+
+
+async def test_a_retraction_goes_alone_after_the_keep_it_was_made_on_and_before_the_keep_after_it(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512, 768)), start_seconds=0.2)
+    rig.toolbox.refusals = [Backpressure(BRANCH, 1, 1)] * 40
+
+    first, retraction, after = await _landed_in_turn(rig, tmp_path, landed=2)
+
+    assert "+max_num_seqs = 256" in rig.patch(first) and "-max_num_seqs = 256" in rig.patch(retraction)
+    assert "+max_num_seqs = 768" in rig.patch(after)
+    assert [len(request.attachments) for request in (first, retraction, after)] == [0, 1, 0]
+
+
+def test_the_keeps_waiting_at_a_crash_are_read_back_by_the_run_after_it(tmp_path: Path) -> None:
+    retraction = Retraction(7, 1, "iter7-selection-invalid", 1)
+    later = KeptChange(3, "patch", "--max-num-seqs 768")
+    watch = KeepWatch("a" * 40, seq=3, pending=KeptChange(2, "patch", "", retracts=retraction), waiting=[later])
+
+    watch.save(tmp_path / "watch.json")
+
+    loaded = KeepWatch.load(tmp_path / "watch.json")
+    assert loaded.pending is not None and (loaded.pending.seq, loaded.pending.retracts) == (2, retraction)
+    assert [kept.seq for kept in loaded.waiting] == [3]
+
+
+async def test_a_snapshot_that_retracts_nothing_is_imported_as_before(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(256,)), start_seconds=0.2)
+
+    request = await _imported(rig)
+
+    assert (request.attachments, request.consistency_check, request.long_context_check) == ((), None, None)
+    assert rig.toolbox.attachments == {}

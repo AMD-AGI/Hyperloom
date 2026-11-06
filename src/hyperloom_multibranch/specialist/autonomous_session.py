@@ -59,13 +59,14 @@ from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind, LeaseKind
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LearningKind, LeaseKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.specialist.agent_import import (
     ComponentStart,
     KeptChange,
     KeptChangeError,
+    Retraction,
     added_at,
     KeepStores,
     import_delta,
@@ -95,6 +96,7 @@ from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
 from hyperloom_multibranch.specialist.arbor_adapter import refused_reasons
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
+from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import (
     PreflightFailed,
@@ -158,6 +160,8 @@ NO_DEADLINE_SECONDS = 365 * 24 * 3600.0
 #: How often a branch whose cards are taken asks the toolbox for them again: a dev lease or a tool job holding them
 #: ends within minutes of its lifetime, and each ask is one call that holds nothing when refused.
 LEASE_POLL_SECONDS = MINUTE
+#: The conclusions of a test that landed on its own branch.
+_LANDED = frozenset({Conclusion.COMMITTED, Conclusion.COMMITTED_WITH_REPRO})
 #: The toolbox's refusal of a kernel table put with no target for a variable no table was put for yet.
 TARGET_REQUIRED = "target_required"
 
@@ -201,6 +205,8 @@ class KeepWatch:
     """What a run knows of the agent's keeps: ``root``, the workspace's git commit every keep is read against (the agent
     may commit on top of it); ``seq``, the keeps seen; ``mark``, what the keep file last said of them; ``base``, the
     keeps seen before the agent last started its count over; ``pending``, the latest keep read and not submitted yet;
+    ``waiting``, the keeps read after it that go after it, in order: a later keep replaces the one before it unless
+    either is a retraction, which goes alone; ``imported``, the request each keep was submitted as, by the keep;
     ``collected``, whether the workspace of an agent that signals no keep was taken ahead of the EXPLORE end; and
     what of the agent's launch the toolbox refused, which every later keep that still runs with it is imported
     without: ``refused_envs``, each variable with the value refused (``None``: the variable left unset), and
@@ -212,6 +218,8 @@ class KeepWatch:
     mark: int | str | None = None
     base: int = 0
     pending: KeptChange | None = None
+    waiting: list[KeptChange] = field(default_factory=list)
+    imported: dict[str, str] = field(default_factory=dict)
     collected: bool = False
     refused_envs: dict[str, str | None] = field(default_factory=dict)
     refused_args: str | None = None
@@ -220,23 +228,34 @@ class KeepWatch:
     @classmethod
     def load(cls, path: Path) -> KeepWatch:
         document = json.loads(path.read_text(encoding=ENCODING))
-        pending = document.pop("pending")
-        return cls(**document, pending=None if pending is None else KeptChange(**pending))
+        pending = _kept_from(document.pop("pending"))
+        waiting = [_kept(kept) for kept in document.pop("waiting", [])]
+        return cls(**document, pending=pending, waiting=waiting)
 
     def save(self, path: Path) -> None:
-        pending = None if self.pending is None else asdict(self.pending)
         document = {
             "root": self.root,
             "seq": self.seq,
             "mark": self.mark,
             "base": self.base,
-            "pending": pending,
+            "pending": None if self.pending is None else asdict(self.pending),
+            "waiting": [asdict(kept) for kept in self.waiting],
+            "imported": self.imported,
             "collected": self.collected,
             "refused_envs": self.refused_envs,
             "refused_args": self.refused_args,
             "learnt": self.learnt,
         }
         path.write_text(json.dumps(document), encoding=ENCODING)
+
+
+def _kept_from(document: dict[str, object] | None) -> KeptChange | None:
+    return None if document is None else _kept(document)
+
+
+def _kept(document: dict[str, object]) -> KeptChange:
+    retracts = document.pop("retracts", None)
+    return KeptChange(**document, retracts=None if retracts is None else Retraction(**retracts))
 
 
 class AutonomousSession:
@@ -612,18 +631,19 @@ class AutonomousSession:
     async def _take(self, manifest: AgentManifest, watch: KeepWatch, seq: int) -> None:
         watch.seq = seq
         try:
-            watch.pending = await asyncio.to_thread(self._read, manifest, watch.root, seq)
+            kept = await asyncio.to_thread(self._read, manifest, watch.root, seq)
         except (KeptChangeError, WorktreeError) as error:
             await self._note(f"keep {seq} cannot be read and is skipped: {error}")
         else:
-            if watch.pending.uncopied:
-                names = ", ".join(watch.pending.uncopied)
+            _enqueue(watch, kept)
+            if kept.uncopied:
+                names = ", ".join(kept.uncopied)
                 await self._note(
                     f"keep {seq}: the kernel tables of {names} were not copied, too large; imported as set"
                 )
-            await self._record_dropped(watch, watch.pending)
-            await self._warn_disabled(watch.pending)
-            await self._note_outside(seq, watch.pending)
+            await self._record_dropped(watch, kept)
+            await self._warn_disabled(kept)
+            await self._note_outside(seq, kept)
         await self._learn(manifest.ledger, watch)
         watch.save(self._place.workspace / WATCH_FILE)
 
@@ -692,7 +712,7 @@ class AutonomousSession:
         launch = (await self._setup.repo.read_recipe(head)).launch
         kept = _without_refused(kept, launch, watch)
         try:
-            await self._submitted(kept, head, await self._delta(kept, head))
+            await self._submitted(kept, head, await self._delta(kept, head), watch)
         except Backpressure:
             return
         except RequestRejected as error:
@@ -702,17 +722,17 @@ class AutonomousSession:
             else:
                 left_out = ", ".join([*watch.refused_envs, *(["its server arguments"] if watch.refused_args else [])])
                 await self._note(f"keep {kept.seq} was refused: {error.reason}; imported without {left_out}")
-                await self._submit_narrowed(narrowed, head)
+                await self._submit_narrowed(narrowed, head, watch)
         except RecipeError as error:
             await self._note(f"keep {kept.seq} is no recipe change and is skipped: {error}")
         except WorktreeError as error:
             await self._note(f"keep {kept.seq} cannot be read against the branch head and is skipped: {error}")
-        watch.pending = None
+        watch.pending = watch.waiting.pop(0) if watch.waiting else None
         watch.save(self._place.workspace / WATCH_FILE)
 
-    async def _submit_narrowed(self, kept: KeptChange, head: str) -> None:
+    async def _submit_narrowed(self, kept: KeptChange, head: str, watch: KeepWatch) -> None:
         try:
-            await self._submitted(kept, head, await self._delta(kept, head))
+            await self._submitted(kept, head, await self._delta(kept, head), watch)
         except (RequestRejected, RecipeError) as error:
             await self._note(f"keep {kept.seq} was refused again: {error}")
 
@@ -781,15 +801,53 @@ class AutonomousSession:
                 raise
             return await put(KernelKind.GEMM, targets.get(env, env.lower()), env, table.encode(), rows_only)
 
-    async def _submitted(self, kept: KeptChange, head: str, delta: RecipeDelta | None) -> None:
-        """Submit ``kept`` against ``head``; raise what the toolbox raises when it takes no request now."""
+    async def _submitted(self, kept: KeptChange, head: str, delta: RecipeDelta | None, watch: KeepWatch) -> None:
+        """Submit ``kept`` against ``head``, recorded in ``watch``; raise what the toolbox raises when it takes no
+        request now."""
 
         if delta is None:
             await self._note(f"keep {kept.seq} changes nothing on the branch head")
             return
         request = TestRequest(TestKind.TEST, Purpose.EXPLORE, self._start.branch, head, delta)
+        held = "" if kept.retracts is None else await self._speed_held(kept.retracts, watch)
+        if kept.retracts is not None and not held:
+            request = await self._retraction(request, kept.retracts)
         request_id = await self._setup.toolbox.submit_test(request)
+        watch.imported[str(kept.seq)] = request_id
         await self._note(f"keep {kept.seq} imported as {request_id}: {kept.summary or 'no summary'}")
+        if kept.retracts is not None:
+            gate = f"is held to the speed gate: {held}" if held else "is not held to the speed gate"
+            await self._note(f"keep {kept.seq} retracts {kept.retracts}: {request_id} {gate}")
+
+    async def _speed_held(self, retraction: Retraction, watch: KeepWatch) -> str:
+        """Why the retraction is held to the speed gate, empty when it is not: it undoes the keep it names and nothing
+        else when it changes only what that keep did, and the head is the agent's state on the keep it was made on,
+        since that keep was imported and the import that first carried the named keep and every one after it landed."""
+
+        if retraction.beyond:
+            return f"it also changes {retraction.beyond}"
+        if str(retraction.made_on) not in watch.imported:
+            return f"keep {retraction.made_on}, which it was made on, was not imported"
+        since = [request_id for seq, request_id in watch.imported.items() if int(seq) >= retraction.keep]
+        snapshot = await self._place.blackboard.snapshot()
+        landed = {record.request_id for record in snapshot.records if record.conclusion in _LANDED}
+        if not all(request_id in landed for request_id in since):
+            return f"not every import since keep {retraction.keep} landed"
+        return ""
+
+    async def _retraction(self, request: TestRequest, retraction: Retraction) -> TestRequest:
+        """``request`` as the test of a retraction: it carries what it retracts (``RETRACTION_ID``), so the judge holds
+        it to the rule's errors, guards and accuracy and, under a rule whose tests can run them, its consistency
+        checks, and not to its speed; it asks for both consistency checks."""
+
+        data = json.dumps(asdict(retraction), sort_keys=True).encode(ENCODING)
+        attachment = await self._setup.toolbox.put_attachment(RETRACTION_ID, "file", data)
+        return replace(
+            request,
+            attachments=(*request.attachments, attachment),
+            consistency_check=True,
+            long_context_check=True,
+        )
 
     def _mark(self, manifest: AgentManifest) -> int | str | None:
         """What the agent's keep file says of its keeps now; ``None`` when it has none, cannot be read mid-write, or
@@ -943,6 +1001,18 @@ def _reverted(kept: KeptChange, launch: LaunchConfig, names: tuple[str, ...], ar
     envs = {name: value for name, value in kept.envs.items() if name not in names}
     envs.update({name: launch.envs[name] for name in names if name in launch.envs})
     return replace(kept, server_args=launch.server_args if args else kept.server_args, envs=envs)
+
+
+def _enqueue(watch: KeepWatch, kept: KeptChange) -> None:
+    """Queue ``kept`` behind the keeps read and not submitted yet. Keeps are cumulative, so it replaces the last of them,
+    unless either is a retraction: a retraction goes alone, carrying no later change past the speed gate, and after
+    every keep before it, so the head it is measured on is the agent's state it undoes a keep of."""
+
+    queue = [*([watch.pending] if watch.pending is not None else []), *watch.waiting]
+    if queue and queue[-1].retracts is None and kept.retracts is None:
+        queue.pop()
+    queue.append(kept)
+    watch.pending, watch.waiting = queue[0], queue[1:]
 
 
 def collection_margin(records: Iterable[TestRecord], floor: float) -> float:

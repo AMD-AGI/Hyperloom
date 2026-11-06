@@ -14,11 +14,13 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from hyperloom.common.perf_metric import GRADED_ERROR_RATE
-from hyperloom.contracts.long_context import refuses
+from hyperloom.contracts.consistency import SHORT_PROMPTS_COMPLETE
+from hyperloom.contracts.long_context import LONG_CONTEXT_COMPLETE, refuses
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
-from hyperloom_multibranch.contracts.judgement import Judgement
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
 from hyperloom_multibranch.rulegate import agentx, inferencex
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok, inferencex_accuracy_ok
 from hyperloom_multibranch.rulegate.baseline import (
@@ -36,8 +38,14 @@ from hyperloom_multibranch.rulegate.readings import (
 )
 
 
+#: The attachment id of a test that undoes a change its own agent found invalid, a file saying which.
+RETRACTION_ID = "retraction"
+
+
 class Rule(Protocol):
-    """How the session's workload is judged; ``accuracy_round`` says whether its tests run the eval it reads.
+    """How the session's workload is judged; ``accuracy_round`` says whether its tests run the eval it reads, and
+    ``speed_gates`` are the refusals that say only that a candidate is not faster than its parent;
+    ``runs_consistency_checks`` whether its tests can hold their server for the consistency checks.
 
     PRELUDE submits ``baseline_tests`` root tests, and the baseline needs ``min_baselines`` of them measured.
     ``confirms_ahead`` says whether a test is short enough to submit its confirming retest before the judgement asks
@@ -45,6 +53,8 @@ class Rule(Protocol):
     """
 
     accuracy_round: bool
+    speed_gates: frozenset[str]
+    runs_consistency_checks: bool
     baseline_tests: int
     min_baselines: int
     confirms_ahead: bool
@@ -70,6 +80,8 @@ class InferenceXRule(Rule):
     blackboard: CommitQuery
     concurrency: int
     accuracy_round = True
+    speed_gates = inferencex.SPEED_GATES
+    runs_consistency_checks = True
     baseline_tests = inferencex.BASELINE_TESTS
     min_baselines = inferencex.MIN_BASELINES
     confirms_ahead = True
@@ -111,6 +123,9 @@ class AgentXRule(Rule):
     """
 
     accuracy_round = False
+    speed_gates = agentx.SPEED_GATES
+    # Magpie's AgentX recipe runs no benchmark script MB's server lifecycle can wrap, so both checks end incomplete.
+    runs_consistency_checks = False
     baseline_tests = 1
     min_baselines = 1
     confirms_ahead = False
@@ -134,6 +149,45 @@ def ran_accuracy(request: TestRequest, rule: Rule) -> bool:
     """Whether the test ran the eval the rule reads; an InferenceX explore may skip it, recorded as ``accuracy=False``
     on its accepted request."""
     return request.accuracy == rule.accuracy_round
+
+
+def retracts(record: TestRecord, rule: Rule) -> bool:
+    """Whether the test undoes a change its own agent found invalid: it carries an attachment under
+    :data:`RETRACTION_ID`, forced both consistency checks, as an autonomous branch's import of a retraction does, and,
+    under a rule whose tests can run them, both ran to the end. Only the judge of an autonomous branch reads it: a
+    specialist's own request never counts."""
+    request, result = record.request, record.result
+    forced = request.forces_consistency_check and request.forces_long_context_check
+    if not (_marked(request) and forced):
+        return False
+    if not rule.runs_consistency_checks:
+        return True
+    short, long = (None, None) if result is None else (result.short_prompt_consistency, result.long_context)
+    checked = short is not None and short.status == SHORT_PROMPTS_COMPLETE
+    return checked and long is not None and long.status == LONG_CONTEXT_COMPLETE
+
+
+def landed_retraction(record: TestRecord) -> bool:
+    """Whether the test is a retraction the gate landed: marked, and committed on a verdict no gain commits on."""
+    slower = record.judgement is not None and record.judgement.verdict in (Verdict.FLAT, Verdict.REGRESSED)
+    return _marked(record.request) and record.conclusion is Conclusion.COMMITTED and slower
+
+
+def _marked(request: TestRequest) -> bool:
+    return any(attachment.id == RETRACTION_ID for attachment in request.attachments)
+
+
+def lands_as_retraction(record: TestRecord, judgement: Judgement, rule: Rule) -> bool:
+    """Whether a retraction the rule did not find faster lands all the same: undoing a change is slower by
+    construction, so only the rule's errors, guards and accuracy, and a consistency check that ran, hold it back. Under
+    a rule whose tests cannot run the consistency checks (AgentX) none ran, so consistency is not tested. A final verdict whose every refusal is one of the
+    rule's speed gates, on measurements whose accuracy passed, and a long-context check that shows no drop, which the
+    AgentX rule does not read for any other test."""
+    final = judgement.verdict in (Verdict.FLAT, Verdict.REGRESSED)
+    passed = judgement.accuracy is AccuracyVerdict.PASSED
+    long_context = _result(record).long_context
+    dropped = long_context is not None and refuses(long_context, long_context.root)
+    return final and passed and not dropped and set(judgement.refused_by) <= rule.speed_gates
 
 
 def repeats(retest: TestRecord, first: TestRecord, rule: Rule) -> bool:
@@ -172,4 +226,15 @@ def _result(record: TestRecord) -> TestResult:
     return record.result
 
 
-__all__ = ["AgentXRule", "InferenceXRule", "Rule", "ran_accuracy", "repeats", "retest_request"]
+__all__ = [
+    "RETRACTION_ID",
+    "AgentXRule",
+    "InferenceXRule",
+    "Rule",
+    "landed_retraction",
+    "lands_as_retraction",
+    "ran_accuracy",
+    "repeats",
+    "retest_request",
+    "retracts",
+]

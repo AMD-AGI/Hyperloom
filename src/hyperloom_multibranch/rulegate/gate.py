@@ -101,13 +101,21 @@ class RuleGate:
             _require_proof(request, judgement, fix)
             await self._reverify(request, judgement)
             # The scheduler may stop a specialist at any moment; a stop must not split a commit from its judgement.
-            if not await asyncio.shield(self._commit(request, judgement, fix)):
+            message = f"{request.request_id}: {judgement.verdict.value} {judgement.gain_pct:+.2f}%"
+            if not await asyncio.shield(self._commit(request, judgement, fix, message)):
                 return Action.RECORD_ONLY
         elif action is Action.RECORD_ONLY:
             await self._record(request, judgement)
         elif action is Action.DIAGNOSE:
             await self._blackboard.write_judgement(request.request_id, judgement, Conclusion.DIAGNOSIS_PENDING)
         return action
+
+    async def retract(self, request: TestRequest, judgement: Judgement) -> bool:
+        """Land a retraction the rule refused only for speed (``rules.lands_as_retraction``): its agent undid a change
+        it found invalid, which no gain can show. False, and recorded only, when its branch has moved on."""
+        await self._reverify(request, judgement)
+        message = f"{request.request_id}: retraction, {judgement.verdict.value} {judgement.gain_pct:+.2f}%"
+        return await asyncio.shield(self._commit(request, judgement, None, message))
 
     async def decline(self, request: TestRequest, judgement: Judgement) -> TestRecord:
         """Record a blocked gain its specialist found no repair for."""
@@ -199,10 +207,9 @@ class RuleGate:
             logger.info("the scheduler voided %s (%s): %s is recorded only", branch, reason, voided.request.request_id)
             await self._record(voided.request, voided.judgement)
 
-    async def _commit(self, request: TestRequest, judgement: Judgement, fix: FixProof | None) -> bool:
+    async def _commit(self, request: TestRequest, judgement: Judgement, fix: FixProof | None, message: str) -> bool:
         # The repository commit comes first: the judgement names the commit it made, and so does the case.
         recipe = apply(await self._repo.read_recipe(request.parent_commit), request.delta)
-        message = f"{request.request_id}: {judgement.verdict.value} {judgement.gain_pct:+.2f}%"
         try:
             commit = await self._repo.commit(request.branch, request.parent_commit, recipe, message)
         except BranchMoved:

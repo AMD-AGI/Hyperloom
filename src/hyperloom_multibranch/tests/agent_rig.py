@@ -6,6 +6,7 @@ toolbox, the component agent and its plan, an image's aiter tables, and a fake A
 It imports nothing of the autonomous session, so a test that only onboards an agent does not need it."""
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -13,8 +14,9 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+from typing import Literal
 
-from hyperloom.contracts.measurement import TestRequest
+from hyperloom.contracts.measurement import AttachmentRef, TestRequest
 from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.surface import SurfaceViolation, check_launch_envs
@@ -122,19 +124,24 @@ def git(*args):
 
 
 signal.signal(signal.SIGTERM, lambda *_: leave("sigterm", 0))
-parent, previous = root, None
+parent, previous, commits = root, None, {}
 for number, seqs in enumerate(plan["keeps"], start=1):
     time.sleep(plan["gap"])
-    (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
+    retracting = number == plan["retracting_keep"] and plan["retracts"]
+    if retracting:
+        git("revert", "--no-edit", commits[plan["retracts"]["keep"]])
+    else:
+        (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
     if number == 1:
         (workspace / "vllm" / "first.py").write_text("FIRST = 1\\n")
         if plan["scratch"]:
             (workspace / "eval").mkdir()
             (workspace / "eval" / "server.log").write_bytes(b"Loading 10%\\r 20%\\r 30%\\n")
             (workspace / "eval" / "gpucore.1.gpu").write_bytes(bytes(range(256)) * 64)
-    git("add", "-A")
-    git("commit", "-qm", f"keep {number}")
-    commit = git("rev-parse", "HEAD").strip()
+    if not retracting:
+        git("add", "-A")
+        git("commit", "-qm", f"keep {number}")
+    commit = commits[number] = git("rev-parse", "HEAD").strip()
     if number == plan["skip"]:
         continue
     made_on = root if number == plan["orphan"] else parent
@@ -146,6 +153,8 @@ for number, seqs in enumerate(plan["keeps"], start=1):
             "change": f"seqs {seqs}", "intent": "", "outside": 1, "tables": {}, "tables_outside_workspace": []}
     if number == plan["stray"]:
         keep["parent"] = "f" * 40
+    if number == plan["retracting_keep"] and plan["retracts"]:
+        keep["retracts"] = plan["retracts"]
     if number == plan["orphan"] and plan["orphan_notes"]:
         keep["notes"] = f"the commit of keep {previous} is gone from the workspace; this change is against the root"
     envs = dict(plan["envs"])
@@ -211,6 +220,9 @@ class Component:
     parts: str = ""
     #: Whether the first keep also commits the agent's scratch outside vLLM: a log with progress bars and a core dump.
     scratch: bool = False
+    #: What the ``keep.json`` of keep ``retracting_keep`` says it retracts; that keep reverts the named keep's commit.
+    retracts: dict[str, object] | None = None
+    retracting_keep: int = 1
 
 
 async def _until(condition, what: str, seconds: float = 10.0) -> None:
@@ -298,7 +310,13 @@ class Toolbox:
         self.lease_refusals: list[Exception] = []
         self.lease_tries = 0
         self.tables: dict[str, bytes] = {}
+        self.attachments: dict[str, bytes] = {}
         self._variables = KernelVariables()
+
+    async def put_attachment(self, attachment_id: str, kind: Literal["file", "dir"], data: bytes) -> AttachmentRef:
+        ref = AttachmentRef(attachment_id, kind, hashlib.sha256(data).hexdigest())
+        self.attachments[ref.sha256] = data
+        return ref
 
     async def put_kernel_artifact(
         self, kind: KernelKind, target: str | None, env: str, data: bytes, rows_only: bool = False

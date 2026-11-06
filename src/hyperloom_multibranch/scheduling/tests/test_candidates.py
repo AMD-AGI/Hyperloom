@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a change between two recipes names, which is what decides whether a not-stackable candidate comes back."""
+"""What a change between two recipes names, which is what decides whether a not-stackable candidate comes back, and
+which commits a retraction keeps out of the offer."""
 
 from __future__ import annotations
 
@@ -15,7 +16,13 @@ from hyperloom.contracts.recipe import (
     PatchRef,
     Recipe,
 )
-from hyperloom_multibranch.scheduling.candidates import touched
+from hyperloom.contracts.measurement import AttachmentRef
+from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request
+from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
+from hyperloom_multibranch.contracts.judgement import Verdict
+from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
+from hyperloom_multibranch.scheduling.candidates import Candidates, touched
 
 IMAGE_DIGEST = "sha256:" + "b" * 64
 UPSTREAM_REF = "a" * 40
@@ -83,3 +90,51 @@ def test_a_kernel_artifact_is_named_by_its_kind_and_target() -> None:
 
 def test_two_recipes_that_differ_in_nothing_name_nothing() -> None:
     assert touched(BEFORE, replace(BEFORE), PATCHED) == frozenset()
+
+
+class _Committed:
+    """The integrator's view of committed commits and the records behind them."""
+
+    def __init__(self, commits: tuple[CommittedCommit, ...], records: dict[str, TestRecord]) -> None:
+        self._commits, self._records = commits, records
+
+    async def committed(self) -> tuple[CommittedCommit, ...]:
+        return self._commits
+
+    async def record(self, request_id: str) -> TestRecord:
+        return self._records[request_id]
+
+
+def _commit(commit_id: str, parent: str, branch: str = "b01") -> CommittedCommit:
+    return CommittedCommit(commit_id, branch, parent, f"r-{commit_id}", 1.0, False, False)
+
+
+def _landed(commit_id: str, verdict: Verdict, *attachments: AttachmentRef) -> TestRecord:
+    asked = request(f"r-{commit_id}", intent("b01", "c0"), attachments=attachments)
+    decided = judgement(-4.0 if verdict is Verdict.REGRESSED else 3.0, (asked.request_id or "",), verdict=verdict)
+    return TestRecord(asked, judgement=decided, conclusion=Conclusion.COMMITTED, commit_id=commit_id)
+
+
+async def test_the_commits_a_retraction_was_committed_on_are_not_offered_and_the_retraction_is() -> None:
+    mark = AttachmentRef(RETRACTION_ID, "file", "b" * 64)
+    commits = (_commit("c1", "c0"), _commit("c2", "c1"), _commit("c3", "c2"), _commit("d1", "c0", "b02"))
+    records = {
+        "r-c1": _landed("c1", Verdict.IMPROVED),
+        "r-c2": _landed("c2", Verdict.IMPROVED),
+        "r-c3": _landed("c3", Verdict.REGRESSED, mark),
+        "r-d1": _landed("d1", Verdict.IMPROVED),
+    }
+
+    offered = await Candidates(_Committed(commits, records), None).offered_on("i0")
+
+    assert [commit.commit_id for commit in offered] == ["c3", "d1"]
+
+
+async def test_a_gain_that_carries_the_retraction_mark_hides_nothing() -> None:
+    mark = AttachmentRef(RETRACTION_ID, "file", "b" * 64)
+    commits = (_commit("c1", "c0"), _commit("c2", "c1"))
+    records = {"r-c1": _landed("c1", Verdict.IMPROVED), "r-c2": _landed("c2", Verdict.IMPROVED, mark)}
+
+    offered = await Candidates(_Committed(commits, records), None).offered_on("i0")
+
+    assert [commit.commit_id for commit in offered] == ["c1", "c2"]

@@ -30,12 +30,12 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import (
     SnapshotQuery,
 )
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
+from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver, InboxKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, Toolbox
 from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
-from hyperloom_multibranch.rulegate.rules import Rule, repeats, retest_request
+from hyperloom_multibranch.rulegate.rules import Rule, lands_as_retraction, repeats, retest_request, retracts
 from hyperloom_multibranch.specialist.fix_check import FixCheck, FixChecking, check_fix, declares_fix
 
 #: Opens every branch log entry the runtime writes, so the specialist tells them from its own.
@@ -74,6 +74,7 @@ class BranchJudge:
         self._finishing = False
         self._finished = False
         self._submitted = False
+        self._autonomous = False
 
     async def run(self, poll_seconds: float, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Judge what waits, then again whenever the inbox brings a result, until cancelled or, once :meth:`finish`
@@ -96,6 +97,9 @@ class BranchJudge:
         # Only a snapshot read after finish() can show that nothing of the branch is left to arrive.
         finishing, self._submitted = self._finishing, False
         snapshot = await self._blackboard.snapshot()
+        self._autonomous = any(
+            node.branch == self._branch and node.driver is BranchDriver.AUTONOMOUS for node in snapshot.lineage.branches
+        )
         records = [record for record in snapshot.records if record.request.branch_id == self._branch]
         logged = {record.entry for record in snapshot.branch_logs.get(self._branch, ())}
         retests: dict[str, list[TestRecord]] = {}
@@ -135,6 +139,9 @@ class BranchJudge:
         await self._settle(first, judgement, logged)
 
     async def _settle(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
+        if self._autonomous and retracts(first, self._rule) and lands_as_retraction(first, judgement, self._rule):
+            await self._retract(first, judgement, logged)
+            return
         fix = None
         if declares_fix(first.request, judgement):
             checked = await self._check_fix(first, judgement, logged)
@@ -154,9 +161,7 @@ class BranchJudge:
                 admission = await self._gate.fork(first.request, judgement, reason, fix=fix)
                 await self._notice(logged, _forked(first, admission), *judgement.request_ids)
         except ResultUnverified as error:
-            unverified = "a result behind it did not re-verify against its signed bundle"
-            content = f"{first.request_id} {_NOT_COMMITTED} {unverified} ({error.request_id}: {error.reason})"
-            await self._notice(logged, content, *judgement.request_ids)
+            await self._unverified(logged, first, judgement, error)
             return
         if action is Action.COMMIT:
             landed = f"{first.request_id} landed on your branch at {judgement.gain_pct:+.2f}% over {first.request.parent_commit}"
@@ -174,6 +179,26 @@ class BranchJudge:
         elif action is Action.RECORD_ONLY and decide(judgement) is Action.COMMIT:
             moved = f"{first.request_id} improved on {first.request.parent_commit}, but the branch has moved on"
             await self._notice(logged, f"{moved}; submit it again on the head as a new test", *judgement.request_ids)
+
+    async def _retract(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
+        try:
+            landed = await self._gate.retract(first.request, judgement)
+        except ResultUnverified as error:
+            await self._unverified(logged, first, judgement, error)
+            return
+        if landed:
+            retraction = f"{first.request_id} landed on your branch as a retraction at {judgement.gain_pct:+.2f}%"
+            content = f"{retraction} over {first.request.parent_commit}, held to the rule's errors, guards, accuracy and, where its tests run them, consistency checks, not its speed"
+        else:
+            content = f"{first.request_id} retracts a change, but the branch has moved on; it is recorded only"
+        await self._notice(logged, content, *judgement.request_ids)
+
+    async def _unverified(
+        self, logged: set[BranchLogEntry], first: TestRecord, judgement: Judgement, error: ResultUnverified
+    ) -> None:
+        unverified = "a result behind it did not re-verify against its signed bundle"
+        content = f"{first.request_id} {_NOT_COMMITTED} {unverified} ({error.request_id}: {error.reason})"
+        await self._notice(logged, content, *judgement.request_ids)
 
     async def _check_fix(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> FixCheck:
         if self._fixes is None:
