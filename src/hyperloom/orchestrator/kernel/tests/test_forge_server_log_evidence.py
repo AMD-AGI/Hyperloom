@@ -198,19 +198,31 @@ class _StopHere(Exception):
     """Raised from the MoE CSV writer to end the run at the point under test."""
 
 
-class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
-    """Both lanes must see the observed M sweep, not just the dense one."""
+_MOE_KEY = (
+    "('gfx950', 256, {tok}, 6144, 384, 128, 4, 'ActivationType.Silu', 'torch.bfloat16', "
+    "'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
+)
+MOE_DISPATCH = "[aiter] [fused_moe] using 2stage default for " + _MOE_KEY + "\n"
+MOE_MISS = "[aiter] [fused_moe] no tuned FlyDSL config for " + _MOE_KEY + ", using heuristic FlyDSL fallback\n"
+
+
+class TestTheMoeCsvTunesOnlyWhatItsLookupsMissed:
+    """The dense M sweep is the dense lane's; a MoE key is tuned at the tokens its own lookups missed."""
 
     @pytest.mark.asyncio
-    async def test_the_moe_writer_receives_the_serving_log_sweep(self, tmp_path, monkeypatch):
+    async def test_the_moe_rows_are_the_keys_missed_tokens_not_the_dense_sweep(self, tmp_path, monkeypatch):
         model_dir = tmp_path / "model"
         model_dir.mkdir()
-        log_path = _log(tmp_path / "server.log", "".join(HIT.format(m=m) * 4 for m in (1, 64, 2048, 16384)))
+        dense = "".join(HIT.format(m=m) * 4 for m in (1, 64, 2048, 16384))
+        moe = MOE_DISPATCH.format(tok=1) + MOE_DISPATCH.format(tok=512) + MOE_MISS.format(tok=512)
+        log_path = _log(tmp_path / "server.log", dense + moe)
 
-        seen: dict[str, str] = {}
+        seen: dict[str, list[str]] = {}
+        write_csv = forge_gemm_tuning._write_fmoe_untuned_csv_from_log
 
-        def _writer(_log_path, tokens, _workspace):
-            seen["tokens"] = tokens
+        def _writer(*args):
+            path, _report = write_csv(*args)
+            seen["tokens"] = [row.split(",")[0] for row in Path(path).read_text(encoding="utf-8").splitlines()[1:]]
             raise _StopHere
 
         from hyperloom.common import model_paths, visible_devices
@@ -229,6 +241,4 @@ class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
         with pytest.raises(_StopHere):
             await forge_gemm_tuning._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
-        assert seen["tokens"] == serving_log_evidence._tokens_from_serving_log(log_path)
-        # Not the ``[1]`` fallback, and not a single value of any kind.
-        assert len(seen["tokens"].split(",")) > 1
+        assert seen["tokens"] == ["512"]

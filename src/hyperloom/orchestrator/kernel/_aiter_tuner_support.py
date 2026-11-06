@@ -157,54 +157,30 @@ def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
     return any(_aiter_moe_dtype_pair_supported(key["q_dtype_a"], key["q_dtype_w"]) for key in keys)
 
 
-def _fmoe_token_list(tokens: Any) -> list[int]:
-    """Positive token counts to sweep, keyed off whatever the caller sends.
-
-    Accepts forge's comma-separated string (what :func:`_tokens_from_serving_log`
-    produces) or a sequence. Unparseable and non-positive entries are dropped
-    rather than raising -- one bad entry is not worth the run -- and ``[1]`` is
-    the floor so there is always a token to key on.
-    """
-    if isinstance(tokens, str):
-        raw: list[str] = [part.strip() for part in tokens.split(",")]
-    elif isinstance(tokens, (list, tuple, set, frozenset)):
-        raw = [str(item).strip() for item in tokens]
-    elif tokens is None:
-        raw = []
-    else:
-        raw = [str(tokens).strip()]
-
-    out: set[int] = set()
-    for item in raw:
-        if not item:
-            continue
-        try:
-            value = int(item)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            out.add(value)
-    return sorted(out) or [1]
-
-
 def _write_fmoe_untuned_csv_from_log(
     server_log: str,
-    tokens: Any,
     workspace: Path,
 ) -> tuple[str, dict[str, Any]]:
-    """Turn the MoE problems observed in ``server_log`` into a tuning input CSV.
+    """Turn the MoE lookups ``server_log`` shows missing into a tuning input CSV.
 
     Returns ``(csv_path, report)``; ``csv_path`` is "" when nothing tunable was
-    observed. Writing the observed tuple verbatim is the whole point: the
+    missed. Writing the observed tuple verbatim is the whole point: the
     quantisation pair, the per-partition ``inter_dim`` and the EP-inflated
     expert/topk counts are all properties of what the serving framework chose,
     and every attempt to re-derive them from the model config is a guess that has
-    already produced tables no runtime lookup could reach.
+    already produced tables no runtime lookup could reach. Each problem is tuned
+    at the tokens its own lookups missed; a token it hit is already served.
 
     Problems whose dtype pair aiter's codegen rejects are dropped rather than
     passed through, because one unsupported row aborts the whole tuner run.
     """
-    from kernelforge.workflows.gemm_tune import MOE_SHAPE_FIELDS, moe_untuned_csv_text
+    from kernelforge.workflows.gemm_tune import (
+        MOE_SHAPE_FIELDS,
+        moe_ck_missed_keys,
+        moe_dispatch_keys,
+        moe_untuned_csv_text,
+        parse_log_file,
+    )
 
     report: dict[str, Any] = {
         "observed": 0,
@@ -212,8 +188,11 @@ def _write_fmoe_untuned_csv_from_log(
         "dropped_unsupported": [],
         "keys": [],
     }
-    keys = _aiter_fused_moe_dispatch_keys(server_log)
-    report["observed"] = len(keys)
+    if not server_log:
+        return "", report
+    parsed = parse_log_file(server_log)
+    report["observed"] = len(moe_dispatch_keys(parsed))
+    keys = moe_ck_missed_keys(parsed)
     if not keys:
         return "", report
 
@@ -231,8 +210,7 @@ def _write_fmoe_untuned_csv_from_log(
     if not tunable:
         return "", report
 
-    token_list = _fmoe_token_list(tokens)
-    rendered = [moe_untuned_csv_text(key, tokens=token_list).splitlines() for key in tunable]
+    rendered = [moe_untuned_csv_text(key).splitlines() for key in tunable]
     lines = rendered[0][:1] + [row for key_lines in rendered for row in key_lines[1:]]
 
     csv_path = workspace / "untuned_fmoe_from_runtime.csv"
@@ -247,9 +225,9 @@ def _write_fmoe_untuned_csv_from_log(
         log.warning("Forge GEMM shapes: cannot write %s: %s", csv_path, exc)
         return "", report
     log.info(
-        "Forge GEMM shapes: derived %d MoE problem(s) x %d token(s) from %s%s",
+        "Forge GEMM shapes: derived %d MoE problem(s), %d missed token row(s) from %s%s",
         len(tunable),
-        len(token_list),
+        len(lines) - 1,
         server_log,
         (f"; dropped {report['dropped_unsupported']} as untunable by aiter" if report["dropped_unsupported"] else ""),
     )
