@@ -667,7 +667,7 @@ def extract_benchmark_measurement(
         provenance labels).
     """
     report = report or {}
-    from hyperloom.inference_optimizer.agentx.report import agentx_measurement
+    from hyperloom.inference_optimizer.agentx.report import agentx_measurement, measured_corpus_shape
 
     from .magpie_agentx import native_config
 
@@ -677,6 +677,8 @@ def extract_benchmark_measurement(
         measurement = agentx_measurement(report)
         measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
         measurement[GRADED_INTVTY_P50_CHECKPOINT] = workspace_checkpoint_p50(workspace)
+        if corpus_shape := measured_corpus_shape(workspace):
+            measurement["agentx_corpus_shape"] = corpus_shape
         return measurement
     measurement = _measurement_from_report(report, workspace, subprocess_started_unix)
 

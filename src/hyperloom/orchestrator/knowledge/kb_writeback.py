@@ -25,6 +25,8 @@ OUTCOME_ALREADY_PRESENT: str = "already_present"
 OUTCOME_REVERTED_SWITCH_OFF_PARITY: str = "reverted_switch_off_parity"
 # The parity leg produced no usable measurement, so the invariant was never tested.
 OUTCOME_REVERTED_PARITY_INCONCLUSIVE: str = "reverted_parity_inconclusive"
+# A switched rewrite that missed the KEEP gate, kept dormant with its switches registered as levers.
+OUTCOME_KEPT_INERT: str = "kept_inert_levers_registered"
 ALLOWED_OUTCOMES: frozenset[str] = frozenset(
     {
         OUTCOME_INTEGRATED,
@@ -33,6 +35,7 @@ ALLOWED_OUTCOMES: frozenset[str] = frozenset(
         OUTCOME_ALREADY_PRESENT,
         OUTCOME_REVERTED_SWITCH_OFF_PARITY,
         OUTCOME_REVERTED_PARITY_INCONCLUSIVE,
+        OUTCOME_KEPT_INERT,
     }
 )
 
@@ -91,6 +94,7 @@ __all__ = [
     "OUTCOME_ALREADY_PRESENT",
     "LESSONS_FILE",
     "OUTCOME_INTEGRATED",
+    "OUTCOME_KEPT_INERT",
     "OUTCOME_REJECTED_APPLY_FAIL",
     "OUTCOME_REVERTED_PARITY_INCONCLUSIVE",
     "OUTCOME_REVERTED_SMOKE_FAIL",

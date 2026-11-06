@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
-from hyperloom.common.benchmark_config import is_magpie_agentx
 import functools
 import logging
 import os
@@ -17,7 +16,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.coerce import to_float, to_int, to_str_list
-from hyperloom.common.gain_math import accuracy_passed, gain_pct
+from hyperloom.common.gain_math import accuracy_passed, gain_pct, graded_gate_row
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
@@ -39,6 +38,7 @@ from hyperloom.common.perf_metric import (
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ...state.explore_ledger import land_verdict, ledger_view, variant_knobs
 from ...state.failure_evidence import (
     UNMEASURED_OUTCOMES,
     FAILURE_STAGE_DECISION,
@@ -62,7 +62,13 @@ from ._accuracy_gate import parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
 from .bypass_scriptable import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
+from ._proposal_identity import (
+    BaseControls,
+    controls_of,
+    effective_fingerprint,
+    keeps_effective_args,
+    normalize_proposal,
+)
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
 from ._agentx_checkpoint import round_checkpoint
@@ -185,17 +191,6 @@ def _carry_variant_metadata(src: Any, dst: Any) -> Any:
 def _variant_fingerprint(variant: Any) -> str:
     """The canonical fingerprint stamped on a variant before the round launched it."""
     return str(getattr(variant, "canonical_fp", "") or "")
-
-
-def _keep_uses_effective_args(
-    benchmark: dict[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
-) -> bool:
-    """Native KEEP edits remain relative to the verified recipe unless explicitly replaced."""
-    return (
-        base_mode == "replace"
-        or variant_mode == "replace"
-        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
-    )
 
 
 def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
@@ -641,25 +636,6 @@ _REJECTED_FIELDS: tuple[str, ...] = (
 )
 
 
-def _ledger_view(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
-    return {key: row[key] for key in fields if key in row}
-
-
-def _variant_knobs(te: dict[str, Any]) -> dict[str, Any]:
-    # Carry the variant knobs so the journal's ``classify_change_kind`` can classify the change kind.
-    return {
-        "name": str(te.get("name") or ""),
-        "extra_server_args": str(te.get("extra_server_args") or ""),
-        "extra_envs": dict(te.get("extra_envs") or {}),
-        "remove_args": list(te.get("remove_args") or []),
-        "unset_envs": list(te.get("unset_envs") or []),
-        "args_mode": str(te.get("args_mode") or "append"),
-        "note": str(te.get("note") or ""),
-        "reasoning_origin": str(te.get("reasoning_origin") or ""),
-        "experience_citations": list(te.get("experience_citations") or []),
-    }
-
-
 def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str) -> dict[str, Any]:
     name = str(te.get("name") or "")
     outcome = str(te.get("outcome") or "")
@@ -685,7 +661,7 @@ def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str
         "server_log_path": te.get("server_log_path"),
         "workspace": te.get("workspace"),
         "raw_result_path": te.get("raw_result_path"),
-        "variant": _variant_knobs(te),
+        "variant": variant_knobs(te),
         # The verdicts and the stack behind them, as the round ruled. Absent keys mean the variant never got that
         # far: no gate ruled on a warmup failure, and nothing validated one that was killed before it was graded.
         "measured_against": te.get("measured_against") or {},
@@ -788,6 +764,7 @@ class _ExploreRound:
         self.lease: Any = None
 
     async def run(self, session_dir: Path | None = None) -> dict[str, Any]:
+        self.session_dir = session_dir
         self._resolve_grid()
         self._shape_runnable()
         self._open_schedule()
@@ -1376,21 +1353,7 @@ class _ExploreRound:
             reason = graded.veto_reason or (f"{graded.refused_by} ({axes})" if on_intvty else GAIN_BELOW_THRESHOLD)
         else:
             gain = gain_pct(graded.candidate, graded.reference)
-        gates: list[dict[str, Any]] = []
-        if r.status == "succeeded":
-            gates.append(
-                {
-                    "gate": graded.vetoed_by
-                    if graded.veto_reason
-                    else ("graded_axes" if (on_intvty or graded.degrade_reason) else "keep_threshold"),
-                    "passed": False if graded.degrade_reason else graded.verdict != VERDICT_REVERT,
-                    # The anchor is the reference; the floor the candidate has to clear belongs to the gate, as
-                    # the tolerance does for accuracy.
-                    "observed": graded.candidate if on_intvty else gain_pct(graded.candidate, graded.reference),
-                    "threshold": graded.reference if on_intvty else self.keep_threshold_pct,
-                    "reason": reason,
-                }
-            )
+        gates = [graded_gate_row(graded, self.keep_threshold_pct, reason)] if r.status == "succeeded" else []
         return {
             "outcome": outcome,
             # Which gate refused the variant. The prompt ledger renders this row, and without the reason a REVERT
@@ -1443,8 +1406,21 @@ class _ExploreRound:
     def _record(self, gv: GridVariant, row: dict[str, Any]) -> None:
         self.tested[row["fingerprint"]] = row
         if row["outcome"] != "KEEP":
-            self.rejected.append({**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)})
-            self.losers.append(_ledger_view(row, _LOSER_FIELDS))
+            rejected = {**ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)}
+            self.rejected.append(rejected)
+            self.losers.append(ledger_view(row, _LOSER_FIELDS))
+            if self.ss is not None and self.session_dir is not None:
+                # A preempted round keeps the verdicts it judged; a KEEP lands at settlement.
+                outcome = _outcome_row(
+                    row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id)
+                )
+                attributions = _framework_lever_attributions([outcome], self.lever_payload)
+                land_verdict(
+                    self.ss,
+                    self.session_dir,
+                    {"tested": {row["fingerprint"]: row}, "rejected": [rejected]},
+                    attributions,
+                )
             return
         self.winners_history.append(
             {
@@ -1490,9 +1466,7 @@ class _ExploreRound:
             effective["remove_args"] = list(run_remove_args)
         if run_gv.unset_envs:
             effective["unset_envs"] = list(run_gv.unset_envs)
-        persist = _keep_uses_effective_args(
-            self.bench, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs
-        )
+        persist = keeps_effective_args(self.bench, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs)
         if persist:
             effective["args_mode"] = "replace"
         # The variant KEEPs on the round that graded it.

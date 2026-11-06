@@ -174,6 +174,12 @@ from kernelforge.workflows.forge_fusion.request import (
         type=int,
         help="Cap how many ranked recipes to try. 0 means uncapped: every discovered recipe is considered.",
     ),
+    click.option(
+        "--deadline-unix",
+        default=0.0,
+        type=float,
+        help="Absolute time the run must finish by; each recipe's forge-loop gets its share. 0 leaves each its default.",
+    ),
     option_group(
         "smoke",
         SmokeOptions,

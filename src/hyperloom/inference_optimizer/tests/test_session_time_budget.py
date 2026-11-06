@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import sys
 import threading
 import time
@@ -1024,6 +1025,7 @@ def _runs_a_round_in_a_lease(started: asyncio.Event, *, outcome: dict[str, Any],
             lease.run_session_kill,
             SessionKillRound(
                 [sys.executable, "-c", f"import time; time.sleep({_BLOCKING_SEC})"],
+                env=dict(os.environ),
                 timeout=_BLOCKING_SEC * 4,
             ),
         )

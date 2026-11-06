@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,9 @@ DEFAULT_RAY_CONNECT_PROBE_TIMEOUT_SEC = 60.0
 
 # Tail of a failed `ray start` carried in the exception, bounding its length.
 _RAY_START_OUTPUT_TAIL_CHARS = 1500
+
+# Opaque room for a libc ``struct sigaction`` (152 bytes on glibc x86_64 and aarch64).
+_SIGACTION_BUFFER_BYTES = 512
 
 # Custom Ray resource declared on the single-node head so serving-family work (serving / benchmark / profile /
 # gpu_research) can hold a whole-machine ``serving_slot`` as the authoritative physical mutex.
@@ -627,6 +631,23 @@ def safe_runtime_env() -> dict:
     return {"env_vars": env}
 
 
+@contextlib.contextmanager
+def _sigterm_disposition_kept() -> Iterator[None]:
+    """Put the process's SIGTERM disposition back as it was before the body, from any thread.
+
+    The Ray driver core installs a crash handler on SIGTERM whose watchdog aborts the process 3s after the signal;
+    ``signal.signal`` cannot undo it off the main thread, so libc ``sigaction`` saves and restores it.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    saved = ctypes.create_string_buffer(_SIGACTION_BUFFER_BYTES)
+    kept = libc.sigaction(signal.SIGTERM, None, saved) == 0
+    try:
+        yield
+    finally:
+        if kept:
+            libc.sigaction(signal.SIGTERM, saved, None)
+
+
 def quiet_ray_init(num_gpus: Optional[int] = None) -> None:
     """Initialize ray while suppressing the connect banner on stdout."""
     import contextlib
@@ -644,13 +665,14 @@ def quiet_ray_init(num_gpus: Optional[int] = None) -> None:
         vanish into a buffer nobody reads. The caller suppresses the banner instead,
         around a join it always completes.
         """
-        ray.init(
-            address=address,
-            ignore_reinit_error=True,
-            log_to_driver=False,
-            logging_level="error",
-            runtime_env=runtime_env,
-        )
+        with _sigterm_disposition_kept():
+            ray.init(
+                address=address,
+                ignore_reinit_error=True,
+                log_to_driver=False,
+                logging_level="error",
+                runtime_env=runtime_env,
+            )
 
     def _init(address: str) -> None:
         """Connect under a wall-clock bound.
