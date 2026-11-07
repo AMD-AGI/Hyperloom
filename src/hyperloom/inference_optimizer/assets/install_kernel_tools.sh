@@ -1328,7 +1328,8 @@ ensure_geak_node() {
     rm -rf -- "$_tmp"
     die "${_name}.tar.xz does not match its SHASUMS256.txt entry"
   fi
-  if ! tar -xJf "${_tmp}/${_name}.tar.xz" -C "$_tmp"; then
+  # The archive records its builder's uid/gid; root would chown to them, which a one-id user namespace refuses.
+  if ! tar --no-same-owner -xJf "${_tmp}/${_name}.tar.xz" -C "$_tmp"; then
     rm -rf -- "$_tmp"
     die "unpacking ${_name}.tar.xz failed (is xz installed?)"
   fi
