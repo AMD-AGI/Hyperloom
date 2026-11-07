@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.common.benchmark_config import PointError
 from hyperloom.orchestrator.actions.executors import _server_lifecycle
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors import bypass_engine
@@ -462,6 +463,16 @@ def test_bypass_run_missing_inferencex_fails(tmp_path):
     report = json.loads((workspaces[0] / "benchmark_report.json").read_text(encoding="utf-8"))
     assert report["success"] is False
     assert report["errors"]
+
+
+@pytest.mark.parametrize("document", [{"other": {}}, {"benchmark": {"envs": "x", "timeout_seconds": 1}}])
+def test_bypass_run_refuses_a_config_that_is_not_a_point(tmp_path, document):
+    cfg_path = tmp_path / "bad.yaml"
+    cfg_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(PointError, match=str(cfg_path)):
+        bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert not (tmp_path / "out").exists()
 
 
 def test_bypass_run_server_not_ready_fails(tmp_path, monkeypatch):

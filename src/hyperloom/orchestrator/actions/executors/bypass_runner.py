@@ -20,6 +20,7 @@ import yaml
 
 from hyperloom_common.coerce import to_float, to_int
 from hyperloom_common.env import is_truthy
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.common.env_safety import build_benchmark_env
 
 from . import _server_lifecycle
@@ -84,13 +85,7 @@ def run_benchmark(config_path: Path, output_dir: Path) -> int:
     from hyperloom.inference_optimizer import framework_registry
 
     if framework_registry.is_scriptable(spec.framework):
-        return _run_scriptable_benchmark(
-            framework=spec.framework,
-            model=spec.model,
-            bench=spec.bench,
-            timeout_s=spec.timeout_s,
-            output_dir=output_dir,
-        )
+        return _run_scriptable_benchmark(spec, output_dir)
 
     if spec.framework not in bypass_engine.SERVER_FRAMEWORKS:
         _emit_failure(output_dir, spec.framework, spec.model, f"unsupported framework: {spec.framework!r}")
@@ -137,6 +132,7 @@ class _BenchSpec(NamedTuple):
 
     cfg: dict[str, Any]
     bench: dict[str, Any]
+    point: BenchmarkPoint
     framework: str
     model: str
     bench_envs: dict[str, Any]
@@ -150,13 +146,15 @@ class _BenchSpec(NamedTuple):
 def _read_bench_spec(config_path: Path) -> _BenchSpec:
     """Read the benchmark block of a bypass config off disk."""
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    bench = cfg.get("benchmark") or {}
+    point = BenchmarkPoint.from_document(cfg, source=str(config_path))
+    bench = cfg["benchmark"]
     return _BenchSpec(
         cfg=cfg,
         bench=bench,
-        framework=str(bench.get("framework") or "sglang").lower(),
-        model=str(bench.get("model") or os.environ.get("MODEL", "")),
-        bench_envs=dict(bench.get("envs") or {}),
+        point=point,
+        framework=(point.framework or "sglang").lower(),
+        model=point.model or os.environ.get("MODEL", ""),
+        bench_envs=dict(point.envs),
         timeout_s=float(bench["timeout_seconds"]),
         lifecycle=bench.get("server_lifecycle") or {},
     )
@@ -169,8 +167,7 @@ def _round_from_spec(spec: _BenchSpec, output_dir: Path, inferencex_root: str) -
     envs = spec.bench_envs
     port = to_int(os.environ.get("PORT") or envs.get("PORT"), bypass_engine.DEFAULT_PORT)
 
-    profiler = (spec.bench.get("profiler") or {}).get("torch_profiler") or {}
-    profile = bool(profiler.get("enabled"))
+    profile = spec.point.torch_profiler
     profile_dir = str(workspace / "torch_trace") if profile else None
     if profile_dir:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -398,23 +395,16 @@ def _run_lifecycle_all(r: _Round, *, pid_dir: str, cleanup: bool) -> int:
     return r.finalize(start, rc)
 
 
-def _run_scriptable_benchmark(
-    *,
-    framework,
-    model,
-    bench,
-    timeout_s,
-    output_dir,
-) -> int:
+def _run_scriptable_benchmark(spec: _BenchSpec, output_dir: Path) -> int:
     """Run a server-less scriptable benchmark (e.g. xDiT) and write the report."""
+    framework, bench = spec.framework, spec.bench
     inferencex_root = bypass_engine.resolve_inferencex_root(bench)
     workspace = bypass_report.create_workspace(output_dir, framework)
     _snapshot_config(workspace, {"benchmark": bench})
-    runner_type = str(bench.get("runner_type") or os.environ.get("RUNNER_TYPE") or "mi300x").lower()
+    runner_type = (spec.point.runner_type or os.environ.get("RUNNER_TYPE") or "mi300x").lower()
     # Profiler parity with the serving path: honor torch_profiler.enabled so scriptable scripts (xDiT) trace into the
     # workspace torch_trace dir.
-    profiler = (bench.get("profiler") or {}).get("torch_profiler") or {}
-    profile = bool(profiler.get("enabled"))
+    profile = spec.point.torch_profiler
     profile_dir = str(workspace / "torch_trace") if profile else None
     if profile_dir:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -427,11 +417,11 @@ def _run_scriptable_benchmark(
             bench=bench,
         ),
         workspace,
-        timeout_s=timeout_s,
+        timeout_s=spec.timeout_s,
         profile=profile,
         profile_dir=profile_dir,
     )
-    subject = bypass_report.ReportSubject(framework, model, profiling_enabled=profile)
+    subject = bypass_report.ReportSubject(framework, spec.model, profiling_enabled=profile)
     if error is not None:
         _write_report(workspace, subject, bypass_report.RunOutcome(False, [error]), start)
         return 2

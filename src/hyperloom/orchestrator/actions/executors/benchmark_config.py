@@ -34,7 +34,7 @@ from hyperloom.common.agentx_workload import (
     is_agentx_client_script,
     is_mlperf_backend,
 )
-from hyperloom.common.benchmark_config import is_magpie_agentx, read_benchmark_point
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.common.env_safety import valid_env_key
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
@@ -202,17 +202,16 @@ def composed_benchmark_timeout_sec(config_path: Path) -> float:
     this cannot read raises, as launching that round would: the caller owns the blast
     radius of one unusable config, and the grid runner ends that variant on it.
     """
-    bench = (yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}).get("benchmark") or {}
+    point = read_benchmark_point(config_path)
     envs = dict(os.environ)
-    envs.update({str(k): str(v) for k, v in (bench.get("envs") or {}).items()})
-    if is_magpie_agentx(bench):
+    envs.update({str(k): str(v) for k, v in point.envs.items()})
+    if point.agentx:
         # AgentX keeps the variant's deltas in its launch overrides and applies them over the
         # inherited env when it starts; the same order here, so the cap is sized to the env the
         # round runs under rather than to the one it inherited.
-        launch = (bench.get("agentx") or {}).get("launch_overrides") or {}
-        for name in launch.get("unset_env") or []:
-            envs.pop(str(name), None)
-        envs.update({str(k): str(v) for k, v in (launch.get("env") or {}).items()})
+        for name in point.agentx_launch.unset_env:
+            envs.pop(name, None)
+        envs.update({str(k): str(v) for k, v in point.agentx_launch.env.items()})
     if BENCHMARK_TIMEOUT_ENV in envs and BENCHMARK_TIMEOUT_ENV in os.environ:
         return resolve_benchmark_timeouts()[1]
     return default_benchmark_timeout_sec(envs)
