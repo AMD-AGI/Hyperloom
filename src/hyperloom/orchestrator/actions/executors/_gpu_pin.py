@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GPU pin and serving-fidelity resolution for the GEAK handoff."""
+"""GPU pins: the ROCR mask a benchmark point launches on, and the pin and serving fidelity for the GEAK handoff."""
 
 from __future__ import annotations
 
 
+import logging
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -22,14 +23,58 @@ from hyperloom.common.visible_devices import (
 from hyperloom.inference_optimizer.gpu_types import geak_identity_pin
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
 
+log = logging.getLogger(__name__)
+
+
+def resolve_rocr_visible_devices(point_mask: Any, *, tp: int) -> str:
+    """The ROCR mask a benchmark point launches on, at least ``tp`` cards wide.
+
+    The point's own mask wins; the process's (the session's cards) fills it only when the
+    point names none. ROCR ids are physical, so a point id outside the session's mask would
+    land on another session's card and is refused. A mask narrower than ``tp`` is widened
+    from the session's cards, or from ``0..tp-1`` when the process has no mask.
+
+    Raises:
+        ValueError: The point's mask names a card outside the process's mask.
+    """
+    session = mask_tokens(os.environ.get("ROCR_VISIBLE_DEVICES", ""))
+    point = mask_tokens(point_mask)
+    session_ids = {_device_key(d) for d in session}
+    outside = [d for d in point if session and _device_key(d) not in session_ids]
+    if outside:
+        raise ValueError(
+            f"benchmark.envs.ROCR_VISIBLE_DEVICES={','.join(point)!r} names card(s) {','.join(outside)} "
+            f"outside this process's ROCR_VISIBLE_DEVICES={','.join(session)!r}; pin the point to cards "
+            "inside the session's mask or drop its mask."
+        )
+    mask = point or session
+    if len(mask) < tp:
+        widened = (session or [str(i) for i in range(tp)])[:tp]
+        if mask and widened != mask:
+            log.warning(
+                "ROCR_VISIBLE_DEVICES=%r has %d devices but TP=%d; expanding to %r so the server sees enough GPUs.",
+                ",".join(mask),
+                len(mask),
+                tp,
+                ",".join(widened),
+            )
+        mask = widened
+    return ",".join(mask)
+
+
+def _device_key(token: str) -> str:
+    return str(int(token)) if token.isdigit() else token
+
 
 def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
     """Is this recipe's ROCR mask the materializer's autofill rather than a pin?
 
-    ``materialize_config_with_envs`` unconditionally writes
+    With no process mask, ``materialize_config_with_envs`` writes
     ``ROCR_VISIBLE_DEVICES=0..tp-1`` into ``benchmark.envs`` whenever the mask
-    is absent or narrower than TP (``_workload_envs.py``). Every materialized
-    recipe therefore carries the key, so a recipe ROCR value that is
+    is absent or narrower than TP (``resolve_rocr_visible_devices``); with one,
+    it fills from the process's cards, and the process env outranks the recipe
+    here anyway. Every materialized recipe therefore carries the key, so a
+    recipe ROCR value that is
     byte-identical to that default carries no information about where the run
     is actually pinned — treating it as a pin is what made this resolver
     override a real ``HIP_VISIBLE_DEVICES`` and re-pin GEAK to cards ``0..tp-1``.

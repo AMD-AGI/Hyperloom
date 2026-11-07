@@ -82,8 +82,9 @@ repo-wide — while this resolver answers "where is this run pinned", and a run
 pinned with a legacy spelling is really pinned.
 
 The process env comes first because the recipe's ROCR key is not evidence of a
-pin: `materialize_config_with_envs` autofills `ROCR_VISIBLE_DEVICES=0..tp-1`
-into every materialized recipe when the mask is absent or narrower than `TP`.
+pin: with no process mask, `materialize_config_with_envs` autofills
+`ROCR_VISIBLE_DEVICES=0..tp-1` into every materialized recipe when the mask is
+absent or narrower than `TP`.
 A recipe ROCR value byte-identical to that default is therefore ignored, so a
 `HIP`-pinned or genuinely unpinned run is not silently re-pinned to cards
 `0..tp-1`. A recipe mask that differs from the default *is* honoured, and its ids are

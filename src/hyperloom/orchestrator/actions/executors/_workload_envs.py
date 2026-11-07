@@ -31,6 +31,7 @@ from typing import Any, Mapping, NamedTuple
 import yaml
 
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
+from hyperloom.common.visible_devices import mask_tokens
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -72,6 +73,7 @@ from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from ._gpu_pin import resolve_rocr_visible_devices
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -958,17 +960,13 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
     if r_env:
         envs["RANDOM_RANGE_RATIO"] = float(r_env)
-    rocr_env = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
-    if rocr_env:
-        envs["ROCR_VISIBLE_DEVICES"] = rocr_env
+    point_mask = envs.get("ROCR_VISIBLE_DEVICES")
     tp_from_yaml = envs.get("TP")
-    rocr_yaml = str(envs.get("ROCR_VISIBLE_DEVICES") or "").strip()
-    rocr_devices = [d.strip() for d in rocr_yaml.split(",") if d.strip()]
-    if rocr_yaml and not tp_from_yaml:
-        # Derive TP from the user-pinned GPU list when the YAML doesn't set TP.
-        resolved_tp = len(rocr_devices)
+    if tp_from_yaml:
+        resolved_tp = int(tp_from_yaml)
     else:
-        resolved_tp = int(tp_from_yaml or 1)
+        # Derive TP from the pinned GPU list when the YAML doesn't set TP.
+        resolved_tp = len(mask_tokens(resolve_rocr_visible_devices(point_mask, tp=0))) or 1
     # Auto-clamp TP to the visible GPU count. Override via
     # $INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1.
     if os.environ.get("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "").strip() != "1":
@@ -985,19 +983,7 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
             )
             resolved_tp = visible
     envs["TP"] = resolved_tp
-    if not rocr_yaml or len(rocr_devices) < resolved_tp:
-        derived = ",".join(str(i) for i in range(resolved_tp))
-        if rocr_yaml and rocr_yaml != derived:
-            log.warning(
-                "ROCR_VISIBLE_DEVICES=%r has %d devices but TP=%d; "
-                "expanding to %r so SGLang sees enough GPUs. Set "
-                "ROCR_VISIBLE_DEVICES explicitly to override.",
-                rocr_yaml,
-                len(rocr_devices),
-                resolved_tp,
-                derived,
-            )
-        envs["ROCR_VISIBLE_DEVICES"] = derived
+    envs["ROCR_VISIBLE_DEVICES"] = resolve_rocr_visible_devices(point_mask, tp=resolved_tp)
 
 
 def _apply_xdit_profile(envs: dict[str, Any]) -> tuple[str, ...]:
@@ -1597,13 +1583,15 @@ def materialize_config_with_envs(
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
-    The process env wins over the YAML defaults, and the body is the order the phases run
+    The process env wins over the YAML defaults, except a point's own ``ROCR_VISIBLE_DEVICES``
+    (see :func:`resolve_rocr_visible_devices`), and the body is the order the phases run
     in: what the run launches, the request shape it serves, the server arguments composed
     from every source, the per-framework and per-model envs, and the caller's own removals.
 
     Raises:
         FrameworkScriptMismatchError: If ``target.benchmark_script`` targets a
             different known framework than the run's framework.
+        ValueError: If the point's ROCR mask names a card outside the process's.
     """
     server_args = (launch.extra_server_args or "").strip()
     operator_server_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
