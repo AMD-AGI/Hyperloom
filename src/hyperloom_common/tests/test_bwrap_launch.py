@@ -212,7 +212,7 @@ def test_a_masked_directory_holds_while_the_app_replaces_and_creates_credentials
     assert credentials.read_text() == "after-" + CANARY and token.read_text() == "login-" + CANARY
 
 
-def test_read_only_binds_refuse_writes_and_metadata(probe: BwrapProbe, tmp_path: Path) -> None:
+def test_read_only_binds_and_the_root_refuse_writes_and_metadata(probe: BwrapProbe, tmp_path: Path) -> None:
     tree, work = tmp_path / "tree", tmp_path / "wt"
     tree.mkdir()
     work.mkdir()
@@ -228,7 +228,10 @@ print(json.dumps({
     "truncate": outcome(lambda: os.truncate(target, 0)),
     "utime": outcome(lambda: os.utime(target, (0, 0))),
     "rename": outcome(lambda: os.rename(target, target + ".moved")),
+    "beside": outcome(lambda: open(os.path.join(os.path.dirname(tree), "beside"), "w").close()),
+    "root": outcome(lambda: os.mkdir("/made")),
     "worktree": outcome(lambda: open(os.path.join(work, "edit"), "w").write("landed")),
+    "tmp": outcome(lambda: open("/tmp/made", "w").write("tmp")),
 }))
 """
     result = report(run(probe, policy(str(tree), writable=(str(work),)), python(check, tree, work)))
@@ -240,7 +243,10 @@ print(json.dumps({
         "truncate": "EROFS",
         "utime": "EROFS",
         "rename": "EROFS",
+        "beside": "EROFS",
+        "root": "EROFS",
         "worktree": "ok",
+        "tmp": "ok",
     }
     assert stat.S_IMODE((tree / "file").stat().st_mode) == 0o644 and (tree / "file").read_text() == "kept"
     assert (work / "edit").read_text() == "landed"
