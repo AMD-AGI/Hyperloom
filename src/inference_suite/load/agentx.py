@@ -10,8 +10,9 @@ value. The harness draws its warmup from the same seed, so a workload whose warm
 recorded as a seed nothing used; a lane warmup of zero is refused because the harness would then apply its own.
 
 The phase clock follows aiperf's progress API: warmup and measured begin at each phase's ``start_ns``, finished at the
-profiling phase's ``requests_end_ns`` or the client's exit. Each reading is handed to the round's listeners (the profile
-window). After the replay InferenceX's ``process_agentic_result`` aggregates the export; the counts are recounted from
+profiling phase's ``requests_end_ns`` or the client's exit. The round's listeners (the profile window) hear every poll
+after the clock is marked, and once more after the client exits, so they act on the finished mark before the export is
+aggregated. After the replay InferenceX's ``process_agentic_result`` aggregates the export; the counts are recounted from
 ``profile_export.jsonl`` and a disagreement with the aggregate's accounting fails the round's output.
 """
 
@@ -72,8 +73,8 @@ _ACCOUNTING = {
     "dropped_total": "records_dropped_total",
 }
 
-#: Hears each progress reading (``None`` when the API did not answer) with the wall-clock instant it was read.
-ProgressListener = Callable[[Mapping[str, object] | None, float], None]
+#: Hears the replay at the monotonic instant of every poll, and once after the client exits.
+ReplayListener = Callable[[float], None]
 
 
 @dataclass(frozen=True)
@@ -100,7 +101,7 @@ def _workload(config: SuiteConfig) -> AgentxWorkload:
 
 
 def refusal(workload: AgentxWorkload) -> Stop | None:
-    """Why the harness cannot run ``workload`` as written, if it cannot."""
+    """Why the harness cannot run ``workload`` as written, if it cannot; the round asks before its server starts."""
     if workload.warmup_seed != workload.seed:
         return Stop(
             FailedStep.CONFIG_INVALID,
@@ -181,7 +182,7 @@ def _phase_instant(phases: Mapping[str, object], phase: str, key: str) -> float 
 
 
 class ProgressFollower:
-    """Marks the round's phases from aiperf's progress API and hands each reading to the listeners."""
+    """Marks the round's phases from aiperf's progress API."""
 
     _MARKS = (
         (WARMUP_PHASE, "start_ns", Phase.WARMUP),
@@ -189,24 +190,21 @@ class ProgressFollower:
         (PROFILING_PHASE, "requests_end_ns", Phase.FINISHED),
     )
 
-    def __init__(self, url: str, clock: PhaseClock, listeners: tuple[ProgressListener, ...]) -> None:
+    def __init__(self, url: str, clock: PhaseClock) -> None:
         self._url = url
         self._clock = clock
-        self._listeners = listeners
 
-    def check(self, now: float) -> None:
+    def check(self) -> None:
         try:
             phases = read_aiperf_phases(self._url)
         except _PROGRESS_ERRORS:
-            phases = None
-        if phases is not None:
-            for phase, key, mark in self._MARKS:
-                instant = _phase_instant(phases, phase, key)
-                if instant is not None:
-                    self._clock.mark(mark, _ns_to_mono(instant))
-        wall = time.time()
-        for listener in self._listeners:
-            listener(phases, wall)
+            return
+        if phases is None:
+            return
+        for phase, key, mark in self._MARKS:
+            instant = _phase_instant(phases, phase, key)
+            if instant is not None:
+                self._clock.mark(mark, _ns_to_mono(instant))
 
 
 def _export_lines(path: Path) -> Iterator[Mapping[str, Any]]:
@@ -324,7 +322,7 @@ class AgentxRound:
     server: Server
     gate: RoundGate
     clock: PhaseClock
-    listeners: tuple[ProgressListener, ...] = ()
+    listeners: tuple[ReplayListener, ...] = ()
 
 
 def _aggregator_env(agentx_round: AgentxRound, layout: RunLayout) -> dict[str, str]:
@@ -347,16 +345,22 @@ def _replay(
     config = agentx_round.config
     env = {**inherited_env(config.server), **invocation.env}
     progress = f"http://{PROGRESS_API_HOST}:{progress_api_port(config.server)}"
-    follower = ProgressFollower(progress, agentx_round.clock, agentx_round.listeners)
+    follower = ProgressFollower(progress, agentx_round.clock)
     activity = OutputActivity(agentx_round.server, layout.agentx_client_log)
 
+    def hear(now: float) -> None:
+        for listener in agentx_round.listeners:
+            listener(now)
+
     def live(now: float) -> Stop | None:
-        follower.check(now)
+        follower.check()
+        hear(now)
         return activity.check(now)
 
     child = spawn(invocation.argv, env, layout.agentx_client_log)
     ended = wait_child(child, agentx_round.gate, live)
     agentx_round.clock.mark(Phase.FINISHED)
+    hear(time.monotonic())
     returncode = None if isinstance(ended, Stop) else ended.returncode
     return returncode, exit_stop(ended, _WHAT, layout.agentx_client_log)
 
@@ -401,9 +405,6 @@ def run_agentx(agentx_round: AgentxRound) -> AgentxOutcome:
     config = agentx_round.config
     layout = RunLayout(Path(config.paths.run_dir))
     invocation = measured_invocation(config, agentx_round.tool)
-    stop = refusal(_workload(config))
-    if stop is not None:
-        return AgentxOutcome(invocation, None, None, stop)
     returncode, stop = _replay(agentx_round, invocation, layout)
     if stop is not None and stop.step is not FailedStep.CLIENT_FAILED:
         return AgentxOutcome(invocation, returncode, None, stop)
@@ -419,7 +420,7 @@ __all__ = [
     "AgentxRound",
     "AgentxTool",
     "ProgressFollower",
-    "ProgressListener",
+    "ReplayListener",
     "ReplayFacts",
     "agentx_result",
     "client_argv",

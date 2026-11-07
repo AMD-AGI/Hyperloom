@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of the AgentX profile window: it counts from the first profiling request, never from the client's start."""
+"""Contract of the AgentX profile window: it counts from the measured mark and closes by the finished mark."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import pytest
 
 from inference_suite.contracts import ProfileConfig, RunLayout
 from inference_suite.frameworks import Framework
-from inference_suite.profile.agentx_window import AgentxWindow, profiling_start_unix
+from inference_suite.profile.agentx_window import AgentxWindow
 from inference_suite.runtime.phases import Phase, PhaseClock
 
 _START = 1_800_000_000.0
@@ -71,66 +71,77 @@ def engine(request: pytest.FixtureRequest) -> Iterator[tuple[_Server, str]]:
         httpd.shutdown()
 
 
-def _phases(*, warmup_ns: int | None = None, profiling_ns: int | None = None) -> dict[str, object]:
-    phases: dict[str, object] = {}
-    if warmup_ns is not None:
-        phases["warmup"] = {"start_ns": warmup_ns}
-    phases["profiling"] = {"start_ns": profiling_ns}
-    return phases
+def _measured(clock: PhaseClock, at: float = _START) -> PhaseClock:
+    clock.mark(Phase.MEASURED, at)
+    return clock
 
 
-def _ns(unix: float) -> int:
-    return int(unix * 1e9)
-
-
-def test_the_window_opens_its_offset_after_the_first_profiling_request_not_after_the_warmup(engine, tmp_path) -> None:
+def test_the_window_opens_its_offset_after_the_measured_mark_not_after_the_warmup(engine, tmp_path) -> None:
     served, url = engine
     clock = PhaseClock()
     window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock)
 
-    window.hear(_phases(warmup_ns=_ns(_START)), _START + 500)
+    clock.mark(Phase.WARMUP, _START - 480)
+    window.hear(_START + 20)
     assert served.requests == []
-    window.hear(_phases(warmup_ns=_ns(_START), profiling_ns=_ns(_START + 480)), _START + 509)
+    _measured(clock)
+    window.hear(_START + 29)
     assert served.requests == []
-    window.hear(_phases(warmup_ns=_ns(_START), profiling_ns=_ns(_START + 480)), _START + 510)
+    window.hear(_START + 30)
 
     assert served.requests == [("/start_profile", {}), ("/metrics", None)]
-    assert clock.first(Phase.PROFILE_OPEN) is not None
-    window.hear(_phases(profiling_ns=_ns(_START + 480)), _START + 569)
+    assert clock.first(Phase.PROFILE_OPEN).mono == _START + 30
+    window.hear(_START + 89)
     assert [path for path, _ in served.requests][-1] == "/metrics"
-    window.hear(_phases(profiling_ns=_ns(_START + 480)), _START + 570)
+    window.hear(_START + 90)
     assert served.requests[-1] == ("/stop_profile", {})
-    assert clock.first(Phase.PROFILE_CLOSE) is not None
+    assert clock.first(Phase.PROFILE_CLOSE).mono == _START + 90
 
-    capture = window.finish(RunLayout(tmp_path), _START + 600)
-    assert (capture.profiling_start_unix, capture.window_open_unix, capture.window_close_unix) == (
-        _START + 480,
-        _START + 510,
-        _START + 570,
-    )
+    capture = window.finish(RunLayout(tmp_path))
+    assert capture.window_open_unix - capture.profiling_start_unix == pytest.approx(30, abs=1e-3)
+    assert capture.window_close_unix - capture.window_open_unix == pytest.approx(60, abs=1e-3)
+    assert capture.window_open_unix == clock.first(Phase.PROFILE_OPEN).ts
     assert capture.running_requests_in_window == 13
     assert capture.error is None
     assert json.loads((tmp_path / "profile" / "capture.json").read_text()) == capture.to_document()
 
 
-def test_a_replay_that_ends_inside_the_window_closes_it_when_the_load_finishes(engine, tmp_path) -> None:
+def test_the_finished_mark_closes_an_open_window_at_the_next_poll(engine, tmp_path) -> None:
     served, url = engine
-    window = AgentxWindow(_PROFILE, Framework.VLLM, url, PhaseClock())
-    window.hear(_phases(profiling_ns=_ns(_START)), _START + 30)
+    clock = _measured(PhaseClock())
+    window = AgentxWindow(_PROFILE, Framework.VLLM, url, clock)
+    window.hear(_START + 30)
+    clock.mark(Phase.FINISHED, _START + 44)
 
-    capture = window.finish(RunLayout(tmp_path), _START + 45)
+    window.hear(_START + 45)
 
     assert served.requests[-1] == ("/stop_profile", {})
-    assert (capture.window_open_unix, capture.window_close_unix) == (_START + 30, _START + 45)
+    assert clock.first(Phase.PROFILE_CLOSE).mono == _START + 45
+    window.hear(_START + 200)
+    assert [path for path, _ in served.requests].count("/stop_profile") == 1
+
+
+def test_a_replay_that_finishes_before_the_offset_opens_no_window(engine, tmp_path) -> None:
+    served, url = engine
+    clock = _measured(PhaseClock())
+    clock.mark(Phase.FINISHED, _START + 10)
+    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock)
+
+    window.hear(_START + 3600)
+    capture = window.finish(RunLayout(tmp_path))
+
+    assert served.requests == []
+    assert capture.window_open_unix is None and capture.window_close_unix is None
 
 
 def test_a_replay_that_never_reaches_profiling_opens_no_window(engine, tmp_path) -> None:
     served, url = engine
-    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, PhaseClock())
-    window.hear(None, _START)
-    window.hear(_phases(warmup_ns=_ns(_START)), _START + 3600)
+    clock = PhaseClock()
+    clock.mark(Phase.WARMUP, _START)
+    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock)
+    window.hear(_START + 3600)
 
-    capture = window.finish(RunLayout(tmp_path), _START + 3600)
+    capture = window.finish(RunLayout(tmp_path))
 
     assert served.requests == []
     assert capture.window_open_unix is None and capture.profiling_start_unix is None
@@ -139,11 +150,11 @@ def test_a_replay_that_never_reaches_profiling_opens_no_window(engine, tmp_path)
 @pytest.mark.parametrize("engine", ["/start_profile"], indirect=True)
 def test_a_refused_start_is_recorded_and_never_retried(engine, tmp_path) -> None:
     served, url = engine
-    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, PhaseClock())
+    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, _measured(PhaseClock()))
     for offset in (30, 31, 120):
-        window.hear(_phases(profiling_ns=_ns(_START)), _START + offset)
+        window.hear(_START + offset)
 
-    capture = window.finish(RunLayout(tmp_path), _START + 200)
+    capture = window.finish(RunLayout(tmp_path))
 
     assert [path for path, _ in served.requests] == ["/start_profile"]
     assert capture.window_open_unix is None
@@ -155,15 +166,9 @@ def test_sglang_carries_the_configured_start_body(engine) -> None:
     profile = ProfileConfig(
         enabled=True, start_body={"record_shapes": True}, agentx_open_after_sec=0, agentx_duration_sec=1
     )
-    AgentxWindow(profile, Framework.SGLANG, url, PhaseClock()).hear(_phases(profiling_ns=_ns(_START)), _START)
+    AgentxWindow(profile, Framework.SGLANG, url, _measured(PhaseClock())).hear(_START)
 
     assert served.requests[0] == ("/start_profile", {"record_shapes": True})
-
-
-@pytest.mark.parametrize("start_ns", [None, 0, True, "1"])
-def test_a_profiling_phase_without_a_start_has_not_begun(start_ns) -> None:
-    assert profiling_start_unix({"profiling": {"start_ns": start_ns}}) is None
-    assert profiling_start_unix({"profiling": "x"}) is None
 
 
 def test_the_window_needs_both_agentx_bounds(tmp_path: Path) -> None:

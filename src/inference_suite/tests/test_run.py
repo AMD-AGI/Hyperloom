@@ -27,6 +27,7 @@ from hyperloom_common import gpu_telemetry
 from hyperloom_common.tests.test_gpu_telemetry import _row
 from inference_suite import cli, parser_check, run
 from inference_suite.contracts import (
+    AgentxWorkload,
     BaseRef,
     Deadlines,
     FailedStep,
@@ -420,19 +421,23 @@ def test_a_fixed_profile_window_the_server_refuses_leaves_no_trace_and_the_round
     assert capture["window_open_unix"] is None and "/start_profile" in capture["error"]
 
 
-def test_an_agentx_profile_round_replays_and_opens_its_window_from_the_first_profiling_request(rig):
+def _agentx_config(rig, run_id: str, workload: AgentxWorkload, profile: ProfileConfig) -> SuiteConfig:
     agentx_base = replace(rig.base, query=replace(rig.base.query, workload=Workload.AGENTX, isl=None, osl=None))
     rig.base_path.write_text(json.dumps(agentx_base.to_document()))
-    config = rig.config("r1")
-    window = ProfileConfig(enabled=True, agentx_open_after_sec=0.2, agentx_duration_sec=0.4)
-    config = replace(
+    config = rig.config(run_id)
+    return replace(
         config,
         server=replace(config.server, base=BaseRef(str(rig.base_path), agentx_base.digest())),
         workload=WorkloadKind.AGENTX,
         fixed=None,
-        agentx=replace(_AGENTX, warmup_seed=_AGENTX.seed),
-        profile=window,
+        agentx=workload,
+        profile=profile,
     )
+
+
+def test_an_agentx_profile_round_replays_and_opens_its_window_from_the_first_profiling_request(rig):
+    window = ProfileConfig(enabled=True, agentx_open_after_sec=0.2, agentx_duration_sec=0.4)
+    config = _agentx_config(rig, "r1", replace(_AGENTX, warmup_seed=_AGENTX.seed), window)
 
     result = run.run_round(config)
 
@@ -453,6 +458,33 @@ def test_an_agentx_profile_round_replays_and_opens_its_window_from_the_first_pro
     profile = report.profile
     assert profile is not None and profile.has_step_traces and profile.running_requests_in_window == 8
     assert profile.window_open_unix == capture["window_open_unix"]
+
+
+def test_an_agentx_window_longer_than_the_replay_closes_when_the_profiling_requests_end(rig):
+    window = ProfileConfig(enabled=True, agentx_open_after_sec=0.2, agentx_duration_sec=600)
+    config = _agentx_config(rig, "r1", replace(_AGENTX, warmup_seed=_AGENTX.seed), window)
+
+    result = run.run_round(config)
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    finished = _marks(result.layout)[Phase.FINISHED.value]
+    capture = json.loads(result.layout.profile_capture.read_text())
+    assert finished <= capture["window_close_unix"] < finished + 0.15, "closed at the next poll, not after the tail"
+
+
+@pytest.mark.parametrize(
+    ("changes", "match"),
+    [({"warmup_seed": _AGENTX.seed + 1}, "warmup_seed"), ({"warmup_requests_per_lane": 0}, "warmup request")],
+)
+def test_an_agentx_workload_the_harness_cannot_honour_is_refused_before_the_server_starts(rig, changes, match):
+    config = _agentx_config(
+        rig, "r1", replace(_AGENTX, **{"warmup_seed": _AGENTX.seed, **changes}), ProfileConfig(enabled=False)
+    )
+
+    result = run.run_round(config)
+
+    assert result.report.failed_step is FailedStep.CONFIG_INVALID and match in result.report.failure_detail
+    assert not result.layout.launch.exists() and not rig.calls.exists()
 
 
 def test_the_refusal_says_whether_the_host_holds_a_redacted_value(rig, monkeypatch):

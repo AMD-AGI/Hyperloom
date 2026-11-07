@@ -343,6 +343,10 @@ class _Round:
 
     def _prepare(self, base: BaseLaunch, facts: RoundFacts) -> _Prepared | Stop:
         config = self.config
+        if config.agentx is not None:
+            refused = agentx.refusal(config.agentx)
+            if refused is not None:
+                return refused
         framework = Framework(base.framework)
         if framework_facts(framework).kind is not FrameworkKind.SERVING:
             return Stop(
@@ -488,7 +492,7 @@ class _Round:
         listeners = () if window is None else (window.hear,)
         outcome = run_agentx(AgentxRound(config, harness, server, self.gate, self.clock, listeners))
         if window is not None:
-            self.capture = window.finish(self.layout, time.time())
+            self.capture = window.finish(self.layout)
         self.codes = replace(self.codes, client=outcome.returncode)
         if outcome.result is not None:
             self.sections[WorkloadKind.AGENTX.value] = outcome.result
