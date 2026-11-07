@@ -32,7 +32,9 @@ _FACTS = RoundFacts(
     version_check=VersionCheck.PASSED,
     tool_pins={"inferencex": "e" * 40},
     client=ClientInvocation(argv=("python", "-m", "bench"), env={"AIPERF_X": "1"}, seed=0, warmup_seed=1),
-    eval=EvalInvocation(argv=("python", "-I", "-m", "inference_suite.eval.run"), definition_digest="sha256:" + _SHA),
+    eval=EvalInvocation(
+        argv=("python", "-I", "-c", "main()", "/src", "request.json"), definition_digest="sha256:" + _SHA
+    ),
 )
 
 

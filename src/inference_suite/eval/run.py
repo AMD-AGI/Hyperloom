@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The eval process: ``python -I -m inference_suite.eval.run <request.json>`` scores one task against a served model.
+"""The eval process: ``python -I -c EVAL_ENTRY <source root> <request.json>`` scores one task against a served model.
 
 It runs in the staged lm-eval environment, so at import it needs only the standard library; lm-eval is imported once it runs, and
 imports :mod:`inference_suite.eval.model` itself. The request holds every input, and nothing is read from
@@ -17,7 +17,9 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 EVAL_REQUEST_SCHEMA = "inference-suite-eval-request/1"
-EVAL_MODULE = "inference_suite.eval.run"
+#: The eval process's program. It imports the suite from the source root given as its first argument, the tree the
+#: eval definition hashed the model class from; ``-I`` drops PYTHONPATH, so nothing else can point it there.
+EVAL_ENTRY = "import sys; sys.path.insert(0, sys.argv.pop(1)); from inference_suite.eval.run import main; main()"
 #: The lm-eval model name the eval runs under, and the class lm-eval imports for it once asked.
 MODEL_NAME = "inference-suite-chat"
 MODEL_CLASS = "inference_suite.eval.model:SuiteChatCompletion"
@@ -127,7 +129,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Run the eval the request file names; lm-eval exits with its own status."""
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1:
-        raise SystemExit(f"usage: python -I -m {EVAL_MODULE} <request.json>")
+        raise SystemExit("usage: python -I -c EVAL_ENTRY <source root> <request.json>")
     request = read_request(args[0])
 
     from lm_eval.__main__ import cli_evaluate
@@ -140,7 +142,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 __all__ = [
-    "EVAL_MODULE",
+    "EVAL_ENTRY",
     "EVAL_REQUEST_SCHEMA",
     "MAX_RETRIES",
     "MODEL_CLASS",
