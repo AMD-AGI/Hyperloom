@@ -443,6 +443,15 @@ def test_an_mlperf_server_phase_point_boots_the_server_and_runs_no_harness() -> 
     assert (config.workload, config.mlperf) == (WorkloadKind.NONE, None)
 
 
+def test_an_mlperf_server_phase_point_boots_the_server_its_measured_round_reuses() -> None:
+    base = _base("sglang")
+    boot = suite_config(_mlperf_point(MAGPIE_RUN_PHASE="server"), base, _settings(LifecycleMode.BOOT))
+    reuse = suite_config(_mlperf_point(), base, _settings(LifecycleMode.REUSE))
+
+    assert boot.server.served_model_name == reuse.server.served_model_name == "kimi-k3"
+    assert _launch(boot, base).argv == _launch(reuse, base).argv
+
+
 @pytest.mark.parametrize(
     ("envs", "bench", "message"),
     [
