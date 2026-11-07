@@ -543,7 +543,17 @@ class Coordinator:
     def dispatcher(self):
         from .dispatcher import DispatcherCollaborator
 
-        return self._collaborator("_dispatcher", DispatcherCollaborator)
+        return self._collaborator(
+            "_dispatcher",
+            lambda coordinator: DispatcherCollaborator(
+                coordinator, refresh_admission_freeze=self._refresh_admission_freeze_unless_closing
+            ),
+        )
+
+    async def _refresh_admission_freeze_unless_closing(self) -> None:
+        # CLOSE's closing report is dispatched by the pump, which a freeze would hold back.
+        if not self.shared_state.closing_phase:
+            await self.phase_machine.refresh_admission_freeze()
 
     @property
     def writeback(self):
@@ -681,6 +691,7 @@ class Coordinator:
                 if skips_reactor_turn(name, self.shared_state) or not self.conversation.admit_turn(name, time.time()):
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
+            await self.phase_machine.refresh_admission_freeze()
         if not self.stop_requested():
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
@@ -694,10 +705,7 @@ class Coordinator:
             await self.enablement_lane.pump_enablement_safely()
         # phase machine advance; runs even in_closing so CLOSE is recorded.
         try:
-            await self.await_within_session_bound(
-                self.phase_machine.advance_phase_if_needed,
-                stage="advance_phase",
-            )
+            await self.await_within_session_bound(self.phase_machine.advance_phase_if_needed, stage="advance_phase")
         except Exception as exc:
             log.exception("phase advance failed")
             self.record_exception(stage="advance_phase", exc=exc)

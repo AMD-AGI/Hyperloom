@@ -151,8 +151,10 @@ class _InflightAction(NamedTuple):
 class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator):
     """Handles specialist dispatch: budget gating, action routing, and task enqueue."""
 
-    def __init__(self, coordinator) -> None:
+    def __init__(self, coordinator, *, refresh_admission_freeze: Callable[[], Awaitable[None]] | None = None) -> None:
         super().__init__(coordinator)
+        # Re-derives :attr:`admission_frozen` once the pump has booked; unwired, the flag is left as set.
+        self._refresh_admission_freeze = refresh_admission_freeze
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
@@ -466,11 +468,14 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         Dispatched tasks outlive the pump and queue their completion for a later
         one. The pump repeats while a pass books something, so lanes freed by
         completions already queued are refilled in the same call. New spawns stop
-        while the phase budget is spent or :attr:`admission_frozen` is set.
+        while the phase budget is spent or :attr:`admission_frozen` is set, which
+        is re-derived after a drain that booked so a hold that booking settled is not read stale.
         """
         await self._reclaim_stale_dispatch_state()
         while True:
             booked = await self._drain_completions()
+            if booked and self._refresh_admission_freeze is not None:
+                await self._refresh_admission_freeze()
             shutting_down = await self._cancel_inflight_that_outlived_the_session()
             if not shutting_down and not self.admission_frozen and not self.dispatch_paused_for_phase_budget():
                 await self._spawn_fitting_queued()
