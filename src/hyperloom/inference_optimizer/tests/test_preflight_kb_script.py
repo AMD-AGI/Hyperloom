@@ -82,6 +82,20 @@ def test_a_marker_of_mode_0600_is_replaced_by_rename_not_written_in_place(tmp_pa
     assert sorted(path.name for path in kb.iterdir()) == [".kb_preflight.json", "the-old-inode"]
 
 
+def test_a_link_at_the_marker_is_replaced_and_nothing_is_written_through_it(tmp_path):
+    user_data = _setgid(tmp_path / "claw")
+    kb = user_data / "runtime" / "recipe_kb"
+    kb.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("not the marker")
+    (kb / ".kb_preflight.json").symlink_to(victim)
+    done = _run(user_data, umask=0o077)
+    assert (done.returncode, done.stderr) == (0, "")
+    marker = kb / ".kb_preflight.json"
+    assert (marker.is_symlink(), _mode(marker), json.loads(marker.read_text())) == (False, 0o664, _SKIPPED)
+    assert victim.read_text() == "not the marker"
+
+
 def test_a_marker_the_next_account_of_the_group_cannot_write_is_still_replaced_by_it(tmp_path):
     with other_accounts() as accounts:
         script, user_data = _shared_copy(accounts), accounts.shared_dir("claw")

@@ -89,15 +89,7 @@ else
     probe_curl "${KB_STORE_URL%/}/pr-monitor/v1/healthz" 5 3 || true
 fi
 
-# mktemp makes the file 0600 whatever the umask.
-if marker_tmp="$(mktemp -- "${marker_dir}/.kb_preflight.XXXXXX")"; then
-  chmod 664 -- "${marker_tmp}"
-else
-  marker_tmp=""
-  echo "[preflight WARN] cannot write a marker in ${marker_dir}; the reachability result is not recorded." >&2
-fi
-
-{
+write_marker() {
     printf '{'
     printf '"kb_reachable":%s,' "${kb_reachable}"
     printf '"pr_reachable":%s,' "${pr_reachable}"
@@ -107,8 +99,17 @@ fi
         printf ',"pr_failure_reason":"%s"' "${pr_failure_reason}"
     fi
     printf '}\n'
-} > "${marker_tmp:-/dev/null}"
-if [ -n "${marker_tmp}" ] && mv -f -- "${marker_tmp}" "${marker}"; then marker_tmp=""; fi
+}
+
+# Written to a file this process creates (noclobber is O_EXCL: nothing is written through a link another account left at
+# that name), 664 by the umask above, then renamed over the marker, whoever made that one.
+marker_tmp="${marker_dir}/.kb_preflight.$$.${RANDOM}"
+if (set -C; write_marker > "${marker_tmp}") 2>/dev/null; then
+  mv -f -- "${marker_tmp}" "${marker}" && marker_tmp=""
+else
+  marker_tmp=""
+  echo "[preflight WARN] cannot write a marker in ${marker_dir}; the reachability result is not recorded." >&2
+fi
 
 if [ "${pr_skipped}" = "false" ] && [ "${pr_reachable}" = "false" ]; then
     exit 1

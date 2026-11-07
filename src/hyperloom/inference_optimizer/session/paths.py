@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from hyperloom_common.shared_storage import make_shared_dirs, writable_problems
+from hyperloom_common.shared_storage import make_shared_dirs, ownership, writable_problems
 from hyperloom_common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
@@ -175,12 +175,31 @@ def ensure_archive_root(session_dir: Path) -> Path:
     return root
 
 
+def _make_dirs(path: Path) -> None:
+    """:func:`~hyperloom_common.shared_storage.make_shared_dirs`, with a refusal that names the directory this account
+    cannot create in, its owner and mode, and what it needs to be."""
+    try:
+        make_shared_dirs(path)
+    except PermissionError as exc:
+        failed = Path(str(exc.filename or path))
+        parent = failed.parent
+        raise PermissionError(
+            exc.errno,
+            f"cannot create {failed}: the directory {parent}{ownership(parent)} is not writable by this account; the "
+            f"accounts of a run share it, so it needs group write and the setgid bit in the run's group (chmod 2775)",
+        ) from exc
+
+
 def ensure_session_skeleton(session_dir: Path) -> None:
     """Create ``session_dir`` and its per-session directory skeleton, each missing directory ``2775``
     (:func:`~hyperloom_common.shared_storage.make_shared_dirs`): the next leg of a hosted run may be another account of
-    the group."""
+    the group.
+
+    Raises:
+        PermissionError: This account cannot create in a directory that exists, which the message names.
+    """
     for sub in _SESSION_SKELETON:
-        make_shared_dirs(session_dir / sub)
+        _make_dirs(session_dir / sub)
 
 
 def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target: Path | None = None) -> Path:
@@ -190,9 +209,9 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
     generated one.
     """
     ws = workspace_root()
-    make_shared_dirs(ws)
+    _make_dirs(ws)
     for sub in _WORKSPACE_SKELETON:
-        make_shared_dirs(ws / sub)
+        _make_dirs(ws / sub)
 
     if target is not None:
         sd = Path(target)

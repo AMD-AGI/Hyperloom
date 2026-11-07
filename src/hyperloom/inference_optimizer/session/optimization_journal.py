@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom_common.coerce import optional_positive_float, to_int
-from hyperloom_common.io import SHARED, atomic_write_text
+from hyperloom.common.session_files import shared_options
+from hyperloom_common.io import atomic_write_text
 from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_common.jsonio import read_json
 from hyperloom_common.timeutil import now_iso
@@ -227,11 +228,10 @@ class Journal:
     # Persistence
     def _flush(self) -> None:
         """Atomic write (tmp + os.replace); best-effort — IOError logged and swallowed (forensic aid, not a correctness invariant)."""
+        document = self.to_dict()
         try:
             atomic_write_text(
-                self.path,
-                json.dumps(self.to_dict(), indent=2, sort_keys=False) + "\n",
-                options=SHARED,
+                self.path, json.dumps(document, indent=2, sort_keys=False) + "\n", options=shared_options(document)
             )
         except OSError as exc:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)

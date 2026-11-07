@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import hyperloom
-from hyperloom.inference_optimizer.session import lock
+from hyperloom.inference_optimizer.session import lock, paths
 from hyperloom_common.tests.shared_accounts import other_accounts
 
 _SRC = str(Path(hyperloom.__file__).parents[1])
@@ -158,6 +158,78 @@ def test_state_json_is_664_unless_the_operators_pins_hold_a_credential(tmp_path,
     )
     _as_this_account(code, umask=0o077, workspace=workspace)
     assert _mode(workspace / "state.json") == mode
+
+
+@pytest.mark.parametrize(
+    ("server_args", "mode"),
+    [
+        (None, 0o664),
+        ("--tp 8 --max-total-tokens 120000 --tokenizer-path /models/m", 0o664),
+        ("--tp 8 --api-key not-a-pattern", 0o600),
+    ],
+    ids=["no-args", "knobs", "api-key"],
+)
+def test_manifest_json_is_664_unless_the_server_args_hold_a_credential(tmp_path, server_args, mode):
+    workspace = _setgid_workspace(tmp_path / "claw")
+    code = textwrap.dedent(
+        f"""
+        from pathlib import Path
+        from hyperloom.inference_optimizer.cli.parser import _build_parser
+        from hyperloom.inference_optimizer.session.manifest import write_manifest
+        argv = ["optimize", "--model", "/models/m", "--framework", "sglang"]
+        if {server_args!r}:
+            argv += ["--server-args", {server_args!r}]
+        write_manifest(Path({str(workspace)!r}), args=_build_parser().parse_args(argv))
+        """
+    )
+    _as_this_account(code, umask=0o077, workspace=workspace)
+    assert _mode(workspace / "manifest.json") == mode
+
+
+def test_a_parent_this_account_cannot_create_in_is_named_with_its_owner_and_mode(tmp_path):
+    """``<workspace>/<model>`` made by ops without group write: the refusal says which directory and what it needs."""
+    if os.geteuid() == 0:
+        with other_accounts() as accounts:
+            workspace = accounts.shared_dir("claw")
+            model = workspace / "DeepSeek-V4.1-Flash"
+            model.mkdir()
+            os.chown(model, 0, accounts.group)
+            model.chmod(0o2755)
+            accounts.add_module(Path(paths.__file__), "claw_paths")
+            code = (
+                f"import os\nos.environ['USER_DATA_PATH'] = {str(workspace)!r}\nimport claw_paths\n"
+                "try:\n    claw_paths.make_session_dir('DeepSeek-V4.1-Flash')\n"
+                "except PermissionError as exc:\n    print(exc)\n"
+            )
+            said = accounts.run(accounts.first, code).strip()
+            assert said.startswith(f"[Errno 13] cannot create {model}/")
+            assert f"the directory {model} (owner 0:{accounts.group} 2755) is not writable by this account" in said
+            assert "chmod 2775" in said
+            assert sorted(path.name for path in model.iterdir()) == []
+        return
+    workspace = _setgid_workspace(tmp_path / "claw")
+    model = workspace / "DeepSeek-V4.1-Flash"
+    model.mkdir()
+    model.chmod(0o555)
+    os.environ["USER_DATA_PATH"] = str(workspace)
+    try:
+        with pytest.raises(PermissionError) as raised:
+            paths.make_session_dir("DeepSeek-V4.1-Flash")
+    finally:
+        del os.environ["USER_DATA_PATH"]
+    info = model.stat()
+    assert f"the directory {model} (owner {info.st_uid}:{info.st_gid} 0555) is not writable by this account" in str(
+        raised.value
+    )
+    assert sorted(path.name for path in model.iterdir()) == []
+
+
+def test_a_session_made_below_a_parent_with_group_write_is_2775_all_the_way_up(tmp_path):
+    workspace = _setgid_workspace(tmp_path / "claw")
+    code = "from hyperloom.inference_optimizer.session import paths\nprint(paths.make_session_dir('DeepSeek-V4.1-Flash'))\n"
+    session = Path(_as_this_account(code, umask=0o077, workspace=workspace).splitlines()[-1])
+    assert (session.parent.parent, session.parent, session) == (workspace, workspace / session.parent.name, session)
+    assert {_mode(session.parent), _mode(session), _mode(workspace / "runtime"), _mode(workspace / "logs")} == {0o2775}
 
 
 def test_the_lock_a_foreign_account_left_unwritable_is_named_with_its_owner_and_mode(tmp_path, monkeypatch):

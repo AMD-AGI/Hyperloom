@@ -8,7 +8,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.io import SHARED, JsonFormat, JsonLineFormat, append_shared_jsonl, atomic_write_json
+from hyperloom.common.session_files import shared_options
+from hyperloom_common.io import JsonFormat, JsonLineFormat, append_shared_jsonl, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict, read_jsonl
 from hyperloom_common.timeutil import now_iso
 
@@ -79,7 +80,7 @@ def _write_event(path: Path, event: dict[str, Any]) -> None:
         path,
         _public_event(event),
         fmt=JsonFormat(ensure_ascii=False, trailing_newline=True),
-        options=SHARED,
+        options=shared_options(event),
     )
 
 
