@@ -70,7 +70,7 @@ from .benchmark_config import apply_benchmark_round_seed, composed_benchmark_tim
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer import speculative_capability
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override, prepend_launch_path
@@ -382,8 +382,7 @@ def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
 
 def _benchmark_server_log(config_path: Path, output_dir: Path) -> str | None:
     """Scriptable benchmarks have no server whose readiness can arm silence."""
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    framework = str(cfg["benchmark"].get("framework", "")).lower()
+    framework = read_benchmark_point(config_path).framework.lower()
     return None if framework in {"custom", "xdit"} else str(output_dir / "server.log")
 
 
@@ -539,11 +538,9 @@ def _run_magpie(
 def _num_gpus_for_config(config_path: Path) -> float:
     """Read the tensor-parallel size (``TP``) from a materialized benchmark YAML."""
     try:
-        with Path(config_path).open(encoding="utf-8") as fp:
-            cfg = yaml.safe_load(fp) or {}
-        envs = (cfg.get("benchmark") or {}).get("envs") or {}
+        envs = read_benchmark_point(Path(config_path)).envs
         return float(int(envs.get("TP", 1) or 1))
-    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):  # best-effort; default to 1 GPU
+    except (OSError, ValueError, TypeError, yaml.YAMLError):  # best-effort; default to 1 GPU
         return 1.0
 
 
@@ -560,9 +557,8 @@ def _mn_restart_env(
 
 def _resolve_mn_effective_server_args(cfg_path: Path) -> str:
     """The server args the materialized variant YAML carries, for a multi-node variant restart."""
-    with cfg_path.open(encoding="utf-8") as f:
-        bench = (yaml.safe_load(f) or {}).get("benchmark") or {}
-    return str((bench.get("envs") or {}).get(server_args_env_name(bench.get("framework"))) or "")
+    point = read_benchmark_point(cfg_path)
+    return str(point.envs.get(server_args_env_name(point.framework)) or "")
 
 
 def _variant_progress_note(
@@ -1880,8 +1876,9 @@ def _build_variant_yaml(
     base = recipe.base
     target = recipe.target
     cfg = yaml.safe_load(recipe.base_yaml_path.read_text(encoding="utf-8"))
-    bench = cfg.setdefault("benchmark", {})
-    if is_magpie_agentx(bench):
+    point = BenchmarkPoint.from_document(cfg, source=str(recipe.base_yaml_path))
+    bench = cfg["benchmark"]
+    if point.agentx:
         return materialize_grid_variant(
             recipe.base_yaml_path, variant, output_subdir, model_path=target.model_path, base=base
         )
@@ -1893,7 +1890,7 @@ def _build_variant_yaml(
         benchmark_script=target.benchmark_script,
         conc=variant_conc(variant),
     )
-    extra_args_env = server_args_env_name(bench.get("framework"))
+    extra_args_env = server_args_env_name(point.framework)
 
     # A replacing base drops the inherited string wholesale, so its own removals have nothing left to strip.
     inherited, base_remove = ("", []) if replacing else (str(envs.get(extra_args_env, "")), base.remove_args)
@@ -1932,10 +1929,10 @@ def _build_variant_yaml(
     refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
     # ``envs`` is the launch's environment, TP included; the AgentX branch meets it in ``materialize_variant``.
     speculative_capability.refuse_unrunnable_speculative_stack(
-        combined, framework=str(bench.get("framework") or ""), envs=envs, model_path=target.model_path
+        combined, framework=point.framework, envs=envs, model_path=target.model_path
     )
 
-    pin_xdit_tool_path(envs, bench.get("framework"))
+    pin_xdit_tool_path(envs, point.framework)
 
     if server_lifecycle is not None:
         from ._server_lifecycle import inject_lifecycle_settings
@@ -1943,7 +1940,7 @@ def _build_variant_yaml(
         inject_lifecycle_settings(bench, server_lifecycle)
 
     # The final write to the argument env; nothing below may touch it.
-    seal_server_argv(envs, bench.get("framework"))
+    seal_server_argv(envs, point.framework)
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
     with out_path.open("w", encoding="utf-8") as f:

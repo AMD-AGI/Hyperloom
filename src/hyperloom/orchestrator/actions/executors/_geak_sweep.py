@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping
 import yaml
 
 from hyperloom_common.coerce import first_text
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom_common.jsonio import read_json
 from inference_suite.server_log import LogCursor
@@ -128,16 +129,9 @@ def _replay_logical_masks(pin: Mapping[str, Any], gpu_ids: str) -> dict[str, str
 def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any]) -> dict[str, str]:
     """Resolve serving identity from the frozen handoff or its materialized recipe."""
     recipe_path = first_text(handoff.get("launch_recipe"), env_spec.get("base_launch_recipe"))
-    benchmark: dict[str, Any] = {}
-    if recipe_path:
-        parsed = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8"))
-        if not isinstance(parsed, dict) or not isinstance(parsed.get("benchmark"), dict):
-            raise ValueError("invalid_replay_recipe")
-        benchmark = parsed["benchmark"]
-    recipe_envs = benchmark.get("envs") or {}
-    if not isinstance(recipe_envs, dict):
-        raise ValueError("invalid_replay_recipe_envs")
-    legacy_env = {} if handoff or benchmark else os.environ
+    point = read_benchmark_point(Path(recipe_path)) if recipe_path else None
+    recipe_envs = point.envs if point else {}
+    legacy_env = {} if handoff or point else os.environ
     tp = coerce_tp(handoff.get("tp"), recipe_envs.get("TP"), legacy_env.get("TP"))
     pin = handoff.get("gpu_pin")
     if not isinstance(pin, dict):
@@ -151,9 +145,9 @@ def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any])
         raise ValueError("replay_gpu_count_below_tp")
     masks = _replay_logical_masks(pin, gpu_ids) if space == "logical" else {}
     return {
-        "MODEL": first_text(handoff.get("model_path"), benchmark.get("model"), legacy_env.get("MODEL_PATH")),
+        "MODEL": first_text(handoff.get("model_path"), point and point.model, legacy_env.get("MODEL_PATH")),
         "BACKEND": first_text(
-            handoff.get("framework"), benchmark.get("framework"), legacy_env.get("FRAMEWORK"), "sglang"
+            handoff.get("framework"), point and point.framework, legacy_env.get("FRAMEWORK"), "sglang"
         ),
         "TP": str(tp),
         "GPU": gpu_ids,
