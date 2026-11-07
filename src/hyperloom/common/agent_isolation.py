@@ -156,9 +156,11 @@ class BwrapIsolation:
 
 @dataclass(frozen=True)
 class NoIsolation:
-    """Unconfined, as before: a launch that need not be isolated, where no tier works. ``reasons`` name both tiers'."""
+    """Unconfined, as before: a launch that need not be isolated, where no tier works. ``reasons`` name both tiers';
+    ``transient``: bubblewrap's probe gave no answer in time, so this holds for this launch only."""
 
     reasons: tuple[str, ...]
+    transient: bool = False
 
     @property
     def why(self) -> str:
@@ -275,7 +277,7 @@ def _unaccounted(account_reason: str, *, required: bool, warn: bool, probe: Prob
     if required:
         raise IsolationRefused(reasons, transient=found.transient)
     _log_once(logging.INFO, "agents cannot run under bubblewrap here: " + "; ".join(reasons[1:]))
-    return NoIsolation(reasons)
+    return NoIsolation(reasons, transient=found.transient)
 
 
 def choose_agent_isolation(
