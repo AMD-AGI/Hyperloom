@@ -23,12 +23,12 @@ These are set in the app container's environment.
 
 | Variable | Required | What it points at |
 | --- | --- | --- |
-| `USER_DATA_PATH` | yes | Absolute, writable directory. Session directories are created below `<model basename>/` here; put it on persistent storage so a restarted run finds its session again. |
+| `USER_DATA_PATH` | yes | Absolute, writable directory. Session directories are created below `<model basename>/` here; put it on persistent storage so a restarted run finds its session again. When the legs of a run may be different host accounts of one group, make it, and the `HYPERLOOM_STATE_DIR` the host gives the run, a directory of that group with the setgid bit (`chmod 2775`): what a leg makes below them then takes the group, and the next leg's account can write there; the entry warns, naming each, when one is not setgid, and refuses one this account cannot write. Below a directory that other accounts can write (that group's, `/tmp`), what a leg writes there never goes through a link, since any account of the group could have put one there: give these two paths, and everything below them, without links in such a directory. |
 | `HYPERLOOM_RUNNER_CACHE` | yes | Absolute, writable directory on shared storage that the measurement sandboxes also mount. The session builds the runner cache entry of the commit it runs here (`<cache>/<commit>/`) before the first test. When the legs of a run may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`): every builder then takes the `.<commit>.flock` lock (mode `0664`). An entry is built in a new temporary directory of the builder's own (`$TMPDIR`, which needs room for one entry and its build environment), never in this directory, and copied in writable by its builder alone; a `.<commit>.tmp-*` directory that a builder killed while copying leaves is removed only by a later builder of the same account, and others build beside it. This is the path *on the app host*; the sandboxes may mount the same storage elsewhere (see the template's `HYPERLOOM_RUNNER_CACHE` below). |
 | `HYPERLOOM_RUNNER_WHEEL_TARGET` | yes | The measurement image's interpreter and platform, for example `cp310-manylinux_2_28_x86_64`, or `cp314-manylinux_2_28_x86_64` for the Python 3.14 `rocm/vllm` images. The runner cache's wheels are built for it, not for the app container, from the lock of that Python: `requirements/runner-cp314.lock` for `cp314`, `requirements/runner.lock` for the others. An entry holds the wheels of one Python, so deployments whose images run different Pythons need different `HYPERLOOM_RUNNER_CACHE` directories; a sandbox whose interpreter is not the entry's fails its start with `runner_start_failed`. |
 | `HYPERLOOM_SOURCE_REPO` | yes | Where the run's Hyperloom source is fetched from: `OWNER/NAME` on GitHub, any git URL, or a local path (for example a mirror on shared storage when the app host has no GitHub egress). |
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
-| `HYPERLOOM_RSI_ARCHIVE` | yes | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`): what a session publishes there is readable by the others (`0644`) in folders they write (`2775`), and an entry a session cannot read is named in a warning with its owner and mode. |
+| `HYPERLOOM_RSI_ARCHIVE` | yes | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`): what a session publishes there is readable by the others (`0644`) in folders they write (`2775`); in a directory not set up so, the umask decides; and an entry a session cannot read is named in a warning with its owner and mode. |
 | `INFERENCEX_PATH` | yes, unless `install.sh` left a checkout | A writable InferenceX checkout at the commit Hyperloom pins. Without one the session refuses to start, naming `INFERENCEX_PATH`. |
 | `HYPERLOOM_HOST_LAYER` | no | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own); unset, nothing the run launches uses bubblewrap. |
 
@@ -44,10 +44,13 @@ Each leg of a run may be another host account of one group (the `dev` sandboxes 
 directory). Before a session starts, `hyperloom-multibranch hosted run` creates and removes a file in
 `HYPERLOOM_STATE_DIR`, `HYPERLOOM_EVENTS_DIR` (when set), `USER_DATA_PATH`, `HYPERLOOM_RUNNER_CACHE` and
 `HYPERLOOM_RSI_ARCHIVE`, and ends the run with one message naming every one it cannot write, with its errno, owner and
-mode; one that is not setgid is a warning. What the session makes in them is the group's: directories `2775`, and the
-files a later leg reads, appends to or replaces `0664`, whatever the umask. Nothing the application runs or sources is
-kept there, and the application's git runs no hook, fsmonitor, pager, external diff, signing program or filter driver
-that a repository there names.
+mode; one that is not setgid is a warning. Below a directory set up to be shared (setgid, group-writable, not
+writable by others) what the session makes is the group's: directories `2775`, and the files a later leg reads, appends
+to or replaces `0664`, whatever the umask, and git there runs under umask `002`. Anywhere else the umask decides, as for
+a plain create. Either way no link is followed on the way past a directory another account can write or owns, so a
+member of the group cannot point a write elsewhere. Nothing the application runs or sources is kept there, and the
+application's git runs no hook, fsmonitor, pager, external diff, signing program or filter driver that a repository
+there names.
 
 ## Measurement sandbox template
 

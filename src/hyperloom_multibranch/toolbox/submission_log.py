@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom_common.shared_storage import make_shared_dirs, open_shared_append
+from hyperloom_common.shared_storage import open_shared_append, open_shared_existing
 
 ACCEPTED = "accepted"
 OUTCOME = "outcome"
@@ -59,7 +59,7 @@ class LogEntry:
 def append_line(path: Path, record: Mapping[str, object]) -> None:
     """Append ``record`` to the JSON-lines file ``path`` as one line, flushed and fsynced before this returns. A new
     file is ``664``: the run's next leg, maybe another account of the group, replays and appends to it."""
-    with os.fdopen(open_shared_append(path), "a", encoding=_UTF8) as handle:
+    with os.fdopen(open_shared_append(path, make_parents=True), "a", encoding=_UTF8) as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
@@ -69,7 +69,7 @@ def complete_lines(path: Path) -> list[str]:
     """The complete lines of the JSON-lines file ``path``. A torn last line, a write a crash cut short and that was
     never acknowledged, is cut off the file, so the next :func:`append_line` starts a line of its own instead of
     running on into it."""
-    with path.open("r+b") as handle:
+    with os.fdopen(open_shared_existing(path), "r+b") as handle:  # never through a link at its name
         data = handle.read()
         end = data.rfind(b"\n") + 1
         if end < len(data):
@@ -87,7 +87,6 @@ class SubmissionLog:
     _sequences: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        make_shared_dirs(self.path.parent)
         if self.path.exists():
             self._replay()
 

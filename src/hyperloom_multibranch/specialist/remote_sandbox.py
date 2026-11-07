@@ -13,9 +13,11 @@ read, which the shared storage revalidates; a file the sandbox made would show h
 expired.
 
 The sandbox's account and this host's, and the next leg's, may be different accounts of one group, so the root is the
-group's: its directories are made ``2775`` and the files this host makes for the launcher ``664`` (both by ``fchmod``,
-whatever the umask), its scripts are replaced by rename, never rewritten in place, and the launcher runs under umask
-``002``, so what the sandbox makes there -- its home, its caches, what a command writes -- is the group's too.
+group's: below storage set up to be shared its directories are made ``2775`` and the files this host makes for the
+launcher ``664`` (both by ``fchmod``, whatever the umask; elsewhere the umask decides, and no link is followed on the
+way, :mod:`~hyperloom_common.shared_storage`), its scripts are replaced by rename, never rewritten in place, and the
+launcher runs under umask ``002``, so what the sandbox makes there -- its home, its caches, what a command writes -- is
+the group's too.
 
 Every process a command starts carries :data:`~hyperloom_multibranch.specialist.agent_watch.MARKER` set to the root, and
 :data:`PROCESS_MARKER` set to the root and the command's number, so a kill (:data:`PROCS_SCRIPT`) ends a command's or

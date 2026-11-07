@@ -946,8 +946,8 @@ async def _final_only(persisted: PersistedRun, peer_factory: PeerFactory, servic
 
 
 def _file_handler(path: Path) -> logging.Handler:
-    os.close(open_shared_append(path))  # 664: final-only of a later leg, maybe another account, appends to it
-    handler = logging.FileHandler(path, encoding=ENCODING)
+    handler = logging.FileHandler(path, encoding=ENCODING, delay=True)  # writes to the one stream set below
+    handler.stream = os.fdopen(open_shared_append(path), "a", encoding=ENCODING)  # a later leg appends; no link
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     return handler
 

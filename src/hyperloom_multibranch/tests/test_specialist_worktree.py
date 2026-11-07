@@ -313,6 +313,7 @@ def test_the_base_and_each_worktree_are_the_group_s_to_write_whatever_the_umask(
         umask = next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
     assert umask & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
     monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    tmp_path.chmod(0o2775)  # the session directory: storage set up to be shared
     branches = tmp_path / "MB-branches"
     branches.mkdir()
     branches.chmod(0o2775)
@@ -483,7 +484,13 @@ def _as_another_accounts(*trees: Path) -> None:
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
-def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_no_program_of_it_run(tmp_path, base):
+def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_no_program_of_it_run(
+    tmp_path, installed, monkeypatch
+):
+    tmp_path.chmod(0o2775)  # the session directory: storage set up to be shared, so the base is the group's
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
+    base.build(["vllm"])
     worktree = base.worktree("s1", tmp_path / "s1")
     worktree.sync("c0", [])
     ran = tmp_path / "ran"
