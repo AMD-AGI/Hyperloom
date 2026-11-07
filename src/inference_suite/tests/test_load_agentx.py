@@ -161,12 +161,10 @@ def test_the_progress_api_port_stays_in_range():
     ("changes", "match"),
     [({"warmup_seed": _AGENTX.seed + 1}, "warmup_seed"), ({"warmup_requests_per_lane": 0}, "warmup request")],
 )
-def test_a_workload_the_harness_cannot_honour_is_refused_before_it_runs(tmp_path, harness, changes, match):
-    config = _round_config(tmp_path, WorkloadKind.AGENTX, agentx=replace(_WORKLOAD, **changes))
-    assert refusal(config.agentx).step is FailedStep.CONFIG_INVALID
-    outcome = run_agentx(_round(tmp_path, harness, config))
-    assert outcome.stop.step is FailedStep.CONFIG_INVALID and match in outcome.stop.detail
-    assert outcome.returncode is None and not (tmp_path / "calls.jsonl").exists()
+def test_a_workload_the_harness_cannot_honour_is_refused(changes, match):
+    stop = refusal(replace(_WORKLOAD, **changes))
+    assert stop.step is FailedStep.CONFIG_INVALID and match in stop.detail
+    assert refusal(_WORKLOAD) is None
 
 
 def test_export_counts_count_a_failed_warmup_as_both_and_drop_their_union(tmp_path: Path):
@@ -223,7 +221,7 @@ def test_a_missing_aggregate_fails_the_output(tmp_path, harness, monkeypatch):
     assert outcome.result is None and outcome.stop.step is FailedStep.CLIENT_OUTPUT_MISSING
 
 
-def test_the_follower_marks_phases_from_progress_and_hands_every_reading_on(monkeypatch):
+def test_the_follower_marks_phases_from_progress(monkeypatch):
     now_ns = time.time() * 1e9
     phases = {
         "warmup": {"start_ns": now_ns - 20e9},
@@ -231,22 +229,36 @@ def test_the_follower_marks_phases_from_progress_and_hands_every_reading_on(monk
     }
     readings = iter([None, phases])
     monkeypatch.setattr(agentx, "read_aiperf_phases", lambda url: next(readings))
-    clock, heard = PhaseClock(), []
-    follower = ProgressFollower("http://127.0.0.1:31000", clock, (lambda p, wall: heard.append(p),))
-    follower.check(0.0)
+    clock = PhaseClock()
+    follower = ProgressFollower("http://127.0.0.1:31000", clock)
+    follower.check()
     assert clock.marks == ()
-    follower.check(0.0)
-    assert heard == [None, phases]
+    follower.check()
     warmup, measured = clock.first(Phase.WARMUP), clock.first(Phase.MEASURED)
     assert measured.mono - warmup.mono == pytest.approx(10.0, abs=0.5)
+    assert measured.ts == pytest.approx((now_ns - 10e9) / 1e9, abs=0.5)
     assert clock.first(Phase.FINISHED) is None
 
 
-def test_an_unreachable_progress_api_is_heard_as_no_reading(monkeypatch):
+def test_an_unreachable_progress_api_marks_nothing(monkeypatch):
     def unreachable(url):
         raise OSError("refused")
 
     monkeypatch.setattr(agentx, "read_aiperf_phases", unreachable)
-    heard = []
-    ProgressFollower("http://127.0.0.1:31000", PhaseClock(), (lambda p, wall: heard.append(p),)).check(0.0)
-    assert heard == [None]
+    clock = PhaseClock()
+    ProgressFollower("http://127.0.0.1:31000", clock).check()
+    assert clock.marks == ()
+
+
+def test_listeners_hear_the_finished_mark_before_the_export_is_aggregated(tmp_path, harness):
+    calls = tmp_path / "calls.jsonl"
+    agentx_round = _round(tmp_path, harness)
+    clock, heard = agentx_round.clock, []
+
+    def listener(now: float) -> None:
+        replayed = calls.read_text().splitlines() if calls.exists() else []
+        heard.append((clock.first(Phase.FINISHED) is not None, len(replayed)))
+
+    run_agentx(replace(agentx_round, listeners=(listener,)))
+    assert heard[-1] == (True, 1), "the last poll sees the finished mark while only the replay has run"
+    assert len(calls.read_text().splitlines()) == 2

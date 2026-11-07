@@ -54,9 +54,12 @@ class PhaseClock:
         self._marks: dict[Phase, PhaseMark] = {}
 
     def mark(self, phase: Phase, mono: float | None = None) -> PhaseMark:
+        """Mark ``phase`` as begun at ``mono`` (now when omitted); its wall-clock instant is the same moment."""
         if phase in self._marks:
             return self._marks[phase]
-        mark = PhaseMark(phase, time.time(), time.monotonic() if mono is None else mono)
+        wall, now = time.time(), time.monotonic()
+        begun = now if mono is None else mono
+        mark = PhaseMark(phase, wall - (now - begun), begun)
         self._marks[phase] = mark
         for listener in self._listeners:
             listener(phase, mark.mono)
