@@ -4,12 +4,12 @@
 """One round, from its config to its ``report.json``: :func:`run_round` runs exactly one, into an empty run_dir.
 
 Before anything starts the round checks what it runs on: the staged tools, the source files, the frozen base, the
-installed framework's version (D6) and its parser (D7), and the eval's served context. It then acquires the server,
-runs the load and the eval on it, and releases it. The GPU sampler follows the round's phase marks, so its readings
-cover the measured window alone; the KV sampler scrapes the ready server and tags each reading with its phase. An
-AgentX profile round opens the server's capture window on the replay's phase clock, a fixed profile round around its
-measured pass. Every child is reaped and every artifact written before :func:`run_round` returns, so the run_dir does
-not change after it; ``report.json`` is written last.
+installed framework's version (D6) and its parser (D7) unless the server is external, and the eval's served context.
+It then acquires the server, runs the load and the eval on it, and releases it. The GPU sampler follows the round's
+phase marks, so its readings cover the measured window alone; the KV sampler scrapes the ready server and tags each
+reading with its phase. An AgentX profile round opens the server's capture window on the replay's phase clock, a fixed
+profile round around its measured pass. Every child is reaped and every artifact written before :func:`run_round`
+returns, so the run_dir does not change after it; ``report.json`` is written last.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from hyperloom_common.io import atomic_write_json
 from inference_suite import framework_version, parser_check, staging
 from inference_suite.compose import Refusal, RoundFacts, compose
 from inference_suite.contracts.base_launch import DIGEST_PREFIX, BaseLaunch, EnvValue
-from inference_suite.contracts.config import ConfigError, SuiteConfig, WorkloadKind
+from inference_suite.contracts.config import ConfigError, LifecycleMode, SuiteConfig, WorkloadKind
 from inference_suite.contracts.launch import ClientInvocation, Launch, VersionCheck
 from inference_suite.contracts.layout import RunLayout
 from inference_suite.contracts.report import (
@@ -369,7 +369,12 @@ class _Round:
 
     def _hold_framework(self, launch: Launch, env: Mapping[str, str]) -> Launch | Stop:
         """``launch`` once the serving interpreter's install reaches the recipe's version (D6) and its parser accepts
-        every flag (D7)."""
+        every flag (D7).
+
+        An external round holds nothing: it never starts ``launch``, and the server it reaches may run on another host.
+        """
+        if self.config.lifecycle.mode is LifecycleMode.EXTERNAL:
+            return replace(launch, framework=replace(launch.framework, version_check=VersionCheck.NOT_HELD))
         python = self.config.server.framework_python
         try:
             install = probe_install(python, launch.framework.name, env)
