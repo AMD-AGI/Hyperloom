@@ -118,6 +118,64 @@ async def test_every_changed_setting_is_named_with_its_old_and_new_value(tmp_pat
     )
 
 
+# --- a flag in every form its framework reads as it ------------------------------------------------------------------
+
+#: A word the frameworks read as a weight-precision flag without spelling it, on a root that sets nothing, and the
+#: change it is refused for.
+OTHER_FORMS = [
+    # vLLM merges ``--flag.key value`` into ``--flag``'s JSON value; its documentation quantizes linear weights so.
+    ("--quantization-config.linear fp8_per_channel", "--quantization-config: (not set) -> .linear fp8_per_channel"),
+    ("--quantization-config.linear=fp8_per_channel", "--quantization-config: (not set) -> .linear fp8_per_channel"),
+    # vLLM reads ``_`` in a long flag's name as ``-``.
+    ('--quantization_config {"linear":"fp8_per_channel"}', '--quantization-config: (not set) -> {"linear":'),
+    ("--quantization_param_path /scales/x.json", "--quantization-param-path: (not set) -> /scales/x.json"),
+    ("--model_path /models/fp8", "the checkpoint: (not set) -> /models/fp8"),
+    ("--quantization_config.linear fp8_per_channel", "--quantization-config: (not set) -> .linear fp8_per_channel"),
+    # argparse reads a value attached to a one-letter option as its value.
+    ("-qfp8_per_channel", "--quantization: (not set) -> fp8_per_channel"),
+    ("-q=fp8_per_channel", "--quantization: (not set) -> fp8_per_channel"),
+    # argparse takes a prefix of an option for the option; neither framework turns that off.
+    ("--dty float16", "--dtype: (not set) -> float16"),
+    ("--dty=float16", "--dtype: (not set) -> float16"),
+    ('--quantization-c {"linear":"fp8_per_channel"}', '--quantization-config: (not set) -> {"linear":'),
+    ("--quantization-p /scales/x.json", "--quantization-param-path: (not set) -> /scales/x.json"),
+    ("--model-pa /models/fp8", "the checkpoint: (not set) -> /models/fp8"),
+    ("--online_q /quant/a.yaml", "--online-quant-config: (not set) -> /quant/a.yaml"),
+    ("--quantization-c.linear fp8_per_channel", "--quantization-config: (not set) -> .linear fp8_per_channel"),
+]
+
+
+@pytest.mark.parametrize(("server_args", "change"), OTHER_FORMS)
+async def test_a_weight_precision_flag_in_another_form_its_framework_reads_is_refused(
+    tmp_path: Path, server_args: str, change: str
+) -> None:
+    await _refused_naming(tmp_path, _repo(), _delta(server_args), change)
+
+
+@pytest.mark.parametrize(
+    ("root_args", "server_args", "change"),
+    [
+        # The last value given wins in argparse: these launches run ptpc_fp8 and float16, however the root's flag reads.
+        ("--quantization fp8", "-qptpc_fp8", "--quantization: fp8 -> fp8 | ptpc_fp8"),
+        ("--dtype bfloat16", "--dty float16", "--dtype: bfloat16 -> bfloat16 | float16"),
+        (
+            '--quantization-config {"linear":"fp8"}',
+            "--quantization-config.linear mxfp8",
+            '--quantization-config: {"linear":"fp8"} -> .linear mxfp8 | {"linear":"fp8"}',
+        ),
+        (
+            "--quantization-config.linear fp8_per_channel",
+            "--quantization-config.embedding fp8_per_channel",
+            "--quantization-config: .linear fp8_per_channel -> .embedding fp8_per_channel | .linear fp8_per_channel",
+        ),
+    ],
+)
+async def test_another_form_of_a_flag_the_root_sets_is_refused(
+    tmp_path: Path, root_args: str, server_args: str, change: str
+) -> None:
+    await _refused_naming(tmp_path, _repo(root_args), _delta(server_args), change)
+
+
 # --- what is not a change ------------------------------------------------------------------------------------------
 
 
@@ -135,6 +193,14 @@ async def test_every_changed_setting_is_named_with_its_old_and_new_value(tmp_pat
         ("", "--kv-cache-dtype fp8"),
         ("", "--attention-backend TRITON_ATTN"),
         ("--kv-cache-dtype auto", "--kv-cache-dtype fp8_e4m3"),
+        ("-qfp8", "--quantization fp8"),
+        ('--quantization_config {"linear":"fp8"}', '--quantization-config {"linear":"fp8"}'),
+        ("--dty bfloat16", "--dtype bfloat16"),
+        ("--model_path /models/bf16", "--model /models/bf16"),
+        ("--quantization-config.linear fp8", "--quantization-config.linear=fp8 --max-num-seqs 64"),
+        ("--model /models/bf16", "--model-impl transformers --max-model-len 8192"),
+        ("--model /models/bf16", '--model-loader-extra-config {"a":1}'),
+        ("", "-tp 8 -O3 --max-num-seqs 64"),
     ],
 )
 async def test_a_candidate_that_keeps_the_root_weight_precision_is_accepted(
@@ -220,6 +286,16 @@ def _changes(before: str, after: str) -> list[str]:
         ("--quantization-config a.json", "--quantization-config b.json", ["--quantization-config: a.json -> b.json"]),
         ("--quantization-config [1,2]", "--quantization-config [2,1]", ["--quantization-config: [1,2] -> [2,1]"]),
         ("--dtype -1", "--dtype 1", ["--dtype: -1 -> 1"]),
+        ("--quantization", "--quantization=", ["--quantization: (on) -> ''"]),
+        # A prefix that several settings' spellings begin is each of them: argparse refuses it where the framework
+        # has several of those options, and reads it as the one where it has one.
+        (
+            "",
+            "--quantization- x",
+            ["--quantization-config: (not set) -> x", "--quantization-param-path: (not set) -> x"],
+        ),
+        ("", "--mod /m", ["the checkpoint: (not set) -> /m"]),
+        ("", "-- --max-num-seqs 8", []),
     ],
 )
 def test_the_comparison_reads_flags_as_arbor_does(before: str, after: str, expected: list[str]) -> None:
@@ -230,3 +306,8 @@ def test_a_removal_from_the_resolved_launch_is_a_value_of_its_own() -> None:
     removed = LaunchConfig(remove_args=("--quantization",))
     assert weight_precision_changes(LaunchConfig(), removed) == ["--quantization: (not set) -> <removed>"]
     assert weight_precision_changes(removed, removed) == []
+
+
+def test_a_removal_is_read_in_every_form_of_its_flag() -> None:
+    removed = LaunchConfig(remove_args=("--quantization_config",))
+    assert weight_precision_changes(LaunchConfig(), removed) == ["--quantization-config: (not set) -> <removed>"]
