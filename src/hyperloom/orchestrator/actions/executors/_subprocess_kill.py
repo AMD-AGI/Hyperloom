@@ -483,7 +483,7 @@ class _RecorderFanout:
 def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> _RecorderFanout:
     """KV metrics and measured-phase GPU power for this round, behind one recorder surface."""
     from ._gpu_power import build_gpu_power_recorder
-    from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+    from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
 
     return _RecorderFanout(
         [
@@ -491,7 +491,7 @@ def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | No
             for recorder in (_build_kv_recorder(server_log_path, env), build_gpu_power_recorder(server_log_path, env))
             if recorder is not None
         ],
-        ready_phase="boot" if is_magpie_agentx(configured_benchmark(env)) else "measured",
+        ready_phase="boot" if is_agentx(configured_benchmark(env)) else "measured",
     )
 
 
