@@ -6,12 +6,9 @@
 from __future__ import annotations
 
 import logging
-import os
-from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-from hyperloom.inference_optimizer.inferencex_checkout import has_benchmark_lib
 
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE
 from ._promote_outcome import IntegrateRecoveryIncomplete
@@ -41,17 +38,6 @@ class ResumeConsistencyMixin:
             "fixes": [],
             "warnings": [],
         }
-        active_inferencex = str(state.active_inferencex_path or "").strip()
-        if active_inferencex:
-            if has_benchmark_lib(active_inferencex):
-                os.environ["INFERENCEX_PATH"] = active_inferencex
-            elif Path(active_inferencex).is_dir():
-                # Not an InferenceX tree: dropped, so the checkout this launch resolved stays the one every round uses.
-                report["warnings"].append({"kind": "active_inferencex_checkout_invalid", "path": active_inferencex})
-                state.active_inferencex_path = ""
-            else:
-                report["warnings"].append({"kind": "active_inferencex_checkout_missing", "path": active_inferencex})
-                state.set_stop_reason("active_inferencex_checkout_missing")
         # Loading the state file is the one boundary the persisted
         # ``optimization_stack`` crosses, so bind its rows to their members here:
         # a row that cannot name what it integrated makes every later read of the

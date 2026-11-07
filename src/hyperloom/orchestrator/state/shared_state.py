@@ -439,8 +439,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     warm_replay_outcome: dict = field(default_factory=dict)
     # Crash-safe rollback/bookkeeping state for the combined Recipe + Kernel PRELUDE validation.
     warm_replay_pending: dict = field(default_factory=dict)
-    # Session-authoritative InferenceX checkout.
-    active_inferencex_path: str = ""
     # Durable post-save handoffs for section KB staging.
     kb_stage_outbox: list = field(default_factory=list)
     # Owner sections dropped because their persisted artifacts disappeared.
