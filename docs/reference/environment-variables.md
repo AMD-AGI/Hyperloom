@@ -523,13 +523,22 @@ result, and restores the card's entry mode on the way out.
 
 ```bash
 # what it would do, nothing set
-python3 scripts/partition_mode_sweep.py --benchmark-config bench.yaml --dry-run
+python3 scripts/partition_mode_sweep.py --suite-config round.yaml --dry-run
 
 # sweep every mode the card reports, skipping any that cannot hold the workload
 python3 scripts/partition_mode_sweep.py \
-    --benchmark-config bench.yaml --output-dir /shared/sweep \
+    --suite-config round.yaml --output-dir /shared/sweep \
     --per-stream-gib 20.7 --sudo
 ```
+
+Each partition runs the `--suite-config` inference_suite round (`inference-suite-config/1`)
+into its own run_dir, on that partition's HIP device and on the config's port plus the
+partition index, with GPU telemetry off because `amd-smi` indices are not HIP indices.
+The config must serve on one GPU, own its server, not profile, and not let the server
+inherit a GPU mask; anything else is refused before the card is touched. A
+`--benchmark-command` must leave an inference_suite run_dir at `{run_dir}`: every
+partition is measured from its `report.json`, and a round that is not a valid
+measurement leaves its mode unmeasured.
 
 The fan-out is the point rather than a detail: a benchmark that loads one
 partition and ignores the rest measures a fraction of the card, which makes

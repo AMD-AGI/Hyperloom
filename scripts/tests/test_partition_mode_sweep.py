@@ -8,9 +8,15 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
+
+from inference_suite.contracts import FixedMetrics, Lifecycle, LifecycleMode, ProfileConfig
+from inference_suite.tests.test_config_contract import _config as _contract_config
+from inference_suite.tests.test_report_contract import _report
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "partition_mode_sweep.py"
 
@@ -441,10 +447,6 @@ class TestModeResult:
         runs = [_run(0, latency=10.0), _run(1, latency=90.0)]
         assert pms.ModeResult(mode="DPX", runs=runs).worst_latency_ms() == pytest.approx(90.0)
 
-    def test_latency_accepts_the_alternate_spellings(self):
-        runs = [pms.PartitionRun(0, 7, Path("/x"), returncode=0, measurement={"mean_e2el_ms": 12.0})]
-        assert pms.ModeResult(mode="SPX", runs=runs).worst_latency_ms() == pytest.approx(12.0)
-
     def test_latency_missing_on_one_partition_is_not_reported(self):
         runs = [_run(0, latency=10.0), _run(1, latency=None)]
         assert pms.ModeResult(mode="DPX", runs=runs).worst_latency_ms() is None
@@ -591,14 +593,142 @@ class TestSummaryJson:
         assert payload["modes"][0]["measured"] is False
 
 
-class TestMagpieCommand:
-    def test_the_output_dir_is_left_as_a_placeholder_for_the_fan_out(self):
-        cmd = pms.magpie_command(Path("/cfg/bench.yaml"), python_exe="/usr/bin/python3")
-        assert "{output_dir}" in cmd
-        assert "/cfg/bench.yaml" in cmd
+def _suite_config(**changes):
+    config = replace(
+        _contract_config(),
+        server=replace(_contract_config().server, gpus=(0,), env_inherit=("HF_HOME",)),
+        profile=ProfileConfig(enabled=False),
+    )
+    return replace(config, **changes)
 
-    def test_it_is_the_local_run_mode(self):
-        assert "local" in pms.magpie_command(Path("/cfg/bench.yaml"))
+
+def _write_config(path: Path, config) -> Path:
+    path.write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+    return path
+
+
+class TestSuiteCommand:
+    def test_each_partition_runs_one_round_into_its_run_dir(self):
+        cmd = pms.suite_command(python_exe="/usr/bin/python3")
+        assert cmd[:4] == ["/usr/bin/python3", "-m", "inference_suite", "run"]
+        assert cmd[cmd.index("--config") + 1] == "{output_dir}/suite_config.yaml"
+        assert cmd[cmd.index("--run-dir") + 1] == "{run_dir}"
+
+    def test_the_run_dir_is_the_round_under_the_partition_output(self):
+        layout = pms.layout_for("SPX", cu_per_partition=256)
+        cmd = pms.build_partition_command(
+            pms.suite_command(), device=0, output_dir=Path("/o/p0"), layout=layout, partition_index=0
+        )
+        assert cmd[-1] == "/o/p0/round"
+        assert "/o/p0/suite_config.yaml" in cmd
+
+
+class TestReadSuiteConfig:
+    def test_a_sweepable_config_is_read(self, tmp_path):
+        config = _suite_config()
+        assert pms.read_suite_config(_write_config(tmp_path / "c.yaml", config)) == config
+
+    def test_an_unreadable_config_is_refused(self, tmp_path):
+        with pytest.raises(pms.SweepError, match="cannot read the suite config"):
+            pms.read_suite_config(tmp_path / "missing.yaml")
+
+    def test_a_config_off_its_contract_is_refused(self, tmp_path):
+        (tmp_path / "c.yaml").write_text("schema: nope\n", encoding="utf-8")
+        with pytest.raises(pms.SweepError, match="cannot read the suite config"):
+            pms.read_suite_config(tmp_path / "c.yaml")
+
+    def test_more_than_one_gpu_is_refused(self, tmp_path):
+        config = _suite_config()
+        config = replace(config, server=replace(config.server, gpus=(0, 1)))
+        with pytest.raises(pms.SweepError, match="a partition is one device"):
+            pms.read_suite_config(_write_config(tmp_path / "c.yaml", config))
+
+    def test_a_server_that_outlives_its_round_is_refused(self, tmp_path):
+        config = _suite_config(lifecycle=Lifecycle(mode=LifecycleMode.BOOT, pid_dir="/s/pid"))
+        with pytest.raises(pms.SweepError, match="lifecycle boot"):
+            pms.read_suite_config(_write_config(tmp_path / "c.yaml", config))
+
+    def test_a_profiled_round_is_refused(self, tmp_path):
+        config = _suite_config(profile=ProfileConfig(enabled=True, agentx_open_after_sec=0, agentx_duration_sec=30))
+        with pytest.raises(pms.SweepError, match="profiles its round"):
+            pms.read_suite_config(_write_config(tmp_path / "c.yaml", config))
+
+    @pytest.mark.parametrize("mask", ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"])
+    def test_an_inherited_gpu_mask_is_refused(self, tmp_path, mask):
+        config = _suite_config()
+        config = replace(config, server=replace(config.server, env_inherit=("HF_HOME", mask)))
+        with pytest.raises(pms.SweepError, match=mask):
+            pms.read_suite_config(_write_config(tmp_path / "c.yaml", config))
+
+    def test_main_refuses_before_inspecting_the_card(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(pms, "_inspect_card", lambda args: pytest.fail("the card was inspected"))
+        assert pms.main(["--suite-config", str(tmp_path / "missing.yaml")]) == 2
+        assert "cannot read the suite config" in capsys.readouterr().err
+
+    def test_neither_source_is_refused(self, capsys):
+        assert pms.main([]) == 2
+        assert "--suite-config" in capsys.readouterr().err
+
+
+class TestPartitionConfig:
+    def test_each_partition_gets_its_device_port_and_run_dir_without_telemetry(self):
+        run = pms.PartitionRun(partition_index=3, hsa_device=10, output_dir=Path("/o/cpx/partition3"))
+        config = pms.partition_config(_suite_config(), run)
+        assert config.server.gpus == (10,)
+        assert config.server.port == _suite_config().server.port + 3
+        assert config.paths.run_dir == "/o/cpx/partition3/round"
+        assert config.telemetry.enabled is False
+        assert config.workload == _suite_config().workload
+
+
+_ROUND_WRITER = """
+import json, pathlib, sys
+run_dir, output_dir, document = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+assert (output_dir / "suite_config.yaml").is_file()
+run_dir.mkdir()
+(run_dir / "report.json").write_text(document)
+"""
+
+
+def _report_document(**overrides) -> str:
+    return json.dumps(_report(**{"profile": None, "eval": None, **overrides}).to_document())
+
+
+def _workload(tmp_path, document: str):
+    return pms.BenchmarkWorkload(
+        template=[sys.executable, "-c", _ROUND_WRITER, "{run_dir}", "{output_dir}", document],
+        output_root=tmp_path,
+        streams_per_partition=1,
+        timeout_s=60.0,
+        suite_config=_suite_config(),
+    )
+
+
+class TestRunModeReadsRounds:
+    def test_every_partition_is_measured_from_its_round_report(self, tmp_path):
+        layout = pms.layout_for("DPX", cu_per_partition=128)
+        runs = pms.run_mode(layout, [7, 8], workload=_workload(tmp_path, _report_document()))
+        assert [run.error for run in runs] == ["", ""]
+        assert all(run.ok for run in runs)
+        assert pms.ModeResult(mode="DPX", runs=runs).total() == pytest.approx(2 * 1234.5)
+        written = yaml.safe_load((tmp_path / "dpx" / "partition1" / "suite_config.yaml").read_text())
+        assert written["server"]["gpus"] == [8]
+
+    def test_a_round_that_is_not_a_valid_measurement_is_an_error(self, tmp_path):
+        layout = pms.layout_for("SPX", cu_per_partition=256)
+        document = _report_document(fixed=FixedMetrics.of({"output_throughput": 0.0, "completed_requests": 0}))
+        (run,) = pms.run_mode(layout, [0], workload=_workload(tmp_path, document))
+        assert not run.ok
+        assert "not a valid measurement" in run.error
+
+    def test_a_report_off_its_contract_is_an_error_not_a_crash(self, tmp_path):
+        layout = pms.layout_for("SPX", cu_per_partition=256)
+        (run,) = pms.run_mode(layout, [0], workload=_workload(tmp_path, "{}"))
+        assert not run.ok
+        assert "unreadable round" in run.error
+
+    def test_a_run_dir_without_a_report_is_unmeasured(self, tmp_path):
+        assert pms.read_measurement(tmp_path) == {}
 
 
 class TestBusyDetection:
