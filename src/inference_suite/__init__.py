@@ -21,8 +21,8 @@ the manifest's sha256, stages nothing into a cache that already verifies, and ex
 damaged cache or a failed staging. A runner that runs
 the round in another process runs ``python -m inference_suite run``, which exits :data:`EXIT_REFUSED` when it refuses
 the config before the round starts. :func:`inferencex_root` is the staged InferenceX in a tool cache, and
-:data:`CLIENT_FILE` its benchmark client under that root; an InferenceX checkout holds that root in
-:data:`INFERENCEX_PROJECT_DIR`. A round's ``launch.json`` names the GPUs its server ran on under :data:`GPU_MASK_ENV`.
+:data:`CLIENT_FILE` its benchmark client under that root. A round's ``launch.json`` names the GPUs its server ran
+on under :data:`GPU_MASK_ENV`.
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
 :func:`client_env`, the discarded :func:`warmup_pass` before the measured one.
@@ -43,7 +43,6 @@ from inference_suite.runtime.server import stop
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
 from inference_suite.staging import (
     CLIENT_FILE,
-    INFERENCEX_PROJECT_DIR,
     inferencex_root,
     manifest_sha256,
     verified_manifest_sha256,
@@ -57,7 +56,6 @@ __all__ = [
     "EXIT_REFUSED",
     "GPU_MASK_ENV",
     "INFERENCEX_CLIENT_COMMIT",
-    "INFERENCEX_PROJECT_DIR",
     "LaunchQuery",
     "Miss",
     "RoundResult",
