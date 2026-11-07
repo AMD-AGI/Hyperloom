@@ -130,6 +130,17 @@ def test_a_split_phase_is_listed_after_the_phase_it_splits_and_phases_come_in_th
     assert [r.kind for r in rows] == sorted(r.kind for r in rows), "kinds in name order"
 
 
+def test_a_graded_tests_evaluation_is_listed_after_its_measured_bench_as_it_runs_after_it(tmp_path: Path) -> None:
+    graded = [("accuracy_eval", 50.0), ("measured", 30.0), ("warmup", 20.0), ("server_boot", 80.0)]
+    _log(tmp_path, [(TestKind.TEST, _outcome("req-1", graded)), (TestKind.SWEEP, _outcome("req-2", graded))])
+
+    rows = aggregate(read_session(tmp_path).results)
+
+    for kind in ("test", "sweep"):
+        listed = [r.phase for r in rows if r.kind == kind and r.phase != "unaccounted"]
+        assert listed == ["server_boot", "warmup", "measured", "accuracy_eval"], kind
+
+
 def test_what_the_log_holds_no_usable_phases_of_is_counted_and_not_dropped_in_silence(session: Path) -> None:
     read = read_session(session)
 
