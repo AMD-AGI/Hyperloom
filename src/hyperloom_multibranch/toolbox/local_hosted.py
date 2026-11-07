@@ -27,6 +27,12 @@ The long-context check is on by default the same way: ``LocalOptions.long_contex
 the session model at the context the test's launch serves, staged here when acceptance first plans a test of that context
 and it is missing (``long_context.ServedLongContext``). It runs under the short-prompt check's triggers, on the test's own
 server.
+
+A test's server runs a branch's patches, so where bubblewrap can sandbox it, every sandbox runs confined
+(:mod:`hyperloom.sandbox.confined`): it writes its own tree and reads its toolchain, its own signing key and what
+:func:`runner_plan` names (the model, the Hugging Face hub cache and the trees its template's variables name), never the
+session's other files, another sandbox's key, the app's credentials or its processes. Where bubblewrap cannot, tests run
+as before, said once at WARNING; a hosted run refuses to build the toolbox.
 """
 
 from __future__ import annotations
@@ -43,7 +49,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
-from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import PACK_ENV, rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED
@@ -52,7 +58,8 @@ from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
-from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_envs, image_configs
+from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, SNAPSHOT_ENV, framework_envs, image_configs
+from hyperloom.measure.jit.native.config import BUILD_STORE_ENV, BUILD_TRUST_ENV
 from hyperloom.measure.local_templates import image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
@@ -68,7 +75,7 @@ from hyperloom.sandbox.card_occupancy import (
 )
 from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
-from hyperloom.sandbox.local import LocalSandboxProvider
+from hyperloom.sandbox.local import LocalSandboxProvider, ProcessUsers, RunnerPlan
 from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -111,7 +118,9 @@ __all__ = [
     "MAX_CARDS_PER_NODE",
     "build_local_toolbox",
     "host_tool_repos",
+    "hub_cache",
     "private_jit_store",
+    "runner_plan",
 ]
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once.
@@ -124,6 +133,21 @@ DEFAULT_JIT_STORE = "hyperloom-jit-store"
 #: The variables that name where a runner clones the tools its tests run (InferenceX, Magpie) from. A local runner starts
 #: from an emptied environment, so :func:`host_tool_repos` carries them from this host's.
 HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO", "MAGPIE_REPO")
+#: The runner template's variables naming what a confined runner reads: the framework snapshot, the staged rule pack,
+#: the compiled-code store, the runner cache, the native build store and its trust file, and a local InferenceX or
+#: Magpie repository.
+RUNNER_READS: Final = (
+    SNAPSHOT_ENV,
+    PACK_ENV,
+    JIT_CACHE_ENV,
+    RUNNER_CACHE_ENV,
+    BUILD_STORE_ENV,
+    BUILD_TRUST_ENV,
+    *HOST_TOOL_REPO_ENVS,
+)
+_FILE_URL = "file://"
+_HUB = "hub"
+_HUGGINGFACE = "huggingface"
 _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 _RULE_PACK = "rule-pack"
@@ -411,6 +435,62 @@ def host_tool_repos(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     return {name: source[name] for name in HOST_TOOL_REPO_ENVS if source.get(name, "").strip()}
 
 
+def hub_cache(environ: Mapping[str, str] | None = None) -> Path | None:
+    """This host's Hugging Face hub cache, where a model's snapshot links point: ``HF_HUB_CACHE``, else ``hub`` below
+    ``HF_HOME``, ``$XDG_CACHE_HOME/huggingface`` or ``~/.cache/huggingface``; ``None`` when that is not a directory.
+    Never the login files beside it."""
+    source = os.environ if environ is None else environ
+    if source.get("HF_HUB_CACHE"):
+        hub = Path(source["HF_HUB_CACHE"])
+    elif source.get("HF_HOME"):
+        hub = Path(source["HF_HOME"], _HUB)
+    elif source.get("XDG_CACHE_HOME"):
+        hub = Path(source["XDG_CACHE_HOME"], _HUGGINGFACE, _HUB)
+    elif source.get("HOME"):
+        hub = Path(source["HOME"], ".cache", _HUGGINGFACE, _HUB)
+    else:
+        return None
+    return hub if hub.is_absolute() and hub.is_dir() else None
+
+
+def _named_path(value: str) -> Path | None:
+    """The local path a variable's value names (an absolute path, or a ``file://`` URL); ``None`` for anything else."""
+    path = value.removeprefix(_FILE_URL) if value.startswith(_FILE_URL) else value
+    return Path(path) if os.path.isabs(path) else None
+
+
+def _model_trees(model_dir: Path) -> tuple[Path, ...]:
+    """The model's directory and the directories its entries link into (a hub snapshot's files are links to its
+    blobs)."""
+    linked = []
+    with contextlib.suppress(OSError):
+        for entry in model_dir.iterdir():
+            if entry.is_symlink():
+                linked.append(Path(os.path.realpath(entry)).parent)
+    return (model_dir, *dict.fromkeys(linked))
+
+
+def runner_plan(
+    session_dir: Path,
+    model_dir: Path | None,
+    envs: Mapping[str, str],
+    python: str,
+    environ: Mapping[str, str] | None = None,
+) -> RunnerPlan:
+    """What a confined runner of the session at ``session_dir`` reads besides its toolchain (its launcher's
+    interpreter's, this process's), its own tree and its key: the interpreter ``python`` its template starts it with,
+    the trees its template's variables ``envs`` name (:data:`RUNNER_READS`; a repository named by URL names none), the
+    session's model and what its entries link into, and this host's Hugging Face hub cache (:func:`hub_cache` of
+    ``environ``, this process's by default). No bind may show the session's directory whole: it holds the blackboard,
+    every sandbox and key, and the leases."""
+    named = [_named_path(envs.get(name, "")) for name in RUNNER_READS]
+    model = _model_trees(model_dir) if model_dir is not None else ()
+    found = (_named_path(python), *named, *model, hub_cache(environ))
+    return RunnerPlan(
+        readable=tuple(dict.fromkeys(path for path in found if path is not None)), app_only=(Path(session_dir),)
+    )
+
+
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
     """The runner template: the image's variables, the host's tool repositories (:func:`host_tool_repos`), ``runner_envs``
     over both, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
@@ -433,21 +513,37 @@ def _shared_dirs(jit_store: Path | None, eval_sets: bool, environ: Mapping[str, 
     return {name: str(path) for name, path in named.items() if path is not None}
 
 
+def _measured_template(
+    session: LocalSession, template: LocalTemplate, options: LocalOptions, shared_dirs: Mapping[str, str]
+) -> LocalTemplate:
+    """The runner template that also carries the session's framework tables, the card guard and the directories of the
+    shared stores that are on: none is part of the environment the branches' own sandboxes get."""
+    framework = framework_envs(Path(session.session_dir) / SESSION_SNAPSHOT_DIR, options.framework_configs)
+    guard = {CARD_GUARD_ENV: card_guard_of(options).value}
+    return replace(template, envs={**template.envs, **framework, **shared_dirs, **guard})
+
+
 def _provider(
     session: LocalSession,
     cards: tuple[int, ...],
     template: LocalTemplate,
     options: LocalOptions,
-    shared_dirs: Mapping[str, str],
+    model_dir: Path | None,
 ) -> LocalSandboxProvider:
-    """The provider whose runner template also carries the session's framework tables, the card guard and the directories
-    of the shared stores that are on: none is part of the environment the branches' own sandboxes get. Its cards are
-    handed out, to a test's sandbox and to a lease alike, under the same guard."""
-    framework = framework_envs(Path(session.session_dir) / SESSION_SNAPSHOT_DIR, options.framework_configs)
-    guard = {CARD_GUARD_ENV: card_guard_of(options).value}
-    template = replace(template, envs={**template.envs, **framework, **shared_dirs, **guard})
+    """The provider of the runner ``template`` (:func:`_measured_template`). Its cards are handed out, to a test's
+    sandbox and to a lease alike, under the same guard. Its sandboxes are confined by the runner's plan
+    (:func:`runner_plan`) where bubblewrap can sandbox a test.
+
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox a test.
+    """
+    plan = runner_plan(Path(session.session_dir), model_dir, template.envs, options.python)
     provider = LocalSandboxProvider(
-        [template], gpus=cards, base_dir=Path(session.session_dir) / _SANDBOXES, hostname=session.hostname
+        [template],
+        gpus=cards,
+        base_dir=Path(session.session_dir) / _SANDBOXES,
+        hostname=session.hostname,
+        users=ProcessUsers(plan=plan),
     )
     provider.pool = GatedPool(cards, card_guard_of(options), read=options.card_holders)
     return provider
@@ -516,6 +612,7 @@ def build_local_toolbox(
             set is not staged in this host's runner cache; nothing has been started.
         LongContextNotStaged: The same for the long-context check (the option or ``HYPERLOOM_LONG_CONTEXT``).
         ValueError: The options and the acceptance setup name different short-prompt or long-context sets.
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox a test; nothing has been started.
     """
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
@@ -539,7 +636,8 @@ def build_local_toolbox(
     eval_sets = acceptance.short_prompts is not None or acceptance.long_context is not None
     shared_dirs = {**_shared_dirs(jit_root, eval_sets, os.environ), **(native.runner_envs if native else {})}
     acceptance = replace(acceptance, aiter_builds_missing=aiter_builds_missing({**template.envs, **shared_dirs}))
-    provider = _provider(session, cards, template, options, shared_dirs)
+    measured = _measured_template(session, template, options, shared_dirs)
+    provider = _provider(session, cards, measured, options, spec.model_dir)
     backend = started_backend(provider, config)
     leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs, CardDrain(options.card_memory))
     executor = HostedExecutor(
