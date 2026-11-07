@@ -45,7 +45,7 @@ from inference_suite.contracts.base_launch import Workload
 from inference_suite.contracts.launch import Launch, LayerSource
 from inference_suite.contracts.report import Report
 from inference_suite.eval.definition import EvalPlan
-from inference_suite.framework_probe import FrameworkInstall
+from inference_suite.framework_probe import FrameworkInstall, FrameworkProbeError
 from inference_suite.parser_check import FlagRefusal, RefusedFlag
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
 from inference_suite.runtime import server as runtime_server
@@ -322,6 +322,10 @@ def test_a_round_writes_only_into_an_empty_run_dir(rig):
         run.run_round(config)
 
 
+def _crashed_parser(*_args):
+    raise FrameworkProbeError("the probe exited 1 with no answer: KeyError: 'libamd_smi.so'")
+
+
 @pytest.mark.parametrize(
     ("change", "step"),
     [
@@ -330,6 +334,7 @@ def test_a_round_writes_only_into_an_empty_run_dir(rig):
         ("source_files", FailedStep.SOURCE_FILES_CHANGED),
         ("too_old", FailedStep.FRAMEWORK_VERSION_TOO_OLD),
         ("unversioned", FailedStep.FRAMEWORK_VERSION_UNKNOWN),
+        ("parser_crashed", FailedStep.FRAMEWORK_VERSION_UNKNOWN),
         ("redacted", FailedStep.CONFIG_INVALID),
         ("profile", FailedStep.CONFIG_INVALID),
     ],
@@ -348,6 +353,8 @@ def test_a_round_refused_before_its_server_starts_writes_a_failed_report(rig, mo
         rig.installed = "0.5.20"
     elif change == "unversioned":
         rig.installed = None
+    elif change == "parser_crashed":
+        monkeypatch.setattr(parser_check, "check", _crashed_parser)
     elif change == "redacted":
         monkeypatch.setenv("HF_TOKEN", "another")
     else:
