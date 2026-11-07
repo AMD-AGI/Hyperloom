@@ -472,7 +472,7 @@ class SpecialistSubprocessDispatcher:
                     proc = spawned
 
                 # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
-                outcome = await self._reap_loop(proc, watch, deadline=request.deadline, started=proc_started)
+                outcome = await self._reap_loop(proc, watch, deadline=request.deadline, started=proc_started, held=held)
                 unset = proc.setup_failure(process_log) if isinstance(proc, SandboxedProcess) else ""
                 if unset:
                     return _launch_failure(process_log, f"specialist sandbox could not be set up: {unset}")
@@ -982,6 +982,7 @@ class SpecialistSubprocessDispatcher:
         since_mtime: float,
         elapsed: float,
         progress_cb: Any,
+        held: HeldWorktree | None = None,
     ) -> float:
         """Forward a freshly-rewritten partial checkpoint to ``progress_cb``.
 
@@ -992,19 +993,23 @@ class SpecialistSubprocessDispatcher:
             since_mtime: Newest mtime already published.
             elapsed: Seconds since spawn, passed to the callback.
             progress_cb: Async callback receiving ``(payload, elapsed)``.
+            held: The worktree as recorded before the run: a checkpoint in it is read only through that directory,
+                and none while its path names another (the agent may have left a link to any host directory there).
 
         Returns:
             The newest mtime seen, so the caller can skip unchanged files.
         """
         newest = since_mtime
         for cand in partial_files:
+            if held is not None and cand.parent == held.path and not held.intact():
+                continue
             try:
                 mtime = cand.stat().st_mtime
             except OSError:
                 continue
             if mtime <= since_mtime:
                 continue
-            payload = self._read_done(cand)
+            payload = self._read_done(cand, held=held)
             if payload is None:
                 continue
             newest = max(newest, mtime)
@@ -1022,6 +1027,7 @@ class SpecialistSubprocessDispatcher:
         *,
         deadline: Deadline | None,
         started: float,
+        held: HeldWorktree | None = None,
     ) -> dict[str, Any]:
         """Poll the subprocess until it finishes, stalls, or times out.
 
@@ -1039,6 +1045,8 @@ class SpecialistSubprocessDispatcher:
             deadline (Deadline | None): Absolute instant to kill at; ``None``
                 falls back to :data:`UNBOUNDED_REAP_CAP_SEC` from spawn.
             started (float): ``time.monotonic()`` value at spawn time.
+            held (HeldWorktree | None): The worktree as recorded before the run, through which alone a partial
+                checkpoint in it is read.
 
         Returns:
             dict[str, Any]: Outcome with ``exit_code``, ``elapsed``, ``timed_out``, ``stale_heartbeat``, ``error``.
@@ -1082,6 +1090,7 @@ class SpecialistSubprocessDispatcher:
                     since_mtime=last_partial_mtime,
                     elapsed=elapsed,
                     progress_cb=watch.progress_cb,
+                    held=held,
                 )
 
             # Liveness check, the rule ``poll`` applies too: alive while the CLI's output changed within the window, or
@@ -1277,7 +1286,7 @@ class SpecialistSubprocessDispatcher:
         return out, {}
 
     @staticmethod
-    def _read_done(done_file: Path) -> dict[str, Any] | None:
+    def _read_done(done_file: Path, *, held: HeldWorktree | None = None) -> dict[str, Any] | None:
         """Parse a ``specialist_done.json`` file, unwrapping intent envelopes.
 
         Tolerates missing files and parse errors (logged, returns None).
@@ -1287,6 +1296,8 @@ class SpecialistSubprocessDispatcher:
 
         Args:
             done_file (Path): Path to the candidate done-file.
+            held (HeldWorktree | None): The worktree as recorded before the run; a file directly in it is read only
+                through that directory (:meth:`~.worktrees.HeldWorktree.read_text`).
 
         Returns:
             dict[str, Any] | None: The parsed (and possibly unwrapped)
@@ -1295,8 +1306,12 @@ class SpecialistSubprocessDispatcher:
         if not done_file.exists():
             return None
         try:
-            data = json.loads(read_text_nofollow(done_file))
-        except (OSError, json.JSONDecodeError) as exc:
+            if held is not None and done_file.parent == held.path:
+                text = held.read_text(done_file.name)
+            else:
+                text = read_text_nofollow(done_file)
+            data = json.loads(text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             log.warning(
                 "specialist_done.json parse failed at %s: %r",
                 done_file,

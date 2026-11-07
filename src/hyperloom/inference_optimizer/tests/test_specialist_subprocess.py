@@ -52,7 +52,7 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSpawn,
 )
 from hyperloom.orchestrator.specialists import worktrees
-from hyperloom.orchestrator.specialists.worktrees import PinnedGit, _setup_worktree
+from hyperloom.orchestrator.specialists.worktrees import HeldWorktree, PinnedGit, _setup_worktree
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1366,6 +1366,49 @@ async def test_partial_progress_skips_invalid_payload_and_swallow_callback_error
         progress_cb=_callback_fails,
     )
     assert newest == valid.stat().st_mtime
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("swap", ["link", "directory"])
+async def test_a_partial_checkpoint_is_read_only_through_the_worktree_the_specialist_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, swap: str
+):
+    """While the agent runs it can move its worktree aside and leave a link to a host directory, or a directory of its
+    own, in its place: no checkpoint is read there, and one read after the check is still read through the
+    directory recorded, so a swap that lands between the two is refused too."""
+    workspace = tmp_path / "ws"
+    worktree = workspace / "worktree"
+    worktree.mkdir(parents=True)
+    held = HeldWorktree.before_launch(worktree)
+    partials = (worktree / "specialist_done.partial.json", workspace / "specialist_done.partial.json")
+    published: list[dict] = []
+
+    async def publish(payload, _elapsed):
+        published.append(payload)
+
+    async def poll() -> float:
+        return await SpecialistSubprocessDispatcher(SpecialistSubprocessConfig())._publish_partial_progress(
+            partial_files=partials, since_mtime=0.0, elapsed=1.0, progress_cb=publish, held=held
+        )
+
+    partials[0].write_text('{"summary": "mine"}', encoding="utf-8")
+    assert await poll() > 0.0 and published == [{"summary": "mine"}]
+    published.clear()
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / partials[0].name).write_text('{"summary": "CANARY"}', encoding="utf-8")
+    worktree.rename(workspace / "worktree.orig")
+    if swap == "link":
+        worktree.symlink_to(host)
+    else:
+        worktree.mkdir()
+        (worktree / partials[0].name).write_text('{"summary": "CANARY"}', encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        assert await poll() == 0.0 and published == []
+    assert caplog.records == []  # skipped, not tried and refused on every poll
+    monkeypatch.setattr(HeldWorktree, "intact", lambda _self: True)  # the swap lands after the check
+    assert await poll() == 0.0 and published == []
 
 
 @pytest.mark.asyncio
