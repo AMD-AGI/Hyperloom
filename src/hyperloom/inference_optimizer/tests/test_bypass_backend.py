@@ -564,9 +564,9 @@ def _run_capturing_eval_command(tmp_path, monkeypatch) -> tuple[int, dict]:
 
 
 def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
-    """RUN_EVAL uses MAGPIE_EVAL_TASKS/MAGPIE_EVAL_LIMIT env in the eval command."""
-    monkeypatch.setenv("MAGPIE_EVAL_TASKS", "gsm8k")
-    monkeypatch.setenv("MAGPIE_EVAL_LIMIT", "8")
+    """RUN_EVAL uses HYPERLOOM_EVAL_TASKS/HYPERLOOM_EVAL_LIMIT env in the eval command."""
+    monkeypatch.setenv("HYPERLOOM_EVAL_TASKS", "gsm8k")
+    monkeypatch.setenv("HYPERLOOM_EVAL_LIMIT", "8")
     rc, captured = _run_capturing_eval_command(tmp_path, monkeypatch)
     assert rc == 0
     assert captured.get("tasks") == "gsm8k"
@@ -574,9 +574,9 @@ def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
 
 
 def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
-    """Without MAGPIE_EVAL_LIMIT, the eval command limit is None (full run)."""
-    monkeypatch.delenv("MAGPIE_EVAL_LIMIT", raising=False)
-    monkeypatch.delenv("MAGPIE_EVAL_TASKS", raising=False)
+    """Without HYPERLOOM_EVAL_LIMIT, the eval command limit is None (full run)."""
+    monkeypatch.delenv("HYPERLOOM_EVAL_LIMIT", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TASKS", raising=False)
     rc, captured = _run_capturing_eval_command(tmp_path, monkeypatch)
     assert rc == 0
     assert captured.get("tasks") == "gsm8k"
