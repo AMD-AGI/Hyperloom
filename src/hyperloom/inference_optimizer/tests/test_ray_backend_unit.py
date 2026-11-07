@@ -92,18 +92,16 @@ def test_worker_uses_invoking_policy_and_reanchors_session(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "out", "err")
 
     monkeypatch.setattr(sk, "run_with_session_kill", run)
-    result = rb._run_subprocess_worker(
-        rb.SessionKillRound(
-            cmd=["client"],
-            env={},
-            cwd=None,
-            timeout=7800,
-            silence_timeout_sec=600,
-            server_log_path="server.log",
-            server_already_ready=True,
-            session_remaining_sec=42,
-        )
-    )
+    result = rb.SessionKillRound(
+        cmd=["client"],
+        env={},
+        cwd=None,
+        timeout=7800,
+        silence_timeout_sec=600,
+        server_log_path="server.log",
+        server_already_ready=True,
+        session_remaining_sec=42,
+    ).run()
     assert result == (0, "out", "err")
     assert captured["timeout"] == 7800
     assert captured["silence_timeout_sec"] == 600
@@ -1055,34 +1053,30 @@ class TestTheSessionBudgetReachesTheRayWorker:
     def test_the_worker_reaps_a_child_whose_budget_is_already_spent(self):
         """End of the chain: the duration becomes a deadline on the worker's own clock."""
         start = time.monotonic()
-        rc, _out, _err = rb._run_subprocess_worker(
-            rb.SessionKillRound(
-                cmd=[sys.executable, "-c", "import time; time.sleep(30)"],
-                env=None,
-                cwd=None,
-                timeout=60,
-                silence_timeout_sec=None,
-                server_log_path=None,
-                server_already_ready=False,
-                session_remaining_sec=-1.0,
-            )
-        )
+        rc, _out, _err = rb.SessionKillRound(
+            cmd=[sys.executable, "-c", "import time; time.sleep(30)"],
+            env=None,
+            cwd=None,
+            timeout=60,
+            silence_timeout_sec=None,
+            server_log_path=None,
+            server_already_ready=False,
+            session_remaining_sec=-1.0,
+        ).run()
         assert rc == SESSION_TIME_EXHAUSTED_RETURNCODE
         assert time.monotonic() - start < 10.0
 
     def test_the_worker_leaves_a_child_with_budget_left_alone(self):
-        rc, out, _err = rb._run_subprocess_worker(
-            rb.SessionKillRound(
-                cmd=["echo", "still-running"],
-                env=None,
-                cwd=None,
-                timeout=60,
-                silence_timeout_sec=None,
-                server_log_path=None,
-                server_already_ready=False,
-                session_remaining_sec=3600.0,
-            )
-        )
+        rc, out, _err = rb.SessionKillRound(
+            cmd=["echo", "still-running"],
+            env=None,
+            cwd=None,
+            timeout=60,
+            silence_timeout_sec=None,
+            server_log_path=None,
+            server_already_ready=False,
+            session_remaining_sec=3600.0,
+        ).run()
         assert rc == 0
         assert "still-running" in out
 
