@@ -100,6 +100,7 @@ _CREDENTIAL_PREFLIGHT = (
 )
 _OTHER_UID = 65534
 _MARKER = "HYPERLOOM_DOTENV_CREDENTIALS"
+_PLANTED = ("https://planted.invalid", "sk-test-planted")
 
 
 def _write_installer(where: Path) -> Path:
@@ -362,6 +363,42 @@ def test_a_shared_checkout_without_credentials_says_where_they_go(tmp_path, cont
     assert "Missing required credential group(s)" in proc.stderr
     assert f"$KERNEL_AGENT_ENV  ({_kernel_env(workspace)}): .env keeps no credentials, as\n" in proc.stderr
     assert f"another account can write it ({said}); export them in the shell that\n" in proc.stderr
+
+
+def test_a_planted_env_file_lends_no_credentials_to_a_shared_checkouts_readers(tmp_path, container, capsys):
+    """Taking the credentials from the container-local file is held to that file's rule: one another account could
+    have written is refused, unread, by install.sh's preflight and by preflight's .env loader alike."""
+    checkout, workspace = container
+    (checkout / ".env").write_bytes(b"".join(_OTHER_LINES[:4]))
+    _make_shared(checkout, "group-writable-checkout")
+    env_file = _kernel_env(workspace)
+    env_file.parent.mkdir(mode=0o700, parents=True)
+    env_file.write_text(
+        "export ANTHROPIC_BASE_URL='https://planted.invalid'\nexport ANTHROPIC_API_KEY='sk-test-planted'\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o620)
+    refusal = (
+        f"refusing the kernel-agent env file {env_file}: {env_file} can be written by its group or others (mode 620)"
+    )
+
+    proc = _run(
+        _write_installer(tmp_path / "assets"), checkout, {"USER_DATA_PATH": str(workspace), **_no_credentials()}
+    )
+    with mock.patch.dict(os.environ, _launch_env(checkout, workspace), clear=True):
+        with pytest.raises(SystemExit) as preflight:
+            preflight_env._load_dotenv_fallback()
+        preflight_loaded = os.environ.get("ANTHROPIC_API_KEY")
+    preflight_err = capsys.readouterr().err
+
+    assert proc.returncode == 2
+    assert refusal in proc.stderr
+    assert f"credentials not taken from {env_file}; export them in this shell" in proc.stderr
+    assert not [value for value in _PLANTED if value in proc.stdout + proc.stderr]
+    assert preflight.value.code == 2
+    assert refusal in preflight_err
+    assert preflight_loaded is None
+    assert not [value for value in _PLANTED if value in preflight_err]
 
 
 @pytest.mark.parametrize(
