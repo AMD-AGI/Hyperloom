@@ -135,8 +135,9 @@ def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Rec
     """Refuse a candidate whose launch changes the model's weight precision from the session's root recipe, up or down.
 
     The root's precision is the session's: comparing with the parent instead would let a parent that carries a change
-    pass it on. Flags the root sets and the candidate keeps pass, and so does every flag that is not one of
-    :data:`~.weight_precision.WEIGHT_PRECISION_FLAGS` (the KV cache dtype, the attention backend, fusions, any env var).
+    pass it on. Flags the root sets and the candidate keeps pass, and so does every flag the frameworks do not read as
+    one of :data:`~.weight_precision.WEIGHT_PRECISION_FLAGS` (the KV cache dtype, the attention backend, fusions, any
+    env var).
     """
     changed = weight_precision_changes(root, candidate.launch)
     if changed:
@@ -144,7 +145,8 @@ def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Rec
             f"the candidate changes the model's weight precision from the session's root recipe (commit "
             f"{root_commit}): {'; '.join(changed)}; the weight precision of the session cannot change, down or up: "
             "keep the weights' quantization, dtype and checkpoint flags as the root sets them (the KV cache dtype, "
-            "attention compute precision and activation quantization may change)",
+            "attention compute precision and activation quantization may change); a flag counts in every form its "
+            "framework reads as that flag (a prefix of it, '_' for '-', '--flag.key value', '-qVALUE')",
             DELTA_NOT_APPLICABLE_CODE,
         )
 
