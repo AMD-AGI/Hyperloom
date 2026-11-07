@@ -51,7 +51,7 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
     # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
     PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
-    # The benchmark client, or the Magpie harness after serving its whole protocol, refused the result. The next
+    # The benchmark client, or the harness after serving its whole protocol, refused the result. The next
     # attempt runs the same client over the same workload, so it is refused the same way.
     ROUND_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
     FailedStep.CLIENT_FAILED.value: _BASELINE_FAILED_STOP_REASON,

@@ -61,7 +61,7 @@ _WORKLOAD_ARG_COUNTS: dict[str, str] = {
 
 
 def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
-    """Extract KB workload-tag fields from a baseline-materialized Magpie YAML."""
+    """Extract KB workload-tag fields from a baseline-materialized point YAML."""
     try:
         point = read_benchmark_point(Path(yaml_path))
     except (OSError, BenchmarkPointError, yaml.YAMLError):

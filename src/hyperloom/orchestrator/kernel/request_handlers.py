@@ -87,7 +87,7 @@ async def integrate_handler(
 ) -> HandlerResult:
     """Apply a kernel patch + re-baseline + KEEP/REVERT decision.
 
-    Applies an optimized kernel artifact, re-runs the active Magpie baseline,
+    Applies an optimized kernel artifact, re-runs the active baseline,
     and KEEPs only when measured E2E throughput clears the threshold AND the
     re-baseline's accuracy holds (source + artifacts are backed up first so
     non-KEEP can restore without a rebuild). Accuracy is graded only for a
