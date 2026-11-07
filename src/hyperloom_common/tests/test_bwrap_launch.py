@@ -41,7 +41,7 @@ from hyperloom_common.bwrap import (
     Scratch,
     interpreter_roots,
 )
-from hyperloom_common.tests._bwrap_host import usable_bwrap
+from hyperloom_common.tests._bwrap_host import as_owner, usable_bwrap
 
 pytestmark = pytest.mark.agent_isolation
 
@@ -133,34 +133,95 @@ def test_masks_hide_credentials_inside_a_bound_tree(probe: BwrapProbe, tmp_path:
     hf = tmp_path / "hf"
     (hf / "stored_tokens").mkdir(parents=True)
     (hf / "stored_tokens" / "default").write_text(CANARY)
-    (hf / "token").write_text(CANARY)
     (hf / "config.json").write_text("{}")
     check = """
 hf = sys.argv[1]
 print(json.dumps({
     "config": outcome(lambda: open(os.path.join(hf, "config.json")).read()),
-    "token": outcome(lambda: print(open(os.path.join(hf, "token")).read())),
     "stored_list": outcome(lambda: print(os.listdir(os.path.join(hf, "stored_tokens")))),
     "stored_read": outcome(lambda: print(open(os.path.join(hf, "stored_tokens", "default")).read())),
     "stored_create": outcome(lambda: open(os.path.join(hf, "stored_tokens", "new"), "w").close()),
 }))
 """
-    masked = run(probe, policy(str(hf), masked=(str(hf / "stored_tokens"), str(hf / "token"))), python(check, hf))
+    masked = run(probe, policy(str(hf), masked=(str(hf / "stored_tokens"),)), python(check, hf))
     unmasked = run(probe, policy(str(hf)), python(check, hf))
 
     assert report(masked) == {
         "config": "ok",
-        "token": "EACCES",
         "stored_list": "EACCES",
         "stored_read": "EACCES",
         "stored_create": "EACCES",
     }
     assert CANARY not in masked.stdout + masked.stderr
-    assert report(unmasked)["token"] == "ok" and CANARY in unmasked.stdout
+    assert report(unmasked)["stored_read"] == "ok" and CANARY in unmasked.stdout
 
 
-def test_read_only_binds_refuse_writes_and_metadata(probe: BwrapProbe, tmp_path: Path) -> None:
-    tree, work = tmp_path / "tree", tmp_path / "wt"
+#: Reads the two credentials, waits for a line on stdin (the app changes them meanwhile), then reads them again.
+READ_TWICE = """
+def read(path):
+    try:
+        print(open(path).read())
+    except OSError as exc:
+        return errno.errorcode[exc.errno]
+    return "read"
+credentials, token = sys.argv[1:]
+print(json.dumps([read(credentials), read(token)]), flush=True)
+sys.stdin.readline()
+print(json.dumps([read(credentials), read(token)]), flush=True)
+"""
+
+
+def test_a_masked_directory_holds_while_the_app_replaces_and_creates_credentials_in_it(
+    probe: BwrapProbe, tmp_path: Path
+) -> None:
+    # The app refreshes a login by writing a new file and renaming it over the old one (git's lockfile, an atomic
+    # save), or logs in during the task (HF's token): a mount over each file would be gone with the rename, and an
+    # absent one would have none. A mask over the directory holding them stays.
+    home = tmp_path / "home"
+    tool = home / ".config" / "tool"
+    tool.mkdir(parents=True)
+    credentials, token = tool / "credentials.json", tool / "token"
+    credentials.write_text("before-" + CANARY)
+    files = policy(str(home), masked=(str(credentials), str(token)))
+    assert files.problems(probe.version or (0, 0, 0)) == [
+        f"{path} is masked below a bound tree but is not a directory: a mount over a file goes when the app replaces "
+        "the file, and none covers one made later; mask the directory that holds it, or bind only what is needed "
+        "beside it"
+        for path in (credentials, token)
+    ]
+    sandbox = policy(str(home), masked=(str(tool),))
+
+    with subprocess.Popen(
+        sandbox.argv(probe, python(READ_TWICE, credentials, token)),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as agent:
+        before = agent.stdout.readline() if agent.stdout else ""
+        fresh = tool / "credentials.json.lock"
+        fresh.write_text("after-" + CANARY)
+        os.replace(fresh, credentials)
+        token.write_text("login-" + CANARY)
+        out, err = agent.communicate("go\n", timeout=TIMEOUT)
+
+    assert agent.returncode == 0, err
+    assert json.loads(before) == ["EACCES", "EACCES"]
+    assert json.loads(out.strip().splitlines()[-1]) == ["EACCES", "EACCES"]
+    assert CANARY not in before + out + err
+    assert credentials.read_text() == "after-" + CANARY and token.read_text() == "login-" + CANARY
+
+
+@pytest.fixture
+def outside_tmp() -> Iterator[Path]:
+    """A directory below no ``/tmp`` of the host's: there the directories bubblewrap makes to hold a bind are in the
+    sandbox's root, not in its own ``/tmp``, which it writes."""
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as base:
+        yield Path(base)
+
+
+def test_read_only_binds_and_the_root_refuse_writes_and_metadata(probe: BwrapProbe, outside_tmp: Path) -> None:
+    tree, work = outside_tmp / "tree", outside_tmp / "wt"
     tree.mkdir()
     work.mkdir()
     (tree / "file").write_text("kept")
@@ -175,7 +236,10 @@ print(json.dumps({
     "truncate": outcome(lambda: os.truncate(target, 0)),
     "utime": outcome(lambda: os.utime(target, (0, 0))),
     "rename": outcome(lambda: os.rename(target, target + ".moved")),
+    "beside": outcome(lambda: open(os.path.join(os.path.dirname(tree), "beside"), "w").close()),
+    "root": outcome(lambda: os.mkdir("/made")),
     "worktree": outcome(lambda: open(os.path.join(work, "edit"), "w").write("landed")),
+    "tmp": outcome(lambda: open("/tmp/made", "w").write("tmp")),
 }))
 """
     result = report(run(probe, policy(str(tree), writable=(str(work),)), python(check, tree, work)))
@@ -187,7 +251,10 @@ print(json.dumps({
         "truncate": "EROFS",
         "utime": "EROFS",
         "rename": "EROFS",
+        "beside": "EROFS",
+        "root": "EROFS",
         "worktree": "ok",
+        "tmp": "ok",
     }
     assert stat.S_IMODE((tree / "file").stat().st_mode) == 0o644 and (tree / "file").read_text() == "kept"
     assert (work / "edit").read_text() == "landed"
@@ -422,6 +489,51 @@ def test_the_sandbox_outlives_its_bwrap_process_unless_it_dies_with_its_parent(
 
 
 # ---- one holder, many commands -----------------------------------------------------------------------------------
+
+
+def test_scratch_the_agent_locked_is_removed_from_the_host() -> None:
+    # The agent maps to the owning uid, so it can chmod 000 its /tmp and /dev/shm and a directory in them.
+    made = Scratch.create()
+    lock = "mkdir -p /tmp/d/inner /dev/shm/x && echo y > /tmp/d/inner/f && chmod 000 /tmp/d/inner /tmp/d /tmp /dev/shm"
+    done = run(usable_bwrap(), BwrapPolicy(read_only=SYSTEM_ROOTS, tmp=made.tmp, shm=made.shm), ["/bin/sh", "-c", lock])
+
+    removed = as_owner(
+        "import sys; from hyperloom_common.bwrap import Scratch; Scratch(*sys.argv[1:]).remove()", made.tmp, made.shm
+    )
+
+    left = [path for path in (made.tmp, made.shm) if os.path.lexists(path)]
+    for path in left:
+        subprocess.run(["chmod", "-R", "u+rwx", path], check=False)
+        shutil.rmtree(path)
+    assert done.returncode == 0, done.stderr
+    assert removed.returncode == 0 and left == [], removed.stderr
+
+
+#: Trees an agent can leave in its scratch without any chmod: deeper than Python's recursion limit, and with paths
+#: longer than PATH_MAX (each ``mkdir`` names one level relative to the shell's working directory).
+DEEP = "cd /tmp && i=0; while [ $i -lt 1500 ]; do mkdir d && cd d; i=$((i+1)); done; : > f; mkdir -p /dev/shm/keep"
+LONG = (
+    "cd /tmp && n=$(printf 'y%.0s' $(seq 200)); i=0; while [ $i -lt 30 ]; do mkdir $n && cd $n; i=$((i+1)); done; "
+    ": > f; mkdir -p /dev/shm/keep"
+)
+
+
+@pytest.mark.parametrize("shape", [DEEP, LONG], ids=["deeper-than-recursion", "longer-than-path-max"])
+def test_scratch_too_deep_or_too_long_for_a_path_is_removed_from_the_host(shape: str) -> None:
+    made = Scratch.create()
+    done = run(
+        usable_bwrap(), BwrapPolicy(read_only=SYSTEM_ROOTS, tmp=made.tmp, shm=made.shm), ["/bin/sh", "-c", shape]
+    )
+
+    removed = as_owner(
+        "import sys; from hyperloom_common.bwrap import Scratch; Scratch(*sys.argv[1:]).remove()", made.tmp, made.shm
+    )
+
+    left = [path for path in (made.tmp, made.shm) if os.path.lexists(path)]
+    for path in left:
+        subprocess.run(["rm", "-rf", "--one-file-system", path], check=False)
+    assert done.returncode == 0, done.stderr
+    assert removed.returncode == 0 and left == [], removed.stderr
 
 
 def test_joined_commands_share_pids_tmp_and_dev_shm_but_not_sysv_ipc(probe: BwrapProbe, scratch: Scratch) -> None:

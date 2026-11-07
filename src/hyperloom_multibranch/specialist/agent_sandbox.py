@@ -845,8 +845,10 @@ class LocalAgentSandbox:
         """Every command's policy: the sandbox's root, its home, the trees it names and the image's writable
         frameworks writable; the toolchain of :data:`AGENT_PROGRAMS`, its import path, the paths it names and the
         image's other installed frameworks read-only, but none in a tree it writes, which shows it already; the
-        credential locations they show masked; the cards' devices; the app's state never bound. No command dies with
-        the thread that started it: the session's watch ends what is left of a sandbox, with its grace."""
+        credential locations they show absent (a read-only tree bound entry by entry without them, so a login the app
+        replaces or makes while a command runs never shows, :meth:`Confinement.policy`); the cards' devices; the
+        app's state never bound. No command dies with the thread that started it: the session's watch ends what is
+        left of a sandbox, with its grace."""
         installed = installed_frameworks()
         writable = (self.root, home, *self.paths.writable, *installed.writable)
         trees = (*writable, Path(scratch.tmp), Path(scratch.shm))
