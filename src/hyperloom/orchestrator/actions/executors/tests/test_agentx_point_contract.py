@@ -168,16 +168,11 @@ def test_pre_baseline_candidate_carries_operator_server_args(source, tmp_path, m
     assert prepare_grid_benchmark_config(base, tmp_path / "next") == base
 
 
-@pytest.mark.parametrize("appended,recipe", [(True, False), (False, True), (True, True)])
-def test_grid_ablation_removes_the_option_from_its_owning_layers(source, tmp_path, report, appended, recipe):
-    from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
-    from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
-
+@pytest.mark.parametrize("appended", [True, False])
+def test_grid_ablation_removes_the_option_from_its_owning_layer(source, tmp_path, appended):
+    """An option the accepted layer appends is dropped from it; any other is left for the base to remove."""
     option = "--cuda-graph-max-bs"
     base = materialize_benchmark_config(source, tmp_path / "base")
-    receipt = report["agentx_metrics"]["server_launch"]
-    receipt["base_argv"] = list(receipt["effective_argv"]) + ([option, "128"] if recipe else [])
-    persist_launch_evidence(native_launch_evidence(extract_benchmark_measurement(report), base), slot=base.parent)
     candidate = _build_variant_yaml(
         GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args=f"{option}=256" if appended else "")),
         GridVariant("ablate", "--mem-fraction-static 0.85", {}, remove_args=[option]),
@@ -185,7 +180,7 @@ def test_grid_ablation_removes_the_option_from_its_owning_layers(source, tmp_pat
     )
     overrides = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert overrides["append_args"] == ["--mem-fraction-static", "0.85"]
-    assert overrides["remove_args"] == ([option] if recipe else [])
+    assert overrides["remove_args"] == ([] if appended else [option])
 
 
 def test_the_session_base_replaces_the_recipe_argv_once_and_candidates_compose_above_it(source, tmp_path, monkeypatch):
