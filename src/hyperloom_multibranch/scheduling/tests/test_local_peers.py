@@ -62,6 +62,7 @@ from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayou
 from hyperloom_multibranch.scheduling import local_peers as local_peers_module
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
+    AGENTX_OUTSIDE_TRACE_SEC,
     AGENTX_TRACE_SEC,
     InferenceXCheckout,
     LocalCards,
@@ -486,6 +487,23 @@ async def test_an_agentx_session_on_a_model_directory_serves_it_at_its_ep_in_the
         benchmark = yaml.safe_load((built.layout.toolbox / "benchmark.yaml").read_text())["benchmark"]
         assert (benchmark["docker_image"], benchmark["envs"]["EP_SIZE"]) == (IMAGE.ref, 8)
         assert benchmark["envs"]["MODEL_PATH"] == str(model)
+        assert "DURATION" not in benchmark["envs"]
+
+
+async def test_an_agentx_session_replays_the_trace_window_it_names_and_its_tests_are_limited_by_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "models" / "GLM-5.3"
+    model.mkdir(parents=True)
+    workload = replace(AGENTX, model=str(model), agentx_duration_sec=600)
+    given = _options_given(monkeypatch, local_hosted, "build_local_toolbox")
+
+    async with _peers(tmp_path / "workspace", monkeypatch, workload, replace(HOST, inferencex=AGENTX_CHECKOUT)) as built:
+        canonical = yaml.safe_load((built.layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
+        assert str(canonical["envs"]["DURATION"]) == "600"
+
+    [options] = given
+    assert options.timeout_sec == 600 + AGENTX_OUTSIDE_TRACE_SEC
 
 
 def _options_given(monkeypatch: pytest.MonkeyPatch, module: object, builder: str) -> list[object]:

@@ -253,14 +253,14 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
 
 def attempt_timeout_sec(workload: Workload) -> int:
     """How long one attempt of a test of ``workload`` may run on either backend: the toolbox's default for an
-    InferenceX workload, and for an AgentX one the trace window a round replays (:data:`AGENTX_TRACE_SEC`) plus what
-    the test spends outside it (:data:`AGENTX_OUTSIDE_TRACE_SEC`)."""
+    InferenceX workload, and for an AgentX one its trace window (the workload's, else :data:`AGENTX_TRACE_SEC`) plus
+    what the test spends outside it (:data:`AGENTX_OUTSIDE_TRACE_SEC`)."""
 
     from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC
 
     if workload.inferencex is not None:
         return DEFAULT_TEST_TIMEOUT_SEC
-    return AGENTX_TRACE_SEC + AGENTX_OUTSIDE_TRACE_SEC
+    return (workload.agentx_duration_sec or AGENTX_TRACE_SEC) + AGENTX_OUTSIDE_TRACE_SEC
 
 
 def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> None:
@@ -285,6 +285,7 @@ def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> N
         conc=workload.conc,
         model_path=workload.model,
         docker_image=image_ref,
+        duration_sec=workload.agentx_duration_sec,
     )
     write_agentx_benchmark(path, benchmark)
     os.environ[BENCHMARK_CONFIG_ENV] = str(path.resolve())

@@ -68,6 +68,7 @@ class Workload:
     are scoped to. ``inferencex`` is the request shape of an InferenceX workload and ``None`` for an AgentX trace
     replay, whose shape the trace fixes; ``conc`` is the primary operating point of either. ``ep`` is the
     expert-parallel size an AgentX workload is served at; an InferenceX one is served at :data:`DEFAULT_EP`.
+    ``agentx_duration_sec`` is an AgentX workload's trace window, ``None`` for the measuring harness's default.
 
     ``gpu_type`` is named, not detected: the toolbox writes it into every measurement spec, built before PRELUDE runs.
     """
@@ -81,6 +82,7 @@ class Workload:
     kernel_optimizer: KernelOptimizer
     inferencex: InferenceXShape | None
     ep: int = DEFAULT_EP
+    agentx_duration_sec: int | None = None
 
     @property
     def model_basename(self) -> str:
