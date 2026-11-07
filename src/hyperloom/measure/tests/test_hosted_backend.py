@@ -239,6 +239,7 @@ def test_a_rejected_sheet_is_not_a_candidate_failure(rig, tmp_path) -> None:
     assert outcome.returncode == HOSTED_SPEC_REJECTED_RC
     assert outcome.failure_class is None
     assert outcome.stderr.startswith("spec_rejected")
+    assert outcome.stderr.endswith("(the sheet is hyperloom.measurement-spec/v2)"), "an older runner names only its own"
     assert (call.output_dir / "hosted-server.log").read_bytes() == b"partial log\n", "the runner's log is kept"
 
 
