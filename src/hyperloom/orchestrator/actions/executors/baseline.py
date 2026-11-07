@@ -61,7 +61,6 @@ from ._accuracy_gate import materialized_run_eval_disabled
 from ._workload_envs import (
     _client_tokenizer_mode,
     default_baseline_config,
-    prepare_agentx_runtime,
 )
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
@@ -75,7 +74,7 @@ from ._inferencex_patcher import (
 )
 from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
 from ._magpie_patcher import client_tokenizer_hook_installed, ensure_eval_concurrency_compat
-from .benchmark_config import apply_benchmark_round_seed
+from .benchmark_config import apply_benchmark_round_seed, prepare_agentx_runtime
 from .benchmark_result import (
     double_run_requested,
 )
