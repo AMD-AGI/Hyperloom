@@ -61,6 +61,11 @@ class LifecycleMode(str, Enum):
     #: A client-only round against a server something else runs and tears down (multi-node).
     EXTERNAL = "external"
 
+    @property
+    def finds_server(self) -> bool:
+        """Whether the round finds its server already running, so it boots none."""
+        return self in (LifecycleMode.REUSE, LifecycleMode.EXTERNAL)
+
 
 class EvalTask(str, Enum):
     GSM8K = "gsm8k"

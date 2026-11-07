@@ -54,7 +54,7 @@ from inference_suite.contracts.config import (
     WorkloadKind,
 )
 
-from inference_suite.contracts.layout import ReadyStamp, RunLayout, format_ready_stamp, parse_ready_stamp
+from inference_suite.contracts.layout import ReadyStamp, RunDirError, RunLayout, format_ready_stamp, parse_ready_stamp
 from inference_suite.contracts.report import (
     AGENTX_ERROR_RATE_DEFINITION,
     FIXED_METRIC_KEYS,
@@ -131,6 +131,7 @@ __all__ = [
     "Redacted",
     "Report",
     "ReportError",
+    "RunDirError",
     "RunLayout",
     "RunPaths",
     "RunStatus",

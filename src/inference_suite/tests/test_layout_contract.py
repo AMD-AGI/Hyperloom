@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_suite.contracts import ReadyStamp, RunLayout, format_ready_stamp, parse_ready_stamp
+from inference_suite.contracts import ReadyStamp, RunDirError, RunLayout, format_ready_stamp, parse_ready_stamp
 from inference_suite.contracts.layout import GPU_METRICS, HOST_DERIVED
 
 
@@ -68,3 +68,16 @@ def test_run_dir_names(tmp_path: Path) -> None:
     ]
     assert layout.profile_torch_trace == layout.profile_trace_dirs()[0]
     assert HOST_DERIVED == (GPU_METRICS,)
+
+
+def test_claim_creates_an_absent_run_dir_and_accepts_an_empty_one(tmp_path: Path) -> None:
+    layout = RunLayout(tmp_path / "a" / "run")
+    layout.claim()
+    assert layout.root.is_dir()
+    layout.claim()
+
+
+def test_claim_refuses_a_run_dir_that_holds_anything(tmp_path: Path) -> None:
+    (tmp_path / "leftover").write_text("", encoding="utf-8")
+    with pytest.raises(RunDirError, match="not empty"):
+        RunLayout(tmp_path).claim()

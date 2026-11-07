@@ -79,6 +79,10 @@ def parse_ready_stamp(text: str) -> ReadyStamp | None:
         return None
 
 
+class RunDirError(ValueError):
+    """The run_dir already holds something: one round writes one run_dir, from empty."""
+
+
 @dataclass(frozen=True)
 class RunLayout:
     """Where each file of the run_dir at ``root`` lives."""
@@ -217,6 +221,16 @@ class RunLayout:
     def clear_ready_stamp(self) -> None:
         self.ready_stamp.unlink(missing_ok=True)
 
+    def claim(self) -> None:
+        """Create the run_dir for one round.
+
+        Raises:
+            RunDirError: The run_dir already holds something.
+        """
+        if self.root.exists() and any(self.root.iterdir()):
+            raise RunDirError(f"the run_dir {self.root} is not empty")
+        self.root.mkdir(parents=True, exist_ok=True)
+
 
 __all__ = [
     "AGENTX_TIMELINE",
@@ -241,6 +255,7 @@ __all__ = [
     "SERVER_PID",
     "TORCH_TRACE_DIR",
     "ReadyStamp",
+    "RunDirError",
     "RunLayout",
     "format_ready_stamp",
     "parse_ready_stamp",

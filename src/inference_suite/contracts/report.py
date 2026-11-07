@@ -41,6 +41,15 @@ class RunStatus(str, Enum):
     FAILED = "failed"
     STOPPED = "stopped"
 
+    @classmethod
+    def of(cls, failed_step: FailedStep | None, load_measured: bool) -> RunStatus:
+        """The status a round ends with: the step it failed at, if any, and whether its load measured."""
+        if failed_step is None:
+            return cls.COMPLETED
+        if failed_step is FailedStep.CANCELLED:
+            return cls.STOPPED
+        return cls.PARTIAL if load_measured else cls.FAILED
+
 
 class FailedStep(str, Enum):
     """The closed list of steps a round can fail at; each replaces the sentinel or class noted beside it."""

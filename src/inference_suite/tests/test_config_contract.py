@@ -296,3 +296,7 @@ def test_layers_refuse_contradictions():
 
 def test_added_args_are_normalized():
     assert LaunchDelta(args_add=("--tp=8",)).args_add == ("--tp", "8")
+
+
+def test_only_reuse_and_external_rounds_find_their_server_running() -> None:
+    assert {mode for mode in LifecycleMode if mode.finds_server} == {LifecycleMode.REUSE, LifecycleMode.EXTERNAL}
