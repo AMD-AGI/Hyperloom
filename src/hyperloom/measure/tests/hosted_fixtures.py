@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -15,7 +16,10 @@ from hyperloom.measure.archive import DirResultArchive
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
-from hyperloom.measure.socket import TestCall
+from hyperloom.measure.socket import SessionFacts, TestCall
+from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
+from hyperloom.inference_optimizer.session.base_launch import shared_state_fields, write_base_launch
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
 
 FAKE_RUNNER = (sys.executable, "-m", "hyperloom.measure.tests.fake_runner")
@@ -44,6 +48,7 @@ def make_call(tmp: Path, task_id: str = "req-1", *, point: Path | None = None, *
         "cwd": str(tmp),
         "magpie_python": sys.executable,
         "task_id": task_id,
+        "session_facts": SessionFacts(staging=STAGING, base_launch=base_launch()),
     }
     arguments.update(overrides)
     return TestCall(**arguments)
@@ -68,12 +73,27 @@ class Rig:
         return backend
 
 
+def freeze_session_base(session: Path) -> None:
+    """Freeze :func:`base_launch` as ``session``'s base, as a fresh launch does."""
+    write_base_launch(session, base_launch())
+    SharedState(**shared_state_fields(base_launch())).save(session)
+
+
+def staged_tool_cache(tmp: Path, monkeypatch: Any) -> str:
+    """Point the application's inference_suite tool cache at one holding a staging manifest; returns its sha256."""
+    tools = tmp / "inference-suite-tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    manifest = tools / "staging_manifest.json"
+    manifest.write_text('{"schema": "inference-suite-staging/1", "tools": {}}\n')
+    monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tools))
+    return hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+
 def spec_context(tmp: Path, **overrides: Any) -> SpecContext:
     arguments: dict[str, Any] = {
         "image_ref": "registry.invalid/fw@sha256:" + "22" * 32,
         "image_digest": "sha256:" + "22" * 32,
         "gpu_type": "FakeGPU",
-        "magpie_commit": COMMIT,
         "inferencex_commit": COMMIT,
         "blobs": LocalBlobStore(tmp / "session" / "hosted" / "blobs"),
         "process_environ": {},

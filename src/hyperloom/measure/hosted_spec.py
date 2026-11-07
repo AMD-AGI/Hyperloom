@@ -34,7 +34,7 @@ from hyperloom.common.env_safety import (
 )
 from hyperloom.measure.compile import BlobError
 from hyperloom.measure.docs import DocumentError, canonical_json
-from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES, PLATFORM_ENV_NAMES, MeasurementSpec
+from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES, PLATFORM_ENV_NAMES, SPEC_SCHEMA, MeasurementSpec
 from hyperloom.measure.socket import TestCall
 
 __all__ = [
@@ -66,6 +66,7 @@ _HASH_CHUNK_BYTES = _MIB
 _POINT_UNREADABLE = "point_unreadable"
 _PLACEHOLDER = re.compile(r"\$\{HL_ATTACH:([A-Za-z0-9][A-Za-z0-9._-]{0,63})\}")
 _HEX_COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class SpecRefused(ValueError):
@@ -89,13 +90,11 @@ class SpecContext:
     image_ref: str
     image_digest: str
     gpu_type: str
-    magpie_commit: str
     inferencex_commit: str
     blobs: Any
     power_cap_w: float | None = None
     partition_mode: str | None = None
     model_hashes: Mapping[str, str] = field(default_factory=dict)
-    benchmark_backend: str = "magpie"
     shared_roots: tuple[Path, ...] = ()
     model_dir: Path | None = None
     max_total_bytes: int | None = None
@@ -369,17 +368,26 @@ def _hardware_section(ctx: SpecContext, gpus: int) -> dict[str, Any]:
 
 
 def _tools_section(call: TestCall, ctx: SpecContext) -> dict[str, Any]:
-    facts = call.session_facts
+    staging = call.session_facts.staging if call.session_facts else None
+    if not staging or not _SHA256.fullmatch(staging):
+        raise SpecRefused("tools_unknown", f"the inference_suite staging is not a manifest sha256: {staging!r}")
     return {
-        "magpie": {"commit": _commit((facts.magpie_commit if facts else None) or ctx.magpie_commit, "Magpie")},
+        "inference_suite": {"staging": staging},
         "inferencex": {"commit": _commit(ctx.inferencex_commit, "InferenceX")},
     }
 
 
-def _procedure_section(call: TestCall, ctx: SpecContext, deadline_unix: float) -> dict[str, Any]:
+def _base_launch_document(call: TestCall) -> dict[str, Any]:
+    base = call.session_facts.base_launch if call.session_facts else None
+    if base is None:
+        raise SpecRefused("base_launch_missing", f"a {SPEC_SCHEMA} sheet carries the session's frozen base launch")
+    return base.to_document()
+
+
+def _procedure_section(call: TestCall, deadline_unix: float) -> dict[str, Any]:
     section: dict[str, Any] = {
         "prep": call.prep,
-        "benchmark_backend": ctx.benchmark_backend,
+        "base_launch": _base_launch_document(call),
         "rounds": {"warmup": _warmup_rounds(call), "measure": int(call.rounds.measure_rounds)},
         "accuracy": bool(call.accuracy),
         "timeout_sec": float(call.timeout_sec),
@@ -398,8 +406,8 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
 
     Raises:
         SpecRefused: No point, an unreadable point, an environment override that
-            is not allowed, a missing tool commit, a placeholder with no attachment, or a document the sheet schema
-            refuses.
+            is not allowed, a missing tool commit or staging, no frozen base launch, a placeholder with no
+            attachment, or a document the sheet schema refuses (a base launch over its size cap among them).
     """
     if not call.points:
         raise SpecRefused("no_points", "a test needs at least one measurement point")
@@ -408,7 +416,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
     _refuse_unknown_placeholders(configs, attachments)
     gpus = gpu_count_of(first)
     sheet = {
-        "schema": "hyperloom.measurement-spec/v1",
+        "schema": SPEC_SCHEMA,
         "request_id": request_id,
         "kind": call.kind,
         "meta": _meta_section(call),
@@ -422,7 +430,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
         "tools": _tools_section(call, ctx),
         "environment": _environment_document(call.environment, ctx),
         "model_hashes": dict(ctx.model_hashes),
-        "procedure": _procedure_section(call, ctx, deadline_unix),
+        "procedure": _procedure_section(call, deadline_unix),
         "outputs": {"result_dir": split_result_dir(call)[0], **_max_bytes(ctx)},
     }
     try:

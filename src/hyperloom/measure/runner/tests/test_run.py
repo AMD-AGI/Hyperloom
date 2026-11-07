@@ -33,7 +33,7 @@ from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.runner.tests import aiperf_source
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
-from hyperloom.measure.tests.bundle_factory import REQUEST_ID, spec_document_v1
+from hyperloom.measure.tests.bundle_factory import REQUEST_ID, STAGING, base_launch, spec_document, spec_document_v1
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
 
@@ -140,6 +140,59 @@ def test_a_sheet_whose_point_names_no_model_to_hash_is_spec_rejected(tmp_path, e
 
     assert _go(tmp_path, env, _sheet(config=config, model_hashes=hashes)) == 3
     assert _status(tmp_path)["error_class"] == "spec_rejected"
+
+
+def _sheet_v2(**changes) -> dict:
+    """:func:`_sheet` as the application writes it now: the frozen base carried and the staging named."""
+    current = spec_document()
+    return _sheet(schema=current["schema"], tools=current["tools"], **changes) | {
+        "procedure": {
+            **{k: v for k, v in _sheet()["procedure"].items() if k != "benchmark_backend"},
+            "base_launch": current["procedure"]["base_launch"],
+        }
+    }
+
+
+def test_a_v2_sheet_hands_the_test_its_frozen_base_and_staging_and_signs_a_v2_manifest(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, _sheet_v2()) == 0
+
+    (call,) = backend.calls
+    assert (call.session_facts.base_launch, call.session_facts.staging) == (base_launch(), STAGING)
+    assert "HYPERLOOM_BENCHMARK_BACKEND" not in env
+    manifest = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes())
+    assert (manifest.runner.inference_suite_staging, manifest.runner.magpie_commit) == (STAGING, None)
+
+
+@pytest.mark.parametrize(
+    ("sheet", "named"),
+    [
+        (
+            lambda: _sheet_v2() | {"schema": "hyperloom.measurement-spec/v3"},
+            ("measurement-spec/v3", "measurement-spec/v2"),
+        ),
+        (
+            lambda: (
+                _sheet_v2() | {"procedure": {k: v for k, v in _sheet_v2()["procedure"].items() if k != "base_launch"}}
+            ),
+            ("measurement-spec/v2", "hyperloom-base-launch/1"),
+        ),
+    ],
+    ids=["version the runner does not know", "v2 without its base"],
+)
+def test_a_sheet_of_another_version_or_without_its_base_is_refused_naming_both_and_runs_nothing(
+    tmp_path, env, monkeypatch, sheet, named
+):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, sheet()) == 3
+
+    status = _status(tmp_path)
+    assert status["error_class"] == "spec_rejected" and all(name in status["message"] for name in named)
+    assert backend.calls == [] and not (tmp_path / "out" / "manifest.json").exists()
 
 
 def test_a_missing_signing_key_stops_the_runner_at_start(tmp_path, env):
