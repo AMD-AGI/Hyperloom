@@ -69,6 +69,14 @@ _THINKING_MODE = "thinking_on"
 #: InferenceX's value for a spec-decoding or KV-offloading setting the point leaves off.
 _UNSET = "none"
 
+#: The client environment variable naming the trace corpus an AgentX replay loads (``benchmark_lib.sh``).
+AGENTX_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
+#: ``resolve_trace_source`` in ``benchmarks/benchmark_lib.sh``: the 1M-context model families replay the unfiltered
+#: 062126 corpus, every other one (an unknown prefix included) its cut to a 256k-token context.
+_FULL_CONTEXT_PREFIXES = ("dsv4", "glm5.2", "glm5.3", "minimaxm3", "kimik3")
+_FULL_TRACE = "semianalysis_cc_traces_weka_062126"
+_CONTEXT_CUT_TRACE = f"{_FULL_TRACE}_256k"
+
 #: What a matrix point writes into ``benchmark.env`` (InferenceX ``workload.BOUND_ENV`` for single-node points, and
 #: the workload values ``validate_recipe`` holds a recipe to); the rest of it configures the client for any point.
 _POINT_CLIENT_ENV = frozenset(
@@ -481,6 +489,37 @@ def _golden(
     return SourceGolden(selection.acceptance_length, curve=curve)
 
 
+def model_prefixes(bundle: RepoBundle, model: str) -> list[str]:
+    """The model prefixes the master config gives ``model``'s entries, sorted.
+
+    Raises:
+        RecipeSourceError: When the master config is not a mapping.
+    """
+    master = yaml.safe_load(bundle.text(MASTER))
+    if not isinstance(master, Mapping):
+        raise RecipeSourceError(f"{MASTER} is not a mapping")
+    return sorted({str(entry["model-prefix"]) for entry in master.values() if entry.get("model") == model})
+
+
+def agentx_trace(bundle: RepoBundle, models: Sequence[str]) -> str:
+    """The corpus InferenceX replays for the first of ``models`` its master config gives a model prefix.
+
+    Raises:
+        RecipeSourceError: When the master config is not a mapping, or gives that model prefixes that replay
+            different corpora.
+    """
+    for model in models:
+        prefixes = model_prefixes(bundle, model)
+        traces = {
+            _FULL_TRACE if prefix.startswith(_FULL_CONTEXT_PREFIXES) else _CONTEXT_CUT_TRACE for prefix in prefixes
+        }
+        if len(traces) > 1:
+            raise RecipeSourceError(f"InferenceX gives {model} prefixes that replay different corpora: {prefixes}")
+        if traces:
+            return traces.pop()
+    return _CONTEXT_CUT_TRACE
+
+
 def _warnings(point: InferencexPoint, query: LaunchQuery, target: int) -> tuple[str, ...]:
     warnings = []
     if point.conc != target:
@@ -608,6 +647,7 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
 
 
 __all__ = [
+    "AGENTX_TRACE_ENV",
     "GOLDEN_DIR",
     "INFERENCEX_REPO",
     "MASTER",
@@ -615,8 +655,10 @@ __all__ = [
     "RUNNERS",
     "InferencexPoint",
     "Scenario",
+    "agentx_trace",
     "inferencex_launches",
     "inferencex_points",
+    "model_prefixes",
     "served_points",
     "srtctl_cli_args",
 ]

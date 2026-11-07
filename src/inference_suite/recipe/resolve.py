@@ -59,7 +59,7 @@ from inference_suite.recipe.golden_curve import (
     with_golden,
 )
 from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
-from inference_suite.recipe.inferencex import inferencex_launches
+from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV, agentx_trace, inferencex_launches
 from inference_suite.recipe.model import (
     ATOM_ENTRYPOINT,
     ATOM_RUNNER_OWNED,
@@ -110,7 +110,8 @@ class SourceSnapshot:
     """Everything resolving reads, recorded once when the session starts.
 
     ``inferencex`` is read for every query a recipe may serve, and keys the golden curves; it is ``None`` when the
-    operator's ``user_file`` is the base or InferenceX could not be read. A cookbook is carried for the query's framework only. ``golden_lengths`` are InferenceX's ``golden_length`` answers
+    operator's ``user_file`` is the base of a fixed query or a frozen base, or InferenceX could not be read; a
+    shell ``user_file`` of an AgentX query carries it for the corpus the replay runs. A cookbook is carried for the query's framework only. ``golden_lengths`` are InferenceX's ``golden_length`` answers
     for the cookbook's AgentX launches (see :func:`~inference_suite.recipe.golden_curve.golden_requests`) and
     ``base_model`` the model's HF ``cardData.base_model``. ``latest_releases`` maps a framework to its latest release
     tag, which stands for a recipe image that names no version. ``user_file``, when the operator gave one, is the
@@ -169,11 +170,15 @@ def _carried(value: _T | None, what: str) -> _T:
     return value
 
 
+def _inferencex_snapshot(snapshot: SourceSnapshot) -> InferencexSnapshot:
+    return _carried(snapshot.inferencex, "InferenceX")
+
+
 _Reader = Callable[[LaunchQuery, SourceSnapshot], "tuple[SourceLaunch, ...] | SourceMiss"]
 
 
 def _inferencex(query: LaunchQuery, snapshot: SourceSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
-    return inferencex_launches(query, _carried(snapshot.inferencex, "InferenceX"))
+    return inferencex_launches(query, _inferencex_snapshot(snapshot))
 
 
 def _sglang_cookbook(query: LaunchQuery, snapshot: SourceSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
@@ -324,6 +329,15 @@ def _client(env: Mapping[str, str]) -> ClientLaunch:
     return ClientLaunch(tool=INFERENCEX_TOOL, commit=INFERENCEX_CLIENT_COMMIT, env=env)
 
 
+def _client_env(query: LaunchQuery, snapshot: SourceSnapshot, env: Mapping[str, str]) -> dict[str, str]:
+    """The client environment of a recipe base: an AgentX replay names its corpus as InferenceX resolves it."""
+    if query.workload is not Workload.AGENTX or AGENTX_TRACE_ENV in env:
+        return dict(env)
+    bundle = _inferencex_snapshot(snapshot).bundle
+    models = tuple(dict.fromkeys(name for name in (query.model_id, snapshot.base_model) if name))
+    return {**env, AGENTX_TRACE_ENV: agentx_trace(bundle, models)}
+
+
 def _recipe_base(
     query: LaunchQuery, snapshot: SourceSnapshot, choice: _Choice, misses: Sequence[SourceMiss]
 ) -> BaseLaunch:
@@ -341,7 +355,7 @@ def _recipe_base(
         topology=launch.topology,
         args=layers.args,
         env=_without_runner_env(layers.env),
-        client=_client(launch.client_env),
+        client=_client(_client_env(query, snapshot, launch.client_env)),
         resolved_unix=snapshot.fetched_unix,
         golden_al=layers.golden,
         runner_owned=_runner_owned(launch.framework),
@@ -380,7 +394,7 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
         topology=spelling.read(shell.args),
         args=shell.args,
         env=_without_runner_env(shell.env),
-        client=_client({}),
+        client=_client(_client_env(query, snapshot, {})),
         resolved_unix=snapshot.fetched_unix,
         runner_owned=_runner_owned(query.framework),
         stripped=(*shell.stripped, *_runner_env(shell.env)),
@@ -430,7 +444,7 @@ def _why_default(query: LaunchQuery, snapshot: SourceSnapshot) -> str:
 
 
 def _golden_table(snapshot: SourceSnapshot) -> GoldenTable:
-    return GoldenTable(_carried(snapshot.inferencex, "InferenceX").bundle, snapshot.golden_lengths)
+    return GoldenTable(_inferencex_snapshot(snapshot).bundle, snapshot.golden_lengths)
 
 
 def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> BaseLaunch | Miss:
@@ -440,11 +454,11 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
     snapshot could not read a source, and for a fixed one the default table has no row for either.
     """
     _FIELDS.integer(gpus, "the visible GPU count", minimum=1)
+    if snapshot.unread is not None and query.workload is Workload.AGENTX:
+        return Miss((), snapshot.unread)
     if snapshot.user_file is not None:
         return _user_file_base(query, snapshot, snapshot.user_file)
     if snapshot.unread is not None:
-        if query.workload is Workload.AGENTX:
-            return Miss((), snapshot.unread)
         return _default_base(query, snapshot, ())
     misses: list[SourceMiss] = []
     for read in _readers(query.framework):

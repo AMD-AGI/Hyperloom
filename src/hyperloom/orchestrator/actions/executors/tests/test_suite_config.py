@@ -248,8 +248,9 @@ def test_an_explicit_context_length_replaces_the_launcher_default() -> None:
     [
         ({"framework": "vllm"}, "the point runs vllm, its base runs sglang"),
         ({"framework": "xdit"}, "serves nothing"),
-        ({"agentx": {"enabled": True}}, "AgentX point"),
-        ({"profiler": {"torch_profiler": {"enabled": True}}}, "profile point"),
+        ({"benchmark_script": "mlperf_agentic_client.sh"}, "MLPerf agentic client"),
+        ({"profiler": {"torch_profiler": {"enabled": True}}}, "bounds no capture window"),
+        ({"envs": {"PROFILE": "1"}}, "PROFILE without profiler.torch_profiler.enabled"),
         ({"envs": {"BENCHMARK_BASE_URL": "https://head:8888"}}, "is not http://<host>"),
         ({"envs": {"TP": "4"}}, "the point runs TP 4, its base runs 2"),
         ({"envs": {"CONC": None}}, "the point sets no CONC"),
@@ -271,18 +272,47 @@ def test_a_point_the_translation_does_not_carry_is_refused(change: dict, message
     ("change", "reason"),
     [
         ({"framework": "xdit"}, "serves nothing"),
-        ({"agentx": {"enabled": True}}, "AgentX point"),
-        ({"profiler": {"torch_profiler": {"enabled": True}}}, "profile point"),
+        ({"benchmark_script": "mlperf_agentic_client.sh"}, "MLPerf agentic client"),
+        ({"agentx": {"enabled": True}}, None),
+        ({"profiler": {"torch_profiler": {"enabled": True}}}, None),
     ],
 )
-def test_a_point_the_suite_does_not_run_names_why_it_stays_on_the_backend(change: dict, reason: str) -> None:
+def test_only_a_point_serving_nothing_or_driving_its_own_server_stays_on_the_backend(change: dict, reason) -> None:
     point = _point("sglang")
     assert backend_reason(point) is None
-    bench = point["benchmark"]
-    for key, value in change.items():
-        bench[key] = {**bench[key], **value} if key == "envs" else value
+    point["benchmark"].update(change)
 
-    assert reason in (backend_reason(point) or "")
+    assert backend_reason(point) == reason or reason in (backend_reason(point) or "")
+
+
+def _profile_point(framework: str, **envs: str) -> dict:
+    point = _point(framework, PROFILE="1", NUM_PROMPTS="96", **envs)
+    point["benchmark"]["profiler"]["torch_profiler"]["enabled"] = True
+    return point
+
+
+def test_a_sglang_profile_point_opens_the_window_its_start_body_bounds() -> None:
+    body = {"shape_discovery": True, "detailed_annotations": True, "start_step": 40, "num_steps": 16}
+    config = suite_config(_profile_point("sglang", PROFILE_EXTRA_BODY=json.dumps(body)), _base("sglang"), _settings())
+
+    profile = config.profile
+    assert (profile.enabled, profile.num_prompts, profile.delay_iters, profile.max_iters) == (True, 96, 40, 16)
+    assert profile.start_body == {"shape_discovery": True, "detailed_annotations": True}
+    assert {"PROFILE", "PROFILE_EXTRA_BODY"}.isdisjoint(config.server.user.env_set)
+    assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config
+
+
+def test_a_vllm_profile_point_opens_the_window_its_profiler_flags_bound() -> None:
+    args = "--max-num-seqs 64 --profiler-config.delay_iterations 8 --profiler-config.max_iterations=128"
+    config = suite_config(_profile_point("vllm", EXTRA_VLLM_ARGS=args), _base("vllm"), _settings())
+
+    assert (config.profile.delay_iters, config.profile.max_iters, config.profile.start_body) == (8, 128, None)
+
+
+def test_an_atom_profile_point_captures_its_whole_profiled_pass() -> None:
+    config = suite_config(_profile_point("atom"), _base("atom"), _settings())
+
+    assert (config.profile.delay_iters, config.profile.max_iters, config.profile.num_prompts) == (0, 96, 96)
 
 
 def test_a_point_naming_an_unknown_framework_is_refused_not_routed() -> None:

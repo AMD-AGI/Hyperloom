@@ -99,8 +99,11 @@ def _manifest_sha256(tool_cache: str) -> str:
 
 
 def _server_point(document: Mapping[str, Any]) -> dict[str, Any]:
-    """The point as a boot-only round reads it: the server's own knobs, the keep-alive, inference_suite's model name."""
-    bench = dict(document["benchmark"])
+    """The point as a boot-only round reads it: the server's own knobs, the keep-alive, inference_suite's model name.
+
+    The client script is the round's caller, not part of the server it boots.
+    """
+    bench = {key: value for key, value in document["benchmark"].items() if key != "benchmark_script"}
     envs = {str(key): str(value) for key, value in (bench.get("envs") or {}).items() if value is not None}
     envs = {key: value for key, value in envs.items() if key not in _CLIENT_ONLY_ENV}
     envs = {key: value for key, value in envs.items() if not is_agentx_client_key(key, envs)}

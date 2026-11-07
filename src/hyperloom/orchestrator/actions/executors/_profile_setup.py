@@ -51,6 +51,8 @@ _SPECULATIVE_FALLBACK_TOKENS_PER_STEP = 8
 _DELAY_ITERATIONS = "delay_iterations"
 _MAX_ITERATIONS = "max_iterations"
 _DEFAULT_PROFILE_DELAY_ITERS = 8
+#: The ``PROFILE_EXTRA_BODY`` keys that bound SGLang's capture window, in engine forward steps: its delay and length.
+SGLANG_START_STEP, SGLANG_NUM_STEPS = "start_step", "num_steps"
 _VLLM_DELAY_FLAG = re.compile(r"(--profiler-config\.delay_iterations[=\s]+)\d+")
 
 # ``HYPERLOOM_PROFILE_DEGRADED_REASON`` value meaning the TraceLens runtime patch
@@ -337,9 +339,9 @@ def fit_capture_to_speculative(envs: dict[str, Any], framework_env: str) -> None
         return
     body = _profile_extra_body(envs)
     vllm_delay = _profiler_flag_value(server_args, _DELAY_ITERATIONS)
-    if isinstance(body.get("start_step"), int):
-        delay, steps = body["start_step"], int(body.get("num_steps") or 0)
-        body["start_step"] = delay // tokens
+    if isinstance(body.get(SGLANG_START_STEP), int):
+        delay, steps = body[SGLANG_START_STEP], int(body.get(SGLANG_NUM_STEPS) or 0)
+        body[SGLANG_START_STEP] = delay // tokens
         envs["PROFILE_EXTRA_BODY"] = json.dumps(body)
     elif vllm_delay is not None and vllm_delay.isdigit():
         delay, steps = int(vllm_delay), int(_profiler_flag_value(server_args, _MAX_ITERATIONS) or 0)
@@ -486,6 +488,15 @@ SGLANG_PATCH_SERVER_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
 VLLM_PATCH_PROFILER_FIELDS: tuple[str, ...] = ("capture_torch_profiler", "detailed_trace_annotation")
 
 
+def vllm_profiler_fields(*, patched: bool) -> dict[str, str]:
+    """The ``--profiler-config`` fields every vLLM profile passes beside its trace dir and window, by value.
+
+    ``patched`` says the server runs TraceLens's patched vLLM, the only one that takes the patch's fields.
+    """
+    fields = dict.fromkeys(VLLM_PATCH_PROFILER_FIELDS, "True") if patched else {}
+    return {**fields, "ignore_frontend": "True", "torch_profiler_dump_cuda_time_total": "False"}
+
+
 def _apply_vllm_profile(
     envs: dict[str, Any],
     *,
@@ -503,10 +514,8 @@ def _apply_vllm_profile(
     # A dir here would override Magpie's ``<workspace>/torch_trace`` by last-wins.
     if _profiler_flag_value(existing, "profiler") is None:
         flags.append(("profiler", "--profiler-config.profiler torch"))
-    if patch_ok:
-        flags.extend((field, f"--profiler-config.{field} True") for field in VLLM_PATCH_PROFILER_FIELDS)
-    flags.append(("ignore_frontend", "--profiler-config.ignore_frontend True"))
-    flags.append(("torch_profiler_dump_cuda_time_total", "--profiler-config.torch_profiler_dump_cuda_time_total False"))
+    fields = vllm_profiler_fields(patched=patch_ok).items()
+    flags.extend((name, f"--profiler-config.{name} {value}") for name, value in fields)
     # Repeated flags last-win, so the computed cap replaces a YAML pin.
     # ``ignore_frontend`` is already in the shipped YAML; vLLM warns on the duplicate.
     profiler_args = " ".join(
@@ -538,8 +547,8 @@ def _apply_sglang_profile(
 ) -> None:
     delay_iters, max_iters = capture_window
     extra_body = _profile_extra_body(envs)
-    extra_body["start_step"] = delay_iters
-    extra_body["num_steps"] = max_iters
+    extra_body[SGLANG_START_STEP] = delay_iters
+    extra_body[SGLANG_NUM_STEPS] = max_iters
     shape_discovery = shape_discovery_enabled(bench)
     if sitecustomize:
         apply_sglang_shape_tool(envs, shape_discovery=shape_discovery)

@@ -156,6 +156,25 @@ def test_explicit_workload_values_write_the_yaml_the_cli_generates_and_bind_agre
     assert (bound.ep, bound.docker_image, benchmark_config_path()) == (1, None, written.resolve())
 
 
+SHIPPED_AGENTX = Path(cli.__file__).parent.parent / "assets" / "configs" / "agentx_sglang.yaml"
+
+
+def test_the_shipped_agentx_yaml_starts_a_session(monkeypatch):
+    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(SHIPPED_AGENTX))
+    configure_benchmark(_build_parser().parse_args(["optimize"]))
+    assert benchmark_config_path() == SHIPPED_AGENTX.resolve()
+
+
+def test_an_agentx_yaml_asking_for_several_captures_is_refused_before_the_session(tmp_path, monkeypatch):
+    document = yaml.safe_load(SHIPPED_AGENTX.read_text(encoding="utf-8"))
+    document["benchmark"]["profiler"]["torch_profiler"]["num_profiles"] = 3
+    written = tmp_path / "agentx.yaml"
+    written.write_text(yaml.safe_dump(document), encoding="utf-8")
+    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(written))
+    with pytest.raises(ValueError, match="num_profiles 3; a profile round captures one window"):
+        configure_benchmark(_build_parser().parse_args(["optimize"]))
+
+
 def test_explicit_workload_values_are_validated_before_writing(tmp_path):
     target = tmp_path / "benchmark.yaml"
     with pytest.raises(ValueError, match="positive envs.TP and envs.CONC"):

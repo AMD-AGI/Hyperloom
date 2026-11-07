@@ -51,6 +51,7 @@ from inference_suite.recipe.sglang_cookbook import (
     SGLANG_REPO,
     sglang_cookbook_launches,
 )
+from inference_suite.recipe.shell_launch import ShellLaunch
 from inference_suite.recipe.user_file import UserFile
 from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, vllm_recipes_launches, vllm_recipes_requests
 
@@ -400,14 +401,27 @@ def _recipe_reads(
     return tuple(reads)
 
 
+def _with_corpus_source(fetched_unix: int, user_file: UserFile) -> SourceSnapshot:
+    with tempfile.TemporaryDirectory(prefix="inference-suite-sources-") as scratch_dir:
+        try:
+            _, inferencex = _inferencex(Path(scratch_dir) / "inferencex")
+        except SourceFetchError as error:
+            unread = UnreadSource(_INFERENCEX_SOURCE, str(error))
+            return SourceSnapshot(None, fetched_unix, user_file=user_file, unread=unread)
+    return SourceSnapshot(inferencex, fetched_unix, user_file=user_file)
+
+
 def fetch_sources(query: LaunchQuery, *, user_file: UserFile | None = None) -> SourceSnapshot:
     """Read every source ``query`` resolves from, at the head of its ``main`` and as of now.
 
-    With the operator's ``user_file``, which is the base, nothing is read. A source that cannot be read is named as
+    With the operator's ``user_file``, which is the base, only InferenceX is read, and only when the file is a shell
+    launch of an AgentX query: InferenceX names the corpus the replay runs. A source that cannot be read is named as
     the snapshot's ``unread``, and nothing after it is read.
     """
     fetched_unix = int(time.time())
     if user_file is not None:
+        if query.workload is Workload.AGENTX and isinstance(user_file.launch, ShellLaunch):
+            return _with_corpus_source(fetched_unix, user_file)
         return SourceSnapshot(None, fetched_unix, user_file=user_file)
     with tempfile.TemporaryDirectory(prefix="inference-suite-sources-") as scratch_dir:
         scratch = Path(scratch_dir)
