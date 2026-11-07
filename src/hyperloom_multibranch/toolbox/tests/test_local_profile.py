@@ -33,7 +33,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     build_local_toolbox,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, freeze_base_at, req, staged_runner_cache
 from hyperloom_multibranch.toolbox.tests.test_analysis_route import _Analysis
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 from hyperloom_multibranch.toolbox.tests.test_local_hosted import _require_tool_checkout
@@ -67,18 +67,21 @@ def _runner_python(tmp_path: Path) -> str:
 
 def _toolbox(tmp_path: Path, blackboard: LocalBlackboard, commit: str, repo: Path, point: str) -> LocalHostedToolbox:
     session = tmp_path / "session"
+    freeze_base_at(session, commit)
     point_path = tmp_path / "profile-point.yaml"
     point_path.write_text(point)
     return build_local_toolbox(
         LocalSession(session, "run-1", range(2)),
         blackboard,
         AcceptanceSetup(FakeRepo(), PointPlanner(point_path), IMAGE, WorkloadKind.AGENTX),
-        spec_context(
-            tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
-        ),
+        spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs")),
         options=LocalOptions(
             policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
-            runner_envs={"INFERENCEX_REPO": str(repo), "ROCM_PATH": str(tmp_path / "no-rocm")},
+            runner_envs={
+                "INFERENCEX_REPO": str(repo),
+                "ROCM_PATH": str(tmp_path / "no-rocm"),
+                **staged_runner_cache(tmp_path),
+            },
             python=_runner_python(tmp_path),
             poll_interval_sec=0.1,
             timeout_sec=120,

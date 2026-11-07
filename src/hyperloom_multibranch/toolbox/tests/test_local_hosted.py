@@ -45,7 +45,14 @@ from hyperloom_multibranch.toolbox.local_hosted import (
 )
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req, lineage_blackboard
+from hyperloom_multibranch.toolbox.tests.helpers import (
+    IMAGE,
+    FakeRepo,
+    freeze_base_at,
+    lineage_blackboard,
+    req,
+    staged_runner_cache,
+)
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 
 
@@ -179,18 +186,19 @@ def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pyt
 def _toolbox_of(
     blackboard: LocalBlackboard, tmp_path: Path, session: Path, commit: str, **extra: Any
 ) -> LocalHostedToolbox:
+    freeze_base_at(session, commit)
+    runner_envs = {**staged_runner_cache(tmp_path), **extra.pop("runner_envs", {})}
     return build_local_toolbox(
         LocalSession(session, "run-1", range(8)),
         blackboard,
         AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
-        spec_context(
-            tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
-        ),
+        spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs")),
         options=LocalOptions(
             policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
             python=idle_cards_python(tmp_path),
             poll_interval_sec=0.1,
             timeout_sec=120,
+            runner_envs=runner_envs,
             **extra,
         ),
     )

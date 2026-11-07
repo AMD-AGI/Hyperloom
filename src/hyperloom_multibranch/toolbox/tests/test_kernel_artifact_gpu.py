@@ -159,8 +159,6 @@ def _variant(root: Path) -> Variant:
         image_ref="local",
         image_digest=IMAGE,
         gpu_type="MI355X",
-        inferencex_commit=commit,
-        benchmark_backend="bypass",
     )
     canonical = default_canonical(
         root / "canonical", primary_concurrency=4, config_path=default_baseline_config(), model_path=MODEL
