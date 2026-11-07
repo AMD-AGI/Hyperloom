@@ -223,8 +223,8 @@ async def test_native_handoff_keeps_supported_schema_and_seeds_geaks_own_launche
     assert handoff["workload"] == {"isl": 2048, "osl": 1536, "conc": 6}
     assert handoff["gpu_pin"]["var"] == "ROCR_VISIBLE_DEVICES"
     assert handoff["gpu_pin"]["ids"] == [6, 7]
-    assert handoff["gpu_ids"] == "0,1"
-    assert handoff["gpu_ids_space"] == "logical"
+    assert handoff["gpu_ids"] == "6,7"
+    assert handoff["gpu_ids_space"] == "absolute"
     assert handoff["tp"] == 2
     assert handoff["accepted_flags"] == ""
     assert handoff["baseline_env_spec"]["config"]["server_launch_flags"] == _ACCEPTED_FLAGS
@@ -341,7 +341,7 @@ async def test_gpus_a_leftover_server_still_holds_are_not_handed_to_geak(
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
-    # The recipe pins ROCR_VISIBLE_DEVICES=6,7, so GEAK's logical 0,1 are physical cards 6 and 7.
+    # The recipe pins ROCR_VISIBLE_DEVICES=6,7, which the measured round ran on as absolute cards 6 and 7.
     assert asked == [(tmp_path, [6, 7])]
     assert launches == []
     result = coord.shared_state.geak_result
