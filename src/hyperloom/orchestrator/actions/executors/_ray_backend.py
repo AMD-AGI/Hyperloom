@@ -142,7 +142,7 @@ class SuiteLeasedRound:
 
     ``config_path`` holds the round's config. Only the actor knows which GPUs Ray gave it, so it names them in the
     config before the round starts; the round masks its server to them and samples them. The round holds itself to its
-    own deadlines, so ``timeout`` is only the backstop of the process running it.
+    own deadlines, so ``timeout`` and ``session_remaining_sec`` only backstop the process running it.
     """
 
     config_path: str
