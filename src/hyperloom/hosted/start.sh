@@ -8,7 +8,7 @@
 #
 #   sh <layer dir>/start.sh
 #
-# It runs as the container's root and
+# It runs as the container's user (root, to make the specialist account) and
 #   1. refuses, naming the tool, when the image has no git or bash (nothing is installed here),
 #   2. chooses how the specialists are kept from the application's credentials:
 #      - as the account HYPERLOOM_SPECIALIST_USER names, which it makes sure exists with uid/gid 2000, where a process
