@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from hyperloom.orchestrator.actions.executors._workload_envs import _apply_caller_removals
-from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges, RecipeLaunch, apply_launch_changes
 from hyperloom.orchestrator.actions.executors.profile import _merge_profile_params
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState, inject_stack_base_params
@@ -83,24 +84,16 @@ def _removal_winner() -> dict:
     }
 
 
-def test_a_magpie_agentx_removal_keep_stays_relative_to_the_recipe(tmp_path):
-    """Replace mode makes Magpie drop every recipe option, the speculative-decoding ones the golden gate pins too."""
-    coord = _coord(tmp_path, {"workload_identity": "agentx:workload"}, agentx_backend="magpie")
+@pytest.mark.parametrize("agentx_backend", ["", "inferencex", "mlperf"])
+def test_a_removal_keep_replaces_the_inherited_args_on_every_backend(tmp_path, agentx_backend):
+    coord = _coord(tmp_path, {"workload_identity": "agentx:workload"}, agentx_backend=agentx_backend)
     winner = {**_removal_winner(), **AGENTX_MEASUREMENT}
 
     assert coord.writeback.lift_to_current_best("explore", 1200.0, winner) is True
 
     launch = coord.writeback.current_best_launch_config()
-    assert launch["args_mode"] == "append"
+    assert launch["args_mode"] == "replace"
     assert launch["remove_args"] == HICACHE_FLAGS
-
-
-def test_a_removal_keep_outside_magpie_agentx_replaces_the_inherited_args(tmp_path):
-    coord = _coord(tmp_path, {})
-
-    assert coord.writeback.lift_to_current_best("explore", 1200.0, _removal_winner()) is True
-
-    assert coord.writeback.current_best_launch_config()["args_mode"] == "replace"
 
 
 def _eagle_retune_winner() -> dict:
@@ -143,35 +136,13 @@ def test_a_task_seeded_from_current_best_launches_the_speculative_flags_it_measu
     assert "--speculative-num-draft-tokens 4" in composed
 
 
-def test_a_magpie_task_seeded_from_current_best_removes_the_recipes_copy(tmp_path):
-    """Magpie scopes the carried removals to its recipe argv, so one naming the snapshot is what disarms the recipe."""
-    coord = _coord(tmp_path, {"workload_identity": "agentx:workload"}, agentx_backend="magpie")
+def test_an_agentx_removal_the_winner_reasserts_is_not_carried_onto_the_snapshot(tmp_path):
+    coord = _coord(tmp_path, {"workload_identity": "agentx:workload"}, agentx_backend="inferencex")
     winner = {**_eagle_retune_winner(), **AGENTX_MEASUREMENT}
+
     assert coord.writeback.lift_to_current_best("explore", 1200.0, winner) is True
 
-    launch = coord.writeback.current_best_launch_config()
-    benchmark: dict = {"agentx": {"enabled": True}}
-    apply_launch_changes(
-        benchmark,
-        LaunchChanges(
-            launch["extra_server_args"],
-            launch["extra_envs"],
-            launch["remove_args"],
-            launch["unset_envs"],
-            launch["args_mode"] == "replace",
-        ),
-        recipe=RecipeLaunch(
-            argv=(*HICACHE_FLAGS, "--speculative-num-steps", "2", "--speculative-num-draft-tokens", "3")
-        ),
-    )
-
-    overrides = benchmark["agentx"]["launch_overrides"]
-    # Without the recipe-side removal Magpie launches its own speculative values beside the winner's.
-    assert "--speculative-num-steps" in overrides["remove_args"]
-    assert "--speculative-num-draft-tokens" in overrides["remove_args"]
-    appended = overrides["append_args"]
-    assert appended[appended.index("--speculative-num-steps") + 1] == "3"
-    assert appended[appended.index("--speculative-num-draft-tokens") + 1] == "4"
+    assert coord.shared_state.current_best["remove_args"] == HICACHE_FLAGS
 
 
 def _hicache_retune_winner() -> dict:

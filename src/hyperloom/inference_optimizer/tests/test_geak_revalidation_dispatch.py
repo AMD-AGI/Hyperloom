@@ -70,6 +70,7 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    st.agentx_backend = "mlperf"
     st.baseline_tput = 100.0
     st.current_best = {"action": "explore", "tput": 120.0}
     st.cumulative_gain_validated = 20.0
@@ -1036,6 +1037,7 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    st.agentx_backend = "mlperf"
     st.baseline_tput = 100.0
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir()
