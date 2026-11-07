@@ -1134,9 +1134,9 @@ class SpecialistRunner:
         notes: list[str] = []
         # Reconcile self-reported ``patches_written`` against the filesystem:
         # keep only claimed paths that exist on disk, then union with the scan.
-        # A harvested diff is the whole round, so a claim only restates it.
+        # Not when a harvested diff is the whole round, or the worktree was refused.
         claimed = done_payload.get("patches_written")
-        if sub_result.patch_roots or not isinstance(claimed, list):
+        if sub_result.patch_claims_ignored or not isinstance(claimed, list):
             claimed = []
         search_bases = [b for b in (prep.worktree, prep.workspace) if b is not None]
         validated: list[str] = []
