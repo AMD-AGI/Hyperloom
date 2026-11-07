@@ -372,8 +372,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             _lifecycle.teardown_lifecycle_server(
                 pid_dir=output_dir, framework=lifecycle["framework"], port=lifecycle["port"]
             )
-        else:
-            _lifecycle.stop_agentx_servers(output_dir)
 
     def _round_affordable_before_ignition(
         self,
