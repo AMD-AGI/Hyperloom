@@ -22,9 +22,8 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
 from hyperloom_common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
 from hyperloom.common.overlay import overlay_is_loadable
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import agentx_replay_session
 from hyperloom.orchestrator.kernel.geak_config import geak_spec_is_env
 from hyperloom.orchestrator.state.task_registry import Task
 from .geak_rebench import source_digest, overlay_source_files, verify_source_artifacts
@@ -305,7 +304,7 @@ def source_rebench_params(
     from hyperloom.orchestrator.state.shared_state import stack_base_params
 
     state = coord.shared_state
-    if not is_agentx_mode(state.benchmark_mode) or is_mlperf_backend({BACKEND_ENV: state.agentx_backend}):
+    if not agentx_replay_session(state):
         return None
     pending = (state.geak_pending or {}).get("native_review") or {}
     if pending.get("params") and geak_candidate_matches(pending.get("candidate"), result):
