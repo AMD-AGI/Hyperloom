@@ -217,6 +217,10 @@ class HeldGitRepo(GitExperimentRepo):
         async with self.time.held():
             return await super().read_recipe(commit)
 
+    async def root(self) -> str:
+        async with self.time.held():
+            return await super().root()
+
     async def create_branch(self, branch: str, at_commit: str) -> None:
         async with self.time.held():
             await super().create_branch(branch, at_commit)
