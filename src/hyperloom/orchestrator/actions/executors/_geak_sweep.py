@@ -15,22 +15,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-import yaml
-
 from hyperloom_common.coerce import first_text
-from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.common.env_safety import build_benchmark_env
-from hyperloom_common.jsonio import read_json
+from hyperloom_common.jsonio import read_json, read_json_strict
+from inference_suite import GPU_MASK_ENV
+from inference_suite.contracts.launch import Launch, LayerSource
+from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.server_log import LogCursor
-from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
+from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
-)
-from hyperloom.orchestrator.actions.executors._gpu_pin import (
-    coerce_tp,
-    resolve_gpu_pin,
-    _resolve_handoff_gpu_ids,
-    _resolve_handoff_gpu_ids_space,
 )
 from ._accuracy_gate import parse_eval_results
 from ._gpu_power import (
@@ -116,44 +110,29 @@ def _run_sampled(
             recorder.close()
 
 
-def _replay_logical_masks(pin: Mapping[str, Any], gpu_ids: str) -> dict[str, str]:
-    var = first_text(pin.get("var"))
-    tokens = effective_mask_tokens(pin.get("value"))
-    if not is_rocr_level(var) or not tokens:
-        raise ValueError("missing_replay_logical_gpu_pin")
-    if any(not token.isdigit() or int(token) >= len(tokens) for token in effective_mask_tokens(gpu_ids)):
-        raise ValueError("invalid_replay_logical_gpu_ids")
-    return {var: ",".join(tokens)}
+def _served_model(launch: Launch) -> str:
+    server_flags = framework_facts(Framework(launch.base.framework)).server_flags
+    model_flag = server_flags.model if server_flags else ""
+    return next(arg.values[0] for arg in launch.args if arg.source is LayerSource.GUARD and arg.flag == model_flag)
 
 
-def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any]) -> dict[str, str]:
-    """Resolve serving identity from the frozen handoff or its materialized recipe."""
-    recipe_path = first_text(handoff.get("launch_recipe"), env_spec.get("base_launch_recipe"))
-    point = read_benchmark_point(Path(recipe_path)) if recipe_path else None
-    recipe_envs = point.envs if point else {}
-    legacy_env = {} if handoff or point else os.environ
-    tp = coerce_tp(handoff.get("tp"), recipe_envs.get("TP"), legacy_env.get("TP"))
-    pin = handoff.get("gpu_pin")
-    if not isinstance(pin, dict):
-        pin = resolve_gpu_pin(recipe_envs=recipe_envs, environ=legacy_env)
-    gpu_ids = ",".join(effective_mask_tokens(handoff.get("gpu_ids"))) or _resolve_handoff_gpu_ids(gpu_pin=pin, tp=tp)
-    pin_space = _resolve_handoff_gpu_ids_space(gpu_pin=pin)
-    space = str(handoff.get("gpu_ids_space") or pin_space)
-    if space not in {"absolute", "logical"} or pin_space == "none":
-        raise ValueError("invalid_replay_gpu_ids_space")
-    if len(effective_mask_tokens(gpu_ids)) < tp:
-        raise ValueError("replay_gpu_count_below_tp")
-    masks = _replay_logical_masks(pin, gpu_ids) if space == "logical" else {}
+def _replay_serving_env(env_spec: Mapping[str, Any]) -> dict[str, str]:
+    """The serving identity of the round GEAK was handed, as that round's ``launch.json`` records it.
+
+    The round's server saw no other visibility mask than the guard's, so its GPUs are absolute card ids.
+    """
+    launch_json = first_text(env_spec.get("launch_json"))
+    if not launch_json:
+        raise ValueError("missing_replay_launch")
+    launch = Launch.from_document(read_json_strict(Path(launch_json)))
+    gpus = str(launch.env[GPU_MASK_ENV])
     return {
-        "MODEL": first_text(handoff.get("model_path"), point and point.model, legacy_env.get("MODEL_PATH")),
-        "BACKEND": first_text(
-            handoff.get("framework"), point and point.framework, legacy_env.get("FRAMEWORK"), "sglang"
-        ),
-        "TP": str(tp),
-        "GPU": gpu_ids,
-        **masks,
-        "HIP_VISIBLE_DEVICES": gpu_ids,
-        "CUDA_VISIBLE_DEVICES": gpu_ids,
+        "MODEL": _served_model(launch),
+        "BACKEND": launch.base.framework,
+        "TP": str(launch.base.topology.tp),
+        "GPU": gpus,
+        "HIP_VISIBLE_DEVICES": gpus,
+        "CUDA_VISIBLE_DEVICES": gpus,
     }
 
 
@@ -436,10 +415,9 @@ async def sweep_via_geak(
                 f"bench script not found: {bench_script}"
             ),
         }
-    env_spec = handoff.get("baseline_env_spec") or env_spec or {}
     try:
-        serving_env = _replay_serving_env(handoff, env_spec)
-    except (OSError, UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError) as exc:
+        serving_env = _replay_serving_env(handoff.get("baseline_env_spec") or env_spec or {})
+    except (OSError, ValueError) as exc:
         return {"status": "failed", "error_class": "invalid_replay_identity", "error": str(exc)}
 
     plan = _ReplayPlan(

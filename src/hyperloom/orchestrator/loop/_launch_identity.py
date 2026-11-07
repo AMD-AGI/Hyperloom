@@ -385,8 +385,6 @@ class LaunchIdentityMixin:
             "overlay_pythonpath": materialized.get("final_overlay") or "",
             "overlay_digest": _geak_overlay_digest(str(materialized.get("final_overlay") or "")),
             "launch_json": str(RunLayout(Path(measurement["benchmark_workspace"])).launch) if launch else "",
-            # Read only by the GEAK sweep replay for its serving identity when no handoff names one.
-            "base_launch_recipe": str(self.shared_state.baseline_config_path or ""),
             "launch_digest": launch.digest() if launch else "",
             "base_launch_digest": self.shared_state.base_launch_digest,
             # Additive evidence record. Consumers can distinguish a captured
