@@ -257,7 +257,6 @@ def baseline_launch(monkeypatch, tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     monkeypatch.setattr(_aiter_jit, "_resolve_lock_sweep_dirs", lambda *_args: [jit_dir])
-    monkeypatch.setattr(baseline.BenchmarkRunExecutor, "_preflight_server_argv", lambda *args, **kwargs: None)
     monkeypatch.setattr(baseline, "build_benchmark_command", lambda **kwargs: ["fake-benchmark"])
 
     async def no_restart(_server, **kwargs):
@@ -345,18 +344,3 @@ async def test_baseline_does_not_sweep_for_profile_or_client_round(monkeypatch, 
             ready=mode == "ready",
             extra={"server_already_ready": mode == "context-ready", "mn_round_restarted": mode == "multi-node"},
         )
-
-
-@pytest.mark.asyncio
-async def test_baseline_does_not_sweep_when_preflight_refuses_launch(monkeypatch, baseline_launch):
-    launch, jit_dir = baseline_launch
-    layout = _make_aiter_tree(jit_dir)
-    refusal = {"status": "failed", "error_class": "argv_invalid"}
-    monkeypatch.setattr(baseline.BaselineExecutor, "_preflight_server_argv", lambda *args, **kwargs: refusal)
-
-    def unexpected_scan(*args):
-        pytest.fail("a refused launch must not sweep AITER locks")
-
-    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", unexpected_scan)
-    assert await launch() == refusal
-    assert all(path.exists() for path in layout.values())

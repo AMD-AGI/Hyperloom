@@ -30,7 +30,6 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
 )
-from hyperloom.orchestrator.actions.executors.benchmark_run.records import _BenchmarkRound
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
@@ -1714,66 +1713,6 @@ def test_baseline_executor_picks_framework_yaml_at_call_time(tmp_path, monkeypat
     # default_config_path=None so the resolver is consulted at call time.
     assert pe.default_config_path is None
     assert pe._resolve_default_config().name == "baseline_vllm.yaml"
-
-
-def test_profile_argv_preflight_includes_inferencex_vllm_profiler_args(tmp_path, monkeypatch):
-    import yaml
-
-    from hyperloom.orchestrator.bringup.argv_preflight import OK
-
-    config_path = tmp_path / "profile.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": "vllm",
-                    "envs": {
-                        "PROFILE": "1",
-                        "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler True",
-                    },
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    seen = {}
-
-    def _capture(**kwargs):
-        seen.update(kwargs)
-        return SimpleNamespace(status=OK, reason="parsed", detail="", argv=tuple(kwargs["argv"]), unknown_flags=())
-
-    monkeypatch.setattr("hyperloom.orchestrator.bringup.check_server_argv", _capture)
-    executor = BaselineExecutor(session_dir=tmp_path)
-
-    round_ = _BenchmarkRound(
-        config_path=config_path,
-        materialized_config_path=config_path,
-        output_dir=tmp_path / "round",
-        result_dir=tmp_path / "round",
-        ctx=None,
-        ctx_extra={},
-        cmd=[],
-        env={},
-        framework="vllm",
-        watchdog_server_log=None,
-        capture_meta={},
-        timeout_sec=0,
-        silence_timeout_sec=None,
-        session_deadline_sec=None,
-        serving_lease=None,
-        server_already_ready=False,
-        run_eval_disabled=False,
-    )
-
-    result = executor._preflight_server_argv(round_, 1)
-
-    assert result is None
-    assert seen["argv"][:4] == (
-        "--profiler-config.profiler",
-        "torch",
-        "--profiler-config.torch_profiler_dir",
-        str(tmp_path / "round" / "torch_trace"),
-    )
 
 
 def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):

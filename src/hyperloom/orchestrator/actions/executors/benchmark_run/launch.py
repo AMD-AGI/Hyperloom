@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Attempt setup, server-argv preflight and the measured round's result of ``BenchmarkRunExecutor``."""
+"""Attempt setup and the measured round's result of ``BenchmarkRunExecutor``."""
 
 from __future__ import annotations
 
@@ -61,7 +61,6 @@ from .records import (
 from .rounds import _BENCHMARK_REPORT_NAME, _round_report_path
 
 if TYPE_CHECKING:
-    from ....bringup.argv_preflight import ArgvVerdict
     from ....loop.sub_agent_runner import RunnerContext
 
 log = logging.getLogger(__name__)
@@ -225,7 +224,7 @@ def _suite_round_failure(
 
 
 class _BenchmarkLaunchMixin:
-    """Attempt setup, server-argv preflight and the measured round's result of a benchmark run."""
+    """Attempt setup and the measured round's result of a benchmark run."""
 
     async def _run_once(
         self,
@@ -320,81 +319,6 @@ class _BenchmarkLaunchMixin:
             base_extra_envs["RUN_EVAL"] = "false"
         return base_extra_envs
 
-    def _preflight_server_argv(self, round_: _BenchmarkRound, attempt: int) -> dict[str, Any] | None:
-        """Ask the installed framework's parser about this round's argv.
-
-        Args:
-            round_: The round about to launch; its capture_meta is echoed onto a refusal.
-            attempt: This attempt's index within the round slot.
-
-        Returns:
-            dict | None: A terminal failure result when the argv is refused;
-            ``None`` when the round may proceed -- including every unavailable
-            verdict, which must never cost a round.
-        """
-        from ..magpie_agentx import native_config
-
-        if native_config(round_.config_path):
-            return None
-        from ....bringup import check_server_argv
-        from ....bringup.argv_preflight import INVALID, UNAVAILABLE
-        from .._server_argv import config_launch_env, config_server_argv
-
-        sealed = config_server_argv(round_.config_path)
-        if not sealed.tokenized or not sealed.argv:
-            return None
-
-        effective_launch_env = config_launch_env(round_.config_path, round_.env)
-        probe_argv = sealed.argv
-        if round_.framework.strip().lower() == "vllm" and effective_launch_env.get("PROFILE") == "1":
-            probe_argv = (
-                "--profiler-config.profiler",
-                "torch",
-                "--profiler-config.torch_profiler_dir",
-                str(round_.output_dir / "torch_trace"),
-                *probe_argv,
-            )
-
-        verdict = check_server_argv(framework=round_.framework, argv=probe_argv, launch_env=effective_launch_env)
-        if verdict.status == UNAVAILABLE:
-            log.info(
-                "argv preflight unavailable (%s): %s; the launch remains the only verdict",
-                verdict.reason,
-                verdict.detail,
-            )
-            return None
-        if verdict.status == INVALID:
-            return self._argv_refusal(round_, attempt, verdict)
-        return None
-
-    def _argv_refusal(self, round_: _BenchmarkRound, attempt: int, verdict: ArgvVerdict) -> dict[str, Any]:
-        """Record the boot observation of a refused server argv and return the round's terminal failure."""
-        from ....bringup import ARGV_INVALID, argv_invalid_observation, write_boot_observation
-
-        observation = argv_invalid_observation(verdict, session_dir=self.session_dir)
-        round_.capture_meta["boot_observation_path"] = write_boot_observation(
-            observation,
-            session_dir=self.session_dir,
-            output_dir=round_.output_dir,
-            attempt=attempt,
-        )
-        excerpt = observation.excerpt
-        log.error(
-            "argv preflight: %s refused the server argv (%s); not launching",
-            round_.framework or "the framework",
-            verdict.reason,
-        )
-        return {
-            "status": "failed",
-            "error_class": ARGV_INVALID,
-            "error": f"{round_.framework or 'framework'} rejected the server argv ({verdict.reason}): {verdict.detail}",
-            "output_dir": str(round_.output_dir),
-            "enablement_launch_log": excerpt.text if excerpt is not None else "",
-            "server_argv": list(verdict.argv),
-            "server_argv_unknown_flags": list(verdict.unknown_flags),
-            **round_.capture_meta,
-        }
-
     async def _restart_multi_node_server(
         self,
         round_: _BenchmarkRound,
@@ -450,9 +374,6 @@ class _BenchmarkLaunchMixin:
         server_log = round_.output_dir / "server.log"
         attempt_index = open_bringup_attempt(round_.output_dir)
         RunLayout(round_.output_dir).clear_ready_stamp()
-        refusal = self._preflight_server_argv(round_, attempt_index)
-        if refusal is not None:
-            return refusal
         ready = bool(round_.server_already_ready or round_.ctx_extra.get("server_already_ready") or is_multi_node())
         if self.benchmark_watchdog and not ready:
             from .._aiter_jit import sweep_stale_aiter_locks_if_dead
@@ -528,9 +449,12 @@ class _BenchmarkLaunchMixin:
             log.error("baseline_executor: round refused before it ran: %s", exc)
             return _attempt_failure(failed_step_error_class(exc.step), exc, round_.output_dir) | round_.capture_meta
         layout = ran.layout
-        await asyncio.to_thread(
-            self._observe_bringup, round_, attempt_index, layout.server_log, ran.report.failure_detail or ""
-        )
+        if ran.report.failed_step is FailedStep.FLAG_UNKNOWN:
+            self._record_argv_refusal(round_, attempt_index, ran.report.failure_detail or "")
+        else:
+            await asyncio.to_thread(
+                self._observe_bringup, round_, attempt_index, layout.server_log, ran.report.failure_detail or ""
+            )
         RoundFolder.read(layout.root).write_gpu_metrics(round_.output_dir)
         measurement = extract_benchmark_measurement(None, workspace=layout.root, subprocess_started_unix=started_unix)
         finished = _BenchProcess(
@@ -550,6 +474,18 @@ class _BenchmarkLaunchMixin:
         result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)
         self._stamp_round_quality(ran_round, result, measurement, warnings)
         return result
+
+    def _record_argv_refusal(self, round_: _BenchmarkRound, attempt_index: int, detail: str) -> None:
+        """Record the parser's refusal at the parse rung, where enablement reads it as a terminal no patch repairs."""
+        from ....bringup import argv_invalid_observation, write_boot_observation
+
+        round_.capture_meta["boot_observation_path"] = write_boot_observation(
+            argv_invalid_observation(detail, session_dir=self.session_dir),
+            session_dir=self.session_dir,
+            output_dir=round_.output_dir,
+            attempt=attempt_index,
+        )
+        round_.capture_meta["boot_observation_degraded"] = ""
 
     def _record_bringup(
         self,
