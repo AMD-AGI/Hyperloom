@@ -36,6 +36,11 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(os.lstat(path).st_mode)
 
 
+def _open_then_close(path: Path, access: int) -> None:
+    descriptor = open_shared(path, access)
+    os.close(descriptor)
+
+
 @pytest.mark.parametrize("umask", [0o077, 0o027, 0o002])
 def test_a_new_file_is_664_whatever_the_umask(tmp_path, umask):
     _here(
@@ -67,7 +72,7 @@ def test_a_symlink_is_never_followed_to_create_or_open(tmp_path):
     (tmp_path / "dangling").symlink_to(tmp_path / "nowhere")
     for name in ("link", "dangling"):
         with pytest.raises(OSError) as raised:
-            open_shared(tmp_path / name, os.O_RDWR)
+            _open_then_close(tmp_path / name, os.O_RDWR)
         assert raised.value.errno == errno.ELOOP, name
     assert not (tmp_path / "nowhere").exists()
     assert (tmp_path / "target").read_text() == "kept"
@@ -97,7 +102,7 @@ def test_a_file_this_account_cannot_open_raises_permission_error_and_is_not_repl
     path.chmod(0o000)
     inode = path.stat().st_ino
     with pytest.raises(PermissionError):
-        open_shared(path, os.O_RDWR)
+        _open_then_close(path, os.O_RDWR)
     assert (path.stat().st_ino, _mode(path)) == (inode, 0o000)
 
 
