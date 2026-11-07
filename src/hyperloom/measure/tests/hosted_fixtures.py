@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -17,7 +16,7 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.socket import SessionFacts, TestCall
-from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
+from hyperloom.measure.tests.bundle_factory import STAGING, STAGING_MANIFEST, base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
 
@@ -81,10 +80,9 @@ def staged_tool_cache(tmp: Path, monkeypatch: Any) -> str:
     """Point the application's inference_suite tool cache at one holding a staging manifest; returns its sha256."""
     tools = tmp / "inference-suite-tools"
     tools.mkdir(parents=True, exist_ok=True)
-    manifest = tools / "staging_manifest.json"
-    manifest.write_text('{"schema": "inference-suite-staging/1", "tools": {}}\n')
+    (tools / "staging_manifest.json").write_bytes(STAGING_MANIFEST)
     monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tools))
-    return hashlib.sha256(manifest.read_bytes()).hexdigest()
+    return STAGING
 
 
 def spec_context(tmp: Path, **overrides: Any) -> SpecContext:

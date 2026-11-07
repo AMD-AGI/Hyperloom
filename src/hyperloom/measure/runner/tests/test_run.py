@@ -33,7 +33,15 @@ from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.runner.tests import aiperf_source
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
-from hyperloom.measure.tests.bundle_factory import REQUEST_ID, STAGING, base_launch, spec_document, spec_document_v1
+from hyperloom.measure.runner.cache_layout import CACHE_ENV
+from hyperloom.measure.tests.bundle_factory import (
+    REQUEST_ID,
+    STAGING,
+    base_launch,
+    spec_document,
+    spec_document_v1,
+    stage_into,
+)
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
 
@@ -93,6 +101,7 @@ def env(tmp_path, key, monkeypatch):
         "PET_RANK": "0",
         "NCCL_IB_SL": "9",
         IMAGE_DIGEST_VAR: SHEET_IMAGE,
+        CACHE_ENV: str(stage_into(tmp_path / "runner-cache").parents[1]),
     }
     monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache: tmp_path / "ix")
     # a machine that answers every question: the sheet's card, no errors, nothing resident
@@ -162,6 +171,7 @@ def test_a_v2_sheet_hands_the_test_its_frozen_base_and_staging_and_signs_a_v2_ma
     (call,) = backend.calls
     assert (call.session_facts.base_launch, call.session_facts.staging) == (base_launch(), STAGING)
     assert "HYPERLOOM_BENCHMARK_BACKEND" not in env
+    assert env["INFERENCE_SUITE_TOOL_CACHE"] == str(tmp_path / "runner-cache" / "inference-suite" / STAGING)
     manifest = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes())
     assert (manifest.runner.inference_suite_staging, manifest.runner.magpie_commit) == (STAGING, None)
 
