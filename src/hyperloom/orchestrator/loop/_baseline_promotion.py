@@ -22,7 +22,6 @@ import yaml
 
 from ..actions.executors._accuracy_gate import (
     ACCURACY_DEFINITION_DIGEST_KEY,
-    BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
     BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
@@ -119,9 +118,7 @@ def _adopt_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> None:
     cfg = result_payload.get("materialized_config")
     if isinstance(cfg, str) and cfg:
         enablement.probe_config_path = cfg
-    fingerprint = result_payload.get(BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY)
-    if isinstance(fingerprint, str) and fingerprint:
-        enablement.eval_contract_fingerprint = fingerprint
+    enablement.eval_definition_digest = str(result_payload.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
     incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
     if isinstance(incoming_kind, str) and incoming_kind:
         enablement.baseline_eval_kind = incoming_kind
