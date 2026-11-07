@@ -1491,11 +1491,10 @@ def prepare_grid_benchmark_config(
     A native workload YAML that was never materialized (the pre-baseline fallback) is
     materialized first, so the operator ``--server-args`` reach every candidate.
     """
-    from .magpie_agentx import load_benchmark, native_config
+    from .magpie_agentx import is_composed, load_benchmark, native_config
 
     if native_config(config_path):
-        agentx = load_benchmark(config_path)["agentx"]
-        if isinstance(agentx, dict) and "append_args" in agentx.get("launch_overrides", {}):
+        if is_composed(load_benchmark(config_path)):
             return config_path
         return materialize_benchmark_config(
             config_path, output_dir, launch=LaunchLayer(args_mode=launch.args_mode), target=target, options=options

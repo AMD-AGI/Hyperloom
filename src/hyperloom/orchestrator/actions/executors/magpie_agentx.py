@@ -221,15 +221,21 @@ def apply_launch_changes(
         )
 
 
+def is_composed(benchmark: Mapping[str, Any]) -> bool:
+    """Whether a launch layer was already composed on this AgentX workload YAML.
+
+    ``append_args`` marks one that carries the base and the launch accepted above it.
+    """
+    agentx = benchmark.get("agentx")
+    return isinstance(agentx, dict) and "append_args" in agentx.get("launch_overrides", {})
+
+
 def seed_session_base(benchmark: dict[str, Any], base: ServerBase, *, recipe: RecipeLaunch) -> None:
     """Make the session's frozen base the launch Magpie runs, in place of the argv its own recipe resolves.
 
-    Only a workload YAML no layer was composed on yet takes it: ``append_args`` marks one that already carries the
-    base and the launch accepted above it, which seeding again would replace.
+    Only a workload YAML no layer was composed on yet takes it; seeding a composed one would replace its layers.
     """
-    agentx = benchmark.get("agentx")
-    composed = isinstance(agentx, dict) and "append_args" in agentx.get("launch_overrides", {})
-    if composed or not (base.args or base.env):
+    if is_composed(benchmark) or not (base.args or base.env):
         return
     apply_launch_changes(
         benchmark, LaunchChanges(base.args, dict(base.env), replace_args=True), recipe=recipe, accepted=True
