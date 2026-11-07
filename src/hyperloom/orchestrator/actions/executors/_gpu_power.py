@@ -5,7 +5,8 @@
 
 The benchmark report's ``gpu_monitor`` block from Magpie samples one card over the whole process, so it describes
 neither the serving cards nor the load being measured; :class:`hyperloom_common.gpu_telemetry.GpuPowerRecorder` does.
-This module builds that recorder for a round (:func:`build_gpu_power_recorder`), drives it from the server logs of a
+This module builds that recorder for a round (:func:`build_gpu_power_recorder`), names the same sampling for an
+inference_suite round, which runs the recorder itself (:func:`round_gpu_telemetry`), drives it from the server logs of a
 child the watchdog does not own (:class:`ServerLogPhaseDriver`), and reads the round's ``gpu_power.json`` back for the
 power-budget checks.
 """
@@ -23,6 +24,7 @@ from hyperloom_common.amd_smi import metric_value
 from hyperloom_common.env import EnvValueError, env_float
 from hyperloom_common.gpu_telemetry import DEFAULT_INTERVAL_SEC, MIN_INTERVAL_SEC, GpuPhase, GpuPowerRecorder
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
+from inference_suite.contracts import GpuTelemetry
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ __all__ = [
     "build_gpu_power_recorder",
     "read_measured_gpu_power",
     "read_measured_gpu_power_by_gpu",
+    "round_gpu_telemetry",
 ]
 
 #: Artifact written beside the round's ``server.log``.
@@ -141,6 +144,16 @@ def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | 
     except EnvValueError:
         log.warning("gpu_power: recorder could not be built; this round samples nothing", exc_info=True)
         return None
+
+
+def round_gpu_telemetry() -> GpuTelemetry:
+    """The GPU sampling an inference_suite round runs: on where ``amd-smi`` can sample, at the operator's interval."""
+    try:
+        interval_sec = env_float(_INTERVAL_ENV, DEFAULT_INTERVAL_SEC)
+    except EnvValueError:
+        log.warning("gpu_power: the sampling interval is unreadable; this round samples nothing", exc_info=True)
+        return GpuTelemetry(enabled=False, interval_sec=DEFAULT_INTERVAL_SEC)
+    return GpuTelemetry(enabled=not gpu_power_sampling_unavailable(), interval_sec=max(MIN_INTERVAL_SEC, interval_sec))
 
 
 def _read_round_artifact(workspace: Path | None, subprocess_started_unix: float | None) -> dict[str, Any] | None:
