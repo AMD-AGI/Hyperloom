@@ -69,7 +69,7 @@ from .bootstrap import (
     _seed_shared_state,
     resolve_session_base,
     _snapshot_system_prompts,
-    agentx_state_is_stale,
+    measurement_state_is_stale,
     resume_gpu_power_settings,
     latency_budget_scope_error,
     parse_operator_extra_env,
@@ -1165,7 +1165,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or state.operator_server_args
     _resume_extra_env = parse_operator_extra_env(args) or dict(state.operator_extra_env)
     _export_operator_launch_shape(server_args=_resume_server_args, extra_env=_resume_extra_env)
-    _stale = agentx_state_is_stale(state)
+    _stale = measurement_state_is_stale(state)
     if _stale:
         print(
             f"ERROR: cannot resume this session -- {_stale}. "

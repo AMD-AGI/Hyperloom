@@ -368,11 +368,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""
-    # Generation counter for AgentX measurements.
-    agentx_epoch: int = 0
-    # Which AgentX client measured this session: "aiperf" or "mlperf". Empty on sessions that predate the field; resume
-    # treats those as aiperf. Compared on resume so the two workloads cannot anchor each other without bumping the
-    # measurement epoch (which would invalidate unchanged aiperf sessions).
+    # Generation of the measurement path this session was measured on; resume refuses one below the build's epoch.
+    measurement_epoch: int = 0
+    # Which AgentX client measured this session: "inferencex" or "mlperf"; empty outside AgentX. Compared on resume so
+    # the two workloads cannot anchor each other without bumping the measurement epoch (which would invalidate
+    # unchanged sessions of the other client).
     agentx_backend: str = ""
     agentx_accuracy: bool = True  # Native AgentX GSM8K round; off only by ``--no-agentx-accuracy`` at seed.
     # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,

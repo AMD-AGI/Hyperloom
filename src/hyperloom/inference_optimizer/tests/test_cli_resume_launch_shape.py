@@ -253,7 +253,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
     import pytest
 
     from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
-    from hyperloom.inference_optimizer.cli.bootstrap import AGENTX_MEASUREMENT_EPOCH
+    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
 
     cli_mod = "hyperloom.inference_optimizer.cli"
 
@@ -273,7 +273,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
         model_name=model.name,
         model_path=str(model),
         benchmark_mode="agentx",
-        agentx_epoch=AGENTX_MEASUREMENT_EPOCH,
+        measurement_epoch=MEASUREMENT_EPOCH,
         agentx_backend="mlperf",
         operator_extra_env={"HYPERLOOM_AGENTIC_BACKEND": "mlperf"},
     ).save(resume_dir)
