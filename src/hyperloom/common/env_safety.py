@@ -405,12 +405,12 @@ _CREDENTIAL_MARKED_KNOBS: frozenset[str] = frozenset(
 )
 # As a substring TOKEN also hits counts and tokenizers (``MAX_NUM_BATCHED_TOKENS``, ``TOKENIZERS_PARALLELISM``), so it
 # names a credential only where a word ends in it (``HF_TOKEN``, ``HFTOKEN``, ``GITHUB_TOKEN_BACKUP``), and never in a
-# phrase that sizes or selects tokens (``SGLANG_USE_AITER_FP8_PER_TOKEN``, ``--long-prefill-token-threshold``,
-# ``SGLANG_SIMULATE_ACC_TOKEN_MODE``, ``--speculative-token-map``).
+# phrase that sizes, selects or balances tokens (``SGLANG_USE_AITER_FP8_PER_TOKEN``, ``--long-prefill-token-threshold``,
+# ``SGLANG_SIMULATE_ACC_TOKEN_MODE``, ``--prefill-delayer-token-usage-low-watermark``, ``DEEPEP_COMBINE_TOKEN_BALANCED``).
 _SUBSTRING_MARKERS_EXCEPT_TOKEN: tuple[str, ...] = tuple(m for m in SENSITIVE_ENV_NAME_MARKERS if m != "TOKEN")
 _TOKEN_WORD_END_RE = re.compile(r"TOKEN(?=_|$)")
 _TOKEN_KNOB_PHRASE_RE = re.compile(
-    r"(?:^|_)(?:PER_TOKEN|TOKEN_(?:THRESHOLD|NUM|BUDGETS?|PROB|IDS|MAP|MODE|REUSE))(?=_|$)"
+    r"(?:^|_)(?:PER_TOKEN|TOKEN_(?:THRESHOLD|NUM|BUDGETS?|PROB|IDS|MAP|MODE|REUSE|USAGE|BALANCED))(?=_|$)"
 )
 _KEY_LAST_SEGMENT_RE = re.compile(r"(?:^|_)KEY$")
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
