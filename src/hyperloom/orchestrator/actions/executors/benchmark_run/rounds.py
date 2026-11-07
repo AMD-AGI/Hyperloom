@@ -50,6 +50,7 @@ from .records import (
     _cold_anchor_from_warmup,
     _requested_framework,
     _unlaunched_round_result,
+    carry_eval_score,
     record_eval_score,
 )
 from .warm_patches import (
@@ -88,9 +89,7 @@ def _record_accuracy_round(result: dict[str, Any], accuracy_result: dict[str, An
     if accuracy_result.get("status") != "succeeded":
         result.setdefault("nonfatal_warnings", []).append("post_measure_accuracy_failed")
         return
-    for key in ("accuracy", "accuracy_task", "accuracy_metric", "accuracy_source"):
-        if accuracy_result.get(key) is not None:
-            result[key] = accuracy_result[key]
+    carry_eval_score(result, accuracy_result)
 
 
 class _BenchmarkRoundsMixin:

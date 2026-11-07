@@ -214,6 +214,16 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     return not (params or {}).get("quality_ref_exempt")
 
 
+#: What ``record_eval_score`` writes about the score itself; the definition digest travels with it, since a score
+#: graded without the definition it was taken under compares with no baseline.
+EVAL_SCORE_KEYS = ("accuracy", "accuracy_task", "accuracy_metric", "accuracy_source", ACCURACY_DEFINITION_DIGEST_KEY)
+
+
+def carry_eval_score(result: dict[str, Any], scored: Mapping[str, Any]) -> None:
+    """Copy the score ``record_eval_score`` wrote on ``scored`` into ``result``."""
+    result.update({key: scored[key] for key in EVAL_SCORE_KEYS if scored.get(key) is not None})
+
+
 def record_eval_score(result: dict[str, Any], eval_data: Mapping[str, Any]) -> bool:
     """Copy the score ``parse_eval_results`` read into ``result``; False when it read none."""
     accuracy = eval_data.get("accuracy")
