@@ -39,7 +39,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.env import is_truthy
-from hyperloom.common.benchmark_config import AgentxLaunch, BenchmarkPoint, is_magpie_agentx
+from hyperloom.common.benchmark_config import AgentxLaunch, BenchmarkPoint, is_agentx
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
@@ -252,7 +252,7 @@ def backend_reason(document: Mapping[str, object]) -> str | None:
     framework = _framework(bench)
     if framework_facts(framework).kind is not FrameworkKind.SERVING:
         return f"the point runs {framework.value}, which serves nothing"
-    if is_magpie_agentx(bench):
+    if is_agentx(bench):
         return "an AgentX point is not translated"
     if ((bench.get("profiler") or {}).get("torch_profiler") or {}).get("enabled"):
         return "a profile point is not translated"
@@ -476,7 +476,7 @@ def accuracy_config(
             than ``base``, or the session's rounds measure an external server.
     """
     bench = _bench(document)
-    if not is_magpie_agentx(bench):
+    if not is_agentx(bench):
         raise ConfigError("an accuracy round serves an AgentX point")
     if settings.server_url is not None:
         raise ConfigError("an accuracy round owns its server, and a client-only session's server is external")
