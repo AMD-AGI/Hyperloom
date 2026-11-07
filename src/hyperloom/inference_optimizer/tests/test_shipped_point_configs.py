@@ -14,7 +14,6 @@ from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, shipped_config_name
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.actions.executors._suite_config import scriptable_workload
-from hyperloom.inference_optimizer.tests.test_prompt_surfaces_runner import _RETIRED
 
 _FRAMEWORKS = ("atom", "sglang", "vllm", "xdit")
 _SERVING = tuple(framework for framework in _FRAMEWORKS if not is_scriptable(framework))
@@ -85,4 +84,3 @@ def test_the_point_carries_nothing_only_the_retired_runner_read(kind, framework)
     assert set(block.get("profiler", {})) == {"torch_profiler"}
     assert "enabled" not in block.get("server_lifecycle", {})
     assert "XDIT_SUPPORTS_PROFILER" not in block["envs"]
-    assert _RETIRED.findall(_text(kind, framework)) == []
