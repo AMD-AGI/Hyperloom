@@ -536,14 +536,30 @@ acquire_install_lock() {
 # configures both sides on one host.
 #
 # Loader (env wins; never overwrites a key that is already set):
-#   env > $REPO_ROOT/.env
+#   env > $REPO_ROOT/.env > $KERNEL_AGENT_ENV (credentials only, for a checkout another account can write,
+#   whose .env lends none)
 #
 # Strict mode by design: --check-only / --dry-run is the only path that
 # downgrades the die to a warn (introspection mode, no install runs).
 preflight_load_dotenv() {
+  local elsewhere
   load_dotenv_no_clobber
   if [ "${DOTENV_LOADED_COUNT:-0}" -gt 0 ]; then
     log "loaded ${DOTENV_LOADED_COUNT} missing var(s) from $REPO_ROOT/.env (env wins)"
+  fi
+  # A checkout another account can write keeps no credentials in .env: write_env_file put them in this container's
+  # kernel-agent env file alone, so a re-install here takes them from there, as preflight does.
+  elsewhere="$(runtime_env_dotenv_credentials_elsewhere "$REPO_ROOT/.env")"
+  [ -n "$elsewhere" ] || return 0
+  # load_dotenv_no_clobber took none of its credential lines: another account may have written them, and its gateway
+  # URL or headers would carry this account's key to it. Nor are they copied into the kernel-agent env file.
+  if [ "${DOTENV_SKIPPED_CREDENTIAL_COUNT:-0}" -gt 0 ]; then
+    warn "ignored ${DOTENV_SKIPPED_CREDENTIAL_COUNT} credential line(s) in $REPO_ROOT/.env, which keeps none, as ${elsewhere}"
+  fi
+  if ! runtime_env_load_kernel_agent_credentials "$KERNEL_AGENT_ENV"; then
+    warn "credentials not taken from ${KERNEL_AGENT_ENV}; export them in this shell"
+  elif [ "$RUNTIME_ENV_CREDENTIALS_LOADED" -gt 0 ]; then
+    log "loaded ${RUNTIME_ENV_CREDENTIALS_LOADED} missing credential(s) from ${KERNEL_AGENT_ENV} (env wins): $REPO_ROOT/.env keeps none, as ${elsewhere}"
   fi
 }
 
@@ -646,11 +662,18 @@ preflight_validate_credentials() {
     return 0
   fi
   missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY, or OPENAI_BASE_URL + OPENAI_API_KEY")
-  local env_file_status
+  local env_file_status elsewhere kernel_agent_source=""
   if [ -f "$REPO_ROOT/.env" ]; then
     env_file_status="present"
   else
     env_file_status="not found"
+  fi
+  elsewhere="$(runtime_env_dotenv_credentials_elsewhere "$REPO_ROOT/.env")"
+  if [ -n "$elsewhere" ]; then
+    kernel_agent_source="
+  - \$KERNEL_AGENT_ENV  (${KERNEL_AGENT_ENV}): .env keeps no credentials, as
+    ${elsewhere}; export them in the shell that
+    runs install.sh, once per container: a re-install in the same container finds them here."
   fi
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
@@ -664,7 +687,7 @@ preflight_validate_credentials() {
 
 Tried loading from:
   - shell environment
-  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)${kernel_agent_source}
 
 Fix one of:
   1. Anthropic:
