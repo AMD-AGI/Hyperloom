@@ -197,9 +197,9 @@ class TestQualityGate:
         assert out["accuracy"] == 0.0
         assert out["task"] == "quality_gate"
 
-    def test_parse_eval_results_scriptable_gate_without_passed_fails_closed(self, tmp_path):
+    def test_parse_eval_results_scriptable_gate_without_limits_is_judged_by_hyperloom(self, tmp_path):
         report = tmp_path / "benchmark_report.json"
-        report.write_text(json.dumps({"quality_gate": {"ssim": 0.97}}), encoding="utf-8")
+        report.write_text(json.dumps({"quality_gate": {"ssim": 0.5}}), encoding="utf-8")
         out = ag.parse_eval_results(tmp_path, framework="xdit")
         assert out["accuracy"] == 0.0
 
@@ -603,3 +603,47 @@ class TestQualityGateReportSelection:
         out = ag.parse_quality_gate(tmp_path)
         assert out["quality_gate"]["passed"] is True
         assert "zzz" in out["source_file"]
+
+
+class TestSuiteQualityGate:
+    """A scriptable round on inference_suite: the script's raw scores, judged by Hyperloom's limits (D2)."""
+
+    @staticmethod
+    def _round(tmp_path, quality_gate):
+        from hyperloom.common.tests.test_round_measurement import _fixed
+        from inference_suite.contracts import RunLayout, ScriptableResult, WorkloadKind
+
+        result = {"output_throughput": 0.5, "completed": 4, "quality_gate": quality_gate}
+        report = _fixed(
+            workload_kind=WorkloadKind.SCRIPTABLE, fixed=None, scriptable=ScriptableResult("client/r.json", result)
+        )
+        layout = RunLayout(tmp_path / "round" / "suite_run_0")
+        layout.root.mkdir(parents=True)
+        layout.report.write_text(json.dumps(report.to_document()), encoding="utf-8")
+        return tmp_path / "round"
+
+    @pytest.mark.parametrize(
+        ("scores", "passed"),
+        [
+            ({"lpips": 0.05, "ssim": 0.95, "mse": 0.001}, True),
+            ({"lpips": 0.30, "ssim": 0.95, "mse": 0.001}, False),
+            ({"lpips": None, "ssim": 0.80, "mse": 0.001}, False),
+        ],
+    )
+    def test_raw_scores_are_judged_against_hyperloom_limits(self, scores, passed):
+        assert ag.quality_gate_passed(scores, require=True) is passed
+
+    def test_the_eval_of_a_scriptable_round_is_the_quality_gate_its_report_carries(self, tmp_path):
+        workspace = self._round(tmp_path, {"lpips": 0.30, "ssim": 0.95, "mse": 0.001})
+        out = ag.parse_eval_results(workspace, framework="custom")
+        assert (out["task"], out["accuracy"]) == ("quality_gate", 0.0)
+        assert out["quality_gate"]["lpips"] == 0.30
+
+    def test_a_round_that_established_the_reference_passes_its_gate(self, tmp_path):
+        gate = {"skipped": True, "reason": "reference_established", "reference": "/s/ref.png"}
+        out = ag.parse_eval_results(self._round(tmp_path, gate), framework="xdit")
+        assert out["accuracy"] == 1.0
+
+    def test_a_round_without_a_gate_fails_closed(self, tmp_path):
+        out = ag.parse_eval_results(self._round(tmp_path, None), framework="custom")
+        assert out["accuracy"] == 0.0 and "no quality_gate" in out["error"]

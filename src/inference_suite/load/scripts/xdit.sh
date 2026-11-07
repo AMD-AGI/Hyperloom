@@ -4,7 +4,7 @@
 #
 # xDiT diffusion benchmark (server-less): runs the xdit CLI once, parses the per-image latency, scores the last image
 # against a BF16 reference when one is given, and writes the result JSON to ${RESULT_DIR}/${RESULT_FILENAME}.json.
-# The quality scores are written raw; whoever reads the result judges them.
+# Its quality_gate carries the scores raw, or says the reference was established; whoever reads the result judges it.
 #
 # Set by inference_suite.load.scriptable: RESULT_DIR, RESULT_FILENAME, MODEL, TP, ROCR_VISIBLE_DEVICES and, when the
 # workload names one, QUALITY_REFERENCE. The workload's params set the knobs below.
@@ -164,15 +164,16 @@ def _scores(reference_path, image_path):
     return scores
 
 
-quality = None
+quality_gate = None
 if reference and generated:
-    quality = {"reference": reference, "image": os.path.basename(generated[-1]), **_scores(reference, generated[-1])}
+    quality_gate = {"reference": reference, "image": os.path.basename(generated[-1]), **_scores(reference, generated[-1])}
 elif reference_write and generated:
     from PIL import Image
 
     os.makedirs(os.path.dirname(reference_write) or ".", exist_ok=True)
     Image.open(generated[-1]).convert("RGB").save(reference_write)
     print(f"[xdit] wrote the quality reference {reference_write}", file=sys.stderr)
+    quality_gate = {"skipped": True, "reason": "reference_established", "reference": reference_write}
 
 result = {
     "framework": "xdit",
@@ -189,7 +190,7 @@ result = {
     "mean_e2el_ms": round(latency_s * 1000.0, 3),
     "attention_backend": backend,
     "precision_locked": "bf16",
-    "quality": quality,
+    "quality_gate": quality_gate,
 }
 with open(output_path, "w", encoding="utf-8") as handle:
     json.dump(result, handle, indent=2)
