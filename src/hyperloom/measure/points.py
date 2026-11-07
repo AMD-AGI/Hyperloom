@@ -269,7 +269,7 @@ def generate_points(
     """
 
     if accuracy and canonical.agentx:
-        raise PointError("an AgentX workload has no accuracy test: Magpie's replay validity is its check")
+        raise PointError("an AgentX workload has no accuracy test: its report's valid_measurement is its check")
     launch = environment.recipe.launch
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)
