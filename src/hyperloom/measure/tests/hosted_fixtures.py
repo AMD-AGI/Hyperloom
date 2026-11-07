@@ -46,7 +46,6 @@ def make_call(tmp: Path, task_id: str = "req-1", *, point: Path | None = None, *
         "output_dir": tmp / "out" / task_id,
         "timeout_sec": 60,
         "cwd": str(tmp),
-        "magpie_python": sys.executable,
         "task_id": task_id,
         "session_facts": SessionFacts(staging=STAGING, base_launch=base_launch()),
     }

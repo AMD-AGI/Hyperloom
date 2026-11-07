@@ -69,7 +69,6 @@ def _call(tmp_path: Path, point: Path, timeout_sec: int = 4) -> TestCall:
         output_dir=tmp_path / "out",
         timeout_sec=timeout_sec,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t-1",
     )
 

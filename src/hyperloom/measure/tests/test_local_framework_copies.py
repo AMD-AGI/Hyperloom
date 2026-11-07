@@ -124,7 +124,6 @@ def _run(tmp_path: Path, name: str, point: Path | None = None, **kwargs: Any) ->
         output_dir=out,
         timeout_sec=900,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id=name,
         **kwargs,
     )
@@ -235,9 +234,7 @@ def test_the_copy_of_a_table_is_named_by_its_content_so_every_point_naming_it_ge
     listing = f"{first}{os.pathsep}{other}"
     names = (str(first), str(first), str(other), listing)
     points = tuple(_point(tmp_path / f"p{index}", AITER_CONFIG_GEMM=value) for index, value in enumerate(names))
-    call = TestCall(
-        points=points, output_dir=tmp_path / "out", timeout_sec=900, cwd=str(tmp_path), magpie_python="", task_id="t"
-    )
+    call = TestCall(points=points, output_dir=tmp_path / "out", timeout_sec=900, cwd=str(tmp_path), task_id="t")
 
     with private_framework(call) as private:
         values = [

@@ -23,7 +23,6 @@ import json
 import math
 import re
 import subprocess
-import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -145,7 +144,6 @@ class HostedExecutor:
         session_dir: The session directory; test output lands below ``<session_dir>/tests`` and a result's
             ``output_dir`` is relative to it.
         timeout_sec: The timeout of one attempt.
-        magpie_python: The interpreter the measurement runs with (``TestCall.magpie_python``).
         workload_kind: The campaign's workload; an AgentX baseline served with the prefix cache off does not end
             ``succeeded``.
     """
@@ -156,13 +154,11 @@ class HostedExecutor:
         session_dir: Path,
         *,
         timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC,
-        magpie_python: str = sys.executable,
         workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     ) -> None:
         self._backend = backend
         self._session = Path(session_dir)
         self._timeout = timeout_sec
-        self._python = magpie_python
         self._clock: Callable[[], float] = time.time
         self._workload = workload_kind
 
@@ -256,7 +252,6 @@ class HostedExecutor:
             timeout_sec=self._timeout,
             silence_timeout_sec=TEST_SILENCE_TIMEOUT_SEC,
             cwd=str(self._session),
-            magpie_python=self._python,
             task_id=request.request_id or "",
             kind=backend_kind(request.kind),  # type: ignore[arg-type]
             prep=_SWEEP if request.kind is TestKind.SWEEP or len(accepted.points) > 1 else "grid",

@@ -675,7 +675,6 @@ def _item_of(entry: Any, index: int, default_repeats: int = 1) -> ChecklistItem:
             output_dir=output_dir,
             timeout_sec=int(entry.get("timeout_sec", 3600)),
             cwd=str(output_dir),
-            magpie_python=sys.executable,
             task_id=task_id,
             kind=entry.get("kind", "test"),
             prep=entry.get("prep", "grid"),

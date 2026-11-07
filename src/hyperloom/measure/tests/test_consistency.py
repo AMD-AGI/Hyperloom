@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -90,7 +89,6 @@ def _item(tmp: Path, name: str, patched: dict[str, RootExpectation] | None = Non
             output_dir=output_dir,
             timeout_sec=60,
             cwd=str(tmp),
-            magpie_python=sys.executable,
             task_id=task_id,
             session_facts=SessionFacts(staging=STAGING, base_launch=base_launch()),
         )
@@ -321,7 +319,6 @@ def _item_per_rep(tmp: Path, name: str, by_rep: dict[int, dict], patched=None, r
             output_dir=output_dir,
             timeout_sec=60,
             cwd=str(tmp),
-            magpie_python=sys.executable,
             session_facts=SessionFacts(staging=STAGING, base_launch=base_launch()),
             task_id=task_id,
         )

@@ -89,37 +89,31 @@ def test_runner_envs_add_to_the_image_variables_rather_than_replace_them(
 
 
 def test_the_host_tool_repositories_reach_the_runner_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A local runner starts from an emptied environment, so the repositories it clones InferenceX and Magpie from are
-    carried from the host's: both when the host sets both."""
+    """A local runner starts from an emptied environment, so the repository it clones InferenceX from is carried from
+    the host's."""
     monkeypatch.setenv("INFERENCEX_REPO", "/mirrors/inferencex.git")
-    monkeypatch.setenv("MAGPIE_REPO", "/mirrors/magpie.git")
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), LocalOptions())
     assert template.envs["INFERENCEX_REPO"] == "/mirrors/inferencex.git"
-    assert template.envs["MAGPIE_REPO"] == "/mirrors/magpie.git"
 
 
 def test_runner_envs_win_over_the_host_tool_repositories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INFERENCEX_REPO", "/mirrors/inferencex.git")
-    monkeypatch.setenv("MAGPIE_REPO", "/mirrors/magpie.git")
     options = LocalOptions(runner_envs={"INFERENCEX_REPO": "/explicit/inferencex"})
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), options)
     assert template.envs["INFERENCEX_REPO"] == "/explicit/inferencex"
-    assert template.envs["MAGPIE_REPO"] == "/mirrors/magpie.git", "the name runner_envs does not give is the host's"
 
 
 def test_a_host_tool_repository_that_is_not_set_is_not_in_the_runner_template(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("INFERENCEX_REPO", raising=False)
-    monkeypatch.setenv("MAGPIE_REPO", "  ")
+    monkeypatch.setenv("INFERENCEX_REPO", "  ")
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), LocalOptions())
-    assert "INFERENCEX_REPO" not in template.envs, "unset is absent, not empty"
-    assert "MAGPIE_REPO" not in template.envs, "a blank value is absent too"
+    assert "INFERENCEX_REPO" not in template.envs, "a blank value is absent, not empty"
 
 
 def test_only_the_named_tool_repositories_are_taken_from_the_host() -> None:
     environ = {"INFERENCEX_REPO": "/a", "MAGPIE_REPO": "/b", "GITHUB_TOKEN": "t", "INFERENCEX_REF": "main"}
-    assert host_tool_repos(environ) == {"INFERENCEX_REPO": "/a", "MAGPIE_REPO": "/b"}
+    assert host_tool_repos(environ) == {"INFERENCEX_REPO": "/a"}
     assert host_tool_repos({}) == {}
 
 

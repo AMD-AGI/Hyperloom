@@ -394,7 +394,6 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         output_dir=ctx.files,
         timeout_sec=int(max(1, min(p.timeout_sec, remaining))),
         cwd=str(ctx.work),
-        magpie_python="",
         task_id=spec.request_id,
         kind=spec.kind,  # type: ignore[arg-type]
         prep=p.prep,  # type: ignore[arg-type]

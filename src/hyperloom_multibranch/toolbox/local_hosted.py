@@ -121,9 +121,9 @@ JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
 #: The shared compiled-code cache below this host's temporary directory when neither the options nor the environment
 #: name one, followed by ``-<uid>``: each account on the host keeps its own.
 DEFAULT_JIT_STORE = "hyperloom-jit-store"
-#: The variables that name where a runner clones the tools its tests run (InferenceX, Magpie) from. A local runner starts
-#: from an emptied environment, so :func:`host_tool_repos` carries them from this host's.
-HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO", "MAGPIE_REPO")
+#: The variables that name where a runner clones the tools its tests run (InferenceX) from. A local runner starts from an
+#: emptied environment, so :func:`host_tool_repos` carries them from this host's.
+HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO",)
 _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 _RULE_PACK = "rule-pack"
@@ -256,9 +256,9 @@ class LocalOptions:
 
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
     ``runner_envs`` add to the image's variables the runner template carries (for example ``INFERENCEX_REPO``) and win
-    over the same name in the host's ``INFERENCEX_REPO`` and ``MAGPIE_REPO``, which the template carries when set.
+    over the same name in the host's ``INFERENCEX_REPO``, which the template carries when set.
     ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
-    runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
+    runner runs with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
     backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
     is the local set: TraceLens, the roofline of a profile test's trace (``non-llm`` analysis, no card and no model), the
@@ -374,9 +374,9 @@ def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
 def host_tool_repos(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """The variables of :data:`HOST_TOOL_REPO_ENVS` that ``environ`` (this process's by default) sets to a value.
 
-    A local runner does not inherit the host's environment, yet it clones InferenceX and Magpie from the repositories
-    these name: without them a session whose commit exists only in a local mirror fails at the runner's start. Hosted
-    (sandbox) runners get theirs from their own template and never from here.
+    A local runner does not inherit the host's environment, yet it clones InferenceX from the repository these name:
+    without them a session whose commit exists only in a local mirror fails at the runner's start. Hosted (sandbox)
+    runners get theirs from their own template and never from here.
     """
     source = os.environ if environ is None else environ
     return {name: source[name] for name in HOST_TOOL_REPO_ENVS if source.get(name, "").strip()}
@@ -517,7 +517,6 @@ def build_local_toolbox(
         backend,
         directory,
         timeout_sec=options.timeout_sec,
-        magpie_python=options.python,
         workload_kind=acceptance.workload_kind,
     )
     toolbox = LocalHostedToolbox(
