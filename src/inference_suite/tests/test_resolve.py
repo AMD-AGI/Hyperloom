@@ -399,37 +399,33 @@ def test_an_unversioned_image_needs_a_release_that_names_a_version():
 
 _ROWS = [
     ("sglang", {"gfx942"}, "--trust-remote-code --mem-fraction-static 0.8 --disable-radix-cache",
-     {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1"}, "sglang_mi300x.sh"),
+     {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1"}),
     ("sglang", {"gfx950"}, "--trust-remote-code --mem-fraction-static 0.8 --disable-radix-cache",
-     {"SGLANG_USE_AITER": "1"}, "sglang_mi355x.sh"),
+     {"SGLANG_USE_AITER": "1"}),
     ("sglang", {"gfx1151"},
      "--trust-remote-code --mem-fraction-static 0.5 --disable-radix-cache --attention-backend triton --disable-cuda-graph",
-     {"SGLANG_USE_AITER": "0"}, "sglang_radeon8060s.sh"),
+     {"SGLANG_USE_AITER": "0"}),
     ("vllm", {"gfx942", "gfx950"}, "--trust-remote-code --gpu-memory-utilization 0.95",
-     {"VLLM_ROCM_USE_AITER": "1"}, "vllm_mi355x.sh"),
+     {"VLLM_ROCM_USE_AITER": "1"}),
     ("vllm", {"gfx1201"}, "--trust-remote-code --gpu-memory-utilization 0.9",
-     {"VLLM_ROCM_USE_AITER": "0", "FLASH_ATTENTION_TRITON_AMD_ENABLE": "TRUE"}, "vllm_gfx12.sh"),
+     {"VLLM_ROCM_USE_AITER": "0", "FLASH_ATTENTION_TRITON_AMD_ENABLE": "TRUE"}),
     ("vllm", {"gfx1151"}, "--trust-remote-code --gpu-memory-utilization 0.95",
-     {"VLLM_ROCM_USE_AITER": "0", "VLLM_ROCM_USE_AITER_MHA": "0", "VLLM_ROCM_USE_AITER_RMSNORM": "0"},
-     "vllm_radeon8060s.sh"),
-    ("atom", {"gfx942", "gfx950"}, "--trust-remote-code", {}, "baseline_atom.yaml"),
+     {"VLLM_ROCM_USE_AITER": "0", "VLLM_ROCM_USE_AITER_MHA": "0", "VLLM_ROCM_USE_AITER_RMSNORM": "0"}),
+    ("atom", {"gfx942", "gfx950"}, "--trust-remote-code", {}),
 ]  # fmt: skip
 
 
-def test_each_default_row_is_the_launcher_it_names():
+def test_each_default_row_carries_its_launch():
     rows = default_table().rows
 
-    assert [(row.framework, set(row.gfx), " ".join(row.args), dict(row.env)) for row in rows] == [
-        row[:4] for row in _ROWS
-    ]
-    assert all(origin in row.origin for row, (*_, origin) in zip(rows, _ROWS, strict=True))
+    assert [(row.framework, set(row.gfx), " ".join(row.args), dict(row.env)) for row in rows] == _ROWS
     assert {gfx for row in rows for gfx in row.gfx} <= {board.gfx for board in AMD_GPU_BOARDS.values()}
 
 
 def test_the_default_table_leaves_dual_chunk_attention_and_the_moe_runner_to_the_host():
     for row in default_table().rows:
-        assert not any("dual" in token or "moe-runner" in token for token in row.args), row.origin
-        assert not any("DUAL_CHUNK" in name or "MOE" in name for name in row.env), row.origin
+        assert not any("dual" in token or "moe-runner" in token for token in row.args), row
+        assert not any("DUAL_CHUNK" in name or "MOE" in name for name in row.env), row
 
 
 def test_a_fixed_query_no_recipe_serves_runs_the_default_row_with_its_topology():

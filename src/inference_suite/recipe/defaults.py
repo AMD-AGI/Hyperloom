@@ -3,8 +3,7 @@
 
 """The default table: the fixed-workload launch a framework gets on an architecture when no recipe serves it (D5).
 
-The table is ``defaults/table.yaml``, one row per framework and set of architectures, each naming the launcher lines
-it was read from. A row carries no topology: the resolver writes the query's TP and EP in the framework's own spelling.
+The table is ``defaults/table.yaml``, one row per framework and set of architectures. A row carries no topology: the resolver writes the query's TP and EP in the framework's own spelling.
 """
 
 from __future__ import annotations
@@ -29,13 +28,12 @@ _FIELDS = ContractFields(RecipeSourceError)
 
 @dataclass(frozen=True)
 class DefaultRow:
-    """The launch the table gives ``framework`` on the architectures ``gfx``, read from ``origin``."""
+    """The launch the table gives ``framework`` on the architectures ``gfx``."""
 
     framework: str
     gfx: frozenset[str]
     args: tuple[str, ...]
     env: Mapping[str, str]
-    origin: str
 
 
 @dataclass(frozen=True)
@@ -49,13 +47,12 @@ class DefaultTable:
 
 
 def _row(document: object) -> DefaultRow:
-    fields = _FIELDS.known(document, ("framework", "gfx", "args", "env", "origin"), "a default row")
+    fields = _FIELDS.known(document, ("framework", "gfx", "args", "env"), "a default row")
     return DefaultRow(
         framework=_FIELDS.text(fields.get("framework"), "a default row's framework"),
         gfx=frozenset(_FIELDS.strings(fields.get("gfx"), "a default row's architectures")),
         args=normalize_argv(_FIELDS.strings(fields.get("args"), "a default row's args")),
         env=dict(_FIELDS.string_map(fields.get("env"), "a default row's env")),
-        origin=_FIELDS.text(fields.get("origin"), "a default row's origin"),
     )
 
 
