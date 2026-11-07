@@ -297,8 +297,6 @@ hyperloom = [
     "assets/*.py",
     "assets/*.example",
     "assets/configs/*.yaml",
-    "assets/agentx/*.sh",
-    "assets/agentx/*.py",
     # Workload template for the InferaSim projection EXPLORE pre-filters with.
     "assets/inferasim/*.yaml",
     # Host-side evidence probe, injected into the benchmark process via a
@@ -330,11 +328,6 @@ hyperloom = [
 # read at runtime by classify_patchability(), so it must ship.
 "hyperloom.orchestrator.trace_analysis" = [
     "vendor_operator_playbooks.json",
-]
-# ``agentx/deploy.py`` copies these into InferenceX ``benchmarks/`` at runtime
-# and raises FileNotFoundError when they are absent from the install.
-"hyperloom.inference_optimizer.assets.agentx" = [
-    "*.sh",
 ]
 # Breakdown skill assets; the only SKILL.md under src/ that did not ship.
 "hyperloom.inference_optimizer.breakdown" = [

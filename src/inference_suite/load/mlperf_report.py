@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Map the MLPerf agentic harness's ``result_summary.json`` and ``scores.json`` into the InferenceX result schema.
-
-This module imports nothing beyond the standard library: Hyperloom deploys it beside the harness's mapping script.
-"""
+"""Map the MLPerf agentic harness's ``result_summary.json`` and ``scores.json`` into the InferenceX result schema."""
 
 from __future__ import annotations
 
