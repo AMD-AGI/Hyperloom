@@ -8,9 +8,11 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 
-from hyperloom.measure.hosted_spec import build_spec
+import pytest
+
+from hyperloom.measure.hosted_spec import SpecRefused, build_spec
 from hyperloom.measure.socket import SessionFacts
-from hyperloom.measure.tests.hosted_fixtures import make_call, spec_context
+from hyperloom.measure.tests.hosted_fixtures import make_call, point_yaml, spec_context
 
 OTHER_COMMIT = "b" * 40
 
@@ -51,3 +53,25 @@ def test_a_sheet_carries_the_silence_timeout_and_the_deadline_it_was_given(tmp_p
     procedure = _procedure(tmp_path, silence_timeout_sec=30)
 
     assert (procedure.timeout_sec, procedure.silence_timeout_sec, procedure.deadline_unix) == (90.0, 30.0, 1234.0)
+
+
+def _build(tmp_path, point):
+    call = make_call(tmp_path, point=point)
+    return build_spec(call, request_id="req-1", ctx=spec_context(tmp_path), deadline_unix=1234.0)
+
+
+def test_the_sheet_asks_for_as_many_gpus_as_the_first_point_has_tensor_parallel_ranks(tmp_path):
+    sheet = _build(tmp_path, point_yaml(tmp_path, tp=4))
+
+    assert sheet.hardware.gpu_count == 4
+
+
+@pytest.mark.parametrize("text", ["other: {}\n", "benchmark:\n  envs: [TP]\n", "benchmark:\n  envs:\n    TP: x\n"])
+def test_a_first_point_the_sheet_cannot_read_its_gpus_from_is_refused(tmp_path, text):
+    point = tmp_path / "point.yaml"
+    point.write_text(text, encoding="utf-8")
+
+    with pytest.raises(SpecRefused) as refused:
+        _build(tmp_path, point)
+
+    assert refused.value.reason == "point_unreadable"

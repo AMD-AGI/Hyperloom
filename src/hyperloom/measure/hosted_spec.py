@@ -24,6 +24,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.env import env_bool
+from hyperloom.common.benchmark_config import BenchmarkPoint, PointError
 from hyperloom.common.outside_facts import ENV_TP
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.common.env_safety import (
@@ -117,10 +118,16 @@ def _load_yaml(path: Path) -> tuple[str, dict[str, Any]]:
     return text, document
 
 
-def gpu_count_of(document: Mapping[str, Any]) -> int:
+def _read_point(document: Mapping[str, Any], path: Path) -> BenchmarkPoint:
+    try:
+        return BenchmarkPoint.from_document(document, source=Path(path).name)
+    except PointError as exc:
+        raise SpecRefused(_POINT_UNREADABLE, str(exc)) from None
+
+
+def gpu_count_of(point: BenchmarkPoint) -> int:
     """The tensor-parallel size of a materialised point, which is how many cards its runner needs."""
-    envs = (document.get("benchmark") or {}).get("envs") or {}
-    raw = envs.get(ENV_TP, 1)
+    raw = point.envs.get(ENV_TP, 1)
     try:
         count = int(str(raw).strip() or 1)
     except ValueError:
@@ -321,20 +328,18 @@ def _call_attachments(call: TestCall, ctx: SpecContext) -> dict[str, dict[str, s
 
 def _point_configs(
     call: TestCall, ctx: SpecContext, attachments: dict[str, dict[str, str]]
-) -> tuple[list[str], dict[str, Any] | None]:
-    """Each point's YAML with its shared-storage paths replaced by placeholders, and the first point's document.
+) -> tuple[list[str], BenchmarkPoint]:
+    """Each point's YAML with its shared-storage paths replaced by placeholders, and the first point.
 
     Every attachment a point's paths name joins ``attachments``.
     """
+    loaded = [_load_yaml(point) for point in call.points]
     configs: list[str] = []
-    first: dict[str, Any] | None = None
-    for point in call.points:
-        text, document = _load_yaml(point)
-        first = first or document
+    for text, document in loaded:
         found = _scan_attachments(document, ctx)
         attachments.update({a["id"]: a for a in found.values()})
         configs.append(_replace_paths(text, found))
-    return configs, first
+    return configs, _read_point(loaded[0][1], call.points[0])
 
 
 def _refuse_unknown_placeholders(configs: list[str], attachments: Mapping[str, object]) -> None:
@@ -401,7 +406,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
     attachments = _call_attachments(call, ctx)
     configs, first = _point_configs(call, ctx, attachments)
     _refuse_unknown_placeholders(configs, attachments)
-    gpus = gpu_count_of(first or {})
+    gpus = gpu_count_of(first)
     sheet = {
         "schema": "hyperloom.measurement-spec/v1",
         "request_id": request_id,
