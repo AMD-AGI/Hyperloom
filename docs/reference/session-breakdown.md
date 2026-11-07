@@ -316,8 +316,8 @@ Disposition: `baseline.throughput_tok_s_per_gpu` (6.0) → `baseline.output_thro
 * `log_python_cmd`: Literal `python …` launch line scraped from logs.
 * `yaml_cmd`: `cmd:` / `command:` / `launch:` field in the
   materialised config YAML.
-* `yaml_benchmark`: Synthesised from Magpie's `benchmark.*` YAML
-  fields.
+* `yaml_benchmark`: Synthesised from the materialised config's
+  `benchmark.*` YAML fields.
 * `unknown`: None of the above; a warning is appended to
   `metadata.warnings`.
 
