@@ -259,9 +259,9 @@ runtime_env_dotenv_credentials_elsewhere() {
 # load_dotenv_no_clobber reads them. What is kept is written beside the file (mktemp in its directory), given its mode
 # and renamed over it, so a reader sees the old file or the new one, never part of one, and a link there is replaced,
 # never written through. Nothing is written when there is nothing to remove. Status 1 and why on stderr when it cannot
-# be done.
+# be done, a .env this account cannot read included.
 runtime_env_remove_dotenv_credentials() {
-  local dotenv="$1" keys mode=600 tmp line text key nl quote="" drop=0 removed=0
+  local dotenv="$1" keys mode=600 tmp line text key nl quote="" drop=0 removed=0 failed=0
   shift
   keys=" $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $* "
   [ -f "$dotenv" ] || return 0
@@ -292,10 +292,13 @@ runtime_env_remove_dotenv_credentials() {
     if [ "$drop" -eq 1 ]; then
       removed=$((removed + 1))
     else
-      printf '%s%s' "$line" "$nl"
+      printf '%s%s' "$line" "$nl" || failed=1
     fi
-  done < "$dotenv" > "$tmp"
-  if [ -n "$quote" ]; then
+  done < "$dotenv" > "$tmp" || failed=1
+  if [ "$failed" -eq 1 ]; then
+    printf '[runtime-env ERROR] cannot remove the credentials from %s: it could not be read, or what it keeps written\n' \
+      "$dotenv" >&2
+  elif [ -n "$quote" ]; then
     printf '[runtime-env ERROR] cannot remove the credentials from %s: a quoted value in it never ends\n' "$dotenv" >&2
   elif [ "$removed" -eq 0 ] || { chmod -- "$mode" "$tmp" && mv -fT -- "$tmp" "$dotenv"; }; then
     rm -f -- "$tmp"

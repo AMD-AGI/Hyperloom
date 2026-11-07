@@ -103,8 +103,9 @@ _MARKER = "HYPERLOOM_DOTENV_CREDENTIALS"
 _PLANTED = ("https://planted.invalid", "sk-test-planted")
 
 
-def _write_installer(where: Path) -> Path:
-    """install.sh's path setup, its credential preflight, then ``write_env_file``, in files any account can read."""
+def _write_installer(where: Path, before_write: str = "") -> Path:
+    """install.sh's path setup, its credential preflight, then ``write_env_file`` (after ``before_write``), in files any
+    account can read."""
     text = INSTALL_SH.read_text(encoding="utf-8")
     head = text[: text.index(_DERIVATION_END) + len(_DERIVATION_END)]
     where.mkdir(parents=True)
@@ -114,7 +115,7 @@ def _write_installer(where: Path) -> Path:
     script = where / "install.sh"
     script.write_text(
         f"{head}\nCHECK_ONLY=0\nDRY_RUN=0\n{preflight}\npreflight_validate_credentials\n"
-        f". {shlex.quote(kernel_tools.as_posix())}\nwrite_env_file\n",
+        f". {shlex.quote(kernel_tools.as_posix())}\n{before_write}\nwrite_env_file\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -334,6 +335,34 @@ def test_a_reinstall_in_the_same_container_takes_the_credentials_from_its_file(t
     assert _credentials_in(env_file) == {**_CREDENTIALS, **rotated}
     _install(installer, checkout, workspace, _CREDENTIALS)
     assert _preflight_credentials(checkout, workspace, **rotated) == {**_CREDENTIALS, **rotated}
+
+
+# The shipped .env writers, each recording .env as it finds it before it rewrites it.
+_RECORD_EVERY_DOTENV_WRITE = """
+eval "_shipped_$(declare -f upsert_dotenv_var)"
+eval "_shipped_$(declare -f remove_dotenv_var)"
+upsert_dotenv_var() { cat -- "$DOTENV" >> "$RECORD_FILE"; _shipped_upsert_dotenv_var "$@"; }
+remove_dotenv_var() { cat -- "$DOTENV" >> "$RECORD_FILE"; _shipped_remove_dotenv_var "$@"; }
+"""
+
+
+@pytest.mark.parametrize("kind", ["group-writable-checkout", "other-writable-dotenv"])
+def test_no_later_write_copies_a_credential_line_of_a_shared_dotenv(tmp_path, container, kind):
+    """The credential lines, the retired spellings with them, are gone before write_env_file's other writes copy .env
+    into a new file: none of those writes ever finds one."""
+    checkout, workspace = container
+    _make_shared(checkout, kind)
+    record = tmp_path / "dotenv-before-each-write"
+
+    _install(
+        _write_installer(tmp_path / "assets", _RECORD_EVERY_DOTENV_WRITE),
+        checkout,
+        workspace,
+        {**_no_credentials(), "RECORD_FILE": str(record)},
+    )
+
+    assert record.read_bytes().count(b"HF_HOME=/models/hf") > 5
+    assert not [secret for secret in _SECRETS if secret in record.read_bytes()]
 
 
 def test_a_dotenv_the_install_made_this_accounts_takes_them_from_the_next_install(tmp_path, container):
@@ -616,5 +645,29 @@ def test_an_install_that_cannot_remove_the_credentials_stops(monkeypatch):
         )
         assert dotenv.read_bytes() == _EXISTING
         assert not [secret for secret in (b"sk-test-shell", b"shell-tenant") if secret in dotenv.read_bytes()]
+    finally:
+        shutil.rmtree(root)
+
+
+def test_removal_fails_on_a_dotenv_it_cannot_read():
+    """Another account's 0600 .env cannot be told apart: the removal says so and fails, never reporting that nothing
+    was there to remove."""
+    root = _shared_root()
+    try:
+        checkout = root / "hyperloom"
+        checkout.mkdir()
+        checkout.chmod(0o777)
+        dotenv = checkout / ".env"
+        dotenv.write_bytes(_EXISTING)
+        dotenv.chmod(0o600)
+
+        proc = _remove(dotenv, uid=_OTHER_UID)
+
+        assert proc.returncode == 1
+        assert f"cannot remove the credentials from {dotenv}: it could not be read, or what it keeps written" in (
+            proc.stderr
+        )
+        assert dotenv.read_bytes() == _EXISTING
+        assert sorted(entry.name for entry in checkout.iterdir()) == [".env"]
     finally:
         shutil.rmtree(root)
