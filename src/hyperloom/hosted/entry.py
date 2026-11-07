@@ -25,11 +25,11 @@ other than ``HYPERLOOM_STATE_DIR``, which it needs to install the hosted extra.
 
 A hosted run's agents must be isolated: unconfined, they could read the application's credentials. Before the installer
 or ``optimize`` runs, the entry marks the process so (:func:`~hyperloom.common.agent_isolation.require_agent_isolation`),
-with the hosting layer's bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names (:func:`layer_bwrap`),
-and no other; a host where neither an account nor that bubblewrap can isolate them ends the run finally, naming why. A
-probe that gave no answer in time ends the leg without ``exit.json``, so the host starts it again. The entry also
-registers the state directory, whose variable it removes from the environment, among the paths no agent sandbox shows
-(:data:`~hyperloom.common.confinement.PRIVATE_PATHS`).
+with the hosting layer's bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names (the layer's
+``start.sh`` names its own; :func:`layer_bwrap`), and no other; a host where neither an account nor that bubblewrap can
+isolate them ends the run finally, naming why. A probe that gave no answer in time ends the leg without ``exit.json``,
+so the host starts it again. The entry also registers the state directory, whose variable it removes from the
+environment, among the paths no agent sandbox shows (:data:`~hyperloom.common.confinement.PRIVATE_PATHS`).
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ INSTALL_LOG = "install.log"
 #: ``stop_reason`` of a run ended by a stop request before it started; the coordinator's name for an operator stop.
 STOP_REQUEST_REASON = "signal"
 DEFAULT_MCP_HOST = "127.0.0.1"
-#: The hosting layer's directory.
+#: The hosting layer's directory, as its ``start.sh`` names it.
 HOST_LAYER_ENV = "HYPERLOOM_HOST_LAYER"
 #: The hosting layer's bubblewrap, below its directory.
 LAYER_BWRAP = Path("bin", "bwrap")
