@@ -217,6 +217,38 @@ def test_an_agentx_profile_point_opens_its_window_on_the_replays_measured_phase(
     assert config.workload is WorkloadKind.AGENTX
 
 
+_SGLANG_ANNOTATION_ENV = {
+    "SGLANG_PROFILE_WITH_STACK": "True",
+    "SGLANG_PROFILE_RECORD_SHAPES": "True",
+    "SGLANG_GRAPH_BATCH_CAPTURE": "True",
+}
+
+
+def test_an_annotated_sglang_agentx_profile_records_shapes_stacks_and_graph_replays() -> None:
+    user = suite_config(_profiled(), _base(), _settings()).server.user
+
+    assert _SGLANG_ANNOTATION_ENV.items() <= user.env_set.items()
+    assert user.args_add[-1] == "--enable-profile-cuda-graph"
+
+
+def test_an_eager_sglang_agentx_profile_profiles_no_graph_capture() -> None:
+    point = _profiled()
+    point["benchmark"]["agentx"]["launch_overrides"]["append_args"].append("--disable-cuda-graph")
+
+    user = suite_config(point, _base(), _settings()).server.user
+
+    assert _SGLANG_ANNOTATION_ENV.items() <= user.env_set.items()
+    assert "--enable-profile-cuda-graph" not in user.args_add
+
+
+def test_an_unannotated_or_unprofiled_sglang_round_adds_no_instrumentation() -> None:
+    for point in (_profiled(detailed_annotations=False), _point()):
+        user = suite_config(point, _base(), _settings()).server.user
+
+        assert not _SGLANG_ANNOTATION_ENV.keys() & user.env_set.keys()
+        assert "--enable-profile-cuda-graph" not in user.args_add
+
+
 def test_a_vllm_agentx_profile_passes_the_profiler_fields_its_annotations_need() -> None:
     base = _base()
     base = replace(base, framework="vllm", query=replace(base.query, framework="vllm"), entrypoint=("vllm", "serve"))
@@ -228,6 +260,7 @@ def test_a_vllm_agentx_profile_passes_the_profiler_fields_its_annotations_need()
     args = config.server.user.args_add
     for field in ("ignore_frontend", "capture_torch_profiler", "detailed_trace_annotation"):
         assert args[args.index(f"--profiler-config.{field}") + 1] == "True"
+    assert args[args.index("--profiler-config.torch_profiler_dump_cuda_time_total") + 1] == "False"
     assert config.profile.start_body is None
     assert config.profile.agentx_duration_sec == 600.0
 

@@ -108,8 +108,8 @@ from ._profile_setup import (
     _MAX_ITERATIONS,
     SGLANG_NUM_STEPS,
     SGLANG_START_STEP,
-    VLLM_PATCH_PROFILER_FIELDS,
     _profiler_flag_value,
+    vllm_profiler_fields,
 )
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from ._ray_backend import SuiteLeasedRound
@@ -481,8 +481,13 @@ _AGENTX_PROFILE_KEYS = frozenset(
 )
 _AGENTX_CAPTURE_STEPS = 20
 _AGENTX_CAPTURE_SEC = 300.0
-#: The ``--profiler-config`` fields every vLLM profile passes beside the dir and window inference_suite adds.
-_VLLM_PROFILER_FIELDS = {"ignore_frontend": "True", "torch_profiler_dump_cuda_time_total": "False"}
+#: What Magpie's AgentX profile gave an annotated SGLang capture (``agentx_profile_config.py``): shapes and stacks
+#: in the trace, and the CUDA-graph replays profiled unless the server runs eager.
+_SGLANG_ANNOTATION_ENV = MappingProxyType(
+    dict.fromkeys(("SGLANG_PROFILE_WITH_STACK", "SGLANG_PROFILE_RECORD_SHAPES", "SGLANG_GRAPH_BATCH_CAPTURE"), "True")
+)
+_SGLANG_GRAPH_PROFILE_FLAG = "--enable-profile-cuda-graph"
+_SGLANG_EAGER_FLAG = "--disable-cuda-graph"
 
 
 def _agentx_block(bench: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -579,15 +584,39 @@ def _agentx_profile(bench: Mapping[str, Any], framework: Framework) -> ProfileCo
     )
 
 
-def _agentx_profiler_args(bench: Mapping[str, Any], framework: Framework) -> tuple[str, ...]:
-    """The vLLM profiler fields an AgentX profile passes; its annotations take the fields only TraceLens's patch adds."""
+def _graph_disabled(user: LaunchDelta, base: BaseLaunch) -> bool:
+    golden_args = base.golden_al.args if base.golden_al is not None else ()
+    ran = {name for name, _ in argv_flag_occurrences((*base.args, *golden_args, *user.args_add))}
+    removed = {canonical_flag_name(flag) for flag in user.args_remove}
+    return canonical_flag_name(_SGLANG_EAGER_FLAG) in ran - removed
+
+
+def _agentx_profile_layer(
+    bench: Mapping[str, Any], framework: Framework, user: LaunchDelta, base: BaseLaunch
+) -> LaunchDelta:
+    """What an AgentX profile adds to the server's own layer ``user`` for the annotations it asks for."""
     settings = _torch_profiler(bench)
-    if framework is not Framework.VLLM or not settings.get("enabled"):
-        return ()
-    fields = dict(_VLLM_PROFILER_FIELDS)
-    if settings.get("detailed_annotations") is True:
-        fields.update(dict.fromkeys(VLLM_PATCH_PROFILER_FIELDS, "True"))
-    return tuple(token for name, value in fields.items() for token in (f"--profiler-config.{name}", value))
+    if not settings.get("enabled"):
+        return LaunchDelta()
+    annotated = settings.get("detailed_annotations") is True
+    if framework is Framework.VLLM:
+        fields = vllm_profiler_fields(patched=annotated).items()
+        return LaunchDelta(
+            args_add=tuple(token for name, value in fields for token in (f"--profiler-config.{name}", value))
+        )
+    if not annotated:
+        return LaunchDelta()
+    graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
+    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
+
+
+def _profiled_server(server: ServerConfig, bench: Mapping[str, Any], base: BaseLaunch) -> ServerConfig:
+    user = server.user
+    layer = _agentx_profile_layer(bench, Framework(base.framework), user, base)
+    return replace(
+        server,
+        user=replace(user, args_add=(*user.args_add, *layer.args_add), env_set={**user.env_set, **layer.env_set}),
+    )
 
 
 def _agentx_server_env(point: _Point) -> dict[str, str]:
@@ -599,13 +628,11 @@ def _agentx_server_env(point: _Point) -> dict[str, str]:
     }
 
 
-def _agentx_server(
-    point: _Point, bench: Mapping[str, Any], base: BaseLaunch, settings: RoundSettings, args: tuple[str, ...] = ()
-) -> ServerConfig:
+def _agentx_server(point: _Point, bench: Mapping[str, Any], base: BaseLaunch, settings: RoundSettings) -> ServerConfig:
     """The AgentX point's server: its launch over the base, on the interpreter and source files the launch names."""
     launch = BenchmarkPoint.from_block(bench).agentx_launch
     layer = _layer_over_base(launch, base, _agentx_server_env(point))
-    server = _server(point, base, settings, None, replace(layer, args_add=(*layer.args_add, *args)))
+    server = _server(point, base, settings, None, layer)
     overrides = _agentx_block(bench).get("launch_overrides") or {}
     return replace(
         server,
@@ -622,8 +649,9 @@ def _agentx_config(
     _check_agentx_envs(point, base)
     point = replace(point, model=point.text(_MODEL_PATH_ENV) or point.model)
     measures = not boot_only
+    server = _agentx_server(point, bench, base, settings)
     return SuiteConfig(
-        server=_agentx_server(point, bench, base, settings, _agentx_profiler_args(bench, point.framework)),
+        server=_profiled_server(server, bench, base) if measures else server,
         workload=WorkloadKind.AGENTX if measures else WorkloadKind.NONE,
         agentx=_agentx_workload(point, base) if measures else None,
         profile=_agentx_profile(bench, point.framework) if measures else ProfileConfig(enabled=False),
