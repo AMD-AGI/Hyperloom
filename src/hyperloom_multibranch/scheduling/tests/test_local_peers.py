@@ -78,7 +78,9 @@ from hyperloom_multibranch.scheduling.local_peers import (
     workload_environment,
     workload_rule,
     _agent_spec,
+    _lease_area,
     _specialist_role,
+    specialist_readable,
 )
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
@@ -95,7 +97,7 @@ from hyperloom_multibranch.specialist import model_sessions as model_sessions_mo
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
 from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
-from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
+from hyperloom_multibranch.specialist.dev_sandbox import DEV_DIR, DevLeases
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
 from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
@@ -110,6 +112,7 @@ from hyperloom.sandbox.socket import Role as SandboxRole, SandboxInfo
 from hyperloom_multibranch.toolbox import hosted_toolbox
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolbox, HostedToolboxInputs
+from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -932,6 +935,33 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
     assert (without.dev_leases, lending.dev_leases) == (None, leases)
     assert without.role == role_prompt(_specialist_role(WORKLOAD), references={})
     assert lending.role == role_prompt(_specialist_role(WORKLOAD), references={}, dev_leases=1) != without.role
+    # A hosted lease's sandbox roots in the branch's directory: the branch's specialist is shown that area alone.
+    assert without.lease_area is None and lending.lease_area is not None
+    assert lending.lease_area("s1") == tmp_path / DEV_DIR and (tmp_path / DEV_DIR).is_dir()
+
+
+def test_the_specialists_read_the_session_s_references_and_the_model_directory_it_serves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
+    references = {"geak": tmp_path / "MB-reference" / "geak"}
+    served = replace(WORKLOAD, model="meta-llama/Llama-3-8B")
+    unknown = replace(WORKLOAD, model="meta-llama/Not-Here")
+
+    assert specialist_readable(references, served) == (references["geak"], tmp_path / "models" / "Llama-3-8B")
+    assert specialist_readable({}, unknown) == ()
+
+
+def test_a_local_toolbox_s_specialist_reads_its_own_holder_area_of_the_leases(tmp_path: Path) -> None:
+    toolbox = object.__new__(LocalHostedToolbox)
+    object.__setattr__(toolbox, "leases", BranchLeases(object(), tmp_path / "branch-sandboxes", 1, {}))
+    wiring = SimpleNamespace(toolbox=toolbox, dev_leases=object(), setup=None)
+
+    area = _lease_area(wiring)
+
+    assert area is not None and area("s1") == tmp_path / "branch-sandboxes" / "s1" and area("s1").is_dir()
+    assert _lease_area(SimpleNamespace(toolbox=toolbox, dev_leases=None, setup=None)) is None
 
 
 def _package(root: Path, name: str, dist: str, version: str, *files: str) -> PackageBase:

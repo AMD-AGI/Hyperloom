@@ -133,9 +133,11 @@ async def test_the_lease_names_its_cards_its_directory_and_what_is_left(local: M
     lease = await box.lease_branch_sandbox("b02", 2)
     assert (lease.branch_id, len(lease.gpu_ids), lease.remaining_cards) == ("b02", 2, 2)
     assert lease.env["HIP_VISIBLE_DEVICES"] == ",".join(map(str, lease.gpu_ids))
-    assert lease.root.is_dir() and lease.root.parent == tmp_path / "session-0" / "branch-sandboxes"
+    assert lease.root.is_dir() and lease.root.parent == tmp_path / "session-0" / "branch-sandboxes" / "b02"
+    assert lease.root.parent == box.leases.holder_area("b02")
     other = await box.lease_branch_sandbox("b03", 1)
     assert other.remaining_cards == 1 and other.root != lease.root and not set(other.gpu_ids) & set(lease.gpu_ids)
+    assert other.root.parent == tmp_path / "session-0" / "branch-sandboxes" / "b03"
     assert await box.measurement_capacity() == MeasurementCapacity(4, 4, leased_cards=3)
 
 
