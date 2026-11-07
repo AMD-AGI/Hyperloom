@@ -156,15 +156,12 @@ _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 # Sentinel return codes of the local flow (``orchestrator/actions/executors/_subprocess_kill.py``). The names stay
 # literal here because ``measure`` must not import another package's private module; ``test_failures`` pins every
 # value to its definition.
-_AGENTX_PREFLIGHT_RC = -912
 _SESSION_TIME_EXHAUSTED_RC = -915
 _ORCHESTRATOR_CANCELLED_RC = -917
 
 _INFRA_RETURNCODES = {
     HOSTED_RUNNER_UNAVAILABLE_RC: "runner_unavailable",
     HOSTED_INFRA_FAILURE_RC: "infra_failure",
-    # The AgentX client is missing or not the pinned build: an environment failure.
-    _AGENTX_PREFLIGHT_RC: "agentx_preflight",
 }
 _PROGRAM_ERROR_RETURNCODES = {
     HOSTED_SPEC_REJECTED_RC: "spec_rejected",
