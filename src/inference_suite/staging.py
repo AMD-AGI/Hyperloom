@@ -5,9 +5,13 @@
 
 The tool cache holds each tool under ``<tool>/<commit>/`` and one manifest, ``staging_manifest.json``, naming every
 staged file with its sha256. A round fetches nothing: :func:`verify` lists what is absent, changed or staged at a
-commit other than its pin, including a manifest that does not stage the fixed load's client module
-(:data:`CLIENT_MODULE`), and a round with anything listed refuses with ``staging_missing``. The manifest's own
-sha256 is the round's ``tool_manifest_sha256``, so a launch names exactly the bytes it ran.
+commit other than its pin, including a manifest that does not stage a file a load runs (:data:`INFERENCEX_REQUIRED`),
+and a round with anything listed refuses with ``staging_missing``. The manifest's own sha256 is the round's
+``tool_manifest_sha256``, so a launch names exactly the bytes it ran.
+
+The AgentX harness runs in its own venv beside the InferenceX subset, installed from the requirements InferenceX pins
+at its commit. Its manifest entry is the venv's interpreter and each installed distribution's ``RECORD``, which lists
+every installed file with its sha256, so the manifest names the exact resolved set without hashing the whole venv.
 
 ``python -m inference_suite.staging stage --source <InferenceX checkout> --tool-cache <dir>`` stages, and ``check
 --tool-cache <dir>`` reports whether the cache holds the current pins intact; ``install.sh`` runs both.
@@ -42,10 +46,31 @@ GSM8K_TASK = "infx/evals/gsm8k.yaml"
 CLIENT_MODULE = "infx.bench_serving.benchmark_serving"
 #: The file :data:`CLIENT_MODULE` loads, relative to the staged InferenceX root.
 CLIENT_FILE = f"{CLIENT_MODULE.replace('.', '/')}.py"
-#: What a fixed round and its eval run from InferenceX, relative to its project directory.
-INFERENCEX_SUBSET = ("infx/__init__.py", CLIENT_MODULE.rpartition(".")[0].replace(".", "/"), GSM8K_TASK)
+#: The AgentX harness requirements InferenceX pins, under the staged InferenceX root.
+AGENTX_REQUIREMENTS = "infx/bench/agentic/requirements.txt"
+#: The module that aggregates an AgentX replay's export, from the staged InferenceX root.
+AGENTX_AGGREGATOR_MODULE = "infx.results.agentic.process_agentic_result"
+AGENTX_AGGREGATOR_FILE = f"{AGENTX_AGGREGATOR_MODULE.replace('.', '/')}.py"
+#: The package the aggregator imports its builders from, staged whole.
+AGENTX_RESULTS_PACKAGE = "infx/results"
+#: The harness venv, under the staged InferenceX root, and the interpreter and CLI module the AgentX load runs.
+AGENTX_VENV_DIR = "agentx-venv"
+AGENTX_PYTHON = f"{AGENTX_VENV_DIR}/bin/python"
+AGENTX_CLI_MODULE = "agentx_cli"
+#: The interpreters the harness supports (``agentx-harness`` 1.0.13 declares 3.11 to 3.13).
+AGENTX_PYTHON_VERSIONS = ((3, 11), (3, 12), (3, 13))
+#: What a round and its eval run from InferenceX, relative to its project directory.
+INFERENCEX_SUBSET = (
+    "infx/__init__.py",
+    CLIENT_MODULE.rpartition(".")[0].replace(".", "/"),
+    GSM8K_TASK,
+    AGENTX_RESULTS_PACKAGE,
+    AGENTX_REQUIREMENTS,
+)
 #: The files a staged InferenceX must hold for a round to run, whatever else its subset holds at the pin.
-INFERENCEX_REQUIRED = (CLIENT_FILE, GSM8K_TASK)
+INFERENCEX_REQUIRED = (CLIENT_FILE, GSM8K_TASK, AGENTX_AGGREGATOR_FILE, AGENTX_PYTHON)
+#: The file each installed distribution lists its installed files in, with their sha256.
+_DIST_RECORD = "RECORD"
 
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _SKIPPED_DIRS = frozenset({"__pycache__"})
@@ -212,7 +237,8 @@ def _checkout_commit(source: Path) -> str:
 
 
 def _subset_files(project: Path) -> Iterator[Path]:
-    absent = [entry for entry in (*INFERENCEX_SUBSET, CLIENT_FILE) if not (project / entry).exists()]
+    wanted = (*INFERENCEX_SUBSET, CLIENT_FILE, AGENTX_AGGREGATOR_FILE)
+    absent = [entry for entry in wanted if not (project / entry).exists()]
     if absent:
         raise StagingError(f"{project} has no {', '.join(absent)}")
     for entry in INFERENCEX_SUBSET:
@@ -225,6 +251,29 @@ def _subset_files(project: Path) -> Iterator[Path]:
                 yield item
 
 
+def _run_staging_step(argv: Sequence[str], what: str) -> None:
+    done = subprocess.run(list(argv), capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise StagingError(f"{what} exited with code {done.returncode}: {done.stderr.strip()[-2000:]}")
+
+
+def _install_agentx_runtime(root: Path) -> dict[str, str]:
+    """Build the harness venv under ``root`` from InferenceX's pinned requirements; returns its manifest files.
+
+    The venv is built in place: its scripts carry their interpreter's absolute path, so it cannot be moved after.
+    """
+    if sys.version_info[:2] not in AGENTX_PYTHON_VERSIONS:
+        supported = ", ".join(".".join(map(str, version)) for version in AGENTX_PYTHON_VERSIONS)
+        raise StagingError(f"the AgentX harness needs Python {supported}; staging runs {sys.version.split()[0]}")
+    venv = root / AGENTX_VENV_DIR
+    _run_staging_step([sys.executable, "-m", "venv", str(venv)], "creating the AgentX harness venv")
+    python = root / AGENTX_PYTHON
+    install = [str(python), "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
+    _run_staging_step([*install, "-r", str(root / AGENTX_REQUIREMENTS)], "installing the AgentX harness")
+    staged = [python, *sorted(venv.glob(f"lib/python*/site-packages/*.dist-info/{_DIST_RECORD}"))]
+    return {path.relative_to(root).as_posix(): _sha256(path.read_bytes()) for path in staged}
+
+
 def _write_atomically(path: Path, data: bytes) -> None:
     partial = path.with_name(f".{path.name}.{os.getpid()}")
     partial.write_bytes(data)
@@ -232,10 +281,12 @@ def _write_atomically(path: Path, data: bytes) -> None:
 
 
 def stage(source: Path, tool_cache: Path) -> str:
-    """Copy InferenceX's subset from the checkout ``source`` into ``tool_cache``; returns the manifest's sha256.
+    """Copy InferenceX's subset from the checkout ``source`` into ``tool_cache`` and build the AgentX harness venv
+    beside it; returns the manifest's sha256.
 
     Raises:
-        StagingError: ``source`` is not a checkout at the pinned commit, or lacks part of the subset.
+        StagingError: ``source`` is not a checkout at the pinned commit, lacks part of the subset, or the harness
+            cannot be installed under the interpreter staging runs.
     """
     pin = PINNED_TOOLS[INFERENCEX_TOOL]
     commit = _checkout_commit(source)
@@ -254,6 +305,7 @@ def stage(source: Path, tool_cache: Path) -> str:
         files[relative.as_posix()] = _sha256(target.read_bytes())
     shutil.rmtree(root, ignore_errors=True)
     os.replace(partial, root)
+    files.update(_install_agentx_runtime(root))
     manifest = StagingManifest({INFERENCEX_TOOL: StagedTool(pin, files)})
     data = manifest.to_bytes()
     _write_atomically(tool_cache / MANIFEST_FILE, data)
@@ -287,6 +339,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
+    "AGENTX_AGGREGATOR_FILE",
+    "AGENTX_AGGREGATOR_MODULE",
+    "AGENTX_CLI_MODULE",
+    "AGENTX_PYTHON",
+    "AGENTX_PYTHON_VERSIONS",
+    "AGENTX_REQUIREMENTS",
+    "AGENTX_RESULTS_PACKAGE",
+    "AGENTX_VENV_DIR",
     "CLIENT_FILE",
     "CLIENT_MODULE",
     "GSM8K_TASK",

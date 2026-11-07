@@ -19,6 +19,9 @@ from inference_suite import staging
 from inference_suite.contracts import FailedStep
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL, PINNED_TOOLS
 from inference_suite.staging import (
+    AGENTX_AGGREGATOR_FILE,
+    AGENTX_PYTHON,
+    AGENTX_REQUIREMENTS,
     CLIENT_FILE,
     CLIENT_MODULE,
     GSM8K_TASK,
@@ -38,6 +41,8 @@ _CLIENT_TEXT = "print('client')\n"
 _INSTALL_SH = Path(__file__).resolve().parents[2] / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 _SRC = Path(__file__).resolve().parents[2]
 _SHA = "a" * 64
+_HARNESS_RECORD = "agentx-venv/lib/python3.12/site-packages/agentx_harness-1.0.13.dist-info/RECORD"
+_REQUIREMENTS_TEXT = "agentx-harness==1.0.13\n"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -57,6 +62,10 @@ def _checkout(tmp_path: Path, *, without: str | None = None) -> tuple[Path, str]
         GSM8K_TASK: "task: gsm8k\n",
         "infx/evals/gpqa_diamond.yaml": "task: gpqa\n",
         "infx/results/__init__.py": "",
+        "infx/results/agentic/__init__.py": "",
+        AGENTX_AGGREGATOR_FILE: "print('aggregate')\n",
+        AGENTX_REQUIREMENTS: _REQUIREMENTS_TEXT,
+        "infx/bench/agentic/replay.py": "print('replay')\n",
     }
     for relative, text in files.items():
         if without is not None and relative.startswith(without):
@@ -73,8 +82,36 @@ def _checkout(tmp_path: Path, *, without: str | None = None) -> tuple[Path, str]
     return repo, _git(repo, "rev-parse", "HEAD").strip()
 
 
+class _FakeInstall:
+    """Stands in for ``python -m venv`` and ``pip install``: lays down the files a real venv would, and records argv."""
+
+    def __init__(self, *, fail: str | None = None) -> None:
+        self.calls: list[list[str]] = []
+        self.fail = fail
+
+    def __call__(self, argv: list[str], what: str) -> None:
+        self.calls.append(list(argv))
+        if self.fail is not None and self.fail in what:
+            raise StagingError(f"{what} exited with code 1: no network")
+        if argv[1:3] == ["-m", "venv"]:
+            venv = Path(argv[3])
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python").write_text("interpreter\n")
+        else:
+            record = Path(argv[0]).parents[1] / Path(_HARNESS_RECORD).relative_to("agentx-venv")
+            record.parent.mkdir(parents=True)
+            record.write_text("agentx_cli.py,sha256=x,58\n")
+
+
 @pytest.fixture
-def staged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str, str]:
+def install(monkeypatch: pytest.MonkeyPatch) -> _FakeInstall:
+    fake = _FakeInstall()
+    monkeypatch.setattr(staging, "_run_staging_step", fake)
+    return fake
+
+
+@pytest.fixture
+def staged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install: _FakeInstall) -> tuple[Path, str, str]:
     """A tool cache staged from a fixture checkout, pinned at that checkout's commit."""
     repo, commit = _checkout(tmp_path)
     monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
@@ -93,7 +130,9 @@ def test_the_stage_digest_is_the_manifest_file_sha256_and_verifies_with_the_pin_
     assert report.manifest_sha256 == digest
 
 
-def test_staging_copies_the_client_package_and_the_gsm8k_task_and_nothing_else(staged) -> None:
+def test_staging_copies_the_client_the_task_the_agentx_aggregator_and_the_harness_venv_and_nothing_else(
+    staged,
+) -> None:
     cache, commit, digest = staged
 
     root = inferencex_root(cache)
@@ -105,9 +144,65 @@ def test_staging_copies_the_client_package_and_the_gsm8k_task_and_nothing_else(s
         "infx/bench_serving/__init__.py",
         _CLIENT,
         GSM8K_TASK,
+        "infx/results/__init__.py",
+        "infx/results/agentic/__init__.py",
+        AGENTX_AGGREGATOR_FILE,
+        AGENTX_REQUIREMENTS,
+        AGENTX_PYTHON,
+        _HARNESS_RECORD,
     }
     assert (root / _CLIENT).read_text() == _CLIENT_TEXT
     assert not (root / "infx/bench_serving/__pycache__").exists()
+
+
+def test_the_harness_venv_is_built_in_place_by_the_staging_interpreter_from_the_staged_requirements(
+    staged, install: _FakeInstall
+) -> None:
+    cache, _, _ = staged
+    root = inferencex_root(cache)
+
+    assert install.calls == [
+        [sys.executable, "-m", "venv", str(root / "agentx-venv")],
+        [
+            str(root / AGENTX_PYTHON),
+            "-m",
+            "pip",
+            "install",
+            "--no-input",
+            "--disable-pip-version-check",
+            "-r",
+            str(root / AGENTX_REQUIREMENTS),
+        ],
+    ]
+    assert (root / AGENTX_REQUIREMENTS).read_text() == _REQUIREMENTS_TEXT
+
+
+def test_staging_refuses_an_interpreter_the_harness_does_not_support(tmp_path, monkeypatch, install) -> None:
+    repo, commit = _checkout(tmp_path)
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
+    monkeypatch.setattr(staging, "AGENTX_PYTHON_VERSIONS", ((3, 11),))
+
+    with pytest.raises(StagingError, match="needs Python 3.11"):
+        stage(repo, tmp_path / "tools")
+    assert install.calls == []
+    assert not (tmp_path / "tools" / MANIFEST_FILE).exists()
+
+
+def test_a_harness_that_cannot_be_installed_leaves_no_manifest(tmp_path, monkeypatch) -> None:
+    repo, commit = _checkout(tmp_path)
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
+    monkeypatch.setattr(staging, "_run_staging_step", _FakeInstall(fail="installing"))
+
+    with pytest.raises(StagingError, match="installing the AgentX harness exited with code 1: no network"):
+        stage(repo, tmp_path / "tools")
+    assert not (tmp_path / "tools" / MANIFEST_FILE).exists()
+
+
+def test_a_failing_staging_step_names_the_step_and_its_stderr() -> None:
+    with pytest.raises(StagingError, match="the step exited with code 3: broken"):
+        staging._run_staging_step(
+            [sys.executable, "-c", "import sys; sys.stderr.write('broken'); sys.exit(3)"], "the step"
+        )
 
 
 def test_staging_the_same_checkout_again_gives_the_same_digest(staged, tmp_path: Path) -> None:
@@ -157,7 +252,7 @@ def test_a_cache_staged_at_another_commit_than_the_pin_is_staging_missing(staged
     assert report.missing == (f"{INFERENCEX_TOOL} at its pin {'b' * 40} (staged at {commit})",)
 
 
-def test_staging_refuses_a_checkout_off_the_pin(tmp_path: Path) -> None:
+def test_staging_refuses_a_checkout_off_the_pin(tmp_path: Path, install) -> None:
     repo, commit = _checkout(tmp_path)
 
     with pytest.raises(StagingError, match=f"checked out at '{commit}'.*pinned at {INFERENCEX_CLIENT_COMMIT}"):
@@ -189,18 +284,19 @@ def test_the_client_file_is_the_one_the_client_module_loads() -> None:
     assert (CLIENT_MODULE, CLIENT_FILE) == ("infx.bench_serving.benchmark_serving", _CLIENT)
 
 
-def test_a_manifest_at_the_pin_that_does_not_stage_the_client_is_staging_missing(staged) -> None:
+@pytest.mark.parametrize("required", [_CLIENT, AGENTX_AGGREGATOR_FILE, AGENTX_PYTHON])
+def test_a_manifest_at_the_pin_that_does_not_stage_a_file_a_load_runs_is_staging_missing(staged, required) -> None:
     cache, commit, _ = staged
     path = cache / MANIFEST_FILE
     manifest = StagingManifest.from_document(json.loads(path.read_text()))
-    files = {name: digest for name, digest in manifest.tools[INFERENCEX_TOOL].files.items() if name != _CLIENT}
+    files = {name: digest for name, digest in manifest.tools[INFERENCEX_TOOL].files.items() if name != required}
     data = StagingManifest({INFERENCEX_TOOL: StagedTool(commit, files)}).to_bytes()
     path.write_bytes(data)
 
     report = verify(cache, hashlib.sha256(data).hexdigest())
 
     assert report.failed_step is FailedStep.STAGING_MISSING
-    assert report.missing == (f"{INFERENCEX_TOOL}'s {_CLIENT} (not staged)",)
+    assert report.missing == (f"{INFERENCEX_TOOL}'s {required} (not staged)",)
 
 
 def test_the_manifest_round_trips_and_refuses_what_it_does_not_know() -> None:
@@ -275,7 +371,8 @@ echo "STALE ${{_STALE_KEYS[*]:-}}"
 def _cache_at_the_real_pin(cache: Path) -> str:
     root = tool_root(cache, INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT)
     files = {}
-    for relative, text in ((GSM8K_TASK, "task: gsm8k\n"), (_CLIENT, _CLIENT_TEXT)):
+    staged = ((GSM8K_TASK, "task: gsm8k\n"), (_CLIENT, _CLIENT_TEXT), (AGENTX_AGGREGATOR_FILE, ""), (AGENTX_PYTHON, ""))
+    for relative, text in staged:
         (root / relative).parent.mkdir(parents=True, exist_ok=True)
         (root / relative).write_text(text)
         files[relative] = hashlib.sha256(text.encode()).hexdigest()
