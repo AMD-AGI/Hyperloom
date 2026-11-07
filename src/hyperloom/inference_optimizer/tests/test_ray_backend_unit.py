@@ -1455,6 +1455,13 @@ def test_strip_visible_devices_no_envs_dict_returns_src(tmp_path: Path):
     assert rb.strip_visible_devices_from_config(cfg) == cfg
 
 
+def test_strip_visible_devices_no_benchmark_block_returns_src(tmp_path: Path):
+    """A YAML with no ``benchmark`` mapping is not a point; the original path is returned."""
+    cfg = tmp_path / "nobench.yaml"
+    cfg.write_text("other:\n  envs:\n    ROCR_VISIBLE_DEVICES: '0'\n", encoding="utf-8")
+    assert rb.strip_visible_devices_from_config(cfg) == cfg
+
+
 # ── coverage: GpuSpecialistLease exception branches (dead actor) ─────────────
 class _RaisingActor:
     """Fake actor whose method .remote() refs make fake ray.get/kill raise."""

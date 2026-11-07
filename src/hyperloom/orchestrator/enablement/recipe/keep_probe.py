@@ -185,11 +185,11 @@ def graded_framework(params: Mapping[str, Any], materialized_config: str) -> str
     whose config declares no framework.
     """
     if materialized_config:
-        from ...actions.executors._server_argv import _benchmark_envs
+        from ...actions.executors._server_argv import config_point
 
-        declared, _envs = _benchmark_envs(materialized_config)
+        declared = config_point(materialized_config).framework.strip().lower()
         if declared:
-            return str(declared).strip().lower()
+            return declared
     from hyperloom.inference_optimizer.framework_registry import DEFAULT_FRAMEWORK
 
     return str(params.get("framework") or os.environ.get("FRAMEWORK") or DEFAULT_FRAMEWORK).strip().lower()

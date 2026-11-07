@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.inference_optimizer.framework_registry import expert_parallel_flag, server_args_env_name
 
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
@@ -161,30 +162,17 @@ class ConfigUnreadable(Exception):
     """A materialised benchmark YAML that cannot be read as a config."""
 
 
-def _load_config(config_path: str | Path) -> dict[str, Any]:
-    """Read a materialised benchmark YAML.
+def config_point(config_path: str | Path) -> BenchmarkPoint:
+    """Read the point a materialised benchmark YAML holds.
 
     Raises:
         ConfigUnreadable: When the file cannot be opened, is not UTF-8, is not
-            YAML a safe loader can construct, or does not hold a mapping.
+            YAML a safe loader can construct, or holds no ``benchmark`` mapping.
     """
     try:
-        with Path(config_path).open(encoding="utf-8") as handle:
-            cfg = yaml.safe_load(handle)
+        return read_benchmark_point(Path(config_path))
     except (OSError, ValueError, yaml.YAMLError) as exc:
         raise ConfigUnreadable(f"{config_path}: {exc}") from exc
-    if not isinstance(cfg, dict):
-        raise ConfigUnreadable(f"{config_path}: holds {type(cfg).__name__}, not a mapping")
-    return cfg
-
-
-def _benchmark_envs(config_path: str | Path) -> tuple[str | None, dict[str, Any]]:
-    """Read a config's framework and benchmark envs; empty when absent."""
-    bench = _load_config(config_path).get("benchmark")
-    if not isinstance(bench, dict):
-        return None, {}
-    envs = bench.get("envs")
-    return bench.get("framework"), envs if isinstance(envs, dict) else {}
 
 
 def config_server_argv(config_path: str | Path) -> ServerArgv:
@@ -199,9 +187,8 @@ def config_server_argv(config_path: str | Path) -> ServerArgv:
     Raises:
         ConfigUnreadable: When the config cannot be read.
     """
-    framework, envs = _benchmark_envs(config_path)
-    env_name = server_args_env_name(framework)
-    return _sealed(framework, str(envs.get(env_name) or "").strip())
+    point = config_point(config_path)
+    return _sealed(point.framework, str(point.envs.get(server_args_env_name(point.framework)) or "").strip())
 
 
 def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[str, str]:
@@ -217,9 +204,8 @@ def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[
     Raises:
         ConfigUnreadable: When the config cannot be read.
     """
-    _framework, envs = _benchmark_envs(config_path)
     merged = {str(key): str(value) for key, value in base.items()}
-    merged.update({str(key): str(value) for key, value in envs.items() if value is not None})
+    merged.update({str(key): str(value) for key, value in config_point(config_path).envs.items() if value is not None})
     return merged
 
 
@@ -228,6 +214,7 @@ __all__ = [
     "ServerArgv",
     "add_server_arg_unless_pinned",
     "config_launch_env",
+    "config_point",
     "config_server_argv",
     "seal_server_argv",
 ]
