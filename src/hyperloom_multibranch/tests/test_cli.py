@@ -37,6 +37,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom_common.shared_storage import current_umask
 from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom.common import agent_isolation, visible_devices
@@ -1963,11 +1964,19 @@ def test_a_hosted_run_names_every_shared_directory_it_cannot_write_in_one_messag
 
 
 @pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_missing(handed: Started) -> None:
+@pytest.mark.parametrize("shared", [True, False], ids=["below-shared-storage", "elsewhere"])
+def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_missing(
+    handed: Started, shared: bool
+) -> None:
+    parents = {Path(os.environ[name]).parent for name in ("USER_DATA_PATH", "HYPERLOOM_RUNNER_CACHE")}
+    for parent in parents:
+        parent.chmod(0o2775 if shared else 0o755)  # set up to be shared, or a plain directory
+
     assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
 
     for name in ("USER_DATA_PATH", "HYPERLOOM_RUNNER_CACHE"):
-        assert stat.S_IMODE(Path(os.environ[name]).stat().st_mode) == 0o2775, name
+        made = stat.S_IMODE(Path(os.environ[name]).stat().st_mode)
+        assert made == (0o2775 if shared else 0o2775 & ~current_umask() & 0o777), (name, oct(made))
 
 
 @pytest.mark.usefixtures("ready_environment")
