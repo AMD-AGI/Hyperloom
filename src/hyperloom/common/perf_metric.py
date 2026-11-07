@@ -111,6 +111,14 @@ def is_agentx_mode(benchmark_mode: Any) -> bool:
     return str(benchmark_mode or "").strip().lower() == _AGENTX_MODE
 
 
+def agentx_replay_session(state: Any) -> bool:
+    """Whether *state* records an AgentX session whose rounds replay traces, i.e. not one on the MLPerf backend."""
+    from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
+
+    backend = str(getattr(state, "agentx_backend", "") or "")
+    return is_agentx_mode(getattr(state, "benchmark_mode", "")) and not is_mlperf_backend({BACKEND_ENV: backend})
+
+
 def agentx_active(*, benchmark_mode: Any = "") -> bool:
     """Whether either persisted workload identity or the environment enables AgentX."""
     return agentx_enabled() or is_agentx_mode(benchmark_mode)
@@ -452,11 +460,7 @@ def native_agentx_veto(source: Mapping[str, Any], state: Any) -> str:
     Validity is the report mapper's verdict, ``round_measurement`` for a round and ``agentx_measurement`` for a v1
     archive. An MLPerf session's rounds are not AgentX trace replays and are not judged here.
     """
-    from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
-
-    if not is_agentx_mode(getattr(state, "benchmark_mode", "")) or is_mlperf_backend(
-        {BACKEND_ENV: str(getattr(state, "agentx_backend", "") or "")}
-    ):
+    if not agentx_replay_session(state):
         return ""
     if source.get("valid_measurement") is not True or source.get("diagnostic_only") is not False:
         return "agentx_evidence_invalid"
