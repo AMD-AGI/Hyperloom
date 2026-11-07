@@ -39,7 +39,8 @@ def publish_inference_suite(source: Path, cache_root: Path) -> Path:
         SuitePublishError: The publish command failed (its ``staging_missing`` line is in the message).
     """
     argv = [sys.executable, "-m", "inference_suite", "publish", "--stagings", str(cache_root / INFERENCE_SUITE_DIR)]
-    env = {**os.environ, "PYTHONPATH": str(source / _SOURCE_PACKAGES)}
+    # The entry is checked file by file on reuse, so running its source must not write bytecode into it.
+    env = {**os.environ, "PYTHONPATH": str(source / _SOURCE_PACKAGES), "PYTHONDONTWRITEBYTECODE": "1"}
     try:
         done = subprocess.run(argv, capture_output=True, text=True, check=False, env=env)
     except OSError as exc:
