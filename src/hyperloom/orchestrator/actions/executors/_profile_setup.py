@@ -518,9 +518,9 @@ def _apply_vllm_profile(
         (_DELAY_ITERATIONS, f"--profiler-config.delay_iterations {delay_iters}"),
         (_MAX_ITERATIONS, f"--profiler-config.max_iterations {max_iters}"),
     ]
-    # Magpie's launcher puts ``profiler=torch`` before EXTRA_VLLM_ARGS. The argv
-    # probe only sees EXTRA_VLLM_ARGS, and vLLM rejects the bounds without it.
-    # A dir here would override Magpie's ``<workspace>/torch_trace`` by last-wins.
+    # The argv probe only sees EXTRA_VLLM_ARGS, and vLLM rejects the bounds
+    # without ``profiler=torch``. A dir here would override the round's trace
+    # directory by last-wins.
     if _profiler_flag_value(existing, "profiler") is None:
         flags.append(("profiler", "--profiler-config.profiler torch"))
     fields = vllm_profiler_fields(patched=patch_ok).items()
@@ -622,7 +622,7 @@ def _profile_extra_body(envs: dict[str, Any]) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-#: The keys an AgentX ``profiler.torch_profiler`` may set, and Magpie's defaults (``TorchProfilerConfig``) for two.
+#: The keys an AgentX ``profiler.torch_profiler`` may set, and the defaults for two.
 #: ``interval_seconds`` spaces the captures after the first, and the round opens one.
 _AGENTX_PROFILE_KEYS = frozenset(
     {"enabled", "num_steps", "num_profiles", "start_seconds", "interval_seconds", "detailed_annotations"}
@@ -630,7 +630,7 @@ _AGENTX_PROFILE_KEYS = frozenset(
 )
 _AGENTX_CAPTURE_STEPS = 20
 _AGENTX_CAPTURE_SEC = 300.0
-#: What Magpie's AgentX profile gave an annotated SGLang capture (``agentx_profile_config.py``): shapes and stacks
+#: What an annotated SGLang AgentX capture sets: shapes and stacks
 #: in the trace, and the CUDA-graph replays profiled unless the server runs eager.
 _SGLANG_ANNOTATION_ENV = MappingProxyType(
     dict.fromkeys(("SGLANG_PROFILE_WITH_STACK", "SGLANG_PROFILE_RECORD_SHAPES", "SGLANG_GRAPH_BATCH_CAPTURE"), _TRUE)
