@@ -135,7 +135,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import current_umask, make_shared_dirs, ownership
+from hyperloom_common.shared_storage import _parent_is_shared, current_umask, make_shared_dirs, ownership
 from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
 from hyperloom.measure.runner.cache_layout import (
     BOOTSTRAP_NAME,
@@ -559,9 +559,10 @@ def _builder_problems(raw: bytes, manifest: Manifest) -> list[str]:
 
 
 def _shared_umask() -> int:
-    """The umask of what this builder makes for the other builders of the cache, the cache directory and the locks:
-    its own, with every group bit let through, so the group may read, enter and write whatever the umask keeps from
-    others."""
+    """The umask of what this builder makes for the other builders of the cache, the cache directory and the locks,
+    below storage set up to be shared (:func:`~hyperloom_common.shared_storage.make_shared_dirs`): its own, with every
+    group bit let through, so the group may read, enter and write whatever the umask keeps from others. Elsewhere they
+    are made under the builder's own umask, private as anything else it makes."""
     return current_umask() & ~stat.S_IRWXG
 
 
@@ -1003,13 +1004,16 @@ def _reuse(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
 
 
 def _open_lock(path: Path) -> int:
-    """``path`` opened for writing, made ``0664`` (:func:`_shared_umask`) when this call creates it, so that every
-    account of the cache directory's group can take the lock after this one.
+    """``path`` opened for writing. When this call creates it in a cache directory set up to be shared, it is made
+    ``0664`` (:func:`_shared_umask`), so that every account of the cache directory's group can take the lock after this
+    one; in any other directory it is made under the builder's umask, as private as the directory
+    (:func:`_shared_dirs`).
 
     Raises:
         CacheBuildError: When it cannot be opened so, naming it: a lock another account made without group write.
     """
-    mode = _ALL_FILE_BITS & ~_shared_umask()
+    shared = _parent_is_shared(path)
+    mode = _ALL_FILE_BITS & ~(_shared_umask() if shared else current_umask())
     try:
         try:
             descriptor = os.open(path, _LOCK_FLAGS | os.O_CREAT | os.O_EXCL, mode)
@@ -1020,7 +1024,8 @@ def _open_lock(path: Path) -> int:
             f"cannot open the build lock {path} for writing: {exc.strerror}{ownership(path)}; every account that builds "
             "into this cache must be able to"
         ) from None
-    os.fchmod(descriptor, mode)
+    if shared:
+        os.fchmod(descriptor, mode)
     return descriptor
 
 
