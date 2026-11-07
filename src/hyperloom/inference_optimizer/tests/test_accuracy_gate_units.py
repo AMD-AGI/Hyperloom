@@ -125,7 +125,9 @@ class TestGradeIntegrateAccuracy:
     @staticmethod
     def _grade(monkeypatch, tmp_path, *, bench: dict, baseline: float):
 
-        return integrate_accuracy.grade_integrate_accuracy(bench, baseline_accuracy=baseline, workspace=tmp_path)
+        return integrate_accuracy.grade_integrate_accuracy(
+            bench, reference=ag.AccuracyReference(baseline, ""), workspace=tmp_path
+        )
 
     def test_accuracy_within_tolerance_does_not_block(self, monkeypatch, tmp_path):
         out = self._grade(monkeypatch, tmp_path, bench={"accuracy": 0.78}, baseline=0.80)

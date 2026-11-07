@@ -10,6 +10,16 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ..actions.executors._accuracy_gate import (
+    ACCURACY_DEFINITION_DIGEST_KEY,
+    EVAL_DEFINITION_DIGEST_KEY,
+    AccuracyReference,
+    accuracy_keep_block,
+    parse_eval_results,
+    require_kernel_accuracy_default,
+    resolve_served_context,
+    served_context_hosts_eval,
+)
 from ._integrate_outcomes import _applyback_verdict_pending
 from ._integrate_rebaseline import _IntegrateRebaseline
 
@@ -38,14 +48,13 @@ def _eval_generation_budget() -> int:
 
 
 def _integrate_eval_score(bench_result: dict[str, Any], workspace: Path) -> dict[str, Any]:
-    from ..actions.executors._accuracy_gate import parse_eval_results
-
     measured = bench_result.get("accuracy")
     attached = {
         "accuracy": float(measured) if isinstance(measured, (int, float)) else None,
         "task": str(bench_result.get("accuracy_task") or ""),
         "metric": str(bench_result.get("accuracy_metric") or ""),
         "source_file": str(bench_result.get("accuracy_source") or ""),
+        EVAL_DEFINITION_DIGEST_KEY: str(bench_result.get(ACCURACY_DEFINITION_DIGEST_KEY) or ""),
     }
     if attached["accuracy"] is not None:
         return attached
@@ -58,33 +67,28 @@ def _integrate_eval_score(bench_result: dict[str, Any], workspace: Path) -> dict
         "task": str(eval_out.get("task") or ""),
         "metric": str(eval_out.get("metric") or ""),
         "source_file": str(eval_out.get("source_file") or ""),
+        EVAL_DEFINITION_DIGEST_KEY: str(eval_out.get(EVAL_DEFINITION_DIGEST_KEY) or ""),
     }
 
 
 def grade_integrate_accuracy(
     bench_result: dict[str, Any],
     *,
-    baseline_accuracy: float,
+    reference: AccuracyReference,
     workspace: Path,
     strict: bool = False,
     server_args: str = "",
 ) -> dict[str, Any]:
-    """Grade a kernel re-baseline's accuracy against the session baseline.
+    """Grade a kernel re-baseline's accuracy against the session baseline ``reference``.
 
     The staged re-baseline already ran the serving eval after hot throughput passed, so the score is read
     back rather than re-measured.
     """
     from hyperloom.common.gain_math import accuracy_passed
 
-    from ..actions.executors._accuracy_gate import (
-        accuracy_keep_block,
-        require_kernel_accuracy_default,
-        resolve_served_context,
-        served_context_hosts_eval,
-    )
-
     scored = _integrate_eval_score(bench_result, workspace)
-    new_accuracy = scored["accuracy"]
+    new_accuracy = reference.comparable(scored)
+    baseline_accuracy = reference.score
 
     accuracy_pass: bool | None = None
     if new_accuracy is not None and baseline_accuracy > 0:
@@ -164,7 +168,7 @@ async def _integrate_accuracy_verdict(
     # a salvaged sibling accuracy during the run republishes the reference this candidate is graded against.
     gate = grade_integrate_accuracy(
         bench_result,
-        baseline_accuracy=float(state.baseline_accuracy or 0.0),
+        reference=AccuracyReference.of_baseline(state),
         workspace=rebaseline.workspace,
         strict=_applyback_verdict_pending(payload),
         server_args=rebaseline.server_args,

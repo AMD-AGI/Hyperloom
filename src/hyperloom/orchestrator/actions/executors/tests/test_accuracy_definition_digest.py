@@ -151,3 +151,24 @@ def test_an_integrate_bench_is_graded_only_under_the_baselines_definition(tmp_pa
     gate_evidence: dict = {}
     _grade_bench_accuracy({"status": "succeeded"}, bench_leg, str(slot), gate_evidence)
     assert gate_evidence["accuracy_pass"] is expected
+
+
+@pytest.mark.parametrize(
+    ("digest", "accuracy_pass"), [(BASELINE_DIGEST, False), (OTHER_DIGEST, None)], ids=["same_definition", "other"]
+)
+def test_a_kernel_rebaseline_is_graded_only_under_the_baselines_definition(tmp_path, digest, accuracy_pass):
+    from hyperloom.orchestrator.kernel.integrate_accuracy import grade_integrate_accuracy
+
+    bench = {"accuracy": 0.0, ag.ACCURACY_DEFINITION_DIGEST_KEY: digest}
+    reference = ag.AccuracyReference(0.945, BASELINE_DIGEST)
+    gate = grade_integrate_accuracy(bench, reference=reference, workspace=tmp_path, strict=True)
+    assert (gate["accuracy_pass"], gate["blocked"]) == (accuracy_pass, True)
+
+
+def test_a_kernel_rebaseline_reads_the_digest_of_the_score_its_workspace_holds(tmp_path):
+    from hyperloom.orchestrator.kernel.integrate_accuracy import grade_integrate_accuracy
+
+    suite_eval(tmp_path / ag.ACCURACY_DIR, 0.94, BASELINE_DIGEST)
+    reference = ag.AccuracyReference(0.945, BASELINE_DIGEST)
+    gate = grade_integrate_accuracy({}, reference=reference, workspace=tmp_path)
+    assert (gate["accuracy_pass"], gate[ag.EVAL_DEFINITION_DIGEST_KEY]) == (True, BASELINE_DIGEST)
