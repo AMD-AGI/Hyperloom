@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     LaunchLayer,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
 
 
 def load_benchmark(path: Path) -> dict:

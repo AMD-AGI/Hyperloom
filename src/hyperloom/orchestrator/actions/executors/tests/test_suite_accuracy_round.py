@@ -28,8 +28,8 @@ from hyperloom.orchestrator.actions.executors._suite_config import (
     run_accuracy_suite_round,
     session_route,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges, apply_launch_changes
-from hyperloom.orchestrator.actions.executors.magpie_agentx import seed_session_base
+from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges, apply_launch_changes
+from hyperloom.orchestrator.actions.executors.agentx_point import seed_session_base
 from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import AccuracyRoundOutcome, run_accuracy_round
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _settings
 from hyperloom.orchestrator.state.base_launch import ServerBase

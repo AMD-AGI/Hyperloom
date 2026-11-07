@@ -26,7 +26,7 @@ from hyperloom.orchestrator.actions.executors._suite_config import (
     suite_config,
     suite_route,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges
+from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges
 from hyperloom.orchestrator.actions.executors.tests.test_suite_accuracy_round import _agentx_base, _agentx_point
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _settings
 from hyperloom.orchestrator.state.tests._session_base import freeze_base

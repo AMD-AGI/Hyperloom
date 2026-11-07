@@ -1494,7 +1494,7 @@ def test_a_profile_call_that_would_not_profile_or_asks_for_more_is_refused(grid,
 def test_an_agentx_profile_test_is_one_profiled_round_that_turns_the_profiler_on_in_the_yaml(
     grid, tmp_path, monkeypatch
 ):
-    from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+    from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
 
     point = _agentx_point(tmp_path, monkeypatch)
     enable_profile(point)
@@ -1581,7 +1581,7 @@ def machine(monkeypatch, tmp_path):
 
 
 def _profile_agentx_point(tmp_path: Path, monkeypatch) -> Path:
-    from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+    from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
 
     point = _agentx_point(tmp_path, monkeypatch)
     enable_profile(point)

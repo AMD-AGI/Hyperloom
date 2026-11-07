@@ -42,7 +42,7 @@ from .._suite_config import (
     round_lifecycle,
     run_suite_round,
 )
-from ..magpie_agentx import ServerArgvInvalidError
+from ..agentx_point import ServerArgvInvalidError
 from .bringup import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
 from .records import (
     _BENCHMARK_MODE_ATTR,
@@ -257,7 +257,7 @@ class _BenchmarkLaunchMixin:
             )
         except (FrameworkScriptMismatchError, ServerArgvInvalidError) as exc:
             return _attempt_failure(getattr(exc, "error_class", "framework_script_mismatch"), exc, output_dir)
-        from ..magpie_agentx import activate_runtime
+        from ..agentx_point import activate_runtime
 
         activate_runtime(config_path, params.get("runtime_override") or {})
         # Report the invocation now, with the config final and the server not

@@ -628,7 +628,7 @@ def test_build_variant_yaml_keeps_a_value_the_replacing_variant_re_adds(tmp_path
 
 def test_agentx_removals_reach_magpie_as_bare_names_without_losing_the_re_added_value():
     """Magpie takes one bare option name per removal; only that boundary drops the value a spec is scoped to."""
-    from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges, apply_launch_changes
+    from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges, apply_launch_changes
 
     bench = {"framework": "sglang", "agentx": {"enabled": True}}
     apply_launch_changes(

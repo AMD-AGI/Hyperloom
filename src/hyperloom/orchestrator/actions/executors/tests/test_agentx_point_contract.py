@@ -27,7 +27,7 @@ from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
     is_valid_measurement,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import bind_source_evidence, enable_profile
+from hyperloom.orchestrator.actions.executors.agentx_point import bind_source_evidence, enable_profile
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
@@ -490,7 +490,7 @@ def vllm_source(source):
 
 @pytest.mark.parametrize("args", list(_CI_JSON_ARGS.values()), ids=list(_CI_JSON_ARGS))
 def test_json_server_args_survive_every_native_composition(vllm_source, tmp_path, args):
-    from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+    from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime
 
     base = materialize_benchmark_config(vllm_source, tmp_path / "base", launch=LaunchLayer(extra_server_args=args))
     assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == args.split(" ")
@@ -518,7 +518,7 @@ def test_json_server_args_survive_every_native_composition(vllm_source, tmp_path
     ids=["plain", "json"],
 )
 def test_a_value_with_a_single_quote_survives_repeated_native_composition(vllm_source, tmp_path, args):
-    from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+    from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime
 
     argv = args.split(" ")
     base = materialize_benchmark_config(vllm_source, tmp_path / "base", launch=LaunchLayer(extra_server_args=args))
@@ -643,7 +643,7 @@ def test_a_native_variant_is_judged_at_the_tensor_parallel_size_its_launch_carri
 
 
 def test_vllm_attempt_uses_python_for_magpies_module_entrypoint(source, tmp_path):
-    from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+    from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime
 
     config = yaml.safe_load(source.read_text())
     config["benchmark"]["framework"] = "vllm"
