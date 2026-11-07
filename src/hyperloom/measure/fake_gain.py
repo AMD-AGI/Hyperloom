@@ -27,9 +27,11 @@ from hyperloom.orchestrator.actions.executors import (
     PREFIX_CACHE_OFF_ERROR_CLASS,
     CONTEXT_COPY_REFUSAL,
     RequestedLaunch,
+    RoundFolder,
     SpeculativeDecodingPinnedError,
     build_launch_evidence,
     context_copy_refusal,
+    is_round_folder,
     refuse_cacheless_agentx_baseline,
     refuse_unpinned_speculative_change,
 )
@@ -94,21 +96,27 @@ def baseline_prefix_cache_refusal(point: Path, round_dir: Path) -> str:
     """Why an AgentX baseline round served with the prefix cache off may not end ``succeeded``, or ``""``.
 
     ``point`` is the measurement point the round ran and ``round_dir`` the directory it landed in; the launch evidence
-    is built from both the way main's baseline and grid executors build it, and main's #1884 check reads it. An AgentX
-    point's launch is the one Magpie reports it ran (``native_launch_evidence`` over the round's own report); a round
-    with no valid AgentX report has no launch to read and is left alone, since it is not the succeeded round main
-    checks. Any other point's launch is read from its own server args.
+    is built from both the way main's baseline and grid executors build it, and main's #1884 check reads it. A round
+    the report mapper does not call a valid measurement is not the succeeded round main checks, and is left alone. An
+    inference_suite run_dir is judged by ``round_measurement`` and its launch read from the point's server args. A v1
+    Magpie AgentX round is judged by ``agentx_measurement`` and its launch is the one Magpie reports it ran. Any other
+    point's launch is read from its own server args.
     """
     log = _server_log(round_dir)
-    if read_benchmark_point(point).agentx:
+    if is_round_folder(round_dir):
+        if not RoundFolder.read(round_dir).measurement()["valid_measurement"]:
+            return ""
+    elif read_benchmark_point(point).agentx:
         measurement = agentx_measurement(_own_report(round_dir))
         if not measurement["valid_measurement"]:
             return ""
-        evidence = native_launch_evidence(measurement, point, actual_server_log=log)
-    else:
-        evidence = build_launch_evidence(
-            RequestedLaunch(config_path=point, framework=""), actual_server_log=log, slot=round_dir
-        )
+        return _cacheless_refusal(native_launch_evidence(measurement, point, actual_server_log=log))
+    return _cacheless_refusal(
+        build_launch_evidence(RequestedLaunch(config_path=point, framework=""), actual_server_log=log, slot=round_dir)
+    )
+
+
+def _cacheless_refusal(evidence: dict[str, Any]) -> str:
     measured: dict[str, Any] = {"status": "succeeded", "launch_evidence": evidence}
     refuse_cacheless_agentx_baseline(measured)
     return str(measured.get("error") or "") if measured["status"] != "succeeded" else ""
