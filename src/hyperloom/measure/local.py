@@ -109,6 +109,7 @@ from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     REUSE_PORT_DEFAULT,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundFolder,
     GridLaunch,
     GridRecipe,
     GridStop,
@@ -116,6 +117,7 @@ from hyperloom.orchestrator.actions.executors import (
     LaunchLayer,
     VariantResult,
     assign_free_port,
+    is_round_folder,
     resolve_lifecycle_params,
     run_grid,
     run_grid_warmup_enabled,
@@ -1083,10 +1085,13 @@ def _result_returncode(result: VariantResult) -> int:
 
 
 def _eval_returncode(result: VariantResult) -> int:
-    """The accuracy pass's own exit code when the round recorded one, else the round's."""
-    marker = Path(result.workspace or "") / "eval_returncode"
+    """The accuracy pass's own exit code when its run_dir's report or Magpie's marker file has one, else the round's."""
+    workspace = Path(result.workspace or "")
+    if is_round_folder(workspace):
+        code = RoundFolder.read(workspace).report.codes.eval
+        return _result_returncode(result) if code is None else code
     try:
-        return int(marker.read_text(encoding=_UTF8).strip())
+        return int((workspace / "eval_returncode").read_text(encoding=_UTF8).strip())
     except (OSError, ValueError):
         return _result_returncode(result)
 

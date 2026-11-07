@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The accuracy values of the round that evaluated, read from the ``results*.json`` lm-eval wrote for it.
+"""The accuracy values of the round that evaluated: an inference_suite run_dir's from its ``report.json``, a Magpie
+round's from the ``results*.json`` lm-eval wrote for it.
 
 Only the directory of the round that evaluated is read: the warmup round of a graded test, which is its one
 evaluation, or else the measured round. When ``run_grid`` itself discards a warm-up round and evaluates in it too, that
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.contracts.measurement import AccuracyValue
+from inference_suite.contracts import EvalResult, Report, RunLayout
 
 __all__ = ["DISCARDED_DIRS", "RESULT_METRICS", "read_accuracy"]
 
@@ -75,12 +77,34 @@ def _values(document: object) -> tuple[AccuracyValue, ...]:
     return tuple(values)
 
 
+def _report_values(result: EvalResult) -> tuple[AccuracyValue, ...]:
+    version = f"{_HARNESS}={result.definition.lm_eval_version}"
+    if result.task_version:
+        version += f";{result.task}={result.task_version}"
+    return tuple(
+        AccuracyValue(result.task, key, result.scores[key], version) for key in RESULT_METRICS if key in result.scores
+    )
+
+
+def _run_dir_accuracy(layout: RunLayout) -> tuple[AccuracyValue, ...]:
+    """The scores the round's report holds; none for a round whose report is unreadable or that did not evaluate."""
+    try:
+        report = Report.from_document(json.loads(layout.report.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return ()
+    return () if report.eval is None else _report_values(report.eval)
+
+
 def read_accuracy(directory: Path) -> tuple[AccuracyValue, ...]:
     """Every accuracy score in the newest readable ``results*.json`` below ``directory``; empty when there is none.
 
     Files below a discarded warm-up directory are skipped. lm-eval names its files by time, so the last name is the
-    newest; a file that cannot be read or holds no recognised metric falls back to the one before it.
+    newest; a file that cannot be read or holds no recognised metric falls back to the one before it. An inference_suite
+    run_dir is read through its report alone.
     """
+    layout = RunLayout(Path(directory))
+    if layout.report.is_file():
+        return _run_dir_accuracy(layout)
     for path in reversed(_result_files(directory)):
         try:
             values = _values(json.loads(path.read_text(encoding="utf-8")))
