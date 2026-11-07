@@ -66,6 +66,7 @@ from inference_suite.load.scriptable import run_scriptable
 from inference_suite.profile.agentx_window import AgentxWindow
 from inference_suite.profile.fixed_window import FixedWindow
 from inference_suite.profile.inject import WindowCapture, make_trace_dirs, profiler_layer, settle_traces
+from inference_suite.pins import LM_EVAL_DISTRIBUTION
 from inference_suite.runtime.phases import Phase, PhaseClock, PhaseListener
 from inference_suite.runtime.process import spawn
 from inference_suite.runtime.server import Server, ServerLaunch, ServerLifecycle, server_url
@@ -76,8 +77,6 @@ from inference_suite.telemetry.kv_record import KvMetricsRecorder, KvRound
 
 #: The eval process's request, beside the definition it was planned from.
 EVAL_REQUEST_FILE = "request.json"
-#: The distribution the eval runs, read in the interpreter the eval process runs under.
-LM_EVAL_DISTRIBUTION = "lm_eval"
 #: lm-eval names each results file ``results_<time>.json`` below the output path it is given.
 _LM_EVAL_RESULTS = "results_*.json"
 #: Recorded when the serving interpreter's framework carries no version and the base names no recipe version to hold
@@ -616,4 +615,4 @@ def run_round(config: SuiteConfig, *, cancel: Cancel = _not_cancelled) -> RoundR
     return RoundResult(report, layout)
 
 
-__all__ = ["EVAL_REQUEST_FILE", "LM_EVAL_DISTRIBUTION", "UNVERSIONED", "RoundResult", "run_round"]
+__all__ = ["EVAL_REQUEST_FILE", "UNVERSIONED", "RoundResult", "run_round"]

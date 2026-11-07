@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -34,7 +35,14 @@ from types import MappingProxyType
 
 from hyperloom_common.contract_fields import ContractFields, field_names
 from inference_suite.contracts.report import FailedStep
-from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
+from inference_suite.pins import (
+    INFERENCEX_REPO_URL,
+    INFERENCEX_TOOL,
+    LM_EVAL_DISTRIBUTION,
+    LM_EVAL_REQUIREMENT,
+    LM_EVAL_VERSION,
+    PINNED_TOOLS,
+)
 
 STAGING_SCHEMA = "inference-suite-staging/1"
 MANIFEST_FILE = "staging_manifest.json"
@@ -73,6 +81,7 @@ INFERENCEX_REQUIRED = (CLIENT_FILE, GSM8K_TASK, AGENTX_AGGREGATOR_FILE, AGENTX_P
 _DIST_RECORD = "RECORD"
 
 _COMMIT = re.compile(r"[0-9a-f]{40}")
+_GIT = "git"
 _SKIPPED_DIRS = frozenset({"__pycache__"})
 _SCHEMA_KEY = "schema"
 _TOOLS_KEY = "tools"
@@ -218,6 +227,14 @@ def manifest_sha256(tool_cache: Path) -> str | None:
         return None
 
 
+def _parse_manifest(path: Path, data: bytes) -> StagingManifest | str:
+    """The manifest in ``data``, or what to report when it does not parse."""
+    try:
+        return StagingManifest.from_document(json.loads(data))
+    except ValueError as exc:
+        return f"a readable staging manifest at {path} ({exc})"
+
+
 def verify(tool_cache: Path, manifest_sha256: str) -> StagingReport:
     """Check ``tool_cache`` against the manifest whose sha256 is ``manifest_sha256`` and the pins in force."""
     path = tool_cache / MANIFEST_FILE
@@ -227,10 +244,9 @@ def verify(tool_cache: Path, manifest_sha256: str) -> StagingReport:
     actual = _sha256(data)
     if actual != manifest_sha256:
         return StagingReport(manifest_sha256, {}, (f"the staging manifest {manifest_sha256} ({path} is {actual})",))
-    try:
-        manifest = StagingManifest.from_document(json.loads(data))
-    except ValueError as exc:
-        return StagingReport(manifest_sha256, {}, (f"a readable staging manifest at {path} ({exc})",))
+    manifest = _parse_manifest(path, data)
+    if isinstance(manifest, str):
+        return StagingReport(manifest_sha256, {}, (manifest,))
     pins = {name: tool.commit for name, tool in manifest.tools.items()}
     return StagingReport(
         manifest_sha256, pins, (*_unpinned(manifest), *_incomplete(manifest), *_damaged(tool_cache, manifest))
@@ -238,7 +254,7 @@ def verify(tool_cache: Path, manifest_sha256: str) -> StagingReport:
 
 
 def _checkout_commit(source: Path) -> str:
-    done = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
+    done = subprocess.run([_GIT, "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
     if done.returncode != 0:
         raise StagingError(f"{source} is not a git checkout: {done.stderr.strip()}")
     return done.stdout.strip()
@@ -320,6 +336,74 @@ def stage(source: Path, tool_cache: Path) -> str:
     return _sha256(data)
 
 
+def _distribution_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _install_lm_eval() -> None:
+    """Install the pinned lm-eval into this interpreter, the one a round runs its eval under, unless it is there."""
+    if _distribution_version(LM_EVAL_DISTRIBUTION) == LM_EVAL_VERSION:
+        return
+    install = [sys.executable, "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
+    _run_staging_step([*install, LM_EVAL_REQUIREMENT], f"installing {LM_EVAL_REQUIREMENT}")
+
+
+def _intact_digest(tool_cache: Path) -> str | None:
+    """The manifest's sha256 when ``tool_cache`` holds the pinned tools intact; ``None`` when it is to be staged.
+
+    Raises:
+        StagingError: a staged file was removed or edited, or the manifest does not parse.
+    """
+    digest = manifest_sha256(tool_cache)
+    if digest is None or verify(tool_cache, digest).failed_step is None:
+        return digest
+    path = tool_cache / MANIFEST_FILE
+    manifest = _parse_manifest(path, path.read_bytes())
+    damage = (manifest,) if isinstance(manifest, str) else tuple(_damaged(tool_cache, manifest))
+    if damage:
+        raise StagingError("; ".join(damage))
+    return None
+
+
+def _fetch_inferencex(checkout: Path) -> None:
+    """Check out InferenceX at its pin from :data:`INFERENCEX_REPO_URL` into the empty directory ``checkout``."""
+    pin = PINNED_TOOLS[INFERENCEX_TOOL]
+    git = [_GIT, "-C", str(checkout)]
+    _run_staging_step([_GIT, "init", "-q", str(checkout)], f"creating {checkout}")
+    _run_staging_step([*git, "fetch", "-q", "--depth", "1", INFERENCEX_REPO_URL, pin], f"fetching InferenceX {pin}")
+    _run_staging_step([*git, "checkout", "-q", "FETCH_HEAD"], f"checking out InferenceX {pin}")
+
+
+def ensure_staged(tool_cache: Path, source: Path | None) -> str:
+    """Stage the pinned tools into ``tool_cache`` unless it holds them intact; returns the manifest's sha256.
+
+    A cache whose manifest verifies stages nothing. One staged at a pin no longer in force, or without a file a load
+    now runs, is staged again. One whose staged files were removed or edited, or whose manifest does not parse, is
+    refused as it stands, never overwritten. InferenceX is staged from the checkout ``source``, or with none,
+    fetched at its pin. lm-eval is installed at its pin into the interpreter running this.
+
+    Raises:
+        StagingError: the cache is damaged, or a tool cannot be fetched, staged or installed.
+    """
+    digest = _intact_digest(tool_cache)
+    _install_lm_eval()
+    if digest is not None:
+        return digest
+    tool_cache.mkdir(parents=True, exist_ok=True)
+    if source is not None:
+        return stage(source, tool_cache)
+    checkout = tool_cache / f".source-{PINNED_TOOLS[INFERENCEX_TOOL]}"
+    shutil.rmtree(checkout, ignore_errors=True)
+    try:
+        _fetch_inferencex(checkout)
+        return stage(checkout, tool_cache)
+    finally:
+        shutil.rmtree(checkout, ignore_errors=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """``stage`` prints the new manifest's sha256; ``check`` prints the cache's, or what is missing and exits 1."""
     parser = argparse.ArgumentParser(prog="python -m inference_suite.staging")
@@ -369,6 +453,7 @@ __all__ = [
     "StagingError",
     "StagingManifest",
     "StagingReport",
+    "ensure_staged",
     "inferencex_root",
     "main",
     "manifest_sha256",
