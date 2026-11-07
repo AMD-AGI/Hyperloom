@@ -260,13 +260,20 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
     from pathlib import Path as _Path
 
     executors = _Path(_accuracy_gate.__file__).parent
-    tree = ast.parse((executors / "_accuracy_gate.py").read_text(encoding="utf-8"))
-    siblings = {
-        node.module.lstrip(".")
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module
-    }
-    assert siblings == set(), f"_accuracy_gate must stay a leaf, but it imports {sorted(siblings)}"
+
+    def siblings(module: str) -> set[str]:
+        tree = ast.parse((executors / f"{module}.py").read_text(encoding="utf-8"))
+        return {
+            node.module.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module
+        }
+
+    reached, frontier = set(), siblings("_accuracy_gate")
+    while frontier:
+        reached |= frontier
+        frontier = {module for name in frontier for module in siblings(name)} - reached
+    assert "_accuracy_gate" not in reached, f"_accuracy_gate is imported back through {sorted(reached)}"
 
     from hyperloom.orchestrator.actions.executors import benchmark_backend, baseline
 
