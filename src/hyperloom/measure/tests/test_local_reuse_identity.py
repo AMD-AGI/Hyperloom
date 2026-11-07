@@ -300,6 +300,18 @@ def test_a_variable_the_launcher_exports_is_kept_or_dropped_alike_in_every_round
         assert magpie_server_env(round_["envs"]) == magpie_server_env(boot["envs"]), f"the round at {round_['name']}"
 
 
+def test_on_bypass_the_boot_round_is_the_same_one_request_round_with_no_evaluation(rounds, tmp_path, monkeypatch):
+    """No backend names a server-only phase: a bypass boot runs its server and one request, as a Magpie boot does."""
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
+
+    LocalMeasurementBackend().run_test(_sweep(tmp_path))
+
+    boot, *measured = rounds.rounds
+    assert "MAGPIE_RUN_PHASE" not in boot["envs"]
+    assert (boot["envs"]["RUN_EVAL"], boot["envs"]["NUM_PROMPTS"]) == ("false", "1")
+    assert not any("MAGPIE_RUN_PHASE" in r["envs"] for r in measured)
+
+
 def test_the_copy_of_magpies_filter_is_magpies(tmp_path):
     benchmarker = pytest.importorskip("Magpie.modes.benchmark.benchmarker")
     envs = {
