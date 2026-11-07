@@ -152,7 +152,7 @@ _PROBE = textwrap.dedent(
         "causes": [value.pattern for name, value in vars(log_causes).items() if hasattr(value, "pattern")],
         "surface": [surface.SURFACE_ENV_KEYS, surface.POINT_ENV_KEYS, surface.REQUEST_ENV_KEYS],
         "points": [points._PROFILE_PINNED, points._PROFILE_SURFACE_EXEMPT],
-        "local": [sorted(local._BOOT_CLIENT_ENVS), sorted(local._MEASURED_ENVS)],
+        "local": [sorted(local._BOOT_CLIENT_ENVS), sorted(local._BENCH_ENVS), sorted(local._EVAL_ENVS)],
         "compile": [compiled.IMAGE_SOURCE_ROOTS, sorted(compiled.PER_DEVICE_TABLE_ENVS)],
         "configs": framework_base.DEFAULT_CONFIGS,
         "context": [eval_context.EVAL_CONTEXT_ENV, eval_context.CONTEXT_FLAGS],
@@ -269,7 +269,7 @@ def test_inferencex_env_names_are_read_from_the_owner(probe: dict[str, Any]) -> 
         ["ENV_TP", "ENV_EP", "ENV_ISL", "ENV_RANDOM_RANGE_RATIO", "ENV_MAX_MODEL_LEN"],
         ["envs.ENV_OSL"],
     ]
-    assert probe["local"] == [["ENV_NUM_PROMPTS", "ENV_RUN_EVAL"], ["ENV_RUN_EVAL"]]
+    assert probe["local"] == [["ENV_NUM_PROMPTS", "ENV_RUN_EVAL"], ["ENV_RUN_EVAL"], ["ENV_EVAL_ONLY", "ENV_RUN_EVAL"]]
     assert [hint[2] for hint in probe["hints"][1]] == ["ENV_CONC", "ENV_OSL", "ENV_RANDOM_RANGE_RATIO", "ENV_ISL"]
     assert {"ENV_TP", "ENV_EP", "ENV_CONC", "ENV_ISL", "ENV_OSL", "ENV_MAX_MODEL_LEN", "ENV_RUN_EVAL"} <= set(
         probe["blocked"]

@@ -34,11 +34,10 @@ In a session that plays a scheduling playbook the scoring writes, beside every s
 evidence (:func:`stall_evidence`), the facts the judge's stop rule turns on: ``stalled_tests``, its tests judged
 since its last commit that did not fail to merge, against the bar ``stall_bar`` (:class:`StopRule`, the stall odds of
 :mod:`rsi.history` by default); ``merged_commits`` and ``merged_gain_pct``, what of it reached the integration
-branch; ``near_bar_tests`` and ``stranded_lead_pct``, the leads it holds; and ``stop_candidate``, 1 when it has
-stalled past the bar with nothing of the safety envelope holding it (:func:`envelope_hold`), no candidate waiting for
-its confirm and its grace over. A ``probation_share`` of the candidates is drawn, once a stall, to run
-``probation_tests`` more first, with ``probation`` 1 meanwhile: what such a branch does next is how the stop rule
-learns whether stopping it was right.
+branch; ``stranded_lead_pct``, the stranded lead it holds; and ``stop_candidate``, 1 when it has stalled past the bar
+with nothing of the safety envelope holding it (:func:`envelope_hold`), no candidate waiting for its confirm and its
+grace over. A ``probation_share`` of the candidates is drawn, once a stall, to run ``probation_tests`` more first, with
+``probation`` 1 meanwhile: what such a branch does next is how the stop rule learns whether stopping it was right.
 
 Given a ``log`` path, the scoring appends one :data:`FRONTIER_LOG_FORMAT` line per round it scored anything: when, on
 the session clock too, the policy's parameters, the scorer, and each scored branch's spend, head value and score.
@@ -75,7 +74,6 @@ from hyperloom_multibranch.contracts.blackboard.vocab import (
 )
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.local.files import encode_json
-from hyperloom_multibranch.blackboard.local.unfinished import near_misses
 from hyperloom_multibranch.blackboard.rsi.archive import (
     SearchTree,
     TreeBranch,
@@ -111,7 +109,6 @@ STALLED_COMPONENT = "stalled_tests"
 STALL_BAR_COMPONENT = "stall_bar"
 MERGED_COMPONENT = "merged_commits"
 MERGED_GAIN_COMPONENT = "merged_gain_pct"
-NEAR_BAR_COMPONENT = "near_bar_tests"
 STRANDED_COMPONENT = "stranded_lead_pct"
 CANDIDATE_COMPONENT = "stop_candidate"
 PROBATION_COMPONENT = "probation"
@@ -122,7 +119,6 @@ PROBATION_SHARE = 0.25
 PROBATION_TESTS = HORIZON_TESTS
 #: What of the safety envelope holds a branch (:func:`envelope_hold`), named as the scheduler names its holds.
 PROBATION_HOLD = "probation"
-NEAR_BAR_HOLD = "near_bar_lead"
 STRANDED_HOLD = "stranded_lead"
 #: What holds a branch outside the envelope: a candidate of it waiting for its confirm.
 PENDING_CONFIRM_HOLD = "pending_confirm"
@@ -356,13 +352,11 @@ def drawn_for_probation(snapshot: BlackboardSnapshot, branch: str, anchor: str, 
 
 def envelope_hold(components: Mapping[str, float]) -> str:
     """What of the safety envelope holds a branch whose stall evidence is ``components``: its probation, else a
-    near-bar lead, else a stranded lead; ``""`` for none. The one reading of the envelope: the stall evidence makes no
-    such branch a stop candidate, and the scheduler refuses its stop, though not a lower K."""
+    stranded lead; ``""`` for none. The one reading of the envelope: the stall evidence makes no such branch a stop
+    candidate, and the scheduler refuses its stop, though not a lower K."""
 
     if components.get(PROBATION_COMPONENT):
         return PROBATION_HOLD
-    if components.get(NEAR_BAR_COMPONENT, 0.0) > 0:
-        return NEAR_BAR_HOLD
     if STRANDED_COMPONENT in components:
         return STRANDED_HOLD
     return ""
@@ -387,17 +381,14 @@ def stall_evidence(
     """The stall evidence of the running branch ``row``, ``young`` while its grace lasts.
 
     The stall counts the tests judged since the branch's last commit that did not fail to merge, or since it opened.
-    A branch holds a near-bar lead when one of its last ``stall.bar`` judged tests is a near miss
-    (:func:`~hyperloom_multibranch.blackboard.local.unfinished.near_misses`), and a stranded one when its head leads
-    integration over the bar on commits that did not merge (:func:`~.stranded.stranded_leads`), until the lead is
-    released (:func:`_lead_released`). A branch the envelope holds so (:func:`envelope_hold`), one with a candidate
-    waiting for its confirm, or one in its grace, is no stop candidate however long it stalled.
+    A branch holds a stranded lead when its head leads integration over the bar on commits that did not merge
+    (:func:`~.stranded.stranded_leads`), until the lead is released (:func:`_lead_released`). A branch the envelope
+    holds so (:func:`envelope_hold`), one with a candidate waiting for its confirm, or one in its grace, is no stop
+    candidate however long it stalled.
     """
 
     anchor, since = _last_mergeable_commit(snapshot, row.branch)
     judged = _judged_since(snapshot, row.branch, since)
-    recent = judged[-stall.bar :] if stall.bar > 0 else []
-    near = near_misses(recent)
     merged = [item for item in snapshot.committed if item.branch == row.branch and item.merged_into is not None]
     lead = next((lead for lead in stranded_leads(snapshot, metric) if lead.branch == row.branch), None)
     evidence = {
@@ -405,7 +396,6 @@ def stall_evidence(
         STALL_BAR_COMPONENT: float(stall.bar),
         MERGED_COMPONENT: float(len(merged)),
         MERGED_GAIN_COMPONENT: sum(item.gain_pct for item in merged),
-        NEAR_BAR_COMPONENT: float(near),
     }
     if lead is not None and not _lead_released(snapshot, lead, len(judged), stall.bar):
         evidence[STRANDED_COMPONENT] = lead.lead_pct
@@ -615,8 +605,6 @@ __all__ = [
     "HEADROOM_COMPONENT",
     "MERGED_COMPONENT",
     "MERGED_GAIN_COMPONENT",
-    "NEAR_BAR_COMPONENT",
-    "NEAR_BAR_HOLD",
     "NEW_BRANCH_FLOOR_PCT",
     "OBSERVATION_FLOOR_PCT",
     "OBSERVATION_SECONDS",
