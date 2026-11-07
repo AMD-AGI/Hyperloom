@@ -186,8 +186,7 @@ def sanitize_publish_server_args(value: str) -> str:
     whitespace_tokens = [token for token in safe if any(ch.isspace() for ch in token)]
     if whitespace_tokens:
         raise ValueError(
-            "extra_server_args contains a whitespace-bearing value unsupported "
-            "by Magpie's unquoted environment expansion"
+            "extra_server_args contains a whitespace-bearing value unsupported by the unquoted EXTRA_*_ARGS transport"
         )
     return reserialize_json_blobs(" ".join(safe))
 
