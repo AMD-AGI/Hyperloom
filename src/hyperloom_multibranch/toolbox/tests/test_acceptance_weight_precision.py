@@ -12,11 +12,11 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import Purpose
-from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta
+from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected
 from hyperloom_multibranch.toolbox.acceptance import DELTA_NOT_APPLICABLE_CODE, Acceptance, AcceptanceSetup
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakePlanner, FakeRepo, build, req
-from hyperloom_multibranch.toolbox.weight_precision import weight_precision_changes
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, PARENT, FakePlanner, FakeRepo, build, req
+from hyperloom_multibranch.toolbox.weight_precision import ambiguous_words, weight_precision_changes
 
 ROOT = "r0"
 SAME_PRECISION = "the weight precision of the session cannot change"
@@ -758,20 +758,17 @@ def test_a_removal_from_the_resolved_launch_comes_before_the_launch_own_flags() 
 # --- vLLM's dotted flag takes the next word as its value, whatever it is ---------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "server_args",
-    [
-        # vLLM sets ``foo`` to ``-qfp8`` and serves no quantization: the composed launch keeps no other.
+def test_a_flag_word_a_dotted_flag_takes_as_its_value_is_not_that_flag() -> None:
+    """vLLM sets ``foo`` to ``-qfp8`` and serves no quantization; acceptance refuses a candidate that adds such a pair
+    (below), so only a root's own is read so."""
+    for server_args in (
         "--hf-overrides.foo -qfp8",
         "--hf-overrides.foo -q=fp8",
         "--additional-config.foo -qfp8 --max-num-seqs 64",
         # A one-dash flag with a dot is dotted too (vLLM's ``-cc`` is its ``--compilation-config``).
         "-cc.custom_ops+ -qfp8",
-    ],
-)
-async def test_a_flag_word_a_dotted_flag_takes_as_its_value_is_not_that_flag(tmp_path: Path, server_args: str) -> None:
-    change = _delta(server_args, remove_args=("--quantization",))
-    await _refused_naming(tmp_path, _repo("--quantization fp8"), change, "--quantization: fp8 -> (not set)")
+    ):
+        assert _changes("--quantization fp8", server_args) == ["--quantization: fp8 -> (not set)"], server_args
 
 
 @pytest.mark.parametrize(
@@ -799,6 +796,208 @@ def test_a_dotted_flag_written_with_its_value_takes_no_other_word() -> None:
     """The composed launch writes ``--flag.key=value`` as two words, so only the comparison sees this form."""
     assert _changes("--quantization fp8", "--hf-overrides.foo=bar -qfp8") == []
     assert _changes("--quantization fp8", "--hf-overrides.foo -qfp8") == ["--quantization: fp8 -> (not set)"]
+
+
+# --- -O<rest> is --optimization-level <rest> -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        # vLLM reads ``-O3.0`` as ``--optimization-level 3.0``, never as a dotted flag that takes the next word.
+        ("", "-O3.0 --quantization fp8", ["--quantization: (not set) -> fp8"]),
+        ("", "-O.x -qfp8", ["--quantization: (not set) -> fp8"]),
+        ("", "-O=3.0 --dtype float16", ["--dtype: (not set) -> float16"]),
+        # The words after ``-O<rest>`` are values of ``--optimization-level``, not of the flag before it.
+        ("--dtype 16", "--dtype -O3.0 x 16", ["--dtype: 16 -> (on)"]),
+        ("--dtype float16", "-O3 --dtype float16", []),
+        ("--dtype float16", "-O 3 --dtype float16", []),
+    ],
+)
+def test_a_word_that_begins_with_dash_o_is_the_optimization_level(before: str, after: str, expected: list[str]) -> None:
+    assert _changes(before, after) == expected
+
+
+# --- a launch the frameworks read in two ways ------------------------------------------------------------------------
+
+AMBIGUOUS = "ambiguous between frameworks"
+
+
+def _composed(repo: FakeRepo, change: RecipeDelta) -> tuple[LaunchConfig, LaunchConfig]:
+    """The root's launch and the candidate's, as acceptance composes them."""
+    return apply(repo.recipes[ROOT], RecipeDelta()).launch, apply(repo.recipes[PARENT], change).launch
+
+
+async def _refused_as_ambiguous(
+    tmp_path: Path, repo: FakeRepo, change: RecipeDelta, pair: str, **fields: object
+) -> None:
+    refused = await _refusal(tmp_path, repo, change, **fields)
+    assert refused is not None, "a launch the frameworks read in two ways was accepted"
+    assert refused.code == DELTA_NOT_APPLICABLE_CODE
+    assert AMBIGUOUS in str(refused)
+    assert "(--flag.key=value)" in str(refused)
+    assert repr(pair) in str(refused), str(refused)
+
+
+#: A candidate that adds a word that begins with ``-`` and holds a ``.`` but no ``=``, right before a word that begins
+#: with ``-``, on a root that does not give the pair, and the pair. The comparison alone accepts each: it reads the pair
+#: one way (a dotted flag takes the next word, a number is a value, ``-O3.0`` is ``--optimization-level 3.0``), and a
+#: framework that reads it the other way serves another precision.
+READ_TWO_WAYS = [
+    ("", _delta("--hf-overrides.foo -qfp8"), "--hf-overrides.foo -qfp8"),
+    ("", _delta("-cc.custom_ops+ -qfp8"), "-cc.custom_ops+ -qfp8"),
+    ("--quantization fp8", _delta("-O3.0 -qfp8", remove_args=("--quantization",)), "-O3.0 -qfp8"),
+    ("--dtype float16", _delta("-0.5 --dtype float16", remove_args=("--dtype",)), "-0.5 --dtype"),
+    ("--dtype float16", _delta("-0.0 --dtype float16", remove_args=("--dtype",)), "-0.0 --dtype"),
+    ("--dtype float16", _delta("-.5 --dtype float16", remove_args=("--dtype",)), "-.5 --dtype"),
+    ("--dtype float16", _delta("-1. --dtype float16", remove_args=("--dtype",)), "-1. --dtype"),
+    ("--quantization fp8", _delta("--served-model-name a -0.5 -qfp8", remove_args=("--quantization",)), "-0.5 -qfp8"),
+    # The composed launch writes ``--flag=-0.5`` as ``--flag -0.5``.
+    ("--dtype float16", _delta("--some-flag=-0.5 --dtype float16", remove_args=("--dtype",)), "-0.5 --dtype"),
+    # The root gives the word with another word after it, or as its last.
+    (
+        "--served-model-name a -0.5 --max-num-seqs 32",
+        _delta("--enable-x", remove_args=("--max-num-seqs",)),
+        "-0.5 --enable-x",
+    ),
+    ("--some-flag -0.5", _delta("--max-num-seqs 64"), "-0.5 --max-num-seqs"),
+    # A pair counts each time it is given: the candidate gives the root's twice.
+    ("-cc.custom_ops+ -qfp8", _delta("-cc.custom_ops+ -qfp8"), "-cc.custom_ops+ -qfp8"),
+]
+
+
+@pytest.mark.parametrize(("root_args", "change", "pair"), READ_TWO_WAYS)
+async def test_a_candidate_that_adds_a_word_read_two_ways_is_refused(
+    tmp_path: Path, root_args: str, change: RecipeDelta, pair: str
+) -> None:
+    repo = _repo(root_args)
+    assert weight_precision_changes(*_composed(repo, change)) == [], "the comparison alone refuses this candidate"
+    await _refused_as_ambiguous(tmp_path, repo, change, pair)
+
+
+@pytest.mark.parametrize(
+    ("root_args", "change", "pair", "purpose"),
+    [
+        ("--max-num-seqs 64", _delta("-O3.0 --quantization fp8"), "-O3.0 --quantization", Purpose.EXPLORE),
+        ("--max-num-seqs 64", _delta("-O3.0 -qfp8"), "-O3.0 -qfp8", Purpose.EXPLORE),
+        ("--max-num-seqs 64", _delta("-O3.0 --dtype float16"), "-O3.0 --dtype", Purpose.EXPLORE),
+        (
+            "--max-num-seqs 64",
+            _delta('-O2.0 --hf-overrides {"torch_dtype":"float16"}'),
+            "-O2.0 --hf-overrides",
+            Purpose.EXPLORE,
+        ),
+        (
+            "--quantization fp8 --served-model-name a",
+            _delta("-0.5 -qfp8", remove_args=("--quantization",)),
+            "-0.5 -qfp8",
+            Purpose.EXPLORE,
+        ),
+        (
+            "--dtype float16 --served-model-name a",
+            _delta("-0.5 --dtype float16", remove_args=("--dtype",)),
+            "-0.5 --dtype",
+            Purpose.EXPLORE,
+        ),
+        # A dotted flag that takes the flag after it, whatever the comparison makes of the rest.
+        (
+            "--quantization fp8",
+            _delta("--hf-overrides.foo -qfp8", remove_args=("--quantization",)),
+            "--hf-overrides.foo -qfp8",
+            Purpose.EXPLORE,
+        ),
+        (
+            "--quantization fp8",
+            _delta("--hf-overrides.foo -q=fp8", remove_args=("--quantization",)),
+            "--hf-overrides.foo -q=fp8",
+            Purpose.EXPLORE,
+        ),
+        (
+            "--quantization fp8",
+            _delta("--additional-config.foo -qfp8 --max-num-seqs 64", remove_args=("--quantization",)),
+            "--additional-config.foo -qfp8",
+            Purpose.EXPLORE,
+        ),
+        ("", _delta("--hf-overrides.foo --quantization fp8"), "--hf-overrides.foo --quantization", Purpose.EXPLORE),
+    ],
+)
+async def test_the_launches_found_read_two_ways_are_refused(
+    tmp_path: Path, root_args: str, change: RecipeDelta, pair: str, purpose: Purpose
+) -> None:
+    await _refused_as_ambiguous(tmp_path, _repo(root_args), change, pair, purpose=purpose)
+
+
+@pytest.mark.parametrize(
+    ("root_args", "change", "pair"),
+    [
+        ("--max-num-seqs 64", _delta("-O3.0 --quantization fp8"), "-O3.0 --quantization"),
+        (
+            "--quantization fp8 --served-model-name a",
+            _delta("-0.5 -qfp8", remove_args=("--quantization",)),
+            "-0.5 -qfp8",
+        ),
+    ],
+)
+async def test_a_confirm_that_adds_a_word_read_two_ways_is_refused(
+    root_args: str, change: RecipeDelta, pair: str
+) -> None:
+    acceptance = Acceptance(AcceptanceSetup(_repo(root_args), FakePlanner(), IMAGE), is_accepted=lambda _: True)
+    with pytest.raises(RequestRejected) as refused:
+        await acceptance.prepare(req(purpose=Purpose.CONFIRM, retest_of="r1", change=change))
+    assert refused.value.code == DELTA_NOT_APPLICABLE_CODE
+    assert AMBIGUOUS in str(refused.value)
+    assert repr(pair) in str(refused.value)
+
+
+@pytest.mark.parametrize("purpose", [Purpose.INTEGRATION, Purpose.FINAL])
+async def test_a_rerun_of_a_parent_that_adds_a_word_read_two_ways_is_refused(tmp_path: Path, purpose: Purpose) -> None:
+    repo = _repo("--max-num-seqs 64 -qfp8", parent_args="--max-num-seqs 64 -0.5 -qfp8")
+    await _refused_as_ambiguous(tmp_path, repo, RecipeDelta(), "-0.5 -qfp8", purpose=purpose)
+
+
+@pytest.mark.parametrize(
+    ("root_args", "change"),
+    [
+        # A dotted value written with ``=`` takes no other word: the composed launch gives ``bar`` after the flag.
+        ("--quantization fp8", _delta("--hf-overrides.foo=bar -qfp8", remove_args=("--quantization",))),
+        # A one-dash word keeps its ``=``.
+        ("--quantization fp8", _delta("-cc.custom_ops+=none -qfp8", remove_args=("--quantization",))),
+        ("", _delta("-cc.custom_ops+=none")),
+        ("", _delta("-tp 8 -O3 --max-num-seqs 64")),
+        ("", _delta("-O 3 --max-num-seqs 64")),
+        ("", _delta("-O=3.0 --max-num-seqs 64")),
+        ("", _delta('--compilation-config \'{"cudagraph_mode": "FULL_AND_PIECEWISE", "x": -0.5}\' --max-num-seqs 64')),
+        ("", _delta("--hf-overrides.rope_scaling.factor 2.5 --max-num-seqs 64")),
+        ("", _delta("--profiler-config.ignore_frontend True --max-num-seqs 64")),
+        # A number given to a flag, last or with no word that begins with ``-`` after it.
+        ("--dtype float16", _delta("--max-num-seqs 64 --some-flag -0.5")),
+        ("--dtype float16", _delta("--some-flag -1 --max-num-seqs 64")),
+        ("--dtype float16", _delta("--some-flag -0.5 1 --max-num-seqs 64")),
+        # The root's own pairs: the session's launch.
+        ("--served-model-name a -0.5 --dtype float16", _delta("--max-num-seqs 64")),
+        ("--hf-overrides.foo -qfp8", _delta("--max-num-seqs 64")),
+        ("-O3.0 --quantization fp8", _delta("--max-num-seqs 64")),
+        ("-0.5 --max-num-seqs 32", _delta("-0.5 --max-num-seqs 64")),
+    ],
+)
+async def test_a_word_read_one_way_or_the_root_own_is_accepted(
+    tmp_path: Path, root_args: str, change: RecipeDelta
+) -> None:
+    assert await _refusal(tmp_path, _repo(root_args), change) is None
+
+
+@pytest.mark.parametrize("purpose", [Purpose.BASELINE, Purpose.INTEGRATION])
+async def test_the_root_launch_read_two_ways_is_the_session_own(tmp_path: Path, purpose: Purpose) -> None:
+    repo = _repo("--hf-overrides.foo -qfp8 --served-model-name a -0.5 --dtype float16 -O3.0 -qfp8")
+    assert await _refusal(tmp_path, repo, RecipeDelta(), purpose=purpose) is None
+
+
+def test_the_pairs_a_launch_adds_are_named_in_its_order() -> None:
+    root = LaunchConfig(server_args="--a -0.5 --b x")
+    assert ambiguous_words(root, root) == []
+    after = LaunchConfig(server_args='-1.5 --dtype float16 --a -0.5 --b x --hf-overrides.foo -qfp8 --c {"d":-0.5}')
+    assert ambiguous_words(root, after) == ["-1.5 --dtype", "--hf-overrides.foo -qfp8"]
+    assert ambiguous_words(after, root) == []
 
 
 # --- options of the frameworks that a spelling only begins, or that only begin one ---------------------------------
