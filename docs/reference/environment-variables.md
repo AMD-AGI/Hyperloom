@@ -794,16 +794,21 @@ account for it (`ProcessUsers`), bubblewrap where `choose_test_isolation()` give
 (`tests run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`); a
 hosted run refuses to build the toolbox instead. Each sandbox writes its own `fs/` (`/in`, `/out`, `/work`), a private
 `/tmp` and a full-size `/dev/shm`, and a sealed one its own `private/`, where the runner reads its signing key and
-removes it; it reads its toolchain, its interpreter, the model and what its links point into, the Hugging Face hub
-cache, and the trees its template names (the framework snapshot, the staged rule pack, the compiled-code store, the
-runner cache, the native build store and trust file, a local InferenceX or Magpie repository); the app's credential
-locations those show are masked. Nothing else of the host is there: not the session's other files, another sandbox's
+removes it; it reads its toolchain, its interpreter, the model and what its entries link to (each link's target
+itself, never the directory it is in; a hub snapshot's repository `blobs`), the Hugging Face hub cache, and the trees
+its template names (the framework snapshot, the staged rule pack, the compiled-code store, the runner cache, the native
+build store and trust file, a local InferenceX or Magpie repository); the app's credential locations those show are
+masked, and a sandbox one of whose read paths is itself a credential location (a home, a login file) runs as before
+with a WARNING, refused in a hosted run. Nothing else of the host is there: not the session's other files, another sandbox's
 directory or key, the app's state, nor any process of the app's (its own pid namespace; a sandbox that runs several
 commands shares one holder's, as an agent sandbox does). A sandbox with cards gets `/dev/kfd` and `/dev/dri`, `/sys`
 is read-only, the network is the app's (its server listens on loopback for the benchmark client). The sandbox's id
 (`E2B_SANDBOX_ID`) is set inside only, so the reap, the card guard and the tag sweep find its processes and never
 bubblewrap's own, and a reap's SIGTERM reaches them with their grace. Before bubblewrap 0.12 a sealed runner whose
-session directory is below `/tmp` gets a fresh `/tmp` of its own instead of the bound one.
+session directory is below `/tmp` gets a fresh `/tmp` of its own instead of the bound one. A probe that gives no answer
+in time leaves only that launch's test unconfined: the next sandbox is chosen for again. The app opens a sandbox's files
+(the runner's output and logs) by one walk below its `fs/` that follows no link out of it, so a process of the sandbox
+cannot swap a link to the app's files in between a check and the open.
 
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
 framework image may carry its own); a local run uses the `bwrap` on `PATH`. The probe (`python -I -m

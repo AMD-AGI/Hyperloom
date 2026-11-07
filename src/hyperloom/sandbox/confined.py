@@ -319,7 +319,11 @@ def local_test_isolation(*, probe: ProbeBwrap = bwrap_probe) -> tuple[str, tuple
     """How a local test sandbox no account is named for is launched now, as a session's record names it, and why it is
     not isolated: :data:`~hyperloom.common.agent_isolation.BWRAP`; :data:`~hyperloom.common.agent_isolation.NONE`
     (unconfined, as before) with the reasons of both tiers; or :data:`~hyperloom.common.agent_isolation.REFUSED` with
-    them, in a hosted run where bubblewrap cannot sandbox a test. Never raises."""
+    them, in a hosted run where bubblewrap cannot sandbox a test. Never raises.
+
+    This is the tier, as the chooser gives it: a sandbox whose own paths bubblewrap cannot bind safely
+    (:meth:`SandboxConfiner.confine`) runs as before even where this says
+    :data:`~hyperloom.common.agent_isolation.BWRAP`, which its own WARNING says; a hosted run refuses it."""
     try:
         found = choose_test_isolation(probe=probe)
     except IsolationRefused as refused:
