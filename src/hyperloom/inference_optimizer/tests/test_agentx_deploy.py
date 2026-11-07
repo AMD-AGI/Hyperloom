@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.agentx import mapping
+from inference_suite.load import mlperf_report
 from hyperloom.inference_optimizer.agentx.deploy import (
     agentx_asset_dir,
     deploy_agentx_assets,
@@ -28,7 +28,7 @@ def test_deploy_copies_and_is_executable(tmp_path):
     deploy_agentx_assets(dst)
     assert (dst / "mlperf_agentic_client.sh").exists()
     assert (dst / "map_mlperf.py").exists()
-    assert (dst / "agentx_mapping.py").read_bytes() == Path(mapping.__file__).read_bytes()
+    assert (dst / "agentx_mapping.py").read_bytes() == Path(mlperf_report.__file__).read_bytes()
     assert os.access(dst / "mlperf_agentic_client.sh", os.X_OK)
 
 

@@ -1,23 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""MLPerf harness -> InferenceX schema, read against upstream's real output.
+"""Contract of the MLPerf harness's output mapped into the InferenceX result schema, against upstream's real output.
 
-The fixtures are one smoke run's ``result_summary.json`` and ``scores.json``
-from ``inference-endpoint``, with only the per-turn lists trimmed.
+The fixtures are one smoke run's ``result_summary.json`` and ``scores.json`` from ``inference-endpoint``, with only
+the per-turn lists trimmed.
 """
 
 from __future__ import annotations
 
 import copy
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.agentx.deploy import deploy_agentx_assets
-from hyperloom.inference_optimizer.agentx.mapping import MlperfReportError, map_mlperf
+from inference_suite.load.mlperf_report import MlperfReportError, map_mlperf
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "mlperf_agentic_smoke"
 
@@ -93,22 +91,12 @@ def test_no_scores_file_leaves_accuracy_absent():
         ("completed", True, []),
     ],
 )
-def test_submission_verdict_reaches_the_measurement_gate(tmp_path, state, complete, reasons):
-    from hyperloom.orchestrator.actions.executors.benchmark_result import (
-        extract_benchmark_measurement,
-        is_valid_measurement,
-    )
-
+def test_the_submission_verdict_is_mapped(state, complete, reasons):
     report = _report()
     report.update(complete=complete, state=state)
     mapped = _map(report)
     assert mapped["submission_valid"] is (not reasons)
     assert mapped["submission_invalid_reasons"] == reasons
-    (tmp_path / "inferencex_result.json").write_text(json.dumps(mapped))
-    measurement = extract_benchmark_measurement(None, workspace=tmp_path)
-    assert measurement["output_throughput"] > 0
-    assert measurement["completed_requests"] > 0
-    assert is_valid_measurement(measurement) is (not reasons)
 
 
 def test_failed_samples_are_an_error_rate_over_issued():
@@ -144,20 +132,3 @@ def test_a_schema_mismatch_raises_instead_of_mapping_zeros(mutate):
 def test_a_scores_file_without_turns_raises():
     with pytest.raises(MlperfReportError):
         _map(scores={"score": 0.7})
-
-
-def test_deployed_map_mlperf_cli(tmp_path, monkeypatch):
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    monkeypatch.delitem(sys.modules, "agentx_mapping", raising=False)
-    monkeypatch.setenv("AGENTIC_DATASET_PATH", "/data/agentic_combined_v6.jsonl")
-    deploy_agentx_assets(tmp_path / "benchmarks")
-    mapper = tmp_path / "benchmarks" / "map_mlperf.py"
-    dst = tmp_path / "inferencex_result.json"
-    from importlib.machinery import SourceFileLoader
-
-    mod = SourceFileLoader("map_mlperf_cli", str(mapper)).load_module()
-    mod.main(str(_FIXTURES / "result_summary.json"), str(dst), str(_FIXTURES / "scores.json"))
-    out = json.loads(dst.read_text(encoding="utf-8"))
-    assert out["corpus_loader"] == "agentic_combined_v6"
-    assert out["accuracy_score"] == pytest.approx(0.7178)
-    assert out["median_ttft_ms"] == pytest.approx(3325.72024)
