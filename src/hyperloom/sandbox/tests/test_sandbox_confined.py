@@ -427,7 +427,7 @@ def test_a_plan_path_that_is_a_credential_location_runs_the_sandbox_as_before_lo
     with caplog.at_level(logging.WARNING):
         sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
     assert not sandbox.confined and fake.launches() == []
-    assert f"{linked} is a credential location of the app's, which its bind would show unmasked" in caplog.text
+    assert f"{linked} is a credential location, which its bind would show unmasked" in caplog.text
     sandbox.kill()
 
     monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=True, layer_bwrap=str(fake.path)))

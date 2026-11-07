@@ -47,7 +47,7 @@ import pwd
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
@@ -500,8 +500,8 @@ def _passwd_home() -> Path | None:
 @dataclass(frozen=True)
 class _LinkRule:
     """Where a model entry's link may lead (all paths resolved): never to or below one of the credential
-    ``locations``, except below one of the ``homes`` outside its hidden entries; and anywhere in a tree the plan reads
-    whole anyway (``bound``)."""
+    ``locations``, except below one of the ``homes`` outside its hidden entries, unless a tree the plan reads whole
+    anyway (``bound``) holds the link's target and is itself in that credential location."""
 
     homes: tuple[Path, ...]
     locations: tuple[Path, ...]
@@ -509,26 +509,29 @@ class _LinkRule:
 
     def refusal(self, entry: Path, tree: Path) -> str | None:
         """Why ``entry``'s bind of ``tree`` would show credentials no mask hides (masks open a credential location up
-        around a bound path, so nothing in that path is masked); ``None`` when it would not: ``tree`` is in a tree the
-        plan reads whole, or is neither a credential location nor below one, except below a home outside its hidden
-        entries (``~/.ssh``, ``~/.config``, ``~/.netrc``), where tools keep their logins by name."""
-        if any(_at_or_below(tree, bound) for bound in self.bound):
-            return None
-        where = self._credentials(tree)
-        return None if where is None else f"{entry} links to {tree}, {where}, which its bind would show unmasked"
+        around a bound path, so nothing in that path is masked); ``None`` when it would not: ``tree`` is in no
+        credential location (below a home it may be, outside the hidden entries, ``~/.ssh``, ``~/.config``,
+        ``~/.netrc``, where tools keep their logins by name), or each one it is in holds a tree the plan reads whole
+        that holds ``tree`` too, whose masks are opened up around it already. A tree the plan reads whole above the
+        location (a hub cache that is a home's parent) is no excuse: its masks hide the location, and the link's bind
+        would open them up."""
+        for where, location in self._credentials(tree):
+            if not any(_at_or_below(tree, bound) and _at_or_below(bound, location) for bound in self.bound):
+                return f"{entry} links to {tree}, {where}, which its bind would show unmasked"
+        return None
 
-    def _credentials(self, tree: Path) -> str | None:
+    def _credentials(self, tree: Path) -> Iterator[tuple[str, Path]]:
+        """Each credential location ``tree`` is at or below, said, with the location: one of ``locations``, or a
+        hidden entry of one of ``homes``."""
         for location in dict.fromkeys((*self.locations, *self.homes)):
             if tree == location:
-                return "a credential location of the app's"
-            if location not in tree.parents:
-                continue
-            if location not in self.homes:
-                return f"below the credential location {location} of the app's"
-            hidden = location / tree.relative_to(location).parts[0]
-            if hidden.name.startswith("."):
-                return f"in {hidden}, a hidden entry of a home where tools keep their logins"
-        return None
+                yield "a credential location", location
+            elif location in tree.parents:
+                hidden = location / tree.relative_to(location).parts[0]
+                if location not in self.homes:
+                    yield f"below the credential location {location}", location
+                elif hidden.name.startswith("."):
+                    yield f"in {hidden}, a hidden entry of a home where tools keep their logins", hidden
 
 
 def _link_rule(

@@ -801,7 +801,8 @@ build store and trust file, a local InferenceX or Magpie repository); the app's 
 masked, and a sandbox one of whose read paths is itself a credential location (a home, a login file) runs as before
 with a WARNING, refused in a hosted run. So does one whose model links to or below a credential location, or into a
 hidden entry of a home (`~/.ssh`, `~/.claude`, `~/.config`, `~/.aws`, `~/.netrc`), where no mask could hide the logins;
-a link to anything else in the home (`~/tokdir`, `~/config.json`), outside it, or into the hub cache binds as before.
+a link to anything else in the home (`~/tokdir`, `~/config.json`), outside it, or into the hub cache binds as before,
+except into a credential location the hub cache holds (one set to the home's parent), whose mask the link would open.
 Nothing else of the host is there: not the session's other files, another sandbox's directory or key, the app's state,
 nor any process of the app's (its own pid namespace; a sandbox that runs several commands shares one holder's, as an
 agent sandbox does). A sandbox with cards gets `/dev/kfd` and `/dev/dri`, `/sys`
