@@ -57,7 +57,7 @@ from hyperloom.orchestrator.actions.executors import (
     is_patched_copy,
     lay_tracelens_patch,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime
 
 __all__ = [
     "BuiltRoot",

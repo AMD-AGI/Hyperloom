@@ -995,7 +995,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
 
     def _prepare_point(self, config_path: Path, output_dir: Path) -> None:
         """Turn the AgentX profile on, or arm the host probe, in the point either backend then runs."""
-        from .magpie_agentx import enable_profile, native_config
+        from .agentx_point import enable_profile, native_config
 
         if native_config(config_path):
             enable_profile(config_path)
