@@ -258,27 +258,28 @@ def app_git(
     *args: str,
     timeout: float = _DEFAULT_TIMEOUT_SEC,
     env: Mapping[str, str] | None = None,
-    common: Path | None = None,
     admin: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
 
-    The admin dir is ``admin``, as the caller found it from the repository's side (:func:`recorded_admin_dir`), when
-    given: the worktree's ``.git`` is then not read at all. Otherwise it is the one that ``.git`` names, believed only
-    when the app owns it (:func:`trusted_admin_dir`), which proves nothing against an agent that runs as the app's uid.
+    The admin dir is ``admin``, as the caller found it from the repository's side when given: recorded there
+    (:func:`recorded_admin_dir`), and the worktree's ``.git`` then not read at all, or the one ``.git`` names proven one
+    of the repository's (:func:`trusted_admin_dir` with its ``common``). Otherwise it is the one that ``.git`` names,
+    believed only when the app owns it (:func:`trusted_admin_dir`), which proves nothing against an agent that runs as
+    the app's uid.
 
     No program the repository's config names runs: the ``NO_PROGRAMS`` pins, every configured driver program blanked,
     and no transport. The driver programs are read from the config just before the command, which reads it again; the
     config lies in the admin and common directories, the app's (on shared storage, its accounts'), so no one else
     writes a driver in between. A repository nested in the tree is the caller's to keep out (see the module docstring).
-    ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so; ``common``
-    is as :func:`trusted_admin_dir`'s. In a shared repository (a setgid ``common``) git runs under the shared child
-    umask, so what it makes -- objects, refs, the worktree's files -- stays the group's to write.
+    ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so. In a shared
+    repository (the admin dir's git directory setgid) git runs under the shared child umask, so what it makes --
+    objects, refs, the worktree's files -- stays the group's to write.
 
     Raises:
         OSError: The worktree's git metadata is not the app's, or its config cannot be neutralized (nothing was run).
     """
-    admin = trusted_admin_dir(worktree, common) if admin is None else admin
+    admin = trusted_admin_dir(worktree) if admin is None else admin
     env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **(env or {})}
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
@@ -305,7 +306,7 @@ def app_git(
         argv,
         cwd=worktree,
         env=env,
-        umask=SHARED_CHILD_UMASK if _shared_group(common) is not None else -1,
+        umask=SHARED_CHILD_UMASK if _shared_group(admin.parent.parent) is not None else -1,
         capture_output=True,
         encoding="utf-8",
         errors="surrogateescape",
