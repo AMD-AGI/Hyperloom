@@ -170,9 +170,7 @@ def test_r9700_materializes_vllm_gfx12_runner(tmp_path):
 def test_r9700_materialized_config_is_lifecycle_eligible(tmp_path, monkeypatch):
     """An R9700 session's materialized config may hold one server across rounds (baseline, explore, conc sweep)."""
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
-    from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 
-    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
     monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm")

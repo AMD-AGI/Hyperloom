@@ -335,6 +335,8 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
     monkeypatch.setattr(explore, "maybe_serving_lease", lambda **_kwargs: None)
     monkeypatch.setattr(explore, "teardown_variant_server", lambda *_args: [])
+    # One cold decision round, so the single capture is the materialized rebench.
+    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
     result = await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )
@@ -1212,7 +1214,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     assert len(calls) == 1
     assert calls[0][1]["benchmark_script"] == "sglang_custom.sh"
     assert calls[0][1]["runner_type"] == "mi355x"
-    assert calls[0][0]["launch"].server_lifecycle is None
+    assert calls[0][0]["launch"].server_lifecycle is not None
 
 
 @pytest.mark.asyncio

@@ -571,7 +571,7 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monke
     _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
     output_dir = tmp_path / "ws"
     captured: dict = {}
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "baseline_double_run": False})
 
     result = run_baseline(
         base,
@@ -598,6 +598,7 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(tmp_p
         params={
             "output_dir": str(output_dir),
             "timeout_sec": 10,
+            "baseline_double_run": False,
         },
     )
     ctx = SimpleNamespace(
@@ -622,13 +623,12 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatc
     _write_yaml(base)
     output_dir = tmp_path / "ws"
     captured: dict = {}
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "baseline_double_run": False})
 
     result = run_baseline(base, tmp_path, ctx, capture_launch(captured))
 
     assert result["status"] == "succeeded"
-    # Default RESULT_DIR is the per-task workspace: this fixture omits benchmark_script so the cold-start double-run
-    # is not eligible and the single-round path runs directly in output_dir.
+    # Default RESULT_DIR is the per-task workspace: the single-round path runs directly in output_dir.
     assert captured["env"]["RESULT_DIR"] == str(output_dir)
     assert "OPENAI_API_KEY" not in captured["env"]
 

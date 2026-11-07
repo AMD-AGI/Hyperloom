@@ -130,9 +130,6 @@ def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypa
     import yaml
 
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
-    from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
-
-    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
 
     bad_yaml = tmp_path / "bad.yaml"
     bad_yaml.write_text("benchmark: [", encoding="utf-8")

@@ -657,7 +657,7 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
         # ISL + OSL of 9216 sends three requests per unit of concurrency, as the session's own rounds do.
         assert int(bench["envs"]["NUM_PROMPTS"]) == 192
         assert bench["envs"]["RUN_EVAL"] == "false"
-        assert kwargs["launch"].server_lifecycle is None
+        assert kwargs["launch"].server_lifecycle is not None
 
 
 def test_run_conc_sweep_optimized_oom_yields_failed_pair(
