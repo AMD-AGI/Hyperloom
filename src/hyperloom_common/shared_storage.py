@@ -23,7 +23,6 @@ import stat
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TextIO
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +33,7 @@ SHARED_CHILD_UMASK = 0o002
 
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+_APPEND = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
 _PROBE_PREFIX = ".hl-writable-"
 
 
@@ -90,6 +90,22 @@ def create_shared_file(path: Path) -> None:
         os.close(descriptor)
 
 
+def open_shared_append(path: Path) -> int:
+    """``path`` opened for appending, never through a link: made ``664`` by ``fchmod`` when this call creates it, so the
+    next account of the group appends to it too, and opened as it is when it exists. One another account made without
+    group write fails ``EACCES``: a file that is appended to cannot be replaced by rename."""
+    try:
+        descriptor = os.open(path, _APPEND | os.O_CREAT | os.O_EXCL, 0o600)  # the umask never decides it: fchmod below
+    except FileExistsError:
+        return os.open(path, _APPEND)
+    try:
+        os.fchmod(descriptor, SHARED_FILE_MODE)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def open_shared(path: Path, access: int) -> int:
     """Open ``path`` for ``access`` (``os.O_RDWR``, ``os.O_WRONLY | os.O_APPEND``) without following a link, creating it
     with mode ``664`` when it is not there, and return the descriptor.
@@ -108,11 +124,6 @@ def open_shared(path: Path, access: int) -> int:
         os.close(descriptor)
         raise
     return descriptor
-
-
-def open_shared_append(path: Path) -> TextIO:
-    """:func:`open_shared` for appending UTF-8 text."""
-    return os.fdopen(open_shared(path, os.O_WRONLY | os.O_APPEND), "a", encoding="utf-8")
 
 
 def write_shared_bytes(path: Path, data: bytes, *, mode: int = SHARED_FILE_MODE) -> None:

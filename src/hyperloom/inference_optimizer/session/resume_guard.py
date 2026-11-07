@@ -15,13 +15,13 @@ from datetime import datetime
 from pathlib import Path
 
 from hyperloom.common.owner_scope import process_started_at, same_environment
-from hyperloom_common.shared_storage import open_shared_append
+from hyperloom_common.shared_storage import open_shared_append, ownership
 from hyperloom_common.timeutil import now_iso
 
 from . import lock as session_lock
 from . import session_paths
 from .coordinator_db import OlderCoordinatorDB, refuse_older_schema
-from .paths import db_path_for
+from .paths import SESSION_FILES, db_path_for
 
 
 class ResumeBlocked(RuntimeError):
@@ -198,12 +198,34 @@ def foreign_owner_scopes(session_dir: Path, owner_scope: str) -> list[str]:
         return []
 
 
+def _require_readable(session_dir: Path) -> None:
+    """Refuse, naming the file, a session file this account cannot read.
+
+    ``state.json`` and ``manifest.json`` are owner-only while the operator's ``--extra-env`` or ``--server-args`` hold a
+    credential: another account of the group is refused here, not handed it.
+    """
+    for name in SESSION_FILES:
+        path = session_dir / name
+        try:
+            with path.open("rb"):
+                pass
+        except FileNotFoundError:
+            continue  # said by the checks that need the file
+        except PermissionError as exc:
+            raise ResumeBlocked(
+                f"cannot read {path}{ownership(path)}. A session whose --extra-env or --server-args hold a credential "
+                "keeps its state and manifest owner-only: resume it as the account that made it, or start a new "
+                "session."
+            ) from exc
+
+
 def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
     """Reject unobservable residual work without migrating or repairing the DB.
 
     Observable local owners are left to the coordinator's existing reaper. An
     empty ledger does not prove a recorded running or cancelled execution exited.
     """
+    _require_readable(session_dir)
     path = db_path_for(session_dir)
     try:
         if not path.exists():
@@ -621,7 +643,7 @@ def confirm_scope_gone(session_dir: Path, *, owner_scope: str, reason: str, curr
         "released_gpu_leases": result["released_gpu_leases"],
     }
     try:
-        with open_shared_append(session_paths.pod_history_path(session_dir)) as fh:
+        with os.fdopen(open_shared_append(session_paths.pod_history_path(session_dir)), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, sort_keys=True) + "\n")
     except OSError:
         result["ledger_recorded"] = False

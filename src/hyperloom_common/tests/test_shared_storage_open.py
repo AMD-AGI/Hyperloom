@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import inspect
 import json
 import os
 import stat
@@ -17,8 +18,9 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common import io as io_module
 from hyperloom_common import shared_storage
-from hyperloom_common.io import SHARED, append_jsonl, append_shared_jsonl, atomic_write_json
+from hyperloom_common.io import SHARED, JsonLineFormat, append_jsonl, append_shared_jsonl, atomic_write_json
 from hyperloom_common.shared_storage import open_shared, open_shared_append
 from hyperloom_common.tests.shared_accounts import other_accounts
 
@@ -46,7 +48,7 @@ def test_a_new_file_is_664_whatever_the_umask(tmp_path, umask):
     _here(
         "import os\nfrom pathlib import Path\nfrom hyperloom_common.shared_storage import open_shared, open_shared_append\n"
         f"os.close(open_shared(Path({str(tmp_path / 'lock')!r}), os.O_RDWR))\n"
-        f"open_shared_append(Path({str(tmp_path / 'ledger.jsonl')!r})).close()\n",
+        f"os.close(open_shared_append(Path({str(tmp_path / 'ledger.jsonl')!r})))\n",
         umask=umask,
     )
     assert (_mode(tmp_path / "lock"), _mode(tmp_path / "ledger.jsonl")) == (0o664, 0o664)
@@ -109,7 +111,7 @@ def test_a_file_this_account_cannot_open_raises_permission_error_and_is_not_repl
 def test_appends_land_after_what_is_there(tmp_path):
     path = tmp_path / "ledger.jsonl"
     for line in ("one", "two"):
-        with open_shared_append(path) as handle:
+        with os.fdopen(open_shared_append(path), "a", encoding="utf-8") as handle:
             handle.write(line + "\n")
     assert path.read_text() == "one\ntwo\n"
 
@@ -158,3 +160,49 @@ def test_share_parents_makes_the_parents_2775_and_leaves_the_file_owner_only(tmp
         umask=0o077,
     )
     assert (_mode(path.parent.parent), _mode(path.parent), _mode(path)) == (0o2775, 0o2775, 0o600)
+
+
+# -- the contract the other branches that use these functions rely on ------------------------------------------------
+def test_open_shared_append_returns_a_descriptor_that_appends_and_is_not_inherited(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    descriptor = open_shared_append(path)
+    try:
+        assert isinstance(descriptor, int)
+        assert fcntl.fcntl(descriptor, fcntl.F_GETFL) & (os.O_ACCMODE | os.O_APPEND) == os.O_WRONLY | os.O_APPEND
+        assert os.get_inheritable(descriptor) is False
+        os.write(descriptor, b"one\n")
+    finally:
+        os.close(descriptor)
+    descriptor = open_shared_append(path)
+    try:
+        os.write(descriptor, b"two\n")
+    finally:
+        os.close(descriptor)
+    assert path.read_text() == "one\ntwo\n"
+
+
+def test_open_shared_append_never_follows_a_link(tmp_path):
+    (tmp_path / "target").write_text("kept")
+    (tmp_path / "link").symlink_to(tmp_path / "target")
+    with pytest.raises(OSError) as raised:
+        os.close(open_shared_append(tmp_path / "link"))
+    assert raised.value.errno == errno.ELOOP
+    assert (tmp_path / "target").read_text() == "kept"
+
+
+def test_append_shared_jsonl_has_the_signature_of_the_branch_that_calls_it_with_fsync(tmp_path, monkeypatch):
+    parameters = inspect.signature(append_shared_jsonl).parameters
+    assert [(name, parameter.kind.name, parameter.default) for name, parameter in parameters.items()] == [
+        ("path", "POSITIONAL_OR_KEYWORD", inspect.Parameter.empty),
+        ("row", "POSITIONAL_OR_KEYWORD", inspect.Parameter.empty),
+        ("fsync", "KEYWORD_ONLY", False),
+        ("fmt", "KEYWORD_ONLY", JsonLineFormat()),
+    ]
+    synced = []
+    monkeypatch.setattr(io_module.os, "fsync", synced.append)
+    path = tmp_path / "events.jsonl"
+    append_shared_jsonl(path, {"n": 1})
+    assert synced == []
+    append_shared_jsonl(path, {"n": 2}, fsync=True)
+    assert len(synced) == 1 and isinstance(synced[0], int)
+    assert [json.loads(line)["n"] for line in path.read_text().splitlines()] == [1, 2]

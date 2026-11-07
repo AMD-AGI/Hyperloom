@@ -133,7 +133,7 @@ class SessionLock:
         try:
             path = session_paths.pod_history_path(self.session_dir)
             make_shared_dirs(path.parent)
-            with open_shared_append(path) as fh:
+            with os.fdopen(open_shared_append(path), "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, sort_keys=True) + "\n")
         except OSError:
             log.debug("session lock: pod history append failed", exc_info=True)

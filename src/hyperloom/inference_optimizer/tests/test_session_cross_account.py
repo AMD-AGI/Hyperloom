@@ -22,6 +22,7 @@ import pytest
 
 import hyperloom
 from hyperloom.inference_optimizer.session import lock, paths
+from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, ensure_resume_safe
 from hyperloom_common.tests.shared_accounts import other_accounts
 
 _SRC = str(Path(hyperloom.__file__).parents[1])
@@ -229,6 +230,77 @@ def test_a_session_made_below_a_parent_with_group_write_is_2775_all_the_way_up(t
     session = Path(_as_this_account(code, umask=0o077, workspace=workspace).splitlines()[-1])
     assert (session.parent.parent, session.parent, session) == (workspace, workspace / session.parent.name, session)
     assert {_mode(session.parent), _mode(session), _mode(workspace / "runtime"), _mode(workspace / "logs")} == {0o2775}
+
+
+@pytest.mark.parametrize("name", ["manifest.json", "state.json"])
+def test_a_resume_by_an_account_that_cannot_read_an_owner_only_file_is_refused_naming_it(tmp_path, monkeypatch, name):
+    for each in ("manifest.json", "state.json"):
+        (tmp_path / each).write_text("{}")
+    target = tmp_path / name
+    target.chmod(0o600)
+    real_open = Path.open
+
+    def as_another_account(self, *args, **kwargs):
+        if self == target:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", as_another_account)
+    with pytest.raises(ResumeBlocked) as raised:
+        ensure_resume_safe(tmp_path, owner_scope="host:1")
+    info = target.stat()
+    assert str(raised.value) == (
+        f"cannot read {target} (owner {info.st_uid}:{info.st_gid} 0600). A session whose --extra-env or --server-args "
+        "hold a credential keeps its state and manifest owner-only: resume it as the account that made it, or start "
+        "a new session."
+    )
+
+
+#: A first leg whose operator pins hold a credential: its state and manifest stay owner-only.
+_CREDENTIAL_LEG = textwrap.dedent(
+    """
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+    from hyperloom.inference_optimizer.session import paths
+    from hyperloom.inference_optimizer.session.manifest import write_manifest
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    argv = ["optimize", "--model", "/models/m", "--framework", "sglang", "--server-args", "--tp 8 --api-key not-a-pattern"]
+    session = paths.make_session_dir("m")
+    write_manifest(session, args=_build_parser().parse_args(argv))
+    state = SharedState()
+    state.operator_extra_env = {"HF_TOKEN": "hf_live_value_123"}
+    state.save(session)
+    print(session)
+    """
+)
+
+_READ_AS_THE_NEXT_ACCOUNT = textwrap.dedent(
+    """
+    import errno, json
+    seen = {{}}
+    for name in ("manifest.json", "state.json"):
+        try:
+            seen[name] = len(open({session!r} + "/" + name, "rb").read())
+        except PermissionError as exc:
+            seen[name] = errno.errorcode[exc.errno]
+    print(json.dumps(seen))
+    """
+)
+
+
+def test_the_next_account_reads_state_and_manifest_unless_they_hold_a_credential(tmp_path):
+    with other_accounts() as accounts:
+        for leg, expected in ((_FIRST_LEG, "bytes"), (_CREDENTIAL_LEG, "EACCES")):
+            workspace = accounts.shared_dir(f"claw-{expected}")
+            session = Path(_as_this_account(leg, umask=0o077, workspace=workspace).splitlines()[-1])
+            out = accounts.run(accounts.second, _READ_AS_THE_NEXT_ACCOUNT.format(session=str(session)))
+            seen = json.loads(out)
+            if expected == "EACCES":
+                assert seen == {"manifest.json": "EACCES", "state.json": "EACCES"}
+                assert "hf_live_value_123" not in out and "not-a-pattern" not in out
+                assert (_mode(session / "manifest.json"), _mode(session / "state.json")) == (0o600, 0o600)
+            else:
+                assert all(isinstance(size, int) and size > 0 for size in seen.values()), seen
+                assert (_mode(session / "manifest.json"), _mode(session / "state.json")) == (0o664, 0o664)
 
 
 def test_the_lock_a_foreign_account_left_unwritable_is_named_with_its_owner_and_mode(tmp_path, monkeypatch):
