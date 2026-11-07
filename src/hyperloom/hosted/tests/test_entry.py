@@ -15,7 +15,10 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from hyperloom_common.bwrap import BwrapProbe
 
+from hyperloom.common import agent_isolation, confinement
+from hyperloom.common.agent_isolation import NO_LAYER_BWRAP, IsolationRefused
 from hyperloom.hosted import entry, host_info
 from hyperloom.hosted.host_info import Var
 from hyperloom.hosted.tests.test_campaign import FULL, MINIMAL
@@ -26,6 +29,7 @@ from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
 INSTALL_REAL = Path(entry.INSTALL_SCRIPT)
 _SECRETS = {name: f"sentinel-secret-{index}" for index, name in enumerate(host_info.SECRET_VARS)}
 _IMAGE = "registry.example/sglang:v0.5.4-rocm"
+_LAYER_BWRAP_VERSION = (0, 13, 1)
 
 
 def _free_port() -> int:
@@ -34,9 +38,41 @@ def _free_port() -> int:
         return probe.getsockname()[1]
 
 
+class Isolation:
+    """Stands in for the bubblewrap probe the entry's isolation check runs, and records what it was asked about and
+    whether the run had started anything then. Answers ``problems`` (none: a working bubblewrap) for any path."""
+
+    def __init__(self) -> None:
+        self.asked: list[str | None] = []
+        self.state: Path | None = None
+        self.started_then: list[bool] = []
+        self.problems: tuple[str, ...] = ()
+        self.transient = False
+
+    def probe(self, path: str | None) -> BwrapProbe:
+        self.asked.append(path)
+        if self.state is not None:
+            self.started_then.append(any(self.state.iterdir()))
+        return BwrapProbe(path, _LAYER_BWRAP_VERSION, self.problems, transient=self.transient)
+
+
+@pytest.fixture(autouse=True)
+def isolation(monkeypatch) -> Isolation:
+    """A process that is not yet marked hosted, with no specialist account configured and a registry of private paths
+    of its own, whose isolation check asks :class:`Isolation` instead of a real bubblewrap."""
+    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
+    monkeypatch.setattr(confinement, "PRIVATE_PATHS", confinement.PrivatePaths())
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    stand_in = Isolation()
+    require = agent_isolation.require_agent_isolation
+    monkeypatch.setattr(entry, "require_agent_isolation", lambda *, bwrap: require(bwrap=bwrap, probe=stand_in.probe))
+    return stand_in
+
+
 @pytest.fixture
-def run(tmp_path, monkeypatch):
-    """A complete host environment in ``os.environ`` and the paths it names."""
+def run(tmp_path, monkeypatch, isolation):
+    """A complete host environment in ``os.environ`` and the paths it names, with the hosting layer's directory in
+    ``HYPERLOOM_HOST_LAYER``."""
     state, work = tmp_path / "state", tmp_path / "work"
     state.mkdir()
     work.mkdir()
@@ -51,6 +87,7 @@ def run(tmp_path, monkeypatch):
         Var.SANDBOX_TEMPLATES: json.dumps({"runner": {"1": "r1"}}),
         Var.E2B_API_URL: "https://api.sandbox.example.test",
         Var.MCP_PORT: str(_free_port()),  # a fixed port collides with whatever else listens on this host
+        entry.HOST_LAYER_ENV: str(tmp_path / "layer"),
         "USER_DATA_PATH": str(work),
         "ANTHROPIC_API_KEY": "gateway-key",
         "ANTHROPIC_BASE_URL": "https://gateway.example.test",
@@ -75,6 +112,7 @@ def run(tmp_path, monkeypatch):
     installer.write_text("#!/bin/bash\necho stub installer ran\n")
     monkeypatch.setattr(entry, "INSTALL_SCRIPT", installer)  # the real installer is never run by a unit test
     inject()
+    isolation.state = state
     yield type(
         "Run",
         (),
@@ -85,6 +123,7 @@ def run(tmp_path, monkeypatch):
             "restart": staticmethod(inject),
             "installer": installer,
             "container_tmp": container_tmp,
+            "layer": tmp_path / "layer",
         },
     )
     set_hosted_plug_inputs(None)
@@ -489,7 +528,7 @@ def _multibranch(run, **placement):
     run.spec.write_text(json.dumps(doc))
 
 
-def test_multibranch_execs_into_its_entry_with_the_environment_unchanged_but_for_path(run, monkeypatch):
+def test_multibranch_execs_into_its_entry_with_the_environment_unchanged_but_for_path(run, monkeypatch, isolation):
     _multibranch(run)
     before = dict(os.environ)
     calls = []
@@ -507,6 +546,7 @@ def test_multibranch_execs_into_its_entry_with_the_environment_unchanged_but_for
     assert calls[0][2] == before and Var.RUN_ID in before
     assert fake.calls == [] and not (run.state / "session.json").exists() and not (run.state / "exit.json").exists()
     assert os.environ.get(entry.ENV_IMAGE) is None
+    assert isolation.asked == []  # the multibranch command checks its own agents' isolation
 
 
 def _multibranch_order(run, monkeypatch, *, exit_code=0):
@@ -684,6 +724,77 @@ def test_a_host_token_shorter_than_the_server_minimum_refuses_the_run(run, monke
     assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
     assert fake.calls == [] and _exit(run)["final"] is True
     assert Var.MCP_TOKEN in _exit(run)["error"] and "x" * MIN_TOKEN_LENGTH not in _exit(run)["error"]
+
+
+# -- agent isolation ---------------------------------------------------------------------------------------------
+def test_the_layers_bubblewrap_is_probed_by_path_before_anything_runs_and_marks_the_run_hosted(
+    run, monkeypatch, isolation
+):
+    fake = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 0
+    assert isolation.asked == [str(run.layer / "bin" / "bwrap")]
+    assert isolation.started_then == [False]  # no session.json, no install.log yet
+    assert len(fake.calls) == 1 and agent_isolation.isolation_required()
+
+
+@pytest.mark.parametrize(
+    ("layer", "said"),
+    [(None, NO_LAYER_BWRAP), ("layer", "bubblewrap at layer/bin/bwrap is not an absolute path")],
+    ids=["unset", "relative"],
+)
+def test_a_run_whose_layer_names_no_bubblewrap_ends_finally_without_probing_one(
+    run, monkeypatch, isolation, layer, said
+):
+    """No bubblewrap on PATH stands in for the layer's: the framework image may carry its own, maybe setuid."""
+    if layer is None:
+        monkeypatch.delenv(entry.HOST_LAYER_ENV)
+    else:
+        monkeypatch.setenv(entry.HOST_LAYER_ENV, layer)
+    fake = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
+    written = _exit(run)
+    assert (written["final"], written["returncode"]) == (True, entry.RETURNCODE_REFUSED)
+    assert written["error"].startswith("agents cannot be isolated on this host: ") and said in written["error"]
+    assert isolation.asked == [] and fake.calls == []
+
+
+def test_a_host_where_no_tier_can_isolate_an_agent_ends_the_run_finally_naming_both(run, monkeypatch, isolation):
+    isolation.problems = ("bwrap: setting up uid map: Permission denied",)
+    _recording_installer(run, None)
+    fake = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
+    bwrap = run.layer / "bin" / "bwrap"
+    assert _exit(run) == {
+        "final": True,
+        "returncode": entry.RETURNCODE_REFUSED,
+        "error": "agents cannot be isolated on this host: running them as an account: HYPERLOOM_SPECIALIST_USER is"
+        f" not set; bubblewrap ({bwrap}, 0.13.1): bwrap: setting up uid map: Permission denied",
+    }
+    assert fake.calls == [] and not (run.work / "order").exists()  # neither the installer nor optimize ran
+    assert sorted(path.name for path in run.state.iterdir()) == [entry.EXIT_FILE]  # no session either
+
+
+def test_a_probe_that_gave_no_answer_ends_the_leg_without_exit_json_so_the_host_starts_it_again(
+    run, monkeypatch, isolation
+):
+    isolation.problems, isolation.transient = ("no answer in 10 s",), True
+    fake = FakeOptimize(monkeypatch)
+    with pytest.raises(IsolationRefused) as raised:
+        entry.main(["run"])
+    assert raised.value.transient and "no answer in 10 s" in str(raised.value)
+    assert fake.calls == [] and not list(run.state.iterdir())
+
+
+def test_the_state_directory_is_masked_wherever_an_agent_sandbox_would_show_it(run, monkeypatch):
+    """The entry takes HYPERLOOM_STATE_DIR out of the environment, where a launch looks for the app's own trees, so it
+    registers the directory itself: a sandbox that binds a tree holding it masks it."""
+    FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 0
+    assert Var.STATE_DIR not in os.environ
+    shown = run.state.parent
+    masked = confinement.credential_paths({}, app_environ={}, allowed=(shown,))
+    policy = confinement.Confinement(readable=(shown,), masked=masked).policy()
+    assert str(run.state) in policy.masked, policy.masked
 
 
 # -- the installer -----------------------------------------------------------------------------------------------
