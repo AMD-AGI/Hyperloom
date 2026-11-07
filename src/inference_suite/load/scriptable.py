@@ -46,6 +46,8 @@ _WHAT = "the scriptable script"
 
 
 class ShippedScript(str, Enum):
+    """The scripts this package ships, each named after the framework it runs."""
+
     XDIT = "xdit"
 
     @property
@@ -82,14 +84,21 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def scriptable_base(query: LaunchQuery, script: str, model: LaunchModel, topology: Topology) -> BaseLaunch:
+def scriptable_base(query: LaunchQuery, script: str | None, model: LaunchModel, topology: Topology) -> BaseLaunch:
     """The base of a scriptable session: ``script``, a shipped name or an absolute path, frozen with its content.
 
+    ``script`` ``None`` runs the script the query's framework ships.
+
     Raises:
-        BaseLaunchError: When ``query`` is not scriptable or ``script`` names no shipped script and no existing file.
+        BaseLaunchError: When ``query`` is not scriptable, ``script`` is ``None`` for a framework that ships none, or
+            ``script`` names no shipped script and no existing file.
     """
     if query.workload is not Workload.SCRIPTABLE:
         raise BaseLaunchError(f"a scriptable base answers a scriptable query, got {query.workload.value}")
+    if script is None:
+        if query.framework not in {item.value for item in ShippedScript}:
+            raise BaseLaunchError(f"{query.framework} ships no script; the operator names its own")
+        script = query.framework
     path = script_path(script)
     if path is None:
         raise BaseLaunchError(f"{script!r} is no shipped script and no absolute script path")

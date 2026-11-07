@@ -398,6 +398,10 @@ def _frozen_base(call: TestCall) -> BaseLaunch:
     base = call.session_facts.base_launch if call.session_facts else None
     if base is None:
         raise SpecRefused("base_launch_missing", f"a {SPEC_SCHEMA} sheet carries the session's frozen base launch")
+    if base.scriptable:
+        raise SpecRefused(
+            "base_launch_scriptable", f"a {SPEC_SCHEMA} sheet measures a server; {base.framework} runs a script"
+        )
     return base
 
 

@@ -51,6 +51,16 @@ def test_a_call_whose_facts_carry_no_frozen_base_is_refused_naming_the_sheet_ver
         _tools(tmp_path, session_facts=SessionFacts(staging=STAGING))
 
 
+def test_a_scriptable_session_has_no_hosted_sheet(tmp_path):
+    from inference_suite import scriptable_base
+    from inference_suite.contracts import LaunchModel, LaunchQuery, Topology, Workload
+
+    query = LaunchQuery("FLUX.1-dev", "xdit", "mi355x", Workload.SCRIPTABLE, (1,))
+    base = scriptable_base(query, None, LaunchModel("FLUX.1-dev"), Topology(tp=1))
+    with pytest.raises(SpecRefused, match="base_launch_scriptable: .* xdit runs a script"):
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=base))
+
+
 def test_the_sheet_carries_the_frozen_base_whole(tmp_path):
     procedure = _procedure(tmp_path)
 
