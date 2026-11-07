@@ -304,6 +304,7 @@ class LaunchStatus:
             try:
                 self.data = read_bytes_nofollow(self.path)
             except OSError:
+                # Not written yet (the actor's shell opens it), or already removed: what was read before stands.
                 pass
         elif self.read_fd >= 0:
             self.data += _drained(self.read_fd)
