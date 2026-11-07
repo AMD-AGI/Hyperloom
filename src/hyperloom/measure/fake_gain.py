@@ -15,12 +15,14 @@ here and a test together; the test sends a minimal example through the real enfo
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.benchmark_config import read_benchmark_point
+from hyperloom.common.launch_log_evidence import observed_server_config_from_log
 from hyperloom.contracts.recipe import LaunchConfig
 from hyperloom.inference_optimizer.agentx.report import agentx_measurement, native_launch_evidence
 from hyperloom.orchestrator.actions.executors import (
@@ -40,11 +42,17 @@ from hyperloom.orchestrator.actions.executors import (
 #: parent pins; main's grid records the same refusal as a candidate ``serve_flag`` failure.
 SPECULATIVE_DECODING_PINNED = "speculative_decoding_pinned"
 
+
+class RoundUnreadable(ValueError):
+    """An inference_suite round whose report or launch breaks its contract: no measurement to judge."""
+
+
 __all__ = [
     "CONTEXT_COPY_REFUSAL",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
     "FAKE_GAINS",
     "FakeGain",
+    "RoundUnreadable",
     "SPECULATIVE_DECODING_PINNED",
     "baseline_prefix_cache_refusal",
     "launch_context_copy_refusal",
@@ -95,24 +103,40 @@ def _own_report(round_dir: Path) -> dict[str, Any]:
 def baseline_prefix_cache_refusal(point: Path, round_dir: Path) -> str:
     """Why an AgentX baseline round served with the prefix cache off may not end ``succeeded``, or ``""``.
 
-    ``point`` is the measurement point the round ran and ``round_dir`` the directory it landed in; the launch evidence
-    is built from both the way main's baseline and grid executors build it, and main's #1884 check reads it. A round
-    the report mapper does not call a valid measurement is not the succeeded round main checks, and is left alone. An
-    inference_suite run_dir is judged by ``round_measurement`` and its launch read from the point's server args. A v1
-    Magpie AgentX round is judged by ``agentx_measurement`` and its launch is the one Magpie reports it ran. Any other
-    point's launch is read from its own server args.
+    ``point`` is the measurement point the round ran and ``round_dir`` the directory it landed in; main's #1884 check
+    reads the launch evidence built from them. A round the report mapper does not call a valid measurement is not the
+    succeeded round main checks, and is left alone. An inference_suite run_dir is judged by ``round_measurement`` and
+    its launch is the one its ``launch.json`` records; one whose report or launch breaks its contract raises
+    :class:`RoundUnreadable`. A v1 Magpie AgentX round is judged by ``agentx_measurement`` and its launch is the one
+    Magpie reports it ran. Any other point's launch is read from its own server args.
     """
     log = _server_log(round_dir)
     if is_round_folder(round_dir):
-        if not RoundFolder.read(round_dir).measurement()["valid_measurement"]:
-            return ""
-    elif read_benchmark_point(point).agentx:
+        return _suite_round_refusal(round_dir, log)
+    if read_benchmark_point(point).agentx:
         measurement = agentx_measurement(_own_report(round_dir))
         if not measurement["valid_measurement"]:
             return ""
         return _cacheless_refusal(native_launch_evidence(measurement, point, actual_server_log=log))
     return _cacheless_refusal(
         build_launch_evidence(RequestedLaunch(config_path=point, framework=""), actual_server_log=log, slot=round_dir)
+    )
+
+
+def _suite_round_refusal(run_dir: Path, log: str | None) -> str:
+    try:
+        folder = RoundFolder.read(run_dir)
+    except (OSError, ValueError) as error:
+        raise RoundUnreadable(f"{run_dir}: {error}") from error
+    if folder.launch is None or not folder.measurement()["valid_measurement"]:
+        return ""
+    framework = folder.launch.framework.name.value
+    return _cacheless_refusal(
+        {
+            "framework": framework,
+            "requested_server_args": shlex.join(folder.launch.argv),
+            "observed_server_config": observed_server_config_from_log(log, framework) if log else {},
+        }
     )
 
 
