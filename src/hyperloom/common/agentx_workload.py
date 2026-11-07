@@ -85,11 +85,6 @@ CANON_PROFILING_WINDOW_SEC = 3640.0
 CANON_FINALISATION_SEC = 300.0
 
 
-#: The trace corpus InferenceX replays for every model family outside its four 1M-context ones (``benchmark_lib.sh``
-#: ``resolve_trace_source``): the 062126 corpus, filtered to fit a 256k-token context.
-CANON_TRACE = "semianalysis_cc_traces_weka_062126_256k"
-
-
 def agentx_profiling_requests(conc: int) -> int:
     """Requests an inference_suite AgentX replay profiles at ``conc``: the canonical window's worth for each lane.
 

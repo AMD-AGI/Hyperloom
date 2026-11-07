@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.common.agentx_workload import CANON_TRACE, CANON_WARMUP_PER_LANE, agentx_profiling_requests
+from hyperloom.common.agentx_workload import CANON_WARMUP_PER_LANE, agentx_profiling_requests
 from hyperloom.orchestrator.actions.executors import _suite_config
 from hyperloom.orchestrator.actions.executors._suite_config import (
     MEASURED_SEED,
@@ -43,6 +43,13 @@ from inference_suite.contracts import (
 from inference_suite.contracts.launch import Launch, VersionCheck
 
 _SHA = "0" * 64
+_CORPUS = "semianalysis_cc_traces_weka_062126"
+
+
+def _base():
+    """The session base as resolving freezes it for AgentX: its client env names the corpus InferenceX replays."""
+    base = _agentx_base()
+    return replace(base, client=replace(base.client, env={"WEKA_LOADER_OVERRIDE": _CORPUS}))
 
 
 def _stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,7 +62,7 @@ def _stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _point(**changes) -> dict:
-    point = _agentx_point(_agentx_base())
+    point = _agentx_point(_base())
     bench = point["benchmark"]
     bench["timeout_seconds"] = 7200
     for key, value in changes.items():
@@ -69,7 +76,7 @@ def _point(**changes) -> dict:
 
 
 def test_an_agentx_point_replays_on_its_launch_over_the_base_with_the_golden_layer_applied() -> None:
-    base = _agentx_base()
+    base = _base()
 
     config = suite_config(_point(), base, _settings())
 
@@ -83,7 +90,7 @@ def test_an_agentx_point_replays_on_its_launch_over_the_base_with_the_golden_lay
         env_unset=("SGLANG_USE_AITER",),
     )
     agentx = config.agentx
-    assert (agentx.concurrency, agentx.dataset, agentx.num_prompts) == (8, CANON_TRACE, agentx_profiling_requests(8))
+    assert (agentx.concurrency, agentx.dataset, agentx.num_prompts) == (8, _CORPUS, agentx_profiling_requests(8))
     assert (agentx.warmup_requests_per_lane, agentx.seed, agentx.warmup_seed) == (CANON_WARMUP_PER_LANE, 0, 0)
     assert agentx.failed_request_threshold == 0.1
     assert agentx.client_env == {"AIPERF_EXPERIMENTAL_FAST": "0"}
@@ -96,7 +103,7 @@ def test_an_agentx_point_replays_on_its_launch_over_the_base_with_the_golden_lay
 
 
 def test_the_replay_takes_the_bases_client_knobs_under_the_points() -> None:
-    base = _agentx_base()
+    base = _base()
     client = {"AIPERF_WARMUP_REQUESTS_PER_LANE": "4", "AIPERF_TRACE_IDLE_GAP_CAP_SECONDS": "300"}
     base = replace(base, client=replace(base.client, env={**client, "WEKA_LOADER_OVERRIDE": "corpus_a"}))
     point = _point(envs={"AIPERF_WARMUP_REQUESTS_PER_LANE": "2", "NUM_PROMPTS": "640"})
@@ -110,13 +117,27 @@ def test_the_replay_takes_the_bases_client_knobs_under_the_points() -> None:
     )
 
 
+def test_a_replay_whose_base_and_point_name_no_corpus_is_refused() -> None:
+    with pytest.raises(ConfigError, match="WEKA_LOADER_OVERRIDE"):
+        suite_config(_point(), _agentx_base(), _settings())
+
+
+def test_the_server_sees_the_points_environment_under_its_launchs() -> None:
+    point = _point(envs={"SGLANG_X": "1", "AITER_LOG_TUNED_CONFIG": "0", "SGLANG_USE_AITER": "1", "AIPERF_Y": "2"})
+
+    user = suite_config(point, _base(), _settings()).server.user
+
+    assert user.env_set == {"SGLANG_X": "1", "AITER_LOG_TUNED_CONFIG": "1"}
+    assert user.env_unset == ("SGLANG_USE_AITER",)
+
+
 def test_the_server_runs_on_the_interpreter_and_source_files_the_launch_names() -> None:
     point = _point()
     overrides = point["benchmark"]["agentx"]["launch_overrides"]
     overrides.update(executable="/venv/candidate/bin/python", source_files={"/src/a.py": "a" * 64})
     overrides["absent_source_files"] = ["/src/b.py"]
 
-    server = suite_config(point, _agentx_base(), _settings()).server
+    server = suite_config(point, _base(), _settings()).server
 
     assert server.framework_python == "/venv/candidate/bin/python"
     assert (dict(server.source_files), server.absent_source_files) == ({"/src/a.py": "a" * 64}, ("/src/b.py",))
@@ -128,7 +149,7 @@ def test_a_discarded_warmup_replay_draws_its_trajectories_with_the_warmup_seed(
 ) -> None:
     session = tmp_path / "session"
     session.mkdir()
-    freeze_base(session, _agentx_base())
+    freeze_base(session, _base())
     _stage(tmp_path, monkeypatch)
     ran = []
     monkeypatch.setattr(_suite_config, "_run_config", lambda config, lease, on_poll: ran.append(config))
@@ -146,7 +167,7 @@ def test_a_discarded_warmup_replay_draws_its_trajectories_with_the_warmup_seed(
 
 def test_a_server_phase_point_boots_the_launch_and_replays_nothing() -> None:
     point = _point(envs={"MAGPIE_RUN_PHASE": "server"})
-    config = suite_config(point, _agentx_base(), _settings(LifecycleMode.BOOT))
+    config = suite_config(point, _base(), _settings(LifecycleMode.BOOT))
 
     assert (config.workload, config.agentx, config.profile.enabled) == (WorkloadKind.NONE, None, False)
 
@@ -168,7 +189,7 @@ def test_a_server_phase_point_boots_the_launch_and_replays_nothing() -> None:
 )
 def test_an_agentx_setting_no_round_carries_is_refused(changes: dict, message: str) -> None:
     with pytest.raises(ConfigError, match=message):
-        suite_config(_point(**changes), _agentx_base(), _settings())
+        suite_config(_point(**changes), _base(), _settings())
 
 
 def test_a_launch_override_magpie_did_not_define_is_refused() -> None:
@@ -176,7 +197,7 @@ def test_a_launch_override_magpie_did_not_define_is_refused() -> None:
     point["benchmark"]["agentx"]["launch_overrides"]["prepend_args"] = ["--x"]
 
     with pytest.raises(ConfigError, match="launch_overrides prepend_args"):
-        suite_config(point, _agentx_base(), _settings())
+        suite_config(point, _base(), _settings())
 
 
 def _profiled(framework: str = "sglang", **settings) -> dict:
@@ -187,7 +208,7 @@ def _profiled(framework: str = "sglang", **settings) -> dict:
 
 
 def test_an_agentx_profile_point_opens_its_window_on_the_replays_measured_phase() -> None:
-    config = suite_config(_profiled(), _agentx_base(), _settings())
+    config = suite_config(_profiled(), _base(), _settings())
 
     profile = config.profile
     assert (profile.enabled, profile.delay_iters, profile.max_iters) == (True, 0, 256)
@@ -197,7 +218,7 @@ def test_an_agentx_profile_point_opens_its_window_on_the_replays_measured_phase(
 
 
 def test_a_vllm_agentx_profile_passes_the_profiler_fields_its_annotations_need() -> None:
-    base = _agentx_base()
+    base = _base()
     base = replace(base, framework="vllm", query=replace(base.query, framework="vllm"), entrypoint=("vllm", "serve"))
     point = _profiled("vllm", capture_timeout_seconds=600)
     point["benchmark"]["agentx"]["launch_overrides"].update(append_args=list(base.args), env={})
@@ -217,7 +238,7 @@ def test_a_vllm_agentx_profile_passes_the_profiler_fields_its_annotations_need()
 )
 def test_an_agentx_profile_setting_no_round_carries_is_refused(settings: dict, message: str) -> None:
     with pytest.raises(ConfigError, match=message):
-        suite_config(_profiled(**settings), _agentx_base(), _settings())
+        suite_config(_profiled(**settings), _base(), _settings())
 
 
 def test_the_accuracy_round_serves_the_same_launch_as_the_measured_round() -> None:
@@ -225,7 +246,7 @@ def test_the_accuracy_round_serves_the_same_launch_as_the_measured_round() -> No
 
     point = _point()
     point["benchmark"]["agentx"]["launch_overrides"]["executable"] = "/venv/candidate/bin/python"
-    base = _agentx_base()
+    base = _base()
 
     measured = suite_config(point, base, _settings()).server
     accuracy = accuracy_config(point, base, _settings(), 900.0).server
@@ -235,7 +256,7 @@ def test_the_accuracy_round_serves_the_same_launch_as_the_measured_round() -> No
 
 
 def test_a_slot_running_the_base_unchanged_replays_it_with_no_layer_of_its_own() -> None:
-    point = _agentx_point(_agentx_base(), LaunchChanges())
+    point = _agentx_point(_base(), LaunchChanges())
     point["benchmark"]["timeout_seconds"] = 7200
 
-    assert suite_config(point, _agentx_base(), _settings()).server.user == LaunchDelta()
+    assert suite_config(point, _base(), _settings()).server.user == LaunchDelta()
