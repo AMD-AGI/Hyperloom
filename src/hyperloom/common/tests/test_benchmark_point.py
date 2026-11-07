@@ -129,6 +129,12 @@ def test_agentx_is_off_unless_turned_on(agentx: object) -> None:
     assert is_agentx({} if agentx is None else {"agentx": agentx}) is False
 
 
+def test_the_old_agentx_name_main_and_multibranch_dev_import_is_the_same_reader() -> None:
+    from hyperloom.common.benchmark_config import is_magpie_agentx
+
+    assert is_magpie_agentx is is_agentx
+
+
 def test_agentx_launch_is_read_from_the_overrides() -> None:
     point = BenchmarkPoint.from_document(
         {
