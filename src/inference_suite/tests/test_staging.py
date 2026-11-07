@@ -48,6 +48,7 @@ _CLIENT = "infx/bench_serving/benchmark_serving.py"
 _CLIENT_TEXT = "print('client')\n"
 _INSTALL_SH = Path(__file__).resolve().parents[2] / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 _SRC = Path(__file__).resolve().parents[2]
+_SUITE_INSTALL_SH = _SRC / "inference_suite" / "install.sh"
 _SHA = "a" * 64
 _HARNESS_RECORD = "agentx-venv/lib/python3.12/site-packages/agentx_harness-1.0.13.dist-info/RECORD"
 _REQUIREMENTS_TEXT = "agentx-harness==1.0.13\n"
@@ -575,3 +576,30 @@ def test_the_lm_eval_pin_is_the_release_the_runner_extra_locks() -> None:
     pyproject = (_SRC.parent / "pyproject.toml").read_text(encoding="utf-8")
 
     assert f'"{LM_EVAL_REQUIREMENT}",' in pyproject
+
+
+def _run_suite_install(*args: str) -> subprocess.CompletedProcess[str]:
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env["PYTHON"] = sys.executable
+    return subprocess.run(
+        ["bash", str(_SUITE_INSTALL_SH), *args], env=env, cwd="/", capture_output=True, text=True, check=False
+    )
+
+
+def test_install_sh_is_an_executable_that_takes_exactly_the_tool_cache(tmp_path: Path) -> None:
+    assert os.access(_SUITE_INSTALL_SH, os.X_OK)
+    for args in ((), (str(tmp_path), "extra")):
+        done = _run_suite_install(*args)
+        assert done.returncode == cli.EXIT_REFUSED
+        assert done.stderr.startswith("usage: install.sh <tool-cache-dir>")
+
+
+def test_install_sh_stages_with_the_inference_suite_beside_it_and_refuses_a_damaged_cache(tmp_path: Path) -> None:
+    _cache_at_the_real_pin(tmp_path)
+    task = inferencex_root(tmp_path) / GSM8K_TASK
+    task.write_text("edited\n")
+
+    done = _run_suite_install(str(tmp_path))
+
+    assert done.returncode == cli.EXIT_REFUSED, done.stderr
+    assert done.stderr.strip() == f"{FailedStep.STAGING_MISSING.value}: {task} (changed since staging)"

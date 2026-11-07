@@ -14,7 +14,9 @@ at its commit. Its manifest entry is the venv's interpreter and each installed d
 every installed file with its sha256, so the manifest names the exact resolved set without hashing the whole venv.
 
 ``python -m inference_suite.staging stage --source <InferenceX checkout> --tool-cache <dir>`` stages, and ``check
---tool-cache <dir>`` reports whether the cache holds the current pins intact; ``install.sh`` runs both.
+--tool-cache <dir>`` reports whether the cache holds the current pins intact; Hyperloom's ``install.sh`` runs both.
+:func:`ensure_staged`, behind ``python -m inference_suite stage`` and this package's ``install.sh``, stages only what
+a cache lacks.
 """
 
 from __future__ import annotations

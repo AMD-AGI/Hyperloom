@@ -370,6 +370,10 @@ hyperloom_multibranch = [
     "blackboard/knowledge/declarations/*.yaml",
     "blackboard/knowledge/mappings/*.yaml",
 ]
+# The runner's bootstrap entry point: install.sh <tool-cache-dir> stages the tools a round runs.
+inference_suite = [
+    "install.sh",
+]
 "inference_suite.recipe" = [
     "defaults/*.yaml",
 ]
