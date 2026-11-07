@@ -50,7 +50,8 @@ class BenchmarkPoint:
     Text fields absent from the block are ``""``; ``envs`` keeps each value as the YAML gave it. ``agentx_launch`` is
     read whenever the block's ``agentx`` is a mapping, whether or not it is ``enabled``. ``torch_profiler`` is whether
     ``profiler.torch_profiler.enabled`` is ``true``; ``server_ready_timeout_s`` is the number
-    ``server_lifecycle.server_ready_timeout_s`` carries, ``None`` when it carries none.
+    ``server_lifecycle.server_ready_timeout_s`` carries, ``None`` when it carries none. ``workload_spec`` is the replay
+    shape only AgentX materializations carry.
     """
 
     framework: str
@@ -59,8 +60,11 @@ class BenchmarkPoint:
     runner_type: str
     benchmark_script: str
     workload_kind: str
+    workload_mode: str
+    quant_scheme: str
     inferencex_path: str
     envs: Mapping[str, Any]
+    workload_spec: Mapping[str, Any]
     agentx: bool
     agentx_launch: AgentxLaunch
     torch_profiler: bool
@@ -81,8 +85,11 @@ class BenchmarkPoint:
             runner_type=_text(block, "runner_type"),
             benchmark_script=_text(block, "benchmark_script"),
             workload_kind=_text(block, "workload_kind"),
+            workload_mode=_text(block, "workload_mode"),
+            quant_scheme=_text(block, "quant_scheme"),
             inferencex_path=_text(block, "inferencex_path").strip(),
             envs=_mapping(block.get("envs"), source),
+            workload_spec=_mapping(block.get("workload_spec"), source),
             agentx=is_magpie_agentx(block),
             agentx_launch=AgentxLaunch(
                 env=_mapping(launch.get("env"), source),
