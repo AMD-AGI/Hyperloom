@@ -104,7 +104,7 @@ class _Redirect:
     def _copy(self, name: str, part: str) -> str:
         """The private copy of the table ``part`` names; every point that names the same table gets the same path.
 
-        The copy lives at ``tables/<variable>/<digest>/<file name>``, named by what the table holds: Magpie's reuse
+        The copy lives at ``tables/<variable>/<digest>/<file name>``, named by what the table holds: a reuse
         check compares the server's environment word for word, so a path that counted the tables copied so far (one
         per point of a sweep arm) would make every round after the one that booted the server look like another server.
         Tables with the same file name and other content stay apart, and the server's write-back lands in the one copy.
