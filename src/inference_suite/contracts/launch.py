@@ -64,6 +64,8 @@ class VersionCheck(str, Enum):
     PASSED = "passed"
     #: The base names no recipe image, so there is no version to reach.
     NOT_APPLICABLE = "not_applicable"
+    #: The round runs against a server it does not start, whose install is on another host than this round's.
+    NOT_HELD = "not_held"
 
 
 def _canonical(document: object) -> str:

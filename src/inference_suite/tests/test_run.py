@@ -45,7 +45,7 @@ from inference_suite.contracts import (
     WorkloadKind,
 )
 from inference_suite.contracts.base_launch import Workload
-from inference_suite.contracts.launch import Launch, LayerSource
+from inference_suite.contracts.launch import Launch, LayerSource, VersionCheck
 from inference_suite.contracts.report import Report
 from inference_suite.eval.definition import EvalPlan
 from inference_suite.framework_probe import FrameworkInstall, FrameworkProbeError
@@ -614,3 +614,24 @@ def test_cli_run_round_trips_the_config_and_exits_by_the_round_status(rig, tmp_p
 def test_cli_stop_on_a_pid_dir_without_a_server_reaps_nothing(tmp_path, capsys):
     assert cli.main(["stop", "--pid-dir", str(tmp_path)]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out) == {"reaped": [], "survivors": []}
+
+
+def test_an_external_round_measures_a_server_it_neither_starts_nor_holds_to_the_local_install(rig):
+    pid_dir = rig.tmp / "pids"
+    boot = rig.config(
+        "boot", workload=WorkloadKind.NONE, fixed=None, lifecycle=Lifecycle(LifecycleMode.BOOT, str(pid_dir))
+    )
+    assert run.run_round(boot).report.run_status is RunStatus.COMPLETED
+    rig.installed = "0.0.1"
+    rig.refusal = FlagRefusal((RefusedFlag("--disable-radix-cache", LayerSource.BASE),), "unrecognized arguments")
+
+    result = run.run_round(rig.config("external", lifecycle=Lifecycle(LifecycleMode.EXTERNAL)))
+
+    report, layout = result.report, result.layout
+    assert report.run_status is RunStatus.COMPLETED, report.failure_detail
+    assert report.fixed is not None and report.server is not None and report.server.reused
+    assert report.server.log_range is None and not layout.server_log.exists()
+    launch = Launch.from_document(json.loads(layout.launch.read_text()))
+    assert launch.framework.version_check is VersionCheck.NOT_HELD
+    assert (pid_dir / "server.pid").exists()
+    assert not runtime_server.stop(pid_dir).survivors
