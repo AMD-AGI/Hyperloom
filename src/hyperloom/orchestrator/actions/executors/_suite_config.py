@@ -133,7 +133,6 @@ from ._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
 from ._subprocess_kill import (
     AGENTX_EARLY_STOP_ERROR_CLASS,
     AGENTX_EARLY_STOP_RETURNCODE,
-    _KV_METRICS_ENV,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     AgentxCheckpointMissed,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -141,7 +140,10 @@ from ._subprocess_kill import (
     session_deadline_to_remaining_sec,
 )
 
-#: The host the round's server binds and its client reaches; Magpie bound every interface.
+#: Escape hatch for a round that must not pay even the cost of one HTTP GET every couple of seconds.
+_KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
+
+#: The host the round's server binds and its client reaches.
 SERVER_HOST = "127.0.0.1"
 #: Measured and warmup prompts are drawn with different seeds so the warmup does not prime the measured prompts.
 MEASURED_SEED = 0
