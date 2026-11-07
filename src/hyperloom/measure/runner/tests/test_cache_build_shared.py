@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts, theirs
 from hyperloom.measure.runner import cache_build
 from hyperloom.measure.runner.cache_build import (
     BuildOptions,
@@ -120,6 +120,22 @@ def test_a_lock_that_cannot_be_opened_for_writing_is_named(rig: Rig, tmp_path: P
     with pytest.raises(CacheBuildError, match=f"cannot open the build lock {path} for writing: "):
         ensure_runner_cache(rig.repo, rig.cache.sha, cache, rig.build_options())
     assert not (cache / rig.cache.sha).exists()
+
+
+def test_the_lock_is_not_opened_through_another_accounts_link_on_its_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cache directory swapped for a link after it was made: the lock goes the walk's way, so the link of another
+    account below ``/tmp`` (which every account can write) is not followed to where the lock would be made."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    cache = tmp_path / "cache"
+    cache.symlink_to(elsewhere)
+    theirs(cache, monkeypatch)
+    path = build_lock(cache, "0" * 40)
+    with pytest.raises(CacheBuildError, match=f"cannot open the build lock {path} for writing: "):
+        cache_build._open_lock(path)
+    assert list(elsewhere.iterdir()) == []
 
 
 def test_the_entry_is_built_where_only_its_builder_can_reach(

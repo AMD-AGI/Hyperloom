@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import Flush, make_shared_dirs, write_shared_bytes
+from hyperloom_common.shared_storage import (
+    SHARED_FILE_MODE,
+    Flush,
+    make_shared_dirs,
+    parent_is_shared,
+    write_shared_bytes,
+)
 
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 
@@ -157,12 +163,19 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
     """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
     if options.shared:
+        private_mode = _private_mode(path, options)
+        mode = SHARED_FILE_MODE
         if options.make_parents:
+            # judged before the parents are made: a parent made under a umask that leaves group write in a setgid
+            # directory would look shared itself, and the file would be widened where the call alone would not be
+            if not parent_is_shared(path):
+                mode = private_mode
             make_shared_dirs(path.parent)
         write_shared_bytes(
             path,
             data,
-            private_mode=_private_mode(path, options),
+            mode=mode,
+            private_mode=private_mode,
             flush=Flush(file=options.fsync, directory=options.fsync_dir),
         )
         return

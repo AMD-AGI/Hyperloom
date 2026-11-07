@@ -15,8 +15,8 @@ link at its own name) the umask alone decides, exactly as for a plain ``mkdir`` 
 as private as the account keeps its files; a mode asked for is masked by the umask, never widened. A mode narrower than
 the shared one (``0600`` for a file that holds a credential) is kept as asked, shared or not. Nothing is chowned, and an existing entry is never chmodded (another account's would fail ``EPERM``): a file is
 replaced by rename instead, and never opened in place, since a member of the group may have put a link there. Nor is
-a link followed on the way to it once the way has passed a directory another account can write
-(:func:`open_directory`): a member of the group could have put one there for any directory of the path. The umask of
+a link followed on the way to it once the way has passed a directory another account can write or owns
+(:func:`open_directory`): a member of the group, or that owner, could have put one there for any directory of the path. The umask of
 this process is never changed, since its threads share it and it would also open up the files only this account may
 read.
 
@@ -73,7 +73,8 @@ def open_directory(path: Path, *, make: int | None = None) -> int:
     itself, ``/tmp``) or that another account than this one and root owns (a member's home or project directory):
     any member of the group, or that owner, could have put one there, to any directory the account that follows it
     can write. Links above that point (``/var/run``, a mount reached through a link of the host's), and this account's
-    and root's own anywhere, are followed. With ``make``, each missing directory is made with that mode
+    and root's own anywhere, are followed. In a single-id user namespace root and every other account own their
+    directories as one unmapped id, so there only the mode of such a directory decides (:func:`_unmapped`). With ``make``, each missing directory is made with that mode
     (:func:`make_shared_dirs`).
 
     Raises:
@@ -150,10 +151,33 @@ def _trusted(uid: int) -> bool:
     return uid in (0, os.geteuid())
 
 
+def _owner_trusted(uid: int) -> bool:
+    """Whether a directory ``uid`` owns leaves its links to be followed, as far as its owner goes: one of
+    :func:`_trusted`'s, or one this user namespace cannot tell from root (:func:`_unmapped`)."""
+    return _trusted(uid) or _unmapped(uid)
+
+
+def _unmapped(uid: int) -> bool:
+    """Whether ``uid`` is the overflow id this user namespace shows for an id it does not map: in the single-id
+    namespace of a container (its root mapped to the account) host root and every other account look alike, so which
+    one owns a directory cannot be told. ``False`` when the kernel does not say."""
+    try:
+        with open("/proc/sys/kernel/overflowuid", encoding="ascii") as overflow:
+            if uid != int(overflow.read()):
+                return False
+        with open("/proc/self/uid_map", encoding="ascii") as uid_map:
+            ranges = [tuple(map(int, line.split()[::2])) for line in uid_map if line.strip()]
+    except (OSError, ValueError):
+        return False
+    return not any(first <= uid < first + count for first, count in ranges)
+
+
 class _Walk:
     """Where :func:`open_directory` is on its way: the directory open as :attr:`descriptor` (``O_PATH``) is
     :attr:`here`, and :attr:`shared` once a directory passed can be written by accounts other than its owner, or is
-    owned by an account other than this one and root (which can put any link there)."""
+    owned by an account other than this one and root (which can put any link there). An owner this user namespace
+    does not map (:func:`_unmapped`) cannot be told from root, whose directories (``/``, ``/var``) every path passes,
+    so only the mode decides for its directories."""
 
     def __init__(self, descriptor: int) -> None:
         self.descriptor = descriptor
@@ -182,7 +206,7 @@ class _Walk:
         """``lstat`` of ``name`` here, made first with ``make`` when it is missing; ``None`` when another process
         made it meanwhile."""
         here = os.fstat(self.descriptor)
-        self.shared = self.shared or bool(here.st_mode & _OPEN_TO_OTHERS) or not _trusted(here.st_uid)
+        self.shared = self.shared or bool(here.st_mode & _OPEN_TO_OTHERS) or not _owner_trusted(here.st_uid)
         try:
             return os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
         except FileNotFoundError:
@@ -201,11 +225,12 @@ class _Walk:
         """The parts of the link ``name`` here to walk instead of it, ``left`` parts of the path being left after it;
         an absolute one starts again from ``/``.
 
-        Below a directory others can write, only a link of this account's or root's is followed, which no other account
-        can make: it is opened itself (``O_PATH``), so the link whose owner is checked is the one read.
+        Past a directory others can write or another account owns, only a link of this account's or root's is
+        followed, which no other account can make (one whose owner this user namespace does not map is not): it is
+        opened itself (``O_PATH``), so the link whose owner is checked is the one read.
 
         Raises:
-            OSError: ``ELOOP`` for another account's link below a directory others can write, or after too many links.
+            OSError: ``ELOOP`` for another account's link past such a directory, or after too many links.
         """
         link = os.open(name, _LINK, dir_fd=self.descriptor)
         try:
@@ -213,7 +238,7 @@ class _Walk:
             if self.shared and not _trusted(owner):
                 raise OSError(
                     errno.ELOOP,
-                    f"a link of uid {owner} in a directory other accounts can write is not followed",
+                    f"a link of uid {owner} is not followed past a directory another account can write or owns",
                     str(self.here / name),
                 )
             target = Path(os.readlink("", dir_fd=link))
@@ -239,8 +264,10 @@ class _Walk:
         self._move(child, self.here.parent if name == ".." else self.here / name)
 
     def _move(self, descriptor: int, here: Path) -> None:
-        os.close(self.descriptor)
+        """Hold ``descriptor`` (``here``) instead: it is the walk's from now on, whatever closing the last one does."""
+        left = self.descriptor
         self.descriptor, self.here = descriptor, here
+        os.close(left)
 
 
 def read_directory(descriptor: int) -> int:
@@ -259,22 +286,25 @@ def _make_directory(parent: int, name: str, mode: int, made: Path, *, widen: boo
     except OSError as exc:
         raise type(exc)(exc.errno, exc.strerror, str(made)) from None  # the whole path, not the name below dir_fd
     if widen:
-        _share(os.open(name, _DIRECTORY, dir_fd=parent), mode, made)
+        _share(parent, name, mode, made)
     return True
 
 
-def _share(descriptor: int, mode: int, directory: Path) -> None:
-    """Give the directory open as ``descriptor`` its ``mode`` and close it; logged when it does not keep setgid."""
+def _share(parent: int, name: str, mode: int, directory: Path) -> None:
+    """Give the directory ``name`` of ``parent`` (``directory``), opened without following a link, its ``mode``;
+    logged when it does not keep setgid."""
+    descriptor = os.open(name, _DIRECTORY, dir_fd=parent)
     try:
         os.fchmod(descriptor, mode)
-        if mode & stat.S_ISGID and not os.fstat(descriptor).st_mode & stat.S_ISGID:
-            log.warning(
-                "%s did not keep the setgid bit: this account is not in its group, so what is made below it takes this "
-                "account's own group",
-                directory,
-            )
+        setgid_kept = os.fstat(descriptor).st_mode & stat.S_ISGID
     finally:
         os.close(descriptor)
+    if mode & stat.S_ISGID and not setgid_kept:
+        log.warning(
+            "%s did not keep the setgid bit: this account is not in its group, so what is made below it takes this "
+            "account's own group",
+            directory,
+        )
 
 
 def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
@@ -297,18 +327,19 @@ def share_new_directory(directory: Path, *, mode: int = SHARED_DIR_MODE) -> None
     directory opened without following a link, in its parent reached as :func:`open_directory` reaches it, when that
     parent is shared storage (:func:`parent_is_shared`); logged as in :func:`make_shared_dirs` when it does not keep
     setgid. Anywhere else it is left as it was made; a link at its name is refused either way."""
-    with _directory_of(directory) as (parent, name, widen):
-        made = os.open(name, _DIRECTORY, dir_fd=parent)
+    with shared_parent(directory) as (parent, name, widen):
         if widen:
-            _share(made, mode, directory)
+            _share(parent, name, mode, directory)
         else:
-            os.close(made)
+            os.close(os.open(name, _DIRECTORY, dir_fd=parent))  # a link at its name is refused (ELOOP)
 
 
 @contextmanager
-def _directory_of(path: Path) -> Iterator[tuple[int, str, bool]]:
-    """The directory of ``path`` opened by :func:`open_directory`, the name of ``path`` in it, and whether that
-    directory is shared storage (:func:`parent_is_shared`)."""
+def shared_parent(path: Path) -> Iterator[tuple[int, str, bool]]:
+    """The directory of ``path`` opened by :func:`open_directory` (``O_PATH``, closed after the block), the name of
+    ``path`` in it, and whether that directory is shared storage (:func:`parent_is_shared`): for a writer of its own
+    that opens ``path`` as ``dir_fd`` and name, so that it goes the way the helpers here go and is judged where it
+    writes."""
     walk = _walk_to(Path(path).parent, make=None)
     try:
         yield walk.descriptor, Path(path).name, walk.set_up_to_share()
@@ -346,7 +377,7 @@ def _new_temporary(directory: int, name: str, mode: int, flags: int = 0) -> tupl
 def create_shared_file(path: Path) -> None:
     """Create ``path`` empty with mode ``664`` below shared storage (:func:`parent_is_shared`), else as the umask leaves
     ``664``; an existing file is replaced by rename, never truncated or chmodded."""
-    with _directory_of(path) as (directory, name, widen):
+    with shared_parent(path) as (directory, name, widen):
         try:
             descriptor = os.open(
                 name, _NEW_FILE, _OWNER_ONLY, dir_fd=directory
@@ -382,7 +413,7 @@ def write_shared_bytes(
     whoever owned the one it replaced. Below shared storage (:func:`parent_is_shared`) the file has ``mode`` whatever
     the umask; anywhere else ``private_mode`` when given, else ``mode`` masked by the umask. ``flush`` says what is
     flushed to disk; a flush that fails raises its ``OSError``."""
-    with _directory_of(path) as (directory, name, widen):
+    with shared_parent(path) as (directory, name, widen):
         if widen or private_mode is None:
             private_mode = _final_mode(mode, widen)
         descriptor, temporary = _new_temporary(directory, name, private_mode)
@@ -414,7 +445,7 @@ def open_shared_replacement(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
     is replaced, never opened. ``mode`` is masked by the umask outside shared storage (:func:`parent_is_shared`). The
     caller closes the descriptor.
     """
-    with _directory_of(path) as (directory, name, widen):
+    with shared_parent(path) as (directory, name, widen):
         descriptor, temporary = _new_temporary(directory, name, _final_mode(mode, widen))
         try:
             os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
@@ -437,7 +468,7 @@ def create_new_shared_file(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
     Raises:
         FileExistsError: When anything, a link included, has that name already; it is left as it is.
     """
-    with _directory_of(path) as (directory, name, widen):
+    with shared_parent(path) as (directory, name, widen):
         mode = _final_mode(mode, widen)
         descriptor, temporary = _new_temporary(directory, name, mode, os.O_APPEND)
         try:
@@ -472,7 +503,7 @@ def _create_in_place(directory: int, name: str, mode: int) -> int:
 def copy_shared_file(source: Path, path: Path, *, mode: int = SHARED_FILE_MODE) -> None:
     """Copy ``source`` to a new file beside ``path`` with ``mode`` (masked by the umask outside shared storage) and
     rename it over ``path``, as :func:`write_shared_bytes` does, without holding the content in memory."""
-    with _directory_of(path) as (directory, name, widen):
+    with shared_parent(path) as (directory, name, widen):
         descriptor, temporary = _new_temporary(directory, name, _final_mode(mode, widen))
         try:
             with os.fdopen(descriptor, "wb") as handle, open(source, "rb") as content:
@@ -567,6 +598,7 @@ __all__ = [
     "ownership",
     "parent_is_shared",
     "share_new_directory",
+    "shared_parent",
     "setgid_warnings",
     "writable_problems",
     "write_shared_bytes",

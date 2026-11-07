@@ -238,10 +238,8 @@ else:
 """
 
 
-@pytest.fixture
-def closed_to_others() -> Iterator[Path]:
-    """A new ``0755`` directory of root's whose every directory above is root's and written by root alone: below
-    ``/tmp`` a link would be refused for ``/tmp`` already, whoever owns the directories after it."""
+def _closed_to_others_parent() -> Path | None:
+    """A directory this account can write in whose every directory up to ``/`` is root's and written by root alone."""
     for candidate in map(Path, ("/srv", "/opt", "/var/lib", "/usr/local")):
         chain = (candidate, *candidate.parents)
         try:
@@ -252,10 +250,18 @@ def closed_to_others() -> Iterator[Path]:
         except OSError:
             continue
         if closed and os.access(candidate, os.W_OK):
-            base = Path(tempfile.mkdtemp(prefix=".hl-shared-storage-test-", dir=candidate))
-            break
-    else:
+            return candidate
+    return None
+
+
+@pytest.fixture
+def closed_to_others() -> Iterator[Path]:
+    """A new ``0755`` directory of root's whose every directory above is root's and written by root alone: below
+    ``/tmp`` a link would be refused for ``/tmp`` already, whoever owns the directories after it."""
+    parent = _closed_to_others_parent()
+    if parent is None:
         pytest.skip("no directory here whose way is root's alone")
+    base = Path(tempfile.mkdtemp(prefix=".hl-shared-storage-test-", dir=parent))
     try:
         base.chmod(0o755)
         yield base
@@ -291,6 +297,74 @@ def test_a_link_in_a_directory_another_account_owns_is_not_followed_though_only_
         assert seen == ["ELOOP", str(shared)]
         assert (settings.read_text(), _mode(settings), settings.stat().st_uid) == ("orig", 0o600, accounts.second)
         assert sorted(path.name for path in private.iterdir()) == ["settings.json"]
+
+
+def test_where_this_namespace_maps_the_overflow_id_a_directory_it_owns_is_another_accounts(closed_to_others):
+    """Only an id the namespace does not map is let off the owner rule: where the overflow id is a real account (the
+    host's ``nobody``), its home is another account's like any other, and its link there is not followed."""
+    if os.geteuid() != 0:
+        pytest.skip("only root can give a directory and a link to the overflow id")
+    nobody = int(Path("/proc/sys/kernel/overflowuid").read_text())
+    home = closed_to_others / "home-of-nobody"
+    home.mkdir(mode=0o755)
+    target = closed_to_others / "target"
+    target.mkdir()
+    (home / "link").symlink_to(target)
+    os.lchown(home / "link", nobody, nobody)
+    os.chown(home, nobody, nobody)
+
+    with pytest.raises(OSError, match="is not followed past a directory another account can write or owns") as raised:
+        shared_storage.write_shared_bytes(home / "link" / "f.json", b"x")
+
+    assert (raised.value.errno, raised.value.filename) == (errno.ELOOP, str(home / "link"))
+    assert list(target.iterdir()) == []
+
+
+_WRITE_THROUGH_EACH = """
+import errno, json
+from pathlib import Path
+from hyperloom_common.shared_storage import write_shared_bytes
+seen = []
+for path in {paths!r}:
+    try:
+        write_shared_bytes(Path(path), b"from the container")
+    except OSError as exc:
+        seen.append([errno.errorcode[exc.errno], exc.filename])
+    else:
+        seen.append("written")
+print(json.dumps(seen))
+"""
+
+
+def test_in_a_single_id_namespace_root_links_on_a_way_only_root_writes_are_followed_and_others_still_are_not(
+    closed_to_others,
+):
+    """In a container whose root is the account, root's directories (``/``, ``/var``) look as owned by the overflow id,
+    as does every other account's: their owner cannot be told, so their mode alone decides. A host link in a
+    directory only root writes is followed; one in a directory others can write still is not, whoever it looks like."""
+    with other_accounts() as accounts:
+        target = closed_to_others / "target"
+        target.mkdir()
+        os.chown(target, accounts.first, accounts.group)
+        target.chmod(0o2775)
+        closed = closed_to_others / "closed"
+        closed.mkdir(mode=0o755)
+        (closed / "link").symlink_to(target)
+        open_to_all = closed_to_others / "open-to-all"
+        open_to_all.mkdir()
+        open_to_all.chmod(0o1777)
+        (open_to_all / "link").symlink_to(target)
+        followed, refused = closed / "link" / "followed.json", open_to_all / "link" / "refused.json"
+
+        seen = json.loads(
+            accounts.run_in_single_id_namespace(
+                accounts.first, _WRITE_THROUGH_EACH.format(paths=[str(followed), str(refused)])
+            )
+        )
+
+        assert seen == ["written", ["ELOOP", str(open_to_all / "link")]]
+        assert sorted(path.name for path in target.iterdir()) == ["followed.json"]
+        assert (followed.read_bytes(), followed.stat().st_uid) == (b"from the container", accounts.first)
 
 
 def test_an_account_outside_the_group_gets_no_setgid_and_is_warned(tmp_path):
@@ -439,7 +513,7 @@ def test_a_link_at_a_directory_of_the_path_is_never_followed_below_a_directory_t
     target = shared / "planted" / "kept.json"
     namespace = {"os": os, "target": target, "source": source, **vars(shared_storage)}
     exec("from hyperloom_common.io import WriteOptions, atomic_write_json", namespace)
-    with pytest.raises(OSError, match="in a directory other accounts can write is not followed") as raised:
+    with pytest.raises(OSError, match="is not followed past a directory another account can write or owns") as raised:
         exec(write, namespace)
     assert raised.value.errno == errno.ELOOP and raised.value.filename == str(shared / "planted")
     assert sorted(path.name for path in private.iterdir()) == ["kept.json"]
@@ -546,8 +620,10 @@ def test_a_new_shared_file_never_takes_a_name_that_is_there_and_never_writes_thr
         shared_storage.create_new_shared_file(taken)
     assert outside.read_text() == "kept\n" and taken.is_symlink()
     descriptor = shared_storage.create_new_shared_file(shared / "free.jsonl")
-    os.write(descriptor, b"x")
-    os.close(descriptor)
+    try:
+        os.write(descriptor, b"x")
+    finally:
+        os.close(descriptor)
     assert (shared / "free.jsonl").read_bytes() == b"x" and _mode(shared / "free.jsonl") == 0o664
     assert sorted(path.name for path in shared.iterdir()) == ["free.jsonl", "outside", "taken.jsonl"]
 
@@ -635,7 +711,8 @@ def test_below_a_setgid_group_writable_directory_every_helper_widens_whatever_th
     }
 
 
-@pytest.mark.parametrize("umask", [0o022, 0o077])
+# 0o002 leaves group write: a parent made in a setgid directory then looks shared, but what it holds must not widen
+@pytest.mark.parametrize("umask", [0o022, 0o077, 0o002])
 @pytest.mark.parametrize(
     "parent_mode", [0o755, 0o775, 0o2755, 0o2777, 0o1777], ids=["0755", "0775", "2755", "2777", "1777"]
 )

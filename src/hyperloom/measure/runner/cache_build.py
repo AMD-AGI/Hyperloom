@@ -138,7 +138,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import current_umask, make_shared_dirs, ownership, parent_is_shared
+from hyperloom_common.shared_storage import current_umask, make_shared_dirs, ownership, shared_parent
 from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
 from hyperloom.measure.runner.cache_layout import (
     BOOTSTRAP_NAME,
@@ -1072,25 +1072,36 @@ def _open_lock(path: Path) -> int:
     """``path`` opened for writing. When this call creates it in a cache directory set up to be shared, it is made
     ``0664`` (:func:`_shared_umask`), so that every account of the cache directory's group can take the lock after this
     one; in any other directory it is made under the builder's umask, as private as the directory
-    (:func:`_shared_dirs`).
+    (:func:`_shared_dirs`). Its directory is reached as the shared-storage helpers reach theirs, and judged on what
+    that walk holds open (:func:`~hyperloom_common.shared_storage.shared_parent`): another account's link on the way
+    is not followed, and a link at its own name is not opened.
 
     Raises:
-        CacheBuildError: When it cannot be opened so, naming it: a lock another account made without group write.
+        CacheBuildError: When it cannot be opened so, naming it: a lock another account made without group write, or
+            a way through a link that is not followed.
     """
-    shared = parent_is_shared(path)
-    mode = _ALL_FILE_BITS & ~(_shared_umask() if shared else current_umask())
     try:
-        try:
-            descriptor = os.open(path, _LOCK_FLAGS | os.O_CREAT | os.O_EXCL, mode)
-        except FileExistsError:
-            return os.open(path, _LOCK_FLAGS)
+        with shared_parent(path) as (directory, name, shared):
+            return _open_lock_in(directory, name, _ALL_FILE_BITS & ~(_shared_umask() if shared else current_umask()))
     except OSError as exc:
         raise CacheBuildError(
             f"cannot open the build lock {path} for writing: {exc.strerror}{ownership(path)}; every account that builds "
             "into this cache must be able to"
         ) from None
-    if shared:
+
+
+def _open_lock_in(directory: int, name: str, mode: int) -> int:
+    """The lock ``name`` of ``directory`` opened for writing; made with ``mode`` by ``fchmod`` when this call makes it,
+    which in a directory not shared is only what the umask leaves anyway."""
+    try:
+        descriptor = os.open(name, _LOCK_FLAGS | os.O_CREAT | os.O_EXCL, mode, dir_fd=directory)
+    except FileExistsError:
+        return os.open(name, _LOCK_FLAGS, dir_fd=directory)
+    try:
         os.fchmod(descriptor, mode)
+    except BaseException:
+        os.close(descriptor)
+        raise
     return descriptor
 
 

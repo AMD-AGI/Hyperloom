@@ -406,7 +406,7 @@ def test_a_link_another_account_put_on_the_way_to_the_session_ends_the_run_final
     run.restart()
     assert entry.main(["run"]) == 2
     error = _exit(run)["error"]
-    assert "in a directory other accounts can write is not followed" in error and str(sessions) in error
+    assert "is not followed past a directory another account can write or owns" in error and str(sessions) in error
     assert len(fake.calls) == 1
 
 
