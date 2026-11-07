@@ -40,8 +40,6 @@ from hyperloom_multibranch.blackboard.rsi.frontier import (
     FRONTIER_V1_LABEL,
     MERGED_COMPONENT,
     MERGED_GAIN_COMPONENT,
-    NEAR_BAR_COMPONENT,
-    NEAR_BAR_HOLD,
     OBSERVATION_SECONDS,
     PROBATION_COMPONENT,
     PROBATION_HOLD,
@@ -233,14 +231,13 @@ def test_each_scored_branch_carries_its_stall_evidence_under_a_stop_rule_and_non
     components = s1.components
     assert (components[STALLED_COMPONENT], components[STALL_BAR_COMPONENT]) == (1.0, float(DEFAULT_STALL_TESTS))
     assert (components[MERGED_COMPONENT], components[MERGED_GAIN_COMPONENT]) == (1.0, pytest.approx(4.0))
-    assert (components[NEAR_BAR_COMPONENT], components[CANDIDATE_COMPONENT]) == (0.0, 0.0)
+    assert components[CANDIDATE_COMPONENT] == 0.0
     assert PROBATION_COMPONENT not in components and STRANDED_COMPONENT not in components
     assert set(components) - set(plain.components) == {
         STALLED_COMPONENT,
         STALL_BAR_COMPONENT,
         MERGED_COMPONENT,
         MERGED_GAIN_COMPONENT,
-        NEAR_BAR_COMPONENT,
         CANDIDATE_COMPONENT,
     }
     assert plain.expected_gain_pct == s1.expected_gain_pct
@@ -254,11 +251,10 @@ def test_the_stop_rule_s_grace_ends_the_floor_and_holds_a_stall(snapshot: Blackb
     assert _scores(snapshot, rule=patient)["s1"].components[CANDIDATE_COMPONENT] == 0.0
 
 
-def test_the_envelope_holds_a_probation_then_a_near_bar_then_a_stranded_lead() -> None:
-    assert envelope_hold({PROBATION_COMPONENT: 1.0, NEAR_BAR_COMPONENT: 1.0}) == PROBATION_HOLD
-    assert envelope_hold({NEAR_BAR_COMPONENT: 2.0, STRANDED_COMPONENT: 4.0}) == NEAR_BAR_HOLD
-    assert envelope_hold({NEAR_BAR_COMPONENT: 0.0, STRANDED_COMPONENT: 4.0}) == STRANDED_HOLD
-    assert envelope_hold({STALLED_COMPONENT: 9.0, NEAR_BAR_COMPONENT: 0.0}) == ""
+def test_the_envelope_holds_a_probation_then_a_stranded_lead() -> None:
+    assert envelope_hold({PROBATION_COMPONENT: 1.0, STRANDED_COMPONENT: 4.0}) == PROBATION_HOLD
+    assert envelope_hold({STRANDED_COMPONENT: 4.0}) == STRANDED_HOLD
+    assert envelope_hold({STALLED_COMPONENT: 9.0}) == ""
 
 
 def _stranded(snapshot: BlackboardSnapshot, tried_on: str) -> BlackboardSnapshot:
@@ -361,16 +357,25 @@ def test_a_commit_that_failed_to_merge_does_not_end_the_stall(snapshot: Blackboa
     assert (evidence[STALLED_COMPONENT], evidence[MERGED_COMPONENT]) == (2.0, 0.0)
 
 
-def test_a_near_miss_among_the_last_tests_holds_the_branch(snapshot: BlackboardSnapshot) -> None:
+def test_a_stalled_branch_whose_last_test_fell_just_short_of_the_bar_is_a_stop_candidate_unless_drawn_or_stranded(
+    snapshot: BlackboardSnapshot,
+) -> None:
     near = judgement(0.8, ("r4",), verdict=Verdict.FLAT, threshold_pct=1.0)
     records = tuple(
         dataclasses.replace(record, judgement=near) if record.request_id == "r4" else record
         for record in snapshot.records
     )
     missed = dataclasses.replace(snapshot, records=records)
-    evidence = stall_evidence(missed, _row(missed), METRIC, StallBar(StopRule(probation_share=0.0), 1), young=False)
+    stranded = _stranded(missed, "i0")
+    never_drawn, drawn = (StallBar(StopRule(probation_share=share), 1) for share in (0.0, 1.0))
 
-    assert (evidence[NEAR_BAR_COMPONENT], evidence[CANDIDATE_COMPONENT]) == (1.0, 0.0)
+    evidence = stall_evidence(missed, _row(missed), METRIC, never_drawn, young=False)
+    on_probation = stall_evidence(missed, _row(missed), METRIC, drawn, young=False)
+    leading = stall_evidence(stranded, _row(stranded), METRIC, StallBar(never_drawn.rule, 6), young=False)
+
+    assert (evidence[CANDIDATE_COMPONENT], envelope_hold(evidence)) == (1.0, "")
+    assert (on_probation[CANDIDATE_COMPONENT], envelope_hold(on_probation)) == (0.0, PROBATION_HOLD)
+    assert envelope_hold(leading) == STRANDED_HOLD
 
 
 def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:
