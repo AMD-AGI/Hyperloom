@@ -18,6 +18,7 @@ import pytest
 
 from hyperloom_common.tests import test_git_safety as cases
 from hyperloom_common.tests.test_git_safety import unauthorized  # noqa: F401  (a fixture)
+from hyperloom_multibranch.repo import isolated_git
 from hyperloom_multibranch.specialist import worktree as worktree_module
 
 
@@ -72,3 +73,18 @@ def test_an_http_fetch_through_the_worktree_s_git_starts_no_credential_program(
     done = cases._proves(tmp_path, lambda tree: cases._lazy_fetch(tree, unauthorized, (key, str(tree.program))))
 
     assert done.returncode != 0
+
+
+def test_pinned_git_runs_no_driver_program_the_repository_s_config_names(tmp_path: Path) -> None:
+    """An agent's checkout or workspace: a command that reads the tree runs no filter its config defines."""
+    tree = cases._tree(tmp_path / "t")
+    tree.config(("filter.own.clean", str(tree.filter)))
+    (tree.base / ".gitattributes").write_text("* filter=own\n", encoding="utf-8")
+    (tree.base / "added.py").write_text("fresh = 3\n", encoding="utf-8")
+
+    done = isolated_git.pinned_git(tree.base, "add", "-A")
+
+    assert done.returncode == 0, done.stderr
+    assert not tree.canary.exists()
+    subprocess.run(["git", "-C", str(tree.base), "add", "-A"], env=cases._plain_env(), capture_output=True, check=False)
+    assert tree.canary.exists(), "plain git runs the filter, so the plant is live"

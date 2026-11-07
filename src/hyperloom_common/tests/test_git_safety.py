@@ -10,11 +10,13 @@ does not run would prove nothing.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import http.server
 import os
 import pty
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -24,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common import git_safety
 from hyperloom_common.git_safety import NO_PROGRAMS, app_git, app_git_diff
 
 
@@ -68,7 +71,12 @@ class _Tree:
         (self.worktree / ".gitattributes").write_text(f"{line}\n", encoding="utf-8")
 
     def change(self) -> None:
-        (self.worktree / "mod.py").write_text("new = 2\n", encoding="utf-8")
+        # The committed size, so git must read the file to see the change, and a timestamp a second past the checkout's:
+        # a rewrite within the same timestamp tick has the index entry's stat and looks unchanged, read or not.
+        changed = self.worktree / "mod.py"
+        changed.write_text("new = 2\n", encoding="utf-8")
+        later = changed.stat().st_mtime_ns + 1_000_000_000
+        os.utime(changed, ns=(later, later))
         (self.worktree / "added.py").write_text("fresh = 3\n", encoding="utf-8")
 
 
@@ -396,11 +404,11 @@ _PLANTS = [
     *(
         pytest.param(_filter(program, *command), "", id=f"filter-{program}-{command[0]}")
         for program, command in (
-            ("clean", ("add", "-A", "-N")),
+            ("clean", ("add", "-A")),
             ("clean", ("diff", "--no-ext-diff", "HEAD")),
             ("clean", ("status", "--porcelain")),
             ("smudge", ("checkout", "--", "mod.py")),
-            ("process", ("add", "-A", "-N")),
+            ("process", ("add", "-A")),
             ("process", ("diff", "--no-ext-diff", "HEAD")),
             ("process", ("status", "--porcelain")),
             ("process", ("checkout", "--", "mod.py")),
@@ -617,3 +625,97 @@ def test_the_caller_s_environment_never_outranks_what_keeps_the_config_out(tmp_p
         check=False,
     )
     assert plain.returncode == 0, "the planted global config defines the alias, so the plant is live"
+
+
+def _plain_add(tree: _Tree) -> None:
+    argv = ["git", "-C", str(tree.worktree), "-c", "safe.directory=*", "add", "-A"]
+    subprocess.run(argv, env=_plain_env(), capture_output=True, check=False)
+
+
+@pytest.mark.parametrize("common", [False, True], ids=["any-repository", "the-caller-s"])
+def test_a_symlink_on_the_way_to_the_admin_dir_flipped_after_the_check_reaches_no_git(tmp_path, monkeypatch, common):
+    """The gitfile names the admin dir through a symlink the worktree's writer owns, pointing at the real one when it
+    is checked and at the writer's own repository when git runs: git is given the path the check resolved."""
+    tree = _tree(tmp_path / "t")
+    git = tree.base / ".git"
+    # The writer's repository: the base's copied, its config naming a filter, its admin dir naming this gitfile back.
+    own = tree.worktree / ".writer"
+    shutil.copytree(git, own / ".git", symlinks=True)
+    _git(own, "config", "filter.own.clean", str(tree.filter))
+    link = tree.worktree / "lnk"
+    link.symlink_to(tree.base)
+    (tree.worktree / ".git").write_text(f"gitdir: {link}/.git/worktrees/worktree\n", encoding="utf-8")
+    tree.attributes("* filter=own")
+    tree.change()
+    checked = git_safety.trusted_admin_dir
+
+    def check_then_flip(worktree: Path, caller_s: Path | None = None) -> Path:
+        admin = checked(worktree, caller_s)
+        flipped = tmp_path / "flipped"
+        flipped.symlink_to(own)
+        os.replace(flipped, link)
+        return admin
+
+    monkeypatch.setattr(git_safety, "trusted_admin_dir", check_then_flip)
+
+    done = app_git(tree.worktree, "add", "-A", common=git if common else None)
+
+    assert done.returncode == 0, done.stderr
+    assert not tree.canary.exists()
+    with pytest.raises(OSError, match="lies in the worktree"):
+        checked(tree.worktree, git if common else None)  # flipped before the check, the writer's admin dir is refused
+    _plain_add(tree)
+    assert tree.canary.exists(), "plain git follows the flipped link to the writer's config, so the plant is live"
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a directory of another owner needs root to chown")
+@pytest.mark.parametrize("level", [0, 1, 2], ids=["admin-dir", "worktrees", "repository"])
+def test_an_admin_dir_on_a_path_another_account_owns_runs_nothing(tmp_path, level):
+    tree = _tree(tmp_path / "t")
+    admin = tree.base / ".git" / "worktrees" / "worktree"
+    tree.config(("filter.own.clean", str(tree.filter)))
+    tree.attributes("* filter=own")
+    tree.change()
+    os.lchown((admin, admin.parent, admin.parent.parent)[level], 65534, 65534)
+
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        app_git(tree.worktree, "add", "-A")
+
+    assert not tree.canary.exists()
+    _plain_add(tree)
+    assert tree.canary.exists(), "plain git runs the filter, so the plant is live"
+
+
+def test_a_gitfile_that_is_a_symlink_is_not_followed_even_to_a_true_pointer(tmp_path):
+    """The app reads no file the writer points ``.git`` at (a pipe would hang it, a device fill its memory)."""
+    tree = _tree(tmp_path / "t")
+    gitfile = tree.worktree / ".git"
+    pointer = tmp_path / "pointer"
+    pointer.write_text(gitfile.read_text(encoding="utf-8"), encoding="utf-8")
+    gitfile.unlink()
+    gitfile.symlink_to(pointer)
+
+    with pytest.raises(OSError) as refused:
+        app_git(tree.worktree, "status", "--porcelain")
+
+    assert refused.value.errno == errno.ELOOP
+    assert subprocess.run(["git", "-C", str(tree.worktree), "status"], env=_plain_env(), check=False).returncode == 0
+
+
+def test_an_admin_dir_the_gitfile_names_inside_the_worktree_runs_nothing(tmp_path):
+    """Whoever writes the worktree may write files the app's uid owns, so an admin dir there is never the app's."""
+    tree = _tree(tmp_path / "t")
+    own = tree.worktree / ".writer"
+    shutil.copytree(tree.base / ".git", own, symlinks=True)
+    with (own / "config").open("a", encoding="utf-8") as config:
+        config.write(f'[filter "own"]\n\tclean = {tree.filter}\n')
+    (tree.worktree / ".git").write_text(f"gitdir: {own}/worktrees/worktree\n", encoding="utf-8")
+    tree.attributes("* filter=own")
+    tree.change()
+
+    with pytest.raises(OSError, match="lies in the worktree"):
+        app_git(tree.worktree, "add", "-A")
+
+    assert not tree.canary.exists()
+    _plain_add(tree)
+    assert tree.canary.exists(), "plain git follows the gitfile to the writer's config, so the plant is live"

@@ -13,6 +13,8 @@ against its head, a patch the toolbox applies where it applies every other.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
 import shutil
 import subprocess
@@ -34,7 +36,6 @@ from hyperloom_common.git_safety import app_git, trusted_admin_dir
 from hyperloom_multibranch.repo.isolated_git import (
     INIT,
     NO_EXCLUDES_FILE,
-    NO_LAZY_FETCH,
     blank_driver_programs,
     git_argv,
     git_env,
@@ -161,8 +162,9 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
 
 def _worktree_git(worktree: Path, common: Path, args: Sequence[str], pinned: Mapping[str, str]) -> str:
     """``git <args>`` in the branch worktree ``worktree`` by ``app_git``; raises :class:`WorktreeError` when it fails
-    or is refused, the worktree's git metadata not being the app's."""
-    env = {**pinned, **NO_LAZY_FETCH, "LC_ALL": "C"}
+    or is refused, the worktree's git metadata not being the app's. ``app_git`` allows no transport, so a promisor
+    remote's lazy fetch starts nothing either."""
+    env = {**pinned, "LC_ALL": "C"}
     try:
         done = app_git(
             worktree, *NO_EXCLUDES_FILE, *_FIXED_CONFIG, *args, timeout=GIT_TIMEOUT_S, env=env, common=common
@@ -260,9 +262,7 @@ class SourceBase:
             _git(self.path, "worktree", _ADD, "-b", f"mb/{branch}", str(path), BASE_BRANCH)
         common = self.path / _GIT_DIR
         for prefix, target in linked_paths(common):
-            if not (path / prefix).exists():
-                (path / prefix).parent.mkdir(parents=True, exist_ok=True)
-                (path / prefix).symlink_to(target)
+            _link(path, PurePosixPath(prefix), target)
         return self._worktrees.setdefault(path, BranchWorktree(path, self._native, common=common))
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
@@ -278,6 +278,31 @@ class SourceBase:
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout; its source cannot be laid out")
         return layout
+
+
+def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
+    """Link ``target`` at ``prefix`` in ``worktree`` unless something is there, making the directories on the way.
+
+    The agent writes the worktree and may have made a directory on the way a symlink to somewhere else: each directory
+    is opened without following one, and the next made and opened relative to it, so nothing is made outside.
+
+    Raises:
+        WorktreeError: A directory on the way is a symlink or no directory.
+    """
+    fds = [os.open(worktree, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
+    try:
+        for part in prefix.parts[:-1]:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(part, dir_fd=fds[-1])
+            try:
+                fds.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
+            except OSError as error:
+                raise WorktreeError(f"{worktree / prefix} cannot be linked: {part} is no directory: {error}") from error
+        with contextlib.suppress(FileExistsError):
+            os.symlink(target, prefix.name, dir_fd=fds[-1])
+    finally:
+        for fd in fds:
+            os.close(fd)
 
 
 def _file_sections(patch: str) -> list[tuple[tuple[str, ...], str]]:
@@ -490,7 +515,8 @@ class BranchWorktree:
     def _reset(self, commit: str) -> None:
         self._git("reset", "--hard", commit)
         kept = [f"--exclude=/{prefix}" for prefix, _target in linked_paths(self._common)]
-        self._git("clean", "-fdx", _QUIET, *kept)
+        # Twice forced: a repository the agent nested in the tree goes too, or it would outlive the sync.
+        self._git("clean", "-ffdx", _QUIET, *kept)
 
     def source_only(self, component: str, patch: str) -> tuple[str, tuple[str, ...]]:
         """``patch`` less its files outside ``component``'s paths, and the paths it left out: an agent's scratch (logs,
