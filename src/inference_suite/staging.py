@@ -210,6 +210,14 @@ def _absent_manifest(path: Path) -> str:
     return f"the staging manifest {path} (absent)"
 
 
+def manifest_sha256(tool_cache: Path) -> str | None:
+    """The sha256 of the manifest ``tool_cache`` holds, the ``tool_manifest_sha256`` a round names; ``None`` with none."""
+    try:
+        return _sha256((tool_cache / MANIFEST_FILE).read_bytes())
+    except FileNotFoundError:
+        return None
+
+
 def verify(tool_cache: Path, manifest_sha256: str) -> StagingReport:
     """Check ``tool_cache`` against the manifest whose sha256 is ``manifest_sha256`` and the pins in force."""
     path = tool_cache / MANIFEST_FILE
@@ -326,11 +334,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.tool_cache.mkdir(parents=True, exist_ok=True)
         print(stage(args.source, args.tool_cache))
         return 0
-    path = args.tool_cache / MANIFEST_FILE
-    if not path.is_file():
-        print(f"{FailedStep.STAGING_MISSING.value}: {_absent_manifest(path)}", file=sys.stderr)
+    digest = manifest_sha256(args.tool_cache)
+    if digest is None:
+        print(
+            f"{FailedStep.STAGING_MISSING.value}: {_absent_manifest(args.tool_cache / MANIFEST_FILE)}", file=sys.stderr
+        )
         return 1
-    report = verify(args.tool_cache, _sha256(path.read_bytes()))
+    report = verify(args.tool_cache, digest)
     if report.failed_step is not None:
         print(f"{report.failed_step.value}: {report.detail}", file=sys.stderr)
         return 1
@@ -361,6 +371,7 @@ __all__ = [
     "StagingReport",
     "inferencex_root",
     "main",
+    "manifest_sha256",
     "stage",
     "tool_root",
     "verify",
