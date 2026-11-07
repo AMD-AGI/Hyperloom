@@ -62,6 +62,8 @@ def configure_benchmark(args: argparse.Namespace) -> None:
     elif not native:
         if getattr(args, "docker_image", None):
             raise ValueError("--docker-image requires native AgentX")
+        if getattr(args, "no_agentx_accuracy", False):
+            raise ValueError("--no-agentx-accuracy requires native AgentX; other workloads have no accuracy round")
         return
     _validate_agentx_options(args)
     args.enable_conc_sweep = False
@@ -209,10 +211,16 @@ def bind_benchmark(session_dir: Path, args: argparse.Namespace) -> None:
 
 
 def add_benchmark_argument(parser: argparse.ArgumentParser) -> None:
-    """Register the native workload's optional YAML and image inputs."""
+    """Register the native workload's optional YAML, image and accuracy-round inputs."""
     parser.add_argument(
         "--benchmark-config", type=Path, help="Optional Magpie AgentX YAML instead of Hyperloom workload flags."
     )
     parser.add_argument(
         "--docker-image", help="AgentX serving image identity (run Hyperloom inside it); required for custom models."
+    )
+    parser.add_argument(
+        "--no-agentx-accuracy",
+        action="store_true",
+        help="Skip the AgentX GSM8K round (own server, golden acceptance removed) at the baseline and at each "
+        "candidate past the KEEP threshold. Recorded with the session.",
     )

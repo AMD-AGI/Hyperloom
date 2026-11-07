@@ -401,10 +401,17 @@ def constraint_budgets_from_args(args: Any) -> dict[str, Any]:
     }
 
 
+def _agentx_accuracy_resume_conflict(args: Any, state: Any) -> str:
+    if getattr(args, "no_agentx_accuracy", False) and state.agentx_accuracy:
+        return "the session runs the AgentX accuracy round; start a new session to turn it off"
+    return ""
+
+
 def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
-    """Why a resume cannot keep the latency and power budgets the session was graded under, or ``""``."""
+    """Why a resume cannot keep the budgets and accuracy round the session was graded under, or ``""``."""
     return (
-        latency_budget_resume_conflict(state, getattr(args, _MAX_LATENCY_MS, None))
+        _agentx_accuracy_resume_conflict(args, state)
+        or latency_budget_resume_conflict(state, getattr(args, _MAX_LATENCY_MS, None))
         or power_budget_resume_conflict(state, getattr(args, _MAX_POWER_W, None))
         or per_gpu_power_budget_resume_conflict(state, getattr(args, _MAX_PER_GPU_POWER_W, None))
         or power_budget_unmeasurable_error(
@@ -895,6 +902,7 @@ def _seed_shared_state(
         benchmark_mode=benchmark_mode,
         agentx_epoch=agentx_epoch,
         agentx_backend=agentx_backend,
+        agentx_accuracy=not getattr(args, "no_agentx_accuracy", False),
         grading=seed_grading(framework, benchmark_mode),
         conc_sweep_concs=conc_sweep_concs,
         conc_sweep_total_budget_sec=int(getattr(args, "conc_sweep_total_budget_sec", 9000)),
