@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe
 from hyperloom.orchestrator.actions.executors._recipe_script import (
@@ -50,7 +51,7 @@ def test_the_agentx_client_resolves_to_the_builtin_beside_it_not_a_same_named_on
     (checkout / "single_node" / "vllm_mi355x.sh").write_text("# a different script\n", encoding="utf-8")
     bench = {"benchmark_script": "mlperf_agentic_client.sh", "framework": "vllm", "runner_type": "mi355x"}
 
-    assert resolve_launch_server_script(bench) == str(checkout / "vllm_mi355x.sh")
+    assert resolve_launch_server_script(BenchmarkPoint.from_block(bench)) == str(checkout / "vllm_mi355x.sh")
 
 
 def test_only_unguarded_exports_of_the_launcher_count_as_overwritten(checkout):

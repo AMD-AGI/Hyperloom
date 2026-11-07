@@ -24,6 +24,7 @@ from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import rebench_round_sec
 from hyperloom_common.env import env_float, env_int
 from hyperloom_common.jsonio import read_json
+from hyperloom.common.benchmark_config import BenchmarkPoint, PointError, read_benchmark_point
 from hyperloom.common.launch_log_evidence import recipe_server_launch
 from ..actions.executors._recipe_script import resolve_launch_server_script
 from ..actions.executors._workload_envs import geak_metric_axis
@@ -40,12 +41,13 @@ from ..actions.executors._gpu_pin import (
     _resolve_handoff_tp,
     _resolve_serving_fidelity,
 )
-from .kernel_geak_promotion import GeakRunnerFacts, _bench_envs
+from .kernel_geak_promotion import GeakRunnerFacts
 from .kernel_gemm_tuning import _first_text
 
 log = logging.getLogger(__name__)
 
 _GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
+_NO_RECIPE = BenchmarkPoint.from_block({})
 
 # How long the GEAK handoff waits for the servers it stopped to release their VRAM.
 _GEAK_GPU_FREE_WAIT_SEC: float = 120.0
@@ -148,29 +150,20 @@ class _GeakDispatchMixin:
         return protocol
 
     @staticmethod
-    def _recipe_benchmark(recipe_path: str) -> dict[str, Any]:
-        """Parse a materialized recipe once and hand back its ``benchmark`` mapping.
+    def _recipe_point(recipe_path: str) -> BenchmarkPoint:
+        """Read the materialized recipe once for every handoff resolver.
 
-        Both handoff resolvers below need the same mapping out of the same file,
-        so the read, the YAML parse and the shape validation live here instead of
-        being repeated with their own fallbacks on each side.
-
-        Returns ``{}`` for a missing, unreadable or malformed recipe, which each
-        caller already treats as "nothing to advertise". Never raises.
+        A missing, unreadable or malformed recipe reads as the empty point, which each
+        resolver already treats as "nothing to advertise". Never raises.
         """
         import yaml
 
-        try:
-            if not recipe_path or not Path(recipe_path).is_file():
-                return {}
-            cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
-            if not isinstance(cfg, dict):
-                return {}
-            bench = cfg.get("benchmark") or {}
-            return bench if isinstance(bench, dict) else {}
-        except (OSError, ValueError, yaml.YAMLError):
-            log.warning("recipe: could not read %r", recipe_path, exc_info=True)
-            return {}
+        if recipe_path and Path(recipe_path).is_file():
+            try:
+                return read_benchmark_point(Path(recipe_path))
+            except (OSError, PointError, yaml.YAMLError):
+                log.warning("recipe: could not read %r", recipe_path, exc_info=True)
+        return _NO_RECIPE
 
     def _observed_replay_shape(self, target_tput: float) -> dict[str, Any]:
         """Measure the trace replay's real sequence shape from OUR OWN baseline.
@@ -231,7 +224,7 @@ class _GeakDispatchMixin:
             return {}
 
     @staticmethod
-    def _resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
+    def _resolve_launch_server_script(recipe: BenchmarkPoint) -> str:
         """Name the server-phase script GEAK should launch through Magpie.
 
         GEAK infers its launcher from the recipe's ``benchmark_script``, which on
@@ -263,9 +256,9 @@ class _GeakDispatchMixin:
 
             # Only the AgentX client misleads the inference; anything else in
             # this field is the launcher GEAK should keep deriving for itself.
-            if not is_agentx_client_script(str(bench.get("benchmark_script") or "").strip()):
+            if not is_agentx_client_script(recipe.benchmark_script.strip()):
                 return ""
-            return resolve_launch_server_script(bench)
+            return resolve_launch_server_script(recipe)
         except OSError:
             log.warning("launch_server_script: could not resolve from the recipe", exc_info=True)
             return ""
@@ -518,11 +511,10 @@ class _GeakDispatchMixin:
             state_max_model_len=int(self.shared_state.max_model_len or 0),
         )
 
-    def _geak_workload_spec(self, bench: Mapping[str, Any]) -> dict[str, Any]:
+    def _geak_workload_spec(self, spec: Mapping[str, Any]) -> dict[str, Any]:
         # Only AgentX materializations carry ``benchmark.workload_spec``; every other recipe
         # omits it so GEAK keeps today's synthetic path unchanged.
-        spec = bench.get("workload_spec")
-        if not isinstance(spec, dict) or not spec:
+        if not spec:
             return {}
         # Give the kernel agents the shape they must actually optimize for;
         # absence leaves GEAK on the handoff's synthetic isl/osl.
@@ -570,11 +562,11 @@ class _GeakDispatchMixin:
         spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
         accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
         extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
-        recipe_bench = self._recipe_benchmark(str(self.shared_state.baseline_config_path or ""))
-        recipe_envs = _bench_envs(recipe_bench)
+        recipe = self._recipe_point(str(self.shared_state.baseline_config_path or ""))
+        recipe_envs = recipe.envs
         # Absent => GEAK keeps deriving the launcher from the recipe, which is
         # correct everywhere except AgentX (see _resolve_launch_server_script).
-        launch_server_script = self._resolve_launch_server_script(recipe_bench)
+        launch_server_script = self._resolve_launch_server_script(recipe)
         handoff = {
             **self._geak_session_fields(agentx=agentx),
             **self._geak_device_fields(recipe_envs),
@@ -588,7 +580,7 @@ class _GeakDispatchMixin:
         }
         for key, value in (
             ("bench_protocol", self._resolve_bench_protocol(recipe_envs)),
-            ("workload_spec", self._geak_workload_spec(recipe_bench)),
+            ("workload_spec", self._geak_workload_spec(recipe.workload_spec)),
             ("launch_server_script", launch_server_script),
             # Full layered environment and its matching measurement identity.
             ("baseline_env_spec", env_spec),
@@ -609,7 +601,7 @@ class _GeakDispatchMixin:
 
         from hyperloom.inference_optimizer.agentx.geak_proxy import seed_native_geak_proxy
 
-        seed_native_geak_proxy(handoff, benchmark=recipe_bench, measurement=measurement)
+        seed_native_geak_proxy(handoff, point=recipe, measurement=measurement)
         return handoff
 
     def _geak_result_path(self) -> Path:

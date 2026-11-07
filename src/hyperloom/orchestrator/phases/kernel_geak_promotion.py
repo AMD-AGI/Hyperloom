@@ -49,11 +49,6 @@ log = logging.getLogger(__name__)
 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 
 
-def _bench_envs(bench: Mapping[str, Any]) -> dict[str, Any]:
-    envs = bench.get("envs")
-    return dict(envs) if isinstance(envs, dict) else {}
-
-
 def _covered_step(kind: str, params: dict[str, Any], *, idempotency_key: str) -> Task:
     """An unpersisted task for a step run under the ``kernel_agent`` task's lanes."""
     return Task(task_id=uuid.uuid4().hex, kind=kind, state="running", params=params, idempotency_key=idempotency_key)
@@ -432,7 +427,7 @@ class _GeakPromotionMixin:
             return
         inherited_args = ""
         if not complete and prior_controls.get("args_mode") != "replace":
-            recipe_envs = _bench_envs(self._recipe_benchmark(str(self.shared_state.baseline_config_path or "")))
+            recipe_envs = self._recipe_point(str(self.shared_state.baseline_config_path or "")).envs
             inherited_args = str(recipe_envs.get(server_args_env_name(self.shared_state.framework)) or "")
         measurement["extra_server_args"] = compose_server_args(
             inherited_args=inherited_args,

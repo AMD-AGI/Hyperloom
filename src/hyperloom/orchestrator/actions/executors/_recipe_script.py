@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.agentx_workload import is_agentx_client_script
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom_common.coerce import first_text
 
 log = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ log = logging.getLogger(__name__)
 _UNGUARDED_EXPORT_RE = re.compile(r"^[^\S\n]*export\s+([A-Za-z_][A-Za-z0-9_]*)=(?!\"?\$\{?\1[:-])", re.MULTILINE)
 
 
-def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
+def resolve_launch_server_script(point: BenchmarkPoint) -> str:
     """Path of the script that boots the server, or ``""`` when unresolvable.
 
     ``benchmark_script`` names a server launcher on every non-AgentX run. The
@@ -32,21 +33,21 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     ``<checkout>/benchmarks/`` with no recursive search. Recipe-recorded values
     beat the ambient env because the recipe is the record of what actually ran.
     """
-    envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-    script = Path(first_text(bench.get("benchmark_script"))).name
+    envs = point.envs
+    script = Path(point.benchmark_script.strip()).name
     if not script:
         return ""
 
     if is_agentx_client_script(script):
         script = first_text(envs.get("AGENTX_SERVER_SCRIPT"), os.environ.get("AGENTX_SERVER_SCRIPT"))
         if not script:
-            framework = first_text(bench.get("framework"), envs.get("FRAMEWORK")).lower()
+            framework = first_text(point.framework, envs.get("FRAMEWORK")).lower()
             if not framework:
                 return ""
             gpu = first_text(
                 envs.get("GPU_TYPE"),
                 envs.get("RUNNER_TYPE"),
-                bench.get("runner_type"),
+                point.runner_type,
                 os.environ.get("GPU_TYPE"),
                 os.environ.get("RUNNER_TYPE"),
                 "mi300x",
@@ -54,7 +55,7 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
             script = f"{framework}_{gpu}.sh"
 
     for root in (
-        first_text(bench.get("inferencex_path")),
+        point.inferencex_path.strip(),
         os.environ.get("INFERENCEX_PATH", "").strip(),
     ):
         if not root:
@@ -69,8 +70,12 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
 
 
 def launcher_overwritten_envs(bench: Mapping[str, Any]) -> frozenset[str]:
-    """Env names the launcher re-exports unconditionally."""
-    path = resolve_launch_server_script(bench)
+    """Env names the launcher re-exports unconditionally.
+
+    Raises:
+        PointError: ``bench`` is not shaped as a point's ``benchmark`` block.
+    """
+    path = resolve_launch_server_script(BenchmarkPoint.from_block(bench))
     if not path:
         return frozenset()
     try:

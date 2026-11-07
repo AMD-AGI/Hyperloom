@@ -7,6 +7,7 @@ from copy import deepcopy
 
 import pytest
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.inference_optimizer.agentx.geak_proxy import seed_native_geak_proxy
 
 
@@ -25,7 +26,7 @@ def test_native_geak_preserves_explicit_env_and_unsets(framework):
     }
     seed_native_geak_proxy(
         handoff,
-        benchmark={"agentx": {"enabled": True}},
+        point=BenchmarkPoint.from_block({"agentx": {"enabled": True}}),
         measurement={"launch_evidence": {"magpie_server_launch": receipt}},
     )
     config = handoff["baseline_env_spec"]["config"]

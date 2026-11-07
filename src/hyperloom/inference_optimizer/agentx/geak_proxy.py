@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint
 
 _PROXY_OWNED_OPTIONS = frozenset(
     {
@@ -61,16 +61,14 @@ def _tunable_flags(argv: list[str], framework: str) -> str:
     return shlex.join(retained)
 
 
-def seed_native_geak_proxy(
-    handoff: dict[str, Any], *, benchmark: Mapping[str, Any], measurement: Mapping[str, Any]
-) -> None:
+def seed_native_geak_proxy(handoff: dict[str, Any], *, point: BenchmarkPoint, measurement: Mapping[str, Any]) -> None:
     """Pass observed tunables through GEAK's existing effective-config contract.
 
     GEAK owns its proxy endpoint, client, topology and profiling lifecycle. Its
     measurements remain incomparable even when all server tunables match.
     Only Hyperloom's subsequent canonical AgentX run can accept the product.
     """
-    if not is_magpie_agentx(benchmark):
+    if not point.agentx:
         return
     evidence = (measurement.get("launch_evidence") or {}).get("magpie_server_launch")
     if not isinstance(evidence, dict):

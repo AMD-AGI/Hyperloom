@@ -73,7 +73,11 @@ class BenchmarkPoint:
     @classmethod
     def from_document(cls, document: object, *, source: str = "the point") -> BenchmarkPoint:
         """Read the ``benchmark`` block of a loaded point YAML; ``source`` names it in a :class:`PointError`."""
-        block = _benchmark_block(document, source)
+        return cls.from_block(_benchmark_block(document, source), source=source)
+
+    @classmethod
+    def from_block(cls, block: Mapping[str, Any], *, source: str = "the point") -> BenchmarkPoint:
+        """Read a ``benchmark`` block already taken out of its point YAML."""
         agentx = block.get(_AGENTX)
         launch = _mapping(agentx.get("launch_overrides") if isinstance(agentx, Mapping) else None, source)
         torch_profiler = _mapping(_mapping(block.get("profiler"), source).get("torch_profiler"), source)

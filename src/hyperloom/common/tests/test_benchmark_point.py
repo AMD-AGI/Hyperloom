@@ -206,3 +206,9 @@ def test_the_operator_config_is_refused_through_the_same_check(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="must contain a benchmark mapping"):
         configured_benchmark({BENCHMARK_CONFIG_ENV: str(path)})
+
+
+def test_a_block_reads_as_the_document_holding_it() -> None:
+    block = {"framework": "sglang", "envs": {"TP": 2}, "agentx": "enable"}
+
+    assert BenchmarkPoint.from_block(block) == BenchmarkPoint.from_document({"benchmark": block})
