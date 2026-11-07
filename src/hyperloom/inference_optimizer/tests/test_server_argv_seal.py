@@ -15,9 +15,11 @@ from hyperloom.inference_optimizer.framework_registry import names, server_args_
 from hyperloom.orchestrator.actions.executors import _grid_runner, _profile_setup, _workload_envs
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._server_argv import (
+    ConfigUnreadable,
     ServerArgv,
     add_server_arg_unless_pinned,
     config_launch_env,
+    config_point,
     config_server_argv,
     seal_server_argv,
 )
@@ -402,3 +404,23 @@ def test_a_grid_variant_ep_that_does_not_divide_tp_adds_no_flag(tmp_path, caplog
 
     assert "--ep-size" not in config_server_argv(config).argv
     assert "EP=3 does not divide the launched TP=8" in caplog.text
+
+
+def test_the_config_point_is_the_benchmark_block(tmp_path):
+    cfg = tmp_path / "point.yaml"
+    cfg.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {"TP": 2}}}), encoding="utf-8")
+
+    point = config_point(cfg)
+
+    assert (point.framework, dict(point.envs)) == ("sglang", {"TP": 2})
+
+
+@pytest.mark.parametrize("document", [{"other": {}}, {"benchmark": {"envs": "x"}}, ["benchmark"]])
+def test_a_config_without_a_benchmark_mapping_is_unreadable(tmp_path, document):
+    cfg = tmp_path / "point.yaml"
+    cfg.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ConfigUnreadable, match=str(cfg)):
+        config_server_argv(cfg)
+    with pytest.raises(ConfigUnreadable):
+        config_launch_env(cfg, {})
