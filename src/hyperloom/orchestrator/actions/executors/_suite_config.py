@@ -42,7 +42,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom_common.env import is_truthy
+from hyperloom_common.env import env_flag, is_truthy
 from hyperloom.common.agentx_workload import (
     CANON_WARMUP_PER_LANE,
     is_agentx_client_key,
@@ -86,7 +86,6 @@ from inference_suite.contracts import (
     EvalTask,
     FixedWorkload,
     GoldenUse,
-    GpuTelemetry,
     FailedStep,
     LaunchDelta,
     Lifecycle,
@@ -98,6 +97,7 @@ from inference_suite.contracts import (
     RunPaths,
     ServerConfig,
     SuiteConfig,
+    Telemetry,
     WorkloadKind,
 )
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
@@ -126,6 +126,7 @@ from ._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
 from ._subprocess_kill import (
     AGENTX_EARLY_STOP_ERROR_CLASS,
     AGENTX_EARLY_STOP_RETURNCODE,
+    _KV_METRICS_ENV,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     AgentxCheckpointMissed,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -218,7 +219,7 @@ class RoundSettings:
     paths: RunPaths
     framework_python: str
     lifecycle: Lifecycle
-    telemetry: GpuTelemetry
+    telemetry: Telemetry
     silence_sec: float
     env_inherit: tuple[str, ...] = ()
     deadline_unix: int | None = None
@@ -711,7 +712,9 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
         profile=ProfileConfig(enabled=False) if unloaded else _fixed_profile(bench, point),
         eval=_eval(point, enabled=not boot_only and point.flag(ENV_RUN_EVAL, default=False)),
         # An external server's GPUs are not this host's to sample.
-        telemetry=settings.telemetry if external is None else replace(settings.telemetry, enabled=False),
+        telemetry=settings.telemetry
+        if external is None
+        else replace(settings.telemetry, gpu=replace(settings.telemetry.gpu, enabled=False)),
         lifecycle=settings.lifecycle if external is None else Lifecycle(LifecycleMode.EXTERNAL),
         deadlines=_deadlines(point, settings),
         paths=settings.paths,
@@ -985,7 +988,7 @@ def _settings(
         paths=RunPaths(str(run_dir), str(route.tool_cache), route.manifest_sha256),
         framework_python=route.framework_python,
         lifecycle=lifecycle,
-        telemetry=round_gpu_telemetry(),
+        telemetry=Telemetry(round_gpu_telemetry(), kv=env_flag(_KV_METRICS_ENV, default=True)),
         silence_sec=resolve_benchmark_timeouts()[0],
         env_inherit=inherited_env_names({k: v for k, v in os.environ.items() if k not in env_drop}),
         deadline_unix=deadline,

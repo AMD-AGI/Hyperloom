@@ -53,6 +53,7 @@ from inference_suite.contracts.config import (
     ScriptableWorkload,
     ServerConfig,
     SuiteConfig,
+    Telemetry,
     WorkloadKind,
 )
 
@@ -160,6 +161,7 @@ __all__ = [
     "SourceApi",
     "SourceKind",
     "SuiteConfig",
+    "Telemetry",
     "Topology",
     "VersionBasis",
     "Workload",

@@ -23,7 +23,15 @@ import pytest
 
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import argv_flag_occurrences
-from inference_suite.contracts import BaseLaunch, LaunchQuery, SourceKind, Topology, VersionBasis, Workload
+from inference_suite.contracts import (
+    BaseLaunch,
+    BaseLaunchError,
+    LaunchQuery,
+    SourceKind,
+    Topology,
+    VersionBasis,
+    Workload,
+)
 from inference_suite.golden import golden_owned_settings
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.defaults import TABLE_PATH, default_table
@@ -116,6 +124,7 @@ def test_inferencex_wins_and_its_base_round_trips_through_its_document():
     assert (base.client.tool, base.client.commit) == (INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT)
     assert base.resolved_unix == _FETCHED
     assert "--served-model-name" in base.runner_owned.args
+    assert "--enable-metrics" in base.runner_owned.args and "--enable-metrics" not in base.args
     assert "HIP_VISIBLE_DEVICES" in base.runner_owned.env
     assert (base.model.id, base.model.path) == (_fixed().model_id, None)
     assert BaseLaunch.from_document(json.loads(json.dumps(base.to_document()))) == base
@@ -155,6 +164,15 @@ def test_a_shell_user_file_wins_over_every_recipe():
     assert base.image.version_basis is VersionBasis.NOT_APPLICABLE
     assert {"--port", "HIP_VISIBLE_DEVICES"} <= set(base.stripped)
     assert base.warnings == ("launch.sh exports HF_TOKEN from shell variables; the base carries none of them",)
+
+
+def test_a_shell_user_file_setting_the_runner_owned_metrics_switch_is_refused():
+    user_file = parse_user_file(
+        "launch.sh", b"python3 -m sglang.launch_server --tp 4 --enable-metrics\n", framework="sglang"
+    )
+
+    with pytest.raises(BaseLaunchError, match="runner-owned --enable-metrics"):
+        _base(_fixed(), dataclasses.replace(_snapshot(), user_file=user_file))
 
 
 def test_a_frozen_base_as_user_file_keeps_its_digest_under_the_new_query():

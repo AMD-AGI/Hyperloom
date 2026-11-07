@@ -63,7 +63,8 @@ class FrameworkFacts:
     ``python_package`` is the importable package it installs as, ``None`` when it ships none. A scriptable
     framework has no ``server_flags``; a framework with no ``expert_parallel`` option runs no expert parallelism.
     ``parser_source`` is Python source defining ``_build_parser()``, run in the serving interpreter so an argv is
-    judged by the parser that would refuse it; ``None`` when no server parser can be reached.
+    judged by the parser that would refuse it; ``None`` when no server parser can be reached. ``metrics_flag`` is the
+    switch without which the server serves no ``/metrics``; ``None`` when it serves them by default.
     """
 
     kind: FrameworkKind
@@ -71,6 +72,7 @@ class FrameworkFacts:
     server_flags: ServerFlags | None = None
     expert_parallel: ExpertParallelFlag | None = None
     parser_source: str | None = None
+    metrics_flag: str | None = None
 
 
 # vLLM 0.30 moved the serve parser from ``entrypoints.openai`` to ``entrypoints.launchers``.
@@ -126,6 +128,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         server_flags=ServerFlags("--model-path", _HOST_FLAG, "--port", "--served-model-name", "--context-length"),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
         parser_source=_SGLANG_PARSER_SOURCE,
+        metrics_flag="--enable-metrics",
     ),
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,

@@ -607,13 +607,32 @@ class GpuTelemetry:
         _positive(self.interval_sec, "the GPU telemetry interval")
 
     def to_document(self) -> dict[str, object]:
-        return {"gpu": {"enabled": self.enabled, "interval_sec": self.interval_sec}}
+        return {"enabled": self.enabled, "interval_sec": self.interval_sec}
 
     @classmethod
     def from_document(cls, document: object) -> GpuTelemetry:
-        telemetry = _FIELDS.known(document, ("gpu",), "the telemetry config")
-        fields = _FIELDS.known(telemetry.get("gpu"), field_names(cls), "the GPU telemetry")
+        fields = _FIELDS.known(document, field_names(cls), "the GPU telemetry")
         return cls(fields.get("enabled"), fields.get("interval_sec"))
+
+
+@dataclass(frozen=True)
+class Telemetry:
+    """What the round samples: its GPUs, and with ``kv`` the server's ``/metrics``, which the runner then turns on."""
+
+    gpu: GpuTelemetry
+    kv: bool
+
+    def __post_init__(self) -> None:
+        _FIELDS.boolean(self.kv, "the KV telemetry's enabled")
+
+    def to_document(self) -> dict[str, object]:
+        return {"gpu": self.gpu.to_document(), "kv": {"enabled": self.kv}}
+
+    @classmethod
+    def from_document(cls, document: object) -> Telemetry:
+        fields = _FIELDS.known(document, field_names(cls), "the telemetry config")
+        kv = _FIELDS.known(fields.get("kv"), ("enabled",), "the KV telemetry")
+        return cls(GpuTelemetry.from_document(fields.get("gpu")), kv.get("enabled"))
 
 
 @dataclass(frozen=True)
@@ -707,7 +726,7 @@ class SuiteConfig:
     server: ServerConfig
     workload: WorkloadKind
     eval: EvalConfig
-    telemetry: GpuTelemetry
+    telemetry: Telemetry
     lifecycle: Lifecycle
     deadlines: Deadlines
     paths: RunPaths
@@ -787,7 +806,7 @@ class SuiteConfig:
             mlperf=None if fields.get("mlperf") is None else MlperfWorkload.from_document(fields.get("mlperf")),
             profile=ProfileConfig(enabled=False) if profile is None else ProfileConfig.from_document(profile),
             eval=EvalConfig.from_document(fields.get("eval")),
-            telemetry=GpuTelemetry.from_document(fields.get("telemetry")),
+            telemetry=Telemetry.from_document(fields.get("telemetry")),
             lifecycle=Lifecycle.from_document(fields.get("lifecycle")),
             deadlines=Deadlines.from_document(fields.get("deadlines")),
             paths=RunPaths.from_document(fields.get("paths")),
@@ -822,5 +841,6 @@ __all__ = [
     "ScriptableWorkload",
     "ServerConfig",
     "SuiteConfig",
+    "Telemetry",
     "WorkloadKind",
 ]
