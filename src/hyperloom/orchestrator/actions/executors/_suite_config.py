@@ -86,6 +86,7 @@ from inference_suite.contracts import (
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 from ..cancel_channel import cancel_scope_listener
+from ._accuracy_gate import ACCURACY_DIR
 from ._benchmark_interpreter import _resolve_probe_python
 from ._failed_step import failed_step_error_class
 from ._gpu_power import round_gpu_telemetry
@@ -499,8 +500,6 @@ def accuracy_config(
 TOOL_CACHE_DIR = "inference-suite-tools"
 TOOL_CACHE_ENV = "INFERENCE_SUITE_TOOL_CACHE"
 RUN_DIR_PREFIX = "suite_run_"
-#: Where in its slot an accuracy round writes its run_dir; the accuracy gate reads ``<slot>/accuracy/eval``.
-ACCURACY_DIR = "accuracy"
 #: The config a leased round runs from, beside its run_dir: the run_dir must be empty when the round starts.
 LEASED_CONFIG_SUFFIX = ".config.yaml"
 #: A leased round Ray never ran: its actor could not be placed, answered no more, or outlived its wait.
@@ -775,7 +774,6 @@ def _run_leased(config: SuiteConfig, lease: ServingLease) -> RoundResult:
 
 
 __all__ = [
-    "ACCURACY_DIR",
     "LEASED_CONFIG_SUFFIX",
     "MEASURED_SEED",
     "RAY_ROUND_UNPLACED_CLASS",

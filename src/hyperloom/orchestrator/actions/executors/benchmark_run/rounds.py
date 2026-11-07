@@ -50,6 +50,7 @@ from .records import (
     _cold_anchor_from_warmup,
     _requested_framework,
     _unlaunched_round_result,
+    record_eval_score,
 )
 from .warm_patches import (
     _apply_warm_patches,
@@ -804,12 +805,7 @@ class _BenchmarkRoundsMixin:
             # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh moving/cleaning
             # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from Magpie's benchmark reports.
             eval_data = parse_eval_results(round_.result_dir, framework=eval_framework, benchmark_mode=benchmark_mode)
-            if eval_data.get("accuracy") is not None:
-                result["accuracy"] = eval_data["accuracy"]
-                result["accuracy_task"] = eval_data.get("task", "gsm8k")
-                result["accuracy_metric"] = eval_data.get("metric", "")
-                result["accuracy_source"] = eval_data.get("source_file", "")
-                result["eval_runtime_sec"] = eval_data.get("eval_runtime_sec")
+            if record_eval_score(result, eval_data):
                 log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
             else:
                 log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))

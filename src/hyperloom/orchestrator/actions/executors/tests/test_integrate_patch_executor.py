@@ -2514,8 +2514,12 @@ async def test_executor_grades_real_patch_bench(
         json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
     )
     if grading_mode != "synthetic":
-        # An AgentX round's correctness signal is its request error rate, which the client writes here.
-        (workspace / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}), encoding="utf-8")
+        # An AgentX slot is graded on the GSM8K score its accuracy round wrote.
+        eval_dir = workspace.parent / "accuracy" / "eval"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "results_1.json").write_text(
+            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
+        )
     measured = VariantResult(
         name="patch-grading",
         extra_server_args="",

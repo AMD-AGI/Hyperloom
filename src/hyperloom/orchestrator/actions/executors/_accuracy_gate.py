@@ -29,9 +29,12 @@ from hyperloom_common.coerce import optional_positive_float
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom_common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
-from inference_suite.contracts import ProbeOutcome, ReportError
+from inference_suite.contracts import ProbeOutcome, ReportError, RunLayout
 
 log = logging.getLogger(__name__)
+
+#: Where in its slot an AgentX accuracy round writes its run_dir, which the gate reads the slot's score from.
+ACCURACY_DIR = "accuracy"
 
 # Enablement admission, selected by the ``--enablement`` CLI flag.
 ENABLEMENT_MODE_OFF = "off"
@@ -386,24 +389,18 @@ def quality_gate_passed(
 
 
 def _agentx_accuracy_result(workspace: Path) -> dict[str, Any]:
-    """Grade an AgentX run on the request error rate upstream gates a submission on.
+    """Grade an AgentX run on the GSM8K score its slot's accuracy round wrote, or on the MLPerf harness's inline score.
 
-    Fails closed like the scriptable gate: a run that reported no rate is not comparable, and treating that as a
-    pass is how an incomparable measurement reaches the leaderboard set.
+    Outside MLPerf the request error rate is only the measurement's validity, never a score: a slot whose accuracy
+    round did not run or left no result has no accuracy, which every gate fails closed on.
     """
-    rate = parse_agentx_error_rate(workspace)
-    passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
-    log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
-
     from hyperloom.common.agentx_workload import is_mlperf_backend
 
     if not is_mlperf_backend():
-        return {
-            "accuracy": 1.0 if passed else 0.0,
-            "task": "agentx_error_rate",
-            "metric": "request_error_rate",
-            "error_rate": rate,
-        }
+        return _lm_eval_accuracy_result(RunLayout(workspace / ACCURACY_DIR).eval_dir)
+    rate = parse_agentx_error_rate(workspace)
+    passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
+    log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
     # The harness scores every smoke run inline, so each KEEP is gated on that score against the baseline's, the
     # same way lm-eval accuracy is. Over the error-rate ceiling, an unscored turn or no scores.json is a drop
     # outright: 0.0, not None, which a lane without a required gate reads as "no eval ran" and skips.
@@ -421,14 +418,13 @@ def parse_eval_results(
     framework: str | None = None,
     benchmark_mode: str = "",
 ) -> dict[str, Any]:
-    """Extract accuracy score from Magpie workspace's eval output; AgentX grades on its error rate instead."""
+    """Extract the accuracy score from a workspace's eval output; AgentX reads its slot's accuracy round instead."""
     workspace = Path(workspace)
 
     from hyperloom.inference_optimizer import framework_registry
 
     scriptable = framework_registry.is_scriptable(framework)
 
-    # AgentX has no lm-eval; its correctness signal is the request error rate.
     if is_agentx_mode(benchmark_mode):
         return _agentx_accuracy_result(workspace)
 
@@ -676,6 +672,7 @@ def enablement_correctness(
 
 
 __all__ = [
+    "ACCURACY_DIR",
     "BASELINE_ACCURACY_STOP_REASON",
     "BASELINE_EVAL_ACCURACY_FLOOR_KEY",
     "BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY",

@@ -368,9 +368,15 @@ def test_baseline_mn_warmup_eval_result_dir_is_discarded(tmp_path, monkeypatch):
     assert result.get("accuracy") == pytest.approx(0.83)
 
 
-@pytest.mark.parametrize("rate,expected", [(0.0, 1.0), (25.0, 0.0), (None, 0.0)])
+@pytest.mark.parametrize("score", [0.83, None], ids=["scored", "no_score"])
 @pytest.mark.parametrize("state_in_context", [False, True])
-def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expected, state_in_context):
+def test_agentx_baseline_is_graded_on_its_accuracy_round_not_its_error_rate(
+    tmp_path, monkeypatch, score, state_in_context
+):
+    """A clean request error rate grades nothing: the baseline's accuracy is the score its accuracy round wrote."""
+    from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_DIR
+    from hyperloom.orchestrator.actions.executors.benchmark_run import accuracy
+
     base = tmp_path / "base.yaml"
     write_sglang_yaml(base)
     config = yaml.safe_load(base.read_text(encoding="utf-8"))
@@ -385,10 +391,17 @@ def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expec
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         ws = fake_workspace(slot)
         (ws / "inferencex_result.json").write_text(
-            json.dumps({"request_error_rate": rate, "submission_valid": True}), encoding="utf-8"
+            json.dumps({"request_error_rate": 0.0, "submission_valid": True}), encoding="utf-8"
         )
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
+    async def accuracy_round(request, *, session):
+        if score is not None:
+            _write_lm_eval_output(request.slot / ACCURACY_DIR / "eval")
+        return accuracy.AccuracyRoundOutcome(request.slot / ACCURACY_DIR, "")
+
+    monkeypatch.setattr(accuracy, "run_accuracy_round", accuracy_round)
+    monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
     executor = BaselineExecutor(
         magpie_python="/opt/venv/bin/python",
         default_config_path=base,
@@ -404,14 +417,13 @@ def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expec
 
     assert result["status"] == "succeeded"
     assert result["run_eval_disabled"] is True
-    assert result["accuracy"] == expected
-    assert result["accuracy_task"] == "agentx_error_rate"
-    assert bool(result.get("baseline_eval_failed")) is (expected == 0.0)
+    assert result.get("accuracy") == score
+    assert bool(result.get("baseline_eval_failed")) is (score is None)
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coordinator = object.__new__(Coordinator)
     coordinator.knowledge_plane = None
-    assert coordinator.writeback.is_promotable_result("baseline", result) is (expected == 1.0)
+    assert coordinator.writeback.is_promotable_result("baseline", result) is (score is not None)
 
 
 def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
