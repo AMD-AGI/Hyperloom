@@ -20,11 +20,8 @@ import os
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
 
-import yaml
-
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import read_benchmark_point
 
 __all__ = ["install_launchers"]
 
@@ -35,7 +32,6 @@ _INFERENCEX_PATH_ENV = "INFERENCEX_PATH"
 _LAUNCHERS = Path("scripts") / "benchmark"
 _BENCHMARKS = "benchmarks"
 _EXECUTABLE = 0o700
-_UTF8 = "utf-8"
 
 
 def install_launchers(points: Iterable[Path]) -> None:
@@ -48,11 +44,11 @@ def install_launchers(points: Iterable[Path]) -> None:
     if source is None:
         return
     for point in points:
-        bench = (yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {}).get("benchmark") or {}
-        script = Path(str(bench.get("benchmark_script") or "")).name
-        if not script or is_magpie_agentx(bench):
+        bench = read_benchmark_point(Path(point))
+        script = Path(bench.benchmark_script).name
+        if not script or bench.agentx:
             continue
-        for checkout in _checkouts(bench):
+        for checkout in _checkouts(bench.inferencex_path):
             _install(source / script, checkout / _BENCHMARKS / script)
 
 
@@ -73,9 +69,9 @@ def _installed_package() -> Path | None:
     return Path(places[0]) if places else None
 
 
-def _checkouts(bench: dict[str, Any]) -> list[Path]:
+def _checkouts(named_by_point: str) -> list[Path]:
     """Where ``run_grid`` looks for the launcher: the point's own checkout, then the process environment's."""
-    named = (str(bench.get("inferencex_path") or "").strip(), os.environ.get(_INFERENCEX_PATH_ENV, "").strip())
+    named = (named_by_point, os.environ.get(_INFERENCEX_PATH_ENV, "").strip())
     return [Path(root) for root in dict.fromkeys(name for name in named if name)]
 
 
