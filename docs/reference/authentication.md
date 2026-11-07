@@ -55,7 +55,7 @@ checkout another account can write:
 |---------------------------------------------|-----------------------------------------------------------|
 | Process environment (`export FOO=...`)      | Always — wins unconditionally.                            |
 | `$REPO_ROOT/.env`                           | Only for keys missing from the process environment.       |
-| `$KERNEL_AGENT_ENV` (container-local)       | Only for the Anthropic-side credentials missing from both, when `.env` keeps none ([below](#a-checkout-another-account-can-write)). |
+| `$KERNEL_AGENT_ENV` (container-local)       | Only for the Anthropic-side credentials missing from the shell, when `.env` keeps none and lends none ([below](#a-checkout-another-account-can-write)). |
 
 Shell environment variables always win over `.env`.
 Both the inference optimizer CLI dotenv loader and
@@ -88,13 +88,21 @@ belongs to another account, or is a link. A source directory bind-mounted from
 shared storage, as the Slurm job's `--source-dir` is, is the usual case. There
 another account could read or rewrite them, so `install.sh` writes them into the
 container-local `kernel-agent.env.sh` (`KERNEL_AGENT_ENV`) alone. It also removes
-those an earlier install or you left in `.env`, with the retired spellings it
-purges anyway, once it has read them like any other `.env` value, and keeps every
-other line byte for byte: the rest is written beside `.env` with its mode and
-renamed over it, and a link is replaced rather than written through.
+those an earlier install, you or another account left in `.env`, with their
+retired spellings (`ANTHROPIC_AUTH_TOKEN`, `DEEPSEEK_*`, `SAFE_API_KEY`,
+`AMD_LLM_API_KEY`, `LLM_GATEWAY_KEY`, `GEAK_API_KEY`), and keeps every other line
+byte for byte: the rest is written beside `.env` with its mode and renamed over
+it, a link to a file is replaced rather than written through, and a link to
+anything else is removed.
+
+Such a `.env` lends no credential to any reader: a line there may be another
+account's, and a gateway URL or headers of its own would carry your key to it.
+`install.sh` and the CLI preflight skip every one of those keys in it, with a
+warning that names the file and never a value, so a credential you left only in a
+shared `.env` is neither used nor copied into `kernel-agent.env.sh`: export it.
 
 Readers that took the credentials from `.env` take them from that file instead,
-after the shell and `.env`: `install.sh` itself, so a re-install in the same
+after the shell: `install.sh` itself, so a re-install in the same
 container keeps them, and the CLI preflight, which counts them as `.env`'s when
 it decides whether a single provider side is configured. The documented `source`
 line and the Slurm job load that file anyway. A new container has no such file,
