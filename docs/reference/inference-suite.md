@@ -108,9 +108,14 @@ mark. Nothing is matched by port or command line. `stop` reaps the server a
 ## Staging and pins
 
 A round fetches nothing. The InferenceX client, at the commit
-`src/inference_suite/pins.py` pins, and the AgentX harness, in its own virtual
-environment, are staged ahead of time into a tool cache with one
-`staging_manifest.json`. A round refuses with `staging_missing` when the manifest
+`src/inference_suite/pins.py` pins, and the AgentX harness, installed with
+`--no-deps` from `src/inference_suite/agentx-client.lock` into the relocatable
+CPython 3.12 build `pins.py` pins, are staged ahead of time into a tool cache with
+one `staging_manifest.json`. Two hosts compare stagings by their normalised
+manifest: each installed package's name, version and wheel sha256, the
+interpreter's version and build sha256, the InferenceX pin and lm-eval, with no
+path. `python -m inference_suite publish --stagings <dir>` publishes a staging
+shared by several hosts as `<dir>/<staging key>` by rename. A round refuses with `staging_missing` when the manifest
 lists a file that is absent, changed or staged at another commit, or when an eval
 round finds no `lm_eval` installed in the Python that runs it.
 
