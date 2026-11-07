@@ -6,8 +6,9 @@
 The base comes from the operator's ``--reference-script`` when one is given, otherwise from the first recipe source
 that serves the session, otherwise, for a fixed workload only, from the default table, which also runs a fixed session
 when a recipe source cannot be read. An AgentX session no recipe serves is refused. Resolving reads every source once,
-here; a resume reads the frozen file instead. Scriptable workloads launch no server and the MLPerf AgentX client still
-launches its own, so neither resolves a base.
+here; a resume reads the frozen file instead. Scriptable workloads launch no server, so they resolve no base. The MLPerf
+AgentX client drives its own traffic at a server that serves any request, so its session resolves a fixed workload's
+base, which the default table always serves.
 """
 
 from __future__ import annotations
@@ -151,11 +152,9 @@ def resolve_base_launch(
         if location:
             _refuse(f"--reference-script is a server launch; a {framework} workload launches no server")
         return None
-    agentx = is_agentx_mode(benchmark_mode)
-    if agentx and is_mlperf_backend():
-        return None
+    replay = is_agentx_mode(benchmark_mode) and not is_mlperf_backend()
     try:
-        workload = Workload.AGENTX if agentx else Workload.FIXED
+        workload = Workload.AGENTX if replay else Workload.FIXED
         query = _query(args, framework=framework, workload=workload, concurrencies=concurrencies)
         gpus = _session_gpus(args)
         user_file = _read_user_file(location, framework) if location else None

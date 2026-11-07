@@ -396,11 +396,14 @@ def test_a_scriptable_session_resolves_no_base(tmp_path, fetched):
     assert read_base_launch(tmp_path) is None
 
 
-def test_an_mlperf_agentx_session_resolves_no_base(tmp_path, fetched, monkeypatch):
+def test_an_mlperf_agentx_session_freezes_a_fixed_base_for_the_server_it_boots(tmp_path, fetched, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
 
-    assert _resolve(tmp_path, _args(), benchmark_mode="agentx", concurrencies=(8,)) is None
-    assert fetched == []
+    base = _resolve(tmp_path, _args(), benchmark_mode="agentx", concurrencies=(8,))
+
+    query = fetched[0][0]
+    assert (query.workload, query.isl, query.osl, query.concurrencies) == (Workload.FIXED, 8192, 1024, (8,))
+    assert base is not None and read_base_launch(tmp_path) == base
 
 
 def _agentx(session_dir: Path, args: argparse.Namespace, **overrides) -> BaseLaunch | None:

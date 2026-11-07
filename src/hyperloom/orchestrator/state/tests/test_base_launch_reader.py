@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The orchestrator reads the session's base launch only through ``session_server_base``, which checks its digest."""
+"""The orchestrator reads the session's base launch only through ``frozen_session_base``, which checks its digest."""
 
 from __future__ import annotations
 
@@ -14,7 +14,13 @@ import pytest
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
-from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, ServerBase, session_server_base
+from hyperloom.orchestrator.state.base_launch import (
+    BaseLaunchMismatch,
+    FrozenBase,
+    ServerBase,
+    frozen_session_base,
+    session_server_base,
+)
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite.contracts import GoldenAcceptance, GoldenCurve, Redacted
 
@@ -82,6 +88,13 @@ def test_a_session_that_froze_no_base_starts_from_nothing(session):
     SharedState(session_id="scriptable").save(session)
 
     assert session_server_base() == ServerBase()
+    assert frozen_session_base() is None
+
+
+def test_the_frozen_base_names_its_file_beside_the_launch_it_holds(session):
+    base = freeze_session_base(session, args=("--kv-cache-dtype", "fp8_e4m3"))
+
+    assert frozen_session_base() == FrozenBase(session / BASE_LAUNCH_FILE, base)
 
 
 def test_the_server_base_carries_the_argv_and_the_env_a_launch_may_set(session):
@@ -162,6 +175,8 @@ def test_a_base_file_the_session_did_not_record_is_refused(session):
 
     with pytest.raises(BaseLaunchMismatch, match=other.digest()):
         session_server_base()
+    with pytest.raises(BaseLaunchMismatch, match=other.digest()):
+        frozen_session_base()
 
 
 def test_a_recorded_base_whose_file_is_gone_is_refused(session):
