@@ -85,11 +85,12 @@ from ._benchmark_interpreter import _resolve_probe_python
 from ._failed_step import failed_step_error_class
 from ._gpu_power import round_gpu_telemetry
 from ._multi_node_env import client_only_server_url
-from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
+from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from ._ray_backend import SuiteLeasedRound
 from ._ray_serving import ServingLease
 from ._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
     resolve_benchmark_timeouts,
     session_deadline_to_remaining_sec,
 )
@@ -411,7 +412,7 @@ RUN_DIR_PREFIX = "suite_run_"
 LEASED_CONFIG_SUFFIX = ".config.yaml"
 #: A leased round Ray never ran: its actor could not be placed, answered no more, or outlived its wait.
 RAY_ROUND_UNPLACED_CLASS = "ray_round_unplaced"
-#: How far past the round's own deadlines the process running a leased round is reaped.
+#: How far past the round's own deadlines, session deadline included, the process running a leased round is reaped.
 _LEASED_BACKSTOP_SLACK_SEC = 300.0
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -438,6 +439,7 @@ _UNRUN_LEASED_CLASSES: Mapping[int, str] = MappingProxyType(
     {
         EXIT_REFUSED: failed_step_error_class(FailedStep.CONFIG_INVALID),
         ORCHESTRATOR_CANCELLED_RETURNCODE: ORCHESTRATOR_CANCELLED_CLASS,
+        SESSION_TIME_EXHAUSTED_RETURNCODE: SESSION_TIME_EXHAUSTED_CLASS,
     }
 )
 
@@ -600,7 +602,9 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
 
 def _leased_round(config: SuiteConfig, config_path: Path) -> SuiteLeasedRound:
     deadlines = config.deadlines
-    remaining = None if deadlines.deadline_unix is None else deadlines.deadline_unix - time.time()
+    remaining = (
+        None if deadlines.deadline_unix is None else deadlines.deadline_unix - time.time() + _LEASED_BACKSTOP_SLACK_SEC
+    )
     return SuiteLeasedRound(
         config_path=str(config_path),
         run_dir=config.paths.run_dir,

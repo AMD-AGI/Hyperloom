@@ -10,6 +10,7 @@ the report the round wrote, and a leased round that left no report is refused un
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -20,7 +21,10 @@ from hyperloom.orchestrator.actions.executors import _ray_serving, _suite_config
 from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors._ray_backend import SessionKillRound, SuiteLeasedRound
-from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
+from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
+)
 from hyperloom.orchestrator.actions.executors._suite_config import (
     LEASED_CONFIG_SUFFIX,
     RAY_ROUND_UNPLACED_CLASS,
@@ -36,7 +40,7 @@ from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import suite as grid_suite  # noqa: F401
 from hyperloom.orchestrator.actions.executors.tests.test_suite_round import _rounds, _write_point, session  # noqa: F401
 from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt
-from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
+from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from inference_suite import EXIT_REFUSED
 from inference_suite.contracts import FailedStep, LifecycleMode, RunStatus, SuiteConfig
 from inference_suite.tests.test_config_contract import _config
@@ -93,6 +97,7 @@ def test_a_leased_round_runs_in_the_lease_and_its_report_is_read_back(session, t
     [
         (_Lease(exit_code=EXIT_REFUSED), failed_step_error_class(FailedStep.CONFIG_INVALID)),
         (_Lease(exit_code=ORCHESTRATOR_CANCELLED_RETURNCODE), ORCHESTRATOR_CANCELLED_CLASS),
+        (_Lease(exit_code=SESSION_TIME_EXHAUSTED_RETURNCODE), SESSION_TIME_EXHAUSTED_CLASS),
         (_Lease(exit_code=1), RAY_ROUND_UNPLACED_CLASS),
         (_Lease(raised=subprocess.TimeoutExpired(["round"], 60)), RAY_ROUND_UNPLACED_CLASS),
     ],
@@ -104,6 +109,18 @@ def test_a_leased_round_that_left_no_report_is_refused_under_why_it_never_ran(se
         run_suite_round(suite_route(session, point), _request(point, lease), on_poll=lambda: None)
 
     assert refused.value.error_class == error_class
+
+
+def test_the_leased_round_is_reaped_only_past_its_own_session_deadline(session, tmp_path) -> None:
+    lease = _Lease(exit_code=SESSION_TIME_EXHAUSTED_RETURNCODE)
+    point = _write_point(tmp_path / "slot" / "point.yaml")
+    request = replace(_request(point, lease), deadline_unix=int(time.time()) + 600)
+
+    with pytest.raises(SuiteRoundRefused):
+        run_suite_round(suite_route(session, point), request, on_poll=lambda: None)
+
+    (leased,) = lease.leased
+    assert leased.session_remaining_sec == pytest.approx(600 + _suite_config._LEASED_BACKSTOP_SLACK_SEC, abs=5)
 
 
 def _leased(tmp_path: Path, gpus: tuple[int, ...]) -> SuiteLeasedRound:
