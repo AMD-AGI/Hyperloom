@@ -19,6 +19,7 @@ from typing import Any
 from inference_suite.contracts import FailedStep
 
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.failure_signature import SERVE_FLAG
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 FAILURE_STAGE_WARMUP: str = "warmup"
@@ -68,6 +69,7 @@ FAILED_STEP_ERROR_CLASSES: Mapping[FailedStep, str] = {
     FailedStep.STAGING_MISSING: FailedStep.STAGING_MISSING.value,
     FailedStep.SOURCE_FILES_CHANGED: FailedStep.SOURCE_FILES_CHANGED.value,
     FailedStep.FLAG_UNKNOWN: ARGV_INVALID,
+    FailedStep.GOLDEN_OWNED_TOUCHED: SERVE_FLAG,
     FailedStep.PORT_IN_USE: FailedStep.PORT_IN_USE.value,
     FailedStep.SERVER_EXITED_BEFORE_READY: SERVER_INIT_DEAD,
     FailedStep.SERVER_SILENT_BEFORE_READY: FailedStep.SERVER_SILENT_BEFORE_READY.value,
@@ -89,6 +91,7 @@ _CANDIDATE_ERROR_CLASSES = frozenset(
         "capability_unsupported",
         "invalid_argument",
         "unsupported_config",
+        SERVE_FLAG,
     }
 )
 _ENVIRONMENT_ERROR_CLASSES = frozenset(
