@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import json
+import re
+from pathlib import Path
 from dataclasses import replace
 
 import pytest
@@ -52,6 +56,7 @@ def test_a_credential_named_env_is_frozen_as_its_sha256_and_never_reported_in_th
         "NCCL_IB_HCA",
         "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD",
         "AITER_PER_TOKEN_2",
+        "DEEPEP_COMBINE_TOKEN_BALANCED",
     ],
 )
 def test_a_tuning_knob_is_not_a_credential(name):
@@ -65,6 +70,33 @@ def test_an_env_and_a_flag_of_the_same_name_are_both_credentials(name):
     assert is_credential_name(name) and is_credential_name(flag)
     assert credential_arg_indices((flag, "opaque")) == [1]
     assert credential_arg_indices((f"{flag}=opaque",)) == [0]
+
+
+_SNAPSHOTS = Path(__file__).parents[3] / "inference_suite" / "tests" / "fixtures"
+_SNAPSHOT_CREDENTIALS = {"--api-key", "ANTHROPIC_AUTH_TOKEN"}
+
+
+def _names_in(node, names: set[str]) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if re.fullmatch(r"[A-Z][A-Z0-9_]+", key):
+                names.add(key)
+            _names_in(value, names)
+    elif isinstance(node, list):
+        for value in node:
+            _names_in(value, names)
+    elif isinstance(node, str):
+        names.update(m.split("=")[0] for m in re.findall(r"(?<![\w-])--[A-Za-z][\w-]*", node))
+        names.update(re.findall(r"\b([A-Z][A-Z0-9_]{2,})=", node))
+
+
+def test_no_knob_in_the_shipped_recipe_snapshots_is_a_credential():
+    names: set[str] = set()
+    for snapshot in _SNAPSHOTS.glob("*/*.json.gz"):
+        _names_in(json.loads(gzip.decompress(snapshot.read_bytes())), names)
+
+    assert len(names) > 300
+    assert {n for n in names if is_credential_name(n)} == _SNAPSHOT_CREDENTIALS
 
 
 @pytest.mark.parametrize(
@@ -107,6 +139,7 @@ def test_a_credential_flag_value_is_found_in_both_forms(argv, indices):
         ("--sp-min-token-num", "4"),
         ("--encoder-cudagraph-token-budgets", "4"),
         ("--suffix-decoding-min-token-prob", "0.1"),
+        ("--prefill-delayer-token-usage-low-watermark", "0.7"),
         ("-", "x"),
     ],
 )

@@ -232,8 +232,9 @@ def test_a_fixed_session_whose_inferencex_cannot_be_read_freezes_the_default_tab
 def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_frozen_file(tmp_path, fetched):
     script = tmp_path / "launch.sh"
     script.write_text(
-        "export SGLANG_USE_AITER=1\nexport HF_TOKEN=hunter2\n"
-        "python3 -m sglang.launch_server --model-path /models/r1 --tp 4 --mem-fraction-static 0.7 --port 30000\n"
+        "export SGLANG_USE_AITER=1\nexport HF_TOKEN=hunter2\nexport DEEPEP_COMBINE_TOKEN_BALANCED=1\n"
+        "python3 -m sglang.launch_server --model-path /models/r1 --tp 4 --mem-fraction-static 0.7 --port 30000"
+        " --prefill-delayer-token-usage-low-watermark 0.7\n"
     )
     session = tmp_path / "session"
     session.mkdir()
@@ -242,11 +243,19 @@ def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_froze
 
     assert base is not None and base.source.kind is SourceKind.USER_FILE
     assert fetched[0][1].location == str(script)
-    assert base.args == ("--tp", "4", "--mem-fraction-static", "0.7")
+    assert base.args == (
+        "--tp",
+        "4",
+        "--mem-fraction-static",
+        "0.7",
+        "--prefill-delayer-token-usage-low-watermark",
+        "0.7",
+    )
     assert isinstance(base.env["HF_TOKEN"], Redacted)
     assert "hunter2" not in (session / BASE_LAUNCH_FILE).read_text()
     assert base.model.path == _DSR1
     assert base.env["SGLANG_USE_AITER"] == "1"
+    assert base.env["DEEPEP_COMBINE_TOKEN_BALANCED"] == "1"
 
 
 _PROBE_ENV = (
