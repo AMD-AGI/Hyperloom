@@ -1294,7 +1294,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
             file=sys.stderr,
         )
         sys.exit(2)
-    # Re-export so subprocess executors inject the resolved model into the Magpie YAML, not its hardcoded model.
+    # Re-export so the rounds _suite_config composes serve the resolved model, not the path the operator typed.
     from hyperloom.common.model_paths import resolve_serving_model_path
 
     os.environ["MODEL_PATH"] = resolve_serving_model_path(str(args.model)) or str(args.model)
@@ -1334,7 +1334,9 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     if _fw_version_for_env:
         os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
     if _agentx_enabled():
-        print(f"Workload        : AgentX replay, CONC={args.conc}; corpus and model context resolved by Magpie")
+        print(
+            f"Workload        : AgentX replay, CONC={args.conc}; corpus and model context resolved by inference_suite"
+        )
     else:
         print(
             f"Workload        : ISL={args.isl} OSL={args.osl} MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
@@ -1753,7 +1755,7 @@ async def _close_optimize_run(coordinator: Any, session_lock: Any, session_dir: 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: parse arguments and dispatch the requested subcommand."""
     # Force line-buffering so output piped through a non-TTY sink flushes every line immediately instead of
-    # block-buffering, which would otherwise freeze the top-level log for the duration of a blocking Magpie
+    # block-buffering, which would otherwise freeze the top-level log for the duration of a blocking benchmark
     # subprocess.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
