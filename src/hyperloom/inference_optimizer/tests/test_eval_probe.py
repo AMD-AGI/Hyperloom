@@ -23,6 +23,7 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     read_eval_probe,
 )
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import _EVAL_PROBE_PY
+from inference_suite.contracts import ProbeOutcome, RunLayout
 
 
 class _StubTemplateAPI:
@@ -363,6 +364,29 @@ def test_read_eval_probe_tolerates_an_unscannable_tree(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "rglob", _rglob_raises)
     assert read_eval_probe(tmp_path) is None
+
+
+def _suite_probe(run_dir: Path, outcome: ProbeOutcome) -> None:
+    probe = RunLayout(run_dir).eval_probe
+    probe.parent.mkdir(parents=True)
+    probe.write_text(json.dumps(outcome.to_document()), encoding="utf-8")
+
+
+def test_read_eval_probe_ignores_a_suite_eval_whose_probe_did_not_trip(tmp_path):
+    """inference_suite records its probe outcome on every eval, so the file alone is no trip."""
+    _suite_probe(tmp_path / "suite_run_0", ProbeOutcome(tripped=False, samples_seen=1319, length_ratio_observed=0.006))
+
+    assert read_eval_probe(tmp_path) is None
+
+
+def test_read_eval_probe_reports_a_tripped_suite_probe_with_its_counts(tmp_path):
+    _suite_probe(tmp_path / "suite_run_0", ProbeOutcome(tripped=True, samples_seen=128, length_ratio_observed=0.9))
+
+    record = read_eval_probe(tmp_path)
+
+    assert record is not None and record["kind"] == EVAL_KIND_GENERATION_PATHOLOGY
+    summary = eval_probe_summary(record)
+    assert "128 sampled responses" in summary and "90%" in summary
 
 
 def test_eval_probe_summary_is_empty_without_a_probe():

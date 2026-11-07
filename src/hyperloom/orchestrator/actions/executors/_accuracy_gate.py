@@ -29,6 +29,7 @@ from hyperloom_common.coerce import optional_positive_float
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom_common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
+from inference_suite.contracts import ProbeOutcome, ReportError
 
 log = logging.getLogger(__name__)
 
@@ -70,8 +71,10 @@ EVAL_KIND_ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
 # The model never emitted EOS, so the eval was cut short and scored ~0.
 EVAL_KIND_GENERATION_PATHOLOGY = "eval_generation_pathology"
 
-# Sidecar the probe writes into ``$RESULT_DIR`` when it trips.
+# Sidecar the probe writes into ``$RESULT_DIR`` when it trips; inference_suite writes its ProbeOutcome there on every
+# eval, tripped or not.
 EVAL_PROBE_FILENAME = "hyperloom_eval_probe.json"
+_SUITE_SAMPLES_KEY = "samples_seen"
 
 # stop_reason recorded when the baseline could not produce an accuracy result even though the accuracy test was
 # expected to run.
@@ -506,7 +509,7 @@ def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
 
 
 def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
-    """Read the generation-pathology probe sidecar, when the probe tripped."""
+    """Read the newest generation-pathology probe sidecar below ``workspace``, when that probe tripped."""
     try:
         matches = list(Path(workspace).rglob(EVAL_PROBE_FILENAME))
     except OSError:
@@ -520,9 +523,26 @@ def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
         record = json.loads(latest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    if _SUITE_SAMPLES_KEY in record:
+        try:
+            tripped = ProbeOutcome.from_document(record).tripped
+        except ReportError:
+            return None
+        if not tripped:
+            return None
     record["kind"] = EVAL_KIND_GENERATION_PATHOLOGY
     record["source_file"] = str(latest)
     return record
+
+
+def _probe_evidence(probe: dict[str, Any]) -> str:
+    if _SUITE_SAMPLES_KEY in probe:
+        ratio = probe.get("length_ratio_observed") or 0.0
+        return f"{ratio:.0%} of {probe[_SUITE_SAMPLES_KEY]} sampled responses stopped at the length cap"
+    return (
+        f"{probe.get('cap_hits', 0)}/{probe.get('observed_samples', 0)} sampled responses stopped at the "
+        f"{probe.get('max_completion_tokens_seen', 0)}-token cap"
+    )
 
 
 def eval_probe_summary(probe: dict[str, Any] | None) -> str:
@@ -530,10 +550,8 @@ def eval_probe_summary(probe: dict[str, Any] | None) -> str:
     if not probe:
         return ""
     return (
-        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {probe.get('cap_hits', 0)}/"
-        f"{probe.get('observed_samples', 0)} sampled responses stopped at the "
-        f"{probe.get('max_completion_tokens_seen', 0)}-token cap; the model never "
-        "emitted EOS, so the eval was cut short and scored ~0"
+        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {_probe_evidence(probe)}; the model never emitted EOS, so the eval was "
+        "cut short and scored ~0"
     )
 
 
