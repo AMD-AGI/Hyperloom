@@ -1066,7 +1066,7 @@ async def test_a_branch_waiting_on_a_native_build_shows_it_once_with_its_compone
     toolbox = FakeToolbox(
         blackboard=LocalBlackboard(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox")), wiring=FakeWiring(builds=driver)
     )
-    for branch, args in (("b01", "--a"), ("b01", "--b"), ("b02", "--c")):
+    for branch, args in (("b01", "--a"), ("b01", "--b"), ("b02", "--f")):
         change = RecipeDelta(config=ConfigDelta(server_args=args))
         await toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, branch, "c-root", delta=change))
     snapshot = await LocalBlackboard(tmp_path / "nb", Writer(Role.OBSERVER, "judge")).snapshot()
