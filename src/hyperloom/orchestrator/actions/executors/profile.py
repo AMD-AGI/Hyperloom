@@ -1178,9 +1178,9 @@ class ProfileExecutor(BenchmarkRunExecutor):
         params = ctx.task.params or {}
         _merge_profile_params(params)
         extra = getattr(ctx, "extra", None) or {}
-        from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+        from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
 
-        if is_magpie_agentx(configured_benchmark()):
+        if is_agentx(configured_benchmark()):
             return await self._run_native_profile(ctx)
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
