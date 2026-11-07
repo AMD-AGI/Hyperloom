@@ -11,7 +11,9 @@ ATOM's ``--max-model-len`` default, sglang's radix-cache conflict) are applied t
 not hold -- where the round writes, its interpreter, lifecycle and telemetry -- comes in :class:`RoundSettings`.
 
 An AgentX point runs the agentx-harness replay on the launch its ``agentx.launch_overrides`` composed on the session
-base, above the base's golden layer; a profile point turns the torch profiler on for the window it asks for.
+base, above the base's golden layer; a profile point turns the torch profiler on for the window it asks for. An MLPerf
+point (``benchmark_script`` names the MLPerf agentic client) runs the MLPerf harness against the round's own server,
+which serves under the model name the harness requests.
 
 A point runs on inference_suite (:func:`suite_route`) once its session froze a base launch. A client-only round --
 multi-node, or one whose session or point names a ``BENCHMARK_BASE_URL`` -- holds its server as ``external``: it
@@ -44,6 +46,7 @@ from hyperloom_common.env import is_truthy
 from hyperloom.common.agentx_workload import (
     CANON_WARMUP_PER_LANE,
     agentx_profiling_requests,
+    is_agentx_client_key,
     is_agentx_client_script,
 )
 from hyperloom.common.benchmark_config import AgentxLaunch, BenchmarkPoint, is_agentx
@@ -67,7 +70,7 @@ from hyperloom.inference_optimizer.framework_registry import extra_args_env
 from hyperloom.inference_optimizer.session.paths import resolve_dep_dir
 from hyperloom.orchestrator.state.base_launch import frozen_base
 from inference_suite import EXIT_REFUSED, RoundResult, manifest_sha256, run_round
-from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv, remove_server_args
 from inference_suite.contracts import (
     AGENTX_CLIENT_ENV_PREFIX,
     AGENTX_FAST_MODE_ENV,
@@ -87,6 +90,7 @@ from inference_suite.contracts import (
     LaunchDelta,
     Lifecycle,
     LifecycleMode,
+    MlperfWorkload,
     ProfileConfig,
     Report,
     RunLayout,
@@ -276,8 +280,6 @@ def backend_reason(document: Mapping[str, object]) -> str | None:
     framework = _framework(bench)
     if framework_facts(framework).kind is not FrameworkKind.SERVING:
         return f"the point runs {framework.value}, which serves nothing"
-    if is_agentx_client_script(str(bench.get("benchmark_script") or "")):
-        return "the point runs the MLPerf agentic client, which boots its own server"
     return None
 
 
@@ -663,6 +665,87 @@ def _agentx_config(
     )
 
 
+#: The point's environment the MLPerf client reads, each a :class:`MlperfWorkload` field the AgentX switch settles.
+_MLPERF_ENV = MappingProxyType(
+    {
+        "flow": "MLPERF_AGENTIC_FLOW",
+        "model": "MLPERF_AGENTIC_MODEL",
+        "hardware": "MLPERF_AGENTIC_HARDWARE",
+        "dataset": "AGENTIC_DATASET_PATH",
+        "tokenizer": "MLPERF_TOKENIZER_DIR",
+        "endpoints_dir": "MLPERF_ENDPOINTS_DIR",
+    }
+)
+_MLPERF_TRAJECTORIES_ENV = "AGENTIC_NUM_TRAJECTORIES"
+_MLPERF_CONCURRENCY_ENV = "AGENTIC_CONCURRENCY"
+#: What the AgentX switch writes for the MLPerf client alone, beside its ``MLPERF_*`` and ``AGENTIC_*`` knobs.
+_MLPERF_CLIENT_ENV = frozenset({"MODEL", "FRAMEWORK"})
+_SERVED_MODEL_FLAG = "--served-model-name"
+#: An agentic turn idles for minutes between tool results, so a server defaulting to a short keep-alive drops the
+#: connection mid-trajectory.
+_KEEP_ALIVE_SEC = "900"
+_KEEP_ALIVE_ENV: Mapping[Framework, str] = MappingProxyType(
+    {Framework.VLLM: "VLLM_HTTP_TIMEOUT_KEEP_ALIVE", Framework.SGLANG: "SGLANG_TIMEOUT_KEEP_ALIVE"}
+)
+
+
+def _is_mlperf(bench: Mapping[str, Any]) -> bool:
+    return is_agentx_client_script(str(bench.get("benchmark_script") or ""))
+
+
+def _mlperf_workload(point: _Point) -> MlperfWorkload:
+    knobs = {field_name: point.text(name) for field_name, name in _MLPERF_ENV.items()}
+    unset = sorted(_MLPERF_ENV[field_name] for field_name, value in knobs.items() if value is None)
+    if unset:
+        raise ConfigError(f"the MLPerf point sets no {', '.join(unset)}")
+    concurrency = point.integer(ENV_CONC)
+    if point.integer(_MLPERF_CONCURRENCY_ENV, concurrency) != concurrency:
+        raise ConfigError(f"the MLPerf point's {_MLPERF_CONCURRENCY_ENV} is not its {ENV_CONC} {concurrency}")
+    return MlperfWorkload(concurrency=concurrency, trajectories=point.integer(_MLPERF_TRAJECTORIES_ENV), **knobs)
+
+
+def _mlperf_server_point(point: _Point) -> _Point:
+    """The point as its server reads it: no client knob, no served name of its own, an agentic turn's keep-alive.
+
+    The round's config names the served model, and the AgentX switch's ``--served-model-name`` stays in the point for
+    GEAK's handoff, which launches the builtin server script.
+    """
+    envs = {
+        name: value
+        for name, value in point.envs.items()
+        if name not in _MLPERF_CLIENT_ENV and not is_agentx_client_key(name, point.envs)
+    }
+    extra = extra_args_env(point.framework.value)
+    envs[extra] = remove_server_args(envs.get(extra, ""), [_SERVED_MODEL_FLAG])
+    keep_alive = _KEEP_ALIVE_ENV.get(point.framework)
+    if keep_alive is not None:
+        envs.setdefault(keep_alive, _KEEP_ALIVE_SEC)
+    return replace(point, envs=envs)
+
+
+def _mlperf_config(
+    bench: Mapping[str, Any], point: _Point, base: BaseLaunch, settings: RoundSettings, boot_only: bool
+) -> SuiteConfig:
+    """The MLPerf point's round: the harness against a server of the round's own, unprofiled and without eval."""
+    if _torch_profiler(bench).get("enabled"):
+        raise ConfigError("the MLPerf point asks for a torch profile; an MLPerf round is not profiled")
+    if point.flag(ENV_RUN_EVAL, default=False):
+        raise ConfigError(f"the MLPerf point sets {ENV_RUN_EVAL}; the harness scores its accuracy inline")
+    workload = None if boot_only else _mlperf_workload(point)
+    server_point = _mlperf_server_point(point)
+    server = _server(server_point, base, settings, None, _user_layer(server_point))
+    return SuiteConfig(
+        server=server if workload is None else replace(server, served_model_name=workload.model),
+        workload=WorkloadKind.NONE if workload is None else WorkloadKind.MLPERF,
+        mlperf=workload,
+        eval=_eval(point, enabled=False),
+        telemetry=settings.telemetry,
+        lifecycle=settings.lifecycle,
+        deadlines=_deadlines(point, settings),
+        paths=settings.paths,
+    )
+
+
 def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings) -> SuiteConfig:
     """The config one round of the point ``document`` runs from, composed on ``base``.
 
@@ -670,19 +753,21 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
     client-only round (``settings.server_url`` or the point's ``BENCHMARK_BASE_URL``) holds its server as ``external``.
 
     Raises:
-        ConfigError: When the point is one this translation does not carry (scriptable, the MLPerf client, or an
-            AgentX or profile setting no round has), names another framework or topology than ``base``, lacks a knob
-            its load needs, or names an external server that is not plain HTTP or serves an AgentX point.
+        ConfigError: When the point is one this translation does not carry (scriptable, or an AgentX, MLPerf or
+            profile setting no round has), names another framework or topology than ``base``, lacks a knob its load
+            needs, or names an external server that is not plain HTTP or serves an AgentX or MLPerf point.
     """
     point = _point(document)
     _check_base(point, base)
     bench = _bench(document)
     boot_only = (point.text(_RUN_PHASE_ENV) or "").lower() == _SERVER_ONLY_PHASE
     url = point.text(_REMOTE_SERVER_ENV) or settings.server_url
+    if url is not None and (is_agentx(bench) or _is_mlperf(bench)):
+        raise ConfigError(f"an AgentX or MLPerf round serves its own launch, not the external server at {url}")
     if is_agentx(bench):
-        if url is not None:
-            raise ConfigError(f"an AgentX round serves its own launch, not the external server at {url}")
         return _agentx_config(bench, point, base, settings, boot_only)
+    if _is_mlperf(bench):
+        return _mlperf_config(bench, point, base, settings, boot_only)
     external = None if url is None else _external_address(url)
     return SuiteConfig(
         server=_server(point, base, settings, external, _user_layer(point)),
