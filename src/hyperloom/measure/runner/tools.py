@@ -20,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from inference_suite import manifest_sha256
+from inference_suite import CLIENT_FILE, manifest_sha256
 
 __all__ = ["INFERENCE_SUITE_DIR", "ToolError", "ensure_inference_suite", "ensure_inferencex", "ensure_magpie"]
 
@@ -33,11 +33,12 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 INFERENCE_SUITE_DIR = "inference-suite"
 #: Staging builds the AgentX harness venv with pip, from the wheels the runner cache holds.
 _STAGE_TIMEOUT_SEC = 1800
-#: Where an InferenceX tree keeps its benchmark library: at the root, or below ``inferencex-e2e/``, the layout the
-#: pinned Magpie resolves for a native AgentX run.
+#: What marks an InferenceX tree: the benchmark library a v1 sheet's Magpie runs, at the root or below
+#: ``inferencex-e2e/``, or the client inference_suite stages a v2 sheet's rounds from (the pinned commit has no library).
 _INFERENCEX_MARKERS = (
     Path("benchmarks") / "benchmark_lib.sh",
     Path("inferencex-e2e") / "benchmarks" / "benchmark_lib.sh",
+    Path("inferencex-e2e") / CLIENT_FILE,
 )
 _MAGPIE_MARKERS = (Path("Magpie") / "__init__.py",)
 

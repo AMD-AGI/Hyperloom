@@ -16,6 +16,7 @@ import pytest
 
 from hyperloom.measure.runner import tools
 from hyperloom.measure.runner.tools import ToolError, ensure_inference_suite, ensure_inferencex
+from inference_suite import CLIENT_FILE
 
 
 def _git(path, *args):
@@ -78,6 +79,21 @@ def test_a_tree_that_keeps_its_benchmark_library_below_inferencex_e2e_is_accepte
 
     assert (tree / "inferencex-e2e" / "benchmarks" / "benchmark_lib.sh").is_file()
     assert ensure_inferencex(commit, tmp_path / "cache") == tree
+
+
+def test_a_tree_of_the_layout_inference_suite_stages_from_is_accepted(tmp_path, monkeypatch):
+    client = tmp_path / "up" / "inferencex-e2e" / CLIENT_FILE
+    client.parent.mkdir(parents=True)
+    client.write_text("# client\n")
+    repo = tmp_path / "up"
+    _git(repo, "init", "-q")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "add", ".")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one")
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+
+    tree = ensure_inferencex(_git(repo, "rev-parse", "HEAD"), tmp_path / "cache")
+
+    assert (tree / "inferencex-e2e" / CLIENT_FILE).is_file()
 
 
 def test_an_unknown_commit_is_refused(upstream, tmp_path, monkeypatch):
