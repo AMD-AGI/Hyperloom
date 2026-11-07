@@ -100,13 +100,18 @@ class MemoryBlackboard:
         return []
 
 
+#: The root commit of a fake toolbox given no repository.
+_ROOT = "root"
+
+
 class _Repo:
-    """The repository acceptance reads a parent's recipe from.
+    """The repository acceptance reads a parent's recipe and the root's from.
 
     With a ``repo`` the recipe is the one that repository holds for the commit, read as the real toolbox reads it, so a
     parent that pins a component takes a delta of patches only; a commit the repository does not know is an unknown
-    parent. Without one every parent exists and its recipe is the empty one on the fake's image, which pins no
-    component. ``parent_exists`` narrows either: a commit it refuses is unknown.
+    parent; the root is that repository's. Without one every parent exists and its recipe is the empty one on the
+    fake's image, which pins no component, and so is the root's. ``parent_exists`` narrows the parents either way: a
+    commit it refuses is unknown.
     """
 
     def __init__(
@@ -114,8 +119,11 @@ class _Repo:
     ) -> None:
         self._image, self._exists, self._repo = image, parent_exists, repo
 
+    async def root(self) -> str:
+        return await self._repo.root() if self._repo is not None else _ROOT
+
     async def read_recipe(self, commit: str) -> Recipe:
-        if self._exists is not None and not self._exists(commit):
+        if commit != _ROOT and self._exists is not None and not self._exists(commit):
             raise KeyError(commit)
         if self._repo is not None:
             return await self._repo.read_recipe(commit)
