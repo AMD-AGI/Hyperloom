@@ -192,6 +192,11 @@ _NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CL
 _OWN_DIR_MODE, _OWN_FILE_MODE = 0o700, 0o600
 #: The permission bits an entry in place keeps of those it was built with: all but the group's and others' write.
 _ENTRY_BITS = 0o755
+#: What an entry's own directory always has once in place, whatever the umask it was built under: the group may read
+#: and enter it (the other builders of the cache check it), and it is never ``0700``, the mode by which the sweep
+#: (:func:`_sweep_leftovers`) tells a builder's unfinished copy, so a finished entry that another account of the group
+#: renames to a ``.<sha>.tmp-*`` name is never taken for one.
+_ENTRY_GROUP_BITS = stat.S_IRGRP | stat.S_IXGRP
 _COPY_CHUNK = 1 << 20
 _TAIL = 2000
 _UTF8 = "utf-8"
@@ -612,9 +617,12 @@ def _publish(made: Path, final: Path) -> None:
     descriptor of the directory it goes in, never through a link and never over a name that is there already
     (:data:`_NEW_FILE_FLAGS`). Whatever another account plants, the builder writes the entry and nothing else, into
     what it opened; what is in place is vouched for by the pin, as ever. The new directory is the builder's alone
-    (``0700``) until it is whole, each copy has the mode of what it copies without the group's and others' write
-    (:data:`_ENTRY_BITS`), and the manifest is copied last. A copy that fails removes the directory it opened, through
-    that descriptor, and nothing another account put in its place (:func:`_remove_directory`)."""
+    (``0700``) until it is whole and renamed into place, so a builder killed at any point before the rename leaves a
+    directory the sweep removes (:func:`_sweep_leftovers`); each copy has the mode of what it copies without the group's
+    and others' write (:data:`_ENTRY_BITS`), the entry's own directory, given its mode through the descriptor after the
+    rename, also the group's read (:data:`_ENTRY_GROUP_BITS`), and the manifest is copied last. A copy that fails
+    removes the directory it opened, through that descriptor, and nothing another account put in its place
+    (:func:`_remove_directory`)."""
     root = os.open(final.parent, _CACHE_FLAGS)
     pending = f".{final.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     try:
@@ -622,11 +630,13 @@ def _publish(made: Path, final: Path) -> None:
         directory = _open_new_directory(root, pending)
         opened = os.fstat(directory)
         try:
-            _copy_tree(made, directory, last=MANIFEST_NAME)
+            _copy_tree(made, directory, last=MANIFEST_NAME, keep_private=True)
             os.rename(pending, final.name, src_dir_fd=root, dst_dir_fd=root)
         except BaseException:
             _remove_directory(root, pending, lambda found: os.path.samestat(found, opened))
             raise
+        else:
+            os.fchmod(directory, _entry_mode(made))
         finally:
             os.close(directory)
     finally:
@@ -673,9 +683,16 @@ def _open_new_directory(parent: int, name: str) -> int:
     return descriptor
 
 
-def _copy_tree(source: Path, directory: int, last: str = "") -> None:
+def _entry_mode(source: Path) -> int:
+    """The mode of an entry's own directory in place: that of ``source`` without the group's and others' write, with
+    the group's read (:data:`_ENTRY_GROUP_BITS`)."""
+    return stat.S_IMODE(os.stat(source).st_mode) & _ENTRY_BITS | _ENTRY_GROUP_BITS
+
+
+def _copy_tree(source: Path, directory: int, last: str = "", *, keep_private: bool = False) -> None:
     """Fill the new directory open as ``directory`` (:func:`_open_new_directory`) with a copy of what is in ``source``
-    (``last`` after the rest), then give it ``source``'s mode without the group's and others' write (:func:`_publish`).
+    (``last`` after the rest), then give it ``source``'s mode without the group's and others' write (:func:`_publish`),
+    unless ``keep_private``: the entry's own directory stays ``0700`` until it is in place.
 
     Raises:
         CacheBuildError: For something in ``source`` that is not a directory, a regular file or a link.
@@ -695,7 +712,8 @@ def _copy_tree(source: Path, directory: int, last: str = "") -> None:
             _copy_file(Path(entry.path), directory, entry.name, info.st_mode)
         else:
             raise CacheBuildError(f"{entry.path} is not a directory, a regular file or a link")
-    os.fchmod(directory, stat.S_IMODE(os.stat(source).st_mode) & _ENTRY_BITS)
+    if not keep_private:
+        os.fchmod(directory, stat.S_IMODE(os.stat(source).st_mode) & _ENTRY_BITS)
 
 
 def _remove_directory(parent: int, name: str, ours: Callable[[os.stat_result], bool]) -> None:

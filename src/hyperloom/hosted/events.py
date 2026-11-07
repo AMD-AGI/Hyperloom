@@ -10,7 +10,10 @@ directory by byte offset relies on three guarantees kept here:
   an unfinished write and never an event;
 * ``id`` is a decimal string that strictly increases within the app run, across restarts: on start the last
   complete line of the last segment gives the id to continue after, and a half-written tail left by a crash is
-  cut off first so the next event does not glue onto it;
+  cut off first (the segment is replaced by a copy of its complete lines, never cut in place);
+* each start of the writer begins a new segment, made new (``O_EXCL``, never through a link) with mode ``0664``:
+  the next leg of a hosted run may be another account of the directory's group, which reads the earlier segments but
+  never opens one of another account's for writing;
 * there is exactly one writer per events directory.  The directory and the run id come from the host inputs
   (:class:`hyperloom.hosted.host_info.HostInfo`) the plug host was given, never from the process environment,
   which :func:`hyperloom.hosted.host_info.take_host_info` has already cleared: a child process therefore has
@@ -21,15 +24,18 @@ Emitting is best effort: a failure is logged and the run continues.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
+import stat
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from hyperloom_common.shared_storage import create_new_shared_file, make_shared_dirs, write_shared_bytes
 from hyperloom.plugs.socket import PlugContext
 
 log = logging.getLogger(__name__)
@@ -43,6 +49,8 @@ FSYNC_INTERVAL_SEC = 1.0
 SPECVERSION = "1.0"
 DATA_CONTENT_TYPE = "application/json"
 _OVERSIZE_KEYS = 20
+#: How many taken names past the last segment a new one is tried at before the writer gives up.
+_NEW_SEGMENT_TRIES = 64
 
 
 def segment_name(number: int) -> str:
@@ -78,26 +86,44 @@ def _last_id(lines: list[bytes]) -> int | None:
 
 
 def _cut_unfinished_tail(path: Path, raw: bytes, keep: int) -> None:
-    """Drop the bytes after the last newline: a crashed write that no reader may take for an event."""
+    """Drop the bytes after the last newline: a crashed write that no reader may take for an event.  The segment is
+    replaced by a new file of its complete lines, never opened in place: it may be another account's."""
     if keep < len(raw):
         log.warning("events: dropping %d unfinished bytes at the end of %s", len(raw) - keep, path.name)
-        with open(path, "r+b") as handle:
-            handle.truncate(keep)
+        write_shared_bytes(path, raw[:keep])
+
+
+def _read_segment(path: Path) -> bytes | None:
+    """What the segment file ``path`` holds, or ``None`` when it is not a regular file (a link a member of the group
+    put there, a pipe): such a name is never read, written or taken for a segment with events."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None
+        raise
+    with os.fdopen(descriptor, "rb") as handle:
+        return handle.read() if stat.S_ISREG(os.fstat(descriptor).st_mode) else None
 
 
 def _resume_point(events_dir: Path) -> tuple[int, int]:
-    """``(segment number, last id)`` to continue from; ``(1, 0)`` for an empty directory."""
+    """``(last segment number, last id)`` to continue after; ``(0, 0)`` for an empty directory.  The newest segment
+    that is a regular file has its unfinished tail cut first (:func:`_cut_unfinished_tail`)."""
     numbers = segment_numbers(events_dir)
+    newest = True
     for number in reversed(numbers):
         path = events_dir / segment_name(number)
-        raw = path.read_bytes()
+        raw = _read_segment(path)
+        if raw is None:
+            continue
         lines, keep = _complete_lines(raw)
-        if number == numbers[-1]:
+        if newest:
             _cut_unfinished_tail(path, raw, keep)
+            newest = False
         last = _last_id(lines)
         if last is not None:
             return numbers[-1], last
-    return (numbers[-1] if numbers else 1), 0
+    return (numbers[-1] if numbers else 0), 0
 
 
 def _utc_now() -> str:
@@ -125,23 +151,28 @@ class HostedProgressEvents:
         self._dirty = False
         self._last_sync = clock()
         self._closed = False
-        self._dir.mkdir(parents=True, exist_ok=True)
-        self._segment, self._last_id = _resume_point(self._dir)
-        self._fd, self._size = self._open_segment(self._segment)
+        make_shared_dirs(self._dir)
+        last_segment, self._last_id = _resume_point(self._dir)
+        self._fd, self._segment = self._new_segment(last_segment)
 
     @property
     def last_id(self) -> int:
         """The id of the last event written, ``0`` before the first."""
         return self._last_id
 
-    def _open_segment(self, segment: int) -> tuple[int, int]:
-        """Open a segment file; the descriptor and its size.  Changes no state, so a failure leaves the writer as it was."""
-        fd = os.open(self._dir / segment_name(segment), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            return fd, os.fstat(fd).st_size
-        except OSError:
-            os.close(fd)
-            raise
+    def _new_segment(self, after: int) -> tuple[int, int]:
+        """Create the first free segment after ``after``, new; its descriptor and number.  Changes no state, so a
+        failure leaves the writer as it was.
+
+        Raises:
+            FileExistsError: When every one of the next :data:`_NEW_SEGMENT_TRIES` names is taken.
+        """
+        for number in range(after + 1, after + 1 + _NEW_SEGMENT_TRIES):
+            try:
+                return create_new_shared_file(self._dir / segment_name(number)), number
+            except FileExistsError:
+                continue  # made meanwhile by something else: never written into
+        raise FileExistsError(f"events: no free segment name after {segment_name(after)} in {self._dir}")
 
     def _sync(self) -> None:
         if self._fd is not None and self._dirty:
@@ -152,9 +183,9 @@ class HostedProgressEvents:
     def _roll_if_full(self, incoming: int) -> None:
         if self._size and self._size + incoming > self._segment_max:
             self._sync()
-            fd, size = self._open_segment(self._segment + 1)  # the current segment stays in use until this succeeds
+            fd, segment = self._new_segment(self._segment)  # the current segment stays in use until this succeeds
             os.close(self._fd)  # type: ignore[arg-type]
-            self._fd, self._size, self._segment = fd, size, self._segment + 1
+            self._fd, self._size, self._segment = fd, 0, segment
 
     def _line(self, event_id: int, event_type: str, data: Mapping[str, Any]) -> bytes:
         event = {

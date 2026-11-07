@@ -141,12 +141,13 @@ def test_an_archive_root_an_earlier_leg_made_is_taken_as_it_is(tmp_path):
     assert _mode(paths.ensure_archive_root(tmp_path)) == 0o750, "never chmodded"
 
 
-def test_an_archive_root_any_account_can_write_is_refused_and_left_as_it_was(tmp_path):
+@pytest.mark.parametrize("mode", [0o777, 0o2775, 0o2771, 0o754])
+def test_an_archive_root_open_to_accounts_outside_its_group_is_refused_and_left_as_it_was(tmp_path, mode):
     (tmp_path / "archive").mkdir()
-    (tmp_path / "archive").chmod(0o777)
-    with pytest.raises(PermissionError, match="can be written by any account"):
+    (tmp_path / "archive").chmod(mode)
+    with pytest.raises(PermissionError, match=f"is open to accounts outside its group \\(mode {mode:04o}, not 2770\\)"):
         paths.ensure_archive_root(tmp_path)
-    assert _mode(tmp_path / "archive") == 0o777
+    assert _mode(tmp_path / "archive") == mode
 
 
 @pytest.mark.parametrize("planted", ["link", "file"])

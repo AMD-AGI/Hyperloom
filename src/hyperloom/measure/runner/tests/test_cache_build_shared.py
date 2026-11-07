@@ -70,9 +70,10 @@ def test_the_lock_and_the_cache_let_the_group_write_and_the_entry_no_one_but_its
     assert stat.S_IMODE(build_lock(root, rig.cache.sha).stat().st_mode) == lock
     assert stat.S_IMODE(root.stat().st_mode) == cache
     # The entry is readable as the builder's umask lets others read, and writable by its builder alone, even under a
-    # umask that lets the group write what the builder makes.
+    # umask that lets the group write what the builder makes; its own directory the group may always read and enter, so
+    # it is never 0700 like a builder's unfinished copy.
     entry = _modes(root / rig.cache.sha)
-    assert (entry["."], entry[BOOTSTRAP_NAME]) == (0o755 & ~umask, 0o755)
+    assert (entry["."], entry[BOOTSTRAP_NAME]) == (0o755 & ~umask | 0o050, 0o755)
     assert {name for name, mode in entry.items() if mode & _SHARED_WRITE} == set()
 
 
@@ -169,6 +170,76 @@ def test_a_killed_build_leaves_the_cache_only_a_lock_another_accounts_builder_ta
         taken = json.loads(accounts.run(accounts.second, f"import sys\nsys.argv[1:] = {names!r}\n{_TAKE_LOCKS}"))
 
         assert taken == {build_lock(cache, sha).name: "ok", old_style.name: "EACCES"}
+
+
+_KILLED_BEFORE_THE_RENAME = """
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+from hyperloom.measure.runner import cache_build
+copy_tree = cache_build._copy_tree
+def killed_after(source, directory, last="", **flags):
+    copy_tree(source, directory, last, **flags)
+    if last:  # the whole entry is copied, the manifest last: the builder dies before the rename
+        os.kill(os.getpid(), signal.SIGKILL)
+cache_build._copy_tree = killed_after
+cache_build.main(sys.argv[2:])
+"""
+
+
+def _build_command(rig: Rig, cache: Path, code: str | None = None) -> list[str]:
+    arguments = ["--sha", rig.cache.sha, "--repo", str(rig.repo), "--out", str(cache)]
+    arguments += ["--no-index", "--find-links", str(rig.wheelhouse)]
+    if code is None:
+        return [sys.executable, "-m", "hyperloom.measure.runner.cache_build", *arguments]
+    return [sys.executable, "-I", "-c", code, _SRC, *arguments]
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_a_builder_killed_with_the_copy_whole_but_not_yet_in_place_leaves_what_the_next_build_sweeps(
+    rig: Rig, tmp_path: Path, umask: int
+) -> None:
+    cache = tmp_path / "cache"
+    sha = rig.cache.sha
+    killed = subprocess.run(
+        _build_command(rig, cache, _KILLED_BEFORE_THE_RENAME),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        umask=umask,
+        check=False,
+    )
+    assert killed.returncode == -signal.SIGKILL, killed.stderr
+    (leftover,) = cache.glob(f".{sha}.tmp-*")
+    assert (leftover / MANIFEST_NAME).is_file(), "killed with the copy whole"
+    assert stat.S_IMODE(leftover.stat().st_mode) & 0o777 == 0o700, "still the builder's alone"
+
+    done = subprocess.run(
+        _build_command(rig, cache), capture_output=True, text=True, timeout=300, umask=umask, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    assert {path.name for path in cache.iterdir()} == {sha, build_lock(cache, sha).name}
+
+
+def test_a_finished_entry_renamed_to_a_leftovers_name_is_never_swept_whatever_the_umask_it_was_built_under(
+    rig: Rig, tmp_path: Path
+) -> None:
+    """Another account of the group can rename an entry in the cache to ``.<sha>.tmp-*``; a builder of the entry's
+    account that then sweeps must not take it for its own unfinished copy, even when it was built under umask 077."""
+    cache = tmp_path / "cache"
+    sha = rig.cache.sha
+    built = subprocess.run(
+        _build_command(rig, cache), capture_output=True, text=True, timeout=300, umask=0o077, check=False
+    )
+    assert built.returncode == 0, built.stderr
+    renamed = cache / f".{sha}.tmp-1-renamed"
+    (cache / sha).rename(renamed)
+
+    again = subprocess.run(
+        _build_command(rig, cache), capture_output=True, text=True, timeout=300, umask=0o077, check=False
+    )
+    assert again.returncode == 0, again.stderr
+    assert (renamed / MANIFEST_NAME).is_file(), "a finished entry is never swept"
+    assert {path.name for path in cache.iterdir()} == {sha, build_lock(cache, sha).name, renamed.name}
 
 
 _PLANT_PTH = """

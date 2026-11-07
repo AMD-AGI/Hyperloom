@@ -729,6 +729,42 @@ def test_the_installer_output_goes_to_a_log_in_the_state_dir(run, monkeypatch):
     assert set((run.state / entry.INSTALL_LOG).read_text().split()) == {"install-output", "install-error"}
 
 
+def test_each_legs_installer_log_is_a_new_file_renamed_over_the_last_never_one_opened_in_place(run, monkeypatch):
+    """The previous leg's log may be another account's, and a member of the group may have put a link there."""
+    _recording_installer(run, None)
+    _record_optimize(run, monkeypatch)
+    entry.main(["run"])
+    log = run.state / entry.INSTALL_LOG
+    assert stat.S_IMODE(log.stat().st_mode) == 0o664
+    (run.state.parent / "first-leg-log").hardlink_to(log)
+    first = log.read_text()
+    outside = run.state.parent / "outside"
+    outside.write_text("kept")
+    log.unlink()
+    log.symlink_to(outside)
+
+    run.restart()
+    entry.main(["run"])
+
+    assert outside.read_text() == "kept" and not log.is_symlink()
+    assert (run.state.parent / "first-leg-log").read_text() == first
+    assert set(log.read_text().split()) == {"install-output", "install-error"}
+    assert stat.S_IMODE(log.stat().st_mode) == 0o664
+    assert [path.name for path in run.state.iterdir() if path.name.startswith(".")] == []
+
+
+def test_exit_and_session_json_are_readable_by_the_group_and_replaced_never_rewritten(run, monkeypatch):
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    for name in (entry.EXIT_FILE, entry.SESSION_FILE):
+        (run.state.parent / f"earlier-{name}").hardlink_to(run.state / name)
+    run.restart()
+    entry.main(["run"])
+    for name in (entry.EXIT_FILE, entry.SESSION_FILE):
+        assert stat.S_IMODE((run.state / name).stat().st_mode) == 0o664
+        assert not (run.state / name).samefile(run.state.parent / f"earlier-{name}")
+
+
 def test_a_failing_installer_ends_the_run_finally_and_optimize_never_starts(run, monkeypatch, capsys):
     _recording_installer(run, None, exit_code=7)
     _record_optimize(run, monkeypatch)

@@ -162,7 +162,8 @@ def ensure_archive_root(session_dir: Path) -> Path:
     in a user namespace another account's directory shows as the overflow id.
 
     Raises:
-        PermissionError: The archive is a link or not a directory, any account can write it, or this one cannot.
+        PermissionError: The archive is a link or not a directory, any account outside its group can read, write or
+            enter it, or this one cannot write it.
     """
     make_shared_dirs(session_dir)
     root = archive_root(session_dir)
@@ -171,9 +172,10 @@ def ensure_archive_root(session_dir: Path) -> Path:
     info = os.lstat(root)
     if not stat.S_ISDIR(info.st_mode):
         raise PermissionError(f"the archive {root} is not a directory (a link to one is refused too)")
-    if info.st_mode & stat.S_IWOTH:
+    if info.st_mode & stat.S_IRWXO:
         raise PermissionError(
-            f"the archive {root} can be written by any account (mode {stat.S_IMODE(info.st_mode):04o})"
+            f"the archive {root} is open to accounts outside its group (mode {stat.S_IMODE(info.st_mode):04o}, "
+            f"not {ARCHIVE_MODE:04o})"
         )
     problems = writable_problems({"the archive": root})
     if problems:
