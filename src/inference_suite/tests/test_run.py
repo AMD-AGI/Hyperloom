@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """Contract of a round: one round per call into an empty run_dir, which does not change once the call returns, GPU
-samples from the measured window alone, KV samples tagged by phase, the checks that refuse a round before its server starts, a reuse round on
+samples from the measured window alone, KV samples tagged by phase, a fixed profile round's window around its
+measured pass, the checks that refuse a round before its server starts, a reuse round on
 the server a boot round left, and the CLI's ``run`` and ``stop`` round trips."""
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ pytestmark = pytest.mark.skipif(not Path("/proc/net/tcp").exists(), reason="need
 _SECRET = "hf-secret"
 _SERVER = textwrap.dedent(
     """
-    import http.server, sys
+    import http.server, json, os, sys
     port = int(sys.argv[sys.argv.index("--port") + 1])
     print("server starting on", port, flush=True)
 
@@ -70,6 +71,18 @@ _SERVER = textwrap.dedent(
             self.send_response(200 if self.path in ("/health", "/metrics") else 404)
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"null")
+            with open(os.environ["FAKE_CLIENT_CALLS"], "a") as calls:
+                calls.write(json.dumps({"path": self.path, "body": body}) + "\\n")
+            if self.path == "/stop_profile":
+                trace_dir = os.environ["SGLANG_TORCH_PROFILER_DIR"]
+                with open(os.path.join(trace_dir, "rank0.trace.json.gz"), "w") as trace:
+                    trace.write("trace")
+            refused = os.environ.get("FAKE_PROFILE_REFUSED") == "1"
+            self.send_response(500 if refused else 200)
+            self.end_headers()
 
         def log_message(self, *args):
             pass
@@ -303,6 +316,59 @@ def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
     assert all(row["capacity_tokens"] == 4096 for row in kv["samples"])
 
 
+_FIXED_WINDOW = ProfileConfig(
+    enabled=True, start_body={"merge_profiles": True}, num_prompts=16, delay_iters=2, max_iters=4
+)
+
+
+def test_a_fixed_profile_round_opens_its_window_after_the_warmup_and_closes_it_after_the_measured_pass(rig):
+    result = run.run_round(rig.config("r1", profile=_FIXED_WINDOW))
+
+    report, layout = result.report, result.layout
+    assert report.run_status is RunStatus.COMPLETED, report.failure_detail
+    assert [json.loads(line) for line in rig.calls.read_text().splitlines()] == [
+        {"seed": "1", "num_prompts": "2"},
+        {"path": "/start_profile", "body": {"merge_profiles": True, "start_step": 2, "num_steps": 4}},
+        {"seed": "0", "num_prompts": "16"},
+        {"path": "/stop_profile", "body": {}},
+    ]
+    launch = Launch.from_document(json.loads(layout.launch.read_text()))
+    assert launch.client is not None and launch.client.argv[launch.client.argv.index("--num-prompts") + 1] == "16"
+    marks = _marks(layout)
+    assert marks[Phase.WARMUP.value] <= marks[Phase.PROFILE_OPEN.value] <= marks[Phase.MEASURED.value]
+    assert marks[Phase.FINISHED.value] <= marks[Phase.PROFILE_CLOSE.value] <= marks[Phase.TEARDOWN.value]
+    profile = report.profile
+    assert profile is not None and profile.trace_dirs == ("profile/torch_trace",) and profile.has_step_traces
+    capture = json.loads(layout.profile_capture.read_text())
+    assert (capture["window_open_unix"], capture["window_close_unix"]) == (
+        profile.window_open_unix,
+        profile.window_close_unix,
+    )
+    assert capture["error"] is None and profile.running_requests_in_window is None
+
+
+def test_a_fixed_profile_window_the_server_refuses_leaves_no_trace_and_the_round_completes(rig, monkeypatch):
+    monkeypatch.setenv("FAKE_PROFILE_REFUSED", "1")
+    config = rig.config("r1", profile=_FIXED_WINDOW)
+    config = replace(
+        config, server=replace(config.server, env_inherit=(*config.server.env_inherit, "FAKE_PROFILE_REFUSED"))
+    )
+
+    result = run.run_round(config)
+
+    report, layout = result.report, result.layout
+    assert report.run_status is RunStatus.COMPLETED, report.failure_detail
+    assert [json.loads(line).get("path") for line in rig.calls.read_text().splitlines()] == [
+        None,
+        "/start_profile",
+        None,
+    ]
+    assert Phase.PROFILE_OPEN.value not in _marks(layout)
+    assert report.profile is not None and not report.profile.has_step_traces and report.profile.trace_dirs == ()
+    capture = json.loads(layout.profile_capture.read_text())
+    assert capture["window_open_unix"] is None and "/start_profile" in capture["error"]
+
+
 def test_the_refusal_says_whether_the_host_holds_a_redacted_value(rig, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "another")
     differs = run.run_round(rig.config("r1")).report.failure_detail
@@ -336,7 +402,6 @@ def _crashed_parser(*_args):
         ("unversioned", FailedStep.FRAMEWORK_VERSION_UNKNOWN),
         ("parser_crashed", FailedStep.FRAMEWORK_VERSION_UNKNOWN),
         ("redacted", FailedStep.CONFIG_INVALID),
-        ("profile", FailedStep.CONFIG_INVALID),
     ],
 )
 def test_a_round_refused_before_its_server_starts_writes_a_failed_report(rig, monkeypatch, tmp_path, change, step):
@@ -355,11 +420,8 @@ def test_a_round_refused_before_its_server_starts_writes_a_failed_report(rig, mo
         rig.installed = None
     elif change == "parser_crashed":
         monkeypatch.setattr(parser_check, "check", _crashed_parser)
-    elif change == "redacted":
-        monkeypatch.setenv("HF_TOKEN", "another")
     else:
-        window = ProfileConfig(enabled=True, num_prompts=8, delay_iters=2, max_iters=4)
-        config = replace(config, profile=window, lifecycle=Lifecycle(LifecycleMode.OWN))
+        monkeypatch.setenv("HF_TOKEN", "another")
 
     report = run.run_round(config).report
 

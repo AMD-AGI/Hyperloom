@@ -6,9 +6,9 @@
 Before anything starts the round checks what it runs on: the staged tools, the source files, the frozen base, the
 installed framework's version (D6) and its parser (D7), and the eval's served context. It then acquires the server,
 runs the load and the eval on it, and releases it. The GPU sampler follows the round's phase marks, so its readings
-cover the measured window alone; the KV sampler scrapes the ready server and tags each reading with its phase. A
-profile round is refused: nothing opens the server's capture window yet. Every child is reaped and every artifact written before :func:`run_round` returns,
-so the run_dir does not change after it; ``report.json`` is written last.
+cover the measured window alone; the KV sampler scrapes the ready server and tags each reading with its phase. A fixed
+profile round opens the server's capture window around its measured pass. Every child is reaped and every artifact
+written before :func:`run_round` returns, so the run_dir does not change after it; ``report.json`` is written last.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from inference_suite.contracts.report import (
     FailedStep,
     GpuMonitorBlock,
     ProbeOutcome,
+    ProfileResult,
     Report,
     RunStatus,
     ServerFacts,
@@ -50,8 +51,18 @@ from inference_suite.framework_probe import FrameworkProbeError, probe_install
 from inference_suite.framework_version import VersionRefusal
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 from inference_suite.load import inherited_env
-from inference_suite.load.fixed import ClientTool, FixedRound, OutputActivity, measured_invocation, run_fixed
+from inference_suite.load.fixed import (
+    ClientTool,
+    FixedOutcome,
+    FixedRound,
+    MeasuredWindow,
+    OutputActivity,
+    measured_invocation,
+    run_fixed,
+)
 from inference_suite.load.scriptable import run_scriptable
+from inference_suite.profile.fixed_window import FixedWindow
+from inference_suite.profile.inject import WindowCapture, make_trace_dirs, profiler_layer, settle_traces
 from inference_suite.runtime.phases import Phase, PhaseClock, PhaseListener
 from inference_suite.runtime.process import spawn
 from inference_suite.runtime.server import Server, ServerLaunch, ServerLifecycle, server_url
@@ -272,6 +283,7 @@ class _Round:
         self.server: ServerFacts | None = None
         self.codes = ExitCodes()
         self.sections: dict[str, object] = {}
+        self.capture: WindowCapture | None = None
 
     def fail(self, stop: Stop) -> None:
         if self.stop is None:
@@ -321,9 +333,6 @@ class _Round:
         config = self.config
         if config.workload is WorkloadKind.AGENTX:
             return Stop(FailedStep.CONFIG_INVALID, "this suite runs no AgentX load yet")
-        if config.profile.enabled:
-            # The server captures only between /start_profile and /stop_profile, and nothing sends them yet.
-            return Stop(FailedStep.CONFIG_INVALID, "this suite opens no profile window yet")
         framework = Framework(base.framework)
         if framework_facts(framework).kind is not FrameworkKind.SERVING:
             return Stop(
@@ -333,6 +342,7 @@ class _Round:
         server = config.server
         if config.workload is WorkloadKind.FIXED:
             facts = replace(facts, client=measured_invocation(config, client, server_url(server)))
+        facts = replace(facts, profiler=profiler_layer(config, framework))
         composed = compose(config, base, facts)
         if isinstance(composed, Refusal):
             return Stop(composed.step, composed.detail)
@@ -348,6 +358,8 @@ class _Round:
             return eval_plan
         if eval_plan is not None:
             launch = replace(launch, eval=eval_plan.invocation(sys.executable, self._eval_request))
+        if facts.profiler is not None:
+            make_trace_dirs(self.layout)
         return _Prepared(launch, server_env, client, eval_plan)
 
     def _hold_framework(self, launch: Launch, env: Mapping[str, str]) -> Launch | Stop:
@@ -411,6 +423,8 @@ class _Round:
             self.server = ServerFacts(server.host, server.port, server.served_model_name, reused, released.log_range)
             if released.teardown is not None:
                 self.fail(released.teardown)
+            if self.capture is not None:
+                self.sections["profile"] = _profile_result(self.layout, self.capture)
 
     def _sampled(self, server: Server, prepared: _Prepared) -> None:
         self.kv.start()
@@ -421,7 +435,7 @@ class _Round:
 
     def _on_server(self, server: Server, prepared: _Prepared) -> None:
         if self.config.workload is WorkloadKind.FIXED:
-            outcome = run_fixed(FixedRound(self.config, prepared.client, server, self.gate, self.clock))
+            outcome = self._run_fixed(server, prepared)
             self.codes = replace(self.codes, client=outcome.returncode)
             if outcome.metrics is not None:
                 self.sections[WorkloadKind.FIXED.value] = outcome.metrics
@@ -436,6 +450,18 @@ class _Round:
             self.fail(result)
         else:
             self.sections["eval"] = result
+
+    def _run_fixed(self, server: Server, prepared: _Prepared) -> FixedOutcome:
+        """Run the fixed load, with a profile round's window around its measured pass."""
+        config = self.config
+        if not config.profile.enabled:
+            return run_fixed(FixedRound(config, prepared.client, server, self.gate, self.clock))
+        framework = Framework(prepared.launch.framework.name)
+        window = FixedWindow(config.profile, framework, server.base_url, self.clock)
+        measured = MeasuredWindow(window.open, window.close)
+        outcome = run_fixed(FixedRound(config, prepared.client, server, self.gate, self.clock, measured))
+        self.capture = window.finish(self.layout)
+        return outcome
 
     def _run_eval(self, server: Server, plan: EvalPlan) -> EvalResult | Stop:
         layout = self.layout
@@ -475,6 +501,18 @@ class _Round:
             gpu_monitor=gpu_monitor,
             **self.sections,  # type: ignore[arg-type]
         )
+
+
+def _profile_result(layout: RunLayout, capture: WindowCapture) -> ProfileResult:
+    """The report's profile section once the server has stopped writing its traces."""
+    trace_dirs = settle_traces(layout)
+    return ProfileResult(
+        trace_dirs=trace_dirs,
+        has_step_traces=layout.profile_torch_trace.relative_to(layout.root).as_posix() in trace_dirs,
+        window_open_unix=capture.window_open_unix,
+        window_close_unix=capture.window_close_unix,
+        running_requests_in_window=capture.running_requests_in_window,
+    )
 
 
 def _status(stop: Stop | None, load_measured: bool) -> RunStatus:

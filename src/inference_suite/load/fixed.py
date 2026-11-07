@@ -5,12 +5,14 @@
 
 Every knob the client has a default for is passed, so two arms send the same requests whatever the client's defaults
 become or whichever host runs it; a switch the load leaves off (``--use-chat-template``) is absent. The warmup is its own invocation on its own seed, with its result discarded; the measured invocation runs no
-warmup of its own, so the measured window is the measured invocation and nothing else.
+warmup of its own, so the measured window is the measured invocation and nothing else. A profile round's measured
+pass sends the profile's prompt count, which keeps the load running past the server's capture window, and runs inside
+the round's :class:`MeasuredWindow`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -181,14 +183,25 @@ class OutputActivity:
 
 
 @dataclass(frozen=True)
+class MeasuredWindow:
+    """What runs around the measured pass alone: ``open`` once the warmup is over, ``close`` once the measured pass
+    has ended, however it ended."""
+
+    open: Callable[[], None]
+    close: Callable[[], None]
+
+
+@dataclass(frozen=True)
 class FixedRound:
-    """What the fixed load runs in: the round's config, the staged client, its server, gates and phase clock."""
+    """What the fixed load runs in: the round's config, the staged client, its server, gates, phase clock and the
+    window around its measured pass (``None``: none)."""
 
     config: SuiteConfig
     tool: ClientTool
     server: Server
     gate: RoundGate
     clock: PhaseClock
+    window: MeasuredWindow | None = None
 
 
 def _run_pass(fixed_round: FixedRound, argv: tuple[str, ...], phase: Phase) -> tuple[int | None, Stop | None]:
@@ -211,7 +224,9 @@ def _workload(config: SuiteConfig) -> FixedWorkload:
 def measured_invocation(config: SuiteConfig, tool: ClientTool, base_url: str) -> ClientInvocation:
     """The measured pass as ``launch.json`` records it, before the round's server is up."""
     workload = _workload(config)
-    measured = ClientPass(workload.seed, workload.num_prompts, RunLayout(Path(config.paths.run_dir)).inferencex_result)
+    profiled = config.profile.num_prompts if config.profile.enabled else None
+    prompts = workload.num_prompts if profiled is None else profiled
+    measured = ClientPass(workload.seed, prompts, RunLayout(Path(config.paths.run_dir)).inferencex_result)
     return ClientInvocation(
         argv=client_argv(tool, base_url, config.server, workload, measured),
         env=client_env(tool),
@@ -233,8 +248,13 @@ def run_fixed(fixed_round: FixedRound) -> FixedOutcome:
         returncode, stop = _run_pass(fixed_round, warmup_argv, Phase.WARMUP)
         if stop is not None:
             return FixedOutcome(invocation, returncode, None, stop)
+    window = fixed_round.window
+    if window is not None:
+        window.open()
     returncode, stop = _run_pass(fixed_round, measured_argv, Phase.MEASURED)
     fixed_round.clock.mark(Phase.FINISHED)
+    if window is not None:
+        window.close()
     if stop is not None and stop.step is not FailedStep.CLIENT_FAILED:
         return FixedOutcome(invocation, returncode, None, stop)
     result = read_result(layout.inferencex_result, _WHAT)
@@ -254,6 +274,7 @@ __all__ = [
     "ClientTool",
     "FixedOutcome",
     "FixedRound",
+    "MeasuredWindow",
     "OutputActivity",
     "client_argv",
     "client_env",
