@@ -41,7 +41,7 @@ from hyperloom.common.outside_facts import (
 )
 from hyperloom.contracts.recipe import RecipeError
 
-#: ``benchmark`` keys that fix what is measured, each a text field of :class:`BenchmarkPoint`.
+#: ``benchmark`` keys that fix what is measured.
 SURFACE_BENCH_KEYS: tuple[str, ...] = ("framework", "model", "benchmark_script")
 #: ``benchmark.envs`` keys that fix the workload shape and the evaluation.
 SURFACE_ENV_KEYS: tuple[str, ...] = (
@@ -129,11 +129,6 @@ class MeasurementSurface:
         }
 
 
-def _given(value: str) -> str | None:
-    """A text field of the point as the surface spells it: ``None`` for one the point leaves out."""
-    return _text(value) or None
-
-
 def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
     """The surface fields of a materialized Magpie configuration, with the script and model files hashed.
 
@@ -141,14 +136,15 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
     and keeps the model's identity in ``benchmark.model``; any other names the directory in ``benchmark.model``.
     """
 
-    point = BenchmarkPoint.from_document(config)
-    envs = point.envs
-    fields: dict[str, str | None] = {f"benchmark.{key}": _given(getattr(point, key)) for key in SURFACE_BENCH_KEYS}
+    envs = BenchmarkPoint.from_document(config).envs
+    # Spelled from the raw block: BenchmarkPoint's text fields fold falsy values to "", which would move the hash.
+    bench = config["benchmark"]
+    fields: dict[str, str | None] = {f"benchmark.{key}": _text(bench.get(key)) for key in SURFACE_BENCH_KEYS}
     fields.update({f"envs.{key}": _text(envs.get(key)) for key in SURFACE_ENV_KEYS})
-    script, root = _text(point.benchmark_script), point.inferencex_path
+    script, root = _text(bench.get("benchmark_script")), _text(bench.get("inferencex_path"))
     script_path = Path(root) / "benchmarks" / script if script and root else None
     fields[SCRIPT_FIELD] = _sha256_file(script_path) if script_path and script_path.is_file() else None
-    model = _text(envs.get("MODEL_PATH")) or _text(point.model)
+    model = _text(envs.get("MODEL_PATH")) or _text(bench.get("model"))
     model_files = hash_model_files(Path(model)) if model and Path(model).is_dir() else None
     fields[_MODEL_FILES_FIELD] = json.dumps(model_files, sort_keys=True) if model_files is not None else None
     return MeasurementSurface(fields)
