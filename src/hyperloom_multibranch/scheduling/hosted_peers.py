@@ -158,7 +158,7 @@ class PinnedToolboxInputs:
         given = hosted_toolbox_inputs(self.host, session_dir=layout.toolbox, tp=tp)
         given["run_id"] = self.host.run_id or layout.session_id
         sha = str(given["source_sha"])
-        source = runner_source(layout.runner_source, str(given["source_repo"]), sha)
+        source = runner_source(layout.runner_source, str(self.host.source_repo), sha)
         pin = runner_cache_pin(source, sha, self.cache_root, runner_wheel_target(os.environ))
         return HostedToolboxInputs(**given, runner_cache_manifest_sha256=pin)  # type: ignore[arg-type]
 

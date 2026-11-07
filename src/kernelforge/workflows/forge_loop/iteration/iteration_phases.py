@@ -577,11 +577,13 @@ class IterationPhasesMixin:
         lanes: int = 1,
     ) -> tuple[Path | None, str]:
         """Run planning and durably publish every lane's plan for the round."""
-        context = self._with_ceiling_standing(
-            self._with_case_config_coverage(
-                self._active_analysis_context
-                if self._active_analysis_context is not None
-                else self._build_orchestration_context()
+        context = self._with_search_policy(
+            self._with_ceiling_standing(
+                self._with_case_config_coverage(
+                    self._active_analysis_context
+                    if self._active_analysis_context is not None
+                    else self._build_orchestration_context()
+                )
             )
         )
         if orchestration_service.has_plan_critic:
