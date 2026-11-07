@@ -3,26 +3,33 @@ sheet names, and for a v2 sheet the inference_suite staging of this runner's own
 
 The runner never uses the session's checkouts: they are on storage the candidate's author can write. Each commit gets
 its own directory in the runner's cache, fetched by hash and checked out detached, so a directory that exists at the
-right commit is the one that was fetched. The inference_suite staging gets a directory in the runner cache per
-InferenceX pin; the runner stages it there itself, offline, and names the manifest it ran.
+right commit is the one that was fetched. The inference_suite staging is never built here: ``cache_build`` publishes it
+as ``<runner cache>/inference-suite/<staging key>/`` (:func:`inference_suite.staging_key`) on a host with network, and
+the runner only verifies it and compares its normalised manifest with the one the sheet carries.
 """
 
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from inference_suite import CLIENT_FILE, INFERENCEX_CLIENT_COMMIT, verified_manifest_sha256
+from inference_suite import (
+    CLIENT_FILE,
+    NormalisedManifest,
+    StagingError,
+    normalised_manifest,
+    staging_key,
+    verified_manifest_sha256,
+)
 
 __all__ = [
     "INFERENCE_SUITE_DIR",
     "StagedSuite",
+    "StagingMismatch",
     "ToolError",
     "ensure_inference_suite",
     "ensure_inferencex",
@@ -33,10 +40,8 @@ INFERENCEX_REPO = "https://github.com/SemiAnalysisAI/InferenceX.git"
 MAGPIE_REPO = "https://github.com/AMD-AGI/Magpie.git"
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _FETCH_TIMEOUT_SEC = 900
-#: Where the stagings live below the runner cache, one directory per InferenceX pin.
+#: Where the published stagings live below the runner cache, one directory per staging key.
 INFERENCE_SUITE_DIR = "inference-suite"
-#: Staging builds the AgentX harness venv with pip, offline, from the sandbox's wheel directory.
-_STAGE_TIMEOUT_SEC = 1800
 #: What marks an InferenceX tree: the benchmark library a v1 sheet's Magpie runs, at the root or below
 #: ``inferencex-e2e/``, or the client inference_suite stages a v2 sheet's rounds from (the pinned commit has no library).
 _INFERENCEX_MARKERS = (
@@ -49,6 +54,10 @@ _MAGPIE_MARKERS = (Path("Magpie") / "__init__.py",)
 
 class ToolError(Exception):
     """A checkout could not be prepared at the commit that was asked for."""
+
+
+class StagingMismatch(ToolError):
+    """The runner's published staging is not the software the sheet's normalised manifest names."""
 
 
 def _git(*args: str, cwd: Path | None = None, timeout: int = 120) -> str:
@@ -115,53 +124,34 @@ def ensure_magpie(commit: str, cache_dir: Path) -> Path:
 
 @dataclass(frozen=True)
 class StagedSuite:
-    """An inference_suite tool cache in the runner cache, and the sha256 of the staging manifest it holds."""
+    """A published inference_suite staging in the runner cache: its directory (a tool cache) and its normalised
+    manifest, the one the test ran."""
 
     tool_cache: Path
-    staging: str
+    normalised: NormalisedManifest
 
 
-def ensure_inference_suite(inferencex: Path, runner_cache: Path, wheels: Path) -> StagedSuite:
-    """The inference_suite tool cache this runner's pins stage, ``<runner_cache>/inference-suite/<InferenceX pin>/``.
+def ensure_inference_suite(runner_cache: Path, expected: NormalisedManifest) -> StagedSuite:
+    """The published staging of this runner's pins, ``<runner_cache>/inference-suite/<staging key>/``, once it verifies
+    and its normalised manifest, with this interpreter's lm-eval, is ``expected``, the sheet's.
 
-    One that verifies is used as it is. Otherwise ``python -m inference_suite stage --wheels`` stages it offline from
-    the InferenceX checkout ``inferencex``, installing the AgentX harness from the wheel directory ``wheels`` alone;
-    stage refuses a checkout off the pin and leaves a damaged cache as it found it. The venv it builds holds its own
-    absolute path, so it is staged in its final directory, under a lock that runners sharing the cache take.
-
-    The staging is this runner's own: its manifest names the harness the sandbox's interpreter and wheels resolved,
-    which is never byte for byte the application's, so the result manifest records it rather than the sheet's.
+    Raises:
+        StagingMismatch: The staging is other software than the sheet's; the message names each package that differs.
+        ToolError: No staging of these pins is published, or the published one does not verify.
     """
-    stagings = runner_cache / INFERENCE_SUITE_DIR
-    destination = stagings / INFERENCEX_CLIENT_COMMIT
-    staged = _intact(destination)
-    if staged is not None:
-        return staged
-    try:
-        stagings.mkdir(parents=True, exist_ok=True)
-        with open(stagings / f".{INFERENCEX_CLIENT_COMMIT}.lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            return _intact(destination) or _stage(inferencex, destination, wheels)
-    except OSError as exc:
-        raise ToolError(f"inference_suite: the runner cache {stagings} cannot be staged into: {exc}") from exc
-
-
-def _intact(tool_cache: Path) -> StagedSuite | None:
-    digest = verified_manifest_sha256(tool_cache)
-    return None if digest is None else StagedSuite(tool_cache, digest)
-
-
-def _stage(inferencex: Path, destination: Path, wheels: Path) -> StagedSuite:
-    argv = [sys.executable, "-m", "inference_suite", "stage", "--source", str(inferencex)]
-    argv += ["--tool-cache", str(destination), "--wheels", str(wheels)]
-    try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=_STAGE_TIMEOUT_SEC)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ToolError(f"inference_suite stage failed: {exc}") from exc
-    staged = _intact(destination)
-    if done.returncode != 0 or staged is None:
+    tool_cache = runner_cache / INFERENCE_SUITE_DIR / staging_key()
+    if verified_manifest_sha256(tool_cache) is None:
         raise ToolError(
-            f"inference_suite stage into {destination} exited {done.returncode} without a staging that verifies: "
-            f"{done.stderr.strip()[-300:]}"
+            f"inference_suite: no published staging at {tool_cache} that verifies; cache_build publishes it"
         )
-    return staged
+    try:
+        mine = normalised_manifest(tool_cache)
+    except StagingError as exc:
+        raise ToolError(f"inference_suite: the staging at {tool_cache} cannot be identified: {exc}") from exc
+    differences = mine.differences(expected)
+    if differences:
+        raise StagingMismatch(
+            f"inference_suite: the staging at {tool_cache} (here) is not the application's (there): "
+            + "; ".join(differences)
+        )
+    return StagedSuite(tool_cache, mine)

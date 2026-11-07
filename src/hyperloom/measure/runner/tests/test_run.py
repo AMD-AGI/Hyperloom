@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 
 import pytest
 import yaml
@@ -33,6 +34,7 @@ from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.runner.tests import aiperf_source
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
+from hyperloom.measure.runner import tools as runner_tools
 from hyperloom.measure.runner.cache_layout import CACHE_ENV
 from hyperloom.measure.tests.bundle_factory import (
     REQUEST_ID,
@@ -44,7 +46,7 @@ from hyperloom.measure.tests.bundle_factory import (
 )
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
-from inference_suite import INFERENCEX_CLIENT_COMMIT
+from inference_suite import staging_key
 
 SHEET_IMAGE = spec_document_v1()["image"]["digest"]
 POINT = {"benchmark": {"model": "/m", "framework": "sglang", "envs": {"TP": 1, "CONC": 4, "RUN_EVAL": "false"}}}
@@ -105,6 +107,8 @@ def env(tmp_path, key, monkeypatch):
         CACHE_ENV: str(stage_into(tmp_path / "runner-cache").parents[1]),
     }
     monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache: tmp_path / "ix")
+    # this interpreter's identity of the published staging; lm-eval is not installed in CI
+    monkeypatch.setattr(runner_tools, "normalised_manifest", lambda tool_cache: STAGING)
     # a machine that answers every question: the sheet's card, no errors, nothing resident
     monkeypatch.setattr(
         runner.hardware, "read_gpu_facts", lambda visible: [GpuFacts(0, "AMD Instinct MI355X", 1400.0, "SPX/NPS1")]
@@ -168,18 +172,35 @@ def test_a_v2_sheet_hands_the_test_its_frozen_base_and_the_runners_own_staging_a
 ):
     backend = _Backend(_ok)
     monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
-    sheet = _sheet_v2()
-    sheet["tools"] = {**sheet["tools"], "inference_suite": {"staging": "c" * 64}}  # the application's staging
 
-    assert _go(tmp_path, env, sheet) == 0
+    assert _go(tmp_path, env, _sheet_v2()) == 0
 
     (call,) = backend.calls
     assert (call.session_facts.base_launch, call.session_facts.staging) == (base_launch(), STAGING)
     assert "HYPERLOOM_BENCHMARK_BACKEND" not in env
-    tool_cache = tmp_path / "runner-cache" / "inference-suite" / INFERENCEX_CLIENT_COMMIT
+    tool_cache = tmp_path / "runner-cache" / "inference-suite" / staging_key()
     assert env["INFERENCE_SUITE_TOOL_CACHE"] == str(tool_cache)
     manifest = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes())
-    assert (manifest.runner.inference_suite_staging, manifest.runner.magpie_commit) == (STAGING, None)
+    assert (manifest.runner.inference_suite_staging, manifest.runner.magpie_commit) == (STAGING.sha256(), None)
+
+
+def test_a_v2_sheet_whose_staging_is_other_software_than_the_runners_is_a_preflight_mismatch_naming_it(
+    tmp_path, env, monkeypatch
+):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    theirs = replace(STAGING, interpreter_version="3.12.16")
+    sheet = _sheet_v2()
+    sheet["tools"] = {
+        **sheet["tools"],
+        "inference_suite": {"staging": theirs.sha256(), "normalised": theirs.to_document()},
+    }
+
+    assert _go(tmp_path, env, sheet) != 0
+
+    status = _status(tmp_path)
+    assert status["error_class"] == "preflight_mismatch" and "interpreter 3.12.15" in status["message"], status
+    assert backend.calls == []
 
 
 @pytest.mark.parametrize(

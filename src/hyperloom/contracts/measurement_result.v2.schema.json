@@ -106,7 +106,7 @@
         "inference_suite_staging": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
-          "description": "The sha256 of the inference_suite staging manifest the runner ran."
+          "description": "The sha256 of the normalised manifest of the inference_suite staging the runner ran."
         },
         "inferencex_commit": {
           "type": "string",
