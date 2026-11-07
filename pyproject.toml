@@ -363,9 +363,10 @@ hyperloom_multibranch = [
     "blackboard/knowledge/declarations/*.yaml",
     "blackboard/knowledge/mappings/*.yaml",
 ]
-# The runner's bootstrap entry point: install.sh <tool-cache-dir> stages the tools a round runs.
+# The runner's bootstrap entry point: install.sh <tool-cache-dir> stages the tools a round runs; the AgentX client lock.
 inference_suite = [
     "install.sh",
+    "agentx-client.lock",
 ]
 "inference_suite.recipe" = [
     "defaults/*.yaml",
