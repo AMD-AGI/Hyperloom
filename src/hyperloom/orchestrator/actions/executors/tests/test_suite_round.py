@@ -43,7 +43,6 @@ def session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv(TOOL_CACHE_ENV, str(cache))
     monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: f"/venv/{framework}/python")
     monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
-    monkeypatch.setattr(_suite_config, "ray_exec_enabled", lambda: False)
     return session_dir
 
 
@@ -73,12 +72,6 @@ def test_a_session_without_a_frozen_base_stays_on_the_backend(session: Path, tmp
 
     assert suite_route(session, _write_point(tmp_path / "point.yaml")) is None
     assert suite_route(None, _write_point(tmp_path / "point.yaml")) is None
-
-
-def test_ray_leased_rounds_stay_on_the_backend(session, tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(_suite_config, "ray_exec_enabled", lambda: True)
-
-    assert suite_route(session, _write_point(tmp_path / "point.yaml")) is None
 
 
 def test_a_point_the_translation_does_not_carry_stays_on_the_backend(session: Path, tmp_path: Path) -> None:

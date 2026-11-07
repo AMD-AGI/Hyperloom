@@ -528,7 +528,12 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         try:
             async with heartbeat_while_output_flows(unit=_PROGRESS_UNIT, label=_MN_WARMUP) as activity:
                 ended = await asyncio.to_thread(
-                    run_grid_suite_round, suite, warm_round, env_drop=frozenset(), on_poll=activity.note
+                    run_grid_suite_round,
+                    suite,
+                    warm_round,
+                    env_drop=frozenset(),
+                    serving_lease=round_.serving_lease,
+                    on_poll=activity.note,
                 )
         except SuiteRoundRefused as exc:
             log.warning("baseline_executor: MN warmup pass refused (ignored): %s", exc)

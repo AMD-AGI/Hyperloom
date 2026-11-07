@@ -16,7 +16,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _suite_config
+from hyperloom.orchestrator.actions.executors import _ray_serving, _suite_config
+from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors._ray_backend import SessionKillRound, SuiteLeasedRound
 from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
@@ -29,7 +30,12 @@ from hyperloom.orchestrator.actions.executors._suite_config import (
     run_suite_round,
     suite_route,
 )
+from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round import _COLD, _HOT, suite  # noqa: F401
+from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round import _play as baseline_play
+from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _play as grid_play
+from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import suite as grid_suite  # noqa: F401
 from hyperloom.orchestrator.actions.executors.tests.test_suite_round import _rounds, _write_point, session  # noqa: F401
+from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from inference_suite import EXIT_REFUSED
 from inference_suite.contracts import FailedStep, LifecycleMode, RunStatus, SuiteConfig
@@ -150,3 +156,50 @@ def test_an_actor_placed_on_another_gpu_count_refuses_the_round(tmp_path, monkey
 
     assert returncode == EXIT_REFUSED and "config_invalid" in stderr
     assert _gpus(leased) == (0, 1) and not ran
+
+
+class _Actor:
+    """A lease whose actor plays each round with whatever ``run_round`` the test installed in ``_suite_config``."""
+
+    def __init__(self) -> None:
+        self.leased: list[SuiteLeasedRound] = []
+        self.closed = False
+
+    def run_session_kill(self, leased: SuiteLeasedRound) -> tuple[int, str, str]:
+        self.leased.append(leased)
+        config = SuiteConfig.from_document(yaml.safe_load(Path(leased.config_path).read_text()))
+        _suite_config.run_round(replace(config, paths=replace(config.paths, run_dir=leased.run_dir)))
+        return 0, "", ""
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_baseline_with_a_serving_lease_runs_both_rounds_of_its_pair_in_the_lease(monkeypatch, suite) -> None:
+    actor = _Actor()
+    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda num_gpus: actor)
+
+    result, rounds = baseline_play(
+        monkeypatch,
+        suite,
+        LaunchAttempt(outcome=READY, metrics=_COLD),
+        LaunchAttempt(outcome=READY, metrics=_HOT),
+    )
+
+    assert result["status"] == "succeeded", result
+    assert len(actor.leased) == len(rounds.calls) == 2 and actor.closed
+    assert [call.config.lifecycle.mode for call in rounds.calls] == [LifecycleMode.BOOT, LifecycleMode.REUSE]
+
+
+def test_a_grid_with_a_serving_lease_runs_its_rounds_in_the_lease(monkeypatch, grid_suite) -> None:
+    actor = _Actor()
+
+    row, calls, _slot = grid_play(
+        monkeypatch,
+        grid_suite,
+        LaunchAttempt(outcome=READY, metrics=_HOT),
+        launch=GridLaunch(warmup_before_measure=False, serving_lease=actor),
+    )
+
+    assert row.status == "succeeded", row
+    assert len(actor.leased) == len(calls) == 1

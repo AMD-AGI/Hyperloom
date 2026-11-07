@@ -879,10 +879,10 @@ async def _reported_round(run: _GridRun, at: _VariantSlot, label: str, bench_rou
         total=len(run.grid),
     ) as activity:
         if route is not None:
-            unset = frozenset(at.variant.unset_envs)
+            unset, lease = frozenset(at.variant.unset_envs), run.launch.serving_lease
             try:
                 ended = await asyncio.to_thread(
-                    run_grid_suite_round, route, bench_round, env_drop=unset, on_poll=activity.note
+                    run_grid_suite_round, route, bench_round, env_drop=unset, serving_lease=lease, on_poll=activity.note
                 )
             except SuiteRoundRefused as exc:
                 _abort_variant(at, _VariantFailure(exc.error_class, exc.detail))

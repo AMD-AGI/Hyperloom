@@ -42,6 +42,7 @@ from ._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     sync_agentx_phase_wait,
 )
+from ._ray_serving import ServingLease
 from ._suite_config import SuiteRound, SuiteRoute, deadline_unix, point_server, run_suite_round
 
 log = logging.getLogger(__name__)
@@ -105,9 +106,16 @@ class SuiteRoundExit:
 
 
 def run_grid_suite_round(
-    route: SuiteRoute, round_: GridRound, *, env_drop: frozenset[str], on_poll: Callable[[], None]
+    route: SuiteRoute,
+    round_: GridRound,
+    *,
+    env_drop: frozenset[str],
+    serving_lease: ServingLease | None,
+    on_poll: Callable[[], None],
 ) -> SuiteRoundExit:
     """Run ``round_`` on ``route``; ``env_drop`` names host variables its processes do not inherit.
+
+    ``serving_lease`` is the Ray lease whose actor runs the round, ``None`` to run it in this process.
 
     Raises:
         SuiteRoundRefused: When the round is refused before it runs.
@@ -121,6 +129,7 @@ def run_grid_suite_round(
         warmup=round_.warmup,
         deadline_unix=deadline_unix(round_.session_deadline_sec),
         env_drop=env_drop,
+        serving_lease=serving_lease,
     )
     try:
         report = run_suite_round(route, request, on_poll=on_poll).report
