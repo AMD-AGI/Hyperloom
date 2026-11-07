@@ -94,31 +94,16 @@ def test_budget_profile_preserves_operator_values(native_benchmark, monkeypatch)
 
 
 # --- explicit-flag detection --------------------------------------------------
-def test_bypass_guard_allows_magpie(native_benchmark, monkeypatch):
-    _on(monkeypatch, native_benchmark)
-    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
-    _preflight_agentx_backend(argparse.Namespace())  # must not raise
-
-
-def test_bypass_guard_is_inert_without_agentx(monkeypatch):
-    _off(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
-    _preflight_agentx_backend(argparse.Namespace())  # must not raise
-
-
-def test_bypass_guard_rejects_the_silent_combination(native_benchmark, monkeypatch):
-    """AgentX + bypass runs synthetic work and labels it AgentX."""
+def test_guard_ignores_the_retired_backend_switch(native_benchmark, monkeypatch):
+    """HYPERLOOM_BENCHMARK_BACKEND no longer selects anything, so AgentX does not refuse it."""
     _on(monkeypatch, native_benchmark)
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
-    with pytest.raises(SystemExit) as ei:
-        _preflight_agentx_backend(argparse.Namespace())
-    assert ei.value.code == 2
+    _preflight_agentx_backend(argparse.Namespace(framework="vllm"))  # must not raise
 
 
 def test_guard_rejects_agentx_with_a_scriptable_framework(native_benchmark, monkeypatch):
     """The other way for the switch to no-op while every gate still fires."""
     _on(monkeypatch, native_benchmark)
-    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     with pytest.raises(SystemExit) as ei:
         _preflight_agentx_backend(argparse.Namespace(framework="xdit"))
     assert ei.value.code == 2
@@ -126,7 +111,6 @@ def test_guard_rejects_agentx_with_a_scriptable_framework(native_benchmark, monk
 
 def test_guard_allows_agentx_with_a_serving_framework(native_benchmark, monkeypatch):
     _on(monkeypatch, native_benchmark)
-    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     for fw in ("vllm", "sglang"):
         _preflight_agentx_backend(argparse.Namespace(framework=fw))  # must not raise
 
