@@ -49,7 +49,7 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.measure.agentx_requests import read_round_classes
-from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
+from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, RoundUnreadable, baseline_prefix_cache_refusal
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.archive import ArchiveError
 from hyperloom.measure.boot_watch import boot_seconds
@@ -371,7 +371,10 @@ class HostedExecutor:
         for item in outcome.rounds:
             if item.phase != _MEASURE or item.point >= len(accepted.points):
                 continue
-            reason = baseline_prefix_cache_refusal(accepted.points[item.point], Path(item.output_dir))
+            try:
+                reason = baseline_prefix_cache_refusal(accepted.points[item.point], Path(item.output_dir))
+            except RoundUnreadable as exc:
+                raise MeasurementRefused(f"the verified baseline round is unreadable: {exc}") from None
             if reason:
                 return f"{PREFIX_CACHE_OFF_ERROR_CLASS}: {reason}"
         return ""
