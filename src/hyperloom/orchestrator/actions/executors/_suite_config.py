@@ -13,7 +13,8 @@ not hold -- where the round writes, its interpreter, lifecycle and telemetry -- 
 A point runs on inference_suite (:func:`suite_route`) once its session froze a base launch and the translation
 carries it. A client-only round -- multi-node, or one whose session or point names a ``BENCHMARK_BASE_URL`` -- holds
 its server as ``external``: it measures the server at that URL, which something else starts and stops, and samples no
-local GPU. Ray-leased rounds stay on the benchmark backend, and so do the points :func:`backend_reason` names. :func:`run_suite_round` writes each round into a fresh
+local GPU. A round with a Ray serving lease runs in the lease's actor on the GPUs Ray placed it on. The points
+:func:`backend_reason` names stay on the benchmark backend. :func:`run_suite_round` writes each round into a fresh
 run_dir below its round directory, so an attempt retried in the same directory never meets the run_dir before it.
 """
 
@@ -85,7 +86,7 @@ from ._failed_step import failed_step_error_class
 from ._gpu_power import round_gpu_telemetry
 from ._multi_node_env import client_only_server_url
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-from ._ray_backend import SuiteLeasedRound, ray_exec_enabled
+from ._ray_backend import SuiteLeasedRound
 from ._ray_serving import ServingLease
 from ._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -496,7 +497,7 @@ def _declined(config_path: Path) -> bool:
 
 def suite_route(session_dir: Path | None, config_path: Path) -> SuiteRoute | None:
     """The route the point at ``config_path`` runs on inference_suite, or ``None`` while it stays on the backend."""
-    if session_dir is None or ray_exec_enabled():
+    if session_dir is None:
         return None
     base = read_base_launch(Path(session_dir))
     if base is None or _declined(config_path):

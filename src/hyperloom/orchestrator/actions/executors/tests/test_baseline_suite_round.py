@@ -65,7 +65,6 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "leaks"))
     monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: sys.executable)
     monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
-    monkeypatch.setattr(_suite_config, "ray_exec_enabled", lambda: False)
 
     def no_magpie(*args, **kwargs):
         raise AssertionError("a suite round launched the Magpie backend")
