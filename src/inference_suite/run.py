@@ -6,9 +6,10 @@
 Before anything starts the round checks what it runs on: the staged tools, the source files, the frozen base, the
 installed framework's version (D6) and its parser (D7), and the eval's served context. It then acquires the server,
 runs the load and the eval on it, and releases it. The GPU sampler follows the round's phase marks, so its readings
-cover the measured window alone; the KV sampler scrapes the ready server and tags each reading with its phase. A fixed
-profile round opens the server's capture window around its measured pass. Every child is reaped and every artifact
-written before :func:`run_round` returns, so the run_dir does not change after it; ``report.json`` is written last.
+cover the measured window alone; the KV sampler scrapes the ready server and tags each reading with its phase. An
+AgentX profile round opens the server's capture window on the replay's phase clock, a fixed profile round around its
+measured pass. Every child is reaped and every artifact written before :func:`run_round` returns, so the run_dir does
+not change after it; ``report.json`` is written last.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from inference_suite import framework_version, parser_check, staging
 from inference_suite.compose import Refusal, RoundFacts, compose
 from inference_suite.contracts.base_launch import DIGEST_PREFIX, BaseLaunch, EnvValue
 from inference_suite.contracts.config import ConfigError, LifecycleMode, SuiteConfig, WorkloadKind
-from inference_suite.contracts.launch import Launch, VersionCheck
+from inference_suite.contracts.launch import ClientInvocation, Launch, VersionCheck
 from inference_suite.contracts.layout import RunLayout
 from inference_suite.contracts.report import (
     EvalResult,
@@ -50,7 +51,8 @@ from inference_suite.eval.definition import EvalPlan, EvalRefusal, StagedEval, p
 from inference_suite.framework_probe import FrameworkProbeError, probe_install
 from inference_suite.framework_version import VersionRefusal
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
-from inference_suite.load import inherited_env
+from inference_suite.load import agentx, inherited_env
+from inference_suite.load.agentx import AgentxRound, AgentxTool, run_agentx
 from inference_suite.load.fixed import (
     ClientTool,
     FixedOutcome,
@@ -61,6 +63,7 @@ from inference_suite.load.fixed import (
     run_fixed,
 )
 from inference_suite.load.scriptable import run_scriptable
+from inference_suite.profile.agentx_window import AgentxWindow
 from inference_suite.profile.fixed_window import FixedWindow
 from inference_suite.profile.inject import WindowCapture, make_trace_dirs, profiler_layer, settle_traces
 from inference_suite.runtime.phases import Phase, PhaseClock, PhaseListener
@@ -207,6 +210,15 @@ def _runnable_env(env: Mapping[str, EnvValue]) -> dict[str, str] | Stop:
     return runnable
 
 
+def _measured_invocation(config: SuiteConfig, client: ClientTool | AgentxTool) -> ClientInvocation | None:
+    """The load's measured run as ``launch.json`` records it; a round without a load records none."""
+    if isinstance(client, AgentxTool):
+        return agentx.measured_invocation(config, client)
+    if config.workload is WorkloadKind.FIXED:
+        return measured_invocation(config, client, server_url(config.server))
+    return None
+
+
 def _provisional_check(base: BaseLaunch) -> VersionCheck:
     """The version check a launch is composed with before the probe answers; :meth:`_Round._hold_framework` replaces it."""
     return VersionCheck.NOT_APPLICABLE if base.image.framework_version is None else VersionCheck.PASSED
@@ -218,7 +230,7 @@ class _Prepared:
 
     launch: Launch
     server_env: Mapping[str, str]
-    client: ClientTool
+    client: ClientTool | AgentxTool
     eval_plan: EvalPlan | None
 
 
@@ -331,25 +343,20 @@ class _Round:
 
     def _prepare(self, base: BaseLaunch, facts: RoundFacts) -> _Prepared | Stop:
         config = self.config
-        if config.workload is WorkloadKind.AGENTX:
-            return Stop(FailedStep.CONFIG_INVALID, "this suite runs no AgentX load yet")
         framework = Framework(base.framework)
         if framework_facts(framework).kind is not FrameworkKind.SERVING:
             return Stop(
                 FailedStep.CONFIG_INVALID, f"{framework.value} serves nothing for a {config.workload.value} round"
             )
-        client = ClientTool(sys.executable, str(staging.inferencex_root(self.tool_cache)))
-        server = config.server
-        if config.workload is WorkloadKind.FIXED:
-            facts = replace(facts, client=measured_invocation(config, client, server_url(server)))
-        facts = replace(facts, profiler=profiler_layer(config, framework))
+        client = self._client()
+        facts = replace(facts, client=_measured_invocation(config, client), profiler=profiler_layer(config, framework))
         composed = compose(config, base, facts)
         if isinstance(composed, Refusal):
             return Stop(composed.step, composed.detail)
         env = _runnable_env(composed.env)
         if isinstance(env, Stop):
             return env
-        server_env = {**inherited_env(server), **env}
+        server_env = {**inherited_env(config.server), **env}
         launch = self._hold_framework(composed, server_env)
         if isinstance(launch, Stop):
             return launch
@@ -361,6 +368,12 @@ class _Round:
         if facts.profiler is not None:
             make_trace_dirs(self.layout)
         return _Prepared(launch, server_env, client, eval_plan)
+
+    def _client(self) -> ClientTool | AgentxTool:
+        root = staging.inferencex_root(self.tool_cache)
+        if self.config.workload is WorkloadKind.AGENTX:
+            return AgentxTool.staged(root)
+        return ClientTool(sys.executable, str(root))
 
     def _hold_framework(self, launch: Launch, env: Mapping[str, str]) -> Launch | Stop:
         """``launch`` once the serving interpreter's install reaches the recipe's version (D6) and its parser accepts
@@ -434,7 +447,10 @@ class _Round:
             self.kv.close(aborted=self.stop is not None)
 
     def _on_server(self, server: Server, prepared: _Prepared) -> None:
-        if self.config.workload is WorkloadKind.FIXED:
+        if isinstance(prepared.client, AgentxTool):
+            if not self._run_agentx(server, prepared.client, Framework(prepared.launch.framework.name)):
+                return
+        elif self.config.workload is WorkloadKind.FIXED:
             outcome = self._run_fixed(server, prepared)
             self.codes = replace(self.codes, client=outcome.returncode)
             if outcome.metrics is not None:
@@ -462,6 +478,25 @@ class _Round:
         outcome = run_fixed(FixedRound(config, prepared.client, server, self.gate, self.clock, measured))
         self.capture = window.finish(self.layout)
         return outcome
+
+    def _run_agentx(self, server: Server, harness: AgentxTool, framework: Framework) -> bool:
+        """Replay the traces, with the profile window following the replay's phases; whether the round goes on."""
+        config = self.config
+        window = (
+            AgentxWindow(config.profile, framework, server.base_url, self.clock) if config.profile.enabled else None
+        )
+        listeners = () if window is None else (window.hear,)
+        outcome = run_agentx(AgentxRound(config, harness, server, self.gate, self.clock, listeners))
+        if window is not None:
+            self.capture = window.finish(self.layout, time.time())
+        self.codes = replace(self.codes, client=outcome.returncode)
+        if outcome.result is not None:
+            self.sections[WorkloadKind.AGENTX.value] = outcome.result
+            self.load_measured = True
+        if outcome.stop is not None:
+            self.fail(outcome.stop)
+            return False
+        return True
 
     def _run_eval(self, server: Server, plan: EvalPlan) -> EvalResult | Stop:
         layout = self.layout
