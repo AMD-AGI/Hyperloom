@@ -312,13 +312,18 @@ def test_a_state_with_a_recorded_base_drops_its_reference_fields_on_resume():
 
 
 @pytest.mark.parametrize("name", sorted(_REFERENCE_FIELDS))
-def test_a_session_whose_server_base_lived_in_state_refuses_to_resume(name):
+def test_a_session_whose_server_base_lived_in_state_is_refused_by_its_measurement_epoch(name):
+    from hyperloom.inference_optimizer.cli.bootstrap import measurement_state_is_stale
+
     raw = SharedState(session_id="old").to_dict()
     del raw["base_launch_digest"]
+    del raw["measurement_epoch"]
     raw[name] = _REFERENCE_FIELDS[name]
 
-    with pytest.raises(ValueError, match=f"{name}.*start a new session"):
-        SharedState.from_dict(raw)
+    restored = SharedState.from_dict(raw)
+
+    assert name not in restored.to_dict()
+    assert "epoch 0" in measurement_state_is_stale(restored)
 
 
 def test_a_state_written_before_base_launch_digest_without_a_reference_launch_resumes_with_none_recorded():

@@ -269,9 +269,6 @@ _LIFECYCLE_CAP = 500
 # Experience KB injection log cap (orchestration and specialist rows share it).
 _KB_INJECTIONS_CAP = 20
 
-# The server base a session kept in state before base_launch.json replaced it; only read to refuse such a resume.
-_RETIRED_REFERENCE_FIELDS = ("reference_server_args", "reference_envs", "reference_launch_controls", "reference_model")
-
 
 @dataclass(frozen=True)
 class KbInjection:
@@ -977,12 +974,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
 
     @classmethod
     def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
-        """Reject damaged crash evidence, and a pre-base-launch session whose server base lived in state."""
-        if any(raw.get(key) for key in _RETIRED_REFERENCE_FIELDS) and not raw.get("base_launch_digest"):
-            raise ValueError(
-                f"state.json carries a server base in {'/'.join(_RETIRED_REFERENCE_FIELDS)} but no base_launch_digest: "
-                "this session predates base_launch.json and cannot be resumed; start a new session"
-            )
+        """Reject damaged crash evidence."""
         if "crash_count" in raw:
             count = raw["crash_count"]
             if not isinstance(count, int) or isinstance(count, bool):
