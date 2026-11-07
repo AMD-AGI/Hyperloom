@@ -54,7 +54,7 @@ from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock, intent, judgement, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES
+from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES, NOT_STACKABLE_ANSWERS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS
@@ -78,6 +78,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     LlmPatchResolver,
     MergeRecords,
     MergeReport,
+    NOT_OFFERED_AGAIN,
     not_stackable_reason,
 )
 from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, CompletionFailed, CompletionReply
@@ -814,41 +815,49 @@ async def test_a_merge_test_the_candidate_failed_is_not_tried_again_on_a_head_it
     assert len(tried) == 1
 
 
-#: ``c1`` then ``c2``, then ``e1`` and ``e2``, each committed on a branch of its own, move the head four times; only
+#: ``k1``, ``k2``, ``e1`` and ``e2``, each committed on a branch of its own, move the head four times in turn; only
 #: ``e2`` sets a variable ``apart`` sets.
-LATER_CURVES: Curves = {
-    **CURVES,
-    frozenset({"c1", "c2", "e1"}): {MAIN_POINT: 1070.0},
-    frozenset({"c1", "c2", "e1", "e2"}): {MAIN_POINT: 1090.0},
-}
-LATER = {
+LATER: dict[str, RecipeDelta] = {
+    "k1": tagged("k1"),
+    "k2": tagged("k2"),
     "e1": RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}e1", envs={"HL_E1": "1"})),
     "e2": RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}e2", envs={"HL_APART": "2"})),
 }
+LATER_CURVES: Curves = {
+    frozenset(list(LATER)[:count]): {MAIN_POINT: 1000.0 + 30.0 * count} for count in range(1, len(LATER) + 1)
+}
+
+
+async def _committed_alone(bench: Bench, name: str, delta: RecipeDelta, gain: float = 1.0) -> str:
+    """``name``, ``delta`` committed on the root of a new branch ``name`` and judged ``gain``."""
+
+    await bench.handle(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, name, from_commit=bench.root, reason="refill")
+    )
+    await bench.repo.create_branch(name, bench.root)
+    return await _committed_on(bench, name, bench.root, delta, gain, name=name)
 
 
 async def test_a_merge_test_ended_by_the_infrastructure_is_retried_on_the_next_heads_up_to_the_cap(
     tmp_path: Path,
 ) -> None:
     """Past the cap such a test holds as an answer: ``apart`` comes back only on the head ``e2``, which sets what it
-    sets, moved to."""
+    sets, moved to. Each later commit arrives after ``apart``'s last try, so a commit never tried does not go first."""
 
-    bench = await _bench(tmp_path, LATER_CURVES)
+    bench = await _bench(tmp_path, LATER_CURVES, tags=())
     apart = await _committed_elsewhere(bench, APART, 9.0)
-    for gain, (name, delta) in zip((1.5, 1.0), LATER.items()):
-        await bench.handle(Role.SCHEDULER).record_lineage(
-            LineageEvent(LineageKind.OPEN, name, from_commit=bench.root, reason="refill")
-        )
-        await bench.repo.create_branch(name, bench.root)
-        await _committed_on(bench, name, bench.root, delta, gain, name=name)
     infra_ending = [Fate.INFRA] * (DEFAULT_MAX_INFRA_RETRIES + 1)
     bench.toolbox.script(lambda test: f"{TAG_FLAG}apart" in test.delta.config.server_args, infra_ending)
 
-    rounds = [await _one(bench) for _ in range(9)]
+    rounds = [await _one(bench)]
+    for name, delta in LATER.items():
+        await _committed_alone(bench, name, delta)
+        rounds += [await _one(bench), await _one(bench)]
+    rounds.append(await _one(bench))
 
     tried = [report for report in rounds if report is not None and report.candidate == apart]
     heads = [report.merged_commit for report in rounds if report is not None and report.merged_commit is not None]
-    assert len(heads) == 4 and rounds[8] is None
+    assert len(heads) == 4 and rounds[-1] is None
     assert [report.onto for report in tried] == [bench.root, *heads[:2], heads[3]]
     assert all(report.outcome is MergeOutcome.PENDING for report in tried)
     assert all(report.reason.startswith("the merge test failed") for report in tried)
@@ -904,6 +913,50 @@ async def test_a_not_stackable_commit_is_not_tried_again_on_a_head_that_patched_
     assert rounds[3] is None
     tried = [test for test in bench.merge_tests().values() if f"{TAG_FLAG}aside" in test.delta.config.server_args]
     assert len(tried) == 1
+
+
+#: ``n1``, ``n2`` and ``n3``, each committed on a branch of its own, each set the variable ``apart`` sets.
+RESETTING = {
+    name: RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}{name}", envs={"HL_APART": value}))
+    for name, value in (("n1", "2"), ("n2", "3"), ("n3", "4"))
+}
+RESETTING_CURVES: Curves = {
+    frozenset({"n1"}): {MAIN_POINT: 1030.0},
+    frozenset({"n1", "n2"}): {MAIN_POINT: 1060.0},
+    frozenset({"n1", "n2", "n3"}): {MAIN_POINT: 1090.0},
+}
+
+
+async def test_a_commit_not_stackable_on_two_heads_is_not_offered_again_and_new_commits_go_before_a_retry(
+    tmp_path: Path,
+) -> None:
+    """Every head after the root sets what ``apart`` sets, which brings a not-stackable answer back; ``apart``'s own
+    gain is the largest, yet ``n2``, never tried, goes before it on ``n1``'s head."""
+
+    bench = await _bench(tmp_path, RESETTING_CURVES, tags=())
+    apart = await _committed_elsewhere(bench, APART, 9.0)
+    n1 = await _committed_alone(bench, "n1", RESETTING["n1"], 1.5)
+    n2 = await _committed_alone(bench, "n2", RESETTING["n2"], 1.0)
+
+    rounds = [await _one(bench) for _ in range(4)]
+    n3 = await _committed_alone(bench, "n3", RESETTING["n3"], 0.5)
+    later = [await _one(bench) for _ in range(2)]
+
+    heads = [report.merged_commit for report in rounds + later if report is not None and report.merged_commit]
+    assert [(report.candidate, report.onto, report.outcome) for report in rounds if report is not None] == [
+        (apart, bench.root, MergeOutcome.NOT_STACKABLE),
+        (n1, bench.root, MergeOutcome.MERGED),
+        (n2, heads[0], MergeOutcome.MERGED),
+        (apart, heads[1], MergeOutcome.NOT_STACKABLE),
+    ]
+    assert later[0] is not None and (later[0].candidate, later[0].outcome) == (n3, MergeOutcome.MERGED)
+    assert later[1] is None
+    retried = rounds[3]
+    assert retried is not None and retried.reason.endswith(f"{NOT_OFFERED_AGAIN}: {apart}")
+    assert bench.logged()[3]["reason"] == retried.reason
+    assert rounds[0] is not None and NOT_OFFERED_AGAIN not in rounds[0].reason
+    counts = {item.commit_id: item.not_stackable for item in await bench.handle(Role.OBSERVER).committed()}
+    assert counts[apart] == NOT_STACKABLE_ANSWERS
 
 
 async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improvement(bench: Bench) -> None:
