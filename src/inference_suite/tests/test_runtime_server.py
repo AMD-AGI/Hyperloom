@@ -338,5 +338,39 @@ def test_own_teardown_with_a_survivor_keeps_the_pidfile_and_says_so(tmp_path, mo
     assert not stop(tmp_path / "r1").survivors
 
 
+def test_reap_waits_out_a_gpu_rank_that_takes_seconds_to_exit_after_sigkill(tmp_path, monkeypatch):
+    from hyperloom_common import proctree
+
+    class _Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    clock, killed_at = _Clock(), []
+    child = process.spawn([sys.executable, "-c", "import time; time.sleep(600)"], dict(os.environ), tmp_path / "log")
+    real_signal_tree = proctree.signal_tree
+
+    def signal_tree(tree, sig):
+        if sig == signal.SIGKILL:
+            killed_at.append(clock.now)
+            real_signal_tree(tree, sig)
+
+    def running(pid):
+        return not killed_at or clock.now < killed_at[0] + 8.0
+
+    monkeypatch.setattr(proctree, "time", clock)
+    monkeypatch.setattr(proctree, "signal_tree", signal_tree)
+    monkeypatch.setattr(proctree, "running", running)
+    monkeypatch.setattr(process, "running", running)
+
+    outcome = child.reap()
+
+    assert child.proc.pid in outcome.reaped and outcome.survivors == ()
+
+
 def test_stop_without_a_pidfile_reaps_nothing(tmp_path):
     assert stop(tmp_path) == Reaped((), ())
