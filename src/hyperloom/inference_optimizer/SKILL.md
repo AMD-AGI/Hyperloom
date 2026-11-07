@@ -999,16 +999,17 @@ executor refuses the retry unlaunched and the phase closes the run with
 Only the failures booked by the current leg count, so a session resumed past the
 line still gets the one baseline its new `--max-minutes` was granted for.
 
-A baseline Magpie refuses to launch because `gpu_selection.auto` found fewer idle
-GPUs than the round needs (`needed 8 idle GPU(s) but only found 7`) fails with
+An AgentX baseline the benchmark harness refuses to launch because
+`gpu_selection.auto` found fewer idle GPUs than the round needs
+(`needed 8 idle GPU(s) but only found 7`) fails with
 `error_class=host_gpus_unavailable` and stops the run with
 `stop_reason='host_gpus_unavailable'` on the first occurrence, whatever
 `--enablement` says. No server started, so the ENABLEMENT lane has nothing to
 author against, and no patch frees a GPU another workload holds. The failure's
-`error_excerpt` in `last_action_failures` names each GPU Magpie turned down and why
-(`rejected: ['GPU 0: has running compute process']`). Handle it as IR-1 finding a
-foreign workload: ask the user before stopping the holder, then `--resume-from`
-the session.
+`error_excerpt` in `last_action_failures` names each GPU the harness turned
+down and why (`rejected: ['GPU 0: has running compute process']`). Handle it
+as IR-1 finding a foreign workload: ask the user before stopping the holder,
+then `--resume-from` the session.
 
 An AgentX baseline whose server ran with the prefix cache off fails with
 `error_class=agentx_baseline_prefix_cache_off` and stops the run with
