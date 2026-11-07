@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.common.agentx_workload import CANON_WARMUP_PER_LANE, agentx_profiling_requests
+from hyperloom.common.agentx_workload import CANON_WARMUP_PER_LANE
 from hyperloom.orchestrator.actions.executors import _suite_config
 from hyperloom.orchestrator.actions.executors._suite_config import (
     MEASURED_SEED,
@@ -32,6 +32,7 @@ from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _se
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from inference_suite.compose import RoundFacts, compose
 from inference_suite.contracts import (
+    AGENTX_DEFAULT_DURATION_SEC,
     ConfigError,
     GoldenUse,
     LaunchDelta,
@@ -90,7 +91,7 @@ def test_an_agentx_point_replays_on_its_launch_over_the_base_with_the_golden_lay
         env_unset=("SGLANG_USE_AITER",),
     )
     agentx = config.agentx
-    assert (agentx.concurrency, agentx.dataset, agentx.num_prompts) == (8, _CORPUS, agentx_profiling_requests(8))
+    assert (agentx.concurrency, agentx.dataset, agentx.duration_sec) == (8, _CORPUS, AGENTX_DEFAULT_DURATION_SEC)
     assert (agentx.warmup_requests_per_lane, agentx.seed, agentx.warmup_seed) == (CANON_WARMUP_PER_LANE, 0, 0)
     assert agentx.failed_request_threshold == 0.1
     assert agentx.client_env == {"AIPERF_EXPERIMENTAL_FAST": "0"}
@@ -106,15 +107,31 @@ def test_the_replay_takes_the_bases_client_knobs_under_the_points() -> None:
     base = _base()
     client = {"AIPERF_WARMUP_REQUESTS_PER_LANE": "4", "AIPERF_TRACE_IDLE_GAP_CAP_SECONDS": "300"}
     base = replace(base, client=replace(base.client, env={**client, "WEKA_LOADER_OVERRIDE": "corpus_a"}))
-    point = _point(envs={"AIPERF_WARMUP_REQUESTS_PER_LANE": "2", "NUM_PROMPTS": "640"})
+    point = _point(envs={"AIPERF_WARMUP_REQUESTS_PER_LANE": "2"})
 
     agentx = suite_config(point, base, _settings()).agentx
 
-    assert (agentx.dataset, agentx.warmup_requests_per_lane, agentx.num_prompts) == ("corpus_a", 2, 640)
+    assert (agentx.dataset, agentx.warmup_requests_per_lane) == ("corpus_a", 2)
     assert agentx.client_env["AIPERF_TRACE_IDLE_GAP_CAP_SECONDS"] == "300"
     assert suite_config(_point(envs={"WEKA_LOADER_OVERRIDE": "corpus_b"}), base, _settings()).agentx.dataset == (
         "corpus_b"
     )
+
+
+@pytest.mark.parametrize("duration", [600, 900, 3600])
+def test_the_replay_runs_for_the_points_duration_and_no_request_count(duration: int) -> None:
+    point = _point(envs={"DURATION": str(duration), "NUM_PROMPTS": "640"})
+
+    config = suite_config(point, _base(), _settings())
+
+    assert config.agentx.duration_sec == duration
+    assert "DURATION" not in config.server.user.env_set
+
+
+@pytest.mark.parametrize("duration", ["0", "ten minutes"])
+def test_a_duration_that_is_not_a_positive_second_count_is_refused(duration: str) -> None:
+    with pytest.raises(ConfigError, match="DURATION|duration_sec"):
+        suite_config(_point(envs={"DURATION": duration}), _base(), _settings())
 
 
 def test_a_replay_whose_base_and_point_name_no_corpus_is_refused() -> None:
@@ -181,7 +198,6 @@ def test_a_server_phase_point_boots_the_launch_and_replays_nothing() -> None:
         ({"agentx": {"failed_request_threshold": 0.2}}, "failed_request_threshold 0.2"),
         ({"agentx": {"concurrency": 16}}, "concurrency 16 is not its CONC"),
         ({"agentx": {"recipe": "glm5-fp8"}}, "agentx recipe"),
-        ({"envs": {"DURATION": "3600"}}, "DURATION"),
         ({"envs": {"AGENTX_EXTRA": "1"}}, "AGENTX_EXTRA"),
         ({"envs": {"RUN_EVAL": "true"}}, "accuracy is a round of its own"),
         ({"envs": {"EP_SIZE": "8"}}, "EP_SIZE 8, its base runs 1"),

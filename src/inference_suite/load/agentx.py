@@ -5,8 +5,9 @@
 
 The harness runs from the venv staging built (:mod:`inference_suite.staging`), not through ``infx.bench agentic``,
 which bootstraps a venv online. Every knob that shapes the replay is passed: the trace corpus, the concurrency, the
-request count, the seed, the warmup requests per lane and the failed-request threshold, which is the caller's single
-value. The harness draws its warmup from the same seed, so a workload whose warmup seed differs is refused rather than
+profiling duration, the seed, the warmup requests per lane and the failed-request threshold, which is the caller's single
+value. The replay is bounded by its duration, as InferenceX's ``replay.py`` runs it: the agentx scenario holds the
+profiling phase to 95% latency coverage of that duration, so a request count would end it short and fail. The harness draws its warmup from the same seed, so a workload whose warmup seed differs is refused rather than
 recorded as a seed nothing used; a lane warmup of zero is refused because the harness would then apply its own.
 
 The phase clock follows aiperf's progress API: warmup and measured begin at each phase's ``start_ns``, finished at the
@@ -51,6 +52,9 @@ AGGREGATE_NAME = "inferencex_result"
 THRESHOLD_STOP_MARKER = "--failed-request-threshold exceeded"
 WARMUP_PHASE = "warmup"
 PROFILING_PHASE = "profiling"
+#: The agentx scenario's ``min_benchmark_duration_seconds`` (agentx-harness 1.0.13); a shorter replay needs
+#: ``--unsafe-override``, which InferenceX's ``replay.py`` adds the same way.
+_SCENARIO_MIN_DURATION_SEC = 900
 _WHAT = "the AgentX client"
 _AGGREGATOR = "the AgentX aggregator"
 _NS_PER_SEC = 1e9
@@ -141,8 +145,8 @@ def client_argv(tool: AgentxTool, config: SuiteConfig) -> tuple[str, ...]:
         workload.dataset,
         "--concurrency",
         str(workload.concurrency),
-        "--request-count",
-        str(workload.num_prompts),
+        "--benchmark-duration",
+        str(workload.duration_sec),
         "--random-seed",
         str(workload.seed),
         "--warmup-requests-per-lane",
@@ -157,6 +161,7 @@ def client_argv(tool: AgentxTool, config: SuiteConfig) -> tuple[str, ...]:
         PROGRESS_API_HOST,
         "--api-port",
         str(progress_api_port(server)),
+        *(("--unsafe-override",) if workload.duration_sec < _SCENARIO_MIN_DURATION_SEC else ()),
     )
 
 

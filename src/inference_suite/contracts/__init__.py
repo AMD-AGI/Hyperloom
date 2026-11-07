@@ -28,6 +28,7 @@ from inference_suite.contracts.base_launch import (
 )
 from inference_suite.contracts.config import (
     AGENTX_CLIENT_ENV_PREFIX,
+    AGENTX_DEFAULT_DURATION_SEC,
     AGENTX_FAST_MODE_ENV,
     CONFIG_SCHEMA,
     DEFAULT_MAX_TOKENS_CAP,
@@ -84,6 +85,7 @@ from inference_suite.contracts.report import (
 __all__ = [
     "AGENTX_CLIENT_ENV_PREFIX",
     "AGENTX_ERROR_RATE_DEFINITION",
+    "AGENTX_DEFAULT_DURATION_SEC",
     "AGENTX_FAST_MODE_ENV",
     "BASE_LAUNCH_SCHEMA",
     "CONFIG_SCHEMA",

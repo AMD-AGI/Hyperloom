@@ -138,7 +138,7 @@ def test_client_argv_passes_every_replay_knob_explicitly(tmp_path: Path):
         "--tokenizer": "/models/GLM-5.3",
         "--public-dataset": "agentx-v1",
         "--concurrency": "8",
-        "--request-count": "40",
+        "--benchmark-duration": "600",
         "--random-seed": "42",
         "--warmup-requests-per-lane": "2",
         "--failed-request-threshold": "0.1",
@@ -149,6 +149,17 @@ def test_client_argv_passes_every_replay_knob_explicitly(tmp_path: Path):
     }
     assert {flag: _flag(argv, flag) for flag in expected} == expected
     assert "--tokenizer-trust-remote-code" in argv
+    assert "--request-count" not in argv
+
+
+@pytest.mark.parametrize(("duration", "override"), [(600, True), (899, True), (900, False), (3600, False)])
+def test_the_replay_runs_for_its_duration_and_overrides_the_scenario_floor_below_it(tmp_path, duration, override):
+    config = _config(tmp_path)
+    config = replace(config, agentx=replace(config.agentx, duration_sec=duration))
+    argv = client_argv(AgentxTool.staged(Path("/ix")), config)
+    assert _flag(argv, "--benchmark-duration") == str(duration)
+    assert ("--unsafe-override" in argv) is override
+    assert "--request-count" not in argv
 
 
 def test_the_progress_api_port_stays_in_range():
