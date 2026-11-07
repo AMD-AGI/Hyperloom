@@ -175,6 +175,44 @@ def test_a_hosted_run_refuses_an_unconfined_sandbox_too():
     assert refused.value.reasons[0] == f"running them as an account: {SANDBOX_ACCOUNT}"
 
 
+def _ray_path_refuses(reason: str) -> str:
+    return (
+        f"specialists run as the account {ACCOUNT.user}, but {RAY_ACTOR_PATH} and bubblewrap cannot confine one here,"
+        f" so that path refuses its specialists: {reason}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("bwrap", "answer", "reason"),
+    [
+        (LAYER, LAYER_DENIED, f"bubblewrap ({LAYER}, 0.13.1): bwrap: setting up uid map: Permission denied"),
+        (LAYER, NO_ANSWER, f"bubblewrap at {LAYER}: no answer in 10 s"),
+        (None, None, NO_LAYER_BWRAP),
+    ],
+    ids=["denied", "no-answer", "none-named"],
+)
+def test_a_hosted_run_with_an_account_warns_once_that_the_ray_path_refuses_where_bubblewrap_cannot_confine(
+    account, caplog, bwrap, answer, reason
+):
+    probes = Probes(answer) if answer else _never
+    with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
+        assert require_agent_isolation(bwrap=bwrap, probe=probes) == AccountIsolation(ACCOUNT)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.WARNING, _ray_path_refuses(reason))]
+    if answer:
+        assert probes.asked == [bwrap], "the layer's bubblewrap, by its path"
+    with pytest.raises(IsolationRefused) as refused:
+        choose_agent_isolation(allow_account=False, probe=probes)
+    assert reason in refused.value.reasons, "the Ray GPU actor path refuses for the reason the warning gave"
+    assert choose_agent_isolation(probe=probes) == AccountIsolation(ACCOUNT), "every other specialist: the account"
+
+
+def test_a_hosted_run_with_an_account_and_a_layer_bubblewrap_that_confines_says_nothing_more(account, caplog):
+    probes = Probes(IN_LAYER)
+    with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
+        assert require_agent_isolation(bwrap=LAYER, probe=probes) == AccountIsolation(ACCOUNT)
+    assert caplog.records == [] and probes.asked == [LAYER]
+
+
 # ---- the order of the tiers ----
 
 
