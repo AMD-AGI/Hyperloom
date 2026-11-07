@@ -840,7 +840,11 @@ framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyp
 the directory `HYPERLOOM_HOST_LAYER` names, which the layer's `start.sh` sets to its own; with the variable unset or
 relative, no launch of the run uses bubblewrap. It checks before its installer or `optimize` runs: where neither tier
 works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
-answer in time ends the leg without one, so the host starts it again. The probe (`python -I -m
+answer in time ends the leg without one, so the host starts it again. Where the account is chosen, it probes the layer's
+bubblewrap too: the Ray GPU actor path never starts a specialist as an account, so where that bubblewrap cannot confine
+one, one WARNING says so (`specialists run as the account <name>, but the Ray GPU actor path cannot run the specialist
+as another user and bubblewrap cannot confine one here, so that path refuses its specialists: <reason>`), and the run
+goes on. The probe (`python -I -m
 hyperloom_common.bwrap probe [--bwrap PATH]`) refuses a setuid bubblewrap and one older than 0.5.0, then runs a canary
 sandbox and checks from inside that its masks, read-only binds, pid namespace, capabilities and `no_new_privs` hold. It
 runs once per process for each binary, interpreter, ids, namespaces and user-namespace sysctls; one that gives no
