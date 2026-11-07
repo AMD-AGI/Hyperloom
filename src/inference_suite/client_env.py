@@ -58,6 +58,9 @@ _LOCK_LINE = re.compile(
 _DIST_INFO = re.compile(r"(?P<name>.+)-(?P<version>[^-]+)\.dist-info")
 _PIP = ("-I", "-m", "pip")
 _PIP_QUIET = ("--disable-pip-version-check", "--no-input", "--isolated", "--quiet")
+_BINARY_ONLY = "--only-binary=:all:"
+#: Exactly the lock's wheels: no dependency resolved beyond it, each file checked against its pinned sha256.
+_LOCKED = ("--no-deps", "--require-hashes", _BINARY_ONLY)
 _CHUNK = 1 << 20
 _TAIL = 2000
 _LOCK_HEADER = """\
@@ -167,7 +170,8 @@ def _unpack(archive: Path, destination: Path) -> Path:
 def _platform_args() -> list[str]:
     major_minor = ".".join(AGENTX_PYTHON_BUILD.version.split(".")[:2])
     abi = "cp" + major_minor.replace(".", "")
-    args = ["--python-version", major_minor, "--implementation", "cp", "--abi", abi, "--abi", "abi3", "--abi", "none"]
+    args = ["--python-version", major_minor, "--implementation", "cp"]
+    args += [part for tag in (abi, "abi3", "none") for part in ("--abi", tag)]
     return args + [part for platform in LOCK_PLATFORMS for part in ("--platform", platform)]
 
 
@@ -182,7 +186,7 @@ def fetch_inputs(inputs: Path) -> None:
     _checked_archive(archive, AGENTX_PYTHON_BUILD)
     with tempfile.TemporaryDirectory(dir=inputs, prefix=".python-") as scratch:
         python = _unpack(archive, Path(scratch, _ARCHIVE_ROOT))
-        download = [str(python), *_PIP, "download", *_PIP_QUIET, "--no-deps", "--require-hashes", "--only-binary=:all:"]
+        download = [str(python), *_PIP, "download", *_PIP_QUIET, *_LOCKED]
         download += [*_platform_args(), "--dest", str(inputs / INPUT_WHEELS), "-r", str(AGENTX_LOCK)]
         _run(download, "downloading the wheels the AgentX client lock pins")
 
@@ -224,7 +228,7 @@ def install(inputs: Path, root: Path) -> None:
         "--find-links",
         str(inputs / INPUT_WHEELS),
     ]
-    install_args += ["--no-deps", "--require-hashes", "--only-binary=:all:", "-r", str(root / STAGED_LOCK)]
+    install_args += [*_LOCKED, "-r", str(root / STAGED_LOCK)]
     _run(install_args, "installing the AgentX client from its lock")
     build = {"version": AGENTX_PYTHON_BUILD.version, "sha256": AGENTX_PYTHON_BUILD.sha256, "bundled": bundled}
     (root / BUILD_FILE).write_text(json.dumps(build, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -268,7 +272,7 @@ def _generate_lock(requirements: Path, label: str) -> str:
         _checked_archive(archive, AGENTX_PYTHON_BUILD)
         python = _unpack(archive, work / _ARCHIVE_ROOT)
         report = work / "report.json"
-        resolve = [str(python), *_PIP, "install", *_PIP_QUIET, "--dry-run", "--ignore-installed", "--only-binary=:all:"]
+        resolve = [str(python), *_PIP, "install", *_PIP_QUIET, "--dry-run", "--ignore-installed", _BINARY_ONLY]
         resolve += [
             "--target",
             str(work / "target"),
