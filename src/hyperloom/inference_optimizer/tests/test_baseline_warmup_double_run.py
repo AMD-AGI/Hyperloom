@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The baseline round's lifecycle teardown and how it classifies a server that failed to come up."""
+"""How the baseline round classifies a server that failed to come up."""
 
 from __future__ import annotations
 
@@ -14,45 +14,6 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root_warmup")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "8")
-
-
-def test_teardown_lifecycle_server_removes_state_files(tmp_path):
-    """The defensive teardown unlinks stale pid/meta files without raising."""
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
-
-    pid_dir = tmp_path / "pids"
-    pid_dir.mkdir()
-    (pid_dir / "vllm_8888.pid").write_text("2147483646")
-    (pid_dir / "vllm_8888.json").write_text("{}")
-
-    sl.teardown_lifecycle_server(
-        pid_dir=pid_dir,
-        framework="vllm",
-        port=8888,
-    )
-
-    assert not (pid_dir / "vllm_8888.pid").exists()
-    assert not (pid_dir / "vllm_8888.json").exists()
-
-
-def test_teardown_lifecycle_server_skips_signal_on_pid_reuse(tmp_path, monkeypatch):
-    """A pid that does not look like a Hyperloom server must not receive a signal."""
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
-
-    pid_dir = tmp_path / "pids"
-    pid_dir.mkdir()
-    (pid_dir / "vllm_8888.pid").write_text("99999")
-    (pid_dir / "vllm_8888.json").write_text("{}")
-
-    signals_sent: list[int] = []
-    monkeypatch.setattr(sl, "signal_group", lambda pgid, sig, **_: signals_sent.append(sig))
-    monkeypatch.setattr(sl, "_looks_like_server_process", lambda pid: False)
-
-    sl.teardown_lifecycle_server(pid_dir=pid_dir, framework="vllm", port=8888)
-
-    assert signals_sent == [], "must not signal a pid that failed the identity check"
-    assert not (pid_dir / "vllm_8888.pid").exists(), "stale pid file must still be removed"
-    assert not (pid_dir / "vllm_8888.json").exists(), "stale meta file must still be removed"
 
 
 # _classify_subprocess_error unit tests

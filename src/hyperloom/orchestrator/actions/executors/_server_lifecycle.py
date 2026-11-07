@@ -5,14 +5,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import signal
 import time
 from collections.abc import Sequence
-from contextlib import suppress
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -22,94 +18,21 @@ from hyperloom.common import rocm_smi
 from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
 from hyperloom.common.ports import pick_server_port
 from hyperloom.inference_optimizer import framework_registry
-from hyperloom_common.proctree import TERM_GRACE_SEC, group_members, leader_exited, running, signal_group
 from inference_suite import stop
 from inference_suite.contracts.layout import SERVER_PID
 
 
 log = logging.getLogger(__name__)
 
-# Substrings that identify a Hyperloom-spawned serving process in ``/proc/<pid>/cmdline``.
-_SERVER_CMDLINE_MARKERS: tuple[str, ...] = (
-    "sglang.launch_server",
-    "sglang serve",
-    "sglang.srt",
-    "vllm.entrypoints",
-    "vllm serve",
-    "atom.entrypoints",
-    # The launcher's own cmdline is what the pidfile records, but the processes
-    # still holding VRAM once that launcher exits are the engine/worker ranks,
-    # and they carry none of the names above -- so the dead-leader-live-group
-    # branch below needs them too.
-    "EngineCore",
-    "VLLM::Worker",
-    "sglang::",
-    "launch_server",
-)
-
-#: How long a SIGKILL'd group is given to disappear. A rank that held VRAM can sit in uninterruptible sleep while the
-#: driver releases its memory.
-_KILL_CONFIRM_SECONDS = 30.0
-
 #: How often a hand-off re-reads VRAM while it waits for the GPUs to drain.
 _GPU_FREE_POLL_SECONDS = 5.0
 
 
-# Default HTTP port for the persistent server when ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML so
-# Magpie's reuse keying and our teardown agree.
+# Default HTTP port for the persistent server when ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML.
 REUSE_PORT_DEFAULT = 8888
 
 # Server-boot budget for the persistent server phase.
 SERVER_READY_TIMEOUT_SEC = 7200
-
-
-def lifecycle_pid_file(pid_dir: Path | str, framework: str, port: int) -> Path:
-    """Return the pid file Magpie's reuse protocol keeps for a persistent server."""
-    return Path(pid_dir) / f"{framework}_{port}.pid"
-
-
-def lifecycle_meta_file(pid_dir: Path | str, framework: str, port: int) -> Path:
-    """Return the meta file Magpie's reuse protocol keeps for a persistent server."""
-    return Path(pid_dir) / f"{framework}_{port}.json"
-
-
-def lifecycle_files_present(pid_dir: str, framework: str, port: int) -> bool:
-    """Whether both pid and meta files exist for a persistent server."""
-    return (
-        lifecycle_pid_file(pid_dir, framework, port).exists() and lifecycle_meta_file(pid_dir, framework, port).exists()
-    )
-
-
-@dataclass(frozen=True)
-class LifecycleRecord:
-    """The persistent server a lifecycle pid/meta pair records."""
-
-    framework: str
-    port: int
-    pid: int
-    pgid: int
-    model: str
-
-
-def write_lifecycle_files(pid_dir: str, record: LifecycleRecord) -> None:
-    """Persist the pid/meta pair ``teardown_lifecycle_server`` reads back for a lifecycle server."""
-    framework = record.framework
-    port = record.port
-    Path(pid_dir).mkdir(parents=True, exist_ok=True)
-    lifecycle_pid_file(pid_dir, framework, port).write_text(f"{record.pid} {record.pgid}\n", encoding="utf-8")
-    lifecycle_meta_file(pid_dir, framework, port).write_text(
-        json.dumps(
-            {
-                "pid": record.pid,
-                "pgid": record.pgid,
-                "framework": framework,
-                "port": port,
-                "model": record.model,
-                "base_url": f"http://127.0.0.1:{port}",
-            }
-        ),
-        encoding="utf-8",
-    )
 
 
 def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
@@ -146,11 +69,8 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         info["reason"] = "torch_profiler enabled (incompatible with reuse)"
         return info
 
-    # Use a per-session free port for the persistent server instead of a fixed default: a stale/leaked
-    # server from a prior baseline attempt (round 1 uses cleanup=false and leaves the server running) or a co-tenant
-    # job holding the fixed port makes Magpie abort every warmup with "Reuse metadata mismatch ... server on PORT=...
-    # is incompatible", so the baseline never records an accuracy and the run wrongly stops with
-    # baseline_accuracy_failed.
+    # A per-session free port rather than the fixed default: a server a prior attempt left up, or a co-tenant job,
+    # may hold the default.
     info["port"] = pick_server_port()
 
     info["eligible"] = True
@@ -178,7 +98,7 @@ def inject_lifecycle(
         "pid_dir": str(pid_dir),
         "server_ready_timeout_s": ready_timeout,
     }
-    # Pin PORT so Magpie's reuse keying and our teardown agree.
+    # Pin PORT so every round of the lifecycle reaches the same server.
     envs = bench.setdefault("envs", {})
     envs["PORT"] = int(port)
 
@@ -193,134 +113,15 @@ def inject_lifecycle_settings(bench: dict[str, Any], settings: dict[str, Any]) -
     )
 
 
-def teardown_lifecycle_server(
-    *,
-    pid_dir: Path | str,
-    framework: str,
-    port: int,
-) -> None:
-    """Best-effort teardown of a persistent server left by a lifecycle round."""
-    pid_file = lifecycle_pid_file(pid_dir, framework, port)
-    meta_file = lifecycle_meta_file(pid_dir, framework, port)
-    server_pid: int | None = None
-    server_pgid: int | None = None
-    try:
-        if pid_file.exists():
-            parts = pid_file.read_text(encoding="utf-8").split()
-            if parts:
-                server_pid = int(parts[0])
-            if len(parts) > 1:
-                server_pgid = int(parts[1])
-    except (OSError, ValueError):
-        # Best-effort: proceed with whatever was parsed; never raise.
-        pass
-
-    if server_pid is not None and os.name == "posix":
-        if not _looks_like_server_process(server_pid):
-            log.warning(
-                "server_lifecycle teardown — pid %d is not a Hyperloom server (pid reuse); not signalling",
-                server_pid,
-            )
-        else:
-            # Server is setsid'd, so pgid == pid unless the pid file gave one.
-            pgid = server_pgid if server_pgid is not None else server_pid
-            _terminate_group(pgid)
-            log.info(
-                "server_lifecycle teardown — reaped persistent server pgid=%d (%s:%d)",
-                pgid,
-                framework,
-                port,
-            )
-    for p in (pid_file, meta_file):
-        try:
-            p.unlink()
-        except OSError:
-            # Already gone or unremovable; teardown must not raise.
-            pass
-
-
-def _terminate_group(pgid: int) -> bool:
-    """SIGTERM a process group, then SIGKILL it if any member outlives the grace; return whether it is gone."""
-    signal_group(pgid, signal.SIGTERM, what="_server_lifecycle")
-    if _group_gone_within(pgid, TERM_GRACE_SEC):
-        return True
-    signal_group(pgid, signal.SIGKILL, what="_server_lifecycle")
-    return _group_gone_within(pgid, _KILL_CONFIRM_SECONDS)
-
-
-def _group_has_live_member(pgid: int) -> bool:
-    """Whether ``pgid`` still has a member that :func:`running` counts.
-
-    A server re-parented to an init that never waits stays a zombie once it exits. A zombie whose every thread has
-    exited holds no memory and takes no signal, so it is not a survivor; one whose leader exited while another thread of
-    it runs is.
-    """
-    return any(running(pid) for pid, _start, _state in group_members(pgid))
-
-
-def _group_gone_within(pgid: int, window_sec: float) -> bool:
-    """Wait up to ``window_sec`` for ``pgid`` to have no live member; return whether it got there."""
-    deadline = time.monotonic() + window_sec
-    while _group_has_live_member(pgid):
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.1)
-    return True
-
-
-def _pid_cmdline(pid: int) -> str:
-    """Return ``pid``'s command line as a space-joined string, or ``\"\"``.
-
-    An exited leader's ``/proc/<pid>/cmdline`` reads empty while another thread of its process may still run. Every
-    thread of a process shares its memory, so such a thread's ``task/<tid>/cmdline`` reads the same command line.
-    """
-    proc = Path(f"/proc/{pid}")
-    sources = [proc / "cmdline"]
-    if leader_exited(pid):
-        with suppress(OSError):
-            sources = [task / "cmdline" for task in (proc / "task").iterdir()]
-    for source in sources:
-        try:
-            raw = source.read_bytes()
-        except OSError:
-            continue
-        if raw:
-            return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
-    return ""
-
-
-def _looks_like_server_process(pid: int) -> bool:
-    """Return whether ``pid``'s cmdline matches a Hyperloom serving process."""
-    cmdline = _pid_cmdline(pid)
-    if not cmdline:
-        return False
-    return any(marker in cmdline for marker in _SERVER_CMDLINE_MARKERS)
-
-
-def _process_group_looks_like_server(pgid: int) -> bool:
-    """Return whether any process in ``pgid`` still looks like a serving process."""
-    return any(_looks_like_server_process(pid) for pid, _start, _state in group_members(pgid))
-
-
-class ServerReap(NamedTuple):
-    """What reaping the servers a set of pidfiles names did."""
-
-    #: Recorded pids whose process group was signalled.
-    reaped: list[int]
-    #: The subset of ``reaped`` whose group still had a live member after SIGKILL.
-    survivors: list[int]
-
-
 def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
     """Stop every server a pidfile under this session's ``runs/`` still records; return the pids signalled.
 
     Each ``server.pid`` directory goes through :func:`inference_suite.stop`: the recorded pid is signalled only while
     its start time still matches, and once that leader is gone its workers are found by the pidfile's run mark, so a
     co-located session's server and a recycled pid are never touched. A pidfile whose server outlives SIGKILL is kept.
-    The Magpie and bypass ``server_lifecycle`` pidfiles go through :func:`reap_recorded_servers`.
     """
     runs = Path(session_dir) / "runs"
-    reaped = reap_recorded_servers(runs).reaped
+    reaped: list[int] = []
     for pid_dir in _suite_pid_dirs(runs):
         outcome = stop(pid_dir)
         reaped.extend(outcome.reaped)
@@ -332,125 +133,6 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
 def _suite_pid_dirs(root: Path) -> list[Path]:
     """Every pid_dir under ``root`` holding an inference_suite ``server.pid``."""
     return [pidfile.parent for pidfile in sorted(root.rglob(SERVER_PID))] if root.is_dir() else []
-
-
-def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> ServerReap:
-    """Reap every serving process still up that a pidfile matching ``pidfile_glob`` under ``root`` names.
-
-    Nothing is signalled on the recorded pid alone: a pid whose leader runs must still look like a serving process,
-    and the group of a leader that is gone or has exited is signalled only while a live member of it does, so a recycled
-    pid or pgid is left untouched. A pidfile is removed once nothing it names is left; a survivor's stays for the next
-    reap. An inference_suite ``server.pid`` is not one of these pidfiles: only its ``stop`` reads it.
-    """
-    reap = ServerReap(reaped=[], survivors=[])
-    root = Path(root)
-    if os.name != "posix" or not root.is_dir():
-        return reap
-
-    own_pgid = os.getpgrp()
-    for pid_file in _lifecycle_pidfiles(root, pidfile_glob):
-        recorded = _read_pidfile(pid_file)
-        if recorded is None:
-            continue
-        server_pid, recorded_pgid = recorded
-
-        # Only a running leader is told by its own cmdline. A leader that has exited, as a zombie nobody waited on or
-        # while ``running`` still counts its process by another thread, is judged like a gone one: by the live members
-        # of its recorded group. Those are its ranks, and its own process while a thread of it runs (``_pid_cmdline``).
-        leader_alive = running(server_pid) and not leader_exited(server_pid)
-        server_pgid = recorded_pgid
-        if leader_alive:
-            with suppress(OSError):
-                server_pgid = os.getpgid(server_pid)
-
-        if leader_alive and not _looks_like_server_process(server_pid):
-            # A running leader but not one of our servers (pid reuse): do not touch the process; leave the pidfile for a
-            # later re-evaluation.
-            log.info(
-                "orphan-reaper: pid=%d from %s no longer looks like a server (cmdline mismatch); leaving it untouched",
-                server_pid,
-                pid_file,
-            )
-            continue
-        if not leader_alive and not _group_has_live_member(server_pgid):
-            # Stale pidfile from a fully-exited server tree; just clean it up.
-            _remove_pidfile(pid_file)
-            continue
-        if not leader_alive and not _process_group_looks_like_server(server_pgid):
-            # The original leader is gone or has exited, and the remaining/reused pgid has no server-looking member; do
-            # not risk signalling an unrelated group.
-            log.info(
-                "orphan-reaper: pid=%d from %s exited and pgid=%d has no server-looking member; leaving it untouched",
-                server_pid,
-                pid_file,
-                server_pgid,
-            )
-            continue
-        if server_pgid == own_pgid:
-            log.error(
-                "orphan-reaper: pid=%d from %s is in this process's own group pgid=%d; refusing to signal it",
-                server_pid,
-                pid_file,
-                server_pgid,
-            )
-            continue
-
-        reap.reaped.append(server_pid)
-        if not _terminate_group(server_pgid):
-            reap.survivors.append(server_pid)
-            log.error(
-                "orphan-reaper: server pid=%d pgid=%d from %s is still alive after SIGKILL; keeping its pidfile",
-                server_pid,
-                server_pgid,
-                pid_file,
-            )
-            continue
-        log.warning(
-            "orphan-reaper: reaped leftover server pid=%d pgid=%d from %s",
-            server_pid,
-            server_pgid,
-            pid_file,
-        )
-        _remove_pidfile(pid_file)
-
-    return reap
-
-
-def _lifecycle_pidfiles(root: Path, pidfile_glob: str) -> list[Path]:
-    """The pidfiles under ``root`` matching ``pidfile_glob`` that are not an inference_suite ``server.pid``."""
-    return [pid_file for pid_file in sorted(root.rglob(pidfile_glob)) if pid_file.name != SERVER_PID]
-
-
-def _remove_pidfile(pid_file: Path) -> None:
-    """Remove a server pidfile and its JSON sidecar."""
-    _unlink_quietly(pid_file)
-    _unlink_quietly(pid_file.with_suffix(".json"))
-
-
-def _read_pidfile(pid_file: Path) -> tuple[int, int] | None:
-    """Return the ``(pid, pgid)`` a server pidfile records, or ``None``; an empty or malformed pidfile is removed."""
-    try:
-        parts = pid_file.read_text(encoding="utf-8").split()
-    except OSError:
-        return None
-    if not parts:
-        _unlink_quietly(pid_file)
-        return None
-    try:
-        server_pid = int(parts[0])
-        recorded_pgid = int(parts[1]) if len(parts) > 1 else server_pid
-    except ValueError:
-        _unlink_quietly(pid_file)
-        return None
-    return server_pid, recorded_pgid
-
-
-def _unlink_quietly(path: Path) -> None:
-    """Best-effort ``unlink`` that never raises."""
-    try:
-        path.unlink()
-    except OSError:
-        pass
 
 
 class GpuHandoff(NamedTuple):

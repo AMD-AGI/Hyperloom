@@ -71,7 +71,6 @@ from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_poi
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer import speculative_capability
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override, prepend_launch_path
-from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import seal_server_argv
 from .agentx_point import ServerArgvInvalidError, materialize_grid_variant
 from ._workload_envs import BenchmarkTarget, LaunchLayer
@@ -1677,10 +1676,6 @@ def _build_variant_yaml(
         envs[extra_args_env] = ""
     base_envs = apply_variant_env(envs, variant, base.extra_envs, base.unset_envs)
     pin_mlperf_round_concurrency(envs)
-    # The launcher re-exports these unconditionally, so a value carried here is one the run never used.
-    for k in launcher_overwritten_envs(bench) & envs.keys():
-        log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
-        envs.pop(k, None)
     # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
     # the client's grace alone would make the round wait inside a cap that did not move with it.
     if _overlay := importable_overlay_dir(variant):
