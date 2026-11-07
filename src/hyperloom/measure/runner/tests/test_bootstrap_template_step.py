@@ -51,11 +51,11 @@ _PINNED_PAYLOAD = (
     'art_failed", "message": "runner bootstrap, step verify, exit 1: bootstrap.sh or manifest of the cach'
     "e entry is missing or not the one HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256 pins, or that or HYPERLOOM_"
     'SOURCE_SHA is not set", "state": "failed"}\'"\'"\' >"$o/.status.json.tmp" && mv "$o/.status.json.tmp" "'
-    '$o/status.json"; exit 2\' >/app/work/runner-boot.log 2>&1 || hl_start_failed "$?") &); } || hl_start_'
-    'failed "$?"'
+    '$o/status.json"; exit 2\' >/app/work/runner-boot.log 2>&1 || hl_start_failed "$?") </dev/null >/dev/null'
+    ' 2>&1 &); } || hl_start_failed "$?"'
 )
 #: The SHA-256 of that payload, with a final newline.
-_PINNED_SHA256 = "74e170bca0fa12e764c17730cbbd1dd269026a61a5e90d8db370003e266fb660"
+_PINNED_SHA256 = "07a9eab8d44e4311edaf817688d6d32288ec89a56413465d03caebf38aad608f"
 _KEY_COPY = '(umask 077 && cp "$HYPERLOOM_SIGNING_KEY_FILE" /app/work/hl-sign.pem)'
 _APP_PATHS = {"dirs": ("/app/in", "/app/out", "/app/work/scratch"), "boot_log": "/app/work/runner-boot.log"}
 #: How long the step may take to return: it makes three directories and forks; the runner's start is not waited for.
@@ -91,7 +91,9 @@ def test_the_runner_waits_the_template_default_for_its_spec_unless_the_arguments
 def test_the_step_without_preparation_or_environment_starts_the_runner_straight_after_the_directories() -> None:
     payload = runner_template_payload()
     assert "; { mkdir -p /in /out /scratch && ( (nohup sh -c " in payload
-    assert payload.endswith(' >/runner-boot.log 2>&1 || hl_start_failed "$?") &); } || hl_start_failed "$?"')
+    assert payload.endswith(
+        ' >/runner-boot.log 2>&1 || hl_start_failed "$?") </dev/null >/dev/null 2>&1 &); } || hl_start_failed "$?"'
+    )
 
 
 @pytest.mark.parametrize(
