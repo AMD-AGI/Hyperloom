@@ -63,7 +63,11 @@ def _modes(tree: Path) -> dict[str, int]:
 def test_the_lock_and_the_cache_let_the_group_write_and_the_entry_no_one_but_its_builder(
     rig: Rig, tmp_path: Path, umask: int, lock: int, cache: int
 ) -> None:
-    root = tmp_path / "cache"
+    # Storage set up to be shared: setgid, group-writable, not writable by others.
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    root = shared / "cache"
     command = [sys.executable, "-m", "hyperloom.measure.runner.cache_build", "--sha", rig.cache.sha]
     command += ["--repo", str(rig.repo), "--out", str(root), "--no-index", "--find-links", str(rig.wheelhouse)]
     done = subprocess.run(command, capture_output=True, text=True, timeout=300, umask=umask, check=False)
@@ -79,6 +83,25 @@ def test_the_lock_and_the_cache_let_the_group_write_and_the_entry_no_one_but_its
     assert {name for name, mode in entry.items() if mode & stat.S_IRGRP == 0} == set()
     tree = root / rig.cache.sha
     assert {name for name in entry if (tree / name).is_dir() and entry[name] & stat.S_IXGRP == 0} == set()
+
+
+@pytest.mark.parametrize("parent", [0o755, 0o2755, 0o2777, 0o1777], ids=["0755", "2755", "2777", "1777"])
+@pytest.mark.parametrize("umask", [0o022, 0o077], ids=["umask-022", "umask-077"])
+def test_the_lock_and_the_cache_stay_private_where_the_storage_is_not_set_up_to_be_shared(
+    rig: Rig, tmp_path: Path, parent: int, umask: int
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir()
+    private.chmod(parent)
+    root = private / "cache"
+    command = [sys.executable, "-m", "hyperloom.measure.runner.cache_build", "--sha", rig.cache.sha]
+    command += ["--repo", str(rig.repo), "--out", str(root), "--no-index", "--find-links", str(rig.wheelhouse)]
+    done = subprocess.run(command, capture_output=True, text=True, timeout=300, umask=umask, check=False)
+    assert done.returncode == 0, done.stderr
+    # A directory made in a setgid one inherits the bit from the kernel, not from the builder.
+    inherited = parent & stat.S_ISGID
+    assert stat.S_IMODE(build_lock(root, rig.cache.sha).stat().st_mode) == 0o666 & ~umask
+    assert stat.S_IMODE(root.stat().st_mode) == inherited | 0o777 & ~umask
 
 
 @pytest.mark.parametrize("lock", ["link", "read-only"])

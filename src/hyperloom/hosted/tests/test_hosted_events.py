@@ -108,6 +108,7 @@ def test_a_restart_begins_a_new_segment_after_the_last_and_continues_its_ids_whe
 def test_each_segment_is_made_new_with_mode_664_and_an_earlier_one_is_never_opened_for_writing(tmp_path):
     """The next leg may be another account of the group: it reads the earlier segments, writes only its own, and a
     half-written tail is dropped by replacing the segment, never by cutting it in place."""
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     _here(
         "from pathlib import Path\nfrom hyperloom.hosted.events import HostedProgressEvents\n"
         f"sink = HostedProgressEvents(Path({str(tmp_path / 'events')!r}), 'r')\n"

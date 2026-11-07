@@ -4,9 +4,16 @@
 """Directories and files that several accounts of one group write in turn.
 
 On shared storage each container of a run may be another host account. The accounts share one group, and the key
-directories are made setgid in it once (``2775``), so what is created below them takes that group. What this module
-creates has an explicit mode, set by ``fchmod`` after the create: directories ``2775`` and files ``664``, whatever the
-umask. Nothing is chowned, and an existing entry is never chmodded (another account's would fail ``EPERM``): a file is
+directories are made setgid in it once (``2775``), so what is created below them takes that group.
+
+Permissions are widened only where the storage is set up to be shared: when the nearest existing directory above what
+is created is setgid, group-writable and not writable by others (:func:`parent_is_shared`), judged on the directory the
+walk to it holds open, never by a second look up the path. There what this module creates has an explicit mode, set by
+``fchmod`` after the create: directories ``2775`` (each one of a chain it makes) and files ``664``, whatever the umask.
+Anywhere else (a ``0755`` home, a ``1777`` ``/tmp``, a setgid directory the group cannot write, one reached through a
+link at its own name) the umask alone decides, exactly as for a plain ``mkdir`` or ``open``, so what is made there stays
+as private as the account keeps its files; a mode asked for is masked by the umask, never widened. A mode narrower than
+the shared one (``0600`` for a file that holds a credential) is kept as asked, shared or not. Nothing is chowned, and an existing entry is never chmodded (another account's would fail ``EPERM``): a file is
 replaced by rename instead, and never opened in place, since a member of the group may have put a link there. Nor is
 a link followed on the way to it once the way has passed a directory another account can write
 (:func:`open_directory`): a member of the group could have put one there for any directory of the path. The umask of
@@ -73,24 +80,67 @@ def open_directory(path: Path, *, make: int | None = None) -> int:
             ``make``, ``FileExistsError`` (with ``make``) or ``ENOTDIR`` for something else where a directory belongs;
             each names the part of the path it is about.
     """
+    return _walk_to(path, make=make).descriptor
+
+
+def parent_is_shared(path: Path) -> bool:
+    """Whether what is created at ``path`` lands in storage set up to be shared: the nearest existing directory above
+    ``path`` is setgid, group-writable and not writable by others, and was not reached through a link standing at its
+    own name.
+
+    It is judged on that directory as the walk of :func:`open_directory` holds it open, the one every writer of this
+    module judges and writes through. A directory that cannot be reached counts as not shared: the umask then decides,
+    which can only keep what is made more private.
+    """
+    try:
+        walk = _walk_to(Path(os.path.abspath(path)).parent, make=None, stop_at_missing=True)
+    except OSError:
+        return False
+    try:
+        return walk.set_up_to_share()
+    finally:
+        os.close(walk.descriptor)
+
+
+def _walk_to(path: Path, *, make: int | None, stop_at_missing: bool = False) -> _Walk:
+    """The walk of :func:`open_directory` to ``path``, done: its :attr:`_Walk.descriptor` is the caller's to close.
+    With ``stop_at_missing`` it ends at the nearest directory of ``path`` that exists."""
     parts = list(Path(os.path.abspath(path)).parts[1:])
     walk = _Walk(os.open("/", _WAY))
     try:
         while parts:
+            walk.arrive(len(parts))
             name = parts.pop(0)
             if name in ("", "."):
                 continue
+            if stop_at_missing and not _exists(walk.descriptor, name):
+                walk.linked = walk.linked or bool(walk.expanding)  # a link to nothing stands there: not shared
+                break
             info = walk.look_up(name, make)
             if info is None:
                 parts.insert(0, name)  # made meanwhile by another process: looked at again
             elif stat.S_ISLNK(info.st_mode):
-                parts[:0] = walk.follow(name)
+                parts[:0] = walk.follow(name, len(parts))
             else:
                 walk.enter(name, info, make)
+        walk.arrive(len(parts))
     except BaseException:
         os.close(walk.descriptor)
         raise
-    return walk.descriptor
+    return walk
+
+
+def _exists(directory: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _set_up_to_share(mode: int) -> bool:
+    """Whether a directory of ``mode`` is storage set up to be shared: setgid, group-writable, not writable by others."""
+    return stat.S_ISDIR(mode) and bool(mode & stat.S_ISGID) and bool(mode & stat.S_IWGRP) and not mode & stat.S_IWOTH
 
 
 def _trusted(uid: int) -> bool:
@@ -108,6 +158,23 @@ class _Walk:
         self.here = Path("/")
         self.shared = False
         self.links = 0
+        #: How many parts of the path were left after each link being walked: its target is walked until as many are.
+        self.expanding: list[int] = []
+        #: Whether :attr:`here` is the end of a link's target: a link stood at its name.
+        self.linked = False
+        #: Whether the directories made on the way are widened (:meth:`set_up_to_share`), judged once, at the first.
+        self.widen: bool | None = None
+
+    def arrive(self, left: int) -> None:
+        """Note that ``left`` parts of the path are still to walk: a link whose target is walked to its end leaves
+        :attr:`linked` set, until the walk moves on."""
+        ended = [mark for mark in self.expanding if mark >= left]
+        self.linked = bool(ended)
+        self.expanding = [mark for mark in self.expanding if mark < left]
+
+    def set_up_to_share(self) -> bool:
+        """Whether :attr:`here` is storage set up to be shared (:func:`parent_is_shared`)."""
+        return not self.linked and _set_up_to_share(os.fstat(self.descriptor).st_mode)
 
     def look_up(self, name: str, make: int | None) -> os.stat_result | None:
         """``lstat`` of ``name`` here, made first with ``make`` when it is missing; ``None`` when another process
@@ -119,12 +186,18 @@ class _Walk:
         except FileNotFoundError:
             if make is None:
                 raise FileNotFoundError(errno.ENOENT, "no such directory", str(self.here / name)) from None
-        if not _make_directory(self.descriptor, name, make, self.here / name):
+        if self.expanding:
+            # as mkdir(2) does: nothing is made at the missing target of a link
+            raise FileExistsError(errno.EEXIST, "a link to a directory that does not exist", str(self.here / name))
+        if self.widen is None:
+            self.widen = self.set_up_to_share()
+        if not _make_directory(self.descriptor, name, make, self.here / name, widen=self.widen):
             return None
         return os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
 
-    def follow(self, name: str) -> tuple[str, ...]:
-        """The parts of the link ``name`` here to walk instead of it; an absolute one starts again from ``/``.
+    def follow(self, name: str, left: int) -> tuple[str, ...]:
+        """The parts of the link ``name`` here to walk instead of it, ``left`` parts of the path being left after it;
+        an absolute one starts again from ``/``.
 
         Below a directory others can write, only a link of this account's or root's is followed, which no other account
         can make: it is opened itself (``O_PATH``), so the link whose owner is checked is the one read.
@@ -147,6 +220,7 @@ class _Walk:
         self.links += 1
         if self.links > _MAX_LINKS:
             raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(self.here / name))
+        self.expanding.append(left)
         if not target.is_absolute():
             return target.parts
         self._move(os.open("/", _WAY), Path("/"))
@@ -173,14 +247,15 @@ def read_directory(descriptor: int) -> int:
     return os.open(".", _DIRECTORY, dir_fd=descriptor)
 
 
-def _make_directory(parent: int, name: str, mode: int, made: Path) -> bool:
-    """Make the directory ``name`` (``made``) of ``parent`` with ``mode`` set by ``fchmod``; ``False`` when it was there
-    already."""
+def _make_directory(parent: int, name: str, mode: int, made: Path, *, widen: bool) -> bool:
+    """Make the directory ``name`` (``made``) of ``parent``: with ``mode`` set by ``fchmod`` when ``widen``, else with
+    ``mode`` as the umask masks it; ``False`` when it was there already."""
     try:
         os.mkdir(name, mode, dir_fd=parent)
     except FileExistsError:
         return False
-    _share(os.open(name, _DIRECTORY, dir_fd=parent), mode, made)
+    if widen:
+        _share(os.open(name, _DIRECTORY, dir_fd=parent), mode, made)
     return True
 
 
@@ -201,11 +276,13 @@ def _share(descriptor: int, mode: int, directory: Path) -> None:
 def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
     """Create each missing directory of ``path`` with ``mode`` (default ``2775``) and return ``path``.
 
-    The way is walked as :func:`open_directory` walks it, so a link a member of the group put there is never followed.
-    The mode is set by ``fchmod`` on the new directory, so the umask never decides it; the group comes from a setgid
-    parent. An existing directory is left as it is. A new directory that did not keep the setgid bit (this account is
-    not in its group, which a setgid parent gave it) is logged: what is made below it takes this account's group,
-    which the next account may not share.
+    The way is walked as :func:`open_directory` walks it, so a link a member of the group put there is never followed,
+    and nothing is made at the missing target of a link (``FileExistsError``, as ``mkdir`` refuses it). Below shared
+    storage (:func:`parent_is_shared`, judged once, at the nearest directory that exists) the mode is set by ``fchmod``
+    on each new directory, so the umask never decides it; the group comes from a setgid parent. Anywhere else ``mode``
+    is only asked of ``mkdir``, which masks it with the umask. An existing directory is left as it is. A new shared
+    directory that did not keep the setgid bit (this account is not in its group, which a setgid parent gave it) is
+    logged: what is made below it takes this account's group, which the next account may not share.
     """
     os.close(open_directory(path, make=mode))
     return path
@@ -213,23 +290,31 @@ def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
 
 def share_new_directory(directory: Path, *, mode: int = SHARED_DIR_MODE) -> None:
     """Give a directory this process has just made (``mkdir``, ``mkdtemp``) its shared ``mode``, by ``fchmod`` on the
-    directory reached as :func:`open_directory` reaches it; logged as in :func:`make_shared_dirs` when it does not keep
-    setgid."""
-    way = open_directory(directory)
-    try:
-        _share(read_directory(way), mode, directory)
-    finally:
-        os.close(way)
+    directory opened without following a link, in its parent reached as :func:`open_directory` reaches it, when that
+    parent is shared storage (:func:`parent_is_shared`); logged as in :func:`make_shared_dirs` when it does not keep
+    setgid. Anywhere else it is left as it was made; a link at its name is refused either way."""
+    with _directory_of(directory) as (parent, name, widen):
+        made = os.open(name, _DIRECTORY, dir_fd=parent)
+        if widen:
+            _share(made, mode, directory)
+        else:
+            os.close(made)
 
 
 @contextmanager
-def _directory_of(path: Path) -> Iterator[tuple[int, str]]:
-    """The directory of ``path`` opened by :func:`open_directory`, and the name of ``path`` in it."""
-    descriptor = open_directory(Path(path).parent)
+def _directory_of(path: Path) -> Iterator[tuple[int, str, bool]]:
+    """The directory of ``path`` opened by :func:`open_directory`, the name of ``path`` in it, and whether that
+    directory is shared storage (:func:`parent_is_shared`)."""
+    walk = _walk_to(Path(path).parent, make=None)
     try:
-        yield descriptor, Path(path).name
+        yield walk.descriptor, Path(path).name, walk.set_up_to_share()
     finally:
-        os.close(descriptor)
+        os.close(walk.descriptor)
+
+
+def _final_mode(mode: int, widen: bool) -> int:
+    """``mode`` below shared storage; anywhere else ``mode`` as a plain create under this process's umask leaves it."""
+    return mode if widen else mode & ~current_umask()
 
 
 def _new_temporary(directory: int, name: str, mode: int, flags: int = 0) -> tuple[int, str]:
@@ -255,8 +340,9 @@ def _new_temporary(directory: int, name: str, mode: int, flags: int = 0) -> tupl
 
 
 def create_shared_file(path: Path) -> None:
-    """Create ``path`` empty with mode ``664``; an existing file is replaced by rename, never truncated or chmodded."""
-    with _directory_of(path) as (directory, name):
+    """Create ``path`` empty with mode ``664`` below shared storage (:func:`parent_is_shared`), else as the umask leaves
+    ``664``; an existing file is replaced by rename, never truncated or chmodded."""
+    with _directory_of(path) as (directory, name, widen):
         try:
             descriptor = os.open(
                 name, _NEW_FILE, _OWNER_ONLY, dir_fd=directory
@@ -265,7 +351,7 @@ def create_shared_file(path: Path) -> None:
             descriptor = None
         if descriptor is not None:
             try:
-                os.fchmod(descriptor, SHARED_FILE_MODE)
+                os.fchmod(descriptor, _final_mode(SHARED_FILE_MODE, widen))
             finally:
                 os.close(descriptor)
             return
@@ -273,13 +359,22 @@ def create_shared_file(path: Path) -> None:
 
 
 def write_shared_bytes(
-    path: Path, data: bytes, *, mode: int = SHARED_FILE_MODE, fsync: bool = False, fsync_dir: bool = False
+    path: Path,
+    data: bytes,
+    *,
+    mode: int = SHARED_FILE_MODE,
+    private_mode: int | None = None,
+    fsync: bool = False,
+    fsync_dir: bool = False,
 ) -> None:
-    """Write ``data`` to a new file beside ``path`` with ``mode`` and rename it over ``path``: the file is then this
-    account's, whoever owned the one it replaced. ``fsync`` flushes the file before the rename, ``fsync_dir`` the
-    directory after it."""
-    with _directory_of(path) as (directory, name):
-        descriptor, temporary = _new_temporary(directory, name, mode)
+    """Write ``data`` to a new file beside ``path`` and rename it over ``path``: the file is then this account's,
+    whoever owned the one it replaced. Below shared storage (:func:`parent_is_shared`) the file has ``mode`` whatever
+    the umask; anywhere else ``private_mode`` when given, else ``mode`` masked by the umask. ``fsync`` flushes the file
+    before the rename, ``fsync_dir`` the directory after it."""
+    with _directory_of(path) as (directory, name, widen):
+        if widen or private_mode is None:
+            private_mode = _final_mode(mode, widen)
+        descriptor, temporary = _new_temporary(directory, name, private_mode)
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
@@ -305,10 +400,11 @@ def open_shared_replacement(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
     For a file a process keeps writing while it runs (a log): the file is made beside ``path`` under a new name of its
     own (``O_EXCL``, so never through a link there) and put in place before the first byte, so ``path`` names this
     process's file from the start. What was at ``path`` (another leg's file, a link a member of the group put there)
-    is replaced, never opened. The caller closes the descriptor.
+    is replaced, never opened. ``mode`` is masked by the umask outside shared storage (:func:`parent_is_shared`). The
+    caller closes the descriptor.
     """
-    with _directory_of(path) as (directory, name):
-        descriptor, temporary = _new_temporary(directory, name, mode)
+    with _directory_of(path) as (directory, name, widen):
+        descriptor, temporary = _new_temporary(directory, name, _final_mode(mode, widen))
         try:
             os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
         except BaseException:
@@ -325,12 +421,13 @@ def create_new_shared_file(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
     The file is made under a name of its own and given its mode first, then linked to ``path`` (which fails for any
     name there already, a link included), so ``path`` never names it with another mode, even when the process is
     killed meanwhile. Where the file system makes no links it is made at ``path`` itself (``O_EXCL``, never through a
-    link).
+    link). ``mode`` is masked by the umask outside shared storage (:func:`parent_is_shared`).
 
     Raises:
         FileExistsError: When anything, a link included, has that name already; it is left as it is.
     """
-    with _directory_of(path) as (directory, name):
+    with _directory_of(path) as (directory, name, widen):
+        mode = _final_mode(mode, widen)
         descriptor, temporary = _new_temporary(directory, name, mode, os.O_APPEND)
         try:
             os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
@@ -362,10 +459,10 @@ def _create_in_place(directory: int, name: str, mode: int) -> int:
 
 
 def copy_shared_file(source: Path, path: Path, *, mode: int = SHARED_FILE_MODE) -> None:
-    """Copy ``source`` to a new file beside ``path`` with ``mode`` and rename it over ``path``, as
-    :func:`write_shared_bytes` does, without holding the content in memory."""
-    with _directory_of(path) as (directory, name):
-        descriptor, temporary = _new_temporary(directory, name, mode)
+    """Copy ``source`` to a new file beside ``path`` with ``mode`` (masked by the umask outside shared storage) and
+    rename it over ``path``, as :func:`write_shared_bytes` does, without holding the content in memory."""
+    with _directory_of(path) as (directory, name, widen):
+        descriptor, temporary = _new_temporary(directory, name, _final_mode(mode, widen))
         try:
             with os.fdopen(descriptor, "wb") as handle, open(source, "rb") as content:
                 shutil.copyfileobj(content, handle)
@@ -414,7 +511,8 @@ def writable_problems(dirs: Mapping[str, Path]) -> list[str]:
 
 def setgid_warnings(dirs: Mapping[str, Path]) -> list[str]:
     """One line for each named directory without the setgid bit: what an account creates there takes that account's own
-    group, so the next account of the run may not be able to write it."""
+    group, and the helpers of this module keep it as private as the umask leaves it, so the next account of the run may
+    not be able to write it."""
     warnings = []
     for name, directory in dirs.items():
         try:
@@ -423,8 +521,9 @@ def setgid_warnings(dirs: Mapping[str, Path]) -> list[str]:
             continue  # :func:`writable_problems` names a directory that cannot be read
         if not mode & stat.S_ISGID:
             warnings.append(
-                f"{name} {directory} is not setgid: what is made in it takes the group of the account that makes it, "
-                f"which the next account of the run may not share (chmod g+s {directory})"
+                f"{name} {directory} is not setgid: what is made in it takes the group of the account that makes it and is "
+                f"not opened to the group, so the next account of the run may not be able to write it "
+                f"(chmod g+s {directory})"
             )
     return warnings
 
@@ -454,6 +553,7 @@ __all__ = [
     "read_directory",
     "open_shared_replacement",
     "ownership",
+    "parent_is_shared",
     "share_new_directory",
     "setgid_warnings",
     "writable_problems",

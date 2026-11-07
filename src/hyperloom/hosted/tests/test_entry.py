@@ -123,6 +123,7 @@ def _session_json(run):
 
 # -- a fresh run -------------------------------------------------------------------------------------------------
 def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_group_shared_archive(run, monkeypatch):
+    run.work.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     fake = FakeOptimize(monkeypatch, stop_reason="target_reached")
     assert entry.main(["run"]) == 0
     (argv,) = fake.calls
@@ -746,6 +747,7 @@ def test_the_installer_output_goes_to_a_log_in_the_state_dir(run, monkeypatch):
 
 def test_each_legs_installer_log_is_a_new_file_renamed_over_the_last_never_one_opened_in_place(run, monkeypatch):
     """The previous leg's log may be another account's, and a member of the group may have put a link there."""
+    run.state.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     _recording_installer(run, None)
     _record_optimize(run, monkeypatch)
     entry.main(["run"])
@@ -769,6 +771,7 @@ def test_each_legs_installer_log_is_a_new_file_renamed_over_the_last_never_one_o
 
 
 def test_exit_and_session_json_are_readable_by_the_group_and_replaced_never_rewritten(run, monkeypatch):
+    run.state.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     FakeOptimize(monkeypatch)
     entry.main(["run"])
     for name in (entry.EXIT_FILE, entry.SESSION_FILE):
