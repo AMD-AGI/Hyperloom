@@ -57,7 +57,7 @@ MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
 
 # The canonical phases below are Magpie's, not ours: Hyperloom composes only
 # ``envs.CONC``, and the shape of the round that answers it belongs to Magpie at
-# the ref native AgentX pins it to (docs/components/magpie.md). Every CANON_
+# the ref native AgentX pins it to (``MAGPIE_REF`` in install.sh). Every CANON_
 # number here describes that pin and has to be re-measured when it moves.
 
 # Canonical replay warms up this many requests per lane, plus one probe, before
