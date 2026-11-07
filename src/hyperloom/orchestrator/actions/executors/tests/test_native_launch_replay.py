@@ -89,7 +89,7 @@ def native_session(tmp_path, monkeypatch):
         state = SharedState(
             framework="sglang",
             benchmark_mode="agentx",
-            agentx_backend="magpie",
+            agentx_backend="inferencex",
             baseline_config_path=str(baseline),
             baseline_tput=100,
             baseline_perf={
@@ -140,7 +140,6 @@ def _stub_gpu(monkeypatch, session, *, effective):
                 duration_seconds=3600,
                 completed_requests=100,
                 request_error_rate=0,
-                benchmark_backend="magpie_agentx",
                 valid_measurement=True,
                 diagnostic_only=False,
                 workload_identity="fixed-workload",
@@ -245,7 +244,7 @@ async def test_accepted_appended_only_ablation_survives_integrate_patch(native_s
 
 
 @pytest.mark.parametrize("option", ["--unrecognized-server-option", "--model-path", "--port"])
-def test_unknown_and_protected_removals_reach_magpie_validation(native_session, tmp_path, option):
+def test_unknown_and_protected_removals_reach_the_launch_validation(native_session, tmp_path, option):
     session = native_session(recipe=_PREFIX + ["--port", "30000"])
     intermediate = prepare_grid_benchmark_config(session.config, tmp_path / "explore")
     variant = _grid_runner._build_variant_yaml(
@@ -317,7 +316,7 @@ _PROTECTED = ("--model-path", "--tp", "--tensor-parallel-size", "--port", "--hos
 async def test_a_native_replace_removal_keep_persists_only_what_hyperloom_appends(
     native_session, tmp_path, monkeypatch, replayed
 ):
-    """Magpie refuses a protected option in append_args, so a KEEP must persist the overlay, not Magpie's argv."""
+    """A protected option is refused in append_args, so a KEEP must persist the overlay, not the round's argv."""
     from hyperloom.orchestrator.loop._integrate_promotion import _integrate_keep_variant
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 

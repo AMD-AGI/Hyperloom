@@ -625,8 +625,8 @@ def test_build_variant_yaml_keeps_a_value_the_replacing_variant_re_adds(tmp_path
     assert "--cuda-graph-max-bs 8" not in args
 
 
-def test_agentx_removals_reach_magpie_as_bare_names_without_losing_the_re_added_value():
-    """Magpie takes one bare option name per removal; only that boundary drops the value a spec is scoped to."""
+def test_agentx_removals_reach_the_launch_as_bare_names_without_losing_the_re_added_value():
+    """An AgentX launch takes one bare option name per removal; only that boundary drops the value a spec is scoped to."""
     from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges, apply_launch_changes
 
     bench = {"framework": "sglang", "agentx": {"enabled": True}}
@@ -640,7 +640,7 @@ def test_agentx_removals_reach_magpie_as_bare_names_without_losing_the_re_added_
     )
 
     launch = bench["agentx"]["launch_overrides"]
-    # Magpie matches these against the recipe before our append_args, so the re-added value survives the removal.
+    # The launch matches these against the recipe before our append_args, so the re-added value survives the removal.
     assert launch["remove_args"] == ["--cuda-graph-max-bs", "--disable-cuda-graph", "--enable-dp-attention"]
     argv = launch["append_args"]
     assert argv[argv.index("--cuda-graph-max-bs") + 1] == "16"
@@ -1015,7 +1015,7 @@ class TestServerArgTokenizerOnTheSyntheticPath:
         assert out == "--no-enable-prefix-caching --max-num-seqs 512"
 
     def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
-        """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
+        """EXTRA_*_ARGS travel unquoted, so a wrapper reaches argv literally."""
         self._off(monkeypatch)
         out = compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
         assert out == "--quantization fp8 --max-num-seqs 512"

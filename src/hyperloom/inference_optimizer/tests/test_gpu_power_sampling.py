@@ -290,24 +290,24 @@ def test_reader_ignores_an_artifact_from_an_earlier_round(tmp_path):
     assert read_measured_gpu_power(tmp_path, subprocess_started_unix=2000.0) == (False, None)
 
 
-_MAGPIE_REPORT = {"gpu_monitor": {"sample_count": 157, "power_watts": {"min": 225.0, "max": 790.0, "avg": 313.7}}}
+_V1_REPORT = {"gpu_monitor": {"sample_count": 157, "power_watts": {"min": 225.0, "max": 790.0, "avg": 313.7}}}
 
 
-def test_measurement_prefers_the_measured_phase_over_magpies_whole_process_reading(tmp_path):
+def test_measurement_prefers_the_measured_phase_over_a_v1_whole_process_reading(tmp_path):
     _write_artifact(tmp_path, avg=780.0, started_unix=time.time())
-    measurement = extract_benchmark_measurement(_MAGPIE_REPORT, workspace=tmp_path)
+    measurement = extract_benchmark_measurement(_V1_REPORT, workspace=tmp_path)
     assert measurement["gpu_power_avg_w"] == 780.0
 
 
 def test_measurement_keeps_a_sampled_but_unmeasured_round_unmeasured(tmp_path):
     _write_artifact(tmp_path, avg=None, started_unix=time.time())
-    assert extract_benchmark_measurement(_MAGPIE_REPORT, workspace=tmp_path)["gpu_power_avg_w"] is None
+    assert extract_benchmark_measurement(_V1_REPORT, workspace=tmp_path)["gpu_power_avg_w"] is None
 
 
 def test_measurement_falls_back_to_the_report_when_no_recorder_ran(tmp_path):
-    measurement = extract_benchmark_measurement(_MAGPIE_REPORT, workspace=tmp_path)
+    measurement = extract_benchmark_measurement(_V1_REPORT, workspace=tmp_path)
     assert measurement["gpu_power_avg_w"] == 313.7
-    assert measurement["gpu_power_by_gpu_w"] is None, "Magpie's host-wide mean cannot be split per card"
+    assert measurement["gpu_power_by_gpu_w"] is None, "a v1 host-wide mean cannot be split per card"
 
 
 def test_a_sampled_round_with_no_serving_card_has_no_by_gpu_reading(tmp_path):

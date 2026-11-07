@@ -23,7 +23,7 @@ from inference_suite.argv import (
 
 
 class TestCompactJsonServerArgs:
-    """JSON-valued flags must be space-free to survive Magpie's unquoted ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config explore variants always crash the server at boot)."""
+    """JSON-valued flags must be space-free to survive the unquoted ``EXTRA_VLLM_ARGS`` transport (otherwise spec-decode / compilation-config explore variants always crash the server at boot)."""
 
     def test_compilation_config_separator_space_removed(self):
         out = compact_json_server_args('--compilation-config {"full_cuda_graph": true}')
@@ -37,7 +37,7 @@ class TestCompactJsonServerArgs:
         assert len(out.split()) == 2
 
     def test_compact_json_server_args_internal_space_unsupported(self):
-        # Spaces inside JSON string values are not collapsed, so the value is not a single shell word under Magpie's
+        # Spaces inside JSON string values are not collapsed, so the value is not a single shell word under an
         # unquoted expansion; this flag shape is unsupported.
         out = compact_json_server_args('--speculative-config {"model": "draft model name"}')
         # Value is preserved verbatim (separator space after ':' removed only).
@@ -156,7 +156,7 @@ class TestRemoveServerArgsPreservesJson:
         assert blob["cudagraph_capture_sizes"] == [1, 2, 3]
 
     def test_shell_quoted_plain_operand_loses_its_wrappers(self):
-        """Magpie expands ``EXTRA_*_ARGS`` unquoted, so wrappers must not persist."""
+        """``EXTRA_*_ARGS`` travel unquoted, so wrappers must not persist."""
         out = remove_server_args("--tool-call-parser 'kimi_k3' --port 8888", ["--port"])
         assert out == "--tool-call-parser kimi_k3"
 

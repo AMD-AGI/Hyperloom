@@ -81,11 +81,9 @@ def _isolate_framework_trees(monkeypatch) -> None:
 class NoLaunchBackendInstalled(BaseException):
     """A test launched a subprocess before installing a launch backend.
 
-    A ``BaseException`` on purpose. Several production launch sites sit inside
-    a bare ``except Exception`` -- the Magpie interpreter probe answers "this
-    interpreter cannot import Magpie" that way -- so an ordinary exception here
-    would be swallowed and the test would carry on against a wrong answer
-    instead of stopping.
+    A ``BaseException`` on purpose. A production launch site that sits inside a
+    bare ``except Exception`` would swallow an ordinary exception here, and the
+    test would carry on against a wrong answer instead of stopping.
     """
 
 

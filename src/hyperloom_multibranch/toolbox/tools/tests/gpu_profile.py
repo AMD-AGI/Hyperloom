@@ -29,7 +29,6 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCEX_PATH", INFERENCEX)
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("TP", "1")
     monkeypatch.setenv("MODEL_PATH", MODEL)

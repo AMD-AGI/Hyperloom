@@ -531,7 +531,6 @@ async def test_stack_validation_preserves_actual_measurement(
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
         "completed_requests": 64,
-        "benchmark_backend": "magpie_agentx" if agentx else "synthetic",
         "valid_measurement": not agentx or submission_valid is True,
         "diagnostic_only": False,
         "workload_identity": "fixed-workload",

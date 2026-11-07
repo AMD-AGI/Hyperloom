@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reading an inference_suite run_dir back: the measurement, the GPU artifact beside it, and the Magpie path unchanged."""
+"""Reading an inference_suite run_dir back: the measurement, the GPU artifact beside it, and an archived v1 report unchanged."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ async def test_the_grid_reads_a_finished_run_dir_once_and_writes_its_gpu_artifac
     assert (run_dir.parent / GPU_ARTIFACT_NAME).is_file()
 
 
-def test_a_magpie_report_maps_field_by_field_as_before(tmp_path: Path) -> None:
+def test_a_v1_report_maps_field_by_field_as_before(tmp_path: Path) -> None:
     report = {
         "success": True,
         "framework": "sglang",

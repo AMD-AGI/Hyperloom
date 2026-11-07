@@ -568,8 +568,3 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("sglang", rec, {"quality_ref_exempt": True}), result)
     assert rec.stop_reason == ""
     assert BASELINE_EVAL_FAILED_KEY not in result
-
-
-# --- regression: the --concurrent-requests flag gate (2026-07-27 outage) ---- Magpie re-copies its own generic *.sh
-# scripts into <inferencex>/benchmarks/ on every run, and the InferenceX checkout is re-mirrored from scratch on every
-# run, so an install-time-only patch does not survive.

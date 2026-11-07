@@ -117,7 +117,7 @@ def test_a_planned_test_answers_on_its_own_server_after_its_measured_round_and_b
     outcome = _run(tmp_path, cache)
 
     assert _names(grid) == ["test"], "no second boot"
-    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "Magpie leaves the server up for the check"
+    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "the round leaves the server up for the check"
     assert (grid.servers.started, grid.servers.teardowns) == (["test"], 1), "one server, torn down after the answers"
     found = read_outputs(tmp_path / "out")
     assert [(e.index, e.status, e.boot_seconds) for e in found.processes] == [(0, OK, 0.0)]

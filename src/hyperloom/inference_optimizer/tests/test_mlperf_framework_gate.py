@@ -46,7 +46,7 @@ def test_an_unregistered_framework_is_refused():
 
 
 def test_an_absent_framework_defers():
-    """Magpie resolves the server script; an unset FRAMEWORK is not this gate's to refuse."""
+    """The round resolves the server; an unset FRAMEWORK is not this gate's to refuse."""
     _check_mlperf_framework({})
     _check_mlperf_framework({"FRAMEWORK": ""})
 

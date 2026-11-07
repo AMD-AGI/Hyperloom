@@ -42,7 +42,7 @@ def test_parse_eval_results_finds_lm_eval_output_under_root(tmp_path):
 
 
 def test_parse_eval_results_misses_when_root_is_benchmark_subdir(tmp_path):
-    # lm-eval writes outside the Magpie ``benchmark_*`` workspace.
+    # lm-eval writes outside the ``benchmark_*`` workspace.
     _write_lm_eval_output(tmp_path)
     bench_ws = tmp_path / "benchmark_sglang_20260715_010101"
     bench_ws.mkdir(parents=True)

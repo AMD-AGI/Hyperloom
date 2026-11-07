@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Preflight's installs: Magpie only for a serving framework, the Ray CLI it validates and the serving slot its Ray head
-carries."""
+"""Preflight's installs: the Ray CLI it validates and the serving slot its Ray head carries."""
 
 from __future__ import annotations
 

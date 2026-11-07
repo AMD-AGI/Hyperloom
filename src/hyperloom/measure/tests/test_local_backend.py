@@ -489,7 +489,7 @@ def test_a_measured_round_that_fails_ends_a_graded_test_before_its_evaluation(gr
 
 
 def test_a_round_whose_client_could_not_fetch_its_dependencies_is_an_infrastructure_failure(grid, server, tmp_path):
-    """No server started: Magpie's git fetch of the replay client stalled, which says nothing of the candidate."""
+    """No server started: the git fetch of the replay client stalled, which says nothing of the candidate."""
     stall = (
         "subprocess.TimeoutExpired: Command ['git', '-C', '/w/InferenceX', 'submodule', 'update', '--init', "
         "'--recursive', '--', 'inferencex-e2e/utils/aiperf'] timed out after 300 seconds"
@@ -756,13 +756,12 @@ def _lifecycle(call: dict[str, Any]) -> dict[str, Any] | None:
     return call["launch"].server_lifecycle
 
 
-#: What a boot round adds to the point on Magpie: no evaluation, and one request of the client round Magpie runs after
-#: its server phase whatever the phase says. Not the phase itself: Magpie sets that, and a variable it does not know
-#: would make its reuse check refuse every round that measures (``test_local_reuse_identity``).
+#: What a boot round adds to the point: no evaluation, and one request of the client round that runs after its server
+#: phase. Not the phase itself, which no round names (``test_local_sweep_rounds``).
 BOOT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 
 
-def _envs_handed_to_magpie(grid: _Grid, tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
+def _envs_handed_to_the_round(grid: _Grid, tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
     """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and the recipe's
     base variables over the round's shape the process environment held while the call ran."""
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
@@ -834,15 +833,15 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
     assert [Path(p).read_text() for p in call.points] == points, "the points are the ones the call was accepted on"
     for index, boot in enumerate(boots):
         level = (8, 4)[index]
-        envs = _envs_handed_to_magpie(grid, tmp_path, boot)
+        envs = _envs_handed_to_the_round(grid, tmp_path, boot)
         assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1"), f"the boot at {level}"
         assert "HYPERLOOM_RUN_PHASE" not in envs and envs["CONC"] == level
         assert envs["NUM_WARMUPS"] == min(level, 8), "a variable outside the reuse check is the point's own"
     for level, round_ in zip((4, 2, 4), measured, strict=True):
-        envs = _envs_handed_to_magpie(grid, tmp_path, round_)
+        envs = _envs_handed_to_the_round(grid, tmp_path, round_)
         assert (envs["NUM_PROMPTS"], envs["NUM_WARMUPS"], envs["CONC"]) == (level * 10, min(level, 8), level)
         assert "HYPERLOOM_RUN_PHASE" not in envs
-    assert [_envs_handed_to_magpie(grid, tmp_path, c)["RUN_EVAL"] for c in measured] == ["false", "false", "true"], (
+    assert [_envs_handed_to_the_round(grid, tmp_path, c)["RUN_EVAL"] for c in measured] == ["false", "false", "true"], (
         "no bench evaluates; one evaluation, from the level the server booted on, after the last bench"
     )
     assert [(r.point, r.phase) for r in outcome.rounds] == [(1, "measure"), (2, "measure"), (1, "accuracy")]
@@ -1185,8 +1184,8 @@ def _agentx_point(tmp_path, monkeypatch, **launch_envs: str) -> Path:
     return materialize_benchmark_config(source, tmp_path / "agentx", launch=LaunchLayer(extra_envs=envs))
 
 
-def _magpie_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
-    """What ``run_grid`` hands Magpie for the point, and what the server it launches then imports from ``a.f()``."""
+def _agentx_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
+    """What ``run_grid`` hands the round for the point, and what the server it launches then imports from ``a.f()``."""
     import subprocess
 
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
@@ -1210,31 +1209,31 @@ def _magpie_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
     return launched
 
 
-def test_a_patched_agentx_test_hands_the_rebuilt_framework_to_the_server_magpie_launches(
+def test_a_patched_agentx_test_hands_the_rebuilt_framework_to_the_server_the_round_launches(
     monkeypatch, tmp_path, installed_framework
 ):
     """``benchmark.envs`` never reaches an AgentX server: its environment and interpreter are the launch's."""
     python, package = installed_framework
-    launched = _magpie_launch(monkeypatch, tmp_path, python)
+    launched = _agentx_launch(monkeypatch, tmp_path, python)
     point = _agentx_point(tmp_path, monkeypatch, HYPERLOOM_FRAMEWORK_PYTHON=str(python))
 
     _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
 
     launch = launched["launch"]
-    assert launched["value"] == "10"  # the interpreter Magpie launches imported the patched file, not the image's
+    assert launched["value"] == "10"  # the interpreter the round launches imported the patched file, not the image's
     assert launch["executable"] == str(python) and "HYPERLOOM_FRAMEWORK_PYTHON" not in launch["env"]
     assert launch["env"]["PYTHONPATH"].split(":")[0] in "".join(launch["source_files"]), "rebuilt files are evidence"
     assert (package / "srt" / "a.py").read_text() == OLD_SOURCE
     assert "PYTHONPATH" not in yaml.safe_load(point.read_text())["benchmark"]["envs"]
 
 
-def test_a_patched_agentx_test_that_names_no_interpreter_is_rebuilt_for_the_python3_magpie_launches(
+def test_a_patched_agentx_test_that_names_no_interpreter_is_rebuilt_for_the_python3_the_round_launches(
     monkeypatch, tmp_path, installed_framework
 ):
-    """Magpie starts the server with ``python3`` unless told otherwise; the farm is built and checked against that."""
+    """The round starts the server with ``python3`` unless told otherwise; the farm is built and checked against that."""
     python, _ = installed_framework
     monkeypatch.setenv("PATH", f"{python.parent}{os.pathsep}{os.environ['PATH']}")
-    launched = _magpie_launch(monkeypatch, tmp_path, python)
+    launched = _agentx_launch(monkeypatch, tmp_path, python)
     point = _agentx_point(tmp_path, monkeypatch)
 
     _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
@@ -1533,9 +1532,9 @@ class _Machine:
     """One machine's ports: ``run_grid`` as it is for a round whose server is up, listening on the port the round's own
     config names in ``benchmark.envs.PORT`` (the default when it names none).
 
-    The InferenceX script reads it from the environment it is run with; Magpie's AgentX recipe reads it into the
-    ``--port`` of the server's argv (``agentx_recipe._port``, at the pinned ref) and refuses ``PORT`` in
-    ``launch_overrides.env`` as a protocol variable, so the AgentX server's port can come from nowhere else.
+    The InferenceX script reads it from the environment it is run with; an AgentX recipe reads it into the ``--port``
+    of the server's argv and ``PORT`` is not one of ``launch_overrides.env``, so the AgentX server's port can come from
+    nowhere else.
 
     The listeners stay open to the end of the test, as the servers of tests running at the same time do; a round whose
     port is taken fails the way the real one did: its server dies.
@@ -1605,7 +1604,7 @@ def test_two_profile_tests_on_one_machine_launch_their_servers_on_ports_of_their
     assert [first.returncode, second.returncode] == [0, 0], "the second server found its port taken"
     assert len(set(machine.ports)) == 2 and REUSE_PORT_DEFAULT not in machine.ports
     server_envs = [((b.get("agentx") or {}).get("launch_overrides") or {}).get("env") or {} for b in machine.launches]
-    assert all("PORT" not in env for env in server_envs), "Magpie refuses PORT among an AgentX server's variables"
+    assert all("PORT" not in env for env in server_envs), "PORT is never among an AgentX server's variables"
     assert point.read_text() == shared, "the point is shared by every test that runs it: it is not written to"
 
 

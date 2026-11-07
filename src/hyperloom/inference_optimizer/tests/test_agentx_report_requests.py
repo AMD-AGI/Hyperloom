@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The request counts an AgentX round records from Magpie's report: warmup requests are neither asked nor failed."""
+"""The request counts an AgentX round records from an archived v1 AgentX report: warmup requests are neither asked nor failed."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _report(requests: dict) -> dict:
 
 
 def test_warmup_requests_are_not_counted_as_requested() -> None:
-    # Magpie's report of a run with 354 warmup records, 3953 profiled and no error.
+    # A v1 report of a run with 354 warmup records, 3953 profiled and no error.
     requests = {"total": 4307, "records_total": 4307, "profiled_total": 3953, "successful": 3953, "errors": 0}
     measurement = agentx_measurement(_report({**requests, "warmup_dropped": 354, "error_rate": 0.0}))
 

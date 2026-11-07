@@ -306,14 +306,7 @@ class TestFailedStepClasses:
         assert classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_CANDIDATE
 
 
-class TestNoMagpieClassOnTheSuitePath:
-    def test_no_failed_step_is_recorded_under_a_magpie_class(self):
-        from inference_suite.contracts import FailedStep
-
-        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
-
-        assert not [step for step in FailedStep if "magpie" in failed_step_error_class(step)]
-
+class TestTheSuitePathClasses:
     def test_a_client_or_timeout_step_is_its_own_class(self):
         from inference_suite.contracts import FailedStep
 

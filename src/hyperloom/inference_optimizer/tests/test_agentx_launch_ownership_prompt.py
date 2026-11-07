@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX prompts no longer send agents to Magpie's launch protocol: inference_suite launches every round."""
+"""AgentX prompts name no retired runner: inference_suite launches every round."""
 
 from __future__ import annotations
 
@@ -19,23 +19,22 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.specialists.domains import get_domain
+from hyperloom.inference_optimizer.tests.test_prompt_surfaces_runner import _RETIRED
 
-_MAGPIE_MODULE = "Magpie.modes.benchmark.agentx_launch"
 
-
-def test_the_orchestration_prompt_names_no_magpie_launch_module():
+def test_the_agentx_orchestration_prompt_names_no_retired_runner():
     prompt = build_orchestration_prompt(
         action_registry=ACTION_CATALOGUE,
         enabled_actions=default_enabled_actions(no_kernel=False),
         session=SessionContext(benchmark_mode="agentx", agentx_backend="inferencex"),
     )
-    assert _MAGPIE_MODULE not in prompt
+    assert _RETIRED.findall(prompt) == []
 
 
 @pytest.mark.parametrize("domain", ["research_scout_specialist", "serving_specialist"])
-def test_no_specialist_prompt_names_a_magpie_launch_module(domain):
+def test_no_agentx_specialist_prompt_names_a_retired_runner(domain):
     inp = SpecialistPromptInputs(domain=get_domain(domain), benchmark_mode="agentx", agentx_backend="inferencex")
-    assert _MAGPIE_MODULE not in "\n".join(build_specialist_prompts(inp))
+    assert _RETIRED.findall("\n".join(build_specialist_prompts(inp))) == []
 
 
 def test_the_speculative_decoding_reference_points_at_the_golden_layer_inference_suite_enforces():
@@ -45,4 +44,4 @@ def test_the_speculative_decoding_reference_points_at_the_golden_layer_inference
     for name in golden.__all__:
         if name.startswith("GOLDEN_OWNED_"):
             assert f"`{name}`" in doc
-    assert "Magpie" not in doc
+    assert _RETIRED.findall(doc) == []

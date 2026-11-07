@@ -80,10 +80,9 @@ def _v1(**report: object) -> dict[str, Any]:
     return agentx_measurement({"scenario": "agentx", **flags, "agentx_metrics": metrics})
 
 
-@pytest.mark.parametrize("backend", ["magpie", "inferencex"])
-def test_a_v1_archive_is_judged_by_its_own_reader_on_the_old_magpie_session_too(backend: str) -> None:
+def test_a_v1_archive_is_judged_by_its_own_reader() -> None:
     valid = _v1()
-    state = _state(valid, agentx_backend=backend)
+    state = _state(valid, agentx_backend="inferencex")
     assert constraint_veto_reason(valid, state) == ""
     assert is_valid_measurement(valid) is True
     unpublishable = _v1(publishable=False)
