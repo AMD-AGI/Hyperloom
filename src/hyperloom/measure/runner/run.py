@@ -90,12 +90,13 @@ from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
 from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR
 from hyperloom.measure.runner.tools import ToolError, ensure_inference_suite, ensure_inferencex, ensure_magpie
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
-from hyperloom.measure.spec import SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
+from hyperloom.measure.spec import SPEC_SCHEMA, SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
-from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, harvest_leaked_artifacts
+from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, backend_reason, harvest_leaked_artifacts
 from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_image_own_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
+from inference_suite.contracts import ConfigError
 
 __all__ = ["run"]
 
@@ -198,6 +199,22 @@ def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
             raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} unreadable: {exc}") from exc
         if actual != wanted:
             raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} differs from the recorded hash")
+
+
+def _check_runs_on_inference_suite(spec: MeasurementSpec) -> None:
+    """A v2 sheet's points all run on inference_suite: this runner stages no Magpie for one, so a point the suite
+    declines is refused here rather than handed to the benchmark backend."""
+    if spec.schema == SPEC_SCHEMA_V1:
+        return
+    for index, point in enumerate(spec.config):
+        try:
+            reason = backend_reason(yaml.safe_load(point.yaml) or {})
+        except ConfigError as exc:
+            reason = str(exc)
+        if reason is not None:
+            raise RunnerFailure(
+                _SPEC_REJECTED, f"point {index}: {reason}; a {SPEC_SCHEMA} sheet runs only on inference_suite"
+            )
 
 
 def _check_runtime(spec: MeasurementSpec) -> None:
@@ -635,6 +652,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     spec = _parse(raw)
     visible = _visible(ctx.environ)
     _check_model(spec.config[0].yaml, dict(spec.model_hashes))
+    _check_runs_on_inference_suite(spec)
     _check_runtime(spec)
     facts = _preflight(ctx, spec, visible)
     before = hardware.ecc_counts(visible)
