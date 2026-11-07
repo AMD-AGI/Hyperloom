@@ -48,8 +48,6 @@ from ._subprocess_kill import (
     AGENTX_EARLY_STOP_RETURNCODE,
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
-    EVAL_PROBE_UNPATCHABLE_RETURNCODE,
-    DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     resolve_benchmark_timeouts,
@@ -1097,32 +1095,6 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
     return _BenchmarkPass(proc, started_unix, workspaces_before, tuple(round_survivors))
 
 
-def _abort_on_detokenizer_stall(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
-    runtime_sec = round(max(0.0, time.time() - round_.started_unix), 2)
-    destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
-    # server.log is itself one of the salvaged artifacts, so the cause of death only reaches the slot here.
-    harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=round_.started_unix)
-    server_log = at.path / "server.log"
-    log.warning(
-        "grid_runner: variant %s aborted: detokenizer_stall (server ready but log went silent) after %.1fs",
-        _variant_tag(run, at),
-        runtime_sec,
-    )
-    _abort_variant(
-        at,
-        _VariantFailure(
-            failure_evidence.DETOKENIZER_STALL,
-            "server reported ready but emitted no log output (hung engine / detokenizer stall); "
-            "reaped by the detokenizer-stall watchdog",
-            "detokenizer_stall: server ready but log went silent",
-        ),
-        returncode=round_.proc.returncode,
-        runtime_sec=runtime_sec,
-        server_log_path=_existing_log_path(server_log),
-        nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in harvested],
-    )
-
-
 def _abort_on_early_stop(at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
     # A verdict rather than a failure, so the grid goes on to the next variant.
     ruling = read_checkpoint(at.path) or {}
@@ -1138,21 +1110,6 @@ def _abort_on_early_stop(at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
 
 def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> None:
     returncode = round_.proc.returncode
-    if returncode == EVAL_PROBE_UNPATCHABLE_RETURNCODE:
-        # Eval bounds could not be installed for a variant that runs eval, so nothing launched.
-        log.error(
-            "grid_runner: variant %s aborted: eval_probe_unpatchable: %s",
-            _variant_tag(run, at),
-            round_.proc.stderr,
-        )
-        _abort_variant(
-            at,
-            _VariantFailure("eval_probe_unpatchable", round_.proc.stderr),
-            returncode=returncode,
-            runtime_sec=round(max(0.0, time.time() - round_.started_unix), 2),
-        )
-    if returncode == DETOKENIZER_STALL_RETURNCODE:
-        _abort_on_detokenizer_stall(run, at, round_)
     if returncode == AGENTX_EARLY_STOP_RETURNCODE:
         _abort_on_early_stop(at, round_)
     stopped = stopped_by_the_run(returncode)
