@@ -20,9 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.contracts.recipe import LaunchConfig
 from hyperloom.inference_optimizer.agentx.report import agentx_measurement, native_launch_evidence
 from hyperloom.orchestrator.actions.executors import (
@@ -102,7 +100,7 @@ def baseline_prefix_cache_refusal(point: Path, round_dir: Path) -> str:
     checks. Any other point's launch is read from its own server args.
     """
     log = _server_log(round_dir)
-    if is_magpie_agentx(yaml.safe_load(point.read_text(encoding="utf-8"))["benchmark"]):
+    if read_benchmark_point(point).agentx:
         measurement = agentx_measurement(_own_report(round_dir))
         if not measurement["valid_measurement"]:
             return ""

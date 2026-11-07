@@ -42,7 +42,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.measure.farm import prepend_pythonpath, server_environment
+from hyperloom.measure.farm import launch_environment, prepend_pythonpath, server_environment
 from hyperloom.measure.framework.base import (
     FRAMEWORK_BASE_FILE,
     SESSION_SHA_ENV,
@@ -197,11 +197,12 @@ class _Redirect:
     def point(self, path: Path, index: int, unset: frozenset[str]) -> Path:
         """``path``, or a copy of it whose own ``AITER_CONFIG_*`` values name private tables."""
         config = yaml.safe_load(Path(path).read_text(encoding=_UTF8)) or {}
-        envs = server_environment(config)
-        named = [name for name in envs if str(name).startswith(AITER_VARIABLE_PREFIX)]
-        hook = self.hook if "PYTHONPATH" in envs else None
+        declared = server_environment(config)
+        named = [name for name in declared if str(name).startswith(AITER_VARIABLE_PREFIX)]
+        hook = self.hook if "PYTHONPATH" in declared else None
         if not named and hook is None:
             return path
+        envs = launch_environment(config)
         for name in named:
             given = "" if name in unset else str(envs[name]).strip()
             if given:
