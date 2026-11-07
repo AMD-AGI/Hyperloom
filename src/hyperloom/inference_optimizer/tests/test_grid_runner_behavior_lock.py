@@ -12,6 +12,7 @@ import json
 import signal
 import subprocess
 import sys
+import uuid
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
@@ -19,8 +20,13 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
+from hyperloom_common.proctree import proc_identity
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._mlperf_server import MLPERF_SERVER_DIR, SERVER_PID_DIR
+from inference_suite.contracts.layout import SERVER_PID
+from inference_suite.frameworks import Framework
+from inference_suite.runtime import server as suite_server
+from inference_suite.runtime.process import Reaped, ServerPidfile
 from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 from hyperloom.orchestrator.actions.executors import (
     _multi_node_server_lifecycle as mnsl,
@@ -612,10 +618,20 @@ def client_servers():
         server.wait(timeout=5)
 
 
+def _record_suite_server(slot: Path, server: subprocess.Popen) -> None:
+    """Record ``server`` where the round's inference_suite boot round records the server it leaves running."""
+    pid_dir = slot / MLPERF_SERVER_DIR / SERVER_PID_DIR
+    pid_dir.mkdir(parents=True, exist_ok=True)
+    identity = proc_identity(server.pid)
+    assert identity is not None
+    record = ServerPidfile(server.pid, server.pid, identity[1], uuid.uuid4().hex, 30000, Framework.SGLANG, "sha256:x")
+    record.write(pid_dir / SERVER_PID)
+
+
 class TestRoundServerTeardown:
-    """An AgentX client boots its server setsid'd, outside the round's process tree, so reaping the round never reaches
-    it. The variant's teardown stops it however the round ended, and the stop marker only calls the round cleaned up
-    once it is gone.
+    """An MLPerf AgentX round's server is inference_suite's, booted outside the round's process tree, so reaping the round
+    never reaches it. The variant's teardown stops it however the round ended, and the stop marker only calls the round
+    cleaned up once it is gone.
     """
 
     def _run(self, client_servers, base, out, *, rc, measured=False):
@@ -630,7 +646,7 @@ class TestRoundServerTeardown:
                 start_new_session=True,
             )
             client_servers.append(server)
-            (ws / AGENTX_SERVER_PIDFILE).write_text(f"{server.pid}\n", encoding="utf-8")
+            _record_suite_server(slot, server)
             return subprocess.CompletedProcess(cmd, rc, "", "")
 
         with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_round):
@@ -661,11 +677,11 @@ class TestRoundServerTeardown:
         assert (result.status, result.error_class) == ("skipped", stop.error_class)
         assert not [w for w in result.nonfatal_warnings if w.startswith("server_survived_teardown:")]
         assert self._abort_marker(out)["error"] == f"{stop.interrupted}; tree reaped"
-        assert not list(out.rglob(AGENTX_SERVER_PIDFILE))
+        assert not list(out.rglob(SERVER_PID))
 
     def test_a_server_that_outlives_sigkill_is_not_reported_reaped(self, tmp_path, monkeypatch, client_servers):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        monkeypatch.setattr(sl, "_terminate_group", lambda _pgid: False)
+        monkeypatch.setattr(suite_server, "reap", lambda roots, _mark: Reaped(tuple(roots), tuple(roots)))
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
         out = tmp_path / "out"
@@ -712,7 +728,7 @@ class TestRoundServerTeardown:
                 start_new_session=True,
             )
             client_servers.append(server)
-            (ws / AGENTX_SERVER_PIDFILE).write_text(f"{server.pid}\n", encoding="utf-8")
+            _record_suite_server(slot, server)
             raise subprocess.TimeoutExpired(cmd, 7800)
 
         with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_round):

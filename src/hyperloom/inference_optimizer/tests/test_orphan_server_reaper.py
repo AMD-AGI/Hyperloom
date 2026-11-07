@@ -10,9 +10,15 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
+
+from hyperloom_common.proctree import proc_identity
+from inference_suite.contracts.layout import SERVER_PID
+from inference_suite.frameworks import Framework
+from inference_suite.runtime.process import ServerPidfile
 
 from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 from hyperloom.orchestrator.actions.executors._server_lifecycle import (
@@ -302,11 +308,17 @@ def test_reap_reports_a_group_that_outlives_sigkill_and_keeps_its_pidfile(tmp_pa
         proc.wait(timeout=5)
 
 
-def test_stop_agentx_servers_leaves_other_pidfiles_alone(tmp_path):
+def test_stop_agentx_servers_stops_the_suite_server_and_leaves_other_pidfiles_alone(tmp_path):
     """A lifecycle server kept warm for the next round is recorded under its own name and must keep running."""
     client_booted = _spawn_marker_process("sglang.launch_server")
     warm = _spawn_marker_process("vllm.entrypoints.openai.api_server")
-    client_pidfile = _write_pidfile(tmp_path, "agentx_server", client_booted.pid)
+    pid_dir = tmp_path / "runs" / "explore" / "v0" / "mlperf_server" / "pid"
+    pid_dir.mkdir(parents=True)
+    client_pidfile = pid_dir / SERVER_PID
+    start_time = proc_identity(client_booted.pid)[1]
+    ServerPidfile(
+        client_booted.pid, client_booted.pid, start_time, uuid.uuid4().hex, 30000, Framework.SGLANG, "sha256:x"
+    ).write(client_pidfile)
     warm_pidfile = _write_pidfile(tmp_path, "vllm_8888", warm.pid)
     try:
         assert stop_agentx_servers(tmp_path) == []
