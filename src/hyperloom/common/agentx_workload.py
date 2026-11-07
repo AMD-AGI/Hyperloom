@@ -86,15 +86,6 @@ CANON_PROFILING_WINDOW_SEC = 3640.0
 CANON_FINALISATION_SEC = 300.0
 
 
-def agentx_profiling_requests(conc: int) -> int:
-    """Requests an inference_suite AgentX replay profiles at ``conc``: the canonical window's worth for each lane.
-
-    inference_suite replays a request count where canonical mode replayed a fixed window, so each lane is given as many
-    requests as fill that window at the measured cost of one.
-    """
-    return conc * int(CANON_PROFILING_WINDOW_SEC // CANON_SECONDS_PER_WARMUP_REQUEST)
-
-
 def agentic_backend(env: Mapping[str, str] | None = None) -> str:
     """Return ``mlperf`` or ``inferencex`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
     runtime = os.environ if env is None else env
