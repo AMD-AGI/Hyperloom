@@ -388,8 +388,16 @@ def ensure_staged(tool_cache: Path, source: Path | None) -> str:
     fetched at its pin. lm-eval is installed at its pin into the interpreter running this.
 
     Raises:
-        StagingError: the cache is damaged, or a tool cannot be fetched, staged or installed.
+        StagingError: the cache is damaged, or a tool cannot be fetched, staged or installed, including when git or
+            the cache directory is unavailable.
     """
+    try:
+        return _stage_unless_intact(tool_cache, source)
+    except OSError as exc:
+        raise StagingError(f"staging into {tool_cache} failed: {exc}") from exc
+
+
+def _stage_unless_intact(tool_cache: Path, source: Path | None) -> str:
     digest = _intact_digest(tool_cache)
     _install_lm_eval()
     if digest is not None:
