@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
+from hyperloom.inference_optimizer.multi_node._internal import pd_cluster as pd_internal
 from hyperloom.inference_optimizer.multi_node._internal import topology_file as topo
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import (
     drop_unsupported_baseline_flags,
@@ -220,7 +221,7 @@ def test_replace_process_image_keeps_the_pid_and_applies_env(tmp_path: Path) -> 
     try:
         replace_process_image(
             pid,
-            ["/bin/sh", "-c", f"printf %s \"$HL_FROM_PARENT\" > {marker}"],
+            ["/bin/sh", "-c", f'printf %s "$HL_FROM_PARENT" > {marker}'],
             env_overrides={"HL_FROM_PARENT": "kept"},
         )
         os.waitpid(pid, 0)
@@ -306,3 +307,87 @@ def test_restart_spec_drops_inferencex_baseline_flags_the_engine_lacks() -> None
     assert out.prefill_extra == "--load-balance-method round_robin"
     manual = pd_cmds.without_unsupported_baseline_flags(dict(state, baseline_args_source="manual"), spec)
     assert manual == spec
+
+
+def _run_launch(tmp_path: Path, command: str, env: dict[str, str], *, log_ip: str = "") -> subprocess.CompletedProcess:
+    script = tmp_path / "launch.sh"
+    script.write_text(pd_internal.launch_script("decode", command, env, log_ip=log_ip), encoding="utf-8")
+    return subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=dict(os.environ, SGLANG_HOST_IP="127.0.0.1"),
+    )
+
+
+def test_engine_launch_tees_its_output_to_the_shared_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(tmp_path / "no-gpu"),))
+    logs = tmp_path / "logs"
+    done = _run_launch(tmp_path, "echo engine-says-hi", {"HYPERLOOM_MN_SERVER_LOG_DIR": str(logs)}, log_ip="10.0.0.2")
+    assert done.returncode == 0, done.stderr
+    assert "engine-says-hi" in done.stdout
+    log_file = logs / "mn_infera_server_10.0.0.2_r0.log"
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and "engine-says-hi" not in (log_file.read_text() if log_file.exists() else ""):
+        time.sleep(0.05)
+    assert "engine-says-hi" in log_file.read_text()
+
+
+def test_engine_launch_waits_for_the_gpu_to_be_released(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    device = tmp_path / "kfd"
+    device.write_text("")
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(device),))
+    marker = tmp_path / "holder-exited"
+    holder = subprocess.Popen(
+        ["python3", "-c", f"import time; f = open({str(device)!r}); time.sleep(1.5); open({str(marker)!r}, 'w')"]
+    )
+    try:
+        time.sleep(0.3)
+        done = _run_launch(tmp_path, f"test -f {marker}", {})
+    finally:
+        holder.wait(timeout=10)
+    assert done.returncode == 0, done.stderr
+
+
+def test_engine_launch_gives_up_waiting_on_a_held_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    device = tmp_path / "kfd"
+    device.write_text("")
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(device),))
+    monkeypatch.setattr(pd_internal, "GPU_RELEASE_WAIT_S", 1)
+    holder = subprocess.Popen(["python3", "-c", f"import time; f = open({str(device)!r}); time.sleep(30)"])
+    try:
+        time.sleep(0.3)
+        done = _run_launch(tmp_path, "echo launched", {})
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+    assert done.returncode == 0
+    assert "launched" in done.stdout
+    assert f"GPU still held by pid(s) {holder.pid}" in done.stderr
+
+
+def test_engine_launch_ignores_gpu_handles_it_inherited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GPU handle the replaced engine left open in this process is not another holder."""
+    device = tmp_path / "kfd"
+    device.write_text("")
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(device),))
+    monkeypatch.setattr(pd_internal, "GPU_RELEASE_WAIT_S", 3)
+    script = tmp_path / "launch.sh"
+    logs = tmp_path / "logs"
+    script.write_text(
+        pd_internal.launch_script("decode", "echo launched", {"HYPERLOOM_MN_SERVER_LOG_DIR": str(logs)}, log_ip="ip"),
+        encoding="utf-8",
+    )
+    with open(device, encoding="utf-8") as held:
+        proc = subprocess.Popen(
+            ["bash", str(script)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            pass_fds=(held.fileno(),),
+            env=dict(os.environ, SGLANG_HOST_IP="127.0.0.1"),
+        )
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "GPU still held" not in out + err

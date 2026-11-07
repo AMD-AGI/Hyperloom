@@ -973,7 +973,10 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
 
 
 def _shared_server_log_dir() -> str:
-    shared = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
+    """Shared-FS dir the pods write server logs to; same default the SSH env forwarder applies."""
+    shared = os.path.expandvars(
+        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
+    )
     return shared if shared.startswith("/") and "$" not in shared else ""
 
 

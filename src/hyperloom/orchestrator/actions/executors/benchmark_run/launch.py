@@ -281,9 +281,11 @@ class _BenchmarkLaunchMixin:
             ``None`` when the round may proceed -- including every unavailable
             verdict, which must never cost a round.
         """
+        from .._multi_node_env import is_multi_node
         from ..magpie_agentx import native_config
 
-        if native_config(round_.config_path):
+        # Multi-node engines are launched remotely with per-role argv; the local framework does not judge it.
+        if is_multi_node() or native_config(round_.config_path):
             return None
         from ....bringup import check_server_argv
         from ....bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE, ArgvRepair

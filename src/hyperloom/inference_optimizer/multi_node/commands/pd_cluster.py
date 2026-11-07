@@ -225,7 +225,7 @@ def _ssh_pod(
     role = str(pod.get("role") or "")
     ip = str(pod.get("podIP") or "")
     port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
-    body = launch_script(role, str(pod.get("launch_command") or "true"), extra_env)
+    body = launch_script(role, str(pod.get("launch_command") or "true"), extra_env, log_ip=ip)
     needle = cmdline_needle(role, str(state.get("backend") or "atom"))
     payload = _bash_payload(role, body, needle, action)
     info(f"{state.get('backend')} {action}: ssh -> {ip}:{port} role={role}")

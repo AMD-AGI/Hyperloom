@@ -26,6 +26,10 @@ PREFILL_BOOTSTRAP_PORT = 8998
 DECODE_BOOTSTRAP_PORT = 9098
 # Engine flags that newer SGLang splits into ``<flag>-decode`` and ``<flag>-prefill``.
 SPLIT_ROLE_FLAGS = ("--cuda-graph-bs", "--cuda-graph-max-bs")
+# Device files whose open handles mean a process still holds GPU memory.
+GPU_DEVICE_PATHS = ("/dev/kfd",)
+# Seconds an engine launch waits for the previous engine to release the GPU.
+GPU_RELEASE_WAIT_S = 120
 
 Lookup = Callable[[str], str]
 
@@ -487,8 +491,60 @@ def record_profile_paths(
         pass
 
 
-def launch_script(role: str, command: str, extra_env: dict[str, str]) -> str:
-    """Bash script that execs ``command`` with the profile and tuning environment."""
+def _engine_log_lines(log_dir: str, log_ip: str) -> list[str]:
+    """Bash that appends the engine's output to ``<log_dir>/mn_infera_server_<ip>_r0.log`` beside the container log."""
+    log_file = shlex.quote(f"{log_dir}/mn_infera_server_{log_ip}_r0.log")
+    return [
+        f"if mkdir -p {shlex.quote(log_dir)} 2>/dev/null; then",
+        f"  exec > >(tee -ai {log_file}) 2>&1",
+        "fi",
+        'echo "[hyperloom] engine launch $(date -u +%Y-%m-%dT%H:%M:%SZ)"',
+    ]
+
+
+def _gpu_patterns() -> str:
+    """``case`` pattern matching any of ``GPU_DEVICE_PATHS``."""
+    return "|".join(shlex.quote(path) for path in GPU_DEVICE_PATHS)
+
+
+def _close_inherited_gpu_lines() -> list[str]:
+    """Bash that closes GPU device handles this process inherited from the image it replaced."""
+    return [
+        "for hl_fd in /proc/$$/fd/*; do",
+        f'  case "$(readlink "$hl_fd" 2>/dev/null || true)" in {_gpu_patterns()}) eval "exec ${{hl_fd##*/}}>&-" ;; esac',
+        "done",
+    ]
+
+
+def _gpu_release_wait_lines() -> list[str]:
+    """Bash that waits until no other process holds a GPU device, up to ``GPU_RELEASE_WAIT_S``."""
+    listing = "|".join("*" + shlex.quote(" -> " + path) + "*" for path in GPU_DEVICE_PATHS)
+    return [
+        "hl_gpu_holders() {",
+        "  local p",
+        "  for p in /proc/[0-9]*; do",
+        '    [ "${p#/proc/}" = "$$" ] && continue',
+        f'    case "$(ls -l "$p"/fd 2>/dev/null || true)" in {listing}) echo "${{p#/proc/}}" ;; esac',
+        "  done",
+        "}",
+        f"hl_wait_end=$((SECONDS + {int(GPU_RELEASE_WAIT_S)}))",
+        'while hl_held="$(hl_gpu_holders | tr "\\n" " ")" && [ -n "${hl_held// /}" ]; do',
+        '  if [ "$SECONDS" -ge "$hl_wait_end" ]; then',
+        f'    echo "[hyperloom] WARN GPU still held by pid(s) ${{hl_held% }} after {int(GPU_RELEASE_WAIT_S)}s;'
+        ' launching anyway" >&2',
+        "    break",
+        "  fi",
+        "  sleep 1",
+        "done",
+    ]
+
+
+def launch_script(role: str, command: str, extra_env: dict[str, str], *, log_ip: str = "") -> str:
+    """Bash script that execs ``command`` with the profile and tuning environment.
+
+    Engine roles tee their output to the shared server-log dir when one is set and
+    ``log_ip`` names the pod, and start only after the previous engine released the GPU.
+    """
     lines = ["#!/bin/bash", "set -euo pipefail", f"export ATOM_SERVER_PORT={ENGINE_PORT}"]
     if role != "router":
         lines.append("export SGLANG_HOST_IP=\"${SGLANG_HOST_IP:-$(hostname -i | awk '{print $1}')}\"")
@@ -496,5 +552,11 @@ def launch_script(role: str, command: str, extra_env: dict[str, str]) -> str:
         if role == "router" and key == "SGLANG_TORCH_PROFILER_DIR":
             continue
         lines.append(f"export {key}={shlex.quote(str(value))}")
+    if role != "router":
+        lines.extend(_close_inherited_gpu_lines())
+        log_dir = str(extra_env.get("HYPERLOOM_MN_SERVER_LOG_DIR") or "")
+        if log_dir.startswith("/") and log_ip:
+            lines.extend(_engine_log_lines(log_dir, log_ip))
+        lines.extend(_gpu_release_wait_lines())
     lines.append(f"exec {command}")
     return "\n".join(lines) + "\n"
