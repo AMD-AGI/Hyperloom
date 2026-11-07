@@ -82,7 +82,6 @@ from hyperloom.measure.long_context.held import (
     served_by,
 )
 from hyperloom.measure.long_context import staging as long_context_staging
-from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.phases import (
     JIT_CACHE,
     KERNEL_TABLES,
@@ -301,7 +300,6 @@ def _measure(call: TestCall, phases: PhaseRecorder, tracer: ruppell.Tracer | Non
             _patch_profile_client(call)
         with _test_environment(call) as unset_envs:
             call, tracer = _traced(call, tracer, notes)
-            install_launchers(call.points)
             run = _Run(call, [name for name in unset_envs if name not in private.redirected], phases=phases)
             run.traced = tracer
             with _watch_output(call), _guard_boot(run):

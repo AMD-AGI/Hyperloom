@@ -40,11 +40,9 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
 from hyperloom.measure.eval_context import check_eval_context
-from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import (
-    SCRIPT_FIELD,
     MeasurementSurface,
     check_launch_envs,
     check_point,
@@ -160,41 +158,8 @@ def default_canonical(
     canonical = CanonicalMeasurement(base, MeasurementSurface({}), primary_concurrency, materialize)
     evaluation = {} if canonical.agentx else {ENV_RUN_EVAL: "true"}
     config = _render(canonical, out_dir, CANONICAL_FILE, extra_envs={ENV_CONC: str(primary_concurrency), **evaluation})
-    surface = _canonical_surface(config, out_dir / CANONICAL_FILE)
-    return CanonicalMeasurement(base, surface, primary_concurrency, materialize)
-
-
-def _canonical_surface(config: Mapping[str, Any], point: Path) -> MeasurementSurface:
-    """The surface of the canonical ``config`` (rendered at ``point``), its script hashed as the tests will find it.
-
-    The script a test runs is Magpie's own launcher, which Magpie copies into the InferenceX checkout when
-    its first benchmark starts; a checkout whose pinned commit does not track the launcher has none until then. A surface
-    taken before that records no script hash, and every test, which reports the hash of the copy, would differ from it.
-    So the launcher is put there first, by the function the runner and the local backend use before they hash a test's
-    point, and a canonical that still has no hash for a launcher it names is refused: ``None`` is never recorded as the
-    canonical value of a field a test will report. A checkout with no ``benchmarks`` directory has nowhere to put the
-    launcher, for a test either, and is left to the host check that refuses a tree without the benchmark library.
-    """
-
-    install_launchers([point])
     surface = extract_surface(config)
-    bench = BenchmarkPoint.from_document(config)
-    if _launcher_missing(bench, surface):
-        raise PointError(
-            f"the canonical measurement runs {bench.benchmark_script} from the InferenceX checkout "
-            f"{bench.inferencex_path}, which has no such file and Magpie has none to put there: a test would report "
-            "a script hash the canonical surface does not hold. Point MAGPIE_PATH at a Magpie that ships the launcher, "
-            "or use a checkout that tracks it"
-        )
-    return surface
-
-
-def _launcher_missing(bench: BenchmarkPoint, surface: MeasurementSurface) -> bool:
-    """Whether ``bench`` names a launcher and a checkout it could be put in, and the surface has no hash for it."""
-
-    checkout = bench.inferencex_path
-    placeable = bool(bench.benchmark_script and checkout) and (Path(checkout) / "benchmarks").is_dir()
-    return placeable and surface.fields.get(SCRIPT_FIELD) is None
+    return CanonicalMeasurement(base, surface, primary_concurrency, materialize)
 
 
 def _concurrencies(requested: Sequence[int], canonical: CanonicalMeasurement) -> tuple[int, ...]:
