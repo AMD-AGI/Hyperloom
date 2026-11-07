@@ -38,14 +38,17 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._grid_base import variant_config_of
 from ._grid_variant_filter import (
     apply_aiter_moe_pin_filter,
     apply_multi_node_invalid_variants,
     apply_user_skip_list,
     resolve_skip_spec,
 )
+from ._integrate_attempt import IntegrateAttempt
 from ._integrate_results import _PatchBench
 from ._patch_artifacts import _ArtifactSpec
+from .benchmark_run.accuracy import record_accuracy_round, run_candidate_accuracy_round
 from ._workload_envs import BenchmarkTarget, LaunchLayer, MaterializeOptions, default_baseline_config
 
 
@@ -238,6 +241,21 @@ class BenchStageMixin:
         _grade_bench_accuracy(bench, bench_leg, result_dir, gate_evidence)
         return bench, gate_evidence
 
+    async def _run_patch_accuracy_round(
+        self, attempt: IntegrateAttempt, params: dict[str, Any], bench: dict[str, Any], gate_evidence: dict[str, Any]
+    ) -> None:
+        """Run the accuracy round of a bench whose throughput cleared the KEEP threshold, then grade its accuracy again.
+
+        The round writes into the slot the accuracy gate reads, so the grade it is weighed on follows the round.
+        """
+        bench_leg = _PatchBench.for_attempt(attempt, params)
+        result_dir = sanitize_result_dir(params.get("result_dir"))
+        slot = Path(_eval_search_root(bench, result_dir))
+        launch = variant_config_of(bench["workspace"])
+        outcome = await run_candidate_accuracy_round(slot, launch, attempt.shared_state, session=self.session_dir)
+        record_accuracy_round(bench, outcome)
+        _grade_bench_accuracy(bench, bench_leg, result_dir, gate_evidence)
+
     def _observe_bench_boot(self, bench: dict[str, Any], output_root: Path) -> str:
         """Classify the server this bench ran against and persist the observation.
 
@@ -417,16 +435,20 @@ def _bench_row(result: VariantResult, variant: GridVariant, base: LaunchLayer, c
     }
 
 
+def _eval_search_root(bench: dict[str, Any], result_dir: str | None) -> str:
+    """Where a bench's accuracy is graded from: its ``result_dir`` override, else the grid slot of its workspace.
+
+    lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside the ``benchmark_*`` workspace.
+    """
+    return result_dir or (str(Path(bench["workspace"]).parent) if bench.get("workspace") else "")
+
+
 def _grade_bench_accuracy(
     bench: dict[str, Any], bench_leg: _PatchBench, result_dir: str | None, gate_evidence: dict[str, Any]
 ) -> None:
     """Fill ``gate_evidence`` with the eval probe and, for a succeeded bench, the accuracy verdict."""
     params = bench_leg.params
-    # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
-    # the ``benchmark_*`` workspace. Grade from the slot so the recursive
-    # search finds eval output while honoring an explicit ``result_dir``
-    # override the same way the grid subprocess does.
-    eval_search_root = result_dir or (str(Path(bench["workspace"]).parent) if bench.get("workspace") else "")
+    eval_search_root = _eval_search_root(bench, result_dir)
     # Guarded: an empty root would send the recursive scan over the cwd.
     if eval_search_root:
         gate_evidence["eval_probe"] = read_eval_probe(eval_search_root)
