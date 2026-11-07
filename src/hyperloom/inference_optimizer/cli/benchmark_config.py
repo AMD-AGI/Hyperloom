@@ -17,7 +17,7 @@ from hyperloom.common.benchmark_config import (
     BENCHMARK_CONFIG_ENV,
     benchmark_config_path,
     configured_benchmark,
-    is_magpie_agentx,
+    is_agentx,
 )
 from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom_common.env import env_bool
@@ -127,7 +127,7 @@ def _validate_agentx_options(args: argparse.Namespace) -> None:
 
 
 def _validate_agentx_benchmark(benchmark: dict) -> None:
-    if not is_magpie_agentx(benchmark):
+    if not is_agentx(benchmark):
         raise ValueError("--benchmark-config currently requires benchmark.agentx: enable")
     agentx = benchmark["agentx"]
     if isinstance(agentx, dict) and agentx.get("mode", _CANONICAL) != _CANONICAL:

@@ -13,6 +13,7 @@ from hyperloom.common.benchmark_config import (
     BenchmarkPoint,
     BenchmarkPointError,
     configured_benchmark,
+    is_agentx,
     read_benchmark_point,
 )
 
@@ -118,8 +119,14 @@ def test_a_ready_timeout_that_is_not_a_number_is_none(carried: object) -> None:
     ("agentx", "enabled"),
     [("enable", True), (True, True), ({"enabled": False}, False), ({}, True), ("off", False)],
 )
-def test_agentx_follows_magpie_spelling(agentx: object, enabled: bool) -> None:
+def test_agentx_follows_the_operator_spelling(agentx: object, enabled: bool) -> None:
+    assert is_agentx({"agentx": agentx}) is enabled
     assert BenchmarkPoint.from_document({"benchmark": {"agentx": agentx}}).agentx is enabled
+
+
+@pytest.mark.parametrize("agentx", [None, False, "", "no", 1, ["enabled"]])
+def test_agentx_is_off_unless_turned_on(agentx: object) -> None:
+    assert is_agentx({} if agentx is None else {"agentx": agentx}) is False
 
 
 def test_agentx_launch_is_read_from_the_overrides() -> None:
