@@ -88,15 +88,13 @@ def _backends_silent() -> dict[str, object]:
     return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
 
 
-def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
+def test_mi325x_session_records_the_real_gpu_type(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi325x")
     args = cli_parser._build_parser().parse_args(
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi325x"]
     )
 
-    assert gpu_types.gpu_runner_type("mi325x") == "mi300x"
     assert gpu_types.reference_gpu_type_for_gfx("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
@@ -110,18 +108,15 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     assert manifest["gpu_type"] == "mi325x"
     assert state.gpu_type == "mi325x"
     assert os.environ["TARGET_GPU_TYPE"] == "mi325x"
-    assert os.environ["GPU_TYPE"] == "mi300x"
 
 
-def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
+def test_mi308x_session_records_the_real_gpu_type(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi308x")
     args = cli_parser._build_parser().parse_args(
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi308x"]
     )
 
-    assert gpu_types.gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -134,7 +129,6 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     assert manifest["gpu_type"] == "mi308x"
     assert state.gpu_type == "mi308x"
     assert os.environ["TARGET_GPU_TYPE"] == "mi308x"
-    assert os.environ["GPU_TYPE"] == "mi300x"
 
 
 def test_cli_parser_accepts_mi308x():

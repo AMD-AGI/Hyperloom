@@ -42,11 +42,9 @@ from .model_gate import (
 )
 from ..gpu_types import (
     _autodetect_gpu_type,
-    gpu_runner_type,
     _resolve_amd_gpu_type,
     _resolve_gpu_type,
-    require_runner_framework,
-    warn_family_runner,
+    require_board_framework,
 )
 from ..model_config_utils import summarize_model_config
 from .benchmark_config import bind_benchmark, configure_benchmark
@@ -235,8 +233,8 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
-    """Fail at launch when the selected runner cannot serve the framework."""
-    require_runner_framework(gpu_type or "", framework)
+    """Fail at launch when the framework is not validated on the board, or a custom one has no entrypoint."""
+    require_board_framework(gpu_type or "", framework)
     if str(framework or "").strip().lower() != "custom":
         return
     from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -966,12 +964,8 @@ def _reexport_session_identity(args: argparse.Namespace, state, session_dir: Pat
     if state.framework == "atom":
         _apply_atom_auto_tighten(args)
     if state.gpu_type:
-        runner_gpu_type = gpu_runner_type(state.gpu_type)
-        os.environ["TARGET_GPU_TYPE"] = state.gpu_type
-        os.environ["GPU_TYPE"] = runner_gpu_type
+        os.environ["TARGET_GPU_TYPE"] = os.environ["GPU_TYPE"] = state.gpu_type
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
-        if runner_gpu_type != state.gpu_type:
-            print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
 
 
 def _reexport_session_environment(
@@ -1203,7 +1197,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
 
 
 def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
-    """Settle ``args.gpu_type`` and the Magpie runner, then refuse a board this session cannot serve."""
+    """Settle ``args.gpu_type``, then refuse a board this session cannot serve."""
     # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
     user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
     if _should_remote_probe_gpu(args):
@@ -1219,19 +1213,15 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
         print(line, file=sys.stderr)
     if probed and not user_specified:
         print(f"GPU type        : {gpu_type} (auto-detected)")
-    runner_gpu_type = gpu_runner_type(gpu_type)
-    warn_family_runner(gpu_type, framework)
     args.gpu_type = gpu_type or None
-    if runner_gpu_type:
-        os.environ["TARGET_GPU_TYPE"] = gpu_type
-        os.environ["GPU_TYPE"] = runner_gpu_type
+    if gpu_type:
+        os.environ["TARGET_GPU_TYPE"] = os.environ["GPU_TYPE"] = gpu_type
         print(f"GPU type        : {gpu_type}")
-        print(f"Magpie runner   : {runner_gpu_type} (will inject runner_type into Magpie YAML)")
     else:
         os.environ.pop("TARGET_GPU_TYPE", None)
         os.environ.pop("GPU_TYPE", None)
-        print("GPU type        : <unset> (Magpie will auto-detect)")
-    _require_custom_entrypoint(framework, gpu_type=runner_gpu_type)
+        print("GPU type        : <unset>")
+    _require_custom_entrypoint(framework, gpu_type=gpu_type)
 
     # Runs here, not in _preflight, because the question it asks -- will provenance be able to name the ISA? -- is
     # unanswerable until args.gpu_type is final.
