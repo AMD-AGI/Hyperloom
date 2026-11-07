@@ -40,6 +40,7 @@ from ._subprocess_kill import (
 from .benchmark_result import harvest_leaked_artifacts
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
 from ._launch_evidence import RequestedLaunch, build_launch_evidence
+from ._round_folder import RoundFolder, is_round_folder
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
 from ._patch_laying import PatchedServer, is_patched_copy
@@ -69,6 +70,7 @@ __all__ = [
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
     "REUSE_PORT_DEFAULT",
     "RequestedLaunch",
+    "RoundFolder",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "SpeculativeDecodingPinnedError",
@@ -85,6 +87,7 @@ __all__ = [
     "ensure_benchmark_serving_patched",
     "explore_executor",
     "harvest_leaked_artifacts",
+    "is_round_folder",
     "materialize_benchmark_config",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
