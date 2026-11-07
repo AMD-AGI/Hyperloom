@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import contextlib
+import errno
 import logging
 import os
 import hashlib
@@ -161,8 +161,12 @@ def ensure_archive_root(session_dir: Path) -> Path:
     """
     make_shared_dirs(session_dir)
     root = archive_root(session_dir)
-    with contextlib.suppress(FileExistsError):  # what already stands there, a link included, is judged below
+    try:
         make_shared_dirs(root, mode=ARCHIVE_MODE)
+    except OSError as exc:
+        if exc.errno not in (errno.EEXIST, errno.ELOOP):
+            raise
+        # what already stands there, a link included, is judged below
     info = os.lstat(root)
     if not stat.S_ISDIR(info.st_mode):
         raise PermissionError(f"the archive {root} is not a directory (a link to one is refused too)")

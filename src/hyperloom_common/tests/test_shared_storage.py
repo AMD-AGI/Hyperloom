@@ -8,12 +8,16 @@ the single-id user namespace its container is."""
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
 import stat
+import shutil
 import subprocess
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -298,3 +302,145 @@ def test_io_shared_writes_are_664_whatever_the_umask_and_make_their_parents_2775
         umask=0o077,
     )
     assert (_mode(target.parent), _mode(target)) == (0o2775, 0o664)
+
+
+# -- a link a member of the group put on the way ------------------------------------------------------------------
+@pytest.fixture
+def unshared(tmp_path: Path) -> Iterator[Path | None]:
+    """A new directory no directory above which another account can write, or ``None`` where there is none: ``/tmp``
+    can be written by all, so what is refused below it may be refused for ``/tmp`` rather than for the directory a test
+    makes the group's."""
+    home = Path.home()
+    if any(os.stat(path).st_mode & (stat.S_IWGRP | stat.S_IWOTH) for path in (home, *home.parents)):
+        yield None
+        return
+    base = Path(tempfile.mkdtemp(prefix=".hl-shared-storage-test-", dir=home))
+    try:
+        yield base
+    finally:
+        shutil.rmtree(base)
+
+
+def _planted(tmp_path: Path) -> tuple[Path, Path]:
+    """A directory the group writes (``2775``) holding a link ``planted`` to a directory only its owner may enter,
+    with a file ``kept`` in it: what a member of the group can do to the account that writes there next."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    (private / "kept.json").write_text("kept\n")
+    (shared / "planted").symlink_to(private)
+    return shared, private
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        "write_shared_bytes(target, b'theirs')",
+        "write_shared_text(target, 'theirs')",
+        "copy_shared_file(source, target)",
+        "os.close(open_shared_replacement(target))",
+        "os.close(create_new_shared_file(target.with_name('new.json')))",
+        "create_shared_file(target.with_name('new.json'))",
+        "make_shared_dirs(target.with_name('new'))",
+        "atomic_write_json(target, {}, options=WriteOptions(shared=True, make_parents=True))",
+    ],
+)
+def test_a_link_at_a_directory_of_the_path_is_never_followed_below_a_directory_the_group_writes(
+    unshared, tmp_path, write
+):
+    base = unshared or tmp_path  # below /tmp the refusal holds all the more
+    shared, private = _planted(base)
+    source = base / "source"
+    source.write_text("theirs")
+    target = shared / "planted" / "kept.json"
+    namespace = {"os": os, "target": target, "source": source, **vars(shared_storage)}
+    exec("from hyperloom_common.io import WriteOptions, atomic_write_json", namespace)
+    with pytest.raises(OSError, match="a link in a directory other accounts can write is not followed") as raised:
+        exec(write, namespace)
+    assert raised.value.errno == errno.ELOOP and raised.value.filename == str(shared / "planted")
+    assert sorted(path.name for path in private.iterdir()) == ["kept.json"]
+    assert (private / "kept.json").read_text() == "kept\n"
+
+
+def test_a_link_deeper_below_a_directory_the_group_writes_is_not_followed_either(unshared, tmp_path):
+    """A member of the group can make a directory of its own there, writable by itself alone, and put the link in it."""
+    shared, private = _planted(unshared or tmp_path)
+    theirs = shared / "theirs"
+    theirs.mkdir(mode=0o755)
+    (theirs / "planted").symlink_to(private)
+    with pytest.raises(OSError, match="not followed"):
+        shared_storage.write_shared_bytes(theirs / "planted" / "kept.json", b"theirs")
+    assert (private / "kept.json").read_text() == "kept\n"
+
+
+def test_a_link_below_directories_only_their_owners_write_is_followed(unshared):
+    if unshared is None:
+        pytest.skip("the home directory or one above it can be written by other accounts")
+    (unshared / "real").mkdir()
+    (unshared / "via").symlink_to("real")
+    shared_storage.write_shared_bytes(unshared / "via" / "kept.json", b"ours")
+    assert (unshared / "real" / "kept.json").read_bytes() == b"ours"
+
+
+@pytest.mark.parametrize("link", ["/var/run", "/lib", "/bin"])
+def test_a_link_where_no_account_but_its_owner_can_put_one_is_followed(link):
+    if not os.path.islink(link) or os.stat(os.path.dirname(link)).st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        pytest.skip(f"{link} is not a link in a directory only its owner writes on this host")
+    descriptor = shared_storage.open_directory(Path(link))
+    try:
+        assert os.path.samestat(os.fstat(descriptor), os.stat(link))
+    finally:
+        os.close(descriptor)
+
+
+def test_open_directory_names_a_missing_directory_and_a_file_on_the_way(tmp_path):
+    (tmp_path / "file").write_text("")
+    with pytest.raises(FileNotFoundError) as missing:
+        shared_storage.open_directory(tmp_path / "missing" / "below")
+    assert missing.value.filename == str(tmp_path / "missing")
+    with pytest.raises(NotADirectoryError) as file:
+        shared_storage.open_directory(tmp_path / "file" / "below")
+    assert file.value.filename == str(tmp_path / "file")
+
+
+# -- a new file at its final name ---------------------------------------------------------------------------------
+def test_a_new_shared_file_has_its_mode_before_it_has_its_name(tmp_path, monkeypatch):
+    """A process killed between the two must not leave the file at its name with a mode only its owner may read."""
+    seen = []
+    real_link = os.link
+
+    def watching_link(source, target, **kwargs):
+        seen.append(_mode(Path(f"/proc/self/fd/{kwargs['src_dir_fd']}") / source))
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(shared_storage.os, "link", watching_link)
+    os.close(shared_storage.create_new_shared_file(tmp_path / "0000000001.jsonl"))
+    assert seen == [0o664]
+    assert _mode(tmp_path / "0000000001.jsonl") == 0o664
+    assert [path.name for path in tmp_path.iterdir()] == ["0000000001.jsonl"], "its own name is gone"
+
+
+@pytest.mark.parametrize("links", ["made", "not made by the file system"])
+def test_a_new_shared_file_never_takes_a_name_that_is_there_and_never_writes_through_a_link(
+    tmp_path, monkeypatch, links
+):
+    if links != "made":
+
+        def no_links(*_args, **_kwargs):
+            raise PermissionError(errno.EPERM, "links are not made here")
+
+        monkeypatch.setattr(shared_storage.os, "link", no_links)
+    outside = tmp_path / "outside"
+    outside.write_text("kept\n")
+    taken = tmp_path / "taken.jsonl"
+    taken.symlink_to(outside)
+    with pytest.raises(FileExistsError):
+        shared_storage.create_new_shared_file(taken)
+    assert outside.read_text() == "kept\n" and taken.is_symlink()
+    descriptor = shared_storage.create_new_shared_file(tmp_path / "free.jsonl")
+    os.write(descriptor, b"x")
+    os.close(descriptor)
+    assert (tmp_path / "free.jsonl").read_bytes() == b"x" and _mode(tmp_path / "free.jsonl") == 0o664
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["free.jsonl", "outside", "taken.jsonl"]

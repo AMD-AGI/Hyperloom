@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs
+from hyperloom_common.shared_storage import make_shared_dirs, write_shared_bytes
 
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 
@@ -86,9 +86,11 @@ class WriteOptions:
     ``shared`` is the one exception to owner-only: the new file is ``0o664``
     (:data:`~hyperloom_common.shared_storage.SHARED_FILE_MODE`), for a tree the accounts of
     one group write in turn, and the rename replaces the file whoever owned it; the three
-    options above are then ignored, and the parents ``make_parents`` creates are ``2775``
-    (:func:`~hyperloom_common.shared_storage.make_shared_dirs`). Never use it for a file that holds a credential or
-    that anything executes or sources. ``fsync`` and ``fsync_dir`` raise the
+    options above are then ignored, the parents ``make_parents`` creates are ``2775``
+    (:func:`~hyperloom_common.shared_storage.make_shared_dirs`), and no link is followed on
+    the way below a directory other accounts can write
+    (:func:`~hyperloom_common.shared_storage.write_shared_bytes`). Never use it for a file
+    that holds a credential or that anything executes or sources. ``fsync`` and ``fsync_dir`` raise the
     ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
     """
@@ -148,21 +150,21 @@ def _owner_mode(tmp: Path, path: Path, options: WriteOptions) -> None:
 def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions = WriteOptions()) -> None:
     """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
-    if options.make_parents and options.shared:
-        make_shared_dirs(path.parent)
-    elif options.make_parents:
+    if options.shared:
+        if options.make_parents:
+            make_shared_dirs(path.parent)
+        write_shared_bytes(path, data, fsync=options.fsync, fsync_dir=options.fsync_dir)
+        return
+    if options.make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     tmp = Path(tmp_str)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-            if options.shared:
-                os.fchmod(fh.fileno(), SHARED_FILE_MODE)
             if options.fsync:
                 _fsync_handle(fh)
-        if not options.shared:
-            _owner_mode(tmp, path, options)
+        _owner_mode(tmp, path, options)
         os.replace(tmp, path)
         if options.fsync_dir:
             fsync_directory(path.parent)
