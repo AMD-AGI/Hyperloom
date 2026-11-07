@@ -260,9 +260,9 @@ def test_inferencex_env_names_are_read_from_the_owner(probe: dict[str, Any]) -> 
         "ENV_ISL",
         "ENV_OSL",
         "ENV_RANDOM_RANGE_RATIO",
-        "ENV_MAGPIE_EVAL_TASKS",
-        "ENV_MAGPIE_EVAL_LIMIT",
-        "ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS",
+        "ENV_EVAL_TASKS",
+        "ENV_EVAL_LIMIT",
+        "ENV_EVAL_TOKENIZED_REQUESTS",
     ]
     assert surface[1:] == [["ENV_NUM_PROMPTS", "ENV_NUM_WARMUPS"], ["ENV_CONC", "ENV_RUN_EVAL"]]
     assert probe["points"] == [
