@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common import io as _common_io
+from hyperloom.common.agent_isolation import session_isolation_lines
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.platform_probe import platform_fingerprint
 
@@ -325,6 +326,8 @@ def _build_summary_dict(
         "model_warnings": list(getattr(state, "model_warnings", None) or []),
         # The card's partition shape these numbers were measured in.
         "compute_partition": dict(getattr(state, "compute_partition", None) or {}),
+        # How this run's agents were isolated, and the launches that ran unconfined.
+        "agent_isolation": list(session_isolation_lines()),
     }
     if external_baseline:
         summary["external_baseline"] = _external_baseline_with_comparison(state, external_baseline, session_dir)
@@ -467,6 +470,7 @@ def _format_md(summary: dict[str, Any]) -> str:
         )
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
+    lines.extend(f"- {line}" for line in summary.get("agent_isolation") or ())
     lines.append("")
     lines.extend(_format_throughput_section(summary))
     lines.extend(_format_run_summary_section(summary))

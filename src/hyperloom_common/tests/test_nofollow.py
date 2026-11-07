@@ -90,12 +90,22 @@ def test_listing_skips_symlinked_entries_and_a_symlinked_directory(tmp_path):
     assert list(regular_files_nofollow(tmp_path / "missing", "patches", (".patch",))) == []
 
 
-def test_the_base_itself_may_be_reached_through_a_link(tmp_path: Path):
+def test_a_link_above_the_base_is_followed_but_a_base_that_is_a_link_is_refused(tmp_path: Path):
     real = tmp_path / "real"
-    real.mkdir()
+    (real / "worktree" / "patches").mkdir(parents=True)
+    (real / "worktree" / "patches" / "a.patch").write_text("a", encoding="utf-8")
     (tmp_path / "alias").symlink_to(real)
-    write_text_nofollow(tmp_path / "alias", ("f",), "x")
-    assert (real / "f").read_text(encoding="utf-8") == "x"
+    write_text_nofollow(tmp_path / "alias" / "worktree", ("f",), "x")
+    assert (real / "worktree" / "f").read_text(encoding="utf-8") == "x"
+
+    # What an agent writing the workspace leaves: its worktree renamed, a link to another directory in its place.
+    swapped = tmp_path / "ws" / "worktree"
+    swapped.parent.mkdir()
+    swapped.symlink_to(real / "worktree")
+    with pytest.raises(OSError):
+        write_text_nofollow(swapped, ("patches", "_worktree_diff.patch"), "diff\n")
+    assert sorted(p.name for p in (real / "worktree" / "patches").iterdir()) == ["a.patch"]
+    assert list(regular_files_nofollow(swapped, "patches", (".patch",))) == []
 
 
 def test_rewriting_lines_never_follows_a_planted_staging_name(tmp_path):

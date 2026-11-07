@@ -272,6 +272,11 @@ class AgentSetup:
     branch's lease is given back when its run ends, however it ended, and when it is stopped, unless it is a long one
     with a process running, which only the branch's stop gives back. A CLI waiting on such a process, a test of its
     branch or another branch's profile of its head is woken every ``wait_wake_s``.
+
+    ``readable`` are what every specialist of the session reads besides its worktree and workspace (the session's
+    references, its model), and ``lease_area(branch)`` the directory the roots of ``branch``'s dev leases are made in;
+    where a launch runs in a bubblewrap sandbox, those that exist are shown read-only, with the files the branch's
+    worktree links and its git metadata, and another branch's leases are not.
     """
 
     command: AgentCommand
@@ -290,6 +295,8 @@ class AgentSetup:
     clock: Callable[[], float] = time.time
     dev_leases: DevLeaseHolder | None = None
     wait_wake_s: float = WAIT_WAKE_S
+    readable: tuple[Path, ...] = ()
+    lease_area: Callable[[str], Path] | None = None
 
 
 class SessionBlackboard(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, LineageSink, Protocol):
@@ -805,7 +812,19 @@ class AgentSession:
             backend=setup.command.backend,
             heartbeat_sink=self._sink(grant.heartbeat_sink),
             stdin_open=setup.command.interactive,
+            readable=self._readable(),
+            git_admin=self._place.worktree.admin,
         )
+
+    def _readable(self) -> tuple[Path, ...]:
+        """What the branch's CLI reads besides its worktree and workspace, each absolute path that exists once: the
+        session's references and model, the files its worktree links, and the area of the branch's own dev leases. The
+        launch's plan masks every credential location these show."""
+        setup = self._setup
+        found = [*setup.readable, *self._place.worktree.linked]
+        if setup.lease_area is not None:
+            found.append(setup.lease_area(self._start.branch))
+        return tuple(path for path in dict.fromkeys(found) if path.is_absolute() and path.exists())
 
     def _sink(self, service: HeartbeatSink) -> HeartbeatSink:
         """Keep the launch's ``beat`` for the idle wait, and hand it on to the MCP service's sink."""

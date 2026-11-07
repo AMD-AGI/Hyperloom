@@ -13,7 +13,7 @@ from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors._git import _git_head_sha
 from hyperloom.orchestrator.actions.executors._patch_git import _git_reset_clean, _git_stash_if_dirty
-from hyperloom.orchestrator.specialists.subprocess_ import _setup_worktree
+from hyperloom.orchestrator.specialists.worktrees import _setup_worktree
 
 _INSTALL = Path(__file__).resolve().parents[1] / "assets" / "install.sh"
 _FUNCTIONS = (
