@@ -49,7 +49,7 @@ template's values to the paths inside the sandbox.
 
 | Variable | Required | What it points at |
 | --- | --- | --- |
-| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache (read-only is enough). Default `/runner-cache`. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
+| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. The runner stages the inference_suite tools a sheet names into its `inference-suite/` directory, so that directory must be writable; the rest of the cache can be read-only. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the hosted multi-branch entry | The hosted multi-branch entry passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. |
