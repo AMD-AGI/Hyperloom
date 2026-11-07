@@ -256,6 +256,8 @@ def _make_directory(parent: int, name: str, mode: int, made: Path, *, widen: boo
         os.mkdir(name, mode, dir_fd=parent)
     except FileExistsError:
         return False
+    except OSError as exc:
+        raise type(exc)(exc.errno, exc.strerror, str(made)) from None  # the whole path, not the name below dir_fd
     if widen:
         _share(os.open(name, _DIRECTORY, dir_fd=parent), mode, made)
     return True

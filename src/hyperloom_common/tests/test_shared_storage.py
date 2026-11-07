@@ -489,6 +489,16 @@ def test_a_link_where_no_account_but_its_owner_can_put_one_is_followed(link):
         os.close(descriptor)
 
 
+def test_a_directory_that_cannot_be_made_is_named_by_its_whole_path(tmp_path, monkeypatch):
+    def refused(name, *_args, **_kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied", name)
+
+    monkeypatch.setattr(shared_storage.os, "mkdir", refused)
+    with pytest.raises(PermissionError) as raised:
+        make_shared_dirs(tmp_path / "new" / "below")
+    assert (raised.value.errno, raised.value.filename) == (errno.EACCES, str(tmp_path / "new"))
+
+
 def test_open_directory_names_a_missing_directory_and_a_file_on_the_way(tmp_path):
     (tmp_path / "file").write_text("")
     with pytest.raises(FileNotFoundError) as missing:
