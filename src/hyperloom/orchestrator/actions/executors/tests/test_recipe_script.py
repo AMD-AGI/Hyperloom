@@ -21,6 +21,7 @@ from hyperloom.orchestrator.actions.executors._recipe_script import (
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
     BenchmarkTarget,
+    LaunchLayer,
     MaterializeOptions,
 )
 
@@ -68,6 +69,17 @@ def test_a_variant_env_the_launcher_overwrites_is_dropped(checkout, tmp_path):
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert "HSA_NO_SCRATCH_RECLAIM" not in envs
     assert envs["VLLM_SOMETHING_ELSE"] == "1"
+
+
+def test_a_caller_env_the_launcher_exports_reaches_the_materialized_point(checkout, tmp_path):
+    """inference_suite boots the server from the point, not from the launcher, so the caller's value is the one used."""
+    out = materialize_config_with_envs(
+        _config(tmp_path, benchmark_script="vllm_mi355x.sh"),
+        tmp_path / "out",
+        launch=LaunchLayer(extra_envs={"HSA_NO_SCRATCH_RECLAIM": "0"}),
+    )
+
+    assert yaml.safe_load(out.read_text())["benchmark"]["envs"]["HSA_NO_SCRATCH_RECLAIM"] == "0"
 
 
 @pytest.mark.parametrize("agentx", [False, True], ids=["synthetic", "agentx"])
