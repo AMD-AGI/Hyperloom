@@ -80,6 +80,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
     session_grid_bounds,
+    teardown_variant_server,
 )
 from ._grid_variant_filter import (
     ServingStack,
@@ -101,7 +102,6 @@ from ._launch_restatement import Launch, config_envs, launch_change, observed_la
 from ._server_argv import ConfigUnreadable, config_point, config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
-    teardown_lifecycle_server,
 )
 from ._workload_envs import (
     BenchmarkTarget,
@@ -802,18 +802,20 @@ class _ExploreRound:
                         row = self._settle(gv, run_gv, measurement, slot)
                         await record_decision_round(round_ctx, gv, measurement, row)
                 finally:
-                    # Reap THIS variant's persistent server on every exit path (idempotent + no-op when reuse was
-                    # ineligible).
+                    # The warmup and decision rounds share this slot's server; reap it on every exit path.
                     if self.lifecycle_eligible:
-                        teardown_lifecycle_server(
-                            pid_dir=slot, framework=self.lifecycle_framework, port=self.lifecycle_port
-                        )
+                        self._reap_variant_server(slot)
         finally:
             # Release the round's Ray serving lease/actor exactly once (this was a per-variant ``ray.kill`` before
             # -- the raylet worker churn that destabilised the single-node cluster).
             if self.lease is not None:
                 self.lease.close()
         return self._result()
+
+    def _reap_variant_server(self, slot: Path) -> None:
+        lifecycle = {"framework": self.lifecycle_framework, "port": self.lifecycle_port}
+        if survivors := teardown_variant_server(slot, lifecycle):
+            log.error("explore: pids %s outlived SIGKILL; %s keeps their record", survivors, slot)
 
     # ----- the stack the round accumulates ---------------------------------
 
