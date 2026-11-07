@@ -14,49 +14,21 @@ rather than failing the round.
 
 from __future__ import annotations
 
-import http.client
-import json
-import urllib.error
-import urllib.request
-from collections.abc import Mapping
-from dataclasses import asdict, dataclass
-
 from inference_suite.contracts.config import ProfileConfig
 from inference_suite.contracts.layout import RunLayout
 from inference_suite.frameworks import Framework
-from inference_suite.profile.inject import start_body
+from inference_suite.profile.inject import (
+    SERVER_REQUEST_ERRORS,
+    START_PROFILE_PATH,
+    STOP_PROFILE_PATH,
+    WindowCapture,
+    server_request,
+    start_body,
+)
 from inference_suite.runtime.phases import Phase, PhaseClock, PhaseMark
 from inference_suite.telemetry.kv_poll import parse_prometheus_text, running_requests
 
-START_PROFILE_PATH = "/start_profile"
-STOP_PROFILE_PATH = "/stop_profile"
 METRICS_PATH = "/metrics"
-#: A control request answers once the profiler has started or flushed, not after the window.
-_CONTROL_TIMEOUT_SEC = 30.0
-#: A loopback request routed through the host's proxy would never reach the server.
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_HTTP_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError)
-
-
-def _request(url: str, body: Mapping[str, object] | None) -> bytes:
-    data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    with _OPENER.open(request, timeout=_CONTROL_TIMEOUT_SEC) as response:
-        return response.read()
-
-
-@dataclass(frozen=True)
-class WindowCapture:
-    """What the window did, as ``profile/capture.json`` records it; every instant is Unix seconds."""
-
-    profiling_start_unix: float | None
-    window_open_unix: float | None
-    window_close_unix: float | None
-    running_requests_in_window: int | None
-    error: str | None
-
-    def to_document(self) -> dict[str, object]:
-        return asdict(self)
 
 
 def _unix(mark: PhaseMark | None) -> float | None:
@@ -95,8 +67,8 @@ class AgentxWindow:
 
     def _open(self, now: float) -> None:
         try:
-            _request(self._base_url + START_PROFILE_PATH, self._body)
-        except _HTTP_ERRORS as exc:
+            server_request(self._base_url + START_PROFILE_PATH, self._body)
+        except SERVER_REQUEST_ERRORS as exc:
             self._error = f"{START_PROFILE_PATH}: {exc}"
             return
         self._opened = self._clock.mark(Phase.PROFILE_OPEN, now)
@@ -104,8 +76,8 @@ class AgentxWindow:
 
     def _running_requests(self) -> int | None:
         try:
-            text = _request(self._base_url + METRICS_PATH, None).decode("utf-8", "ignore")
-        except _HTTP_ERRORS:
+            text = server_request(self._base_url + METRICS_PATH, None).decode("utf-8", "ignore")
+        except SERVER_REQUEST_ERRORS:
             return None
         running = running_requests(parse_prometheus_text(text))
         return None if running is None else int(running)
@@ -113,8 +85,8 @@ class AgentxWindow:
     def _close(self, now: float) -> None:
         self._closed = self._clock.mark(Phase.PROFILE_CLOSE, now)
         try:
-            _request(self._base_url + STOP_PROFILE_PATH, {})
-        except _HTTP_ERRORS as exc:
+            server_request(self._base_url + STOP_PROFILE_PATH, {})
+        except SERVER_REQUEST_ERRORS as exc:
             self._error = f"{STOP_PROFILE_PATH}: {exc}"
 
     def finish(self, layout: RunLayout) -> WindowCapture:
@@ -126,9 +98,8 @@ class AgentxWindow:
             self._running,
             self._error,
         )
-        layout.profile_capture.parent.mkdir(parents=True, exist_ok=True)
-        layout.profile_capture.write_text(json.dumps(capture.to_document(), indent=2) + "\n", encoding="utf-8")
+        capture.write(layout)
         return capture
 
 
-__all__ = ["AgentxWindow", "WindowCapture"]
+__all__ = ["AgentxWindow"]
