@@ -80,10 +80,11 @@ measurement, NOT a failure — do not retry it.
   Override `params.benchmark_script` to a script that respects
   `$RESULT_DIR` (Coordinator already exports `RESULT_DIR=<workspace>` by
   default).
-* **RULE F3 — repeated `error_class='subprocess_nonzero'` or
+* **RULE F3 — repeated `error_class='subprocess_nonzero'`, `'client_failed'` or
   `'magpie_nonzero_invalid_measurement'` on `baseline` ⇒ stop retrying
-  baseline.** Both classes mean the benchmark exited nonzero for a cause
-  Hyperloom did not recognise — `magpie_nonzero_invalid_measurement` additionally
+  baseline.** Each class means the benchmark exited nonzero for a cause
+  Hyperloom did not recognise — `client_failed` names the benchmark client as
+  the process that exited, and `magpie_nonzero_invalid_measurement` additionally
   means the run served every request it asked for, so the exit came from the
   harness around the benchmark and another identical attempt buys nothing.
   `send_message` with `body_md='blocked: subprocess repeatedly nonzero

@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
+from inference_suite.contracts import FailedStep
+
 from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
@@ -49,9 +51,10 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
     # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
     PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
-    # The round served its whole protocol and the harness around it still refused the result. The next
-    # attempt runs the same harness over the same workload, so it is refused the same way.
+    # The benchmark client, or the Magpie harness after serving its whole protocol, refused the result. The next
+    # attempt runs the same client over the same workload, so it is refused the same way.
     MAGPIE_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
+    FailedStep.CLIENT_FAILED.value: _BASELINE_FAILED_STOP_REASON,
 }
 
 
