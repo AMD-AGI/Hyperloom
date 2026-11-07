@@ -116,7 +116,7 @@ def open_shared(path: Path, access: int, mode: int = SHARED_FILE_MODE) -> int:
     """
     flags = access | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
-        descriptor = os.open(path, flags, mode)  # the umask never decides it: fchmod below
+        descriptor = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)  # the umask never decides it: fchmod below
     except FileExistsError:
         return os.open(path, access | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
