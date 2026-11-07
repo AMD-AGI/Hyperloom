@@ -16,7 +16,7 @@ from typing import Any, Mapping, NamedTuple, Sequence
 
 import yaml
 
-from hyperloom.common.benchmark_config import BenchmarkPoint, is_magpie_agentx, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPoint, is_agentx, read_benchmark_point
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.orchestrator.state.base_launch import ServerBase
@@ -278,7 +278,7 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
     """Hash applied patch files immediately before Magpie launches the server."""
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     bench = config["benchmark"]
-    if not is_magpie_agentx(bench):
+    if not is_agentx(bench):
         return
     apply_launch_changes(bench, LaunchChanges())
     launch = bench["agentx"]["launch_overrides"]
@@ -373,7 +373,7 @@ def apply_native_runtime(config_path: Path, runtime: Mapping[str, Any], overlay:
 
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     bench = config["benchmark"]
-    if not is_magpie_agentx(bench):
+    if not is_agentx(bench):
         return
     apply_launch_changes(bench, LaunchChanges())
     launch = bench["agentx"]["launch_overrides"]

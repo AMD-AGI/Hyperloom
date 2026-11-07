@@ -178,6 +178,3 @@ def is_agentx(benchmark: Mapping[str, Any]) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"true", "enabled", "enable", "yes", "1"}
     return value is True
-
-
-is_magpie_agentx = is_agentx
