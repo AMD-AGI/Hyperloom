@@ -102,6 +102,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
 unmatched_ignore_imports_alerting = error
@@ -463,6 +464,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.multi_node.commands.infera -> hyperloom.inference_optimizer.multi_node.cli

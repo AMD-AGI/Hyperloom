@@ -45,7 +45,7 @@ from hyperloom_common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 from hyperloom.common.model_paths import resolve_serving_model_path
 
-from .. import inferencex_checkout
+from .. import framework_registry, inferencex_checkout
 from .bootstrap import parse_operator_extra_env
 from .device_init import _rocm_smi_visible_gpus
 from .framework_probe import (
@@ -338,8 +338,6 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> dict[st
 
 def _selected_framework(args: argparse.Namespace) -> str:
     """The serving framework this launch selected, or the registry default."""
-    from hyperloom.inference_optimizer import framework_registry
-
     return (getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")).strip().lower() or (
         framework_registry.DEFAULT_FRAMEWORK
     )
@@ -347,8 +345,6 @@ def _selected_framework(args: argparse.Namespace) -> str:
 
 def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     """Fail fast when the selected serving framework is not importable here."""
-    from hyperloom.inference_optimizer import framework_registry
-
     framework = _selected_framework(args)
     if framework_registry.is_scriptable(framework):
         return {"status": "skipped", "skip_reason": "scriptable_framework", "target": framework}
@@ -495,8 +491,6 @@ def _resumed_session_state(args: argparse.Namespace) -> dict[str, Any] | None:
 
 def _supported_framework_names() -> tuple[str, ...]:
     """The framework names ``--framework`` accepts (the framework registry)."""
-    from hyperloom.inference_optimizer import framework_registry
-
     return tuple(framework_registry.names())
 
 
@@ -1236,25 +1230,30 @@ def _ensure_magpie(
     install_event: Any,
     *,
     magpie_python: str,
+    benchmark_backend: str,
+    magpie_active: bool,
     pip_extra: list[str],
 ) -> None:
-    """Install Magpie and resolve MAGPIE_PATH."""
+    """Install Magpie and resolve MAGPIE_PATH, unless another benchmark backend is active."""
     magpie_installed = False
     magpie_spec: str | None = None
     try:
-        magpie_ref = os.environ.get("MAGPIE_REF", "06b7cf6e185fdd49483a512e350cb3964ba3bf68")
-        checker = _ASSETS / "check_magpie.py"
-        check = subprocess.run([magpie_python, str(checker), magpie_ref], capture_output=True)
-        if check.returncode != 0 and not os.environ.get("MAGPIE_PATH"):
-            magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
-            magpie_spec = os.environ.get("MAGPIE_PACKAGE_SPEC", f"magpie-eval @ git+{magpie_repo}@{magpie_ref}")
-            print(f"Preflight: Magpie revision is missing; installing {magpie_spec} ...")
-            subprocess.run(
-                [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
-                check=True,
-            )
-            magpie_installed = True
-        if not os.environ.get("MAGPIE_PATH", "").strip():
+        if not magpie_active:
+            print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
+        else:
+            magpie_ref = os.environ.get("MAGPIE_REF", "06b7cf6e185fdd49483a512e350cb3964ba3bf68")
+            checker = _ASSETS / "check_magpie.py"
+            check = subprocess.run([magpie_python, str(checker), magpie_ref], capture_output=True)
+            if check.returncode != 0 and not os.environ.get("MAGPIE_PATH"):
+                magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
+                magpie_spec = os.environ.get("MAGPIE_PACKAGE_SPEC", f"magpie-eval @ git+{magpie_repo}@{magpie_ref}")
+                print(f"Preflight: Magpie revision is missing; installing {magpie_spec} ...")
+                subprocess.run(
+                    [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
+                    check=True,
+                )
+                magpie_installed = True
+        if magpie_active and not os.environ.get("MAGPIE_PATH", "").strip():
             magpie_root = subprocess.run(
                 [
                     magpie_python,
@@ -1276,8 +1275,15 @@ def _ensure_magpie(
         InstallStep(
             "ensure_magpie",
             "install",
-            "applied" if magpie_installed else "already_present",
-            message=f"installed {magpie_spec}" if magpie_installed else None,
+            "skipped" if not magpie_active else "applied" if magpie_installed else "already_present",
+            skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+            message=(
+                f"installed {magpie_spec}"
+                if magpie_installed
+                else f"benchmark backend is {benchmark_backend!r}"
+                if not magpie_active
+                else None
+            ),
         ),
         target="magpie-eval",
         interpreter=magpie_python,
@@ -1358,7 +1364,7 @@ def _ensure_inferencex(install_event: Any) -> str:
     return inferencex_path
 
 
-def _patch_magpie_compat(install_event: Any, inferencex_path: str) -> None:
+def _patch_magpie_compat(install_event: Any, inferencex_path: str, *, magpie_active: bool) -> None:
     """Apply the Magpie script patches install.sh would have.
 
     Preflight installs Magpie and clones InferenceX itself, entirely outside
@@ -1369,8 +1375,12 @@ def _patch_magpie_compat(install_event: Any, inferencex_path: str) -> None:
     by that path.
     """
     try:
-        trust_ok = _ensure_client_trust_compat(os.environ.get("MAGPIE_PATH", ""))
-        concurrency_ok = _ensure_eval_concurrency_compat(os.environ.get("MAGPIE_PATH", ""), inferencex_path)
+        if magpie_active:
+            trust_ok = _ensure_client_trust_compat(os.environ.get("MAGPIE_PATH", ""))
+            concurrency_ok = _ensure_eval_concurrency_compat(os.environ.get("MAGPIE_PATH", ""), inferencex_path)
+        else:
+            trust_ok = True
+            concurrency_ok = True
         anchors_ok = _report_inferencex_patch_anchors(inferencex_path)
     except BaseException as exc:
         _fail_install_step(install_event, step_id="patch_magpie_eval_concurrency", category="patch", exc=exc)
@@ -1378,7 +1388,12 @@ def _patch_magpie_compat(install_event: Any, inferencex_path: str) -> None:
     patch_ok = trust_ok and concurrency_ok and anchors_ok
     _record_install_step(
         install_event,
-        InstallStep("patch_magpie_eval_concurrency", "patch", "applied" if patch_ok else "warned"),
+        InstallStep(
+            "patch_magpie_eval_concurrency",
+            "patch",
+            "skipped" if not magpie_active else "applied" if patch_ok else "warned",
+            skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+        ),
         detail={
             "client_trust_compatible": trust_ok,
             "eval_concurrency_compatible": concurrency_ok,
@@ -1387,7 +1402,7 @@ def _patch_magpie_compat(install_event: Any, inferencex_path: str) -> None:
     )
 
 
-def _prepare_inferencex(install_event: Any) -> str:
+def _prepare_inferencex(install_event: Any, *, magpie_active: bool) -> str:
     """Prepare the synthetic runtime; native AgentX's checkout belongs to Magpie."""
     from hyperloom.common.agentx_workload import is_mlperf_backend
     from hyperloom.common.perf_metric import agentx_enabled
@@ -1399,7 +1414,7 @@ def _prepare_inferencex(install_event: Any) -> str:
         )
         return ""
     inferencex_path = _ensure_inferencex(install_event)
-    _patch_magpie_compat(install_event, inferencex_path)
+    _patch_magpie_compat(install_event, inferencex_path, magpie_active=magpie_active)
     return inferencex_path
 
 
@@ -1604,6 +1619,11 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     _normalize_preflight_env(args, install_event)
 
     from hyperloom.orchestrator.actions.executors._benchmark_interpreter import _resolve_probe_python
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend_name
+
+    # A bypass-only host has no Magpie; the active backend decides whether preflight installs it.
+    benchmark_backend = resolve_backend_name()
+    _magpie_backend_active = benchmark_backend == "magpie"
 
     # The load client runs on the server's interpreter, so the client and Ray installs go there.
     benchmark_python = _resolve_probe_python(_selected_framework(args))
@@ -1650,10 +1670,12 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     _ensure_magpie(
         install_event,
         magpie_python=magpie_python,
+        benchmark_backend=benchmark_backend,
+        magpie_active=_magpie_backend_active,
         pip_extra=pip_extra,
     )
 
-    inferencex_path = _prepare_inferencex(install_event)
+    inferencex_path = _prepare_inferencex(install_event, magpie_active=_magpie_backend_active)
 
     _check_agent_cli()
 
