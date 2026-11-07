@@ -869,6 +869,12 @@ deployments.
    counts as a tree the agent writes. The masks come from the app's own environment and home as well as the child's. Everything under the readable
    system roots (`/etc`, `/opt`, `/usr`) is readable: an image must not keep a credential there.
 
+Only an agent launched through the chooser is isolated: every specialist (the dispatcher, its Ray GPU actor path and the
+agent runner). Agents started elsewhere that can run shell commands run as the app and can read what it can, in a
+hosted run too: the TraceLens skill runner's (`orchestrator/trace_analysis/tracelens_skill_runner.py`, whose agent may
+use `Bash`), GEAK's (`orchestrator/kernel/geak_runner.py`) and kernelforge's forge loops'. A hosted run whose spec's
+`flow` is `multibranch` is handed to `hyperloom-multibranch` before the entry's isolation check (below).
+
 **Specialists in a bubblewrap sandbox** (`orchestrator/specialists/launch_env.py`; the dispatcher, its Ray GPU actor
 path and the agent runner) write their workspace and worktree, and a private `/tmp` and `/dev/shm` (directories of
 mode 0700 on the host's `/tmp` and `/dev/shm`; with a bubblewrap older than 0.12, a fresh tmpfs where the workspace
@@ -911,8 +917,8 @@ the specialist runs, its checkpoint in the worktree (`specialist_done.partial.js
 directory, and none is read while the path names another; the session's resource record gives no disk use
 (`worktree_disk_bytes: null`) for a worktree path that is a link.
 
-Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch in a hosted
-run (its entry calls `require_agent_isolation()` once at start-up, so a host where neither works refuses before
+Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch through the
+chooser in a hosted run (its entry calls `require_agent_isolation()` once at start-up, so a host where neither works refuses before
 anything runs), and a specialist's wherever `HYPERLOOM_SPECIALIST_USER` is set. Any other launch runs unconfined as
 before; `announce_agent_isolation()`, which the optimize command calls at start-up, then logs one WARNING
 (`agents run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`), and
@@ -1319,7 +1325,7 @@ packaged `src/hyperloom/inference_optimizer/assets/install.sh` (no flags; the in
 wheel as the running code; it provisions TraceLens, GEAK, ray and `runtime/kernel-agent.env.sh`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
 output in `$HYPERLOOM_STATE_DIR/install.log`, then runs `optimize` in the same process. An installer that exits non-zero ends the run
 with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. Before the installer, the entry checks that
-the run's agents can be isolated, and ends the run the same way, naming why, where they cannot (see [Agent isolation](#agent-isolation)). The session directory is
+the run's specialists can be isolated, and ends the run the same way, naming why, where they cannot (see [Agent isolation](#agent-isolation)). The session directory is
 `$USER_DATA_PATH/<model directory name>/<HYPERLOOM_RUN_CREATED_AT as YYYYMMDDTHHMMSSZ>-<first 8 hex of sha256(HYPERLOOM_RUN_ID)>`; a
 restart finds the same directory and resumes it when it holds `manifest.json` and `state.json`. The entry writes two files in
 `$HYPERLOOM_STATE_DIR`: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`

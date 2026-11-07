@@ -23,13 +23,18 @@ after the same installer run; its environment is the entry's own, with the runni
 command resolves to, and runs with, the interpreter the installer installed into.  The installer itself never sees a host-only input
 other than ``HYPERLOOM_STATE_DIR``, which it needs to install the hosted extra.
 
-A hosted run's agents must be isolated: unconfined, they could read the application's credentials. Before the installer
-or ``optimize`` runs, the entry marks the process so (:func:`~hyperloom.common.agent_isolation.require_agent_isolation`),
-with the hosting layer's bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names (the layer's
-``start.sh`` names its own; :func:`layer_bwrap`), and no other; a host where neither an account nor that bubblewrap can
-isolate them ends the run finally, naming why. A probe that gave no answer in time ends the leg without ``exit.json``,
-so the host starts it again. The entry also registers the state directory, whose variable it removes from the
-environment, among the paths no agent sandbox shows (:data:`~hyperloom.common.confinement.PRIVATE_PATHS`).
+A hosted run's specialists, which every launch path starts through the isolation chooser
+(:mod:`hyperloom.common.agent_isolation`), must be isolated: unconfined, they could read the application's credentials.
+Before the installer or ``optimize`` runs, the entry marks the process so
+(:func:`~hyperloom.common.agent_isolation.require_agent_isolation`), with the hosting layer's bubblewrap, ``bin/bwrap``
+in the directory ``HYPERLOOM_HOST_LAYER`` names (the layer's ``start.sh`` names its own; :func:`layer_bwrap`), and no
+other; a host where neither an account nor that bubblewrap can isolate a specialist ends the run finally, naming why,
+and every later launch through the chooser is isolated or refused. A probe that gave no answer in time ends the leg
+without ``exit.json``, so the host starts it again. The entry also registers the state directory, whose variable it
+removes from the environment, among the paths no agent sandbox shows
+(:data:`~hyperloom.common.confinement.PRIVATE_PATHS`). Agents started outside the chooser are not isolated by it: the
+TraceLens skill runner's, GEAK's and kernelforge's forge loops' agents, which can run shell commands, run as the
+application. A ``multibranch`` flow is handed to its command before this check.
 """
 
 from __future__ import annotations
@@ -160,11 +165,11 @@ def layer_bwrap(environ: Mapping[str, str]) -> str | None:
 
 
 def _require_isolation(info: HostInfo) -> None:
-    """Keep the state directory out of every agent sandbox, mark this process as a hosted run's, whose agents must be
-    isolated, and refuse the run now where they cannot be.
+    """Keep the state directory out of every agent sandbox, mark this process as a hosted run's, whose specialists must
+    be isolated, and refuse the run now where they cannot be.
 
     Raises:
-        Refused: Neither an account nor the hosting layer's bubblewrap can isolate an agent here.
+        Refused: Neither an account nor the hosting layer's bubblewrap can isolate a specialist here.
         IsolationRefused: The bubblewrap probe gave no answer in time (``transient``): no ``exit.json``, so the host
             starts the leg again.
     """

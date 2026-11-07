@@ -467,7 +467,7 @@ def test_multibranch_execs_into_its_entry_with_the_environment_unchanged_but_for
     assert calls[0][2] == before and Var.RUN_ID in before
     assert fake.calls == [] and not (run.state / "session.json").exists() and not (run.state / "exit.json").exists()
     assert os.environ.get(entry.ENV_IMAGE) is None
-    assert isolation.asked == []  # the multibranch command checks its own agents' isolation
+    assert isolation.asked == []  # the entry hands over to this command before its isolation check
 
 
 def _multibranch_order(run, monkeypatch, *, exit_code=0):
