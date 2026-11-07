@@ -102,24 +102,27 @@ def test_the_last_context_flag_of_the_final_argv_is_the_served_context(staged, t
     assert _accepted(_accuracy_round(), staged, tmp_path, candidate=candidate).definition.max_length == 16384
 
 
-@pytest.mark.parametrize("served", [PROMPT_ROOM_TOKENS, PROMPT_ROOM_TOKENS + 4095])
-def test_a_served_context_without_room_for_prompt_and_completion_is_refused(staged, tmp_path, served):
+@pytest.mark.parametrize(
+    ("served", "max_tokens"),
+    [(16384, 4096), (6144, 6144 - PROMPT_ROOM_TOKENS), (PROMPT_ROOM_TOKENS, PROMPT_ROOM_TOKENS // 2)],
+)
+def test_the_completion_budget_is_what_the_served_context_leaves_after_the_prompt_room(
+    staged, tmp_path, served, max_tokens
+):
     candidate = LaunchDelta(args_add=("--context-length", str(served)))
 
-    refusal = _plan(_accuracy_round(), staged, tmp_path, candidate=candidate)
+    plan = _accepted(_accuracy_round(), staged, tmp_path, candidate=candidate)
 
-    assert isinstance(refusal, EvalRefusal)
-    assert refusal.step is FailedStep.EVAL_CONTEXT_TOO_SHORT
-    assert f"a context of {served} tokens" in refusal.detail
-    assert "max_tokens_cap 4096" in refusal.detail
+    assert (plan.definition.max_length, plan.request.max_tokens) == (served, max_tokens)
+    assert plan.definition.max_tokens_cap == max_tokens
 
 
 def test_a_smaller_completion_cap_fits_a_smaller_context(staged, tmp_path):
-    candidate = LaunchDelta(args_add=("--context-length", "6144"))
+    candidate = LaunchDelta(args_add=("--context-length", "16384"))
 
     plan = _accepted(replace(_accuracy_round(), eval=_eval(max_tokens_cap=2048)), staged, tmp_path, candidate=candidate)
 
-    assert (plan.definition.max_length, plan.request.max_tokens) == (6144, 2048)
+    assert (plan.definition.max_length, plan.request.max_tokens) == (16384, 2048)
 
 
 def _model_dir(tmp_path: Path, config: dict[str, object]) -> Path:
