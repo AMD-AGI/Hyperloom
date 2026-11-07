@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common import confinement
 from hyperloom.common.outside_facts.rule_pack import PACK_ENV, load_pack
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
 from hyperloom.measure.archive import DirResultArchive
@@ -196,9 +197,9 @@ _HIDDEN = "a hidden entry of a home where tools keep their logins"
         ("a", "home/.aws", {}, f"in {{root}}/home/.aws, {_HIDDEN}"),
         ("n", "home/.netrc", {}, f"in {{root}}/home/.netrc, {_HIDDEN}"),
         ("id", "home/.ssh/id_rsa", {}, f"in {{root}}/home/.ssh, {_HIDDEN}"),
-        ("h", "home", {}, "a credential location of the app's"),
-        ("n", "logins/netrc", {"NETRC": "{root}/logins/netrc"}, "a credential location of the app's"),
-        ("gh", "xdg/gh", {"XDG_CONFIG_HOME": "{root}/xdg"}, "below the credential location {root}/xdg of the app's"),
+        ("h", "home", {}, "a credential location"),
+        ("n", "logins/netrc", {"NETRC": "{root}/logins/netrc"}, "a credential location"),
+        ("gh", "xdg/gh", {"XDG_CONFIG_HOME": "{root}/xdg"}, "below the credential location {root}/xdg"),
     ],
 )
 def test_a_model_entry_linking_into_a_credential_location_binds_nothing_and_the_plan_says_why(
@@ -246,6 +247,126 @@ def test_a_model_in_the_hub_cache_below_the_home_binds_its_blobs_and_the_hub(tmp
 
         assert plan.refused == ()
         assert plan.readable == (Path("/usr/bin/python3"), model, blobs, hub)
+
+
+#: A hub cache that is the home's parent, which the plan reads whole, masking the home in it.
+_HUB_ABOVE = {"HOME": "{root}/hp/home", "HF_HUB_CACHE": "{root}/hp"}
+#: A hub cache in a hidden entry of the home, its Hugging Face login beside its blobs.
+_HUB_HIDDEN = {"HOME": "{root}/home2", "HF_HOME": "{root}/home2/.hf", "HF_HUB_CACHE": "{root}/home2/.hf"}
+
+
+def _link_area(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Homes with logins and a tokenizer beside them: the app's (the default hub cache in its ``.cache``), the
+    runner's, the passwd entry's (``pw``, made this process's), one below a hub cache and one with a hub cache in its
+    ``.hf``; a runner ``CLAUDE_CONFIG_DIR``; links to the app home's ``.ssh`` and tokenizer through a link
+    (``hop/a``, ``hop/tok``) and through a directory link (``hop/d``). Returns the model directory, empty."""
+    for path in (
+        "home/.ssh/id_rsa",
+        "home/tokdir/tok.json",
+        "home/.cache/pip/creds",
+        "home/.cache/huggingface/hub/models--m/blobs/w",
+        "rhome/.ssh/id_rsa",
+        "rhome/tokdir/tok.json",
+        "rcc/sub/creds",
+        "pw/.ssh/id_rsa",
+        "pw/tokdir/tok.json",
+        "hp/home/.ssh/id_rsa",
+        "hp/home/tokdir/tok.json",
+        "home2/.hf/token",
+        "home2/.hf/models--m/blobs/w",
+    ):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(path)
+    hop = root / "hop"
+    hop.mkdir()
+    (hop / "b").symlink_to(root / "home" / ".ssh")
+    (hop / "a").symlink_to(hop / "b")
+    (hop / "d").symlink_to(root / "home" / ".ssh")
+    (hop / "tok").symlink_to(root / "home" / "tokdir")
+    monkeypatch.setattr(local_hosted, "_passwd_home", lambda: root / "pw")
+    monkeypatch.setattr(confinement, "_passwd_home", lambda: root / "pw")
+    model = root / "model"
+    model.mkdir()
+    return model
+
+
+def _named(values: dict[str, str], root: Path) -> dict[str, str]:
+    return {name: value.format(root=root) for name, value in values.items()}
+
+
+@pytest.mark.parametrize(
+    ("link", "named", "envs", "tree", "why"),
+    [
+        ("hop/a", {}, {}, "home/.ssh", f"in {{root}}/home/.ssh, {_HIDDEN}"),
+        ("hop/d/id_rsa", {}, {}, "home/.ssh/id_rsa", f"in {{root}}/home/.ssh, {_HIDDEN}"),
+        ("rcc/sub", {}, {"CLAUDE_CONFIG_DIR": "{root}/rcc"}, "rcc/sub", "below the credential location {root}/rcc"),
+        ("rhome/.ssh", {}, {"HOME": "{root}/rhome"}, "rhome/.ssh", f"in {{root}}/rhome/.ssh, {_HIDDEN}"),
+        ("pw/.ssh", {}, {}, "pw/.ssh", f"in {{root}}/pw/.ssh, {_HIDDEN}"),
+        ("home/.cache/pip", {}, {}, "home/.cache/pip", f"in {{root}}/home/.cache, {_HIDDEN}"),
+        ("hp/home/.ssh", _HUB_ABOVE, {}, "hp/home/.ssh", f"in {{root}}/hp/home/.ssh, {_HIDDEN}"),
+        ("home2/.hf/token", _HUB_HIDDEN, {}, "home2/.hf/token", "a credential location"),
+    ],
+    ids=[
+        "link-to-link",
+        "directory-link",
+        "runner-claude",
+        "runner-home",
+        "passwd-home",
+        "beside-hub",
+        "hub-above",
+        "login-in-hub",
+    ],
+)
+def test_a_model_link_into_a_credential_location_binds_nothing_however_it_gets_there(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link: str,
+    named: dict[str, str],
+    envs: dict[str, str],
+    tree: str,
+    why: str,
+) -> None:
+    """A link is judged by where it ends, through links to links and directory links; the runner's credential
+    locations and home and the passwd entry's home count as the app's do; and a tree the plan reads whole excuses a
+    link only from a credential location it is in: one above it (a hub cache that is the home's parent) masks the
+    location, which the link's bind would open up, and a login in a hub cache stays a login."""
+    root = tmp_path.resolve()
+    model = _link_area(root, monkeypatch)
+    (model / "x").symlink_to(root / link)
+    (model / "tokenizer").symlink_to(root / "hop" / "tok")
+    environ = {"HOME": str(root / "home"), **_named(named, root)}
+    plan = runner_plan(root / "session", model, _named(envs, root), "/usr/bin/python3", environ)
+
+    reason = f"{model / 'x'} links to {root / tree}, {why.format(root=root)}, which its bind would show unmasked"
+    assert plan.refused == (reason,)
+    assert root / tree not in plan.readable and root / "home" / "tokdir" in plan.readable
+
+
+@pytest.mark.parametrize(
+    ("link", "named", "envs", "tree"),
+    [
+        ("hop/tok", {}, {}, "home/tokdir"),
+        ("rhome/tokdir", {}, {"HOME": "{root}/rhome"}, "rhome/tokdir"),
+        ("pw/tokdir", {}, {}, "pw/tokdir"),
+        ("home/.cache/huggingface/hub/models--m/blobs/w", {}, {}, "home/.cache/huggingface/hub/models--m/blobs"),
+        ("hp/home/tokdir", _HUB_ABOVE, {}, "hp/home/tokdir"),
+        ("home2/.hf/models--m/blobs/w", _HUB_HIDDEN, {}, "home2/.hf/models--m/blobs"),
+    ],
+    ids=["link-to-link", "runner-home", "passwd-home", "default-hub", "hub-above", "hub-in-hidden-entry"],
+)
+def test_a_model_link_to_a_home_s_other_entries_or_into_a_hub_cache_in_a_home_binds_what_it_links_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link: str, named: dict[str, str], envs: dict[str, str], tree: str
+) -> None:
+    """Every home's entries but its hidden ones (the app's, the runner's, the passwd entry's) may be linked to, and a
+    hub cache's blobs in a home's hidden entry, whose masks the plan's read of the hub cache opens up anyway."""
+    root = tmp_path.resolve()
+    model = _link_area(root, monkeypatch)
+    (model / "x").symlink_to(root / link)
+    environ = {"HOME": str(root / "home"), **_named(named, root)}
+    plan = runner_plan(root / "session", model, _named(envs, root), "/usr/bin/python3", environ)
+
+    assert plan.refused == ()
+    assert root / tree in plan.readable, plan.readable
 
 
 @pytest.mark.parametrize(
