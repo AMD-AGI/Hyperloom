@@ -130,19 +130,21 @@ Fix or remove a damaged `plugs.resolved.json` to resume.
 
 ## Choose the base launch
 
-Every server a fixed-workload session starts begins from one base launch: the
-framework's flags and environment that the optimizer's own changes sit on top
-of. A fresh session resolves it once, at launch, from the first source that
-serves the model on your GPU board:
+Every server a fixed-workload or native AgentX session starts begins from one
+base launch: the framework's flags and environment that the optimizer's own
+changes sit on top of. A fresh session resolves it once, at launch, from the
+first source that serves the model on your GPU board:
 
 1. `--reference-script PATH_OR_URL`, when given.
 2. InferenceX `main`.
 3. The framework's cookbook `main` (SGLang cookbook, vLLM recipes, ATOM).
-4. A built-in default table, with a warning.
+4. A built-in default table, with a warning (fixed workloads only).
 
-When another source cannot be read, the session runs on the default table and
-the warning names that source; when InferenceX itself cannot be read, the
-launch exits 2. When `--tp` or `--ep` is omitted, the session runs at the
+When another source cannot be read, a fixed session runs on the default table
+and the warning names that source; when InferenceX itself cannot be read, the
+launch exits 2. An AgentX session that no source serves, or whose sources
+cannot be read, exits 2 and names why each source missed. An AgentX base
+replaces the launch Magpie's own recipe would resolve. When `--tp` or `--ep` is omitted, the session runs at the
 topology the base chose. The base is frozen as `$SESSION_DIR/base_launch.json`
 and its warnings print in the startup banner; `--resume-from` reads that file
 and never refetches. A session whose state predates `base_launch.json` cannot
@@ -209,7 +211,7 @@ top. ISL/OSL are not injected: request lengths come from the AgentX trace corpus
 Concurrency stays fixed for the session.
 
 Native AgentX rejects `--enable-conc-sweep`, `--isl`, `--osl`, `--profile-osl`,
-`--max-model-len`, `--reference-script`, `--quantize` and `--quantize-scheme`.
+`--max-model-len`, `--quantize` and `--quantize-scheme`.
 It also rejects multi-node execution and frameworks other than SGLang/vLLM.
 Through `--extra-env`, `ISL`, `OSL`, `RANDOM_RANGE_RATIO`, `MAX_MODEL_LEN`,
 `EP_SIZE` and keys beginning with `AIPERF_`, `AGENTX_` or `AGENTIC_` are unsupported;

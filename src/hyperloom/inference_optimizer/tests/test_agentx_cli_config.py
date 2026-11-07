@@ -213,6 +213,18 @@ def test_unsupported_native_options_fail_before_session_creation(flags):
         configure_benchmark(args)
 
 
+def test_an_atom_agentx_session_is_refused_naming_the_frameworks_it_runs():
+    args = _build_parser().parse_args(["optimize", "--model", "/model", "--framework", "atom"])
+    with pytest.raises(ValueError, match="AgentX optimization supports SGLang or vLLM, not atom"):
+        configure_benchmark(args)
+
+
+def test_an_operator_launch_file_is_accepted_for_agentx(tmp_path):
+    args = _build_parser().parse_args(["optimize", "--model", "/model", "--reference-script", str(tmp_path / "x.sh")])
+    configure_benchmark(args)
+    assert args.reference_script == str(tmp_path / "x.sh")
+
+
 def test_operator_switch_uses_same_native_validation(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "")
     args = _build_parser().parse_args(["optimize", "--extra-env", "HYPERLOOM_AGENTX=1", "--nodes", "2"])
@@ -241,10 +253,10 @@ def test_yaml_input_can_use_recipe_image(tmp_path, monkeypatch):
     assert args.tp == 1
 
 
-def test_generated_snapshot_precedes_manifest(tmp_path, monkeypatch):
+def test_generated_snapshot_records_the_base_topology_and_precedes_manifest(tmp_path, monkeypatch):
     import asyncio
 
-    args = _build_parser().parse_args(["optimize", "--model", "Qwen/Qwen3-8B", "--tp", "2", "--conc", "8"])
+    args = _build_parser().parse_args(["optimize", "--model", "Qwen/Qwen3-8B", "--conc", "8"])
     configure_benchmark(args)
     launch_shape._resolve_run_topology(args)
     for name in (
@@ -260,12 +272,17 @@ def test_generated_snapshot_precedes_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda path: None)
 
+    def resolve_base(session_dir, args, *, framework):
+        args.tp = 4
+
+    monkeypatch.setattr(cli, "resolve_session_base", resolve_base)
+
     class ManifestReached(Exception):
         pass
 
     def manifest(session_dir, *, args):
         assert benchmark_config_path() == session_dir / "benchmark.yaml"
-        assert load_benchmark(benchmark_config_path())["envs"]["TP"] == 2
+        assert load_benchmark(benchmark_config_path())["envs"]["TP"] == 4
         raise ManifestReached
 
     monkeypatch.setattr(cli, "write_manifest", manifest)

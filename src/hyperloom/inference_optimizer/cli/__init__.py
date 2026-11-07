@@ -1289,8 +1289,9 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)
-    bind_benchmark(session_dir, args)
+    # The base settles an open TP and EP, which the bound AgentX workload YAML records.
     base = resolve_session_base(session_dir, args, framework=framework)
+    bind_benchmark(session_dir, args)
     manifest = write_manifest(session_dir, args=args)
     _persist_install_event(args, session_dir)
     # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.

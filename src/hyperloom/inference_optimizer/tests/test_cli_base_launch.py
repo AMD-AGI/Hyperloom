@@ -28,7 +28,7 @@ from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE, 
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite import SourceFetchError, SourceSnapshot
-from inference_suite.contracts import BaseLaunch, BaseLaunchError, Redacted, SourceKind, Topology
+from inference_suite.contracts import BaseLaunch, BaseLaunchError, Redacted, SourceKind, Topology, Workload
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
 from inference_suite.recipe import sources
 from inference_suite.recipe.model import InferencexSnapshot, RepoBundle
@@ -37,6 +37,7 @@ from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot
 
 _FIXTURES = Path(inference_suite.__file__).parent / "tests" / "fixtures"
 _DSR1 = "deepseek-ai/DeepSeek-R1-0528"
+_GLM52 = "zai-org/GLM-5.2-FP8"
 _REFERENCE_FIELDS = ("reference_server_args", "reference_envs", "reference_launch_controls", "reference_model")
 
 
@@ -389,11 +390,65 @@ def test_a_session_without_a_board_exits_2(tmp_path, fetched, capsys):
     assert fetched == []
 
 
-@pytest.mark.parametrize(("framework", "mode"), [("xdit", "synthetic"), ("sglang", "agentx")])
-def test_scriptable_and_agentx_sessions_resolve_no_base(tmp_path, fetched, framework, mode):
-    assert _resolve(tmp_path, _args(), framework=framework, benchmark_mode=mode) is None
+def test_a_scriptable_session_resolves_no_base(tmp_path, fetched):
+    assert _resolve(tmp_path, _args(), framework="xdit") is None
     assert fetched == []
     assert read_base_launch(tmp_path) is None
+
+
+def test_an_mlperf_agentx_session_resolves_no_base(tmp_path, fetched, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+
+    assert _resolve(tmp_path, _args(), benchmark_mode="agentx", concurrencies=(8,)) is None
+    assert fetched == []
+
+
+def _agentx(session_dir: Path, args: argparse.Namespace, **overrides) -> BaseLaunch | None:
+    return _resolve(session_dir, args, benchmark_mode="agentx", concurrencies=(8,), **overrides)
+
+
+def test_an_agentx_session_freezes_the_recipe_base_for_its_trace_replay(tmp_path, fetched):
+    args = _args(model=_GLM52, tp=1, ep=1, operator_tp=None, operator_ep=None)
+
+    base = _agentx(tmp_path, args)
+
+    query = fetched[0][0]
+    assert (query.workload, query.isl, query.osl, query.concurrencies) == (Workload.AGENTX, None, None, (8,))
+    assert base is not None and base.source.kind is SourceKind.INFERENCEX
+    assert read_base_launch(tmp_path) == base
+    assert args.tp == base.topology.tp
+
+
+def test_an_operator_file_is_the_agentx_base_ahead_of_a_recipe_that_serves_it(tmp_path, fetched):
+    script = tmp_path / "launch.sh"
+    script.write_text("python3 -m sglang.launch_server --model-path /models/glm --tp 8 --mem-fraction-static 0.7\n")
+    session = tmp_path / "session"
+    session.mkdir()
+
+    base = _agentx(session, _args(model=_GLM52, operator_tp=8, reference_script=str(script)))
+
+    assert base is not None and base.source.kind is SourceKind.USER_FILE
+    assert base.query.workload is Workload.AGENTX
+    assert base.args == ("--tp", "8", "--mem-fraction-static", "0.7")
+
+
+def test_an_agentx_session_no_recipe_serves_exits_2_without_a_default(tmp_path, fetched, capsys):
+    err = _refused(tmp_path, _args(model="Qwen/Qwen3-8B", operator_tp=1), capsys, benchmark_mode="agentx")
+
+    assert "no source serves" in err
+    assert "inferencex: no entry serves Qwen/Qwen3-8B with sglang on a mi355x" in err
+    assert "default_table" not in err
+
+
+def test_an_agentx_session_whose_sources_cannot_be_read_exits_2(tmp_path, monkeypatch, capsys):
+    unread = UnreadSource("InferenceX main", "connection refused")
+    monkeypatch.setattr(
+        bl, "fetch_sources", lambda query, *, user_file=None: dataclasses.replace(_snapshot(), unread=unread)
+    )
+
+    err = _refused(tmp_path, _args(model=_GLM52, operator_tp=None, operator_ep=None), capsys, benchmark_mode="agentx")
+
+    assert "InferenceX main could not be read: connection refused" in err
 
 
 def test_a_launch_file_for_a_scriptable_workload_exits_2(tmp_path, fetched, capsys):

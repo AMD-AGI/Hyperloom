@@ -100,16 +100,16 @@ def _validate_agentx_options(args: argparse.Namespace) -> None:
         args.framework or pins.get("FRAMEWORK") or os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
     )
     if framework not in {"sglang", "vllm"}:
-        raise ValueError("Magpie AgentX optimization supports SGLang or vLLM")
+        raise ValueError(f"AgentX optimization supports SGLang or vLLM, not {framework}")
     if int(getattr(args, "nodes", 1)) != 1:
-        raise ValueError("Magpie AgentX optimization requires one node")
+        raise ValueError("AgentX optimization requires one node")
     if any(getattr(args, key, None) is not None and int(getattr(args, key)) <= 0 for key in ("tp", "ep", "conc")):
         raise ValueError("AgentX TP, EP and CONC must be positive")
     if getattr(args, "enable_conc_sweep", None):
         raise ValueError("AgentX concurrency is fixed per session; create a session for each CONC")
     conflicting = [
         name
-        for name in ("isl", "osl", "profile_osl", "max_model_len", "reference_script", "quantize", "quantize_scheme")
+        for name in ("isl", "osl", "profile_osl", "max_model_len", "quantize", "quantize_scheme")
         if getattr(args, name, None)
     ]
     if conflicting:
