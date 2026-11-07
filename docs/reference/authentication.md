@@ -48,12 +48,14 @@ point GEAK at something else.
 
 ## Credential precedence
 
-Hyperloom reads credentials from two places, in order:
+Hyperloom reads credentials from two places, in order, and from a third on a
+checkout another account can write:
 
 | Source                                      | When used                                                 |
 |---------------------------------------------|-----------------------------------------------------------|
 | Process environment (`export FOO=...`)      | Always — wins unconditionally.                            |
 | `$REPO_ROOT/.env`                           | Only for keys missing from the process environment.       |
+| `$KERNEL_AGENT_ENV` (container-local)       | Only for the Anthropic-side credentials missing from both, when `.env` keeps none ([below](#a-checkout-another-account-can-write)). |
 
 Shell environment variables always win over `.env`.
 Both the inference optimizer CLI dotenv loader and
@@ -75,6 +77,37 @@ Preflight also rejects a *mispaired* configuration: a base URL whose only key
 belongs to the other provider, or a key whose only endpoint would come from the
 other provider. Hyperloom would otherwise send that key to a foreign host. Give
 each side its own `*_BASE_URL` and key, or drop the foreign key.
+
+### A checkout another account can write
+
+The Anthropic-side credentials `install.sh` persists (`ANTHROPIC_BASE_URL`,
+`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and an `ANTHROPIC_CUSTOM_HEADERS`
+you put in `.env`) stay out of the checkout's `.env` when another account can
+write it: the checkout directory or `.env` is writable by a group or others,
+belongs to another account, or is a link. A source directory bind-mounted from
+shared storage, as the Slurm job's `--source-dir` is, is the usual case. There
+another account could read or rewrite them, so `install.sh` writes them into the
+container-local `kernel-agent.env.sh` (`KERNEL_AGENT_ENV`) alone. It also removes
+those an earlier install or you left in `.env`, with the retired spellings it
+purges anyway, once it has read them like any other `.env` value, and keeps every
+other line byte for byte: the rest is written beside `.env` with its mode and
+renamed over it, and a link is replaced rather than written through.
+
+Readers that took the credentials from `.env` take them from that file instead,
+after the shell and `.env`: `install.sh` itself, so a re-install in the same
+container keeps them, and the CLI preflight, which counts them as `.env`'s when
+it decides whether a single provider side is configured. The documented `source`
+line and the Slurm job load that file anyway. A new container has no such file,
+so export the credentials in the shell that runs `install.sh` there; to rotate a
+key, export the new one and re-run `install.sh`.
+
+`install.sh` leaves `HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env` in such a
+`.env`, which is no secret. Its own writes replace a `.env` another account could
+write, in a directory that is yours, with one of yours, and the line tells the
+readers that the credentials are still in the container-local file. The next
+install of that now-private checkout persists them in `.env` as before and drops
+the line. The OpenAI side, which `install.sh` does not write, stays where you put
+it.
 
 ---
 
@@ -321,7 +354,9 @@ These questions cover common credential configuration scenarios.
 **Q: Do I have to put my key in `.env`?**
 
 No. Exporting credentials in your shell is sufficient. `.env` is a
-convenience for persistence between shells.
+convenience for persistence between shells. On a checkout another account can
+write, `install.sh` keeps the Anthropic-side credentials out of `.env`; see
+[A checkout another account can write](#a-checkout-another-account-can-write).
 
 **Q: I exported `OPENAI_API_KEY` but `.env` has a different value. Which wins?**
 

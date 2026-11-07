@@ -80,6 +80,9 @@ still exported by the launching shell therefore wins over a rotated `.env` value
    ```bash
    bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
+   On a checkout another account can write, `.env` holds no credentials, so a key
+   written there is not one `install.sh` keeps: export the new key in the shell that
+   runs it instead (see [A checkout another account can write](authentication.md#a-checkout-another-account-can-write)).
 
 ---
 
