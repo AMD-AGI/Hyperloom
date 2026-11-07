@@ -69,3 +69,43 @@ def test_runtime_rebuild_refuses_a_point_mask_outside_the_host_mask(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1")
     with pytest.raises(ValueError, match="outside"):
         apply_runtime_benchmark_overrides({"envs": {"TP": 1, "ROCR_VISIBLE_DEVICES": "7"}})
+
+
+@pytest.mark.parametrize(("first_mask", "leased"), [(None, "4,5"), ("4,5,6,7", "4,5")])
+def test_a_filled_mask_is_refilled_on_another_processs_cards(tmp_path, monkeypatch, first_mask, leased):
+    """A materialized config re-run under a leased mask (``rebench``) lands on the lease, not on the old fill."""
+    if first_mask:
+        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", first_mask)
+    src = write_config(tmp_path / "point.yaml", envs={"TP": 2})
+    first = materialize(src, tmp_path / "o1")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", leased)
+    again = write_config(tmp_path / "again.yaml", envs=first["envs"])
+    assert materialize(again, tmp_path / "o2")["envs"]["ROCR_VISIBLE_DEVICES"] == leased
+    assert apply_runtime_benchmark_overrides({"envs": dict(first["envs"])})["ROCR_VISIBLE_DEVICES"] == leased
+
+
+def test_a_point_mask_stays_the_points_own_through_rematerialization(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", _HOST_MASK)
+    first = materialize(
+        write_config(tmp_path / "point.yaml", envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "7"}), tmp_path / "o1"
+    )
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+    again = write_config(tmp_path / "again.yaml", envs=first["envs"])
+    with pytest.raises(ValueError, match="outside"):
+        materialize(again, tmp_path / "o2")
+
+
+def test_geak_pin_is_the_points_own_mask_over_the_session_mask(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", _HOST_MASK)
+    envs = materialize(
+        write_config(tmp_path / "point.yaml", envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "7"}), tmp_path / "o"
+    )["envs"]
+    pin = resolve_gpu_pin(recipe_envs=envs, environ={"ROCR_VISIBLE_DEVICES": _HOST_MASK})
+    assert (pin["value"], pin["count"], pin["source"]) == ("7", 1, "baseline_recipe")
+
+
+def test_geak_pin_ignores_a_session_fill(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    envs = materialize(write_config(tmp_path / "point.yaml", envs={"TP": 2}), tmp_path / "o")["envs"]
+    pin = resolve_gpu_pin(recipe_envs=envs, environ={"ROCR_VISIBLE_DEVICES": "4,5"})
+    assert (pin["value"], pin["source"]) == ("4,5", "process_env")

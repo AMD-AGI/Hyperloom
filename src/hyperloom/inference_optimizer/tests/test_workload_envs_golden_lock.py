@@ -58,6 +58,7 @@ benchmark:
   envs:
     TP: 1
     ROCR_VISIBLE_DEVICES: '0'
+    HYPERLOOM_ROCR_AUTOFILL: '0'
     NUM_PROMPTS: 320
     NUM_WARMUPS: 8
     EXTRA_SGLANG_ARGS: --variant 4 --watchdog-timeout 1800
@@ -75,6 +76,7 @@ benchmark:
   envs:
     TP: 1
     ROCR_VISIBLE_DEVICES: '0'
+    HYPERLOOM_ROCR_AUTOFILL: '0'
     NUM_PROMPTS: 320
     NUM_WARMUPS: 8
     EXTRA_VLLM_ARGS: --max-num-seqs 256
@@ -96,6 +98,7 @@ benchmark:
     OSL: 1024
     TP: 1
     ROCR_VISIBLE_DEVICES: '0'
+    HYPERLOOM_ROCR_AUTOFILL: '0'
     HYPERLOOM_TRACELENS_PATCH_STATUS: not_attempted
     PROFILE_EXTRA_BODY: '{"start_step": 6080, "num_steps": 128, "shape_discovery":
       true, "detailed_annotations": true}'

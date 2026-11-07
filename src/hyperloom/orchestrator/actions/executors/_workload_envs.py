@@ -73,7 +73,7 @@ from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from ._gpu_pin import resolve_rocr_visible_devices
+from ._gpu_pin import pin_rocr_visible_devices
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -960,13 +960,15 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
     if r_env:
         envs["RANDOM_RANGE_RATIO"] = float(r_env)
-    point_mask = envs.get("ROCR_VISIBLE_DEVICES")
     tp_from_yaml = envs.get("TP")
     if tp_from_yaml:
         resolved_tp = int(tp_from_yaml)
     else:
         # Derive TP from the pinned GPU list when the YAML doesn't set TP.
-        resolved_tp = len(mask_tokens(resolve_rocr_visible_devices(point_mask, tp=0))) or 1
+        resolved_tp = (
+            len(mask_tokens(envs.get("ROCR_VISIBLE_DEVICES")) or mask_tokens(os.environ.get("ROCR_VISIBLE_DEVICES")))
+            or 1
+        )
     # Auto-clamp TP to the visible GPU count. Override via
     # $INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1.
     if os.environ.get("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "").strip() != "1":
@@ -983,7 +985,7 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
             )
             resolved_tp = visible
     envs["TP"] = resolved_tp
-    envs["ROCR_VISIBLE_DEVICES"] = resolve_rocr_visible_devices(point_mask, tp=resolved_tp)
+    pin_rocr_visible_devices(envs, tp=resolved_tp)
 
 
 def _apply_xdit_profile(envs: dict[str, Any]) -> tuple[str, ...]:
@@ -1584,7 +1586,7 @@ def materialize_config_with_envs(
     """Render a per-run Magpie YAML with caller-provided overrides.
 
     The process env wins over the YAML defaults, except a point's own ``ROCR_VISIBLE_DEVICES``
-    (see :func:`resolve_rocr_visible_devices`), and the body is the order the phases run
+    (see :func:`pin_rocr_visible_devices`), and the body is the order the phases run
     in: what the run launches, the request shape it serves, the server arguments composed
     from every source, the per-framework and per-model envs, and the caller's own removals.
 

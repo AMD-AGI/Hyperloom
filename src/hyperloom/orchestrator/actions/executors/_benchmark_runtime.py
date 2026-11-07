@@ -15,7 +15,7 @@ from ._workload_envs import (
     apply_agentx_switch,
     apply_scriptable_runtime_defaults,
 )
-from ._gpu_pin import resolve_rocr_visible_devices
+from ._gpu_pin import pin_rocr_visible_devices
 
 
 def _apply_sizing_env_overrides(envs: dict[str, Any]) -> None:
@@ -77,8 +77,6 @@ def apply_runtime_benchmark_overrides(
     )
     _apply_sizing_env_overrides(envs)
     pin_mlperf_round_concurrency(envs)
-    envs["ROCR_VISIBLE_DEVICES"] = resolve_rocr_visible_devices(
-        envs.get("ROCR_VISIBLE_DEVICES"), tp=int(envs.get("TP", 1) or 1)
-    )
+    pin_rocr_visible_devices(envs, tp=int(envs.get("TP", 1) or 1))
 
     return envs
