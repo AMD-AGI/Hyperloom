@@ -52,6 +52,7 @@ class BenchmarkPoint:
     precision: str
     runner_type: str
     benchmark_script: str
+    workload_kind: str
     inferencex_path: str
     envs: Mapping[str, Any]
     agentx: bool
@@ -73,6 +74,7 @@ class BenchmarkPoint:
             precision=_text(block, "precision"),
             runner_type=_text(block, "runner_type"),
             benchmark_script=_text(block, "benchmark_script"),
+            workload_kind=_text(block, "workload_kind"),
             inferencex_path=_text(block, "inferencex_path").strip(),
             envs=_mapping(block.get("envs"), source),
             agentx=is_magpie_agentx(block),
