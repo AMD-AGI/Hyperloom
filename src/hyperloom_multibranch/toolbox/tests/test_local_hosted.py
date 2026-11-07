@@ -31,6 +31,7 @@ from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom.sandbox.local import LocalSandboxProvider
+from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -41,7 +42,9 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     _runner_template,
     build_local_toolbox,
     host_tool_repos,
+    hub_cache,
     max_parallel_tests,
+    runner_plan,
 )
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -117,6 +120,63 @@ def test_only_the_named_tool_repositories_are_taken_from_the_host() -> None:
     environ = {"INFERENCEX_REPO": "/a", "MAGPIE_REPO": "/b", "GITHUB_TOKEN": "t", "INFERENCEX_REF": "main"}
     assert host_tool_repos(environ) == {"INFERENCEX_REPO": "/a", "MAGPIE_REPO": "/b"}
     assert host_tool_repos({}) == {}
+
+
+def test_the_runner_plan_names_what_a_runner_reads_and_never_the_session_whole(tmp_path: Path) -> None:
+    """A confined runner reads its interpreter, the trees its template's variables name, the model with what its links
+    point into, and the hub cache; a repository named by URL and the image's own settings name nothing it binds."""
+    session, blobs, hf = tmp_path / "session", tmp_path / "hf" / "hub" / "models--m" / "blobs", tmp_path / "hf"
+    model = hf / "hub" / "models--m" / "snapshots" / "abc"
+    model.mkdir(parents=True)
+    blobs.mkdir(parents=True)
+    (blobs / "weights-blob").write_text("weights")
+    (model / "weights").symlink_to("../../blobs/weights-blob")
+    envs = {
+        "HYPERLOOM_FRAMEWORK_SNAPSHOT": str(session / "framework"),
+        PACK_ENV: str(session / "rule-pack" / "pack.yaml"),
+        "HYPERLOOM_JIT_CACHE": "/tmp/hyperloom-jit-store-0",
+        "HYPERLOOM_RUNNER_CACHE": "/runner-cache",
+        "HYPERLOOM_BUILD_STORE": "/stores/build",
+        "HYPERLOOM_BUILD_TRUST": "/stores/trust.json",
+        "INFERENCEX_REPO": "file:///mirrors/inferencex.git",
+        "MAGPIE_REPO": "https://github.com/AMD-AGI/Magpie.git",
+        "ROCM_PATH": "/opt/rocm",
+    }
+    plan = runner_plan(session, model, envs, "/usr/bin/python3", {"HF_HOME": str(hf)})
+
+    assert plan.readable == (
+        Path("/usr/bin/python3"),
+        session / "framework",
+        session / "rule-pack" / "pack.yaml",
+        Path("/tmp/hyperloom-jit-store-0"),
+        Path("/runner-cache"),
+        Path("/stores/build"),
+        Path("/stores/trust.json"),
+        Path("/mirrors/inferencex.git"),
+        model,
+        blobs,
+        hf / "hub",
+    )
+    assert plan.app_only == (session,)
+
+
+@pytest.mark.parametrize(
+    ("named", "expected"),
+    [
+        ({"HF_HUB_CACHE": "{root}/own-hub", "HF_HOME": "{root}/hf"}, "{root}/own-hub"),
+        ({"HF_HOME": "{root}/hf", "XDG_CACHE_HOME": "{root}/xdg"}, "{root}/hf/hub"),
+        ({"XDG_CACHE_HOME": "{root}/xdg", "HOME": "{root}/home"}, "{root}/xdg/huggingface/hub"),
+        ({"HOME": "{root}/home"}, "{root}/home/.cache/huggingface/hub"),
+        ({"HOME": "{root}/nowhere"}, None),
+    ],
+)
+def test_the_hub_cache_is_the_one_the_environment_names_and_only_where_it_exists(
+    tmp_path: Path, named: dict[str, str], expected: str | None
+) -> None:
+    for hub in ("own-hub", "hf/hub", "xdg/huggingface/hub", "home/.cache/huggingface/hub"):
+        (tmp_path / hub).mkdir(parents=True)
+    environ = {name: value.format(root=tmp_path) for name, value in named.items()}
+    assert hub_cache(environ) == (None if expected is None else Path(expected.format(root=tmp_path)))
 
 
 def _write(path: Path, text: str, written: float) -> None:
@@ -218,6 +278,21 @@ async def test_a_runner_that_cannot_start_says_why_and_leaves_no_log_traceback(
         assert "could not be saved" not in caplog.text, "a runner with no out/files has no logs: that is not a warning"
     finally:
         await toolbox.close()
+
+
+@pytest.mark.agent_isolation
+async def test_the_toolbox_s_test_sandboxes_run_in_bubblewrap_where_it_can_sandbox_them(tmp_path: Path) -> None:
+    usable_bwrap()
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(blackboard, tmp_path, tmp_path / "session", "0" * 40)
+    try:
+        sandbox = toolbox.provider.create("runner-1", role="measurement", timeout_sec=60, metadata={})
+        confined = sandbox.confined
+        sandbox.kill()
+    finally:
+        await toolbox.close()
+
+    assert confined, "the runner and the server it starts run in bubblewrap"
 
 
 @pytest.mark.skipif(
