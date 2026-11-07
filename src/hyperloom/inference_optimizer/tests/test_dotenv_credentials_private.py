@@ -111,6 +111,13 @@ def _write_installer(where: Path, before_write: str = "") -> Path:
     where.mkdir(parents=True)
     shutil.copyfile(RUNTIME_ENV_SH, where / "runtime_env.sh")
     kernel_tools = sourceable_kernel_tools(where)
+    # The steps source runtime_env.sh from this tree, which a second account may not be able to enter: the copy here.
+    kernel_text = kernel_tools.read_text(encoding="utf-8")
+    sourced = f". {shlex.quote(RUNTIME_ENV_SH.as_posix())}\n"
+    assert sourced in kernel_text
+    kernel_tools.write_text(
+        kernel_text.replace(sourced, f". {shlex.quote((where / 'runtime_env.sh').as_posix())}\n", 1), encoding="utf-8"
+    )
     preflight = "\n".join(install_sh_function(name) for name in _CREDENTIAL_PREFLIGHT)
     script = where / "install.sh"
     script.write_text(
@@ -486,8 +493,14 @@ def test_shell_and_preflight_name_the_same_credentials():
 
 
 def _remove(dotenv: Path, *extra: str, uid: int | None = None) -> subprocess.CompletedProcess:
+    runtime_env = RUNTIME_ENV_SH
+    if uid is not None:
+        # A copy beside the checkout's directory, which the second account can enter; it may not enter this tree.
+        runtime_env = dotenv.parent.parent / "runtime_env.sh"
+        shutil.copyfile(RUNTIME_ENV_SH, runtime_env)
+        runtime_env.chmod(0o644)
     argv = ["bash", "-c", '. "$1"; shift; runtime_env_remove_dotenv_credentials "$@"', "bash"]
-    argv += [RUNTIME_ENV_SH.as_posix(), str(dotenv), *extra]
+    argv += [runtime_env.as_posix(), str(dotenv), *extra]
     if uid is not None:
         argv = ["setpriv", f"--reuid={uid}", f"--regid={uid}", "--clear-groups", "--", *argv]
     return subprocess.run(argv, capture_output=True, text=True, timeout=60)
