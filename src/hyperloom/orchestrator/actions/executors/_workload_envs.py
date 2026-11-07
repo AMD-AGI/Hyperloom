@@ -31,6 +31,7 @@ from typing import Any, Mapping, NamedTuple
 import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
+from hyperloom.common.outside_facts import ENV_EVAL_LIMIT, ENV_EVAL_TASKS, ENV_EVAL_TOKENIZED_REQUESTS
 from hyperloom.common.agentx_workload import is_agentx_client_key, pin_mlperf_round_concurrency
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
@@ -1260,9 +1261,8 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
     # Accuracy eval (GSM8K) is ON unless the round passes ``extra_envs["RUN_EVAL"]`` or the workload is AgentX.
     if "RUN_EVAL" not in envs:
         envs["RUN_EVAL"] = "true"
-    # Persist eval task/limit into the YAML so they become part of the
-    # fingerprint-able contract and bypass_runner reads them from a stable source.
-    for _eval_key in ("MAGPIE_EVAL_TASKS", "MAGPIE_EVAL_LIMIT"):
+    # Persist eval task/limit into the YAML: the measurement surface hashes them and the round reads them from there.
+    for _eval_key in (ENV_EVAL_TASKS, ENV_EVAL_LIMIT):
         _eval_value = os.environ.get(_eval_key, "").strip()
         if _eval_value and _eval_key not in envs:
             envs[_eval_key] = _eval_value
@@ -1271,14 +1271,14 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
     # accuracy eval. Force string prompts so the gate works. Explicit env /
     # extra_envs win; only disaggregated runs are touched (aggregated hits the
     # sglang server directly, which accepts token-id prompts).
-    _eval_tok_env = os.environ.get("MAGPIE_EVAL_TOKENIZED_REQUESTS", "").strip()
+    _eval_tok_env = os.environ.get(ENV_EVAL_TOKENIZED_REQUESTS, "").strip()
     if not _eval_tok_env:
         from ._multi_node_env import resolve_kb_topology
 
         if str(resolve_kb_topology().pd_mode or "").lower() == "disaggregated":
             _eval_tok_env = "false"
-    if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
-        envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
+    if _eval_tok_env and ENV_EVAL_TOKENIZED_REQUESTS not in envs:
+        envs[ENV_EVAL_TOKENIZED_REQUESTS] = _eval_tok_env
 
 
 def _pin_runtime_build_envs(

@@ -920,7 +920,7 @@ def _rewrite(path_in_tmp: str, text: str):
     "change",
     [
         lambda tmp_path, config: _surface_config(tmp_path, ISL=2048),
-        lambda tmp_path, config: _surface_config(tmp_path, MAGPIE_EVAL_LIMIT=5),
+        lambda tmp_path, config: _surface_config(tmp_path, HYPERLOOM_EVAL_LIMIT=5),
         _rewrite("ix/benchmarks/run.sh", "run --other\n"),
         _rewrite("model/config.json", '{"hidden": 2}'),
     ],
@@ -953,9 +953,9 @@ def accepted(tmp_path, monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     for name in (
-        "MAGPIE_EVAL_TASKS",
-        "MAGPIE_EVAL_LIMIT",
-        "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+        "HYPERLOOM_EVAL_TASKS",
+        "HYPERLOOM_EVAL_LIMIT",
+        "HYPERLOOM_EVAL_TOKENIZED_REQUESTS",
         "INFERENCE_OPTIMIZER_SERVER_ARGS",
     ):
         monkeypatch.delenv(name, raising=False)

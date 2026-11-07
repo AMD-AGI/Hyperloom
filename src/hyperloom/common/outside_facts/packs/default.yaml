@@ -326,7 +326,8 @@ facts:
     project: InferenceX
     reason: >-
       The names of the workload, the request and the evaluation in benchmark.envs, as InferenceX's benchmark scripts read
-      them; a renamed variable is silently ignored by the script and the point measures another workload.
+      them and, for the evaluation, as Hyperloom's round translation reads them; a renamed variable is silently ignored
+      and the point measures another workload.
     names:
       isl: ISL
       osl: OSL
@@ -338,9 +339,9 @@ facts:
       max_model_len: MAX_MODEL_LEN
       tp: TP
       ep: EP
-      magpie_eval_tasks: MAGPIE_EVAL_TASKS
-      magpie_eval_limit: MAGPIE_EVAL_LIMIT
-      magpie_eval_tokenized_requests: MAGPIE_EVAL_TOKENIZED_REQUESTS
+      eval_tasks: HYPERLOOM_EVAL_TASKS
+      eval_limit: HYPERLOOM_EVAL_LIMIT
+      eval_tokenized_requests: HYPERLOOM_EVAL_TOKENIZED_REQUESTS
     examples:
       - "hyperloom.measure.surface: SURFACE_ENV_KEYS, POINT_ENV_KEYS and REQUEST_ENV_KEYS group these names by who may set them"
       - "hyperloom.common.env_safety: BLOCKED_EXTERNAL_ENV_NAMES refuses these names in an env export from an untrusted source"

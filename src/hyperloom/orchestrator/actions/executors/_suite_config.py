@@ -44,8 +44,8 @@ from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
     ENV_ISL,
-    ENV_MAGPIE_EVAL_LIMIT,
-    ENV_MAGPIE_EVAL_TASKS,
+    ENV_EVAL_LIMIT,
+    ENV_EVAL_TASKS,
     ENV_MAX_MODEL_LEN,
     ENV_NUM_PROMPTS,
     ENV_NUM_WARMUPS,
@@ -133,8 +133,8 @@ _CONSUMED_ENV = frozenset(
         ENV_NUM_PROMPTS,
         ENV_NUM_WARMUPS,
         ENV_RUN_EVAL,
-        ENV_MAGPIE_EVAL_TASKS,
-        ENV_MAGPIE_EVAL_LIMIT,
+        ENV_EVAL_TASKS,
+        ENV_EVAL_LIMIT,
         _PORT_ENV,
         _GPU_MASK_ENV,
         _RUN_PHASE_ENV,
@@ -366,15 +366,15 @@ def _fixed(point: _Point) -> FixedWorkload:
 
 
 def _eval(point: _Point, enabled: bool) -> EvalConfig:
-    task = point.text(ENV_MAGPIE_EVAL_TASKS) or EvalTask.GSM8K.value
+    task = point.text(ENV_EVAL_TASKS) or EvalTask.GSM8K.value
     if task != EvalTask.GSM8K.value:
         raise ConfigError(f"the point evaluates {task!r}; a round evaluates {EvalTask.GSM8K.value} only")
-    limit = point.text(ENV_MAGPIE_EVAL_LIMIT)
+    limit = point.text(ENV_EVAL_LIMIT)
     return EvalConfig(
         enabled=enabled,
         num_fewshot=_GSM8K_FEWSHOT,
         concurrency=point.integer(ENV_CONC),
-        limit=None if limit is None else point.integer(ENV_MAGPIE_EVAL_LIMIT),
+        limit=None if limit is None else point.integer(ENV_EVAL_LIMIT),
         max_tokens_cap=point.integer(_EVAL_MAX_TOKENS_ENV, DEFAULT_MAX_TOKENS_CAP),
         probe=EvalProbe(
             enabled=point.flag(_PROBE_ENV, default=True),
