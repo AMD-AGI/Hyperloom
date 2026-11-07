@@ -50,14 +50,17 @@ __all__ = [
     "AiperfProgressPoller",
     "KvMetricsPoller",
     "KvSample",
+    "RUNNING_REQUEST_GAUGES",
     "aggregate_series",
     "canonical_label_key",
     "families_from_aiperf_record",
     "json_number",
     "parse_prometheus_text",
+    "read_aiperf_phases",
     "read_aiperf_server_metrics",
     "resolve_metrics_url",
     "resolve_metrics_port",
+    "running_requests",
     "sample_from_families",
     "server_metrics_exports",
 ]
@@ -430,6 +433,19 @@ def aggregate_series(grouped: dict[str, dict[str, float]]) -> float | None:
     if not grouped:
         return None
     return sum(max(shards.values()) for shards in grouped.values() if shards)
+
+
+#: Each engine's gauge of the requests in its running batch.
+RUNNING_REQUEST_GAUGES = ("sglang:num_running_reqs", "vllm:num_requests_running")
+
+
+def running_requests(families: ParsedFamilies) -> float | None:
+    """The requests running across the engine's independent units; ``None`` when it exposes no running gauge."""
+    for name in RUNNING_REQUEST_GAUGES:
+        total = aggregate_series(_series(families, name))
+        if total is not None:
+            return total
+    return None
 
 
 def _rank_keys(families: ParsedFamilies, names: tuple[str, ...]) -> list[str]:
@@ -877,6 +893,18 @@ def json_number(raw: Any) -> float | None:
     return float(raw) if math.isfinite(raw) else None
 
 
+def read_aiperf_phases(url: str) -> dict[str, Any] | None:
+    """The ``phases`` mapping aiperf's progress API at ``url`` reports; ``None`` when its answer carries none.
+
+    Raises:
+        urllib.error.URLError, http.client.HTTPException, OSError, ValueError: The API could not be read.
+    """
+    with _OPENER.open(f"{url.rstrip('/')}/api/progress", timeout=_SCRAPE_TIMEOUT_SEC) as response:
+        payload = json.loads(response.read().decode("utf-8", "ignore"))
+    phases = payload.get("phases") if isinstance(payload, dict) else None
+    return phases if isinstance(phases, dict) else None
+
+
 class AiperfProgressPoller:
     """Reads AIPerf's phase timeline from its local progress API.
 
@@ -926,8 +954,7 @@ class AiperfProgressPoller:
         if url is None:
             return None
         try:
-            with _OPENER.open(f"{url.rstrip('/')}/api/progress", timeout=_SCRAPE_TIMEOUT_SEC) as response:
-                payload = json.loads(response.read().decode("utf-8", "ignore"))
+            phases = read_aiperf_phases(url)
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
             # Only give up on an endpoint that never worked. One that answered before and is failing now is an aiperf
@@ -938,5 +965,4 @@ class AiperfProgressPoller:
             return None
         self._failures = 0
         self._succeeded = True
-        phases = payload.get("phases") if isinstance(payload, dict) else None
-        return phases if isinstance(phases, dict) else None
+        return phases
