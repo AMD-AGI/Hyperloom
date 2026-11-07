@@ -14,7 +14,8 @@ configuration, never from a list of tool names in code (:func:`credential_paths`
 directories, every environment variable that names a credential location, Hugging Face's login files, and the files
 the app registers in :data:`PRIVATE_PATHS` as it creates them. So nothing broad under a credential location is bound
 because a program lives there: :func:`toolchain_paths` binds a program's own directory, and its parent only away from
-those locations, and no search-path entry that is one.
+those locations; a search-path entry (or any other path it derives) that is one is not bound, and one that holds one
+is bound entry by entry around it.
 
 Nothing is resolved through what an agent writes. A name in a tree the agent writes may be a symlink it left there, to
 any host path, or become one before the next launch; so a path reached through such a tree (looked up in a directory
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import pwd
 import shutil
@@ -78,6 +80,31 @@ CREDENTIAL_FILE_SUFFIXES = ("_KEY_FILE", "_KEY_PATH", "_TOKEN_FILE", "_TOKEN_PAT
 XDG_VARIABLES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 #: Hugging Face's login files under its config directory (``HF_HOME``, else ``$XDG_CACHE_HOME/huggingface``).
 HF_LOGIN_FILES = ("token", "stored_tokens")
+#: Where tools keep their logins in a home, relative to it: a path a search-path or data variable names that is one of
+#: these, or holds one, is never bound whole (:func:`_around_logins`), though no variable names it (``~/.config`` is
+#: the XDG configuration directory when ``XDG_CONFIG_HOME`` is unset).
+HOME_LOGINS = (
+    ".ssh",
+    ".gnupg",
+    ".netrc",
+    ".git-credentials",
+    ".config",
+    ".claude",
+    ".claude.json",
+    ".codex",
+    ".docker",
+    ".aws",
+    ".kube",
+    ".azure",
+    ".pypirc",
+    ".npmrc",
+    ".password-store",
+    ".vault-token",
+    ".local/share/keyrings",
+)
+#: Where tools keep their logins in the XDG configuration directory (``~/.config``, or ``XDG_CONFIG_HOME``), so that
+#: a path below it is not bound whole when it is one of these either.
+CONFIG_LOGINS = ("gh", "gcloud", "git", "hub", "rclone", "containers")
 #: Variables whose value is a CA bundle the child needs to read.
 CA_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO", "CURL_CA_BUNDLE")
 #: Variables whose ``:``-separated entries the child searches for programs, libraries and modules.
@@ -92,6 +119,10 @@ _ETC = Path("/etc")
 _ROOT = Path("/")
 #: How many symlinks resolving one path may follow, as the kernel allows (``ELOOP`` past it, so nothing is bound).
 _MAX_LINKS = 40
+
+log = logging.getLogger(__name__)
+_SAID: set[Path] = set()
+_SAID_LOCK = threading.Lock()
 
 
 def _real(path: str | os.PathLike[str]) -> Path:
@@ -643,10 +674,23 @@ def _which(program: str, environ: Mapping[str, str], *, outside: tuple[Path, ...
     return None
 
 
+def _homes(environ: Mapping[str, str]) -> list[Path]:
+    """The child's home, this process's, and this process's passwd entry's, as given."""
+    return [home for home in dict.fromkeys((_app_home(environ), _app_home(os.environ), _passwd_home())) if home]
+
+
 def _credential_roots(environ: Mapping[str, str]) -> tuple[Path, ...]:
     """The credential locations of the child's environment and of this process's own (the child's home may be
-    re-pointed; the app's is where its logins are), resolved."""
+    re-pointed; the app's is where its logins are), and the well-known login locations in each home
+    (:data:`HOME_LOGINS`) and configuration directory (:data:`CONFIG_LOGINS`), there or not, resolved."""
     found = [*_sources(environ, _app_home(environ), ()), *_sources(os.environ, _app_home(os.environ), ())]
+    homes = _homes(environ)
+    configs = [home / ".config" for home in homes]
+    configs += [
+        Path(env["XDG_CONFIG_HOME"]) for env in (environ, os.environ) if env.get("XDG_CONFIG_HOME", "")[:1] == "/"
+    ]
+    found.extend(home / login for home in homes for login in HOME_LOGINS)
+    found.extend(config / login for config in configs for login in CONFIG_LOGINS)
     found.append(_passwd_home() or _ROOT)
     return tuple(dict.fromkeys(_real(path) for path in found if path != _ROOT))
 
@@ -684,6 +728,71 @@ def _resolver() -> Iterator[Path]:
             yield target
 
 
+def _say_once(path: Path, message: str) -> None:
+    with _SAID_LOCK:
+        if path in _SAID:
+            return
+        _SAID.add(path)
+    log.warning(message)
+
+
+def _entries_around(path: Path, roots: tuple[Path, ...], depth: int) -> Iterator[Path]:
+    """The entries of the directory ``path`` (which holds a credential location of ``roots``, resolved) that neither
+    are nor hold one, and those that hold one opened up the same way ``depth`` levels down; an entry is judged by
+    where it resolves, so a link to a credential location is left out too. What lies deeper, or cannot be listed, is
+    left out: nothing of it is bound."""
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return
+    for name in names:
+        entry = path / name
+        real = _real(entry)
+        if not any(_at_or_under(root, real) for root in roots):
+            yield entry
+        elif real not in roots and depth > 1 and real.is_dir():
+            yield from _entries_around(entry, roots, depth - 1)
+
+
+def _a_login_file(path: Path, real: Path, logins: tuple[Path, ...]) -> bool:
+    """Whether ``path`` (resolved: ``real``) is not a directory and lies below a login location of ``logins``
+    (resolved), or is a link that does."""
+    if real.is_dir():
+        return False
+    where = (real, _real(path.parent) / path.name)
+    return any(_at_or_under(at, login) and at != login for at in where for login in logins)
+
+
+def _around_logins(
+    paths: Iterable[Path], roots: tuple[Path, ...], logins: tuple[Path, ...], programs: frozenset[Path]
+) -> Iterator[Path]:
+    """``paths`` without the credential locations ``roots`` (resolved): one that is one (a ``PATH`` entry that is the
+    home) is not bound, and said once, since bound whole it would show every login in it, and a mask is only ever
+    below a bound path; one that holds one is bound entry by entry around it (:func:`_entries_around`), so no login
+    in it is shown, nor one made there after the launch. Below a login location (``logins``: ``roots`` but the
+    homes) only a directory is bound (a tool's program folder): a file there, or a link to one or from there, that a
+    variable names (``MODEL_PATH=~/.ssh/id_rsa``) is a login, so it is not bound, and said once; the program the
+    child runs (``programs``) is."""
+    for path in paths:
+        real = _real(path)
+        if real in roots:
+            _say_once(
+                real,
+                f"confinement: {path} is not shown to the agent: it is a credential location (a home, or a tool's "
+                "login), and bound whole it would show every login in it; programs there are not found inside",
+            )
+        elif path not in programs and _a_login_file(path, real, logins):
+            _say_once(
+                real,
+                f"confinement: {path} is not shown to the agent: it is a file in a tool's login location, which "
+                "holds its login; only directories there (a tool's programs) are bound",
+            )
+        elif any(real in root.parents for root in roots):
+            yield from _entries_around(path, roots, HOME_DEPTH)
+        else:
+            yield path
+
+
 def toolchain_paths(environ: Mapping[str, str], argv0: str, *, writable: Iterable[Path]) -> tuple[Path, ...]:
     """What a child needs to read to run ``argv0`` under ``environ``: the system roots, this interpreter's prefixes,
     the child's interpreter's import path (:func:`interpreter_search_path`), every entry of its search-path variables,
@@ -692,15 +801,21 @@ def toolchain_paths(environ: Mapping[str, str], argv0: str, *, writable: Iterabl
     sandbox mounts its own), ``/sys`` (:attr:`Confinement.sys_paths`), nor what lies in the trees the child writes
     (``writable``; its scratch too, when that is on the host) or is reached through them: those show it already, a
     read-only bind there would take the child's own files from it, and where a link there points is the agent's
-    choice. Nor a variable's entry that is itself a credential location (a ``PATH`` entry that is the home): bound
-    whole, it would show every login in it, unmasked; a directory below one is bound, and the rest of it masked."""
+    choice. Nor, beyond the system roots, a credential location of the child's or this process's (a ``PATH`` entry
+    that is the home), what holds one only entry by entry around it, and below a tool's login location only
+    directories, never a file a variable names there (:func:`_around_logins`)."""
     agent = _trees(writable)
-    logins = _credential_roots(environ)
-    found: list[Path] = [Path(root) for root in SYSTEM_ROOTS]
-    found.extend(Path(root) for root in interpreter_roots())
-    found.extend(interpreter_search_path(environ, writable=agent))
+    derived: list[Path] = [Path(root) for root in interpreter_roots()]
+    derived.extend(interpreter_search_path(environ, writable=agent))
     for name in (*SEARCH_PATH_VARIABLES, *CA_VARIABLES, *DATA_VARIABLES):
-        found.extend(entry for entry in _absolute_entries(environ.get(name, "")) if _real(entry) not in logins)
-    found.extend(_program_dirs(argv0, environ, agent))
-    found.extend(_resolver())
+        derived.extend(_absolute_entries(environ.get(name, "")))
+    programs = tuple(_program_dirs(argv0, environ, agent))
+    derived.extend(programs)
+    derived.extend(_resolver())
+    kept = [path for path in derived if path != _ROOT and not _agents(path, agent)]
+    found = [Path(root) for root in SYSTEM_ROOTS]
+    roots = _credential_roots(environ)
+    homes = {_real(home) for home in _homes(environ)}
+    logins = tuple(root for root in roots if root not in homes)
+    found.extend(_around_logins(dict.fromkeys(kept), roots, logins, frozenset(programs)))
     return tuple(dict.fromkeys(path for path in found if path != _ROOT and not _agents(path, agent)))
