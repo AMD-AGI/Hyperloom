@@ -654,6 +654,20 @@ async def test_an_arbor_checkout_is_made_ready_by_the_adapter_without_the_onboar
     assert all(cwd == ready.source_dir for _command, cwd, _env in sandbox.ran)
 
 
+async def test_an_arbor_given_why_no_source_change_can_be_kept_is_told_so_and_made_ready_as_told(
+    tmp_path: Path,
+) -> None:
+    spec = replace(_spec(tmp_path), source_unkept="the image's vllm names no upstream commit")
+
+    ready = await make_ready(
+        str(_arbor_repo(tmp_path)), spec, tmp_path / "agent", _setup(Sandbox([Process(None)]), None)
+    )
+
+    directives = json.loads((ready.source_dir / CONFIG_FILE).read_text())["directives"]
+    assert any(spec.source_unkept in rule for rule in directives)
+    assert ready.source_unkept == spec.source_unkept
+
+
 async def test_a_config_the_adapter_refuses_fails_the_preflight_in_one_attempt_with_every_reason(
     tmp_path: Path,
 ) -> None:
