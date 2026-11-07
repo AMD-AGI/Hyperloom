@@ -287,7 +287,7 @@ def test_the_call_is_built_from_the_sheet_and_the_environment_is_the_sandboxes(t
     assert rewritten["inferencex_path"] == str(tmp_path / "ix")
     assert rewritten["envs"]["ROCR_VISIBLE_DEVICES"] == "0"
     assert env["NCCL_IB_SL"] == "3" and "MASTER_ADDR" not in env and "PET_RANK" not in env
-    assert "HYPERLOOM_SIGNING_KEY_FILE" not in env and env["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"
+    assert "HYPERLOOM_SIGNING_KEY_FILE" not in env
 
 
 def test_a_profile_whose_patch_cannot_be_laid_in_its_farm_runs_and_its_points_and_status_say_so(

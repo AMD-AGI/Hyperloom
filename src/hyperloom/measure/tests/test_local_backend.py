@@ -756,7 +756,6 @@ def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server
 def test_an_agentx_boot_pins_nothing(grid, server, tmp_path, monkeypatch):
     """An AgentX point has no evaluation round and no prompt count, and no backend phase is said for a boot."""
     point = _agentx_point(tmp_path, monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
 
     _run(_call(tmp_path, point, prep="conc_sweep"))
 
