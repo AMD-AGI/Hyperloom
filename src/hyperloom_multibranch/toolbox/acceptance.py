@@ -151,7 +151,8 @@ def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Rec
             "giving such a flag the root sets under the root's spelling with its keys kept, and the values of a flag "
             "the root gives more than once in the root's order, since the server keeps one occurrence (the KV cache "
             "dtype, attention compute precision and activation quantization may change); a flag counts in every form "
-            "its framework reads as that flag (a prefix of it, '_' for '-', '--flag.key value', '-qVALUE')",
+            "its framework reads as that flag (a prefix of it, '_' for '-', '--flag.key value', '-qVALUE'), and the "
+            "word after a '--flag.key' is its value, even one that begins with '-'",
             DELTA_NOT_APPLICABLE_CODE,
         )
 

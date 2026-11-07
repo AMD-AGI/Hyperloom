@@ -15,10 +15,10 @@ key. Only launch flags are read: a source patch that casts weights at load is no
 
 A launch word is first read as the frameworks' argument parsers read it (:func:`_flag`): ``--flag=value`` is ``--flag
 value``; a long flag's name reads ``_`` as ``-`` and ends at its first ``.``, and ``--flag.key value`` is a value of
-``--flag`` that keeps its key (vLLM gives it as a JSON value of ``--flag``); ``-qVALUE`` is ``-q VALUE``; and a long
-flag that is no spelling of a setting but begins one or more (``--dty``) is each setting it begins, as argparse takes a
-prefix of an option for the option, unless the word is an option of the frameworks' servers itself
-(:data:`_OWN_OPTIONS`).
+``--flag`` that keeps its key (vLLM gives it as a JSON value of ``--flag``), whose value is the next word whatever it is
+(:func:`_flags`); ``-qVALUE`` is ``-q VALUE``; and a long flag that is no spelling of a setting but begins one or more
+(``--dty``) is each setting it begins, as argparse takes a prefix of an option for the option, unless the word is an
+option of the frameworks' servers itself (:data:`_OWN_OPTIONS`).
 
 The comparison is then Arbor's (``arbor/measure/precision.py``): a flag's values are the words up to the next flag, and
 a word before any flag is a positional, not compared; a word that reads as a number (``-1``) is a value, not a flag; a
@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import islice
 from typing import NamedTuple
 
 from hyperloom.contracts.recipe import REMOVED, LaunchConfig
@@ -103,7 +104,7 @@ _NO_KEY = ("(no key)",)
 
 class _Occurrence(NamedTuple):
     """A flag of a launch as :func:`_flag` reads it, with the values it gives; ``dotted`` when it is vLLM's
-    ``--flag.key value``, its key (``.key``) leading the values."""
+    ``--flag.key value`` (or ``-f.key value``), its key (``.key``) leading the values."""
 
     flag: str
     values: tuple[str, ...]
@@ -147,20 +148,31 @@ def _settings(launch: LaunchConfig) -> dict[str, _Setting]:
 
 
 def _flags(server_args: str) -> list[_Occurrence]:
-    """``server_args`` as its flags with their values, in the order given; the words before the first flag are left
-    out."""
+    """``server_args`` as its flags with their values, in the order given, the dotted ones after the others; the words
+    before the first flag are left out.
+
+    vLLM takes each dotted flag word (a flag with a ``.`` before any ``=``) out of the launch before argparse reads the
+    rest, and one written without ``=`` takes the next word with it as its value, whatever that word is:
+    ``--hf-overrides.foo -qfp8`` sets ``foo`` to ``-qfp8`` and quantizes nothing. A word after that value is read with
+    the flag before the dotted one, as argparse reads what is left.
+    """
     parsed = tokenize_server_args_preserving_json(server_args)
-    words = parsed[1] if parsed is not None else server_args.split()
+    words = iter(parsed[1] if parsed is not None else server_args.split())
     found: list[tuple[_Occurrence, list[str]]] = []
+    dotted: list[_Occurrence] = []
     for word in words:
-        if word.startswith("-") and len(word) > 1 and not _is_number(word):
-            found.append((_flag(word), []))
-        elif found:
-            found[-1][1].append(word)
-    return [
-        occurrence._replace(values=tuple(_canonical(value) for value in (*occurrence.values, *more)))
-        for occurrence, more in found
-    ]
+        if not (word.startswith("-") and len(word) > 1 and not _is_number(word)):
+            if found:
+                found[-1][1].append(word)
+            continue
+        occurrence = _flag(word)
+        if not occurrence.dotted:
+            found.append((occurrence, []))
+            continue
+        taken = () if "=" in word else tuple(islice(words, 1))
+        dotted.append(occurrence._replace(values=(*occurrence.values, *taken)))
+    plain = [occurrence._replace(values=(*occurrence.values, *more)) for occurrence, more in found]
+    return [occurrence._replace(values=tuple(map(_canonical, occurrence.values))) for occurrence in [*plain, *dotted]]
 
 
 def _flag(word: str) -> _Occurrence:
@@ -169,16 +181,18 @@ def _flag(word: str) -> _Occurrence:
     argparse reads a value attached to a one-letter option as its value (``-qfp8`` and ``-q=fp8`` are ``-q fp8``).
     vLLM reads a long flag's name with ``_`` as ``-`` up to its first ``.``, and gives ``--flag.key value`` to
     ``--flag`` as the JSON value ``{"key": value}``, merged with the flag's other dotted occurrences: that is a value of
-    ``--flag`` here, led by its key (``.key``), so a key added, removed or given another value changes ``--flag``.
+    ``--flag`` here, led by its key (``.key``), so a key added, removed or given another value changes ``--flag``. It
+    reads a one-dash word with a ``.`` before any ``=`` so too (``-cc.custom_ops+ x``), its option the word's name up
+    to the ``.`` as argparse reads that.
     """
-    if word[:2] in _SHORT_SPELLINGS and len(word) > 2:
-        return _Occurrence(word[:2], (word[2:].removeprefix("="),))
     name, assigned, value = word.partition("=")
     values = (value,) if assigned else ()
-    if not name.startswith("--"):
-        return _Occurrence(name, values)
-    name, dotted, key = name.partition(".")
-    return _Occurrence(name.replace("_", "-"), (f".{key}", *values) if dotted else values, bool(dotted))
+    if "." in name:
+        name, _, key = name.partition(".")
+        return _Occurrence(_flag(name).flag, (f".{key}", *values), dotted=True)
+    if word[:2] in _SHORT_SPELLINGS and len(word) > 2:
+        return _Occurrence(word[:2], (word[2:].removeprefix("="),))
+    return _Occurrence(name.replace("_", "-") if name.startswith("--") else name, values)
 
 
 #: Each setting by its spellings as :func:`_flag` reads them, the override flags' included.
