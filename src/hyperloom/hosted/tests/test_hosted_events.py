@@ -135,6 +135,71 @@ def test_each_segment_is_made_new_with_mode_664_and_an_earlier_one_is_never_open
     assert [json.loads(line)["id"] for line in third.read_bytes().splitlines()] == ["2"]
 
 
+def _one_leg(events: Path, message: str) -> None:
+    sink = HostedProgressEvents(events, "r")
+    sink.emit("hyperloom.warning", {"code": "c", "message": message})
+    sink.close()
+
+
+def _new_ids(events: Path, number: int) -> list[str]:
+    return [json.loads(line)["id"] for line in (events / segment_name(number)).read_bytes().splitlines()]
+
+
+@pytest.mark.parametrize("planted", ["directory", "pipe", "link"])
+def test_what_is_no_regular_file_at_the_newest_segments_name_is_passed_over_and_the_ids_go_on(tmp_path, planted):
+    events = tmp_path / "events"
+    _one_leg(events, "leg 1")
+    with open(events / segment_name(1), "ab") as handle:  # leg 1 died in the middle of event 2
+        handle.write(b'{"specversion":"1.0","id":"2","sour')
+    newest = events / segment_name(2)
+    if planted == "directory":
+        newest.mkdir()
+    elif planted == "pipe":
+        os.mkfifo(newest)
+    else:
+        newest.symlink_to(events / segment_name(1))
+
+    _one_leg(events, "leg 2")
+
+    assert _new_ids(events, 3) == ["2"], "no segment's ids: nothing holds any"
+    assert _new_ids(events, 1) == ["1"], "the newest segment is the one whose unfinished tail is cut"
+    assert (newest.is_dir() and not newest.is_symlink()) == (planted == "directory")
+
+
+def test_a_newest_segment_this_account_cannot_read_is_passed_over_and_no_id_it_may_hold_is_used_again(
+    tmp_path, monkeypatch
+):
+    """A segment only its owner may read: one a writer from before segments were the group's to read left."""
+    events = tmp_path / "events"
+    _one_leg(events, "leg 1")
+    _one_leg(events, "leg 2")
+    real_open = os.open
+
+    def owner_only(path, flags, *args, **kwargs):
+        if path == segment_name(2):
+            raise PermissionError(13, "Permission denied", path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(hosted_events.os, "open", owner_only)
+    _one_leg(events, "leg 3")
+
+    assert _new_ids(events, 3) == [str(1 + hosted_events._MAX_EVENTS_PER_SEGMENT + 1)]
+    shortest = HostedProgressEvents(tmp_path / "other", "")._line(1, "", {})
+    assert len(shortest) >= hosted_events._MIN_EVENT_BYTES, "a bound on what a segment holds, not a guess"
+
+
+def test_a_link_put_where_the_events_directory_goes_is_never_followed(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o2775)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    (state / "events").symlink_to(private)
+    with pytest.raises(OSError, match="not followed"):
+        HostedProgressEvents(state / "events", "r")
+    assert list(private.iterdir()) == []
+
+
 def _here(code: str, *, umask: int) -> None:
     """Run ``code`` in a process of its own under ``umask`` (this process's is never changed)."""
     preamble = f"import os, sys\nos.umask({umask:#o})\nsys.path.insert(0, {_SRC!r})\n"
