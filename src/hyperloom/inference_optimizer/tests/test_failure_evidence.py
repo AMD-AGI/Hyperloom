@@ -234,9 +234,7 @@ class TestFailedStepClasses:
         assert failed_step_error_class(FailedStep.GOLDEN_OWNED_TOUCHED) == SERVE_FLAG
         assert failed_step_error_class(FailedStep.SERVER_EXITED_BEFORE_READY) == "server_init_dead"
         assert failed_step_error_class(FailedStep.SERVER_STALLED) == "detokenizer_stall"
-        assert failed_step_error_class(FailedStep.CLIENT_FAILED) == "magpie_nonzero_invalid_measurement"
         assert failed_step_error_class(FailedStep.CLIENT_OUTPUT_MISSING) == "benchmark_report_missing"
-        assert failed_step_error_class(FailedStep.ROUND_TIMEOUT) == "magpie_timeout"
         assert failed_step_error_class(FailedStep.CONFIG_INVALID) == "yaml_build_error"
         for step in (FailedStep.DEADLINE_EXHAUSTED, FailedStep.CANCELLED):
             assert failed_step_error_class(step) in STOPPED_BY_THE_RUN
@@ -257,7 +255,9 @@ class TestFailedStepClasses:
         }
         harness = {
             FailedStep.BASE_DIGEST_MISMATCH,
+            FailedStep.CLIENT_FAILED,
             FailedStep.EVAL_CONTEXT_TOO_SHORT,
+            FailedStep.ROUND_TIMEOUT,
             FailedStep.SOURCE_FILES_CHANGED,
             FailedStep.STAGING_MISSING,
         }
@@ -277,3 +277,36 @@ class TestFailedStepClasses:
 
         error_class = failed_step_error_class(FailedStep.GOLDEN_OWNED_TOUCHED)
         assert classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_CANDIDATE
+
+
+class TestNoMagpieClassOnTheSuitePath:
+    def test_no_failed_step_is_recorded_under_a_magpie_class(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        assert not [step for step in FailedStep if "magpie" in failed_step_error_class(step)]
+
+    def test_a_client_or_timeout_step_is_its_own_class(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        for step in (FailedStep.CLIENT_FAILED, FailedStep.ROUND_TIMEOUT):
+            assert failed_step_error_class(step) == step.value
+
+    def test_archived_magpie_classes_keep_their_attribution(self):
+        for error_class in (
+            "magpie_nonzero_invalid_measurement",
+            "magpie_nonzero_after_valid_measurement",
+            "magpie_timeout",
+            "warmup_magpie_timeout",
+        ):
+            assert classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_HARNESS
+
+    def test_a_failed_client_is_signed_by_its_output_like_the_magpie_class_it_replaces(self):
+        from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
+
+        client = nonzero_output_signature("client_failed", "", "Traceback: boom at port 8001")
+        magpie = nonzero_output_signature("magpie_nonzero_invalid_measurement", "", "Traceback: boom at port 8001")
+        assert client.startswith("client_failed|") and client.split("|")[1] == magpie.split("|")[1]
