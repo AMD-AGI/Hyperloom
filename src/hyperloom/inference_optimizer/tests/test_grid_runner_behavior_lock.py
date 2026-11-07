@@ -22,7 +22,6 @@ import yaml
 
 from hyperloom_common.proctree import proc_identity
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors.benchmark_config import MLPERF_SERVER_DIR, SERVER_PID_DIR
 from inference_suite.contracts.layout import SERVER_PID
 from inference_suite.frameworks import Framework
 from inference_suite.runtime import server as suite_server
@@ -604,12 +603,12 @@ class TestAutoWarmupTeardown:
         assert teardown_calls[0]["framework"] == "sglang"
 
 
-# servers a round's AgentX client boots
+# the server inference_suite records in a variant's slot
 
 
 @pytest.fixture
 def client_servers():
-    """Stand-ins for the servers a round's AgentX client boots; whatever the run leaves of them dies at teardown."""
+    """Stand-ins for the server recorded in a variant's slot; whatever the run leaves of them dies at teardown."""
     servers: list[subprocess.Popen] = []
     yield servers
     for server in servers:
@@ -619,8 +618,8 @@ def client_servers():
 
 
 def _record_suite_server(slot: Path, server: subprocess.Popen) -> None:
-    """Record ``server`` where the round's inference_suite boot round records the server it leaves running."""
-    pid_dir = slot / MLPERF_SERVER_DIR / SERVER_PID_DIR
+    """Record ``server`` where an inference_suite boot round of the variant records the server it leaves running."""
+    pid_dir = slot
     pid_dir.mkdir(parents=True, exist_ok=True)
     identity = proc_identity(server.pid)
     assert identity is not None
@@ -629,9 +628,9 @@ def _record_suite_server(slot: Path, server: subprocess.Popen) -> None:
 
 
 class TestRoundServerTeardown:
-    """An MLPerf AgentX round's server is inference_suite's, booted outside the round's process tree, so reaping the round
-    never reaches it. The variant's teardown stops it however the round ended, and the stop marker only calls the round
-    cleaned up once it is gone.
+    """A server inference_suite recorded in the variant's slot runs outside the round's process tree, so reaping the
+    round never reaches it. The variant's teardown stops it however the round ended, and the stop marker only calls the
+    round cleaned up once it is gone.
     """
 
     def _run(self, client_servers, base, out, *, rc, measured=False):

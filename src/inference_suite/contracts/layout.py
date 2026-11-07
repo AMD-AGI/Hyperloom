@@ -167,6 +167,10 @@ class RunLayout:
         return self.aiperf_artifacts / "logs" / "aiperf.log"
 
     @property
+    def mlperf_artifacts(self) -> Path:
+        return self.client_dir / "mlperf_artifacts"
+
+    @property
     def eval_dir(self) -> Path:
         """lm-eval names its ``results_<time>.json`` itself; readers search below this directory for it."""
         return self.root / EVAL_DIR

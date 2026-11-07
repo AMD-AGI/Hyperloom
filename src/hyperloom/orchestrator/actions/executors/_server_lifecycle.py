@@ -333,15 +333,6 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
     return reaped
 
 
-def stop_agentx_servers(root: Path | str) -> list[int]:
-    """Stop any server an MLPerf AgentX round under ``root`` left running; return the pids alive after SIGKILL.
-
-    inference_suite booted it and records it in its pid_dir's ``server.pid``, the only handle on it once the client's
-    tree is gone.
-    """
-    return [pid for pid_dir in _suite_pid_dirs(Path(root)) for pid in stop(pid_dir).survivors]
-
-
 def _suite_pid_dirs(root: Path) -> list[Path]:
     """Every pid_dir under ``root`` holding an inference_suite ``server.pid``."""
     return [pidfile.parent for pidfile in sorted(root.rglob(SERVER_PID))] if root.is_dir() else []

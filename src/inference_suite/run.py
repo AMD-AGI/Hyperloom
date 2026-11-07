@@ -51,7 +51,7 @@ from inference_suite.eval.definition import EvalPlan, EvalRefusal, StagedEval, p
 from inference_suite.framework_probe import FrameworkProbeError, probe_install
 from inference_suite.framework_version import VersionRefusal
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
-from inference_suite.load import agentx, inherited_env
+from inference_suite.load import agentx, inherited_env, mlperf
 from inference_suite.load.agentx import AgentxRound, AgentxTool, run_agentx
 from inference_suite.load.fixed import (
     ClientTool,
@@ -62,6 +62,7 @@ from inference_suite.load.fixed import (
     measured_invocation,
     run_fixed,
 )
+from inference_suite.load.mlperf import MlperfRound, run_mlperf
 from inference_suite.load.scriptable import run_scriptable
 from inference_suite.profile.agentx_window import AgentxWindow
 from inference_suite.profile.fixed_window import FixedWindow
@@ -330,10 +331,9 @@ class _Round:
 
     def _prepare(self, base: BaseLaunch, facts: RoundFacts) -> _Prepared | Stop:
         config = self.config
-        if config.agentx is not None:
-            refused = agentx.refusal(config.agentx)
-            if refused is not None:
-                return refused
+        refused = _load_refusal(config)
+        if refused is not None:
+            return refused
         framework = Framework(base.framework)
         if framework_facts(framework).kind is not FrameworkKind.SERVING:
             return Stop(
@@ -443,25 +443,37 @@ class _Round:
             self.kv.close(aborted=self.stop is not None)
 
     def _on_server(self, server: Server, prepared: _Prepared) -> None:
-        if isinstance(prepared.client, AgentxTool):
-            if not self._run_agentx(server, prepared.client, Framework(prepared.launch.framework.name)):
-                return
-        elif self.config.workload is WorkloadKind.FIXED:
-            outcome = self._run_fixed(server, prepared)
-            self.codes = replace(self.codes, client=outcome.returncode)
-            if outcome.metrics is not None:
-                self.sections[WorkloadKind.FIXED.value] = outcome.metrics
-            if outcome.stop is not None:
-                self.fail(outcome.stop)
-                return
-            self.load_measured = True
-        if prepared.eval_plan is None:
+        if not self._run_load(server, prepared) or prepared.eval_plan is None:
             return
         result = self._run_eval(server, prepared.eval_plan)
         if isinstance(result, Stop):
             self.fail(result)
         else:
             self.sections["eval"] = result
+
+    def _run_load(self, server: Server, prepared: _Prepared) -> bool:
+        """Run the round's load on ``server``, if it has one; whether the round goes on."""
+        workload = self.config.workload
+        if isinstance(prepared.client, AgentxTool):
+            return self._run_agentx(server, prepared.client, Framework(prepared.launch.framework.name))
+        if workload is WorkloadKind.MLPERF:
+            outcome = run_mlperf(MlperfRound(self.config, server, self.gate, self.clock))
+            return self._loaded(outcome.returncode, outcome.result, outcome.stop)
+        if workload is WorkloadKind.FIXED:
+            fixed = self._run_fixed(server, prepared)
+            return self._loaded(fixed.returncode, fixed.metrics, fixed.stop)
+        return True
+
+    def _loaded(self, returncode: int | None, section: object | None, stop: Stop | None) -> bool:
+        """Record the load's exit code, report section and stop; whether the round goes on."""
+        self.codes = replace(self.codes, client=returncode)
+        if section is not None:
+            self.sections[self.config.workload.value] = section
+        if stop is not None:
+            self.fail(stop)
+            return False
+        self.load_measured = True
+        return True
 
     def _run_fixed(self, server: Server, prepared: _Prepared) -> FixedOutcome:
         """Run the fixed load, with a profile round's window around its measured pass."""
@@ -532,6 +544,15 @@ class _Round:
             gpu_monitor=gpu_monitor,
             **self.sections,  # type: ignore[arg-type]
         )
+
+
+def _load_refusal(config: SuiteConfig) -> Stop | None:
+    """Why the round's load cannot run as its config writes it, asked before the server starts."""
+    if config.agentx is not None:
+        return agentx.refusal(config.agentx)
+    if config.mlperf is not None:
+        return mlperf.refusal(config.mlperf)
+    return None
 
 
 def _profile_result(layout: RunLayout, capture: WindowCapture) -> ProfileResult:

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the cmdline-gated reaper of the old-format pidfiles (``reap_recorded_servers``, ``stop_agentx_servers``)."""
+"""Tests for the cmdline-gated reaper of the old-format pidfiles (``reap_recorded_servers``)."""
 
 from __future__ import annotations
 
@@ -12,23 +12,15 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from hyperloom_common.proctree import proc_identity, running
-from inference_suite.contracts.layout import SERVER_PID
-from inference_suite.frameworks import Framework
-from inference_suite.runtime.process import ServerPidfile
+from hyperloom_common.proctree import running
 
 from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
-from hyperloom.orchestrator.actions.executors._server_lifecycle import (
-    ServerReap,
-    reap_recorded_servers,
-    stop_agentx_servers,
-)
+from hyperloom.orchestrator.actions.executors._server_lifecycle import ServerReap, reap_recorded_servers
 
 
 def _pid_alive(pid: int) -> bool:
@@ -73,16 +65,6 @@ def _write_pidfile(session_dir: Path, tag: str, pid: int) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     pidfile = run_dir / f"{tag}.pid"
     pidfile.write_text(str(pid), encoding="utf-8")
-    return pidfile
-
-
-def _write_suite_pidfile(session_dir: Path, pid: int) -> Path:
-    """Record ``pid`` the way inference_suite records an MLPerf round's booted server."""
-    pid_dir = session_dir / "runs" / "explore" / "v0" / "mlperf_server" / "pid"
-    pid_dir.mkdir(parents=True)
-    pidfile = pid_dir / SERVER_PID
-    start_time = proc_identity(pid)[1]
-    ServerPidfile(pid, pid, start_time, uuid.uuid4().hex, 30000, Framework.SGLANG, "sha256:x").write(pidfile)
     return pidfile
 
 
@@ -464,29 +446,6 @@ def test_reap_reports_a_group_that_outlives_sigkill_and_keeps_its_pidfile(tmp_pa
     finally:
         proc.kill()
         proc.wait(timeout=5)
-
-
-def test_stop_agentx_servers_stops_the_suite_server_and_leaves_other_pidfiles_alone(tmp_path):
-    """A lifecycle server kept warm for the next round is recorded under its own name and must keep running."""
-    client_booted = _spawn_marker_process("sglang.launch_server")
-    warm = _spawn_marker_process("vllm.entrypoints.openai.api_server")
-    client_pidfile = _write_suite_pidfile(tmp_path, client_booted.pid)
-    warm_pidfile = _write_pidfile(tmp_path, "vllm_8888", warm.pid)
-    try:
-        assert stop_agentx_servers(tmp_path) == []
-
-        client_booted.wait(timeout=5)
-        assert not client_pidfile.exists()
-        assert _pid_alive(warm.pid)
-        assert warm_pidfile.exists()
-    finally:
-        for proc in (client_booted, warm):
-            try:
-                proc.kill()
-            except OSError:
-                # Either may already have exited.
-                pass
-            proc.wait(timeout=5)
 
 
 def test_reap_never_signals_its_own_process_group(tmp_path, monkeypatch):

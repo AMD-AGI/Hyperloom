@@ -184,7 +184,7 @@ _AGENTX_EVIDENCE = ("valid_measurement", "diagnostic_only", "workload_identity")
 def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
     """The graded axes from a measurement or a ``current_best``; None unless objective and guards are all positive."""
     # Requiring all of them is what stops a lane half-applying the objective. A total that is absent, null or
-    # non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
+    # non-positive coalesces to input plus output.
     if not isinstance(source, Mapping):
         return None
     intvty = optional_positive_float(source.get(GRADED_INTVTY))
