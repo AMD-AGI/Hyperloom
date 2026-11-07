@@ -176,17 +176,19 @@ def isolated_builder(
         located = locate_package(AITER_PACKAGE, machine.python, scratch)
         if located.resolve() != Path(package).resolve():
             raise PrewarmError(f"{machine.python} imports aiter from {located}, not from {package}")
-        # The compile's user passes through ``scratch`` to its work directory below it, without listing it.
-        os.chmod(scratch, stat.S_IMODE(os.stat(scratch).st_mode) | stat.S_IXOTH)
         blobs = LocalBlobStore(scratch / BLOBS_DIR)
         planner = NativePlanner(NativeSite(machine, {}, scratch / "sources", Path(package).parent), blobs)
         image = EnvRoot(AITER_PACKAGE, AITER_PACKAGE, *_UNREAD_DIST, ())
         planned = AiterModules(planner, environ=environ)((image,), read_config(config_path(package)), modules)
         if planned is None:
             return {}
+        isolated = isolation()
+        if isolated is not None and isolated.uid is not None:
+            # The compile's user passes through ``scratch`` to its work directory below it, without listing it.
+            os.chmod(scratch, stat.S_IMODE(os.stat(scratch).st_mode) | stat.S_IXOTH)
         work = scratch / "build"
         work.mkdir(mode=0o700)
-        staged = IsolatedBuilds(planner, blobs, isolation(), {AITER_COMPONENT: factory})(planned.inputs)(work)
+        staged = IsolatedBuilds(planner, blobs, isolated, {AITER_COMPONENT: factory})(planned.inputs)(work)
         if staged.status != READY:
             raise PrewarmError(f"the build failed: {staged.failure}: {staged.log.strip()[-_LOG_TAIL:]}")
         outputs = {
