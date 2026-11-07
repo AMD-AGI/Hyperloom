@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: MIT
 
 """A confinement derived from configuration, launched for real through :meth:`BwrapIsolation.launch`: the program
-runs, the home's logins do not exist inside, a credential inside a bound tree is masked at every path that shows it,
-the mark is set inside only, and links an agent leaves in its tree reach nothing at the next launch."""
+runs, the home's logins do not exist inside, a credential inside a bound tree is absent (a file) or masked (a
+directory) at every path that shows it, and stays so while the app replaces it or logs in during the launch, the mark
+is set inside only, and links an agent leaves in its tree reach nothing at the next launch."""
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,8 +18,9 @@ import pytest
 
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 
+from hyperloom.common import confinement as confinement_module
 from hyperloom.common.agent_isolation import BwrapIsolation
-from hyperloom.common.confinement import Confinement, credential_paths, toolchain_paths
+from hyperloom.common.confinement import Confinement, PrivatePaths, credential_paths, toolchain_paths
 
 pytestmark = pytest.mark.agent_isolation
 
@@ -40,6 +43,20 @@ seen["tool"] = shutil.which("tool") and subprocess.run(["tool"], capture_output=
 seen.update({name: outcome(lambda path=path: write(path)) for name, path in writes.items()})
 seen["mark"] = os.environ.get(sys.argv[3], "")
 print(json.dumps(seen))
+"""
+#: Run inside: each named path's read (``ok:<text>`` or the errno name), once at start and once more after a line on
+#: stdin, which the test sends when the app has replaced and created its logins.
+WATCH = r"""
+import errno, json, sys
+def outcome(path):
+    try:
+        return "ok:" + open(path).read()
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno, str(exc.errno))
+paths = json.loads(sys.argv[1])
+print(json.dumps({name: outcome(path) for name, path in paths.items()}), flush=True)
+sys.stdin.readline()
+print(json.dumps({name: outcome(path) for name, path in paths.items()}), flush=True)
 """
 #: Run inside by an agent: turn each named directory or file of its tree into a link to the path given with it.
 PLANT = r"""
@@ -110,7 +127,7 @@ def test_a_derived_confinement_runs_the_program_and_shows_no_login_of_the_home(t
     assert seen == {
         "auth": "ENOENT",
         "aws": "ENOENT",
-        "hf_token": "EACCES",
+        "hf_token": "ENOENT",
         "hf_model": "ok:weights",
         "tool": "tool ran",
         "write": "ok:written",
@@ -138,8 +155,8 @@ def test_a_credential_reached_through_a_linked_directory_is_masked_at_both_paths
     )
 
     assert {name: seen[name] for name in paths} == {
-        "real_secret": "EACCES",
-        "link_secret": "EACCES",
+        "real_secret": "ENOENT",
+        "link_secret": "ENOENT",
         "link_visible": "ok:shown",
     }
 
@@ -211,7 +228,7 @@ def test_a_credential_an_agent_links_to_from_its_tree_stays_masked_at_the_next_l
     planted = work / ".claude" if through == "writable" else prompt
     paths = {"token": token, "via_link": planted, "model": model}
     assert {name: _run(isolation, confinement(), env, paths, work)[name] for name in paths} == {
-        "token": "EACCES",
+        "token": "ENOENT",
         "via_link": "EISDIR" if through == "writable" else "ok:the task",
         "model": "ok:weights",
     }
@@ -220,7 +237,7 @@ def test_a_credential_an_agent_links_to_from_its_tree_stays_masked_at_the_next_l
 
     seen = _run(isolation, confinement(), env, paths, work)
 
-    assert {name: seen[name] for name in paths} == {"token": "EACCES", "via_link": "EACCES", "model": "ok:weights"}
+    assert {name: seen[name] for name in paths} == {"token": "ENOENT", "via_link": "ENOENT", "model": "ok:weights"}
 
 
 @pytest.mark.parametrize("target", ["root", "parent", "link_holder"])
@@ -265,7 +282,81 @@ def test_a_writable_path_an_agent_re_points_through_another_never_takes_its_tree
     seen = _run(isolation, after, env, {"token": token, "via_prompt": prompt, "model": model}, inside, {})
 
     assert {name: seen[name] for name in ("token", "via_prompt", "model")} == {
-        "token": "EACCES",
-        "via_prompt": "ENOENT" if target == "link_holder" else "EACCES",
+        "token": "ENOENT",
+        "via_prompt": "ENOENT",
         "model": "ok:weights",
     }
+
+
+def _replace(path: Path, text: str) -> None:
+    """Write ``path`` as git and the login tools do: a new file beside it, renamed over it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = path.with_name(path.name + ".lock")
+    fresh.write_text(text, encoding="ascii")
+    os.replace(fresh, path)
+
+
+def test_logins_the_app_replaces_or_makes_during_a_launch_never_show_in_it(tmp_path, monkeypatch):
+    """The app's home lies in a tree the child reads (a workspace), opened up around the program it runs; Hugging
+    Face's home is read whole for its hub cache; a registered state file lies in a data tree it reads. While the
+    sandbox runs, the app rewrites its git credentials, gh login, Claude login, Hugging Face token and state file by
+    rename, and logs in anew (Hugging Face's ``stored_tokens``, a ``~/.netrc``, a second gh host file): none of them
+    shows inside, before or after, while the cache, the data and the program stay readable."""
+    isolation = BwrapIsolation(usable_bwrap())
+    workspace, hf, data, work = (tmp_path / name for name in ("workspace", "hf", "data", "work"))
+    home = workspace / "home"
+    work.mkdir()
+    tool = _write(home / ".local/share/tool/versions/1", "#!/bin/sh\necho tool ran\n")
+    tool.chmod(0o755)
+    (home / ".local/bin").mkdir(parents=True)
+    (home / ".local/bin/tool").symlink_to(tool)
+    logins = {
+        "git": _write(home / ".git-credentials", "SECRET-GIT"),
+        "gh": _write(home / ".config/gh/hosts.yml", "SECRET-GH"),
+        "claude": _write(home / ".claude/.credentials.json", "SECRET-CLAUDE"),
+        "hf_token": _write(hf / "token", "SECRET-HF"),
+        "state": _write(data / "run/exit.json", "SECRET-STATE"),
+    }
+    made = {
+        "hf_stored": hf / "stored_tokens",
+        "netrc": home / ".netrc",
+        "gh_other": home / ".config/gh/other.yml",
+    }
+    shown = {
+        "model": _write(hf / "hub/model.txt", "weights"),
+        "data": _write(data / "visible.txt", "data"),
+        "workspace": _write(workspace / "readme", "readme"),
+    }
+    registry = PrivatePaths()
+    registry.add(data / "run/exit.json", "the run's state file")
+    monkeypatch.setattr(confinement_module, "PRIVATE_PATHS", registry)
+    env = {"HOME": str(home), "PATH": f"{home / '.local/bin'}:/usr/bin:/bin", "HF_HOME": str(hf)}
+    readable = (*toolchain_paths(env, "tool", writable=(work,)), workspace, data)
+    masked = credential_paths(env, app_environ={}, allowed=(*readable, work))
+    policy = Confinement(writable=(work,), readable=readable, masked=masked).policy(chdir=work)
+    assert policy.problems(isolation.probe.version or (0, 0, 0)) == []
+    paths = {**logins, **made, **shown}
+    command, child_env = isolation.launch([sys.executable, "-I", "-S", "-c", WATCH, _named(paths)], policy, env)
+
+    with subprocess.Popen(
+        command, env=child_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ) as child:
+        assert child.stdout is not None and child.stdin is not None
+        before = json.loads(child.stdout.readline() or "{}")
+        for name, path in logins.items():
+            _replace(path, f"NEW-SECRET-{name}")
+        for name, path in made.items():
+            _replace(path, f"NEW-SECRET-{name}")
+        child.stdin.write("go\n")
+        child.stdin.flush()
+        after = json.loads(child.stdout.readline() or "{}")
+        _out, err = child.communicate(timeout=60)
+    assert child.returncode == 0, err
+
+    hidden = dict.fromkeys((*logins, *made), "ENOENT")
+    expected = {**hidden, "model": "ok:weights", "data": "ok:data", "workspace": "ok:readme"}
+    assert before == expected
+    assert after == expected
+    assert all(
+        path.read_text(encoding="ascii").startswith("NEW-SECRET-") for path in (*logins.values(), *made.values())
+    )
