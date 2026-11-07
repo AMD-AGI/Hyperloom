@@ -398,7 +398,7 @@ class SuiteRound:
     """One round of an attempt: the point it runs, the directory it writes below, and how it holds the server.
 
     ``warmup`` marks a discarded round, which draws its prompts with the warmup seed so it cannot prime the measured
-    round's prefix cache.
+    round's prefix cache. ``env_drop`` names host variables the round's server and client do not inherit.
     """
 
     config_path: Path
@@ -406,6 +406,15 @@ class SuiteRound:
     lifecycle: Lifecycle
     warmup: bool = False
     deadline_unix: int | None = None
+    env_drop: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class PointServer:
+    """How one round of a point holds its server; ``stop_after`` is the pid_dir it takes the server down in."""
+
+    lifecycle: Lifecycle
+    stop_after: Path | None = None
 
 
 def _read_point(config_path: Path) -> Mapping[str, object]:
@@ -435,6 +444,22 @@ def suite_route(session_dir: Path | None, config_path: Path) -> SuiteRoute | Non
         manifest_sha256=manifest_sha256(tool_cache),
         framework_python=_resolve_probe_python(base.framework),
     )
+
+
+def point_server(config_path: Path, *, finds_server: bool) -> PointServer:
+    """How the round of the point at ``config_path`` holds its server, read from its ``server_lifecycle`` block.
+
+    ``finds_server`` is whether an earlier round left the server up. Without the block the round owns its server. With
+    it, a round that finds the server reuses it and, when the block asks for cleanup, takes it down after; one that
+    does not find it boots it for the rounds after it, or owns it when the block asks for cleanup.
+    """
+    block = _bench(_read_point(config_path)).get("server_lifecycle") or {}
+    if not block.get("enabled"):
+        return PointServer(Lifecycle(LifecycleMode.OWN))
+    pid_dir, cleanup = str(block["pid_dir"]), bool(block.get("cleanup", True))
+    if finds_server:
+        return PointServer(Lifecycle(LifecycleMode.REUSE, pid_dir), Path(pid_dir) if cleanup else None)
+    return PointServer(Lifecycle(LifecycleMode.OWN) if cleanup else Lifecycle(LifecycleMode.BOOT, pid_dir))
 
 
 def round_lifecycle(round_dir: Path, mode: LifecycleMode) -> Lifecycle:
@@ -469,7 +494,7 @@ def _settings(route: SuiteRoute, request: SuiteRound, manifest: str) -> RoundSet
         lifecycle=request.lifecycle,
         telemetry=round_gpu_telemetry(),
         silence_sec=resolve_benchmark_timeouts()[0],
-        env_inherit=inherited_env_names(os.environ),
+        env_inherit=inherited_env_names({k: v for k, v in os.environ.items() if k not in request.env_drop}),
         deadline_unix=request.deadline_unix,
     )
 
@@ -508,6 +533,7 @@ __all__ = [
     "TOOL_CACHE_DIR",
     "TOOL_CACHE_ENV",
     "WARMUP_SEED",
+    "PointServer",
     "RoundSettings",
     "SuiteRound",
     "SuiteRoundRefused",
@@ -515,6 +541,7 @@ __all__ = [
     "backend_reason",
     "deadline_unix",
     "inherited_env_names",
+    "point_server",
     "round_lifecycle",
     "run_suite_round",
     "suite_config",

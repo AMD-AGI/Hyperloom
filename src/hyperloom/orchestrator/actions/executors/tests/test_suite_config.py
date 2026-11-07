@@ -12,10 +12,16 @@ from the same launchers.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._suite_config import RoundSettings, backend_reason, suite_config
+from hyperloom.orchestrator.actions.executors._suite_config import (
+    RoundSettings,
+    backend_reason,
+    point_server,
+    suite_config,
+)
 from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
 from inference_suite.compose import RoundFacts, compose
@@ -285,3 +291,33 @@ def test_a_point_naming_an_unknown_framework_is_refused_not_routed() -> None:
 
     with pytest.raises(ConfigError, match="not one inference_suite runs"):
         backend_reason(point)
+
+
+_PID_DIR = "/session/arm"
+
+
+@pytest.mark.parametrize(
+    ("block", "finds_server", "mode", "stop_after"),
+    [
+        (None, False, LifecycleMode.OWN, None),
+        (None, True, LifecycleMode.OWN, None),
+        ({"cleanup": False}, False, LifecycleMode.BOOT, None),
+        ({"cleanup": True}, False, LifecycleMode.OWN, None),
+        ({"cleanup": False}, True, LifecycleMode.REUSE, None),
+        ({"cleanup": True}, True, LifecycleMode.REUSE, Path(_PID_DIR)),
+    ],
+)
+def test_a_points_server_lifecycle_block_says_how_its_round_holds_the_server(
+    tmp_path, block, finds_server, mode, stop_after
+):
+    point = _point("sglang")
+    if block is not None:
+        point["benchmark"]["server_lifecycle"] = {"enabled": True, "pid_dir": _PID_DIR, **block}
+    path = tmp_path / "point.yaml"
+    path.write_text(json.dumps(point), encoding="utf-8")
+
+    server = point_server(path, finds_server=finds_server)
+
+    assert server.lifecycle.mode is mode
+    assert server.lifecycle.pid_dir == (_PID_DIR if mode in (LifecycleMode.BOOT, LifecycleMode.REUSE) else None)
+    assert server.stop_after == stop_after
