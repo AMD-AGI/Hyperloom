@@ -829,3 +829,25 @@ def test_a_real_arbor_launches_sglang_at_the_workload_s_tp_and_ep(tmp_path: Path
     words = shlex.split(done.stdout)
     assert words[:3] == ["python3", "-m", "sglang.launch_server"]
     assert (words[words.index("--tp-size") + 1], words[words.index("--ep-size") + 1]) == ("4", "4")
+
+
+def test_a_workspace_its_agent_made_a_partial_clone_fetches_nothing_as_its_root_is_checked(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    workspace, ran, transport = Path(spec.workspace), tmp_path / "ran", tmp_path / "transport"
+    transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
+    transport.chmod(0o755)
+    with (workspace / ".git" / "config").open("a") as config:
+        config.write(
+            f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = {transport}\n"
+            '[extensions]\n\tpartialClone = promisor\n[remote "promisor"]\n\turl = ssh://example.invalid/r\n'
+            "\tpromisor = true\n"
+        )
+    missing = "f" * 40
+
+    assert arbor_adapter._has_commit(workspace, spec.root)
+    assert not arbor_adapter._has_commit(workspace, missing)
+    assert arbor_adapter._shipped(workspace) == frozenset()
+
+    assert not ran.exists(), ran.read_text()
+    subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{missing}^{{commit}}"], cwd=workspace, check=False)
+    assert ran.exists(), "plain git fetches the missing object through the configured transport, so the plant is live"
