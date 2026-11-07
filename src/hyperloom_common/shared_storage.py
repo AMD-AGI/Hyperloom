@@ -40,6 +40,8 @@ _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _WAY = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _PROBE_PREFIX = ".hl-writable-"
+#: What a new file is made with, before ``fchmod`` gives it its mode: the umask never decides it.
+_OWNER_ONLY = 0o600
 #: The suffix of the new file a writer makes beside the one it replaces.
 _TEMPORARY_SUFFIX = ".tmp"
 #: How many names a new temporary file is tried at before the writer gives up.
@@ -68,51 +70,79 @@ def open_directory(path: Path, *, make: int | None = None) -> int:
             each names the part of the path it is about.
     """
     parts = list(Path(os.path.abspath(path)).parts[1:])
-    here = Path("/")
-    descriptor = os.open("/", _WAY)
-    shared = False
-    links = 0
+    walk = _Walk(os.open("/", _WAY))
     try:
         while parts:
             name = parts.pop(0)
             if name in ("", "."):
                 continue
-            shared = shared or bool(os.fstat(descriptor).st_mode & _OPEN_TO_OTHERS)
-            try:
-                info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                if make is None:
-                    raise FileNotFoundError(errno.ENOENT, "no such directory", str(here / name)) from None
-                if not _make_directory(descriptor, name, make, here / name):
-                    parts.insert(0, name)  # made meanwhile by another process: looked at again
-                    continue
-                info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-            if stat.S_ISLNK(info.st_mode):
-                if shared:
-                    raise OSError(
-                        errno.ELOOP, "a link in a directory other accounts can write is not followed", str(here / name)
-                    )
-                links += 1
-                if links > _MAX_LINKS:
-                    raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(here / name))
-                target = Path(os.readlink(name, dir_fd=descriptor))
-                if target.is_absolute():
-                    os.close(descriptor)
-                    descriptor = os.open("/", _WAY)
-                    here = Path("/")
-                parts[:0] = target.parts[1:] if target.is_absolute() else target.parts
-                continue
-            if not stat.S_ISDIR(info.st_mode):
-                error = FileExistsError if make is not None else NotADirectoryError
-                raise error(errno.EEXIST if make is not None else errno.ENOTDIR, "not a directory", str(here / name))
-            child = os.open(name, _WAY, dir_fd=descriptor)  # ELOOP or ENOTDIR if it changed since
-            os.close(descriptor)
-            descriptor = child
-            here = here.parent if name == ".." else here / name
+            info = walk.look_up(name, make)
+            if info is None:
+                parts.insert(0, name)  # made meanwhile by another process: looked at again
+            elif stat.S_ISLNK(info.st_mode):
+                parts[:0] = walk.follow(name)
+            else:
+                walk.enter(name, info, make)
     except BaseException:
-        os.close(descriptor)
+        os.close(walk.descriptor)
         raise
-    return descriptor
+    return walk.descriptor
+
+
+class _Walk:
+    """Where :func:`open_directory` is on its way: the directory open as :attr:`descriptor` (``O_PATH``) is
+    :attr:`here`, and :attr:`shared` once a directory passed can be written by accounts other than its owner."""
+
+    def __init__(self, descriptor: int) -> None:
+        self.descriptor = descriptor
+        self.here = Path("/")
+        self.shared = False
+        self.links = 0
+
+    def look_up(self, name: str, make: int | None) -> os.stat_result | None:
+        """``lstat`` of ``name`` here, made first with ``make`` when it is missing; ``None`` when another process
+        made it meanwhile."""
+        self.shared = self.shared or bool(os.fstat(self.descriptor).st_mode & _OPEN_TO_OTHERS)
+        try:
+            return os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            if make is None:
+                raise FileNotFoundError(errno.ENOENT, "no such directory", str(self.here / name)) from None
+        if not _make_directory(self.descriptor, name, make, self.here / name):
+            return None
+        return os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+
+    def follow(self, name: str) -> tuple[str, ...]:
+        """The parts of the link ``name`` here to walk instead of it; an absolute one starts again from ``/``.
+
+        Raises:
+            OSError: ``ELOOP`` when the way has passed a directory others can write, or after too many links.
+        """
+        if self.shared:
+            raise OSError(
+                errno.ELOOP, "a link in a directory other accounts can write is not followed", str(self.here / name)
+            )
+        self.links += 1
+        if self.links > _MAX_LINKS:
+            raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(self.here / name))
+        target = Path(os.readlink(name, dir_fd=self.descriptor))
+        if not target.is_absolute():
+            return target.parts
+        self._move(os.open("/", _WAY), Path("/"))
+        return target.parts[1:]
+
+    def enter(self, name: str, info: os.stat_result, make: int | None) -> None:
+        """Go into the directory ``name`` here, whose ``lstat`` is ``info``."""
+        if not stat.S_ISDIR(info.st_mode):
+            if make is not None:
+                raise FileExistsError(errno.EEXIST, "not a directory", str(self.here / name))
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", str(self.here / name))
+        child = os.open(name, _WAY, dir_fd=self.descriptor)  # ELOOP or ENOTDIR if it changed since
+        self._move(child, self.here.parent if name == ".." else self.here / name)
+
+    def _move(self, descriptor: int, here: Path) -> None:
+        os.close(self.descriptor)
+        self.descriptor, self.here = descriptor, here
 
 
 def read_directory(descriptor: int) -> int:
@@ -186,7 +216,9 @@ def _new_temporary(directory: int, name: str, mode: int, flags: int = 0) -> tupl
     for _ in range(_TEMPORARY_TRIES):
         temporary = f".{name}.{secrets.token_hex(6)}{_TEMPORARY_SUFFIX}"
         try:
-            descriptor = os.open(temporary, _NEW_FILE | flags, 0o600, dir_fd=directory)  # the umask never decides it
+            descriptor = os.open(
+                temporary, _NEW_FILE | flags, _OWNER_ONLY, dir_fd=directory
+            )  # the umask never decides it
         except FileExistsError:
             continue
         try:
@@ -204,7 +236,9 @@ def create_shared_file(path: Path) -> None:
     """Create ``path`` empty with mode ``664``; an existing file is replaced by rename, never truncated or chmodded."""
     with _directory_of(path) as (directory, name):
         try:
-            descriptor = os.open(name, _NEW_FILE, 0o600, dir_fd=directory)  # the umask never decides it: fchmod below
+            descriptor = os.open(
+                name, _NEW_FILE, _OWNER_ONLY, dir_fd=directory
+            )  # the umask never decides it: fchmod below
         except FileExistsError:
             descriptor = None
         if descriptor is not None:
@@ -296,7 +330,7 @@ def create_new_shared_file(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
 
 
 def _create_in_place(directory: int, name: str, mode: int) -> int:
-    descriptor = os.open(name, _NEW_FILE | os.O_APPEND, 0o600, dir_fd=directory)  # the umask never decides it
+    descriptor = os.open(name, _NEW_FILE | os.O_APPEND, _OWNER_ONLY, dir_fd=directory)
     try:
         os.fchmod(descriptor, mode)
     except BaseException:
