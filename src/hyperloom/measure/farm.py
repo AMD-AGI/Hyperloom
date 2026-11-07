@@ -441,9 +441,12 @@ def launch_environment(config: dict[str, Any]) -> dict[str, Any]:
     """The mapping the server of ``config`` takes its variables from, created when it has none: what :func:`server_environment`
     reads, for a caller that writes."""
     bench = config.setdefault("benchmark", {})
-    if is_agentx(bench):
-        return bench["agentx"].setdefault("launch_overrides", {}).setdefault("env", {})
-    return bench.setdefault("envs", {})
+    if not is_agentx(bench):
+        return bench.setdefault("envs", {})
+    if not isinstance(bench["agentx"], dict):
+        # ``agentx: true`` or an enabling word carries no launch to write into; the mapping it becomes stays enabled.
+        bench["agentx"] = {"enabled": True}
+    return bench["agentx"].setdefault("launch_overrides", {}).setdefault("env", {})
 
 
 def patched_configs(farm: Farm | None) -> dict[str, Path | None]:

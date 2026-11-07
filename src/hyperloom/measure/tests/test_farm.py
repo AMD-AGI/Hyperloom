@@ -173,6 +173,16 @@ def test_the_server_environment_is_read_only_and_launch_environment_writes_the_p
     assert config["benchmark"]["envs"] == {"A": "1", "B": "2"}
 
 
+@pytest.mark.parametrize("agentx", [True, "yes"])
+def test_launch_environment_writes_the_launch_of_an_agentx_point_switched_on_by_a_word(agentx: object) -> None:
+    config = {"benchmark": {"envs": {"A": "benchmark"}, "agentx": agentx}}
+
+    launch_environment(config)["B"] = "2"
+
+    assert dict(server_environment(config)) == {"B": "2"}
+    assert config["benchmark"]["envs"] == {"A": "benchmark"}
+
+
 def test_a_point_without_a_benchmark_block_is_refused() -> None:
     with pytest.raises(BenchmarkPointError):
         server_environment({})
