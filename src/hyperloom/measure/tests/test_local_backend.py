@@ -24,6 +24,7 @@ from hyperloom.measure import local
 from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS
 from hyperloom.measure.repro import read_verdict
+from hyperloom.measure.runner.rounds import rounds_document
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.tests import eval_refusal_logs, test_log_causes
 from hyperloom.measure.tests._inferencex import CLIENT, CLIENT_PATH, LIBRARY, LIBRARY_PATH, stock_checkout
@@ -264,119 +265,221 @@ def test_a_test_that_did_not_ask_for_accuracy_reports_no_accuracy_round(grid, tm
     assert [r.phase for r in outcome.rounds] == ["measure"]
 
 
-# --- a graded test evaluates once, in its warmup round ---------------------------------------------------------------
+# --- every test runs its rounds on one held server, the evaluation after the measured bench -------------------------
 
 
 def _graded_call(tmp_path: Path, **kwargs: Any) -> TestCall:
-    """A graded single-point test whose warmup is planned: the case that used to evaluate twice."""
+    """A graded single-point test whose warmup is planned."""
     point = _point(tmp_path, "graded", run_eval="true")
     return _call(
         tmp_path, point, **{"accuracy": True, "kind": "accuracy", "rounds": RoundPlan(warmup_rounds=1), **kwargs}
     )
 
 
+def _explore_call(tmp_path: Path, **kwargs: Any) -> TestCall:
+    """An explore: the same single-point test, not graded."""
+    return _call(tmp_path, **{"rounds": RoundPlan(warmup_rounds=1), **kwargs})
+
+
+def _envs(kwargs: dict[str, Any], config: dict[str, Any]) -> dict[str, str]:
+    """A round's environment as ``run_grid`` would build it: the round's extra envs laid over the point's own."""
+    return {
+        key: str(value)
+        for key, value in {**config["benchmark"]["envs"], **(kwargs["recipe"].base.extra_envs or {})}.items()
+    }
+
+
 def _evaluates(kwargs: dict[str, Any], config: dict[str, Any]) -> bool:
-    """Whether a round evaluates, as ``run_grid`` would build it: the round's extra envs laid over the point's own."""
-    envs = {**config["benchmark"]["envs"], **(kwargs["recipe"].base.extra_envs or {})}
-    return is_truthy(envs["RUN_EVAL"], default=True)
+    return is_truthy(_envs(kwargs, config)["RUN_EVAL"], default=True)
+
+
+def _benches(kwargs: dict[str, Any], config: dict[str, Any]) -> bool:
+    """Whether a round runs a bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``."""
+    return not is_truthy(_envs(kwargs, config).get("EVAL_ONLY"), default=False)
 
 
 def _graded_answers(grid: _Grid, score: float = 0.64) -> VariantResult:
-    """The scripted answers of a graded test: the evaluation's score sits in the warmup round's directory."""
-    warmup = grid.result("warmup", output_throughput=1111.0)
-    _lm_eval_results(Path(warmup.workspace) / "eval_output", score)
-    grid.answers.update(warmup=warmup, test=grid.result("test"))
-    return warmup
-
-
-def test_a_graded_test_runs_one_evaluation_and_it_is_in_the_warmup_round(grid, server, tmp_path):
-    _graded_answers(grid)
-
-    _run(_graded_call(tmp_path))
-
-    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
-    assert [_evaluates(c, config) for c, config in zip(grid.calls, grid.configs)] == [True, False]
-
-
-def test_the_two_rounds_of_a_graded_test_share_one_server_that_the_measured_round_reclaims(grid, server, tmp_path):
-    _graded_answers(grid)
-
-    _run(_graded_call(tmp_path))
-
-    warmup, measured = grid.calls
-    assert warmup["launch"].server_lifecycle == {
-        "cleanup": False,
-        "pid_dir": warmup["launch"].server_lifecycle["pid_dir"],
-        "port": 8123,
-    }
-    assert measured["launch"].server_lifecycle == {**warmup["launch"].server_lifecycle, "cleanup": True}
-    assert not warmup["launch"].server_already_ready and measured["launch"].server_already_ready is True
-    assert warmup["launch"].warmup_before_measure is measured["launch"].warmup_before_measure is False, (
-        "run_grid does not warm up"
+    """The scripted answers of a graded test: the evaluation's score sits in the evaluation round's directory, a score in
+    any other round's directory is one no round of the test wrote."""
+    warmup, measured, evaluation = (
+        grid.result("warmup", output_throughput=1111.0),
+        grid.result("test", output_throughput=2222.0),
+        grid.result("eval", note="evaluation_only"),
     )
-    assert not warmup["launch"].lifecycle_boot_only, "the warmup round is a whole round, it measures and evaluates"
-    assert measured["recipe"].base.extra_envs == {"RUN_EVAL": "false"} and warmup["recipe"].base.extra_envs is None
+    _lm_eval_results(Path(warmup.workspace) / "eval_output", 0.10)
+    _lm_eval_results(Path(measured.workspace) / "eval_output", 0.20)
+    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", score)
+    grid.answers.update(warmup=warmup, test=measured, eval=evaluation)
+    return evaluation
+
+
+@pytest.mark.parametrize(
+    ("make_call", "rounds"),
+    [(_explore_call, ["warmup", "test"]), (_graded_call, ["warmup", "test", "eval"])],
+    ids=["explore", "graded"],
+)
+def test_every_test_runs_warmup_bench_then_measured_bench_and_a_graded_one_evaluates_after_them(
+    grid, server, tmp_path, make_call, rounds
+):
+    _graded_answers(grid)
+
+    _run(make_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == rounds, (
+        "an explore and a graded test share the order to the bench"
+    )
+    calls = list(zip(grid.calls, grid.configs))
+    assert [_benches(c, config) for c, config in calls] == [True, True, False][: len(rounds)]
+    assert [_evaluates(c, config) for c, config in calls] == [False, False, True][: len(rounds)], (
+        "no bench evaluates; the evaluation follows the measured bench"
+    )
+    assert [c["launch"].evaluation_only for c in grid.calls] == [False, False, True][: len(rounds)]
+    assert [c["launch"].warmup_round for c in grid.calls] == [True, False, False][: len(rounds)], (
+        "only the warmup draws prompts of its own"
+    )
+
+
+def test_the_rounds_of_a_graded_test_share_one_server_that_its_last_round_reclaims(grid, server, tmp_path):
+    _graded_answers(grid)
+
+    _run(_graded_call(tmp_path))
+
+    warmup, measured, evaluation = grid.calls
+    held = {"pid_dir": warmup["launch"].server_lifecycle["pid_dir"], "port": 8123}
+    assert [c["launch"].server_lifecycle for c in grid.calls] == [
+        {**held, "cleanup": False},
+        {**held, "cleanup": False},
+        {**held, "cleanup": True},
+    ]
+    assert [c["launch"].server_already_ready for c in grid.calls] == [False, True, True], "one boot, in the warmup"
+    assert all(c["launch"].warmup_before_measure is False for c in grid.calls), "run_grid does not warm up"
+    assert not any(c["launch"].lifecycle_boot_only for c in grid.calls), "every round runs its client"
+    assert [c["recipe"].base.extra_envs for c in grid.calls] == [
+        {"RUN_EVAL": "false"},
+        {"RUN_EVAL": "false"},
+        {"RUN_EVAL": "true", "EVAL_ONLY": "true"},
+    ]
     assert len(server.teardowns) == 1, "and whatever is still up is reclaimed when the test ends"
 
 
-def test_the_accuracy_of_a_graded_test_is_the_one_evaluation_of_the_warmup_round(grid, server, tmp_path):
-    warmup = _graded_answers(grid, 0.64)
+def test_an_explore_on_a_held_server_runs_its_point_as_it_is_and_its_measured_round_reclaims_the_server(
+    grid, server, tmp_path
+):
+    outcome = _run(_explore_call(tmp_path))
+
+    assert [c["launch"].server_lifecycle["cleanup"] for c in grid.calls] == [False, True]
+    assert [c["recipe"].base.extra_envs for c in grid.calls] == [None, None], "an explore's point does not evaluate"
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("measure", 0)]
+    assert len(server.teardowns) == 1
+
+
+def test_the_accuracy_of_a_graded_test_is_read_from_its_evaluation_round(grid, server, tmp_path):
+    evaluation = _graded_answers(grid, 0.64)
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("accuracy", 0), ("measure", 0)]
-    warmed, accuracy, measured = outcome.rounds
-    assert warmed.output_dir == accuracy.output_dir == Path(warmup.workspace)
-    assert measured.output_dir == Path(grid.answers["test"].workspace) != warmed.output_dir
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("measure", 0), ("accuracy", 0)]
+    warmed, measured, accuracy = outcome.rounds
+    assert accuracy.output_dir == Path(evaluation.workspace)
+    assert (warmed.output_dir, measured.output_dir) == (
+        Path(grid.answers["warmup"].workspace),
+        Path(grid.answers["test"].workspace),
+    )
     assert accuracy.accuracy == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),)
     assert warmed.accuracy == measured.accuracy == ()
     assert outcome.returncode == 0
 
 
-def test_the_warmup_round_of_a_graded_test_says_what_run_grid_says_of_a_discarded_one(grid, server, tmp_path):
-    _graded_answers(grid)
-    grid.answers["warmup"].nonfatal_warnings.append("harvested_leaked_artifact:x")
-    grid.answers["test"].nonfatal_warnings.append("served_slowly")
+def test_the_rounds_file_of_a_graded_test_lists_its_rounds_in_the_order_they_ran(grid, server, tmp_path):
+    _graded_answers(grid, 0.64)
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [w for r in outcome.rounds for w in r.nonfatal_warnings] == [
-        "run_grid_warmup_discarded_first",
-        "warmup_round_tput:1111.0",
-        "harvested_leaked_artifact:x",
-        "served_slowly",
+    document = rounds_document(outcome, tmp_path / "ws")
+    assert [(entry["phase"], entry["dir"]) for entry in document] == [
+        ("warmup", "warmup"),
+        ("measure", "test"),
+        ("accuracy", "eval"),
+    ]
+    assert [entry.get("accuracy") for entry in document] == [
+        None,
+        None,
+        [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": 0.64}],
     ]
 
 
-def test_the_eval_exit_code_of_a_graded_test_is_the_one_the_warmup_round_recorded(grid, server, tmp_path):
-    warmup = _graded_answers(grid)
-    (Path(warmup.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+def test_the_warmup_round_of_a_held_test_says_what_run_grid_says_of_a_discarded_one(grid, server, tmp_path):
+    _graded_answers(grid)
+    grid.answers["warmup"].nonfatal_warnings.append("harvested_leaked_artifact:x")
+    grid.answers["test"].nonfatal_warnings.append("served_slowly")
+    grid.answers["eval"].nonfatal_warnings.append("eval_note")
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("accuracy", 3), ("measure", 0)]
+    assert [r.nonfatal_warnings for r in outcome.rounds] == [
+        ("run_grid_warmup_discarded_first", "warmup_round_tput:1111.0", "harvested_leaked_artifact:x"),
+        ("served_slowly",),
+        ("eval_note",),
+    ]
+
+
+def test_the_eval_exit_code_of_a_graded_test_is_the_one_its_evaluation_round_recorded(grid, server, tmp_path):
+    evaluation = _graded_answers(grid)
+    (Path(evaluation.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("measure", 0), ("accuracy", 3)]
     assert outcome.returncode == 3
 
 
-def test_a_warmup_that_fails_ends_a_graded_test_with_nothing_measured_and_no_accuracy(grid, server, tmp_path):
-    grid.answers["warmup"] = grid.result("warmup", status="failed", returncode=7, error="boom", error_class="x")
-    _lm_eval_results(Path(grid.answers["warmup"].workspace) / "eval_output", 0.64)
+def test_a_server_that_dies_in_the_evaluation_fails_the_accuracy_and_keeps_the_measured_reading(grid, server, tmp_path):
+    _graded_answers(grid)
+    workspace = Path(grid.answers["eval"].workspace)
+    (workspace / "server.log").write_text(test_log_causes.ILLEGAL_ADDRESS_LOG, encoding="utf-8")
+    grid.answers["eval"] = grid.result(
+        "eval",
+        status="failed",
+        returncode=1,
+        error="server died",
+        error_class="magpie_nonzero_invalid_measurement",
+        server_log_path=str(workspace / "server.log"),
+    )
 
     outcome = _run(_graded_call(tmp_path))
+
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("measure", 0), ("accuracy", 1)]
+    measured, accuracy = outcome.rounds[1:]
+    assert measured.output_dir == Path(grid.answers["test"].workspace), "the measured reading stays in the result"
+    assert accuracy.accuracy == (), "a score from an evaluation that failed is no score"
+    assert outcome.returncode == 1
+    assert (outcome.failure_class, (outcome.failure_reason or "").split(":")[0]) == ("candidate", "hip_runtime_error")
+    summary = {row["name"]: row["status"] for row in json.loads(outcome.stdout)}
+    assert summary == {"warmup": "succeeded", "test": "succeeded", "eval": "failed"}
+    assert len(server.teardowns) == 1
+
+
+@pytest.mark.parametrize("make_call", [_explore_call, _graded_call], ids=["explore", "graded"])
+def test_a_warmup_that_fails_ends_the_test_with_nothing_measured_and_no_accuracy(grid, server, tmp_path, make_call):
+    _graded_answers(grid)
+    grid.answers["warmup"] = grid.result("warmup", status="failed", returncode=7, error="boom", error_class="x")
+
+    outcome = _run(make_call(tmp_path))
 
     assert [c["grid"][0].name for c in grid.calls] == ["warmup"]
     assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 7)] and outcome.returncode == 7
     assert len(server.teardowns) == 1
 
 
-def test_a_measured_round_that_fails_keeps_the_evaluation_the_warmup_made(grid, server, tmp_path):
+def test_a_measured_round_that_fails_ends_a_graded_test_before_its_evaluation(grid, server, tmp_path):
     _graded_answers(grid)
     grid.answers["test"] = grid.result("test", status="failed", returncode=5, error="boom", error_class="x")
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("accuracy", 0), ("measure", 5)]
-    assert outcome.returncode == 5
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("measure", 5)]
+    assert outcome.returncode == 5 and len(server.teardowns) == 1
 
 
 def test_a_round_whose_client_could_not_fetch_its_dependencies_is_an_infrastructure_failure(grid, server, tmp_path):
@@ -393,58 +496,56 @@ def test_a_round_whose_client_could_not_fetch_its_dependencies_is_an_infrastruct
     assert outcome.failure_reason.startswith("git_fetch_timeout: subprocess.TimeoutExpired")
 
 
-def test_a_graded_test_the_run_stops_during_its_warmup_reports_the_stop_and_measures_nothing(grid, server, tmp_path):
-    grid.answers["warmup"] = grid.result(
-        "warmup", status="failed", returncode=None, error_class="session_time_exhausted", error="out of time"
+@pytest.mark.parametrize("round_name", ["warmup", "test", "eval"])
+def test_a_graded_test_the_run_stops_in_a_round_reports_the_stop_and_runs_no_round_after_it(
+    grid, server, tmp_path, round_name
+):
+    _graded_answers(grid)
+    grid.answers[round_name] = grid.result(
+        round_name, status="failed", returncode=None, error_class="session_time_exhausted", error="out of time"
     )
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [c["grid"][0].name for c in grid.calls] == ["warmup"]
-    assert outcome.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
+    names = ["warmup", "test", "eval"]
+    assert [c["grid"][0].name for c in grid.calls] == names[: names.index(round_name) + 1]
+    assert outcome.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE and len(server.teardowns) == 1
 
 
 @pytest.mark.parametrize(
     ("kwargs", "why"),
     [
-        ({"rounds": RoundPlan(warmup_rounds=0)}, "no warmup is planned, so the one round evaluates"),
+        ({"rounds": RoundPlan(warmup_rounds=0)}, "no warmup is planned"),
         ({"rounds": RoundPlan(warmup_rounds=None)}, "pytest's own default is no warmup"),
     ],
 )
-def test_a_graded_test_without_a_warmup_evaluates_in_its_one_round_as_before(grid, server, tmp_path, kwargs, why):
+def test_a_graded_test_without_a_warmup_boots_in_its_measured_round_and_evaluates_after_it(
+    grid, server, tmp_path, kwargs, why
+):
+    evaluation = _graded_answers(grid)
+
+    outcome = _run(_graded_call(tmp_path, **kwargs))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["test", "eval"], why
+    assert [c["launch"].server_already_ready for c in grid.calls] == [False, True]
+    assert [c["launch"].server_lifecycle["cleanup"] for c in grid.calls] == [False, True]
+    assert [r.phase for r in outcome.rounds] == ["measure", "accuracy"]
+    assert outcome.rounds[1].output_dir == Path(evaluation.workspace) and outcome.rounds[1].accuracy[0].score == 0.64
+
+
+def test_a_graded_test_on_a_framework_that_cannot_hold_a_server_evaluates_in_its_one_round(monkeypatch, grid, tmp_path):
+    _Server(monkeypatch, eligible=False)
     result = grid.result("test")
     _lm_eval_results(Path(result.workspace) / "eval_output", 0.64)
     grid.answers["test"] = result
-    point = _point(tmp_path, "graded", run_eval="true")
 
-    outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy", **kwargs))
-
-    assert [c["grid"][0].name for c in grid.calls] == ["test"], why
-    assert grid.calls[0]["launch"].server_lifecycle is None and grid.calls[0]["recipe"].base.extra_envs is None
-    assert [r.phase for r in outcome.rounds] == ["measure", "accuracy"]
-    assert outcome.rounds[1].accuracy[0].score == 0.64
-
-
-def test_a_graded_test_on_a_framework_that_cannot_hold_a_server_keeps_run_grids_warmup(monkeypatch, grid, tmp_path):
-    _Server(monkeypatch, eligible=False)
-
-    _run(_graded_call(tmp_path))
+    outcome = _run(_graded_call(tmp_path))
 
     (kwargs,) = grid.calls
     assert kwargs["grid"][0].name == "test" and kwargs["launch"].warmup_before_measure is True
     assert kwargs["launch"].server_lifecycle is None and kwargs["recipe"].base.extra_envs is None
-
-
-def test_a_test_that_is_not_graded_keeps_run_grids_warmup_and_never_holds_a_server(grid, server, tmp_path):
-    _run(_call(tmp_path, rounds=RoundPlan(warmup_rounds=1)))
-
-    (kwargs,) = grid.calls
-    assert kwargs["grid"][0].name == "test" and kwargs["launch"].warmup_before_measure is True
-    assert (
-        kwargs["launch"].server_lifecycle is None
-        and kwargs["recipe"].base.extra_envs is None
-        and server.teardowns == []
-    )
+    assert [r.phase for r in outcome.rounds] == ["measure", "accuracy"]
+    assert outcome.rounds[1].accuracy[0].score == 0.64
 
 
 def test_the_default_warmup_of_run_grid_decides_for_a_graded_test_that_states_none(grid, server, tmp_path, monkeypatch):
@@ -453,7 +554,7 @@ def test_the_default_warmup_of_run_grid_decides_for_a_graded_test_that_states_no
 
     _run(_graded_call(tmp_path, rounds=RoundPlan(warmup_rounds=None)))
 
-    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test", "eval"]
 
 
 # --- refusals -----------------------------------------------------------------------------------------------------
@@ -701,7 +802,7 @@ def _graded_sweep(tmp_path: Path, *levels: int, run_eval: str = "true") -> TestC
 
 
 @pytest.mark.parametrize("ambient_conc", [None, "64"], ids=["clean", "conc_left_in_the_process"])
-def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_measured_round_changes(
+def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_bench_evaluates(
     grid, server, tmp_path, monkeypatch, ambient_conc
 ):
     if ambient_conc is None:
@@ -717,9 +818,13 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
     boots = [c for c in grid.calls if c["launch"].lifecycle_boot_only]
     measured = [c for c in grid.calls if not c["launch"].lifecycle_boot_only]
     assert [c["grid"][0].name for c in boots] == ["c8", "c4"], "the failed boot and the one it stepped down to"
-    assert [c["grid"][0].name for c in measured] == ["c4", "c2"]
+    assert [c["grid"][0].name for c in measured] == ["c4", "c2", "eval"]
     assert all(c["recipe"].base.extra_envs == BOOT_ENVS for c in boots)
-    assert all(c["recipe"].base.extra_envs is None for c in measured)
+    assert [c["recipe"].base.extra_envs for c in measured] == [
+        {"RUN_EVAL": "false"},
+        {"RUN_EVAL": "false"},
+        {"RUN_EVAL": "true", "EVAL_ONLY": "true"},
+    ]
     assert [Path(p).read_text() for p in call.points] == points, "the points are the ones the call was accepted on"
     for index, boot in enumerate(boots):
         level = (8, 4)[index]
@@ -727,13 +832,132 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
         assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1"), f"the boot at {level}"
         assert "MAGPIE_RUN_PHASE" not in envs and envs["CONC"] == level
         assert envs["NUM_WARMUPS"] == min(level, 8), "a variable outside the reuse check is the point's own"
-    for level, round_ in zip((4, 2), measured, strict=True):
+    for level, round_ in zip((4, 2, 4), measured, strict=True):
         envs = _envs_handed_to_magpie(grid, tmp_path, round_)
-        assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"], envs["NUM_WARMUPS"]) == ("true", level * 10, min(level, 8))
+        assert (envs["NUM_PROMPTS"], envs["NUM_WARMUPS"], envs["CONC"]) == (level * 10, min(level, 8), level)
         assert "MAGPIE_RUN_PHASE" not in envs
-    assert [r.phase for r in outcome.rounds if r.point == 1] == ["measure", "accuracy"]
+    assert [_envs_handed_to_magpie(grid, tmp_path, c)["RUN_EVAL"] for c in measured] == ["false", "false", "true"], (
+        "no bench evaluates; one evaluation, from the level the server booted on, after the last bench"
+    )
+    assert [(r.point, r.phase) for r in outcome.rounds] == [(1, "measure"), (2, "measure"), (1, "accuracy")]
     assert outcome.returncode == 0
     assert os.environ.get("CONC") == ambient_conc, "the process environment is put back after the test"
+
+
+def _graded_sweep_answers(grid: _Grid, *levels: int, score: float = 0.64) -> VariantResult:
+    """The scripted answers of a graded sweep: each level's directory holds a score no round of the test wrote, and the
+    evaluation's score sits in the evaluation round's directory."""
+    for level in levels:
+        bench = grid.answers[f"c{level}"] = grid.result(f"c{level}", output_throughput=100.0 * level)
+        _lm_eval_results(Path(bench.workspace) / "eval_output", level / 100.0)
+    evaluation = grid.answers["eval"] = grid.result("eval", note="evaluation_only")
+    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", score)
+    return evaluation
+
+
+def test_a_graded_sweep_benches_every_level_and_then_evaluates_once_on_the_server_its_boot_left_up(
+    grid, server, tmp_path
+):
+    """Every level after the first used to bench on the KV pool the evaluation of the level before it left full."""
+    evaluation = _graded_sweep_answers(grid, 2, 8, 4)
+    call = _graded_sweep(tmp_path, 2, 8, 4)
+
+    outcome = _run(call)
+
+    assert [c["grid"][0].name for c in grid.calls] == ["c8", "c8", "c4", "c2", "eval"]
+    calls = list(zip(grid.calls, grid.configs))
+    assert [_benches(c, config) for c, config in calls[1:]] == [True, True, True, False]
+    assert [_evaluates(c, config) for c, config in calls] == [False, False, False, False, True], (
+        "nothing evaluates before the last bench"
+    )
+    assert [c["launch"].evaluation_only for c in grid.calls] == [False, False, False, False, True]
+    assert grid.calls[-1]["recipe"].base_yaml_path == call.points[1], "from the level the server booted on"
+    assert [c["launch"].server_already_ready for c in grid.calls] == [False, True, True, True, True], "one boot"
+    assert [_lifecycle(c)["cleanup"] for c in grid.calls] == [False, False, False, False, True]
+    assert len(server.teardowns) == 1
+    assert [(r.point, r.phase, r.returncode) for r in outcome.rounds] == [
+        (1, "measure", 0),
+        (2, "measure", 0),
+        (0, "measure", 0),
+        (1, "accuracy", 0),
+    ]
+    assert [r.accuracy for r in outcome.rounds] == [
+        (),
+        (),
+        (),
+        (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),),
+    ]
+    assert outcome.rounds[-1].output_dir == Path(evaluation.workspace)
+    assert outcome.returncode == 0
+
+
+def test_the_rounds_file_of_a_graded_sweep_lists_every_bench_and_then_its_one_evaluation(grid, server, tmp_path):
+    _graded_sweep_answers(grid, 8, 4)
+
+    outcome = _run(_graded_sweep(tmp_path, 8, 4))
+
+    document = rounds_document(outcome, tmp_path / "ws")
+    assert [(entry["point"], entry["phase"], entry["dir"]) for entry in document] == [
+        (0, "measure", "c8"),
+        (1, "measure", "c4"),
+        (0, "accuracy", "eval"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("answer", "returncode"),
+    [
+        (dict(status="failed", returncode=5, error="boom", error_class="x"), 5),
+        (
+            dict(status="skipped", returncode=None, error_class="session_time_exhausted"),
+            SESSION_TIME_EXHAUSTED_RETURNCODE,
+        ),
+    ],
+    ids=["failed", "stopped"],
+)
+def test_a_graded_sweep_whose_bench_fails_or_is_stopped_runs_no_evaluation(grid, server, tmp_path, answer, returncode):
+    _graded_sweep_answers(grid, 8, 4, 2)
+    grid.answers["c4"] = grid.result("c4", **answer)
+
+    outcome = _run(_graded_sweep(tmp_path, 8, 4, 2))
+
+    assert "eval" not in [c["grid"][0].name for c in grid.calls]
+    assert not any(r.phase == "accuracy" for r in outcome.rounds)
+    assert outcome.returncode == returncode and len(server.teardowns) == 1
+
+
+def test_a_graded_sweep_whose_evaluation_fails_keeps_every_bench_and_fails_its_accuracy(grid, server, tmp_path):
+    _graded_sweep_answers(grid, 8, 4)
+    grid.answers["eval"] = grid.result("eval", status="failed", returncode=1, error="server died", error_class="x")
+
+    outcome = _run(_graded_sweep(tmp_path, 8, 4))
+
+    assert [(r.point, r.phase, r.returncode) for r in outcome.rounds] == [
+        (0, "measure", 0),
+        (1, "measure", 0),
+        (0, "accuracy", 1),
+    ]
+    assert outcome.rounds[-1].accuracy == (), "a score from an evaluation that failed is no score"
+    assert outcome.returncode == 1 and len(server.teardowns) == 1
+
+
+def test_a_graded_sweep_on_a_framework_that_cannot_hold_a_server_evaluates_in_each_levels_own_round(
+    monkeypatch, grid, tmp_path
+):
+    """Each level has a server of its own, which no bench uses after its evaluation."""
+    _Server(monkeypatch, eligible=False)
+    _graded_sweep_answers(grid, 8, 4)
+
+    outcome = _run(_graded_sweep(tmp_path, 8, 4))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["c8", "c4"]
+    assert all(_lifecycle(c) is None and c["recipe"].base.extra_envs is None for c in grid.calls)
+    assert [(r.point, r.phase) for r in outcome.rounds] == [
+        (0, "measure"),
+        (0, "accuracy"),
+        (1, "measure"),
+        (1, "accuracy"),
+    ]
 
 
 def test_a_sweep_that_does_not_run_accuracy_boots_the_same_way(grid, server, tmp_path):
@@ -1637,20 +1861,8 @@ _ACCESS_400 = '[2000-01-01 00:00:00] INFO:     127.0.0.1:40000 - "POST /v1/compl
 def test_a_refused_evaluation_names_the_refusal_that_a_flood_of_tracebacks_pushed_out_of_the_log_tail(
     grid, server, tmp_path
 ):
-    workspace = tmp_path / "ws" / "warmup"
-    workspace.mkdir(parents=True)
-    (workspace / "server.log").write_text(eval_refusal_logs.server_log(), encoding="utf-8")
-    (workspace / "benchmark_stderr.log").write_text(eval_refusal_logs.benchmark_stderr(), encoding="utf-8")
-    (workspace / "eval_returncode").write_text("1", encoding="utf-8")
-    grid.answers.update(
-        warmup=grid.result(
-            "warmup",
-            returncode=1,
-            output_throughput=1000.0,
-            server_log_path=str(workspace / "server.log"),
-            nonfatal_warnings=["nonzero_rc_after_complete_protocol:1"],
-        ),
-        test=grid.result("test"),
+    grid.answers["eval"] = _failed_evaluation(
+        grid, tmp_path, eval_refusal_logs.server_log(), eval_refusal_logs.benchmark_stderr()
     )
 
     outcome = _run(_graded_call(tmp_path))
@@ -1696,33 +1908,37 @@ def test_a_refusal_older_than_the_scanned_part_of_a_log_is_not_searched_for(tmp_
     assert local._read_refusal(tmp_path / "missing.log") == ""
 
 
-def test_an_evaluation_that_fails_after_a_whole_protocol_is_classified_from_the_logs_it_wrote(grid, server, tmp_path):
-    workspace = tmp_path / "ws" / "warmup"
-    workspace.mkdir(parents=True)
-    (workspace / "server.log").write_text(_ACCESS_400 * 4, encoding="utf-8")
-    (workspace / "benchmark_stderr.log").write_text(_REFUSED_REQUEST + "\n" + _SESSION_CLOSED * 40, encoding="utf-8")
-    (workspace / "eval_returncode").write_text("1", encoding="utf-8")
-    grid.answers.update(
-        warmup=grid.result(
-            "warmup",
-            returncode=1,
-            output_throughput=1111.0,
-            error=_SESSION_CLOSED * 2,
-            server_log_path=str(workspace / "server.log"),
-            nonfatal_warnings=["nonzero_rc_after_complete_protocol:1"],
-        ),
-        test=grid.result("test"),
+def test_an_evaluation_that_fails_is_classified_from_the_logs_it_wrote(grid, server, tmp_path):
+    grid.answers["eval"] = _failed_evaluation(
+        grid, tmp_path, _ACCESS_400 * 4, _REFUSED_REQUEST + "\n" + _SESSION_CLOSED * 40, error=_SESSION_CLOSED * 2
     )
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [c["grid"][0].name for c in grid.calls] == ["warmup"], "a refused evaluation settles the test"
-    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("accuracy", 1)]
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test", "eval"]
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("measure", 0), ("accuracy", 1)]
     assert (outcome.returncode, outcome.failure_class) == (1, "unclear")
     reason = outcome.failure_reason or ""
     assert reason.startswith("lm_eval_http_400: "), "the refusal, not the session the client closed after it"
     assert "longer than the model's context length (400 tokens)" in reason
-    assert len(server.teardowns) == 1, "the server the warmup left up is reclaimed although no measured round runs"
+    assert len(server.teardowns) == 1
+
+
+def _failed_evaluation(grid: _Grid, tmp_path: Path, server_log: str, stderr: str, *, error: str = "") -> VariantResult:
+    """An evaluation round whose evaluation failed: it ran no bench, so it has no measurement and its round failed."""
+    workspace = tmp_path / "ws" / "eval"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "server.log").write_text(server_log, encoding="utf-8")
+    (workspace / "benchmark_stderr.log").write_text(stderr, encoding="utf-8")
+    (workspace / "eval_returncode").write_text("1", encoding="utf-8")
+    return grid.result(
+        "eval",
+        status="failed",
+        returncode=1,
+        error=error,
+        error_class="magpie_nonzero_invalid_measurement",
+        server_log_path=str(workspace / "server.log"),
+    )
 
 
 def _warmup_with_logs(grid: _Grid, tmp_path: Path, server_log: str, *, returncode: int) -> None:
@@ -1772,7 +1988,7 @@ def test_a_warmup_whose_server_crashed_or_refused_to_serve_ends_the_test_with_no
     outcome = _run(_graded_call(tmp_path))
 
     assert [c["grid"][0].name for c in grid.calls] == ["warmup"], "no measured round boots a server that cannot serve"
-    assert [r.phase for r in outcome.rounds] == ["warmup", "accuracy"] and outcome.returncode == 1
+    assert [r.phase for r in outcome.rounds] == ["warmup"] and outcome.returncode == 1
     assert outcome.failure_class == failure_class
     assert (outcome.failure_reason or "").startswith(reason)
     assert len(server.teardowns) == 1
@@ -1799,17 +2015,19 @@ def test_a_warmup_that_failed_for_a_cause_no_log_names_keeps_the_measured_round_
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
-    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("accuracy", 1), ("measure", 0)]
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"], "a test that failed is not evaluated"
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("measure", 0)]
     assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
 
 
 def test_a_warmup_whose_server_log_is_healthy_goes_on_to_the_measured_round(grid, server, tmp_path):
     _warmup_with_logs(grid, tmp_path, test_log_causes.SERVER_LOG_WITH_BAD_REQUEST, returncode=0)
-    _lm_eval_results(Path(grid.answers["warmup"].workspace) / "eval_output", 0.64)
+    evaluation = grid.result("eval")
+    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", 0.64)
+    grid.answers["eval"] = evaluation
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
-    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("accuracy", 0), ("measure", 0)]
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test", "eval"]
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("measure", 0), ("accuracy", 0)]
     assert (outcome.returncode, outcome.failure_class, outcome.failure_reason) == (0, None, None)

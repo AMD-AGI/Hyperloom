@@ -2198,3 +2198,51 @@ def test_the_harvest_still_works_on_an_untouched_worktree(tmp_path: Path):
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
     assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt)
     assert len(worktree_head(wt)) == 40
+
+
+def test_the_harvest_does_not_run_git_in_a_repository_a_child_nested_in_the_worktree(tmp_path: Path):
+    """The child's ``.gitmodules`` asks for the nested repository to be checked; its filter must still not run."""
+    _base, wt = _make_git_worktree_pair(tmp_path)
+    marker = tmp_path / "executed"
+    nested = wt / "vendored"
+    nested.mkdir()
+    (nested / "f.txt").write_text("a\n", encoding="utf-8")
+    planted = f"""set -e
+cd {nested}
+git init -q . && git add -A && git -c user.email=a@b -c user.name=t commit -qm nested
+git config filter.inner.clean "sh -c 'touch {marker}; cat'"
+echo '* filter=inner' > .gitattributes
+echo b > f.txt
+printf '[submodule "vendored"]\\n\\tpath = vendored\\n\\turl = ./vendored\\n\\tignore = none\\n' > {wt}/.gitmodules
+"""
+    subprocess.run(["/bin/sh", "-c", planted], check=True, capture_output=True)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+
+    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt)
+
+    assert not marker.exists()
+    assert "+new = 2" in diff
+
+
+def test_the_harvest_does_not_run_git_in_a_repository_the_worktree_tracks(tmp_path: Path):
+    """A submodule of the base is a gitlink; an ``add -A`` over it runs ``git status`` in whatever repository is there."""
+    _base, wt = _make_git_worktree_pair(tmp_path)
+    marker = tmp_path / "executed"
+    nested = wt / "third_party"
+    identity = ("-c", "user.email=a@b", "-c", "user.name=t")
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "f.txt").write_text("a\n", encoding="utf-8")
+    for repo in (nested, wt):
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), *identity, "commit", "-qm", "c"], check=True)
+    subprocess.run(
+        ["git", "-C", str(nested), "config", "filter.inner.clean", f"sh -c 'touch {marker}; cat'"], check=True
+    )
+    (nested / ".gitattributes").write_text("* filter=inner\n", encoding="utf-8")
+    (nested / "f.txt").write_text("b\n", encoding="utf-8")
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+
+    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt)
+
+    assert not marker.exists()
+    assert "+new = 2" in diff

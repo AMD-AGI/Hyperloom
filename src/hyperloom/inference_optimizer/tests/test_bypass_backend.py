@@ -828,6 +828,7 @@ class _BootRound:
         self.out = tmp_path / "out"
         self.launched = 0
         self.subprocess_tags: list[str] = []
+        self.eval_rc = 0
 
         if server_up and owned:
             _server_lifecycle.write_lifecycle_files(
@@ -868,7 +869,7 @@ class _BootRound:
             (workspace / "inferencex_result.json").write_text(
                 json.dumps({"output_throughput": 700.0, "completed": 40, "duration": 30.0}), encoding="utf-8"
             )
-        return 0
+        return self.eval_rc if tag == "eval" else 0
 
     def run(self) -> int:
         return bypass_runner.main(self.argv)
@@ -906,6 +907,40 @@ def test_round_without_a_phase_still_boots_benchmarks_and_evaluates(tmp_path, mo
     assert boot.subprocess_tags == ["client", "eval"]
     report = json.loads((boot.workspace / "benchmark_report.json").read_text(encoding="utf-8"))
     assert report["success"] is True
+
+
+def test_an_evaluation_only_round_evaluates_on_the_held_server_and_runs_no_bench(tmp_path, monkeypatch):
+    """The round a graded test evaluates in after its measured bench: ``EVAL_ONLY``, as InferenceX's scripts read it."""
+    evaluation = _BootRound(tmp_path, monkeypatch, round_envs={"EVAL_ONLY": "true"}, server_up=True)
+
+    assert evaluation.run() == 0
+
+    assert (evaluation.launched, evaluation.subprocess_tags) == (0, ["eval"])
+    report = json.loads((evaluation.workspace / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert report["success"] is True and not (evaluation.workspace / "inferencex_result.json").exists()
+
+
+def test_an_evaluation_only_round_whose_evaluation_fails_exits_with_the_evaluations_code(tmp_path, monkeypatch):
+    evaluation = _BootRound(tmp_path, monkeypatch, round_envs={"EVAL_ONLY": "true"}, server_up=True)
+    evaluation.eval_rc = 3
+
+    assert evaluation.run() == 3
+
+    assert (evaluation.workspace / "eval_returncode").read_text(encoding="utf-8").strip() == "3"
+    report = json.loads((evaluation.workspace / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert report["success"] is False and "run_eval failed with exit code 3" in report["errors"]
+
+
+def test_an_evaluation_only_round_that_is_not_asked_to_evaluate_fails_having_run_nothing(tmp_path, monkeypatch):
+    evaluation = _BootRound(
+        tmp_path, monkeypatch, round_envs={"EVAL_ONLY": "true", "RUN_EVAL": "false"}, server_up=True
+    )
+
+    assert evaluation.run() != 0
+
+    assert evaluation.subprocess_tags == []
+    report = json.loads((evaluation.workspace / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert report["success"] is False and "EVAL_ONLY with RUN_EVAL off ran nothing" in report["errors"]
 
 
 def test_boot_only_round_leaves_an_owned_running_server_alone(tmp_path, monkeypatch):
