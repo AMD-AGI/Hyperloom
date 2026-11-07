@@ -16,9 +16,12 @@
 # records recipe-KB enablement from --degraded-kb directly.
 #
 # Writes a marker JSON to $USER_DATA_PATH/runtime/recipe_kb/.kb_preflight.json
-# capturing reachability + skip + failure_reason per branch.
+# capturing reachability + skip + failure_reason per branch. The directory may be shared with other accounts of one
+# group (setgid, 2775): the marker is written 664 to a new file and renamed over the old one, so a marker another
+# account left there never blocks this one.
 
 set -u
+umask 002
 
 # Legacy marker fields: kb_* are always skipped (no remote recipe-KB probe).
 kb_reachable="false"
@@ -43,8 +46,10 @@ fi
 : "${SKIP_PR_PROBE:=}"
 
 marker_dir="${USER_DATA_PATH}/runtime/recipe_kb"
-mkdir -p "${marker_dir}"
+mkdir -p -m 2775 -- "${USER_DATA_PATH}/runtime" "${marker_dir}"
 marker="${marker_dir}/.kb_preflight.json"
+marker_tmp=""
+trap '[ -z "${marker_tmp}" ] || rm -f -- "${marker_tmp}"' EXIT
 
 pr_reachable="false"
 pr_skipped="false"
@@ -84,6 +89,14 @@ else
     probe_curl "${KB_STORE_URL%/}/pr-monitor/v1/healthz" 5 3 || true
 fi
 
+# mktemp makes the file 0600 whatever the umask.
+if marker_tmp="$(mktemp -- "${marker_dir}/.kb_preflight.XXXXXX")"; then
+  chmod 664 -- "${marker_tmp}"
+else
+  marker_tmp=""
+  echo "[preflight WARN] cannot write a marker in ${marker_dir}; the reachability result is not recorded." >&2
+fi
+
 {
     printf '{'
     printf '"kb_reachable":%s,' "${kb_reachable}"
@@ -94,7 +107,8 @@ fi
         printf ',"pr_failure_reason":"%s"' "${pr_failure_reason}"
     fi
     printf '}\n'
-} > "${marker}"
+} > "${marker_tmp:-/dev/null}"
+if [ -n "${marker_tmp}" ] && mv -f -- "${marker_tmp}" "${marker}"; then marker_tmp=""; fi
 
 if [ "${pr_skipped}" = "false" ] && [ "${pr_reachable}" = "false" ]; then
     exit 1

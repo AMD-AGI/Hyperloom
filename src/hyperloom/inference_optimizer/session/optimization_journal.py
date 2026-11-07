@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom_common.coerce import optional_positive_float, to_int
-from hyperloom_common.io import WriteOptions, atomic_write_text
+from hyperloom_common.io import SHARED, atomic_write_text
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_common.jsonio import read_json
 from hyperloom_common.timeutil import now_iso
 
@@ -171,7 +172,7 @@ class Journal:
     def load_or_create(cls, session_dir: Path, fresh: Journal) -> Journal:
         """Return the existing journal if on disk, else ``fresh`` (on-disk header fields win only where ``fresh`` leaves them empty)."""
         path = journal_path(session_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(path.parent)
 
         def _warn(exc: BaseException) -> None:
             log.warning("optimization_journal: failed to parse %s (%s); recreating fresh", path, exc)
@@ -230,7 +231,7 @@ class Journal:
             atomic_write_text(
                 self.path,
                 json.dumps(self.to_dict(), indent=2, sort_keys=False) + "\n",
-                options=WriteOptions(make_parents=True),
+                options=SHARED,
             )
         except OSError as exc:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)

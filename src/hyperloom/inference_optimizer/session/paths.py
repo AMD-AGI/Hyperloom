@@ -190,9 +190,9 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
     generated one.
     """
     ws = workspace_root()
-    ws.mkdir(parents=True, exist_ok=True)
+    make_shared_dirs(ws)
     for sub in _WORKSPACE_SKELETON:
-        (ws / sub).mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(ws / sub)
 
     if target is not None:
         sd = Path(target)

@@ -23,6 +23,7 @@ import stat
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TextIO
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +88,31 @@ def create_shared_file(path: Path) -> None:
         os.fchmod(descriptor, SHARED_FILE_MODE)
     finally:
         os.close(descriptor)
+
+
+def open_shared(path: Path, access: int) -> int:
+    """Open ``path`` for ``access`` (``os.O_RDWR``, ``os.O_WRONLY | os.O_APPEND``) without following a link, creating it
+    with mode ``664`` when it is not there, and return the descriptor.
+
+    A file that exists is opened as it is, never truncated, chmodded or replaced by rename: a lock or a log that
+    another process holds open would be left on an unlinked inode. Another account's ``0600`` file therefore raises
+    ``PermissionError``.
+    """
+    try:
+        descriptor = os.open(path, access | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except FileExistsError:
+        return os.open(path, access | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fchmod(descriptor, SHARED_FILE_MODE)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def open_shared_append(path: Path) -> TextIO:
+    """:func:`open_shared` for appending UTF-8 text."""
+    return os.fdopen(open_shared(path, os.O_WRONLY | os.O_APPEND), "a", encoding="utf-8")
 
 
 def write_shared_bytes(path: Path, data: bytes, *, mode: int = SHARED_FILE_MODE) -> None:
@@ -176,6 +202,8 @@ __all__ = [
     "create_shared_file",
     "current_umask",
     "make_shared_dirs",
+    "open_shared",
+    "open_shared_append",
     "ownership",
     "share_new_directory",
     "setgid_warnings",

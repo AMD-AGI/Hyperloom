@@ -67,10 +67,10 @@ def write_boot_observation(
     Raises:
         OSError: When the artifact cannot be written.
     """
-    from hyperloom_common.io import JsonFormat, atomic_write_json
+    from hyperloom_common.io import SHARED, JsonFormat, atomic_write_json
 
     target = _observation_path(session_dir, output_dir, attempt)
-    atomic_write_json(target, observation_summary(observation), fmt=JsonFormat(trailing_newline=True))
+    atomic_write_json(target, observation_summary(observation), fmt=JsonFormat(trailing_newline=True), options=SHARED)
     return str(target)
 
 

@@ -425,6 +425,23 @@ def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, obje
     }
 
 
+def holds_credentials(value: object) -> bool:
+    """Whether a JSON-shaped ``value`` carries a credential: a string :func:`redact_secret_values` would change or with a
+    ``--flag`` named like one, or a mapping entry with a value under a credential-shaped name."""
+    if isinstance(value, str):
+        flags = (
+            token.lstrip("-").partition("=")[0].replace("-", "_") for token in value.split() if token.startswith("-")
+        )
+        return redact_secret_values(value) != value or any(_is_credential_env_name(flag) for flag in flags)
+    if isinstance(value, Mapping):
+        return any(
+            (_is_credential_env_name(key) and bool(item)) or holds_credentials(item) for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(holds_credentials(item) for item in value)
+    return False
+
+
 def is_allowed_external_env_key(key: object) -> bool:
     """True when an env export from an untrusted external source is safe to carry."""
     upper = str(key or "").strip().upper()
@@ -868,6 +885,7 @@ __all__ = [
     "build_benchmark_env",
     "env_file_list_elements",
     "filter_untrusted_env_mapping",
+    "holds_credentials",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",

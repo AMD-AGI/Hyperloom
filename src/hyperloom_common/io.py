@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs
+from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared_append
 
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 
@@ -104,6 +104,9 @@ class WriteOptions:
 
 #: A crash-safe replace: parents created, the data and the rename flushed to disk, an existing file's mode kept.
 DURABLE = WriteOptions(make_parents=True, fsync=True, fsync_dir=True, preserve_mode=True)
+
+#: A replace of a file the next account of the run's group reads or replaces in turn: parents ``2775``, file ``664``.
+SHARED = WriteOptions(make_parents=True, shared=True)
 
 
 @dataclass(frozen=True)
@@ -210,6 +213,16 @@ def append_jsonl(
             _fsync_handle(fh)
 
 
+def append_shared_jsonl(path: Path, row: Any, *, fmt: JsonLineFormat = JsonLineFormat()) -> None:
+    """:func:`append_jsonl` for a file the accounts of one group append to in turn: the parents are made ``2775`` and a
+    new file ``664`` (:func:`~hyperloom_common.shared_storage.open_shared_append`); one that exists is appended to as it is."""
+    path = Path(path)
+    make_shared_dirs(path.parent)
+    line = _json.dumps(row, ensure_ascii=fmt.ensure_ascii, sort_keys=fmt.sort_keys)
+    with open_shared_append(path) as fh:
+        fh.write(line + "\n")
+
+
 def safe_mtime(path: Path) -> float:
     """Return ``path``'s modification time, or ``0.0`` when ``stat()`` fails."""
     try:
@@ -222,11 +235,13 @@ __all__ = [
     "DURABLE",
     "JsonFormat",
     "JsonLineFormat",
+    "SHARED",
     "WriteOptions",
     "atomic_write_bytes",
     "atomic_write_text",
     "atomic_write_json",
     "append_jsonl",
+    "append_shared_jsonl",
     "fsync_directory",
     "fsync_tree",
     "fsync_tree_directories",

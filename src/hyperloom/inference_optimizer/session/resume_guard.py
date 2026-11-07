@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from hyperloom.common.owner_scope import process_started_at, same_environment
+from hyperloom_common.shared_storage import open_shared_append
 from hyperloom_common.timeutil import now_iso
 
 from . import lock as session_lock
@@ -620,7 +621,7 @@ def confirm_scope_gone(session_dir: Path, *, owner_scope: str, reason: str, curr
         "released_gpu_leases": result["released_gpu_leases"],
     }
     try:
-        with session_paths.pod_history_path(session_dir).open("a", encoding="utf-8") as fh:
+        with open_shared_append(session_paths.pod_history_path(session_dir)) as fh:
             fh.write(json.dumps(record, sort_keys=True) + "\n")
     except OSError:
         result["ledger_recorded"] = False

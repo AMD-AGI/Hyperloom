@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
+from hyperloom.common.env_safety import holds_credentials
 from hyperloom_common.io import WriteOptions, atomic_write_text
 from hyperloom_common.timeutil import now_iso
 
@@ -349,7 +350,9 @@ class Recorder:
             else None
         )
         try:
-            atomic_write_text(target, data, options=WriteOptions(make_parents=True))
+            atomic_write_text(
+                target, data, options=WriteOptions(make_parents=True, shared=not holds_credentials(record))
+            )
         except BaseException as exc:
             if trace is not None:
                 trace_write(replace(trace, error=exc))

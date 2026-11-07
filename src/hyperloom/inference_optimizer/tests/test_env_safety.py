@@ -447,3 +447,43 @@ def test_launch_provided_names_cover_the_rank_topology_and_the_schedulers():
     assert common_env_safety.is_launch_provided_env_name("TORCHELASTIC_RUN_ID")
     assert not common_env_safety.is_launch_provided_env_name("HL_FUSE_RMSNORM")
     assert not common_env_safety.is_launch_provided_env_name("")
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        {"operator_extra_env": None, "operator_server_args": None},
+        {
+            "operator_extra_env": {
+                "SGLANG_USE_AITER": "1",
+                "MAX_NUM_BATCHED_TOKENS": "8192",
+                "TOKENIZERS_PARALLELISM": "x",
+            }
+        },
+        {"operator_server_args": "--tp 8 --max-total-tokens=120000 --tokenizer-path /models/m --max-prefill-tokens 5"},
+        {"rows": [{"tput": 1.5, "note": "-1", "key": ""}], "ok": True},
+        {"HF_TOKEN": ""},
+    ],
+    ids=["empty", "none", "env-knobs", "server-arg-knobs", "numbers", "credential-name-without-a-value"],
+)
+def test_holds_credentials_is_false_for_knobs_and_numbers(document):
+    assert common_env_safety.holds_credentials(document) is False
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"HF_TOKEN": "hf_live_value_123"},
+        {"nested": [{"env": {"MY_SERVICE_API_KEY": "plaintext"}}]},
+        {"operator_server_args": "--tp 8 --api-key not-a-pattern"},
+        {"operator_server_args": "--tp 8 --admin-api-key=not-a-pattern"},
+        {"operator_server_args": "--hf-token abc"},
+        {"note": "Authorization: Bearer abcdefghijklmnop"},
+        ["--header", "sk-abcdefghijkl"],
+        ("ghp_abcdef",),
+    ],
+    ids=["name", "nested-name", "flag", "flag-equals", "flag-token", "bearer", "list-of-strings", "tuple"],
+)
+def test_holds_credentials_is_true_for_a_credential_by_name_flag_or_value(document):
+    assert common_env_safety.holds_credentials(document) is True

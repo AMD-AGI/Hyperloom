@@ -15,6 +15,8 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.shared_storage import make_shared_dirs, open_shared
+
 from .schema import ensure_schema
 
 
@@ -107,7 +109,10 @@ def open_connection(db_path: str | Path, *, journal_mode: str | None = None) -> 
     """
     mode = resolve_journal_mode(journal_mode)
     db_path = Path(db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    make_shared_dirs(db_path.parent)
+    # SQLite gives the database 0644 under the umask, and its -wal/-shm/-journal files the mode the database has: made
+    # 664 here, any account of the group can open them, as the next leg of a run may be another.
+    os.close(open_shared(db_path, os.O_RDWR))
     conn = sqlite3.connect(
         db_path,
         timeout=30.0,

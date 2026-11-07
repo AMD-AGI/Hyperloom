@@ -14,6 +14,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.shared_storage import make_shared_dirs, open_shared, open_shared_append, ownership
 from hyperloom_common.timeutil import now_iso
 
 from . import session_paths
@@ -75,15 +76,16 @@ class SessionLock:
 
     def acquire(self) -> SessionLock:
         """Acquire the session lock or raise :class:`SessionAlreadyRunning`."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Non-inheritable fd (PEP 446) so serving subprocesses don't keep the lock alive past the optimizer. 0o600:
-        # owner-only.
-        open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        make_shared_dirs(self.path.parent)
+        # Group-writable and opened in place, never replaced: the next leg of a run may be another account of the
+        # group, and a replaced file would leave a live holder's flock on an unlinked inode.
         try:
-            fd = os.open(self.path, open_flags, 0o600)
+            fd = open_shared(self.path, os.O_RDWR)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise SessionLockPathError(self.path, "lock file must not be a symlink") from exc
+            if isinstance(exc, PermissionError):
+                raise PermissionError(exc.errno, f"{exc.strerror}: {self.path}{ownership(self.path)}") from exc
             raise
         if fcntl is not None:
             try:
@@ -130,8 +132,8 @@ class SessionLock:
         }
         try:
             path = session_paths.pod_history_path(self.session_dir)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
+            make_shared_dirs(path.parent)
+            with open_shared_append(path) as fh:
                 fh.write(json.dumps(record, sort_keys=True) + "\n")
         except OSError:
             log.debug("session lock: pod history append failed", exc_info=True)

@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.io import JsonFormat, JsonLineFormat, append_jsonl, atomic_write_json
+from hyperloom_common.io import SHARED, JsonFormat, JsonLineFormat, append_shared_jsonl, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict, read_jsonl
 from hyperloom_common.timeutil import now_iso
 
@@ -75,7 +75,12 @@ def _public_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_event(path: Path, event: dict[str, Any]) -> None:
-    atomic_write_json(path, _public_event(event), fmt=JsonFormat(ensure_ascii=False, trailing_newline=True))
+    atomic_write_json(
+        path,
+        _public_event(event),
+        fmt=JsonFormat(ensure_ascii=False, trailing_newline=True),
+        options=SHARED,
+    )
 
 
 def _history_files(session_dir: Path | str) -> list[tuple[int, str, Path]]:
@@ -204,7 +209,7 @@ def record_write_warning(
 ) -> bool:
     """Best-effort persist a V6 writer failure for the next export."""
     try:
-        append_jsonl(
+        append_shared_jsonl(
             sbd_v6_write_warnings_path(Path(session_dir)),
             {
                 "ts": now_iso(timespec="seconds"),
@@ -212,7 +217,6 @@ def record_write_warning(
                 "error_class": type(exc).__name__,
                 "message": str(exc) or repr(exc),
             },
-            make_parents=True,
             fmt=JsonLineFormat(ensure_ascii=False, sort_keys=True),
         )
     except (OSError, ValueError):  # warning persistence cannot change runtime behavior
