@@ -9,7 +9,6 @@ import errno
 import json
 import logging
 import os
-import pathlib
 import shutil
 import signal
 import subprocess
@@ -186,7 +185,7 @@ def test_hugging_faces_default_directory_stays_visible_read_only_once_the_home_m
 def _cannot_search(monkeypatch: pytest.MonkeyPatch, locked: Path) -> None:
     """Fail every look below ``locked`` as it fails for a uid that cannot search it (``EACCES``), where the suite runs
     as root, which can."""
-    accessor = getattr(pathlib, "_NormalAccessor", None)  # Python 3.10's Path calls the os functions through it
+    accessor = type(getattr(Path(), "_accessor", None))  # Python 3.10's Path calls the os functions through it
     for name in ("stat", "lstat"):
         real = getattr(os, name)
 
