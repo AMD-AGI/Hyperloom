@@ -15,6 +15,7 @@ import http.server
 import os
 import pty
 import shlex
+import stat
 import subprocess
 import threading
 import time
@@ -579,3 +580,73 @@ def test_the_diff_shows_every_untracked_path(tmp_path):
     assert done.returncode == 0, done.stderr
     assert done.stdout.count("new file mode") == 301
     assert '"b/latin-\\351.txt"' in done.stdout
+
+
+def test_a_worktree_of_another_repository_than_the_caller_names_runs_nothing(tmp_path):
+    """Ownership and the ``gitdir`` back-pointer hold for a worktree of any repository the app owns; ``common`` names
+    the one the caller made it from, and another's admin directory is refused before git runs."""
+    mine, other = _tree(tmp_path / "mine"), _tree(tmp_path / "other")
+    other.config(("filter.own.clean", str(other.filter)))
+    other.attributes("* filter=own")
+    other.change()
+
+    with pytest.raises(OSError, match="is not one of the repository"):
+        app_git(other.worktree, "add", "-A", common=mine.base / ".git")
+
+    assert not other.canary.exists()
+    assert app_git(mine.worktree, "status", "--porcelain", common=mine.base / ".git").returncode == 0
+    assert app_git(other.worktree, "status", "--porcelain").returncode == 0
+
+
+def _chown_tree(root: Path, uid: int, gid: int) -> None:
+    for path in (root, *root.rglob("*")):
+        os.lchown(path, uid, gid)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="an admin directory of another owner needs root to chown")
+def test_an_admin_directory_another_account_made_is_trusted_only_in_a_shared_repository_of_its_group(tmp_path):
+    """Another account's admin directory is the app's only when ``common`` is a shared (setgid) git directory and the
+    entry is in that directory's group: the run's legs, accounts of one group, make the repository in turn."""
+    tree = _tree(tmp_path / "t")
+    common = tree.base / ".git"
+    admin = common / "worktrees" / "worktree"
+    another, group, stranger = 65534, 65533, 65532
+    _chown_tree(common, another, group)
+
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        app_git(tree.worktree, "status", "--porcelain", common=common)  # not setgid: not shared
+    for path in (common, *common.rglob("*")):
+        if path.is_dir() and not path.is_symlink():
+            path.chmod(path.stat().st_mode | stat.S_ISGID)
+    assert app_git(tree.worktree, "status", "--porcelain", common=common).returncode == 0
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        app_git(tree.worktree, "status", "--porcelain")  # no common: the uid alone
+    os.lchown(admin, another, stranger)
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        app_git(tree.worktree, "status", "--porcelain", common=common)
+    os.lchown(admin, another, group)
+    os.lchown(admin / "gitdir", another, stranger)
+    with pytest.raises(OSError, match="not an admin dir of a linked worktree"):
+        app_git(tree.worktree, "status", "--porcelain", common=common)
+
+
+def test_the_caller_s_environment_never_outranks_what_keeps_the_config_out(tmp_path):
+    """``env`` adds an index file or an identity; a variable that would read another config or allow a transport is
+    the app's, whatever the caller passes."""
+    tree = _tree(tmp_path / "t")
+    planted = tmp_path / "planted.gitconfig"
+    planted.write_text(f"[core]\n\tpager = {tree.program}\n[alias]\n\tst = status\n", encoding="utf-8")
+    index = tmp_path / "index"
+
+    read = app_git(tree.worktree, "read-tree", "HEAD", env={"GIT_INDEX_FILE": str(index)})
+    aliased = app_git(tree.worktree, "st", env={"GIT_CONFIG_GLOBAL": str(planted), "GIT_ALLOW_PROTOCOL": "ext"})
+
+    assert read.returncode == 0 and index.is_file()
+    assert aliased.returncode != 0, "the planted global config was read"
+    plain = subprocess.run(
+        ["git", "-C", str(tree.worktree), "st"],
+        env={**_plain_env(), "GIT_CONFIG_GLOBAL": str(planted)},
+        capture_output=True,
+        check=False,
+    )
+    assert plain.returncode == 0, "the planted global config defines the alias, so the plant is live"

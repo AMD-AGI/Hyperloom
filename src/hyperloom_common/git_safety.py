@@ -31,10 +31,11 @@ import errno
 import os
 import stat
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from hyperloom_common.fs_utils import read_text_nofollow
+from hyperloom_common.shared_storage import SHARED_CHILD_UMASK
 
 
 _GITFILE = ".git"
@@ -102,19 +103,43 @@ _NO_SUCH_KEY = 1  # git config's exit status when no key matches
 _ADD_BATCH = 256  # paths per add: at PATH_MAX each, 1 MiB, inside the kernel's 2 MiB for arguments
 
 
-def _app_owned_dir(path: Path) -> None:
+def _shared_group(common: Path | None) -> int | None:
+    """The group whose accounts write the repository at ``common`` in turn, when its git directory is a shared one
+    (setgid, as ``hyperloom_common.shared_storage`` makes it): each leg of a run may be another account of that group,
+    and what the earlier one made is that group's. ``None`` when ``common`` is not given or not shared."""
+    if common is None:
+        return None
+    info = os.lstat(common)
+    return info.st_gid if stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISGID else None
+
+
+def _app_owned(info: os.stat_result, group: int | None) -> bool:
+    """Whether the entry ``info`` is the app's: its uid's, or, in a shared repository, its accounts' ``group``'s."""
+    return info.st_uid == os.geteuid() or (group is not None and info.st_gid == group)
+
+
+def _app_owned_dir(path: Path, group: int | None = None) -> None:
     info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+    if not stat.S_ISDIR(info.st_mode) or not _app_owned(info, group):
         raise OSError(errno.EPERM, "not a directory owned by the app", str(path))
 
 
-def trusted_admin_dir(worktree: Path) -> Path:
+def trusted_admin_dir(worktree: Path, common: Path | None = None) -> Path:
     """The admin directory of the linked worktree ``worktree``, proven to be the app's.
+
+    Ownership alone does not prove it when whoever writes the worktree writes files the app's uid owns (a sandbox
+    whose user namespace maps its user to the app's): it can lay out an admin directory of its own beside a gitfile
+    naming it. A caller that knows the repository it made the worktree from passes its git directory as ``common``,
+    and the admin directory must then be one of that repository's.
+
+    The app is its uid, and, when ``common`` is a shared git directory (setgid), the group that directory is in too:
+    the run's legs, accounts of that group, make the repository and its worktrees in turn. No one else writes there,
+    so the group owning an entry under it proves the same as the uid does.
 
     Raises:
         OSError: ``.git`` is not a gitfile, or the directory it names is not an
             app-owned admin directory of a repository whose ``worktrees`` entry
-            points back at this gitfile.
+            points back at this gitfile, or of ``common`` when given.
     """
     gitfile = worktree / _GITFILE
     first = read_text_nofollow(gitfile).strip()
@@ -123,14 +148,17 @@ def trusted_admin_dir(worktree: Path) -> Path:
     admin = Path(first.removeprefix("gitdir:").strip())
     if not admin.is_absolute():
         admin = worktree / admin
-    _app_owned_dir(admin)
-    _app_owned_dir(admin.parent)
-    _app_owned_dir(admin.parent.parent)
+    group = _shared_group(common)
+    _app_owned_dir(admin, group)
+    _app_owned_dir(admin.parent, group)
+    _app_owned_dir(admin.parent.parent, group)
     back = admin / "gitdir"
-    if admin.parent.name != "worktrees" or back.lstat().st_uid != os.geteuid():
+    if admin.parent.name != "worktrees" or not _app_owned(back.lstat(), group):
         raise OSError(errno.EPERM, "not an admin dir of a linked worktree", str(admin))
     if os.path.realpath(read_text_nofollow(back).strip()) != os.path.realpath(gitfile):
         raise OSError(errno.EPERM, "the admin dir does not belong to this worktree", str(admin))
+    if common is not None and os.path.realpath(admin.parent.parent) != os.path.realpath(common):
+        raise OSError(errno.EPERM, f"the admin dir is not one of the repository {common}", str(admin))
     return admin
 
 
@@ -172,17 +200,26 @@ def _blanked(key: str) -> str:
     return f"{key.rpartition('.')[0]}.enabled=false" if key.startswith("hook.") else f"{key}="
 
 
-def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -> subprocess.CompletedProcess[str]:
+def app_git(
+    worktree: Path,
+    *args: str,
+    timeout: float = _DEFAULT_TIMEOUT_SEC,
+    env: Mapping[str, str] | None = None,
+    common: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
 
     No program the repository's config names runs: the ``NO_PROGRAMS`` pins, every configured driver program blanked,
     and no transport. A repository nested in the tree is the caller's to keep out (see the module docstring).
+    ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so; ``common``
+    is as :func:`trusted_admin_dir`'s. In a shared repository (a setgid ``common``) git runs under the shared child
+    umask, so what it makes -- objects, refs, the worktree's files -- stays the group's to write.
 
     Raises:
         OSError: The worktree's git metadata is not the app's, or its config cannot be neutralized (nothing was run).
     """
-    admin = trusted_admin_dir(worktree)
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    admin = trusted_admin_dir(worktree, common)
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **(env or {})}
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_GLOBAL="/dev/null",
@@ -208,6 +245,7 @@ def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -
         argv,
         cwd=worktree,
         env=env,
+        umask=SHARED_CHILD_UMASK if _shared_group(common) is not None else -1,
         capture_output=True,
         encoding="utf-8",
         errors="surrogateescape",
