@@ -282,6 +282,151 @@ def test_a_program_directly_in_a_credential_location_binds_only_itself(tmp_path,
     assert tool in found and home not in found and home.parent not in found
 
 
+@pytest.mark.parametrize("variable", ["PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "MODEL_PATH"])
+def test_a_variables_entry_that_is_a_credential_location_is_not_bound_and_one_below_it_is(
+    tmp_path, monkeypatch, no_child_python, variable
+):
+    """Bound whole, the home would show every login in it, and no mask: a mask is only ever below a bound path. So
+    would a tool's login directory a variable names, and a link to either."""
+    home, tools, gh = tmp_path / "home", tmp_path / "tools", tmp_path / "gh"
+    login = _write(home / ".ssh/id_ed25519")
+    _write(gh / "hosts.yml")
+    (home / "bin").mkdir()
+    tools.mkdir()
+    (tmp_path / "link").symlink_to(home)
+    monkeypatch.setenv("HOME", str(home))
+    entries = (home, tmp_path / "link", gh, home / "bin", tools)
+    environ = {"PATH": "/usr/bin", "GH_CONFIG_DIR": str(gh), variable: os.pathsep.join(map(str, entries))}
+
+    found = toolchain_paths(environ, "sh", writable=())
+
+    assert not {home, tmp_path / "link", gh} & set(found)
+    assert {home / "bin", tools} <= set(found)
+    masked = credential_paths(environ, allowed=found)
+    assert _absent_inside(login, Confinement(readable=found, masked=masked).policy())
+
+
+@pytest.mark.parametrize("variable", ["PATH", "PYTHONPATH", "MODEL_PATH"])
+def test_an_entry_that_holds_a_credential_location_is_bound_entry_by_entry_around_it(
+    tmp_path, monkeypatch, no_child_python, variable
+):
+    """An ancestor of the home (or of a tool's login directory) on a search path is never bound whole: its other
+    entries are, down to the login, which is not bound at all, so neither a login in it nor one made later shows."""
+    top = tmp_path / "top"
+    home, gh = top / "users" / "u", top / "etc-gh"
+    _write(home / ".netrc")
+    _write(gh / "hosts.yml")
+    (top / "users" / "u2").mkdir()
+    (top / "users" / "to-home").symlink_to(home)
+    tool = _write(top / "bin" / "tool", "#!/bin/sh\n")
+    monkeypatch.setenv("HOME", str(home))
+    environ = {"PATH": "/usr/bin", "GH_CONFIG_DIR": str(gh), variable: str(top)}
+
+    found = set(toolchain_paths(environ, "sh", writable=()))
+
+    assert {top / "bin", top / "users" / "u2"} <= found
+    assert not {top, top / "users", home, top / "users" / "to-home", gh} & found
+    assert tool.parent in found
+
+
+@pytest.mark.parametrize("variable", ["PATH", "PYTHONPATH", "MODEL_PATH", "SSL_CERT_FILE"])
+@pytest.mark.parametrize(
+    "entry", [".ssh", ".config", "config-link", ".claude", ".netrc", ".config/gh", "xdg/gh", "xdg", "users"]
+)
+def test_a_well_known_login_location_in_the_home_is_not_bound_whole_though_no_variable_names_it(
+    tmp_path, monkeypatch, no_child_python, variable, entry
+):
+    """``~/.ssh``, ``~/.config`` (``XDG_CONFIG_HOME`` unset), a tool's directory in it (or in ``XDG_CONFIG_HOME``),
+    ``~/.claude`` and ``~/.netrc`` hold logins though no variable names them: one on a search path is not bound, nor
+    is a link to it, and what holds one only entry by entry around it; a program directory below one still is."""
+    home, xdg = tmp_path / "users" / "u", tmp_path / "xdg"
+    logins = [
+        _write(home / ".ssh/id_rsa"),
+        _write(home / ".config/gh/hosts.yml"),
+        _write(home / ".claude/.credentials.json"),
+        _write(home / ".netrc"),
+        _write(xdg / "gh/hosts.yml"),
+    ]
+    tools = [_write(home / ".config/tool/bin/tool"), _write(home / ".claude/local/claude")]
+    (tmp_path / "config-link").symlink_to(home / ".config")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    named = {"config-link": tmp_path / "config-link", "xdg/gh": xdg / "gh", "xdg": xdg, "users": tmp_path / "users"}
+    shown = named.get(entry, home / entry)
+    entries = (shown, *(tool.parent for tool in tools))
+    environ = {"HOME": str(home), "PATH": "/usr/bin", "XDG_CONFIG_HOME": str(xdg)}
+    environ[variable] = os.pathsep.join(map(str, entries))
+
+    found = toolchain_paths(environ, "sh", writable=())
+
+    assert shown not in found
+    assert {tool.parent for tool in tools} <= set(found)
+    masked = credential_paths(environ, app_environ={}, allowed=found)
+    policy = Confinement(readable=found, masked=masked).policy()
+    assert [login for login in logins if not _absent_inside(login, policy)] == []
+
+
+@pytest.mark.parametrize("variable", ["MODEL_PATH", "SSL_CERT_FILE", "PYTHONPATH", "PATH"])
+@pytest.mark.parametrize(
+    "named", [".ssh/id_rsa", ".config/gh/hosts.yml", ".aws/credentials", ".claude/x.json", "xdg/gh/hosts.yml", "link"]
+)
+def test_a_file_a_variable_names_below_a_login_location_is_not_bound(
+    tmp_path, monkeypatch, caplog, no_child_python, variable, named
+):
+    """``MODEL_PATH=~/.ssh/id_rsa``, ``SSL_CERT_FILE=~/.config/gh/hosts.yml``, a file in ``~/.aws``, ``~/.claude``
+    or ``$XDG_CONFIG_HOME/gh``, or a link elsewhere to one: a file below a login location is a login, so it is not
+    bound, and one warning names it; a file in the home outside every login location, and the program folders
+    below one (``~/.config/tool/bin``, ``~/.claude/local``), still are."""
+    monkeypatch.setattr(confinement, "_SAID", set())
+    home, xdg = tmp_path / "users" / "u", tmp_path / "xdg"
+    secret = _write({"xdg/gh/hosts.yml": xdg / "gh/hosts.yml", "link": home / ".ssh/id_rsa"}.get(named, home / named))
+    shown = tmp_path / "ca.pem" if named == "link" else secret
+    if named == "link":
+        shown.symlink_to(secret)
+    model = _write(home / "models/m.bin")
+    tools = [_write(home / ".config/tool/bin/tool"), _write(home / ".claude/local/claude")]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    environ = {"HOME": str(home), "PATH": "/usr/bin", "XDG_CONFIG_HOME": str(xdg), "HF_HOME": str(tmp_path / "hf")}
+    environ[variable] = os.pathsep.join(map(str, (shown, model, *(tool.parent for tool in tools))))
+
+    with caplog.at_level("WARNING", logger=confinement.__name__):
+        found = toolchain_paths(environ, "sh", writable=())
+        toolchain_paths(environ, "sh", writable=())
+
+    assert shown not in found
+    assert secret not in found
+    assert {model, *(tool.parent for tool in tools)} <= set(found)
+    said = [record.getMessage() for record in caplog.records if str(shown) in record.getMessage()]
+    assert len(said) == 1, said
+    assert "a file in a tool's login location" in said[0]
+    policy = Confinement(readable=found, masked=credential_paths(environ, app_environ={}, allowed=found)).policy()
+    assert _absent_inside(secret, policy)
+
+
+def test_the_program_the_child_runs_from_a_login_location_is_still_bound(tmp_path, monkeypatch, no_child_python):
+    """The program the launch runs is its choice, not a variable's: a program file kept right in ``~/.config`` is
+    still bound, though another file there a variable names is not."""
+    home = tmp_path / "users" / "u"
+    program, other = _write(home / ".config/tool"), _write(home / ".config/token.json")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    environ = {"HOME": str(home), "PATH": "/usr/bin", "MODEL_PATH": str(other)}
+
+    found = toolchain_paths(environ, str(program), writable=())
+
+    assert program in found
+    assert other not in found
+
+
+def test_the_system_roots_stay_whole_whatever_credential_location_lies_below_them(tmp_path, monkeypatch):
+    """A home or login under ``/etc`` or ``/opt`` (baked into an image) leaves the system roots as they are: the
+    masks hide it there."""
+    monkeypatch.setenv("HOME", "/opt")
+    found = toolchain_paths({"PATH": "/usr/bin:/opt", "HOME": "/opt"}, "sh", writable=())
+    assert {Path(root) for root in SYSTEM_ROOTS} <= set(found)
+
+
 def test_the_resolvers_target_is_readable_when_it_lies_outside_etc(tmp_path, monkeypatch, no_child_python):
     stub = _write(tmp_path / "run" / "stub-resolv.conf")
     link = tmp_path / "etc" / "resolv.conf"
