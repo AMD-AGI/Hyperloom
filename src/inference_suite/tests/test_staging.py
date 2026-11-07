@@ -623,3 +623,42 @@ def test_install_sh_stages_with_the_inference_suite_beside_it_and_refuses_a_dama
 
     assert done.returncode == cli.EXIT_REFUSED, done.stderr
     assert done.stderr.strip() == f"{FailedStep.STAGING_MISSING.value}: {task} (changed since staging)"
+
+
+def _harness_install(staged_root: Path, *offline: str) -> list[str]:
+    pip = [str(staged_root / AGENTX_PYTHON), "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
+    return [*pip, *offline, "-r", str(staged_root / AGENTX_REQUIREMENTS)]
+
+
+def test_stage_with_wheels_installs_the_harness_from_them_alone_and_installs_no_lm_eval(
+    pinned, install, tmp_path, capsys
+) -> None:
+    repo, cache = pinned
+    wheels = tmp_path / "wheels"
+
+    assert _stage_cli(cache, "--source", str(repo), "--wheels", str(wheels)) == cli.EXIT_OK
+    offline = ("--no-index", "--find-links", str(wheels), "--only-binary=:all:")
+    assert _harness_install(inferencex_root(cache), *offline) in install.calls
+    assert not [call for call in install.calls if call[0] == sys.executable and "pip" in call]
+
+
+@pytest.mark.parametrize("installed", [None, "0.4.11"])
+def test_stage_with_wheels_refuses_lm_eval_off_its_pin_instead_of_installing_it(
+    pinned, install, monkeypatch, tmp_path, capsys, installed
+) -> None:
+    repo, cache = pinned
+    monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: installed}.get)
+
+    assert _stage_cli(cache, "--source", str(repo), "--wheels", str(tmp_path / "wheels")) == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and LM_EVAL_REQUIREMENT in err
+    assert install.calls == [] and not (cache / MANIFEST_FILE).exists()
+
+
+def test_stage_with_wheels_and_no_source_is_refused_without_fetching(pinned, install, tmp_path, capsys) -> None:
+    _, cache = pinned
+
+    assert _stage_cli(cache, "--wheels", str(tmp_path / "wheels")) == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and "--source" in err
+    assert install.calls == []
