@@ -495,6 +495,33 @@ def test_scratch_the_agent_locked_is_removed_from_the_host() -> None:
     assert removed.returncode == 0 and left == [], removed.stderr
 
 
+#: Trees an agent can leave in its scratch without any chmod: deeper than Python's recursion limit, and with paths
+#: longer than PATH_MAX (each ``mkdir`` names one level relative to the shell's working directory).
+DEEP = "cd /tmp && i=0; while [ $i -lt 1500 ]; do mkdir d && cd d; i=$((i+1)); done; : > f; mkdir -p /dev/shm/keep"
+LONG = (
+    "cd /tmp && n=$(printf 'y%.0s' $(seq 200)); i=0; while [ $i -lt 30 ]; do mkdir $n && cd $n; i=$((i+1)); done; "
+    ": > f; mkdir -p /dev/shm/keep"
+)
+
+
+@pytest.mark.parametrize("shape", [DEEP, LONG], ids=["deeper-than-recursion", "longer-than-path-max"])
+def test_scratch_too_deep_or_too_long_for_a_path_is_removed_from_the_host(shape: str) -> None:
+    made = Scratch.create()
+    done = run(
+        usable_bwrap(), BwrapPolicy(read_only=SYSTEM_ROOTS, tmp=made.tmp, shm=made.shm), ["/bin/sh", "-c", shape]
+    )
+
+    removed = as_owner(
+        "import sys; from hyperloom_common.bwrap import Scratch; Scratch(*sys.argv[1:]).remove()", made.tmp, made.shm
+    )
+
+    left = [path for path in (made.tmp, made.shm) if os.path.lexists(path)]
+    for path in left:
+        subprocess.run(["rm", "-rf", "--one-file-system", path], check=False)
+    assert done.returncode == 0, done.stderr
+    assert removed.returncode == 0 and left == [], removed.stderr
+
+
 def test_joined_commands_share_pids_tmp_and_dev_shm_but_not_sysv_ipc(probe: BwrapProbe, scratch: Scratch) -> None:
     sleep = shutil.which("sleep", path="/usr/bin:/bin")
     key = 0x484C0000 + os.getpid() % 0xFFFF

@@ -429,6 +429,77 @@ def test_scratch_removes_dev_shm_when_tmp_fails_and_names_each_failure(monkeypat
     assert one.value.filename == made.tmp and not shm_left
 
 
+def _descend(root: str, name: str, levels: int) -> None:
+    """Make ``levels`` nested directories ``name`` under ``root``, each relative to the last: no path is spelled out."""
+    current = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for _ in range(levels):
+            os.mkdir(name, dir_fd=current)
+            below = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=current)
+            os.close(current)
+            current = below
+        os.close(os.open("f", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=current))
+        os.mkfifo("pipe", dir_fd=current)
+        os.symlink("/", "up", dir_fd=current)
+        os.mkdir("locked", 0, dir_fd=current)
+    finally:
+        os.close(current)
+
+
+@pytest.mark.parametrize(
+    ("name", "levels"), [("d", 1500), ("y" * 200, 30)], ids=["deeper-than-recursion", "longer-than-path-max"]
+)
+def test_scratch_removes_a_tree_too_deep_or_too_long_for_a_path(name: str, levels: int) -> None:
+    made = Scratch.create()
+    _descend(made.tmp, name, levels)
+    os.mkdir(os.path.join(made.shm, "keep"))
+
+    try:
+        made.remove()
+    finally:
+        left = [path for path in (made.tmp, made.shm) if os.path.lexists(path)]
+        for path in left:
+            subprocess.run(["rm", "-rf", "--one-file-system", path], check=False)
+
+    assert left == []
+
+
+def test_scratch_removes_dev_shm_whatever_stops_tmp(monkeypatch: pytest.MonkeyPatch) -> None:
+    made = Scratch.create()
+    remove = bwrap._remove_tree
+
+    def failing(path: str) -> None:
+        if path == made.tmp:
+            raise RecursionError("maximum recursion depth exceeded")
+        remove(path)
+
+    monkeypatch.setattr(bwrap, "_remove_tree", failing)
+    try:
+        with pytest.raises(RecursionError):
+            made.remove()
+        shm_left = os.path.lexists(made.shm)
+    finally:
+        for path in (made.tmp, made.shm):
+            if os.path.lexists(path):
+                remove(path)
+
+    assert not shm_left
+
+
+def test_remove_tree_refuses_what_is_not_a_directory(tmp_path: Path) -> None:
+    (tmp_path / "file").write_text("x")
+    (tmp_path / "link").symlink_to(tmp_path / "kept")
+    (tmp_path / "kept").mkdir()
+
+    for name in ("file", "link"):
+        with pytest.raises(NotADirectoryError):
+            bwrap._remove_tree(str(tmp_path / name))
+    with pytest.raises(FileNotFoundError):
+        bwrap._remove_tree(str(tmp_path / "absent"))
+
+    assert (tmp_path / "file").exists() and (tmp_path / "kept").is_dir()
+
+
 def test_status_tells_a_command_that_ran_from_a_setup_that_failed() -> None:
     ran = '{ "child-pid": 2813551, "ipc-namespace": 4026534613, "pid-namespace": 4026534614 }\n{ "exit-code": 7 }\n'
     failed = '{ "child-pid": 2927880, "mnt-namespace": 4026534605, "pid-namespace": 4026535221 }\n'
@@ -602,6 +673,23 @@ def test_a_bubblewrap_given_by_path_retries_only_with_the_unshare_beside_it(
     (fake.directory / "bwrap").unlink()
     (fake.directory / "bwrap").symlink_to(bare.path)
     assert bwrap_probe().ok and bwrap_probe().prefix == (str(fake.directory / "unshare"), "--mount", "--")
+
+
+def test_the_probe_of_a_bubblewrap_named_by_path_is_not_the_one_found_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same binary: found on PATH it may use the unshare there, named by path only one beside it.
+    bare = FakeBwrap(tmp_path / "bare", unshare=False)
+    bare.configure(unbindable=UNBINDABLE)
+    other = FakeBwrap(tmp_path / "other")
+    monkeypatch.setenv("PATH", f"{bare.directory}{os.pathsep}{other.directory}")
+
+    found = bwrap_probe()
+    named = bwrap_probe(str(bare.path))
+
+    assert found.ok and found.prefix == (str(other.directory / "unshare"), "--mount", "--")
+    assert not named.ok and "no unshare beside" in named.problems[1]
+    assert bwrap_probe() is found
 
 
 def test_the_probe_runs_once_per_key(fake: FakeBwrap, monkeypatch: pytest.MonkeyPatch) -> None:
