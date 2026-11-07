@@ -272,24 +272,27 @@ def test_a_writable_path_an_agent_re_points_through_another_never_takes_its_tree
     }
 
 
-#: Run inside: say ready, wait for the host's go, then read each named path (``ok:<text>`` or the errno name).
+#: Run inside: say ready, wait for the host's go, then read each named path and write the last argument (``ok:<text>``
+#: or the errno name).
 LATER = r"""
 import errno, json, sys
 print("ready", flush=True)
 sys.stdin.readline()
-def outcome(path):
+def outcome(action):
     try:
-        return "ok:" + open(path).read()
+        return "ok:" + action()
     except OSError as exc:
         return errno.errorcode.get(exc.errno, str(exc.errno))
-print(json.dumps({name: outcome(path) for name, path in json.loads(sys.argv[1]).items()}))
+seen = {name: outcome(lambda path=path: open(path).read()) for name, path in json.loads(sys.argv[1]).items()}
+seen["write"] = outcome(lambda: str(open(sys.argv[2], "w").write("new")))
+print(json.dumps(seen))
 """
 
 
 def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(tmp_path):
     """A tool replaces its login file by a rename (``~/.git-credentials`` through its lock file) and Hugging Face
     writes its token at the first login: neither, done on the host while the sandbox runs, shows inside, while the
-    model beside them still reads."""
+    model beside them still reads; and the directory bound entry by entry stays read-only."""
     isolation = BwrapIsolation(usable_bwrap())
     hf, tools, work = tmp_path / "hf", tmp_path / "tools", tmp_path / "work"
     work.mkdir()
@@ -301,7 +304,8 @@ def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(tmp_pa
     assert {kube, hf / "token"} <= set(masked)
     policy = Confinement(writable=(work,), readable=readable, masked=masked).policy(chdir=work)
     paths = {"kube": kube, "token": hf / "token", "model": model, "visible": visible}
-    command, child_env = isolation.launch([sys.executable, "-I", "-S", "-c", LATER, _named(paths)], policy, env)
+    argv = [sys.executable, "-I", "-S", "-c", LATER, _named(paths), str(hf / "new")]
+    command, child_env = isolation.launch(argv, policy, env)
     with subprocess.Popen(
         command, env=child_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     ) as child:
@@ -314,4 +318,6 @@ def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(tmp_pa
             child.kill()
     assert child.returncode == 0, err
     assert "SECRET" not in out + err
-    assert json.loads(out) == {"kube": "ENOENT", "token": "ENOENT", "model": "ok:weights", "visible": "ok:shown"}
+    seen = json.loads(out)
+    assert seen == {"kube": "ENOENT", "token": "ENOENT", "model": "ok:weights", "visible": "ok:shown", "write": "EROFS"}
+    assert not (hf / "new").exists()
