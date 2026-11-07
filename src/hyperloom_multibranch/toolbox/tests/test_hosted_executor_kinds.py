@@ -133,7 +133,7 @@ def _points(tmp_path: Path, *levels: int) -> tuple[Path, ...]:
 )
 async def test_several_points_or_a_sweep_request_run_as_one_server_arm(tmp_path, kind, levels, prep) -> None:
     backend = _Capture()
-    executor = HostedExecutor(backend, tmp_path)  # type: ignore[arg-type]
+    executor = HostedExecutor(backend, tmp_path / "session")  # type: ignore[arg-type]
     accepted = AcceptedMeasurement(None, _points(tmp_path, *levels))  # type: ignore[arg-type]
     await executor.run(TestJob(req(kind=kind).accepted("b1-000001"), 1, (), 2, 2, accepted))
     (seen,) = backend.calls

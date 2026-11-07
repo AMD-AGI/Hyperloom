@@ -17,6 +17,7 @@ next start.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import math
@@ -61,8 +62,18 @@ from hyperloom.measure.phases import RESULT_READ, account
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.profile_traces import PROFILE_DIR, has_step_traces, has_traces, is_trace_file
 from hyperloom.measure.repro import REPRO_DIR, VERDICT_FILE, ReproError, read_verdict
-from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, RoundPlan, TestCall, TestMeta, TestOutcome
+from hyperloom.measure.consistency import SessionNotMeasurable, session_facts
+from hyperloom.measure.socket import (
+    MeasurementTimeout,
+    RoundOutcome,
+    RoundPlan,
+    SessionFacts,
+    TestCall,
+    TestMeta,
+    TestOutcome,
+)
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.acceptance import backend_kind
@@ -175,6 +186,15 @@ class HostedExecutor:
         result = await self._with_long_context(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
 
+    @functools.cached_property
+    def _session_facts(self) -> SessionFacts:
+        """Read on the first test and kept: the base is frozen, and the staging the application holds is fixed for the
+        session. A session that cannot be measured is not cached, so every test is refused with the reason."""
+        try:
+            return session_facts(self._session)
+        except (SessionNotMeasurable, BaseLaunchMismatch) as exc:
+            raise MeasurementRefused(f"the session cannot be measured: {exc}") from exc
+
     def withdraw(self, request_id: str) -> None:
         """End the running attempt of ``request_id``: its sandbox is closed and its cards go back to the pool."""
         self._backend.withdraw(request_id)
@@ -253,6 +273,7 @@ class HostedExecutor:
             attachments=request.attachments if request.kind is TestKind.REPRO else (),
             short_prompts=accepted.short_prompts,
             long_context=accepted.long_context,
+            session_facts=self._session_facts,
         )
 
     # -- the outcome -----------------------------------------------------------------------------------------------
