@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 from inference_suite.contracts import RunLayout
+from inference_suite.tests.test_compose import _launch
 
 SGLANG_OFF = "server_args=ServerArgs(model_path='m', disable_radix_cache=True, tp_size=8)\n"
 SGLANG_ON = "server_args=ServerArgs(model_path='m', disable_radix_cache=False, tp_size=8)\n"
@@ -25,7 +27,7 @@ POLICY = QueuePolicy(per_branch_k=1, global_concurrency=1)
 
 
 class _LoggingBackend:
-    """The real backend; every round the test landed also gets the server log of the launch that ran it."""
+    """The real backend; every round the test landed also gets the launch that ran it and that launch's server log."""
 
     name = "hosted"
 
@@ -39,9 +41,11 @@ class _LoggingBackend:
     def run_test(self, call):  # type: ignore[no-untyped-def]
         outcome = self.inner.run_test(call)  # type: ignore[attr-defined]
         for item in outcome.rounds:
-            (Path(item.output_dir) / "server.log").write_text(self.log, encoding="utf-8")
+            layout = RunLayout(Path(item.output_dir))
+            layout.launch.write_text(json.dumps(_launch().to_document()), encoding="utf-8")
+            layout.server_log.write_text(self.log, encoding="utf-8")
             if self.report is not None:
-                RunLayout(Path(item.output_dir)).report.write_text(self.report, encoding="utf-8")
+                layout.report.write_text(self.report, encoding="utf-8")
         return outcome
 
 

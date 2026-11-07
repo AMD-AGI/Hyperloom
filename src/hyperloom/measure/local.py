@@ -1046,15 +1046,10 @@ def _result_returncode(result: VariantResult) -> int:
 
 
 def _eval_returncode(result: VariantResult) -> int:
-    """The accuracy pass's own exit code when its run_dir's report or its marker file has one, else the round's."""
+    """The accuracy pass's own exit code when its run_dir's report has one, else the round's."""
     workspace = Path(result.workspace or "")
-    if is_round_folder(workspace):
-        code = RoundFolder.read(workspace).report.codes.eval
-        return _result_returncode(result) if code is None else code
-    try:
-        return int((workspace / "eval_returncode").read_text(encoding=_UTF8).strip())
-    except (OSError, ValueError):
-        return _result_returncode(result)
+    code = RoundFolder.read(workspace).report.codes.eval if is_round_folder(workspace) else None
+    return _result_returncode(result) if code is None else code
 
 
 def _warmup_round_outcome(point: int, result: VariantResult, workspace: Path) -> RoundOutcome:

@@ -25,6 +25,7 @@ from hyperloom.measure.returncodes import (
     HOSTED_SPEC_REJECTED_RC,
 )
 from hyperloom.measure.spec import MeasurementSpec
+from hyperloom.measure.tests.fake_runner import REPORT_PATH
 from hyperloom.measure.tests.hosted_fixtures import (
     HOSTNAME,
     Rig,
@@ -45,6 +46,8 @@ from hyperloom.sandbox.tests.test_sandbox_e2b import (
     key_spent_body,
     service,  # noqa: F401 (the canned service the platform cases run against)
 )
+
+REPORT_DIR = REPORT_PATH.split("/")[0]
 
 
 @pytest.fixture
@@ -79,8 +82,8 @@ def test_a_signed_result_is_verified_archived_and_landed(rig, tmp_path) -> None:
     call, outcome = _run(r, tmp_path, fake_throughput=4321.5, fake_completed=77)
     assert outcome.returncode == 0
     assert outcome.failure_class is None and outcome.failure_reason is None
-    report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
-    assert json.loads(report.read_text())["throughput"]["output_throughput"] == 4321.5
+    report = call.output_dir / REPORT_PATH
+    assert json.loads(report.read_text())["fixed"]["output_throughput"] == 4321.5
     assert (call.output_dir / "server.log").read_bytes() == b"server up\nserver down\n"
     assert outcome.sandbox.node_name == HOSTNAME and outcome.sandbox.backend == "hosted"
     assert outcome.sandbox.gpu_model == "FakeGPU" and outcome.sandbox.gpu_ids
@@ -121,13 +124,13 @@ def test_rounds_come_from_the_runners_rounds_file_when_it_lists_one(rig, tmp_pat
     r = rig()
     _, outcome = _run(r, tmp_path, fake_rounds="true")
     assert [(x.point, x.phase, x.returncode) for x in outcome.rounds] == [(0, "measure", 0)]
-    assert outcome.rounds[0].output_dir.name == "benchmark_fake_20000101_000000"
+    assert outcome.rounds[0].output_dir.name == REPORT_DIR
 
 
 def test_without_a_rounds_file_a_report_in_the_warmup_directory_is_not_a_measuring_round(rig, tmp_path) -> None:
     r = rig()
     _, outcome = _run(r, tmp_path, fake_warmup="true")
-    assert [(x.phase, x.output_dir.name) for x in outcome.rounds] == [("measure", "benchmark_fake_20000101_000000")]
+    assert [(x.phase, x.output_dir.name) for x in outcome.rounds] == [("measure", REPORT_DIR)]
     assert "warmup_round" not in outcome.rounds[0].output_dir.parts
 
 
@@ -500,8 +503,8 @@ def test_a_restarted_application_reattaches_instead_of_measuring_twice(rig, tmp_
     assert resumed.sandbox.sandbox_id == submitted.sandbox_id
     record = r.backend.journal.latest("req-1")
     assert (record.state, record.attempt) == (STATE_FINISHED, 1) and record.extra["verified"] is True
-    report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
-    assert json.loads(report.read_text())["throughput"]["output_throughput"] == 1234.0
+    report = call.output_dir / REPORT_PATH
+    assert json.loads(report.read_text())["fixed"]["output_throughput"] == 1234.0
 
 
 def test_a_restart_that_finds_no_slot_for_its_sandbox_ends_the_attempt_with_the_reason(rig, tmp_path) -> None:
@@ -545,8 +548,8 @@ def test_a_restart_before_the_sheet_was_sent_sends_it_to_the_sandbox_that_waits(
     resumed = r.another_backend().run_test(call)
     assert resumed.returncode == 0 and created == [], "the waiting sandbox was used, not a second one"
     assert [x.state for x in r.backend.journal.records()] == [STATE_SUBMITTED, STATE_SENT, STATE_FINISHED]
-    report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
-    assert json.loads(report.read_text())["throughput"]["output_throughput"] == 777.0
+    report = call.output_dir / REPORT_PATH
+    assert json.loads(report.read_text())["fixed"]["output_throughput"] == 777.0
 
 
 def test_a_restart_after_the_sandbox_is_gone_measures_again_as_the_next_attempt(rig, tmp_path) -> None:
