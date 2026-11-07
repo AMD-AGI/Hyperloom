@@ -1106,7 +1106,7 @@ def _ensure_inferencex(install_event: Any) -> str:
         from ..session.paths import deps_cache_root as _open_source_default
 
         ref = os.environ.get("INFERENCEX_REF") or inferencex_checkout.DEFAULT_REF
-        # Per-revision dir, matching install.sh: a shared name is what allowed a pre-bump clone to be reused forever.
+        # Per-revision dir: a shared name is what allowed a pre-bump clone to be reused forever.
         dest = _open_source_default() / inferencex_checkout.destination_name(ref)
         print(f"Preflight: no InferenceX checkout at {ref[:12]}; cloning into {dest} ...")
         inferencex_path = inferencex_checkout.clone(dest)
@@ -1116,8 +1116,7 @@ def _ensure_inferencex(install_event: Any) -> str:
                 install_event,
                 "Preflight: ERROR — InferenceX checkout missing and clone "
                 "failed. baseline cannot run without it. Set INFERENCEX_PATH "
-                "to a writable checkout or re-run "
-                "src/hyperloom/inference_optimizer/assets/install.sh.",
+                "to a writable checkout.",
             )
     # Magpie stages benchmark scripts into this tree, so a non-writable one fails the run before server boot.
     if not os.access(inferencex_path, os.W_OK):
