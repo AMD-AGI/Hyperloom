@@ -15,6 +15,7 @@ __all__ = [
     "AmdSmiError",
     "gfx_clock_limits",
     "gpu_rows",
+    "gpus_in_rocm_order",
     "metric_value",
     "read_amd_smi_json",
     "run_amd_smi",
@@ -35,6 +36,23 @@ def gpu_rows(payload: Any) -> list[dict[str, Any]]:
     """The per-card rows of an ``amd-smi --json`` payload, each keyed by its integer ``gpu`` index."""
     rows = payload.get("gpu_data") if isinstance(payload, dict) else payload
     return [row for row in rows or [] if isinstance(row, dict) and isinstance(row.get("gpu"), int)]
+
+
+def gpus_in_rocm_order() -> list[int]:
+    """The amd-smi index of every card, in the order ROCm numbers them for ``ROCR_VISIBLE_DEVICES`` and
+    ``HIP_VISIBLE_DEVICES``.
+
+    ROCm numbers cards in KFD node order and amd-smi in PCI order, and the two differ on MI300X/MI355X boards, so a
+    visible-device number is never an amd-smi index: card ``n`` to ROCm is ``gpus_in_rocm_order()[n]`` to amd-smi.
+
+    Raises:
+        AmdSmiError: ``amd-smi list`` failed or reported a card without its KFD node.
+    """
+    rows = gpu_rows(read_amd_smi_json("list"))
+    nodes = {row["gpu"]: row["node_id"] for row in rows if isinstance(row.get("node_id"), int)}
+    if len(nodes) != len(rows):
+        raise AmdSmiError("amd-smi list reports a card without its KFD node, so its ROCm number is unknown")
+    return sorted(nodes, key=nodes.__getitem__)
 
 
 def metric_value(block: Any) -> float | None:
