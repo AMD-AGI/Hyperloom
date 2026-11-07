@@ -933,7 +933,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=Path("partition-sweep"),
-        help="Where per-partition benchmark output and the summary go.",
+        help="Where per-partition benchmark output and the summary go; must be absent or empty.",
     )
     ap.add_argument(
         "--streams-per-partition",
@@ -1128,6 +1128,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.streams_per_partition < 1:
         print("ERROR: --streams-per-partition must be at least 1.", file=sys.stderr)
         return 2
+    output_root = args.output_dir.expanduser().resolve()
+    # Each partition's round refuses a non-empty run_dir, so a reused root would cycle the card and measure nothing.
+    if output_root.exists() and any(output_root.iterdir()):
+        print(f"ERROR: --output-dir {output_root} is not empty; give each sweep a fresh directory.", file=sys.stderr)
+        return 2
 
     try:
         card = _inspect_card(args)
@@ -1152,7 +1157,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Would restore {card.entry_mode} on exit.")
         return 0
 
-    output_root = args.output_dir.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     workload = BenchmarkWorkload(
         template=template,
