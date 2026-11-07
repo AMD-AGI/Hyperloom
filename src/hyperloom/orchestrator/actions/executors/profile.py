@@ -694,16 +694,50 @@ def _trace_fs_round_start(round_trace_root: str, fallback_unix: float) -> float:
         return fallback_unix
 
 
-# Restarts the multi-node server for this profiling round; returns the refusal result when it failed.
+_GRAPH_CAPTURE_PROFILE_ENV_KEYS = (
+    "SGLANG_GRAPH_BATCH_CAPTURE",
+    "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
+    "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING",
+    "DEBUG_HIP_GRAPH_CLASSIC_PATH",
+)
+_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
+
+
+def _graph_capture_profile_settings(config_path: Path) -> tuple[dict[str, str], str]:
+    """Graph-capture profiling env and server flag the profile YAML sets, as ``(env, flag)``; empty when unset."""
+    try:
+        cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        log.warning("profile_executor: cannot read %s for graph-capture profiling settings: %s", config_path, exc)
+        return {}, ""
+    bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
+    envs = bench.get("envs") if isinstance(bench, dict) else None
+    if not isinstance(envs, dict):
+        return {}, ""
+    env = {key: str(envs[key]) for key in _GRAPH_CAPTURE_PROFILE_ENV_KEYS if key in envs}
+    flag = (
+        _PROFILE_CUDA_GRAPH_FLAG if _PROFILE_CUDA_GRAPH_FLAG in str(envs.get("EXTRA_SGLANG_ARGS") or "").split() else ""
+    )
+    return env, flag
+
+
+# Restarts the multi-node server for this profiling round with graph-capture profiling on; returns the refusal
+# result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
+    extra_env, flag = _graph_capture_profile_settings(_default_profile_config())
+    extra_server_args = str(params.get("extra_server_args") or "")
+    tokens = extra_server_args.split()
+    if flag and flag not in tokens and "--disable-cuda-graph" not in tokens:
+        extra_server_args = f"{extra_server_args} {flag}".strip()
     try:
         await restart_server_for_round(
             RoundServer.from_env(
-                str(params.get("extra_server_args") or ""),
+                extra_server_args,
                 str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
             ),
+            extra_env=extra_env or None,
             torch_profiler_dir=round_trace_root,
         )
     except ServerRestartFailed as exc:

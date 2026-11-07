@@ -354,6 +354,43 @@ def test_pd_engine_profile_with_stack_follows_env(
     assert stops == [{}, {}]
 
 
+def test_profiling_round_restart_enables_graph_capture_profiling(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import profile
+
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    shipped = yaml.safe_load(profile._default_profile_config().read_text(encoding="utf-8"))["benchmark"]["envs"]
+    calls: list[tuple[life.RoundServer, dict]] = []
+
+    async def _restart(server, **kwargs):
+        calls.append((server, kwargs))
+
+    monkeypatch.setattr(life, "restart_server_for_round", _restart)
+
+    assert (
+        asyncio.run(profile._restart_round_server({"extra_server_args": "--context-length 11264"}, str(tmp_path)))
+        is None
+    )
+    assert (
+        asyncio.run(profile._restart_round_server({"extra_server_args": "--disable-cuda-graph"}, str(tmp_path))) is None
+    )
+
+    graph, eager = calls
+    assert graph[0].extra_server_args.split() == ["--context-length", "11264", "--enable-profile-cuda-graph"]
+    assert graph[1]["torch_profiler_dir"] == str(tmp_path)
+    assert graph[1]["extra_env"] == {
+        key: str(shipped[key])
+        for key in (
+            "SGLANG_GRAPH_BATCH_CAPTURE",
+            "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
+            "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING",
+            "DEBUG_HIP_GRAPH_CLASSIC_PATH",
+        )
+    }
+    assert eager[0].extra_server_args == "--disable-cuda-graph"
+
+
 def test_pd_role_traces_are_kept_when_the_trace_filesystem_clock_lags(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
