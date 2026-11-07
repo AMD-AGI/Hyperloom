@@ -134,7 +134,7 @@ def test_the_lock_is_not_opened_through_another_accounts_link_on_its_way(
     theirs(cache, monkeypatch)
     path = build_lock(cache, "0" * 40)
     with pytest.raises(CacheBuildError, match=f"cannot open the build lock {path} for writing: "):
-        cache_build._open_lock(path)
+        os.close(cache_build._open_lock(path))
     assert list(elsewhere.iterdir()) == []
 
 

@@ -252,8 +252,7 @@ class _Walk:
         self.expanding.append(left)
         if not target.is_absolute():
             return target.parts
-        root = Path("/")  # named before the open: nothing between the open and the move can raise
-        self._move(os.open("/", _WAY), root)
+        self._move("/", Path("/"))
         self.shared = False  # the target's own way decides from here
         return target.parts[1:]
 
@@ -263,13 +262,14 @@ class _Walk:
             if make is not None:
                 raise FileExistsError(errno.EEXIST, "not a directory", str(self.here / name))
             raise NotADirectoryError(errno.ENOTDIR, "not a directory", str(self.here / name))
-        here = self.here.parent if name == ".." else self.here / name
-        self._move(os.open(name, _WAY, dir_fd=self.descriptor), here)  # ELOOP or ENOTDIR if it changed since
+        self._move(name, self.here.parent if name == ".." else self.here / name, self.descriptor)  # ELOOP if changed
 
-    def _move(self, descriptor: int, here: Path) -> None:
-        """Hold ``descriptor`` (``here``) instead: it is the walk's from now on, whatever closing the last one does."""
+    def _move(self, name: str, here: Path, directory: int | None = None) -> None:
+        """Hold the directory ``name`` of ``directory`` (``here``) instead, opened as the way is (:data:`_WAY`): it is
+        the walk's from the open on, whatever closing the last one does."""
         left = self.descriptor
-        self.descriptor, self.here = descriptor, here
+        self.descriptor = os.open(name, _WAY, dir_fd=directory)
+        self.here = here
         os.close(left)
 
 

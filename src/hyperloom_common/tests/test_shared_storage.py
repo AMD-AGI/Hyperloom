@@ -617,7 +617,7 @@ def test_a_new_shared_file_never_takes_a_name_that_is_there_and_never_writes_thr
     taken = shared / "taken.jsonl"
     taken.symlink_to(outside)
     with pytest.raises(FileExistsError):
-        shared_storage.create_new_shared_file(taken)
+        os.close(shared_storage.create_new_shared_file(taken))
     assert outside.read_text() == "kept\n" and taken.is_symlink()
     descriptor = shared_storage.create_new_shared_file(shared / "free.jsonl")
     try:
