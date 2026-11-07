@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 3-gate tests: the backend switch and install.sh's Magpie gate."""
+"""Stage 3-gate tests: Magpie install in preflight and install.sh is gated by benchmark backend."""
 
 from __future__ import annotations
 
@@ -20,6 +20,32 @@ def test_backend_resolution_controls_magpie_need(monkeypatch):
     # Unknown typos normalize to magpie so preflight still installs Magpie.
     monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "magpiee")
     assert bb.resolve_backend_name() == "magpie"
+
+
+def test_preflight_skips_magpie_install_and_patches_under_bypass(monkeypatch):
+    """A bypass-only host has no Magpie; preflight must neither import, install nor patch it."""
+
+    def _no_subprocess(*_args, **_kwargs):
+        raise AssertionError("Magpie must not be probed or installed under bypass")
+
+    recorded = []
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    monkeypatch.setattr(preflight_mod.subprocess, "run", _no_subprocess)
+    monkeypatch.setattr(preflight_mod, "_ensure_client_trust_compat", _no_subprocess)
+    monkeypatch.setattr(preflight_mod, "_ensure_eval_concurrency_compat", _no_subprocess)
+    monkeypatch.setattr(preflight_mod, "_report_inferencex_patch_anchors", lambda _path: True)
+    monkeypatch.setattr(preflight_mod, "_record_install_step", lambda _event, step, **_kw: recorded.append(step))
+
+    preflight_mod._ensure_magpie(
+        None, magpie_python="python3", benchmark_backend="bypass", magpie_active=False, pip_extra=[]
+    )
+    preflight_mod._patch_magpie_compat(None, "/nonexistent/InferenceX", magpie_active=False)
+
+    assert [(step.step_id, step.status, step.skip_reason) for step in recorded] == [
+        ("ensure_magpie", "skipped", "benchmark_backend_not_magpie"),
+        ("patch_magpie_eval_concurrency", "skipped", "benchmark_backend_not_magpie"),
+    ]
+    assert "MAGPIE_PATH" not in preflight_mod.os.environ
 
 
 def test_install_sh_gates_magpie_calls():
