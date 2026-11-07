@@ -62,6 +62,8 @@ _MAX_LINKS = 40
 _OPEN_TO_OTHERS = stat.S_IWGRP | stat.S_IWOTH
 #: When a link cannot be made, a new file is made at its final name instead (:func:`create_new_shared_file`).
 _NO_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
+#: What the kernel writes its reports under /proc in.
+_PROC_ENCODING = "ascii"
 
 
 def open_directory(path: Path, *, make: int | None = None) -> int:
@@ -162,10 +164,10 @@ def _unmapped(uid: int) -> bool:
     namespace of a container (its root mapped to the account) host root and every other account look alike, so which
     one owns a directory cannot be told. ``False`` when the kernel does not say."""
     try:
-        with open("/proc/sys/kernel/overflowuid", encoding="ascii") as overflow:
+        with open("/proc/sys/kernel/overflowuid", encoding=_PROC_ENCODING) as overflow:
             if uid != int(overflow.read()):
                 return False
-        with open("/proc/self/uid_map", encoding="ascii") as uid_map:
+        with open("/proc/self/uid_map", encoding=_PROC_ENCODING) as uid_map:
             ranges = [tuple(map(int, line.split()[::2])) for line in uid_map if line.strip()]
     except (OSError, ValueError):
         return False
@@ -526,7 +528,7 @@ def current_umask() -> int:
     Raises:
         OSError: When the kernel does not report it (``ENOTSUP``).
     """
-    with open("/proc/self/status", encoding="ascii") as status:
+    with open("/proc/self/status", encoding=_PROC_ENCODING) as status:
         for line in status:
             if line.startswith("Umask:"):
                 return int(line.split()[1], 8)
