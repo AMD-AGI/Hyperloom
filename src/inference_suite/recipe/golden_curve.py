@@ -19,7 +19,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-import yaml
 
 from hyperloom_common.contract_fields import ContractFields
 from inference_suite.argv import (
@@ -30,7 +29,7 @@ from inference_suite.argv import (
     without_speculative_config,
 )
 from inference_suite.contracts.base_launch import DEFAULT_THINKING_MODE, GoldenCurve, LaunchQuery
-from inference_suite.recipe.inferencex import GOLDEN_DIR, MASTER
+from inference_suite.recipe.inferencex import GOLDEN_DIR, model_prefixes
 from inference_suite.recipe.model import (
     RecipeSourceError,
     RepoBundle,
@@ -133,11 +132,8 @@ class GoldenTable:
 
 
 def _model_prefix(bundle: RepoBundle, model_id: str, base_model: str | None) -> str | SourceGolden:
-    master = yaml.safe_load(bundle.text(MASTER))
-    if not isinstance(master, Mapping):
-        raise RecipeSourceError(f"{MASTER} is not a mapping")
     for model in dict.fromkeys(name for name in (model_id, base_model) if name):
-        prefixes = sorted({str(entry["model-prefix"]) for entry in master.values() if entry.get("model") == model})
+        prefixes = model_prefixes(bundle, model)
         if len(prefixes) > 1:
             return SourceGolden(None, reason=f"InferenceX gives {model} several model prefixes: {prefixes}")
         if prefixes:

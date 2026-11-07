@@ -59,7 +59,7 @@ from inference_suite.recipe.golden_curve import (
     with_golden,
 )
 from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
-from inference_suite.recipe.inferencex import inferencex_launches
+from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV, agentx_trace, inferencex_launches
 from inference_suite.recipe.model import (
     ATOM_ENTRYPOINT,
     ATOM_RUNNER_OWNED,
@@ -169,11 +169,15 @@ def _carried(value: _T | None, what: str) -> _T:
     return value
 
 
+def _inferencex_snapshot(snapshot: SourceSnapshot) -> InferencexSnapshot:
+    return _carried(snapshot.inferencex, "InferenceX")
+
+
 _Reader = Callable[[LaunchQuery, SourceSnapshot], "tuple[SourceLaunch, ...] | SourceMiss"]
 
 
 def _inferencex(query: LaunchQuery, snapshot: SourceSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
-    return inferencex_launches(query, _carried(snapshot.inferencex, "InferenceX"))
+    return inferencex_launches(query, _inferencex_snapshot(snapshot))
 
 
 def _sglang_cookbook(query: LaunchQuery, snapshot: SourceSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
@@ -324,6 +328,15 @@ def _client(env: Mapping[str, str]) -> ClientLaunch:
     return ClientLaunch(tool=INFERENCEX_TOOL, commit=INFERENCEX_CLIENT_COMMIT, env=env)
 
 
+def _client_env(query: LaunchQuery, snapshot: SourceSnapshot, env: Mapping[str, str]) -> dict[str, str]:
+    """The client environment of a recipe base: an AgentX replay names its corpus as InferenceX resolves it."""
+    if query.workload is not Workload.AGENTX or AGENTX_TRACE_ENV in env:
+        return dict(env)
+    bundle = _inferencex_snapshot(snapshot).bundle
+    models = tuple(dict.fromkeys(name for name in (query.model_id, snapshot.base_model) if name))
+    return {**env, AGENTX_TRACE_ENV: agentx_trace(bundle, models)}
+
+
 def _recipe_base(
     query: LaunchQuery, snapshot: SourceSnapshot, choice: _Choice, misses: Sequence[SourceMiss]
 ) -> BaseLaunch:
@@ -341,7 +354,7 @@ def _recipe_base(
         topology=launch.topology,
         args=layers.args,
         env=_without_runner_env(layers.env),
-        client=_client(launch.client_env),
+        client=_client(_client_env(query, snapshot, launch.client_env)),
         resolved_unix=snapshot.fetched_unix,
         golden_al=layers.golden,
         runner_owned=_runner_owned(launch.framework),
@@ -430,7 +443,7 @@ def _why_default(query: LaunchQuery, snapshot: SourceSnapshot) -> str:
 
 
 def _golden_table(snapshot: SourceSnapshot) -> GoldenTable:
-    return GoldenTable(_carried(snapshot.inferencex, "InferenceX").bundle, snapshot.golden_lengths)
+    return GoldenTable(_inferencex_snapshot(snapshot).bundle, snapshot.golden_lengths)
 
 
 def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> BaseLaunch | Miss:
