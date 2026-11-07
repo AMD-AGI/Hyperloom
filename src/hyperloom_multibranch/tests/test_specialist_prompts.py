@@ -163,11 +163,13 @@ def test_the_role_carries_what_found_gains_on_rocm_with_examples():
     assert prompt.index("What has found gains") < prompt.index("Examples:") < prompt.index("How a candidate is judged")
 
 
-def test_the_role_points_at_a_bf16_gemm_left_among_fp8_ones_and_the_table_a_shape_really_reads():
+def test_the_role_keeps_the_weight_precision_and_points_at_the_table_a_shape_really_reads():
     prompt = role_prompt(WORKLOAD)
 
-    assert "a large GEMM still in bf16, such as lm_head (the vocabulary projection), is a candidate" in prompt
-    assert "a source change on top of an FP8 GEMM kernel" in prompt
+    assert "lm_head (the vocabulary projection), is a candidate" not in prompt
+    assert "The model's weight precision is the session's, never yours to change, down or up" in prompt
+    assert "no patch that quantizes or de-quantizes weights, lm_head's included" in prompt
+    assert "Intermediates may change while the weights stay as they are and accuracy passes" in prompt
     assert "the server.log's tuned-config lookups name the table each shape reads" in prompt
     assert "a table for a path the model no longer reaches changes nothing" in prompt
 
