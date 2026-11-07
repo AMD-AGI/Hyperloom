@@ -47,7 +47,6 @@ from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_reb
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     # Stub the interpreter resolver so the unit test never spawns a real probe.
-    monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
 
     return make_session_dir()
 

@@ -275,9 +275,6 @@ def _derive_runtime_paths() -> None:
         _prepend_path("PATH", str(Path(vllm_root) / "bin"))
 
     # Reconstruct the installer's import roots instead of accepting raw PATH/PYTHONPATH assignments from files.
-    magpie = os.environ.get("MAGPIE_PATH", "")
-    if magpie and not is_python_package_root(Path(magpie).as_posix()):
-        _prepend_path("PYTHONPATH", magpie)
     package_parent = Path(__file__).resolve().parents[2].parent
     root = Path(os.environ.get("REPO_ROOT") or package_parent)
     for candidate in (root / "src", root):

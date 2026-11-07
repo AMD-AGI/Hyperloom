@@ -162,13 +162,13 @@ def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(mon
     runtime = tmp_path / "runtime.env.sh"
     runtime.write_text(
         f"TRACELENS_ROOT='{installed}'\n"
-        "MAGPIE_PATH=/installed/Magpie\n"
+        "GEAK_ROOT=/installed/GEAK\n"
         "KERNEL_AGENT_LOG_LEVEL=INFO\n"
         "PYTHONPATH=/untrusted/raw/path\nPATH=/untrusted/raw/bin\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(runtime))
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    monkeypatch.delenv("GEAK_ROOT", raising=False)
     monkeypatch.setenv("TRACELENS_ROOT", str(override))
     monkeypatch.setenv("KERNEL_AGENT_LOG_LEVEL", "DEBUG")
     monkeypatch.delenv("PYTHONPATH", raising=False)
@@ -176,19 +176,19 @@ def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(mon
 
     cli_preflight_env._load_kernel_agent_env_fallback()
 
-    assert os.environ["MAGPIE_PATH"] == "/installed/Magpie"
+    assert os.environ["GEAK_ROOT"] == "/installed/GEAK"
     assert os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
     assert os.environ["TRACELENS_ROOT"] == str(override if valid_override else installed)
     assert "PYTHONPATH" not in os.environ
     assert os.environ.get("PATH") == path_before
     child = subprocess.run(
-        [sys.executable, "-c", "import os; print(os.environ['MAGPIE_PATH']); print(os.environ['TRACELENS_ROOT'])"],
+        [sys.executable, "-c", "import os; print(os.environ['GEAK_ROOT']); print(os.environ['TRACELENS_ROOT'])"],
         capture_output=True,
         text=True,
         timeout=20,
     )
     assert child.returncode == 0, child.stderr
-    assert child.stdout.splitlines() == ["/installed/Magpie", str(override if valid_override else installed)]
+    assert child.stdout.splitlines() == ["/installed/GEAK", str(override if valid_override else installed)]
 
 
 def test_runtime_loader_rejects_a_missing_env_file(monkeypatch, tmp_path):
