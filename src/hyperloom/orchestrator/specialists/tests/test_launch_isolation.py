@@ -183,7 +183,9 @@ def test_hugging_faces_default_directory_stays_visible_read_only_once_the_home_m
     prepared.release()
 
     assert env["HF_HOME"] == str(hub) and env["HOME"] == str(place.workspace / ".home")
-    assert str(hub) in prepared.policy.read_only and str(hub / "token") in prepared.policy.masked
+    assert str(hub / "hub") in prepared.policy.read_only, "the cache is bound entry by entry, without the login"
+    assert not [path for path in prepared.policy.read_only if str(hub / "token").startswith(path)]
+    assert str(hub / "token") not in prepared.policy.masked, "a file is left out, not masked"
     named = _env(HOME=str(home), HF_HUB_CACHE=str(tmp_path / "hub"))
     prepare_launch(_bwrap(), place, ["claude"], named).release()
     assert "HF_HOME" not in named

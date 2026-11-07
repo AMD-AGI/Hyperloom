@@ -192,7 +192,9 @@ def test_this_processs_own_credential_locations_are_masked_whatever_the_child_is
     assert {kube, home} <= set(found)
     assert work / ".home" not in found, "the child's own home, in the tree it writes"
     policy = Confinement(writable=(work,), readable=(tools,), masked=found).policy()
-    assert policy.masked == (str(kube),)
+    assert policy.masked == ()
+    assert str(tools / "bin") in policy.read_only, "what is beside the login is bound entry by entry"
+    assert not any(kube.is_relative_to(path) for path in map(Path, policy.read_only)), "the login is not bound"
     monkeypatch.setenv("KUBECONFIG", str(kube))
     assert kube in credential_paths(child, allowed=[tools]), "this process's environment by default"
 
@@ -650,20 +652,57 @@ def test_a_relative_program_path_binds_nothing_wherever_it_lies(tmp_path, monkey
 
 def test_masks_are_only_paths_a_bind_shows(tmp_path):
     hf = tmp_path / "hf"
-    token, elsewhere = _write(hf / "token"), _write(tmp_path / "home" / ".aws" / "credentials")
-    policy = Confinement(readable=(hf,), masked=(token, elsewhere, tmp_path / "missing")).policy()
-    assert policy.masked == (str(token),), "a credential no bind shows does not exist inside: nothing to mask"
+    secrets, elsewhere = _write(hf / "secrets" / "token"), _write(tmp_path / "home" / ".aws" / "credentials")
+    policy = Confinement(readable=(hf,), masked=(secrets.parent, elsewhere, tmp_path / "missing")).policy()
+    assert policy.masked == (str(secrets.parent),), "a credential no bind shows does not exist inside: nothing to mask"
 
 
-def test_a_mask_reached_through_a_linked_directory_is_masked_at_both_paths(tmp_path):
-    """``link/data`` with ``link -> real`` shows ``real/data`` at both paths, so its credential is masked at both."""
+def test_a_login_file_in_a_bound_tree_is_left_out_by_binding_what_is_beside_it(tmp_path):
+    """A mount over a file goes with the file's first rename, and none covers one made later: the tree that holds a
+    login file (``token``, there or not) is bound entry by entry instead, without it, down the way to it."""
+    hf = tmp_path / "hf"
+    model, kube = _write(hf / "hub" / "model"), _write(hf / "deep" / "kube" / "config")
+    _write(hf / "deep" / "kube" / "cache" / "entry")
+    _write(hf / "deep" / "other")
+    policy = Confinement(readable=(hf,), masked=(hf / "token", kube)).policy()
+    expected = [hf / "deep" / "kube" / "cache", hf / "deep" / "other", model.parent]
+    assert policy.read_only == tuple(map(str, expected))
+    assert policy.masked == ()
+
+
+def test_a_link_beside_a_login_file_stays_a_link_only_to_what_is_shown(tmp_path):
+    """Bound entry by entry, a link is recreated where another bind shows its target; one to the login file, or to
+    what nothing shows, is left out (a bind of it would show its target)."""
+    tree, outside = tmp_path / "tree", _write(tmp_path / "outside" / "key")
+    secret, visible = _write(tree / "secret"), _write(tree / "visible")
+    for name, target in (("to_secret", secret), ("to_visible", visible), ("to_outside", outside)):
+        (tree / name).symlink_to(target)
+    policy = Confinement(readable=(tree,), masked=(secret,)).policy()
+    assert policy.read_only == (str(tree / "to_visible"), str(visible))
+    assert policy.masked == ()
+
+
+def test_a_login_file_in_a_tree_the_agent_writes_is_refused_by_name(tmp_path):
+    """The agent's own tree is never bound entry by entry: a login file the app keeps there stays a mask, which
+    :meth:`BwrapPolicy.problems` refuses by name."""
+    work = tmp_path / "work"
+    login = _write(work / "login")
+    policy = Confinement(writable=(work,), masked=(login, work / "token")).policy()
+    assert policy.writable == (str(work),)
+    assert policy.masked == (str(login),)
+    assert [problem for problem in policy.problems((0, 13, 1)) if str(login) in problem]
+
+
+def test_a_credential_reached_through_a_linked_directory_is_left_out_at_both_paths(tmp_path):
+    """``link/data`` with ``link -> real`` shows ``real/data`` at both paths, so both are bound entry by entry,
+    without its credential."""
     secret = _write(tmp_path / "real" / "data" / "secret")
     _write(tmp_path / "real" / "data" / "visible")
     (tmp_path / "link").symlink_to(tmp_path / "real")
     given = tmp_path / "link" / "data"
     policy = Confinement(readable=(given,), masked=(secret,)).policy()
-    assert policy.read_only == (str(tmp_path / "real" / "data"), str(given))
-    assert policy.masked == (str(secret), str(given / "secret"))
+    assert policy.read_only == (str(tmp_path / "real" / "data" / "visible"), str(given / "visible"))
+    assert policy.masked == ()
 
 
 def test_a_mask_below_another_mask_is_left_out(tmp_path):

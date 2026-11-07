@@ -5,9 +5,10 @@
 
 The sandbox starts from an empty root. A path exists inside only when the policy binds it, so what is not bound (the
 app's state, its keys, other tasks' trees) is absent rather than forbidden; read-only binds refuse writes and metadata
-changes (``EROFS``); a mask hides a credential inside a bound tree (``EACCES``). The agent gets its own user, pid and
-IPC namespaces, a fresh ``/proc``, no capabilities and ``no_new_privs``; it shares the network unless the policy asks
-for its own.
+changes (``EROFS``), and so does the root once everything is mounted (a name made beside a bind, in a directory
+bubblewrap made to hold it, would land in no tree and be gone with the sandbox); a mask hides the directory that holds
+a credential inside a bound tree (``EACCES``). The agent gets its own user, pid and IPC namespaces, a fresh ``/proc``,
+no capabilities and ``no_new_privs``; it shares the network unless the policy asks for its own.
 
 bubblewrap prints the namespaces' ``child-pid`` on ``--json-status-fd`` as soon as it has cloned, before it mounts
 anything, and an ``exit-code`` only when the command ran: :class:`BwrapStatus` reads that difference.
@@ -35,7 +36,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -105,6 +106,11 @@ _VERSION = re.compile(r"bubblewrap (\d+)\.(\d+)\.(\d+)")
 #: unbindable (as some container runtimes leave it) otherwise refuses to every bind with ``EINVAL``.
 _PRIVATE_MOUNTS = ("--mount", "--")
 _HOLD = "import signal; print('ready', flush=True); signal.pause()"
+#: Remounts the sandbox's root tmpfs read-only after the last mount: the directories bubblewrap made to hold the binds
+#: (a directory bound entry by entry, the parents of a bind) take no new name; every bind and tmpfs keeps its own mode.
+_SEAL_ROOT = ("--remount-ro", "/")
+#: Finds the ``unshare`` for a launch of a bubblewrap: its path, else ``None`` and why.
+_FindUnshare = Callable[[str], tuple[str | None, str]]
 
 
 class BwrapSetupError(RuntimeError):
@@ -155,12 +161,33 @@ def _scratch_mount(source: str | None, destination: str) -> _Mount:
     return _Mount(destination, (_BIND, source, destination) if source else (_TMPFS, destination))
 
 
-def _mask_mount(path: str) -> _Mount | None:
-    """A mask over what ``path`` is now; ``None`` when nothing is there: a mount point would create it."""
-    if os.path.isdir(path):
+def _is_directory(path: str) -> bool:
+    """Whether ``path`` is a directory itself (not a link to one)."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _not_a_directory(path: str) -> str:
+    return (
+        f"{path} is masked below a bound tree but is not a directory: a mount over a file goes when the app replaces "
+        "the file, and none covers one made later; mask the directory that holds it, or bind only what is needed "
+        "beside it"
+    )
+
+
+def _mask_mount(path: str, bound: Sequence[str]) -> _Mount | None:
+    """A mask over the directory ``path``: an empty mode-0000 tmpfs; ``None`` for anything else outside every tree in
+    ``bound`` (nothing is there to hide).
+
+    Raises:
+        BwrapPolicyError: ``path`` is below a tree in ``bound`` and is not a directory (:meth:`BwrapPolicy.problems`).
+    """
+    if _is_directory(path):
         return _Mount(path, ("--perms", "0000", _TMPFS, path, "--remount-ro", path), mask=True)
-    if os.path.lexists(path):
-        return _Mount(path, ("--ro-bind", "/dev/null", path), mask=True)
+    if any(_at_or_below(path, tree) for tree in bound):
+        raise BwrapPolicyError([_not_a_directory(path)])
     return None
 
 
@@ -168,17 +195,21 @@ def _mask_mount(path: str) -> _Mount | None:
 class BwrapPolicy:
     """What one sandbox may reach. Every path is absolute and bound at the same path inside.
 
-    ``read_only`` and ``writable`` are bound (a missing read-only path is skipped); ``masked`` hides a path inside a
-    bound tree: a directory becomes an empty mode-0000 tmpfs, anything else an unreadable ``/dev/null``. ``devices``
-    are bound with device access (``/dev/kfd``, ``/dev/dri``). ``tmp`` and ``shm`` are bound at ``/tmp`` and
-    ``/dev/shm`` (a :class:`Scratch`; a sandbox whose commands share files there passes the same pair to each, so
-    before :data:`NESTED_SAFE` nothing may be mounted below them), else each is a fresh tmpfs. ``sys_paths`` are bound
-    read-only (a compile narrows ``/sys`` to the CPU tree).
-    ``own_network`` gives the sandbox a network of its own (loopback only). ``die_with_parent`` kills the sandbox when
-    the *thread* that started it ends (``PR_SET_PDEATHSIG``), so it is only for a launch made on a thread that
-    outlives it; without it, killing bubblewrap's own process leaves the sandbox running (kill its pid 1, the
-    status's ``child_pid``, or the whole process tree). ``join`` holds the user and pid namespace descriptors of a
-    :class:`Holder` to join instead of making new ones. ``marks`` are set in the command's environment only, so
+    ``read_only`` and ``writable`` are bound (a missing read-only path is skipped); ``masked`` hides a directory
+    inside a bound tree: it becomes an empty mode-0000 tmpfs, which holds while the app adds, replaces or removes
+    entries in it (a mount over a file would go with the file's first rename, and an absent one has no mount to
+    cover it later, so below a bound tree only a directory may be masked). The mount stays on the directory it
+    was made on: one the host removes or renames away, or whose parent it renames or replaces (with a link, say),
+    is unmasked, and what is put in its place is readable; a credential whose tool swaps directories so is kept out
+    by binding only what is needed beside it, not by a mask. ``devices`` are bound with device access (``/dev/kfd``,
+    ``/dev/dri``). ``tmp`` and ``shm`` are bound at ``/tmp`` and ``/dev/shm`` (a :class:`Scratch`; a sandbox whose
+    commands share files there passes the same pair to each, so before :data:`NESTED_SAFE` nothing may be mounted
+    below them), else each is a fresh tmpfs. ``sys_paths`` are bound read-only (a compile narrows ``/sys`` to the CPU
+    tree). ``own_network`` gives the sandbox a network of its own (loopback only). ``die_with_parent`` kills the
+    sandbox when the *thread* that started it ends (``PR_SET_PDEATHSIG``), so it is only for a launch made on a
+    thread that outlives it; without it, killing bubblewrap's own process leaves the sandbox running (kill its pid 1,
+    the status's ``child_pid``, or the whole process tree). ``join`` holds the user and pid namespace descriptors of
+    a :class:`Holder` to join instead of making new ones. ``marks`` are set in the command's environment only, so
     bubblewrap's own processes do not carry them (they show in bubblewrap's command line: never a secret).
     ``app_only`` paths are never bound, nor anything above them.
     """
@@ -209,7 +240,8 @@ class BwrapPolicy:
         """Why this policy must not be launched with bubblewrap ``version``; empty when it may.
 
         A relative path; a bind or mask of a path the sandbox mounts itself (``/``, ``/proc`` and below, ``/dev``
-        and below, ``/sys``, ``/tmp``); a device outside ``/dev``; a bind at or above an ``app_only`` path; and,
+        and below, ``/sys``, ``/tmp``); a mask below a bound tree that is not a directory now (a file, a link, or
+        nothing); a device outside ``/dev``; a bind at or above an ``app_only`` path; and,
         before :data:`NESTED_SAFE`, a mount below what an agent could already have written: a read-only bind or mask
         below a writable bind, and any bind, mask or device below a bound ``tmp`` or ``shm`` (nothing tells a
         directory no sandbox has used from one an earlier command or launch left a symlink in). A writable path below
@@ -224,7 +256,7 @@ class BwrapPolicy:
         ]
         if relative:
             return relative
-        found = self._placement_problems() + self._exposure_problems()
+        found = self._placement_problems() + self._mask_problems() + self._exposure_problems()
         if version < NESTED_SAFE:
             found += self._nesting_problems(version)
         return found
@@ -238,6 +270,22 @@ class BwrapPolicy:
         found += [f"device {path} is not under {_DEV}" for path in self.devices if not _below(path, _DEV)]
         found += [f"{path} is not under {_SYS}" for path in self.sys_paths if not _at_or_below(path, _SYS)]
         return found
+
+    def _bound_trees(self) -> tuple[str, ...]:
+        """Where a host path shows inside: the binds, and ``/tmp`` and ``/dev/shm`` when a :class:`Scratch` is."""
+        return (
+            *self.read_only,
+            *self.writable,
+            *(mount for source, mount in ((self.tmp, _TMP), (self.shm, _SHM)) if source),
+        )
+
+    def _mask_problems(self) -> list[str]:
+        bound = self._bound_trees()
+        return [
+            _not_a_directory(path)
+            for path in self.masked
+            if not _is_directory(path) and any(_at_or_below(path, tree) for tree in bound)
+        ]
 
     def _exposure_problems(self) -> list[str]:
         apps = [os.path.realpath(path) for path in self.app_only]
@@ -278,8 +326,9 @@ class BwrapPolicy:
     def argv(self, bwrap: BwrapProbe, command: Sequence[str], *, status_fd: int | None = None) -> list[str]:
         """The command line that runs ``command`` in this sandbox with the probed ``bwrap``: its
         :attr:`BwrapProbe.launcher`, the namespace flags, every mount sorted by destination depth with the masks last
-        (so a bind below ``/tmp`` or a mask below a bind is not hidden by the mount above it), then ``--chdir``, the
-        marks and ``--json-status-fd``. The masks and symlinked roots are read from the filesystem now.
+        (so a bind below ``/tmp`` or a mask below a bind is not hidden by the mount above it), the root made read-only
+        (:data:`_SEAL_ROOT`), then ``--chdir``, the marks and ``--json-status-fd``. The masks and symlinked roots are
+        read from the filesystem now.
 
         Raises:
             BwrapPolicyError: :meth:`problems` names any for ``bwrap``'s version.
@@ -295,7 +344,7 @@ class BwrapPolicy:
         if status_fd is not None:
             tail += ["--json-status-fd", str(status_fd)]
         mounts = [arg for mount in self._mounts() for arg in mount.args]
-        return [*launcher, *self._namespace_flags(), *mounts, *tail, "--", *command]
+        return [*launcher, *self._namespace_flags(), *mounts, *_SEAL_ROOT, *tail, "--", *command]
 
     def _namespace_flags(self) -> list[str]:
         if self.join is None:
@@ -320,7 +369,8 @@ class BwrapPolicy:
         mounts.append(_Mount(_PROC, ("--proc", _PROC)))
         mounts += [_Mount(path, (_RO_BIND_TRY, path, path)) for path in self.sys_paths]
         mounts += [_scratch_mount(self.tmp, _TMP), _scratch_mount(self.shm, _SHM)]
-        mounts += [mount for mount in map(_mask_mount, self.masked) if mount is not None]
+        masks = (_mask_mount(path, self._bound_trees()) for path in self.masked)
+        mounts += [mount for mount in masks if mount is not None]
         return sorted(mounts, key=lambda mount: (mount.mask, _depth(mount.destination)))
 
     @staticmethod
@@ -333,14 +383,78 @@ class BwrapPolicy:
         return _Mount(path, (_RO_BIND_TRY, path, path))
 
 
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _unlock_directory(name: str, parent: int) -> int:
+    """Give the directory ``name`` in ``parent`` mode 0700 (the agent may have left it 0000) and open it."""
+    os.chmod(name, stat.S_IRWXU, dir_fd=parent)
+    return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+
+
+def _empty_directory(directory: int) -> list[str]:
+    """Unlink every entry of ``directory`` that is not a directory; the names of those that are."""
+    below = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                below.append(entry.name)
+            else:
+                os.unlink(entry.name, dir_fd=directory)
+    return below
+
+
 def _remove_tree(path: str) -> None:
-    """Remove ``path`` even where the agent left a directory it cannot list (mode 0000)."""
-    for parent, names, _files in os.walk(path):
-        for name in names:
-            child = os.path.join(parent, name)
-            if not os.path.islink(child):
-                os.chmod(child, stat.S_IRWXU)
-    shutil.rmtree(path)
+    """Remove the directory ``path`` and everything below it, however the agent left it: a directory of mode 0000
+    (``path`` itself too), a tree deeper than the interpreter's recursion limit, a path longer than ``PATH_MAX``.
+
+    The walk holds one descriptor and no recursion: every call names one entry relative to an open directory, and the
+    way back up is ``..`` (no process moves directories in a scratch whose sandbox is gone).
+
+    Raises:
+        OSError: ``path`` is not a directory, or an entry could not be removed.
+    """
+    parent_path, name = os.path.split(os.path.abspath(path))
+    if not stat.S_ISDIR(os.lstat(path).st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, "Not a directory", path)
+    parent = os.open(parent_path, _DIRECTORY_FLAGS)
+    try:
+        _remove_below(parent, name)
+    except OSError as exc:  # the entry is named relative to a directory: name the tree too
+        raise OSError(exc.errno, f"{exc.strerror} at {exc.filename!r} below", path) from exc
+    finally:
+        os.close(parent)
+
+
+def _remove_below(parent: int, name: str) -> None:
+    """:func:`_remove_tree` of the directory ``name`` in the open directory ``parent``."""
+    current = -1
+    try:
+        current = _unlock_directory(name, parent)
+        # One frame per level open on the way down: its name in the level above, and its subdirectories left.
+        stack = [(name, _empty_directory(current))]
+        while True:
+            left = stack[-1][1]
+            if left:
+                child = left.pop()
+                below = _unlock_directory(child, current)
+                os.close(current)
+                current = below
+                stack.append((child, _empty_directory(current)))
+            elif len(stack) > 1:
+                done = stack.pop()[0]
+                up = os.open("..", _DIRECTORY_FLAGS, dir_fd=current)
+                os.close(current)
+                current = up
+                os.rmdir(done, dir_fd=current)
+            else:
+                break
+        os.close(current)
+        current = -1
+        os.rmdir(name, dir_fd=parent)
+    finally:
+        if current >= 0:
+            os.close(current)
 
 
 @dataclass(frozen=True)
@@ -364,9 +478,27 @@ class Scratch:
         return cls(tmp, shm)
 
     def remove(self) -> None:
-        """Delete both directories and what the sandbox left in them."""
-        _remove_tree(self.tmp)
-        _remove_tree(self.shm)
+        """Delete both directories and what the sandbox left in them; the second even when the first fails.
+
+        Raises:
+            OSError: one could not be deleted (naming both when neither could).
+        """
+        failed: list[OSError] = []
+
+        def attempt(path: str) -> None:
+            try:
+                _remove_tree(path)
+            except OSError as exc:
+                failed.append(exc)
+
+        try:
+            attempt(self.tmp)
+        finally:  # whatever else stops the first, the second is still attempted
+            attempt(self.shm)
+        if len(failed) == 1:
+            raise failed[0]
+        if failed:
+            raise OSError(failed[0].errno, f"scratch not removed: {failed[0]}; {failed[1]}") from failed[0]
 
 
 def interpreter_roots() -> tuple[str, ...]:
@@ -475,14 +607,18 @@ class _Canary:
     def read_only(self) -> str:
         return os.path.join(self.root, "ro")
 
+    @property
+    def secret(self) -> str:
+        return os.path.join(self.read_only, "secret")
+
     def policy(self) -> BwrapPolicy:
-        """The shape of an agent's policy: system roots, a read-only tree with a masked directory and file in it, a
-        writable tree, all below the host's ``/tmp`` and so below the sandbox's (a fresh tmpfs: binds below a bound
+        """The shape of an agent's policy: system roots, a read-only tree with a masked directory in it, a writable
+        tree, all below the host's ``/tmp`` and so below the sandbox's (a fresh tmpfs: binds below a bound
         :class:`Scratch` need :data:`NESTED_SAFE`), where the depth order counts."""
         return BwrapPolicy(
             read_only=(*SYSTEM_ROOTS, *interpreter_roots(), self.read_only),
             writable=(os.path.join(self.root, "rw"),),
-            masked=(os.path.join(self.read_only, "secret"), os.path.join(self.read_only, "secretfile")),
+            masked=(self.secret,),
             die_with_parent=False,
         )
 
@@ -490,7 +626,7 @@ class _Canary:
         """The problems the canary found through ``bwrap`` (the binary under test, before its probe has an answer);
         ``subprocess.TimeoutExpired`` when it did not end."""
         policy = self.policy()
-        args = (os.readlink("/proc/self/ns/pid"), self.read_only, *policy.writable, *policy.masked)
+        args = (os.readlink("/proc/self/ns/pid"), self.read_only, *policy.writable, self.secret, f"{self.secret}/inner")
         status, write = os.pipe()
         with contextlib.closing(os.fdopen(status, "rb", buffering=0)) as status_file:
             try:
@@ -545,7 +681,7 @@ def _canary() -> Iterator[_Canary]:
     try:
         for name in ("ro/secret", "rw"):
             os.makedirs(os.path.join(root, name))
-        for name, text in (("ro/visible", "visible\n"), ("ro/secretfile", "secret\n"), ("ro/secret/inner", "secret\n")):
+        for name, text in (("ro/visible", "visible\n"), ("ro/secret/inner", "secret\n")):
             with open(os.path.join(root, name), "w", encoding="ascii") as handle:
                 handle.write(text)
         yield _Canary(root)
@@ -557,21 +693,34 @@ def _unbindable(problems: tuple[str, ...]) -> bool:
     return bool(problems) and "Can't bind mount" in problems[0] and "Invalid argument" in problems[0]
 
 
-def _with_private_mounts(
-    canary: _Canary, path: str, version: Version, first: tuple[str, ...], timeout: float
-) -> BwrapProbe:
-    """The canary again under ``unshare --mount``, after binds failed with ``EINVAL`` (an unbindable root)."""
-    unshare = shutil.which("unshare")
-    if unshare is None:
-        return BwrapProbe(
-            path, version, (*first, "unshare (util-linux) is not on PATH to give a launch its own mounts")
-        )
-    prefix = (unshare, *_PRIVATE_MOUNTS)
+def _unshare_on_path(_bwrap: str) -> tuple[str | None, str]:
+    """The ``unshare`` for a bubblewrap found on ``PATH``: the one on ``PATH``, and why there is none."""
+    return shutil.which("unshare"), "unshare (util-linux) is not on PATH to give a launch its own mounts"
+
+
+def _unshare_beside(bwrap: str) -> tuple[str | None, str]:
+    """The ``unshare`` for a bubblewrap named by path (a hosting layer's): only the one beside it, never one from
+    ``PATH``; and why there is none."""
+    beside = os.path.join(os.path.dirname(bwrap), "unshare")
+    if os.path.isfile(beside) and os.access(beside, os.X_OK):
+        return beside, ""
+    why = (
+        f"no unshare beside {bwrap} to give a launch its own mounts, and none is taken from PATH for a bubblewrap "
+        "named by path: the host must make the root mount private first (mount --make-rprivate /)"
+    )
+    return None, why
+
+
+def _with_private_mounts(canary: _Canary, first: BwrapProbe, unshare: str | None, timeout: float) -> BwrapProbe:
+    """The canary again under ``unshare --mount`` after the ``first`` run's binds failed with ``EINVAL`` (an
+    unbindable root)."""
+    path, version = first.path, first.version
+    prefix = (str(unshare), *_PRIVATE_MOUNTS)
     again = canary.run(BwrapProbe(path, version, (), prefix=prefix), timeout)
     if again:
-        return BwrapProbe(path, version, (*first, *(f"under unshare --mount: {problem}" for problem in again)))
+        return BwrapProbe(path, version, (*first.problems, *(f"under unshare --mount: {line}" for line in again)))
     note = (
-        f"binds from the root mount fail here ({first[0]}): every launch runs under unshare --mount, "
+        f"binds from the root mount fail here ({first.problems[0]}): every launch runs under unshare --mount, "
         "which gives it a private copy of the mount tree"
     )
     return BwrapProbe(path, version, (), prefix=prefix, notes=(note,))
@@ -581,13 +730,16 @@ def _transient(path: str, version: Version | None, timeout: float) -> BwrapProbe
     return BwrapProbe(path, version, (f"bubblewrap at {path}: no answer in {timeout:g} s",), transient=True)
 
 
-def _canary_probe(path: str, version: Version, timeout: float) -> BwrapProbe:
+def _canary_probe(path: str, version: Version, timeout: float, unshare: _FindUnshare) -> BwrapProbe:
     try:
         with _canary() as canary:
-            problems = canary.run(BwrapProbe(path, version, ()), timeout)
-            if _unbindable(problems):
-                return _with_private_mounts(canary, path, version, problems, timeout)
-            return BwrapProbe(path, version, problems)
+            first = BwrapProbe(path, version, canary.run(BwrapProbe(path, version, ()), timeout))
+            if not _unbindable(first.problems):
+                return first
+            found, missing = unshare(path)
+            if found is None:
+                return dataclasses.replace(first, problems=(*first.problems, missing))
+            return _with_private_mounts(canary, first, found, timeout)
     except subprocess.TimeoutExpired:
         return _transient(path, version, timeout)
 
@@ -595,9 +747,15 @@ def _canary_probe(path: str, version: Version, timeout: float) -> BwrapProbe:
 def probe_bwrap(bwrap: str | None = None, *, timeout: float = _TIMEOUT) -> BwrapProbe:
     """Whether ``bwrap`` (an absolute path; default: the one on ``PATH``) runs a sandbox here: not setuid, at least
     :data:`BWRAP_FLOOR`, and a canary sandbox of an agent's shape holds (masks unreadable, read-only binds
-    ``EROFS``, the writable tree writable, its own pid namespace, no capabilities, ``no_new_privs``). Not cached:
-    :func:`bwrap_probe` is."""
-    path = bwrap or shutil.which(_BWRAP)
+    ``EROFS``, the writable tree writable, its own pid namespace, no capabilities, ``no_new_privs``). Where the root
+    mount cannot be bound, the canary runs again under ``unshare --mount``, for a ``bwrap`` given by path only with
+    the ``unshare`` beside it. Not cached: :func:`bwrap_probe` is."""
+    if bwrap is None:
+        return _probe(shutil.which(_BWRAP), _unshare_on_path, timeout)
+    return _probe(bwrap, _unshare_beside, timeout)
+
+
+def _probe(path: str | None, unshare: _FindUnshare, timeout: float = _TIMEOUT) -> BwrapProbe:
     if path is None:
         return BwrapProbe(None, None, ("bubblewrap: not found on PATH",))
     if not os.path.isabs(path):
@@ -619,7 +777,7 @@ def probe_bwrap(bwrap: str | None = None, *, timeout: float = _TIMEOUT) -> Bwrap
     if version < BWRAP_FLOOR:
         problem = f"bubblewrap {_shown(version)} is older than {_shown(BWRAP_FLOOR)} (needs --perms)"
         return BwrapProbe(path, version, (problem,))
-    return _canary_probe(path, version, timeout)
+    return _canary_probe(path, version, timeout, unshare)
 
 
 _PROBES: dict[tuple[object, ...], BwrapProbe] = {}
@@ -643,7 +801,8 @@ def _identity(path: str | None) -> tuple[int, ...] | None:
 
 
 def _namespace(name: str) -> int | None:
-    """This process's namespace ``name`` (its nsfs inode number; the inode's times change when it is re-instantiated)."""
+    """This process's namespace ``name`` (its nsfs inode number; the inode's times change when it is
+    re-instantiated)."""
     try:
         return os.stat(f"/proc/self/ns/{name}").st_ino
     except OSError:
@@ -661,12 +820,12 @@ def bwrap_probe(bwrap: str | None = None) -> BwrapProbe:
     """:func:`probe_bwrap` for ``bwrap`` (an absolute path, such as a hosting layer's; default: the ``bwrap`` on
     ``PATH``), run once per process for each :func:`_probe_key`: a concurrent caller waits for the one run, and a
     transient answer is not kept."""
-    path = bwrap or shutil.which(_BWRAP)
-    key = _probe_key(path)
+    path, unshare = (shutil.which(_BWRAP), _unshare_on_path) if bwrap is None else (bwrap, _unshare_beside)
+    key = (unshare.__name__, *_probe_key(path))
     with _PROBES_LOCK:
         found = _PROBES.get(key)
         if found is None:
-            found = probe_bwrap(path)
+            found = _probe(path, unshare)
             if not found.transient:
                 _PROBES[key] = found
                 for note in found.notes:

@@ -7,9 +7,11 @@ process manager: what the agent reaches, how it is stopped, and how a sandbox th
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
+import subprocess
 import tempfile
 import time
 from dataclasses import replace
@@ -19,7 +21,7 @@ import pytest
 
 from hyperloom_common.git_safety import app_git, recorded_admin_dir, trusted_admin_dir, worktree_head
 from hyperloom_common.tests._bwrap_host import usable_bwrap
-from hyperloom.common import agent_isolation
+from hyperloom.common import agent_isolation, confinement
 from hyperloom.common.agent_isolation import BwrapIsolation, session_isolation_lines
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.proctree import REAP_MARK_ENV
@@ -99,6 +101,18 @@ cat > /dev/null
 echo '{{"summary": "ran", "proposal_set": []}}' > specialist_done.json
 """
 _CANARY = "APP-SECRET-CANARY"
+#: Run in a specialist's sandbox: say ready, wait for the host's go, then name what each path reads as.
+_LATER = r"""
+import errno, json, sys
+print("ready", flush=True)
+sys.stdin.readline()
+def outcome(path):
+    try:
+        return "ok:" + open(path).read()
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno, str(exc.errno))
+print(json.dumps({name: outcome(path) for name, path in json.loads(sys.argv[1]).items()}))
+"""
 _TRAPPED = """#!/bin/sh
 trap 'echo stopped > "{out}"; exit 0' TERM
 sleep 1000 &
@@ -448,3 +462,54 @@ def test_a_ray_actors_process_manager_runs_the_sandbox_and_its_status_reaches_th
         finally:
             manager.stop()
             prepared.release()
+
+
+def test_a_login_the_app_replaces_or_makes_while_a_specialist_runs_is_not_shown_to_it(
+    tmp_path: Path, sandboxed: BwrapIsolation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The specialist's confinement as launches derive it: the app's Hugging Face cache (its default under the app's
+    home, shown read-only) gets its token at the first login, and the references it reads hold a login file the app
+    registered, which the app replaces by a rename. Neither, done while the specialist runs, shows inside; the model
+    and the reference beside them do."""
+    home, refs, workspace = tmp_path / "app-home", tmp_path / "refs", tmp_path / "ws"
+    hf = home / ".cache" / "huggingface"
+    model, doc, login = hf / "hub" / "model.txt", refs / "doc.txt", refs / "login.json"
+    for path, text in ((model, "weights"), (doc, "reference"), (login, "SECRET-OLD")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    workspace.mkdir()
+    registry = confinement.PrivatePaths()
+    registry.add(login, "a login the app keeps beside the references")
+    monkeypatch.setattr(confinement, "PRIVATE_PATHS", registry)
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("HF_HOME", "HF_HUB_CACHE", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    paths = {"token": str(hf / "token"), "login": str(login), "model": str(model), "doc": str(doc)}
+    argv = [sys.executable, "-I", "-S", "-c", _LATER, json.dumps(paths)]
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home)}
+    prepared = prepare_launch(sandboxed, LaunchPlace(workspace, readable=(refs,)), argv, env)
+    try:
+        spawn = prepared.local(argv, env)
+        with subprocess.Popen(
+            spawn.argv,
+            env=spawn.env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **spawn.kwargs,
+        ) as child:
+            try:
+                assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+                (hf / "token").write_text("SECRET-HF", encoding="utf-8")
+                login.with_name("login.json.lock").write_text("SECRET-NEW", encoding="utf-8")
+                login.with_name("login.json.lock").replace(login)
+                out, err = child.communicate("go\n", timeout=60)
+            finally:
+                child.kill()
+    finally:
+        prepared.release()
+
+    assert child.returncode == 0, err
+    assert "SECRET" not in out + err
+    assert json.loads(out) == {"token": "ENOENT", "login": "ENOENT", "model": "ok:weights", "doc": "ok:reference"}
