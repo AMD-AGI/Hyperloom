@@ -132,7 +132,7 @@ def handed_server_args(config_path: Path) -> str:
     """The server args Hyperloom composed and handed the launcher of a config the grid materializer built.
 
     The env-composed layout carries them in the framework's ``EXTRA_*_ARGS``; a native one in its own
-    ``launch_overrides.append_args``, which Magpie lays over the recipe argv it owns and protects.
+    ``launch_overrides.append_args``, laid over the recipe argv the recipe owns and protects.
     """
     point = read_benchmark_point(config_path)
     if not point.agentx:

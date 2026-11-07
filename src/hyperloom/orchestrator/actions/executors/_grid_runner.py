@@ -248,7 +248,7 @@ _RESULT_DIR_FORBID_RE = re.compile(r"[\s\"'`$;&|<>(){}\[\]\\*?!]")
 
 
 def sanitize_script_name(value: Any) -> str | None:
-    """Return ``value`` if it's a safe Magpie benchmark script file name."""
+    """Return ``value`` if it's a safe benchmark script file name."""
     if value is None:
         return None
     text = str(value).strip()
@@ -326,7 +326,7 @@ async def _settled_measurement(
                     "the report was still being written when the subprocess was reaped",
                     attempts,
                 )
-            # Harvest already tried this, but it runs before the report is guaranteed to exist: a report Magpie
+            # Harvest already tried this, but it runs before the report is guaranteed to exist: a report the round
             # finishes writing after the subprocess is reaped would otherwise leave the round with no GPU artifact at
             # all. Here the report is in hand, so write it from that rather than reading the file a second time.
             if report is not None:
@@ -811,7 +811,7 @@ async def _variant_yaml_or_abort(
     lifecycle: dict[str, Any] | None,
     failure_class: str | None = None,
 ) -> Path:
-    """Materialize this variant's Magpie YAML under ``into``, or end the variant on the build error."""
+    """Materialize this variant's point YAML under ``into``, or end the variant on the build error."""
     try:
         return await _variant_yaml(run, at, into=into, lifecycle=lifecycle)
     except Exception as exc:  # re-raised as _VariantAborted by _abort_variant
@@ -1630,7 +1630,7 @@ def _build_variant_yaml(
     output_subdir: Path,
     server_lifecycle: dict[str, Any] | None = None,
 ) -> Path:
-    """Materialize a per-variant Magpie YAML on disk.
+    """Materialize a per-variant point YAML on disk.
 
     This is where every layer of a variant's launch env is composed, so the config it
     writes -- not the variant spec -- is what ``composed_benchmark_timeout_sec`` sizes
