@@ -276,11 +276,10 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
     async def _attempt_refusal(self, attempt: BenchmarkAttempt, output_dir: Path, shared_state: Any) -> dict | None:
         """Why the attempt fails before any round: its AgentX client or, on the backend, its checkout cannot run it."""
         config_path = attempt.materialized_config_path
-        # MLPerf prepares its delegated client off-loop; native AgentX is entirely managed by Magpie.
+        # MLPerf preflights its harness off-loop.
         agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
             env=os.environ,
-            inferencex_path=attempt.inferencex_path,
             config_path=config_path,
             active=agentx_active(benchmark_mode=getattr(shared_state, _BENCHMARK_MODE_ATTR, "")),
         )
