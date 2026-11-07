@@ -12,7 +12,8 @@ WARNING and :func:`agent_isolation_report` records for the session report.
 
 Isolation is required in a hosted run (its entry calls :func:`require_agent_isolation` once at start-up, which marks
 the process) and, for a specialist, wherever ``HYPERLOOM_SPECIALIST_USER`` is set. An agent sandbox's commands
-(:func:`choose_sandbox_isolation`) never run as an account, so only a hosted run requires theirs.
+(:func:`choose_sandbox_isolation`) never run as an account, so only a hosted run requires theirs, and so do a local
+test sandbox's processes no account was named for (:func:`choose_test_isolation`).
 
 A hosted run launches only its hosting layer's bubblewrap, by the path its entry names, never one found on ``PATH``
 (the framework image may carry its own, possibly setuid); a local run uses the ``bwrap`` on ``PATH``, and the probe
@@ -50,6 +51,7 @@ __all__ = [
     "RAY_ACTOR_PATH",
     "REFUSED",
     "SANDBOX_ACCOUNT",
+    "TEST_ACCOUNT",
     "AccountIsolation",
     "AgentIsolation",
     "BwrapIsolation",
@@ -61,6 +63,7 @@ __all__ = [
     "bwrap_isolation",
     "choose_agent_isolation",
     "choose_sandbox_isolation",
+    "choose_test_isolation",
     "isolation_required",
     "require_agent_isolation",
 ]
@@ -71,6 +74,8 @@ log = logging.getLogger(__name__)
 RAY_ACTOR_PATH = "the Ray GPU actor path cannot run the specialist as another user"
 #: The account tier's reason for an agent sandbox, whose commands run as the app's own account.
 SANDBOX_ACCOUNT = "an agent sandbox runs its commands as the app's own account"
+#: The account tier's reason for a local test sandbox whose provider names no account for its processes.
+TEST_ACCOUNT = "a test sandbox runs as the app's own account where its provider names none for it"
 #: The bubblewrap tier's reason in a hosted run whose entry named no hosting layer bubblewrap.
 NO_LAYER_BWRAP = "bubblewrap: a hosted run launches agents only with its hosting layer's bubblewrap, and none was named"
 
@@ -296,6 +301,16 @@ def choose_sandbox_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolati
         IsolationRefused: In a hosted run, where bubblewrap cannot run a sandbox.
     """
     return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False, probe=probe)
+
+
+def choose_test_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolation | NoIsolation:
+    """How to launch the processes of a local test sandbox no account was named for (the server a branch's patches
+    run in): bubblewrap, else unconfined, which only a hosted run refuses.
+
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox a test.
+    """
+    return _unaccounted(TEST_ACCOUNT, required=_STATE.hosted, warn=False, probe=probe)
 
 
 def bwrap_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolation | None:
