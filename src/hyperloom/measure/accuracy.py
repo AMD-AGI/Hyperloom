@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The accuracy values of the round that evaluated: an inference_suite run_dir's from its ``report.json``, a Magpie
-round's from the ``results*.json`` lm-eval wrote for it.
+"""The accuracy values of the round that evaluated: an inference_suite run_dir's from its ``report.json``, an archived v1
+Magpie round's from the ``results*.json`` lm-eval wrote for it.
 
 Only the directory of the round that evaluated is read: the evaluation round a graded test runs after its measured
 bench on a held server, which is its one evaluation, or else the measured round. When ``run_grid`` itself discards a
