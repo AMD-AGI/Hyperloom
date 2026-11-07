@@ -131,6 +131,12 @@ def server(monkeypatch) -> _Server:
     return _Server(monkeypatch)
 
 
+@pytest.fixture
+def unheld(monkeypatch) -> _Server:
+    """A point whose server the lifecycle cannot hold: the test is one ``run_grid`` call."""
+    return _Server(monkeypatch, eligible=False)
+
+
 def _run(call: TestCall):
     return LocalMeasurementBackend().run_test(call)
 
@@ -145,7 +151,7 @@ def _own_port(config: dict[str, Any]) -> int:
 # --- single-point test --------------------------------------------------------------------------------------------
 
 
-def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, tmp_path):
+def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, unheld, tmp_path):
     call = _call(tmp_path, result_dir="/res", session_deadline_sec=123.0, serving_lease="lease")
 
     outcome = _run(call)
@@ -169,7 +175,7 @@ def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, tmp_pat
 
 
 @pytest.mark.parametrize(("plan", "expected"), [(None, None), (0, False), (1, True)])
-def test_the_warmup_plan_reaches_run_grid_as_it_was_stated(grid, tmp_path, plan, expected):
+def test_the_warmup_plan_reaches_run_grid_as_it_was_stated(grid, unheld, tmp_path, plan, expected):
     _run(_call(tmp_path, rounds=RoundPlan(warmup_rounds=plan)))
 
     assert grid.calls[0]["launch"].warmup_before_measure is expected
@@ -199,7 +205,7 @@ def test_a_point_that_run_grid_did_not_warn_about_carries_none(grid, tmp_path):
     assert [r.nonfatal_warnings for r in outcome.rounds] == [()]
 
 
-def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(grid, tmp_path):
+def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(grid, unheld, tmp_path):
     result = grid.result("test", returncode=0)
     (Path(result.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
     grid.answers["test"] = result
@@ -217,7 +223,7 @@ def _lm_eval_results(directory: Path, score: float) -> None:
     (directory / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
 
 
-def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(grid, tmp_path):
+def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(grid, unheld, tmp_path):
     result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
     workspace = Path(result.workspace)
     _lm_eval_results(workspace / "eval_output", 0.64)
@@ -232,7 +238,7 @@ def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(g
     assert by_phase["warmup"] == by_phase["measure"] == ()
 
 
-def test_the_accuracy_round_carries_the_version_lm_eval_reported(grid, tmp_path):
+def test_the_accuracy_round_carries_the_version_lm_eval_reported(grid, unheld, tmp_path):
     result = grid.result("test")
     workspace = Path(result.workspace)
     workspace.joinpath("eval_output").mkdir(parents=True, exist_ok=True)
@@ -1263,7 +1269,7 @@ def test_a_profile_whose_patch_cannot_be_laid_in_the_rebuilt_framework_runs_and_
     ]
 
 
-def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, tmp_path, installed_framework):
+def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, unheld, tmp_path, installed_framework):
     from hyperloom.contracts.recipe import RecipeDelta
     from hyperloom.measure.compile import LocalBlobStore, compile_environment
     from hyperloom.measure.tests._recipes import IMAGE, recipe_with
