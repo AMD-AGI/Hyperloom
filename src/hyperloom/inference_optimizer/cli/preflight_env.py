@@ -572,13 +572,14 @@ def _read_kernel_agent_env(env_path: Path) -> str:
 def _kernel_agent_env_text(env_path: Path) -> str:
     """``_read_kernel_agent_env``, exiting 2 with why when the file cannot be read."""
     try:
-        return _read_kernel_agent_env(env_path)
+        text = _read_kernel_agent_env(env_path)
     except OSError as exc:
         print(
             f"Preflight: ERROR — failed to read {env_path}: {exc}",
             file=sys.stderr,
         )
         sys.exit(2)
+    return text
 
 
 def _dotenv_not_private(env_file: Path) -> str | None:
