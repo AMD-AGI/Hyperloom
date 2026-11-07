@@ -49,4 +49,4 @@ rows:
     gfx: [gfx942, gfx950]
     args: [--trust-remote-code]
     env: {}
-    origin: Hyperloom assets/configs/baseline_atom.yaml:50 (EXTRA_ATOM_ARGS); Magpie atom_mi3*.sh export no server env
+    origin: Hyperloom assets/configs/baseline_atom.yaml:23 (EXTRA_ATOM_ARGS); Magpie atom_mi3*.sh export no server env
