@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint
 import functools
 import logging
 import os
@@ -98,7 +98,7 @@ from ._ray_serving import maybe_serving_lease
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
 from ._launch_restatement import Launch, config_envs, launch_change, observed_launch_after, read_launch
-from ._server_argv import ConfigUnreadable, config_server_argv
+from ._server_argv import ConfigUnreadable, config_point, config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -183,14 +183,10 @@ def _variant_fingerprint(variant: Any) -> str:
 
 
 def _keep_uses_effective_args(
-    benchmark: dict[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
+    agentx: bool, base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
 ) -> bool:
     """Native KEEP edits remain relative to the verified recipe unless explicitly replaced."""
-    return (
-        base_mode == "replace"
-        or variant_mode == "replace"
-        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
-    )
+    return base_mode == "replace" or variant_mode == "replace" or (not agentx and bool(remove_args or unset_envs))
 
 
 def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
@@ -502,14 +498,11 @@ def _materialized_round_config(
         raise _RoundRefused("framework_script_mismatch", str(exc)) from exc
 
 
-def _framework_of(config_path: Path) -> tuple[str, dict[str, Any]]:
+def _round_point(config_path: Path) -> BenchmarkPoint:
     try:
-        with config_path.open(encoding="utf-8") as handle:
-            bench = (yaml.safe_load(handle) or {}).get("benchmark") or {}
-    except (OSError, yaml.YAMLError) as exc:
-        log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
-        return "", {}
-    return str(bench.get("framework") or "").lower(), bench
+        return config_point(config_path)
+    except ConfigUnreadable as exc:
+        raise _RoundRefused("unreadable_config", str(exc)) from exc
 
 
 def _anchor_the_params(params: dict[str, Any], ss: Any) -> None:
@@ -725,9 +718,9 @@ class _ExploreRound:
         grading = getattr(self.ss, "grading", None)
         self.config_path = _materialized_round_config(params, output_root, self.target, grading)
         _anchor_the_params(params, self.ss)
-        self.framework, bench = _framework_of(self.config_path)
-        self.bench = bench
-        self.yaml_envs = bench.get("envs") or {}
+        self.point = _round_point(self.config_path)
+        self.framework = self.point.framework.lower()
+        self.yaml_envs = dict(self.point.envs)
         self.base_args = str(params.get("base_extra_args") or "").strip()
         self.base_envs = dict(params.get("base_extra_envs") or {})
         self.base_remove_args = to_str_list(params.get("base_remove_args"))
@@ -1484,7 +1477,7 @@ class _ExploreRound:
         if run_gv.unset_envs:
             effective["unset_envs"] = list(run_gv.unset_envs)
         persist = _keep_uses_effective_args(
-            self.bench, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs
+            self.point.agentx, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs
         )
         if persist:
             effective["args_mode"] = "replace"
