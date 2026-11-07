@@ -56,6 +56,12 @@ from inference_suite.contracts.config import (
 )
 
 from inference_suite.contracts.layout import ReadyStamp, RunDirError, RunLayout, format_ready_stamp, parse_ready_stamp
+from inference_suite.contracts.normalised import (
+    NORMALISED_SCHEMA,
+    NormalisedError,
+    NormalisedManifest,
+    PackageIdentity,
+)
 from inference_suite.contracts.report import (
     AGENTX_ERROR_RATE_DEFINITION,
     FIXED_METRIC_KEYS,
@@ -91,6 +97,7 @@ __all__ = [
     "DEFAULT_PRE_READY_SILENCE_SEC",
     "FIXED_METRIC_KEYS",
     "GPU_METRIC_KEYS",
+    "NORMALISED_SCHEMA",
     "REPORT_KEYS",
     "REPORT_SCHEMA",
     "AgentxResult",
@@ -127,6 +134,9 @@ __all__ = [
     "LogRange",
     "MetricStats",
     "MlperfResult",
+    "NormalisedError",
+    "NormalisedManifest",
+    "PackageIdentity",
     "PointAlternative",
     "ProbeOutcome",
     "ProfileConfig",
