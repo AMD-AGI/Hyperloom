@@ -365,8 +365,11 @@ class _Round:
         launch = replace(launch, framework=held)
         try:
             refusal = parser_check.check(launch, python, env)
-        except (parser_check.ParserCheckError, FrameworkProbeError) as exc:
+        except parser_check.ParserCheckError as exc:
             return Stop(FailedStep.FLAG_UNKNOWN, str(exc))
+        except FrameworkProbeError as exc:
+            # The interpreter could not run its own parser, so no flag was judged; the install is what failed.
+            return Stop(FailedStep.FRAMEWORK_VERSION_UNKNOWN, str(exc))
         if refusal is None:
             return launch
         source = "an unnamed" if refusal.source is None else f"the {refusal.source.value}"
