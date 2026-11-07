@@ -280,3 +280,18 @@ def test_round_times_and_digests_are_checked() -> None:
         _report(ended_unix=999.0)
     with pytest.raises(ReportError, match="launch digest"):
         _report(launch_digest="a" * 64)
+
+
+@pytest.mark.parametrize(
+    ("step", "load_measured", "status"),
+    [
+        (None, False, RunStatus.COMPLETED),
+        (FailedStep.CANCELLED, True, RunStatus.STOPPED),
+        (FailedStep.EVAL_FAILED, True, RunStatus.PARTIAL),
+        (FailedStep.CLIENT_FAILED, False, RunStatus.FAILED),
+    ],
+)
+def test_run_status_follows_the_failed_step_and_whether_the_load_measured(
+    step: FailedStep | None, load_measured: bool, status: RunStatus
+) -> None:
+    assert RunStatus.of(step, load_measured) is status
