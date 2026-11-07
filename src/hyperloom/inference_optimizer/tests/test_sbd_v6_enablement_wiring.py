@@ -27,8 +27,8 @@ from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
+    ACCURACY_DEFINITION_DIGEST_KEY,
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
-    BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
     BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
@@ -529,7 +529,7 @@ def test_the_eval_writeback_opens_the_lane_with_what_it_measured(_bound_session)
             BASELINE_EVAL_FAILURE_KIND_KEY: "accuracy_below_floor",
             BASELINE_EVAL_OBSERVED_ACCURACY_KEY: 0.21,
             BASELINE_EVAL_ACCURACY_FLOOR_KEY: 0.5,
-            BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY: "fp-abc",
+            ACCURACY_DEFINITION_DIGEST_KEY: "sha256:abc",
             BASELINE_EVAL_EVIDENCE_KEY: "gsm8k exact_match 0.21",
             "accuracy_task": "gsm8k",
             "accuracy_metric": "exact_match",
@@ -544,7 +544,7 @@ def test_the_eval_writeback_opens_the_lane_with_what_it_measured(_bound_session)
     assert trigger["observed_accuracy"] == 0.21
     assert trigger["accuracy_floor"] == 0.5
     assert trigger["observed_task"] == "gsm8k"
-    assert trigger["eval_contract_fingerprint"] == "fp-abc"
+    assert trigger["eval_definition_digest"] == "sha256:abc"
     assert trigger["probe_config_path"] == "/s/runs/baseline/materialized.yaml"
 
 

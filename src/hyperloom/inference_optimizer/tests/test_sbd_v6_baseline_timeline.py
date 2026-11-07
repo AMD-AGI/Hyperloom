@@ -912,7 +912,7 @@ def _eval_failed(**overrides: Any) -> dict[str, Any]:
         baseline_eval_observed_accuracy=0.12,
         baseline_eval_accuracy_floor=0.5,
         baseline_eval_evidence="lm-eval scored 0.12 on gsm8k",
-        baseline_eval_contract_fingerprint="abc123def456",
+        accuracy_definition_digest="sha256:abc123def456",
         accuracy=0.12,
         accuracy_task="gsm8k",
         accuracy_metric="exact_match,strict-match",
@@ -935,7 +935,7 @@ def test_an_eval_rooted_failure_projects_a_rich_eval_failure_block(tmp_path: Pat
     assert eval_failure["kind"] == "accuracy_below_floor"
     assert eval_failure["observed_accuracy"] == pytest.approx(0.12)
     assert eval_failure["accuracy_floor"] == pytest.approx(0.5)
-    assert eval_failure["contract_fingerprint"] == "abc123def456"
+    assert eval_failure["definition_digest"] == "sha256:abc123def456"
     assert eval_failure["accuracy_task"] == "gsm8k"
     assert eval_failure["accuracy_metric"] == "exact_match,strict-match"
     anchoring = _events(tmp_path)[0]["ext"]["anchoring_eval"]

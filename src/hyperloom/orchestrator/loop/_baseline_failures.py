@@ -147,7 +147,7 @@ class BaselineFailureMixin:
                 accuracy_floor=state.enablement.accuracy_floor,
                 observed_task=state.enablement.observed_task,
                 observed_metric=state.enablement.observed_metric,
-                eval_contract_fingerprint=state.enablement.eval_contract_fingerprint,
+                eval_definition_digest=state.enablement.eval_definition_digest,
                 probe_config_path=state.enablement.probe_config_path,
             ),
         )

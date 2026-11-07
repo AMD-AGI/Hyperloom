@@ -89,7 +89,7 @@ _KEY_BASELINE_EVAL_FAILURE_KIND = "baseline_eval_failure_kind"
 _KEY_BASELINE_EVAL_OBSERVED_ACCURACY = "baseline_eval_observed_accuracy"
 _KEY_BASELINE_EVAL_ACCURACY_FLOOR = "baseline_eval_accuracy_floor"
 _KEY_BASELINE_EVAL_EVIDENCE = "baseline_eval_evidence"
-_KEY_BASELINE_EVAL_CONTRACT_FINGERPRINT = "baseline_eval_contract_fingerprint"
+_KEY_ACCURACY_DEFINITION_DIGEST = "accuracy_definition_digest"
 _DEFAULT_EVAL_ACCURACY_FLOOR = 0.5
 
 # Executor warnings that mean the accuracy eval did not produce a usable reference.
@@ -354,7 +354,7 @@ def _eval_failure(result: Mapping[str, Any]) -> dict[str, Any] | None:
         "kind": _eval_failure_kind(result, observed_accuracy=observed),
         "observed_accuracy": _float_or_none(observed),
         "accuracy_floor": floor,
-        "contract_fingerprint": str(result.get(_KEY_BASELINE_EVAL_CONTRACT_FINGERPRINT) or ""),
+        "definition_digest": str(result.get(_KEY_ACCURACY_DEFINITION_DIGEST) or ""),
         "evidence": _clip(result.get(_KEY_BASELINE_EVAL_EVIDENCE) or "", 2000),
         "accuracy_task": str(result.get("accuracy_task") or ""),
         "accuracy_metric": str(result.get("accuracy_metric") or ""),
