@@ -93,3 +93,25 @@ def test_every_classified_terminal_is_one_the_state_machine_can_actually_write()
         sr.SUCCESS_STOP_REASONS | sr.ABORTED_STOP_REASONS | sr.INFRASTRUCTURE_STOP_REASONS | sr.MODEL_GATE_STOP_REASONS
     )
     assert not (classified - STOP_REASON_VOCAB)
+
+
+def test_a_retired_inferencex_checkout_stop_still_reads_from_an_archived_report():
+    """No module sets the stop any more; an archived report that ended on it still validates and is explained."""
+    from pathlib import Path
+
+    from hyperloom.orchestrator.actions import stop_reason_explanations
+
+    reason = sr.INFERENCEX_CHECKOUT_MISSING_STOP_REASON
+    assert sr.is_valid_stop_reason(reason)
+    assert stop_reason_explanations.STOP_REASON_EXPLANATIONS[reason]
+    assert sr.outcome_status(reason, 1.0) == "failed"
+
+    src = Path(sr.__file__).resolve().parents[2]
+    readers = {Path(sr.__file__).resolve(), Path(stop_reason_explanations.__file__).resolve()}
+    mentions = {
+        path
+        for path in src.rglob("*.py")
+        if "tests" not in path.parts
+        and ("INFERENCEX_CHECKOUT_MISSING_STOP_REASON" in (text := path.read_text(encoding="utf-8")) or reason in text)
+    }
+    assert mentions == readers

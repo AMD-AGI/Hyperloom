@@ -8,6 +8,7 @@ from __future__ import annotations
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     AGENTX_PREFLIGHT_STOP_REASON,
     BACKEND_UNHEALTHY_STOP_REASON,
+    INFERENCEX_CHECKOUT_MISSING_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
 from ..measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
@@ -68,9 +69,9 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "Warm replay rollback could not restore every Recipe/Kernel mutation; "
         "the run stopped to avoid continuing from an uncertain code state."
     ),
-    "active_inferencex_checkout_missing": (
-        "The session-authoritative InferenceX checkout is missing during "
-        "resume; the run stopped instead of falling back to a different tree."
+    INFERENCEX_CHECKOUT_MISSING_STOP_REASON: (
+        "The session-authoritative InferenceX checkout was missing during resume; the run stopped instead of "
+        "falling back to a different tree. Only sessions from before the benchmark client was pinned end this way."
     ),
     # Search / phase plateaus and completions.
     "sweep_done": "SWEEP finished the concurrency ladder.",
