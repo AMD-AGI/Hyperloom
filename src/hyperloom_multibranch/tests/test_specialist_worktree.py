@@ -319,9 +319,8 @@ def wheel(tmp_path, monkeypatch):
         f"Metadata-Version: 2.4\nName: vllm\nVersion: {version}\nProject-URL: Homepage, {VLLM}\n"
         "Project-URL: Slack, https://slack.vllm.ai/\n"
     )
-    worktree_module._wheel_upstream.cache_clear()
-    yield PackageBase("vllm", site / "vllm", "vllm", version)
-    worktree_module._wheel_upstream.cache_clear()
+    monkeypatch.setattr(worktree_module, "_RESOLVED", {})
+    return PackageBase("vllm", site / "vllm", "vllm", version)
 
 
 def _image(monkeypatch, ref):
@@ -368,6 +367,45 @@ def test_a_resolved_commit_the_version_does_not_name_is_not_taken(monkeypatch, w
     _fetched(monkeypatch, "From " + "e" * 40 + " Mon Sep 17 00:00:00 2001\n")
 
     assert installed_upstream(wheel) is None
+
+
+class _Reply:
+    def __init__(self, line: bytes | None = None) -> None:
+        self._line = line
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def readline(self, _limit: int) -> bytes:
+        if self._line is None:
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return self._line
+
+
+def test_a_wheel_s_upstream_github_failed_to_resolve_once_is_looked_up_again(monkeypatch, wheel):
+    monkeypatch.delenv("HYPERLOOM_ACTIVE_IMAGE_REF", raising=False)
+    asked = []
+
+    def flaky(url, timeout):
+        asked.append(url)
+        if len(asked) == 1:
+            raise worktree_module.urllib.error.URLError("temporary failure in name resolution")
+        return _Reply(f"From {NIGHTLY} Mon Sep 17 00:00:00 2001\n".encode())
+
+    monkeypatch.setattr(worktree_module.urllib.request, "urlopen", flaky)
+
+    assert installed_upstream(wheel) is None
+    assert installed_upstream(wheel) == installed_upstream(wheel) == Upstream(VLLM, NIGHTLY)
+    assert len(asked) == 2
+
+
+def test_a_patch_whose_connection_drops_while_its_body_is_read_is_unread(monkeypatch):
+    monkeypatch.setattr(worktree_module.urllib.request, "urlopen", lambda url, timeout: _Reply())
+
+    assert worktree_module._patch_head(f"{VLLM}/commit/dd4e40142.patch") is None
 
 
 def test_a_wheel_neither_the_image_nor_its_repository_resolves_names_no_upstream(monkeypatch, wheel):
