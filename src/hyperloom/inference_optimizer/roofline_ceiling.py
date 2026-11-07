@@ -12,8 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
+import yaml
+
 from hyperloom_common.checkpoint_quant import WeightDeclaration, weight_declarations
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.model_paths import resolve_local_model_dir
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
@@ -166,33 +169,26 @@ class RuntimeWorkload:
     server_args: str
 
 
-def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
-    """Read ``benchmark`` from the materialized yaml of the accepted baseline anchor.
+#: What the roofline reads when there is no accepted baseline point: every field falls back to ``state``.
+_NO_BASELINE_POINT = BenchmarkPoint.from_document({"benchmark": {}})
+
+
+def _baseline_point(state: Any) -> BenchmarkPoint:
+    """The materialized point of the accepted baseline anchor.
 
     ``last_baseline`` is the latest attempt, which may be a rejected re-baseline or, inside promotion, the
     attempt before the one being promoted; ``baseline_config_path`` is set when an anchor is accepted.
     """
     cfg_path = str(getattr(state, "baseline_config_path", "") or "")
     if not cfg_path:
-        return {}
-    import yaml as _yaml  # type: ignore[reportMissingModuleSource]
-
+        return _NO_BASELINE_POINT
     try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = _yaml.safe_load(f) or {}
-        benchmark = cfg.get("benchmark") if isinstance(cfg, dict) else None
-        return benchmark if isinstance(benchmark, dict) else {}
-    except (OSError, ValueError, _yaml.YAMLError):  # an unreadable or malformed config falls back to env args
-        return {}
+        return read_benchmark_point(Path(cfg_path))
+    except (OSError, ValueError, yaml.YAMLError):  # an unreadable or malformed config falls back to state
+        return _NO_BASELINE_POINT
 
 
-def _benchmark_envs(benchmark: dict[str, Any]) -> dict[str, Any]:
-    """Return the ``envs`` mapping from a benchmark record."""
-    envs = benchmark.get("envs") or {}
-    return envs if isinstance(envs, dict) else {}
-
-
-def _env_int(envs: dict[str, Any], key: str) -> int:
+def _env_int(envs: Mapping[str, Any], key: str) -> int:
     """Read a positive integer from an env mapping."""
     raw = envs.get(key)
     if raw is None:
@@ -204,7 +200,7 @@ def _env_int(envs: dict[str, Any], key: str) -> int:
         return 0
 
 
-def _server_args_from_envs(envs: dict[str, Any]) -> str:
+def _server_args_from_envs(envs: Mapping[str, Any]) -> str:
     """Assemble server CLI args from recognized env keys."""
     parts = [
         str(envs[k]).strip() for k in _RUNTIME_SERVER_ARG_ENV_KEYS if isinstance(envs.get(k), str) and envs[k].strip()
@@ -214,7 +210,7 @@ def _server_args_from_envs(envs: dict[str, Any]) -> str:
 
 def read_baseline_server_args(state: Any) -> str:
     """Read the runtime server args from the materialized baseline yaml."""
-    return _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
+    return _server_args_from_envs(_baseline_point(state).envs)
 
 
 def _server_args_env_override(entry: Any) -> str:
@@ -260,11 +256,9 @@ def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
     return base_args
 
 
-def _runtime_gpu_type(state: Any, benchmark: dict[str, Any]) -> str:
+def _runtime_gpu_type(state: Any, point: BenchmarkPoint) -> str:
     """Resolve real hardware for roofline; runner_type is only script routing."""
-    return str(
-        getattr(state, "gpu_type", "") or os.environ.get("TARGET_GPU_TYPE", "") or benchmark.get("runner_type") or ""
-    )
+    return str(getattr(state, "gpu_type", "") or os.environ.get("TARGET_GPU_TYPE", "") or point.runner_type)
 
 
 def resolve_runtime_workload(
@@ -273,8 +267,8 @@ def resolve_runtime_workload(
     arm: str | None = None,
 ) -> RuntimeWorkload:
     """Resolve runtime workload fields from baseline yaml plus overlay args."""
-    benchmark = _read_baseline_yaml_benchmark(state)
-    envs = _benchmark_envs(benchmark)
+    point = _baseline_point(state)
+    envs = point.envs
 
     def _state_int(name: str) -> int:
         """Read a positive integer attribute from ``state``."""
@@ -285,10 +279,10 @@ def resolve_runtime_workload(
             return 0
 
     return RuntimeWorkload(
-        model_path=str(benchmark.get("model") or getattr(state, "model_path", "") or ""),
-        gpu_type=_runtime_gpu_type(state, benchmark),
-        precision=str(benchmark.get("precision") or getattr(state, "precision", "") or ""),
-        framework=str(benchmark.get("framework") or getattr(state, "framework", "") or ""),
+        model_path=str(point.model or getattr(state, "model_path", "") or ""),
+        gpu_type=_runtime_gpu_type(state, point),
+        precision=str(point.precision or getattr(state, "precision", "") or ""),
+        framework=str(point.framework or getattr(state, "framework", "") or ""),
         tp=_env_int(envs, "TP") or _state_int("tp"),
         concurrency=_env_int(envs, "CONC") or _state_int("conc") or 1,
         isl=_env_int(envs, "ISL") or _state_int("isl"),
@@ -788,13 +782,13 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 
 def _read_diffusion_num_steps(state: Any) -> int:
     """Read the denoising step count from the baseline yaml."""
-    return _env_int(_benchmark_envs(_read_baseline_yaml_benchmark(state)), "XDIT_NUM_STEPS")
+    return _env_int(_baseline_point(state).envs, "XDIT_NUM_STEPS")
 
 
 def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
     """Read the image/frame resolution from the baseline yaml."""
     try:
-        envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
+        envs = _baseline_point(state).envs
         return _env_int(envs, "XDIT_HEIGHT"), _env_int(envs, "XDIT_WIDTH")
     except (AttributeError, TypeError, ValueError):
         return 0, 0

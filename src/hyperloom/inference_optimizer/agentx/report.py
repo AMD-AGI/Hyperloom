@@ -12,8 +12,7 @@ from pathlib import Path
 
 from typing import Any
 
-import yaml
-
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.common.launch_log_evidence import (
     engine_adjusted_settings_from_log,
     observed_server_config_from_log,
@@ -80,16 +79,16 @@ def native_launch_evidence(
     measurement: dict[str, Any], config_path: Path, *, actual_server_log: str | None = None
 ) -> dict[str, Any]:
     """Adapt the launch Magpie already verified into the optimizer's evidence shape."""
-    bench = yaml.safe_load(config_path.read_text())["benchmark"]
+    point = read_benchmark_point(config_path)
     launch = measurement["agentx_metrics"]["server_launch"]
     argv = launch["effective_argv"]
     first_option = next((index for index, token in enumerate(argv) if token.startswith("--")), len(argv))
     flags = shlex.join(argv[first_option:])
     env = {name: value for name, value in launch["effective_env"].items() if value is not None}
-    model = str(bench.get("envs", {}).get("MODEL_PATH") or bench["model"])
+    model = str(point.envs.get("MODEL_PATH") or point.model)
     digest = operand_digest(model)
     recipe = measurement["agentx_metrics"]["recipe"]
-    framework = bench["framework"]
+    framework = point.framework
     return {
         "schema_version": 1,
         "materialized_config_path": str(config_path),
