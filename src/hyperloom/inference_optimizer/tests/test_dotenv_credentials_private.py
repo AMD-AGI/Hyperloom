@@ -552,6 +552,32 @@ def test_removal_replaces_a_link_and_never_writes_through_it(tmp_path, container
     assert elsewhere.read_bytes() == _EXISTING
 
 
+def test_removal_renames_a_file_written_beside_dotenv(tmp_path, container, monkeypatch):
+    """The kept lines are written in .env's own directory, so the rename over .env is one atomic step on one
+    filesystem: a temporary file elsewhere (TMPDIR) would be copied across, and a reader could see part of it."""
+    checkout, _ = container
+    dotenv = checkout / ".env"
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    record = tmp_path / "mv-args"
+    real_mv = shutil.which("mv")
+    assert real_mv is not None
+    (shim / "mv").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$@" >> {shlex.quote(str(record))}\nexec {shlex.quote(real_mv)} "$@"\n',
+        encoding="utf-8",
+    )
+    (shim / "mv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+
+    assert _remove(dotenv, "ANTHROPIC_AUTH_TOKEN").returncode == 0
+
+    *_, source, target = record.read_text(encoding="utf-8").splitlines()
+    assert target == str(dotenv)
+    assert Path(source).parent == checkout
+    assert Path(source).name.startswith(".env.")
+    assert dotenv.read_bytes() == b"".join(_OTHER_LINES)
+
+
 def test_removal_leaves_a_file_it_cannot_read_apart_untouched(container):
     """A quoted value that never ends hides where the credential lines stop; nothing is written."""
     checkout, _ = container
