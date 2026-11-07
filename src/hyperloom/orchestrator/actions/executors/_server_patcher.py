@@ -7,7 +7,7 @@ version, and where it is laid (:mod:`._patch_laying`).
 vLLM and SGLang get the patch in a copy of the installed package, which the server that profiles imports first
 (:func:`ensure_vllm_patched_for_tracelens`, :func:`ensure_sglang_patched_for_tracelens`), or in a test's farm
 (:func:`lay_tracelens_patch`); their installed trees are never written. xDiT's checkout is still patched in place:
-Magpie's xDiT script starts its process, and where that script imports ``xfuser`` from is not set here.
+the xDiT benchmark script starts its process, and where that script imports ``xfuser`` from is not set here.
 """
 
 from __future__ import annotations
