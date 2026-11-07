@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
     ENV_CONC,
@@ -46,7 +46,6 @@ from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import (
     SCRIPT_FIELD,
     MeasurementSurface,
-    benchmark_envs,
     check_launch_envs,
     check_point,
     check_surface,
@@ -182,22 +181,22 @@ def _canonical_surface(config: Mapping[str, Any], point: Path) -> MeasurementSur
     if under_magpie:
         install_launchers([point])
     surface = extract_surface(config)
-    bench = config.get("benchmark") or {}
+    bench = BenchmarkPoint.from_document(config)
     if under_magpie and _launcher_missing(bench, surface):
         raise PointError(
-            f"the canonical measurement runs {bench['benchmark_script']} from the InferenceX checkout "
-            f"{bench['inferencex_path']}, which has no such file and Magpie has none to put there: a test would report "
+            f"the canonical measurement runs {bench.benchmark_script} from the InferenceX checkout "
+            f"{bench.inferencex_path}, which has no such file and Magpie has none to put there: a test would report "
             "a script hash the canonical surface does not hold. Point MAGPIE_PATH at a Magpie that ships the launcher, "
             "or use a checkout that tracks it"
         )
     return surface
 
 
-def _launcher_missing(bench: Mapping[str, Any], surface: MeasurementSurface) -> bool:
+def _launcher_missing(bench: BenchmarkPoint, surface: MeasurementSurface) -> bool:
     """Whether ``bench`` names a launcher and a checkout it could be put in, and the surface has no hash for it."""
 
-    checkout = bench.get("inferencex_path")
-    placeable = bool(bench.get("benchmark_script") and checkout) and (Path(str(checkout)) / "benchmarks").is_dir()
+    checkout = bench.inferencex_path
+    placeable = bool(bench.benchmark_script and checkout) and (Path(checkout) / "benchmarks").is_dir()
     return placeable and surface.fields.get(SCRIPT_FIELD) is None
 
 
@@ -215,13 +214,11 @@ def launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str |
     ``agentx.launch_overrides``; any other in ``benchmark.envs``.
     """
 
-    benchmark = config.get("benchmark") or {}
-    if is_magpie_agentx(benchmark):
-        overrides = benchmark["agentx"]["launch_overrides"]
-        return overrides.get("env") or {}, " ".join(overrides.get("append_args") or [])
-    present = benchmark_envs(config)
-    spec = framework_registry.FRAMEWORKS.get(str(benchmark.get("framework") or "").lower())
-    return present, None if spec is None else str(present.get(spec.extra_args_env, ""))
+    point = BenchmarkPoint.from_document(config)
+    if point.agentx:
+        return point.agentx_launch.env, " ".join(point.agentx_launch.append_args)
+    spec = framework_registry.FRAMEWORKS.get(point.framework.lower())
+    return point.envs, None if spec is None else str(point.envs.get(spec.extra_args_env, ""))
 
 
 def _check_removals(config: Mapping[str, Any], launch: LaunchConfig) -> None:
@@ -232,10 +229,10 @@ def _check_removals(config: Mapping[str, Any], launch: LaunchConfig) -> None:
     if not launch.remove_args:
         return
     names = ", ".join(launch.remove_args)
-    benchmark = config.get("benchmark") or {}
-    if not is_magpie_agentx(benchmark):
+    point = BenchmarkPoint.from_document(config)
+    if not point.agentx:
         raise PointError(f"only a Magpie AgentX point removes options of the launch it resolves, so {names} would stay")
-    removed = set(benchmark["agentx"]["launch_overrides"].get("remove_args") or ())
+    removed = set(point.agentx_launch.remove_args)
     kept = sorted(name for name in launch.remove_args if name not in removed)
     if kept:
         raise PointError(f"the renderer did not remove launch arguments {', '.join(kept)}")
@@ -358,7 +355,7 @@ def generate_profile_point(
     out_dir.mkdir(parents=True, exist_ok=True)
     level = canonical.primary_concurrency
     pins = {ENV_CONC: str(level), ENV_RUN_EVAL: "false"}
-    reference = benchmark_envs(_reference(canonical, pins))
+    reference = BenchmarkPoint.from_document(_reference(canonical, pins)).envs
     workload = {name: str(reference[name]) for name in _PROFILE_PINNED if reference.get(name) is not None}
     config = _render(
         _profile_canonical(canonical),
