@@ -843,8 +843,8 @@ bubblewrap cannot bind safely (before 0.12, nothing may be bound below the share
 
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
 framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` names `bin/bwrap` in
-the directory `HYPERLOOM_HOST_LAYER` names, which the layer's `start.sh` sets to its own; with the variable unset or
-relative, no launch of the run uses bubblewrap. It checks before its installer or `optimize` runs: where neither tier
+the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it ignored), which the layer's `start.sh` sets to its
+own; with the variable unset, blank or relative, no launch of the run uses bubblewrap. It checks before its installer or `optimize` runs: where neither tier
 works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
 answer in time ends the leg without one, so the host starts it again. Where the account is chosen, it probes the layer's
 bubblewrap too: the Ray GPU actor path never starts a specialist as an account, so where that bubblewrap cannot confine
@@ -1259,7 +1259,7 @@ The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> 
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
 | `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built in a new mode-0700 directory below the container's temporary directory, never on the shared storage, where another account of the group could put a wheel of its own in its place, and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing, and a new container builds the wheel again (a depth-1 fetch of the commit and a `pip wheel` of it). |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
-| `HYPERLOOM_HOST_LAYER` | Set by `start.sh` | The layer's own directory. The entry launches agents under bubblewrap only with its `bin/bwrap`, never one on `PATH`; unset or relative, no launch of the run uses bubblewrap (see [Agent isolation](#agent-isolation)). |
+| `HYPERLOOM_HOST_LAYER` | Set by `start.sh` | The layer's own directory. The entry launches agents under bubblewrap only with its `bin/bwrap`, never one on `PATH`; whitespace around the value is ignored, and unset, blank or relative, no launch of the run uses bubblewrap (see [Agent isolation](#agent-isolation)). |
 
 ### The host's guarantee about containers, and the resume that relies on it
 
