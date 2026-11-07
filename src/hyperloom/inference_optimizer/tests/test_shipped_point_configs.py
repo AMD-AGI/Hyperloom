@@ -13,7 +13,7 @@ import yaml
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, shipped_config_name
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.orchestrator.actions.executors._suite_config import backend_reason
+from hyperloom.orchestrator.actions.executors._suite_config import scriptable_workload
 
 _FRAMEWORKS = ("atom", "sglang", "vllm", "xdit")
 _SERVING = tuple(framework for framework in _FRAMEWORKS if not is_scriptable(framework))
@@ -48,11 +48,6 @@ def test_the_point_reads_as_a_point_of_its_framework(kind, framework):
     assert point.torch_profiler is (kind == "profile")
 
 
-@pytest.mark.parametrize("framework", _SERVING)
-def test_a_serving_baseline_is_a_point_inference_suite_carries(framework):
-    assert backend_reason({"benchmark": _block("baseline", framework)}) is None
-
-
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("framework", _SERVING)
 def test_a_serving_point_leaves_path_to_the_host_environment(kind, framework):
@@ -60,11 +55,12 @@ def test_a_serving_point_leaves_path_to_the_host_environment(kind, framework):
 
 
 @pytest.mark.parametrize("kind", _KINDS)
-def test_the_xdit_point_is_a_scriptable_point(kind):
+def test_the_xdit_point_is_a_scriptable_point_whose_environment_holds_no_threshold(kind):
     block = _block(kind, "xdit")
 
     assert BenchmarkPoint.from_block(block).workload_kind == "scriptable"
-    assert backend_reason({"benchmark": block}) == "the point runs xdit, which serves nothing"
+    workload = scriptable_workload(block, {name: str(value) for name, value in block["envs"].items()})
+    assert "XDIT_HEIGHT" in workload.params and "TP" not in workload.params
 
 
 @pytest.mark.parametrize("framework", _FRAMEWORKS)

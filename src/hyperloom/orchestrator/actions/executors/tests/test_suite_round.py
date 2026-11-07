@@ -36,6 +36,7 @@ from hyperloom.orchestrator.actions.executors._suite_config import (
     inherited_env_names,
     round_lifecycle,
     run_suite_round,
+    session_route,
     suite_route,
 )
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _base, _point
@@ -72,7 +73,7 @@ def _rounds(count: int = 1) -> ScriptedRounds:
 
 
 def test_a_point_of_a_session_with_a_frozen_base_runs_on_the_suite(session: Path, tmp_path: Path) -> None:
-    route = suite_route(session, _write_point(tmp_path / "point.yaml"))
+    route = suite_route(session)
 
     assert route is not None
     assert route.base_path == session / "base_launch.json"
@@ -84,44 +85,13 @@ def test_a_session_without_a_frozen_base_stays_on_the_backend(session: Path, tmp
     unfrozen = tmp_path / "unfrozen"
     unfrozen.mkdir()
 
-    assert suite_route(unfrozen, _write_point(tmp_path / "point.yaml")) is None
-    assert suite_route(None, _write_point(tmp_path / "point.yaml")) is None
+    assert suite_route(unfrozen) is None
+    assert suite_route(None) is None
 
 
-def _serving_points() -> dict[str, dict]:
-    def changed(**bench) -> dict:
-        document = _point("sglang", RUN_EVAL="false")
-        document["benchmark"].update(bench)
-        return document
-
-    profiler = {"torch_profiler": {"enabled": True}}
-    return {
-        "fixed": changed(),
-        "fixed profile": changed(profiler=profiler),
-        "agentx": changed(agentx={"enabled": True}),
-        "agentx string switch": changed(agentx="enable"),
-        "agentx profile": changed(agentx={"enabled": True}, profiler=profiler),
-        "vllm": _point("vllm"),
-        "atom profile": {"benchmark": {**_point("atom")["benchmark"], "profiler": profiler}},
-        "mlperf": changed(benchmark_script="mlperf_agentic_client.sh"),
-    }
-
-
-@pytest.mark.parametrize("name", sorted(_serving_points()))
-def test_every_serving_point_of_a_session_with_a_frozen_base_runs_on_the_suite(session, tmp_path, name) -> None:
-    point = tmp_path / "point.yaml"
-    point.write_text(yaml.safe_dump(_serving_points()[name]), encoding="utf-8")
-
-    assert suite_route(session, point) is not None
-
-
-def test_a_point_that_serves_nothing_stays_on_the_backend(session, tmp_path) -> None:
-    document = _point("sglang")
-    document["benchmark"]["framework"] = "xdit"
-    point = tmp_path / "point.yaml"
-    point.write_text(yaml.safe_dump(document), encoding="utf-8")
-
-    assert suite_route(session, point) is None
+def test_every_point_of_a_session_with_a_frozen_base_runs_on_the_suite(session) -> None:
+    """The route is the session's: no point, scriptable or serving, falls back to the benchmark backend."""
+    assert suite_route(session) == session_route(session)
 
 
 def test_a_client_only_session_runs_external_rounds_against_its_server(session, tmp_path, monkeypatch) -> None:
@@ -129,7 +99,7 @@ def test_a_client_only_session_runs_external_rounds_against_its_server(session, 
     rounds = _rounds()
     monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
     point = _write_point(tmp_path / "slot" / "point.yaml")
-    route = suite_route(session, point)
+    route = suite_route(session)
     assert route is not None and route.server_url == "http://10.0.0.2:30000"
 
     ran = run_suite_round(
@@ -155,10 +125,9 @@ def test_a_lone_round_owns_its_server_and_a_cold_start_pair_shares_one_through_t
 def test_each_round_writes_a_fresh_run_dir_so_a_retry_in_the_same_directory_runs(session, tmp_path, monkeypatch):
     rounds = _rounds(2)
     monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
-    route = suite_route(session, _write_point(tmp_path / "slot" / "point.yaml"))
-    request = SuiteRound(
-        tmp_path / "slot" / "point.yaml", tmp_path / "slot", round_lifecycle(tmp_path, LifecycleMode.OWN)
-    )
+    route = suite_route(session)
+    point = _write_point(tmp_path / "slot" / "point.yaml")
+    request = SuiteRound(point, tmp_path / "slot", round_lifecycle(tmp_path, LifecycleMode.OWN))
 
     first = run_suite_round(route, request, on_poll=lambda: None)
     second = run_suite_round(route, request, on_poll=lambda: None)
@@ -174,9 +143,7 @@ def test_a_discarded_warmup_round_draws_its_prompts_with_the_warmup_seed(session
     point = _write_point(tmp_path / "slot" / "point.yaml")
     lifecycle = round_lifecycle(point.parent / "warmup_round", LifecycleMode.BOOT if warmup else LifecycleMode.OWN)
 
-    run_suite_round(
-        suite_route(session, point), SuiteRound(point, point.parent, lifecycle, warmup), on_poll=lambda: None
-    )
+    run_suite_round(suite_route(session), SuiteRound(point, point.parent, lifecycle, warmup), on_poll=lambda: None)
 
     (config,) = [call.config for call in rounds.calls]
     assert config.fixed.seed == seed
@@ -195,14 +162,14 @@ def test_a_cache_with_nothing_staged_refuses_the_round_as_staging_missing(sessio
     lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
 
     with pytest.raises(SuiteRoundRefused) as refused:
-        run_suite_round(suite_route(session, point), SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
+        run_suite_round(suite_route(session), SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
 
     assert refused.value.error_class == failed_step_error_class(FailedStep.STAGING_MISSING)
 
 
 def test_a_point_that_does_not_translate_refuses_the_round_as_config_invalid(session, tmp_path) -> None:
     point = _write_point(tmp_path / "slot" / "point.yaml")
-    route = suite_route(session, point)
+    route = suite_route(session)
     _write_point(point, TP="4")
     lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
 
@@ -224,7 +191,7 @@ def test_the_actions_cancel_scope_cancels_the_round_and_each_poll_is_heard(sessi
 
     with use_cancel_scope(scope):
         result = run_suite_round(
-            suite_route(session, point), SuiteRound(point, point.parent, lifecycle), on_poll=lambda: polls.append(None)
+            suite_route(session), SuiteRound(point, point.parent, lifecycle), on_poll=lambda: polls.append(None)
         )
 
     assert result.report.failed_step is FailedStep.CANCELLED
@@ -237,7 +204,7 @@ def test_a_point_naming_an_unknown_framework_runs_on_the_suite_and_is_refused_th
     document = yaml.safe_load(point.read_text(encoding="utf-8"))
     document["benchmark"]["framework"] = "tgi"
     point.write_text(yaml.safe_dump(document), encoding="utf-8")
-    route = suite_route(session, point)
+    route = suite_route(session)
     lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
 
     with pytest.raises(SuiteRoundRefused) as refused:
@@ -276,7 +243,7 @@ def test_a_round_trailing_its_checkpoint_is_stopped_and_exits_as_an_early_stop(
     point = _write_point(tmp_path / "slot" / "point.yaml")
 
     ended = run_grid_suite_round(
-        suite_route(session, point),
+        suite_route(session),
         _grid_round(point, AgentxCheckpoint(100.0, enforce=True)),
         env_drop=frozenset(),
         serving_lease=None,
@@ -296,7 +263,7 @@ def test_a_shadow_checkpoint_records_the_ruling_and_lets_the_round_finish(
     point = _write_point(tmp_path / "slot" / "point.yaml")
 
     ended = run_grid_suite_round(
-        suite_route(session, point),
+        suite_route(session),
         _grid_round(point, AgentxCheckpoint(100.0, enforce=False)),
         env_drop=frozenset(),
         serving_lease=None,
@@ -320,7 +287,7 @@ def test_an_earlier_rounds_stop_ruling_does_not_turn_a_cancel_into_an_early_stop
 
     with use_cancel_scope(scope):
         ended = run_grid_suite_round(
-            suite_route(session, point),
+            suite_route(session),
             _grid_round(point, AgentxCheckpoint(100.0, enforce=True)),
             env_drop=frozenset(),
             serving_lease=None,
