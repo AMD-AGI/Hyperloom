@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from hyperloom.common.agentx_workload import MLPERF_CLIENT_SCRIPT
+from inference_suite.load import mlperf_report
 
 _ASSET_FILES = (MLPERF_CLIENT_SCRIPT, "map_mlperf.py")
 
@@ -26,10 +27,10 @@ def agentx_asset_dir() -> Path:
 
 
 def deploy_agentx_assets(benchmarks_dir: str | Path) -> None:
-    """Copy AgentX assets and the ``mapping`` module they import into ``benchmarks_dir`` (idempotent)."""
+    """Copy AgentX assets and the mapping module they import into ``benchmarks_dir`` (idempotent)."""
     src_dir = agentx_asset_dir()
     sources = {name: src_dir / name for name in _ASSET_FILES}
-    sources[_MAPPING_MODULE] = Path(__file__).resolve().with_name("mapping.py")
+    sources[_MAPPING_MODULE] = Path(mlperf_report.__file__).resolve()
     dst_dir = Path(benchmarks_dir)
     dst_dir.mkdir(parents=True, exist_ok=True)
     for name, src in sources.items():
