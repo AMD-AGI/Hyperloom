@@ -30,7 +30,7 @@ from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
-    is_credential_env_name,
+    is_credential_name,
 )
 from hyperloom.measure.compile import BlobError
 from hyperloom.measure.docs import DocumentError, canonical_json
@@ -142,7 +142,7 @@ def _process_env(call: TestCall, ctx: SpecContext) -> dict[str, str]:
     source = os.environ if ctx.process_environ is None else ctx.process_environ
     env = {name: source[name] for name in PROCESS_ENV_WHITELIST if name in source}
     allowed, dropped = filter_untrusted_env_mapping(call.env_overrides, allow_predicate=is_allowed_variant_env_key)
-    secret = sorted(name for name in allowed if is_credential_env_name(name))
+    secret = sorted(name for name in allowed if is_credential_name(name))
     if dropped or secret:
         raise SpecRefused("env_override_refused", f"env_overrides may not set {sorted(dropped) + secret}")
     env.update(allowed)

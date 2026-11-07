@@ -14,7 +14,7 @@ import dataclasses
 import hashlib
 from collections.abc import Mapping, Sequence
 
-from hyperloom.common.env_safety import credential_arg_indices, is_credential_env_name, redact_secret_values
+from hyperloom.common.env_safety import credential_arg_indices, is_credential_name, redact_secret_values
 from inference_suite.contracts import BaseLaunch, Redacted
 
 
@@ -22,7 +22,7 @@ def redact_credential_env(base: BaseLaunch) -> BaseLaunch:
     """``base`` with the value of every credential-named env replaced by its sha256."""
     env = {
         name: Redacted(hashlib.sha256(value.encode()).hexdigest())
-        if isinstance(value, str) and is_credential_env_name(name)
+        if isinstance(value, str) and is_credential_name(name)
         else value
         for name, value in base.env.items()
     }
@@ -33,7 +33,7 @@ def _clear_env(what: str, env: Mapping[str, object]) -> list[str]:
     return [
         f"{what} {name}"
         for name, value in env.items()
-        if isinstance(value, str) and (is_credential_env_name(name) or redact_secret_values(value) != value)
+        if isinstance(value, str) and (is_credential_name(name) or redact_secret_values(value) != value)
     ]
 
 

@@ -10,7 +10,7 @@ from dataclasses import replace
 
 import pytest
 
-from hyperloom.common.env_safety import credential_arg_indices, is_credential_env_name
+from hyperloom.common.env_safety import credential_arg_indices, is_credential_name
 from hyperloom.common.launch_credentials import credentials_in_the_clear, redact_credential_env
 from hyperloom.measure.tests.bundle_factory import base_launch
 from inference_suite.contracts import GoldenAcceptance, GoldenCurve, Redacted
@@ -27,8 +27,11 @@ PROBE_ENV_NAMES = (
     "HF_TOKEN",
 )
 
+# Named a credential by the old substring rule too, so a rule that drops them would let a base freeze them in the clear.
+RUN_TOGETHER_CREDENTIAL_NAMES = ("HFTOKEN", "GITHUBTOKEN", "SERVICE_TOKEN_CACHE", "GITHUB_TOKEN_BACKUP", "DB_KEY")
 
-@pytest.mark.parametrize("name", PROBE_ENV_NAMES)
+
+@pytest.mark.parametrize("name", PROBE_ENV_NAMES + RUN_TOGETHER_CREDENTIAL_NAMES)
 def test_a_credential_named_env_is_frozen_as_its_sha256_and_never_reported_in_the_clear(name):
     base = redact_credential_env(replace(base_launch(), env={**base_launch().env, name: "plain-value"}))
 
@@ -47,10 +50,21 @@ def test_a_credential_named_env_is_frozen_as_its_sha256_and_never_reported_in_th
         "SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS",
         "SGLANG_TOKEN_REUSE",
         "NCCL_IB_HCA",
+        "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD",
+        "AITER_PER_TOKEN_2",
     ],
 )
 def test_a_tuning_knob_is_not_a_credential(name):
-    assert not is_credential_env_name(name)
+    assert not is_credential_name(name)
+
+
+@pytest.mark.parametrize("name", PROBE_ENV_NAMES + RUN_TOGETHER_CREDENTIAL_NAMES)
+def test_an_env_and_a_flag_of_the_same_name_are_both_credentials(name):
+    flag = "--" + name.lower().replace("_", "-")
+
+    assert is_credential_name(name) and is_credential_name(flag)
+    assert credential_arg_indices((flag, "opaque")) == [1]
+    assert credential_arg_indices((f"{flag}=opaque",)) == [0]
 
 
 @pytest.mark.parametrize(
@@ -65,6 +79,11 @@ def test_a_tuning_knob_is_not_a_credential(name):
         (("--admin-api-key=X", "--tp", "8"), [0]),
         (("python3", "-m", "sglang.launch_server", "--api-key=sk-" + "q" * 20), [3]),
         (("--trust", "Bearer " + "q" * 20), [1]),
+        (("--hf-auth", "opaque"), [1]),
+        (("--auth", "x"), [1]),
+        (("--apiKey=X",), [0]),
+        (("--accessKey", "x"), [1]),
+        (("--hfToken", "x"), [1]),
     ],
 )
 def test_a_credential_flag_value_is_found_in_both_forms(argv, indices):
@@ -80,6 +99,15 @@ def test_a_credential_flag_value_is_found_in_both_forms(argv, indices):
         ("--api-key", "--tp", "8"),
         ("--tokenizer", "m"),
         ("--return-tokens-as-token-ids",),
+        ("--long-prefill-token-threshold", "512"),
+        ("--speculative-token-map", "/m/map.pt"),
+        ("--allowed-headers", '["*"]'),
+        ("--bytes-per-token", "4"),
+        ("--returned-token-ids", "1"),
+        ("--sp-min-token-num", "4"),
+        ("--encoder-cudagraph-token-budgets", "4"),
+        ("--suffix-decoding-min-token-prob", "0.1"),
+        ("-", "x"),
     ],
 )
 def test_a_flag_that_carries_no_credential_is_not_found(argv):
