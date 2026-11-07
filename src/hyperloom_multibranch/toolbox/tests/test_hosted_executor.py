@@ -20,6 +20,7 @@ from hyperloom.measure.hosted import HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import TestCall, TestOutcome
+from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom.sandbox.socket import IDEMPOTENCY_KEY, CreateOptions, SandboxGone, SandboxQuotaExceeded
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -457,14 +458,14 @@ def _outcome(rc: int = 0, failure: str | None = None, reason: str | None = None)
 
 
 async def test_a_success_the_journal_does_not_call_verified_is_refused(tmp_path: Path) -> None:
-    executor = HostedExecutor(_Stub(_outcome()), tmp_path)  # type: ignore[arg-type]
+    executor = HostedExecutor(_Stub(_outcome()), tmp_path / "session")  # type: ignore[arg-type]
     with pytest.raises(MeasurementRefused, match="not recorded as a verified bundle"):
         await executor.run(_job(point_yaml(tmp_path)))
 
 
 async def test_every_attempt_carries_the_ten_minute_silence_timeout_under_the_hard_one(tmp_path: Path) -> None:
     backend = _Stub(_outcome(1, FailureClass.UNCLEAR.value, "no_known_signature"))
-    await HostedExecutor(backend, tmp_path).run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
+    await HostedExecutor(backend, tmp_path / "session").run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
     (call,) = backend.calls
     assert (call.silence_timeout_sec, call.timeout_sec) == (600.0, DEFAULT_TEST_TIMEOUT_SEC)
     assert TEST_SILENCE_TIMEOUT_SEC == 600.0
@@ -475,13 +476,13 @@ async def test_an_infrastructure_failure_keeps_the_beginning_of_what_the_runner_
     said = "runner_start_failed: bootstrap.sh or manifest of the cache entry is missing " + "x" * 1900
     outcome = _outcome(1, FailureClass.INFRA.value, "runner_start_failed")
     outcome = replace(outcome, stderr=f"{said} (sandbox sbx-1 on node n)")
-    result = await HostedExecutor(_Stub(outcome), tmp_path).run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
+    result = await HostedExecutor(_Stub(outcome), tmp_path / "session").run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
     assert result.failure_reason == f"{said} (sandbox sbx-1 on node n)"
 
 
 @pytest.mark.parametrize("failure", list(FailureClass), ids=lambda f: f.value)
 async def test_every_failure_class_reaches_the_result(tmp_path: Path, failure: FailureClass) -> None:
-    executor = HostedExecutor(_Stub(_outcome(1, failure.value, "why")), tmp_path)  # type: ignore[arg-type]
+    executor = HostedExecutor(_Stub(_outcome(1, failure.value, "why")), tmp_path / "session")  # type: ignore[arg-type]
     result = await executor.run(_job(point_yaml(tmp_path)))
     assert result.failure_class is failure and result.failure_reason == "why"
     expected = Validity.MEASUREMENT_FAILED if failure is FailureClass.INFRA else Validity.CANDIDATE_FAILED
@@ -489,19 +490,53 @@ async def test_every_failure_class_reaches_the_result(tmp_path: Path, failure: F
 
 
 async def test_a_stop_is_a_cancellation_not_a_result(tmp_path: Path) -> None:
-    executor = HostedExecutor(_Stub(_outcome(-917)), tmp_path)  # type: ignore[arg-type]
+    executor = HostedExecutor(_Stub(_outcome(-917)), tmp_path / "session")  # type: ignore[arg-type]
     with pytest.raises(asyncio.CancelledError):
         await executor.run(_job(point_yaml(tmp_path)))
 
 
 async def test_an_end_with_no_class_and_no_success_is_refused_with_its_reason(tmp_path: Path) -> None:
-    executor = HostedExecutor(_Stub(_outcome(-923)), tmp_path)  # type: ignore[arg-type]
+    executor = HostedExecutor(_Stub(_outcome(-923)), tmp_path / "session")  # type: ignore[arg-type]
     with pytest.raises(MeasurementRefused, match="result_rejected"):
         await executor.run(_job(point_yaml(tmp_path)))
 
 
 async def test_a_job_without_the_accepted_measurement_is_refused(tmp_path: Path) -> None:
-    executor = HostedExecutor(_Stub(_outcome()), tmp_path)  # type: ignore[arg-type]
+    executor = HostedExecutor(_Stub(_outcome()), tmp_path / "session")  # type: ignore[arg-type]
     job = TestJob(req().accepted("b1-000001"), 1, (), 2, 2, {"env": "x"})
     with pytest.raises(MeasurementRefused, match="accepted measurement"):
         await executor.run(job)
+
+
+async def test_every_call_carries_the_sessions_frozen_base_and_the_staging_of_the_tool_cache(tmp_path: Path) -> None:
+    backend = _Stub(_outcome(1, FailureClass.UNCLEAR.value, "no_known_signature"))
+    await HostedExecutor(backend, tmp_path / "session").run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
+    (call,) = backend.calls
+    assert call.session_facts is not None
+    assert (call.session_facts.staging, call.session_facts.base_launch) == (STAGING, base_launch())
+
+
+async def test_a_session_that_froze_no_base_is_refused_before_anything_is_sent(tmp_path: Path) -> None:
+    backend = _Stub(_outcome())
+    with pytest.raises(MeasurementRefused, match="froze no base launch"):
+        await HostedExecutor(backend, tmp_path / "bare").run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
+    assert backend.calls == []
+
+
+async def test_a_tool_cache_without_a_staging_is_refused_before_anything_is_sent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tmp_path / "empty-tools"))
+    backend = _Stub(_outcome())
+    with pytest.raises(MeasurementRefused, match="holds no staging manifest"):
+        await HostedExecutor(backend, tmp_path / "session").run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
+    assert backend.calls == []
+
+
+async def test_the_staging_is_read_once_for_the_session_not_for_every_test(tmp_path: Path) -> None:
+    backend = _Stub(_outcome(1, FailureClass.UNCLEAR.value, "no_known_signature"))
+    executor = HostedExecutor(backend, tmp_path / "session")  # type: ignore[arg-type]
+    await executor.run(_job(point_yaml(tmp_path)))
+    (tmp_path / "inference-suite-tools" / "staging_manifest.json").unlink()
+
+    await executor.run(_job(point_yaml(tmp_path)))
+
+    assert [call.session_facts.staging for call in backend.calls] == [STAGING, STAGING]  # type: ignore[union-attr]
