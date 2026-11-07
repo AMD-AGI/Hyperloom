@@ -34,7 +34,10 @@ def test_reads_every_field_of_a_fixed_point(tmp_path: Path) -> None:
                     "precision": "bf16",
                     "runner_type": "mi355x",
                     "benchmark_script": "vllm_mi300x.sh",
+                    "inferencex_path": "/ix ",
                     "envs": {"TP": 8, "EXTRA_VLLM_ARGS": "--x"},
+                    "profiler": {"torch_profiler": {"enabled": True}},
+                    "server_lifecycle": {"server_ready_timeout_s": 900},
                 }
             },
         )
@@ -46,9 +49,12 @@ def test_reads_every_field_of_a_fixed_point(tmp_path: Path) -> None:
         precision="bf16",
         runner_type="mi355x",
         benchmark_script="vllm_mi300x.sh",
+        inferencex_path="/ix",
         envs={"TP": 8, "EXTRA_VLLM_ARGS": "--x"},
         agentx=False,
         agentx_launch=point.agentx_launch,
+        torch_profiler=True,
+        server_ready_timeout_s=900.0,
     )
     assert dict(point.agentx_launch.env) == {}
     assert point.agentx_launch.executable == ""
@@ -57,13 +63,29 @@ def test_reads_every_field_of_a_fixed_point(tmp_path: Path) -> None:
 def test_absent_fields_read_empty() -> None:
     point = BenchmarkPoint.from_document({"benchmark": {}})
 
-    assert (point.framework, point.model, point.benchmark_script, dict(point.envs), point.agentx) == (
+    assert (point.framework, point.model, point.benchmark_script, point.inferencex_path, dict(point.envs)) == (
+        "",
         "",
         "",
         "",
         {},
-        False,
     )
+    assert (point.agentx, point.torch_profiler, point.server_ready_timeout_s) == (False, False, None)
+    assert (point.agentx_launch.append_args, point.agentx_launch.remove_args) == ((), ())
+
+
+@pytest.mark.parametrize("enabled", ["true", 1, None])
+def test_only_a_true_enabled_turns_the_torch_profiler_on(enabled: object) -> None:
+    document = {"benchmark": {"profiler": {"torch_profiler": {"enabled": enabled}}}}
+
+    assert BenchmarkPoint.from_document(document).torch_profiler is False
+
+
+@pytest.mark.parametrize("carried", ["900", True, None])
+def test_a_ready_timeout_that_is_not_a_number_is_none(carried: object) -> None:
+    document = {"benchmark": {"server_lifecycle": {"server_ready_timeout_s": carried}}}
+
+    assert BenchmarkPoint.from_document(document).server_ready_timeout_s is None
 
 
 @pytest.mark.parametrize(
@@ -76,12 +98,25 @@ def test_agentx_follows_magpie_spelling(agentx: object, enabled: bool) -> None:
 
 def test_agentx_launch_is_read_from_the_overrides() -> None:
     point = BenchmarkPoint.from_document(
-        {"benchmark": {"agentx": {"launch_overrides": {"env": {"A": "1"}, "executable": "/py"}}}}
+        {
+            "benchmark": {
+                "agentx": {
+                    "launch_overrides": {
+                        "env": {"A": "1"},
+                        "executable": "/py",
+                        "append_args": ["--a", 2],
+                        "remove_args": ["--b"],
+                    }
+                }
+            }
+        }
     )
 
     assert point.agentx
     assert dict(point.agentx_launch.env) == {"A": "1"}
     assert point.agentx_launch.executable == "/py"
+    assert point.agentx_launch.append_args == ("--a", "2")
+    assert point.agentx_launch.remove_args == ("--b",)
 
 
 def test_the_point_is_a_copy_the_reader_cannot_change() -> None:
@@ -104,6 +139,9 @@ def test_the_point_is_a_copy_the_reader_cannot_change() -> None:
         {"benchmark": "x"},
         {"benchmark": {"envs": "x"}},
         {"benchmark": {"agentx": {"launch_overrides": []}}},
+        {"benchmark": {"agentx": {"launch_overrides": {"append_args": "--a"}}}},
+        {"benchmark": {"profiler": {"torch_profiler": True}}},
+        {"benchmark": {"server_lifecycle": "on"}},
     ],
 )
 def test_a_misshapen_point_is_refused(document: object) -> None:
