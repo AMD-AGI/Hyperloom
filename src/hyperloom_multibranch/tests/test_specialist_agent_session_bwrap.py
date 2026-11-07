@@ -3,7 +3,7 @@
 
 """A branch's specialist launched through the agent runner in a real bubblewrap sandbox: it reads the session's
 references and model, and applies a patch from its own dev lease's root to its worktree with git, and it reads
-neither the app's login nor another branch's lease."""
+neither the app's login, nor another branch's lease, nor a file a link in a reference's source pointed at."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from hyperloom.orchestrator.specialists.agent_runner import LocalAgentRunner
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
+from hyperloom_multibranch.scheduling.reference import ReferenceSource, copy_references
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
 from hyperloom_multibranch.specialist.runtime import SessionStart
 from hyperloom_multibranch.tests.branch_rig import branch_rig
@@ -45,6 +46,8 @@ new file mode 100644
 _REACH = """#!/bin/sh
 {{
   echo "reference=$(cat {reference} 2>/dev/null || echo unreadable)"
+  echo "alias=$(cat {alias} 2>/dev/null || echo unreadable)"
+  echo "linked_key=$(cat {linked_key} 2>/dev/null || echo unreadable)"
   echo "model=$(cat {model} 2>/dev/null || echo unreadable)"
   git apply {patch} 2>{out}.git && echo "applied=yes" || echo "applied=no"
   cat {login} >/dev/null 2>&1 && echo "login=read" || echo "login=unreachable"
@@ -92,9 +95,19 @@ async def test_a_sandboxed_specialist_reads_its_references_model_and_lease_and_n
     model = home / "models" / "llama"
     model.mkdir(parents=True)
     (model / "config.json").write_text("weights-config", encoding="utf-8")
+    # The reference's source holds a link to its own tuning notes and one to the operator's key outside it; the
+    # session copies it in as a run does.
+    key = tmp_path / "operator" / ".ssh" / "id_rsa"
+    key.parent.mkdir(parents=True)
+    key.write_text("PRIVATE-KEY", encoding="utf-8")
+    source = tmp_path / "GEAK"
+    source.mkdir()
+    (source / "tuning.md").write_text("tune the GEMMs", encoding="utf-8")
+    (source / "alias.md").symlink_to("tuning.md")
+    (source / "innocent.md").symlink_to(key)
+    (tmp_path / "MB-reference").mkdir()
+    copy_references((ReferenceSource("geak", str(source), "c" * 40),), tmp_path / "MB-reference")
     reference = tmp_path / "MB-reference" / "geak"
-    reference.mkdir(parents=True)
-    (reference / "tuning.md").write_text("tune the GEMMs", encoding="utf-8")
     area = tmp_path / "MB-toolbox" / "branch-sandboxes"
     lease_root = area / BRANCH / "lease-mine"
     lease_root.mkdir(parents=True)
@@ -112,6 +125,8 @@ async def test_a_sandboxed_specialist_reads_its_references_model_and_lease_and_n
     cli.write_text(
         _REACH.format(
             reference=reference / "tuning.md",
+            alias=reference / "alias.md",
+            linked_key=reference / "innocent.md",
             model=model / "config.json",
             patch=lease_root / "forge.patch",
             login=login,
@@ -150,6 +165,8 @@ async def test_a_sandboxed_specialist_reads_its_references_model_and_lease_and_n
     reach = dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines())
     assert reach == {
         "reference": "tune the GEMMs",
+        "alias": "tune the GEMMs",
+        "linked_key": "unreadable",
         "model": "weights-config",
         "applied": "yes",
         "login": "unreachable",
