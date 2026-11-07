@@ -52,3 +52,13 @@ def test_an_agentx_session_records_inferencex_and_resumes(tmp_path, monkeypatch,
 def test_a_state_written_before_the_switch_is_refused(tmp_path):
     (tmp_path / "state.json").write_text('{"benchmark_mode": "synthetic", "agentx_epoch": 1}', encoding="utf-8")
     assert "epoch 0" in cb.measurement_state_is_stale(SharedState.load_or_init(tmp_path))
+
+
+def test_a_reset_session_still_resumes(tmp_path, monkeypatch, native_benchmark):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
+    optimizer_cli._reset_state_file(tmp_path, _seed_and_reload(tmp_path))
+    state = SharedState.load_or_init(tmp_path)
+    assert (state.baseline_tput, state.agentx_backend) == (0.0, "inferencex")
+    assert cb.measurement_state_is_stale(state) == ""

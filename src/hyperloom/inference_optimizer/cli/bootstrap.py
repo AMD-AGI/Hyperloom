@@ -224,6 +224,15 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
     }
 
 
+def fresh_measurement_fields(state: Any) -> dict[str, Any]:
+    """The fields ``measurement_state_is_stale`` reads, for a blank state that keeps measuring like *state*."""
+    return {
+        "measurement_epoch": MEASUREMENT_EPOCH,
+        "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
+        "agentx_backend": str(getattr(state, "agentx_backend", "") or ""),
+    }
+
+
 def measurement_state_is_stale(state: Any) -> str:
     """Return why a resumed session's measurements cannot anchor this run, or ``\"\"``."""
     had_epoch = int(getattr(state, "measurement_epoch", 0) or 0)
