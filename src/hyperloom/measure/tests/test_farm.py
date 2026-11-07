@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.common.benchmark_config import PointError
+from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.measure.farm import (
     FarmError,
     build_farm,
@@ -174,5 +174,5 @@ def test_the_server_environment_is_read_only_and_launch_environment_writes_the_p
 
 
 def test_a_point_without_a_benchmark_block_is_refused() -> None:
-    with pytest.raises(PointError):
+    with pytest.raises(BenchmarkPointError):
         server_environment({})

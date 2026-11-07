@@ -39,7 +39,7 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom.common.benchmark_config import PointError
+from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.contracts.long_context import (
     LONG_CONTEXT_COMPLETE,
     LONG_CONTEXT_INCOMPLETE,
@@ -216,7 +216,7 @@ def launch_served_context(point: Path) -> int | None:
     flag, else its ``MAX_MODEL_LEN``); ``None`` when it states neither or the point cannot be read."""
     try:
         carriers = launch_carriers(yaml.safe_load(Path(point).read_text(encoding="utf-8")))
-    except (OSError, yaml.YAMLError, PointError):
+    except (OSError, yaml.YAMLError, BenchmarkPointError):
         return None
     return served_by(*carriers)
 

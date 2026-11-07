@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.common.benchmark_config import PointError
+from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.measure.magpie_launchers import install_launchers
 
 LAUNCHER = "sglang_mi355x.sh"
@@ -125,5 +125,5 @@ def test_a_point_without_a_benchmark_block_is_refused(tmp_path: Path, magpie: Pa
     path = tmp_path / "point.yaml"
     path.write_text(yaml.safe_dump({"other": {}}))
 
-    with pytest.raises(PointError, match=str(path)):
+    with pytest.raises(BenchmarkPointError, match=str(path)):
         install_launchers([path])

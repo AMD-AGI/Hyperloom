@@ -24,7 +24,7 @@ from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import rebench_round_sec
 from hyperloom_common.env import env_float, env_int
 from hyperloom_common.jsonio import read_json
-from hyperloom.common.benchmark_config import BenchmarkPoint, PointError, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
 from hyperloom.common.launch_log_evidence import recipe_server_launch
 from ..actions.executors._recipe_script import resolve_launch_server_script
 from ..actions.executors._workload_envs import geak_metric_axis
@@ -161,7 +161,7 @@ class _GeakDispatchMixin:
         if recipe_path and Path(recipe_path).is_file():
             try:
                 return read_benchmark_point(Path(recipe_path))
-            except (OSError, PointError, yaml.YAMLError):
+            except (OSError, BenchmarkPointError, yaml.YAMLError):
                 log.warning("recipe: could not read %r", recipe_path, exc_info=True)
         return _NO_RECIPE
 

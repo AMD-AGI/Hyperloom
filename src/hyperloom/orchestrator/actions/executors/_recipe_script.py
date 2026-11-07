@@ -73,7 +73,7 @@ def launcher_overwritten_envs(bench: Mapping[str, Any]) -> frozenset[str]:
     """Env names the launcher re-exports unconditionally.
 
     Raises:
-        PointError: ``bench`` is not shaped as a point's ``benchmark`` block.
+        BenchmarkPointError: ``bench`` is not shaped as a point's ``benchmark`` block.
     """
     path = resolve_launch_server_script(BenchmarkPoint.from_block(bench))
     if not path:

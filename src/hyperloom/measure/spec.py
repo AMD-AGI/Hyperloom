@@ -19,7 +19,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom.common.benchmark_config import BenchmarkPoint, PointError
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
@@ -504,7 +504,7 @@ def _without_point_values(config: Any) -> dict[str, Any]:
     """The configuration with the values the concurrency level decides removed, as the points are compared."""
     try:
         envs = BenchmarkPoint.from_document(config, source="spec.config.yaml").envs
-    except PointError as exc:
+    except BenchmarkPointError as exc:
         raise DocumentError(str(exc)) from None
     benchmark = {**config["benchmark"], "envs": {k: v for k, v in envs.items() if k not in POINT_VALUE_KEYS}}
     return {**config, "benchmark": benchmark}

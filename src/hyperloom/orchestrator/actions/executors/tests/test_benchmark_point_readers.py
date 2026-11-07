@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.common.benchmark_config import PointError
+from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     _extract_eval_contract_fields,
@@ -49,7 +49,7 @@ def test_the_eval_contract_reads_the_point(tmp_path: Path) -> None:
 
 
 def test_a_replay_recipe_that_is_not_a_point_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(PointError):
+    with pytest.raises(BenchmarkPointError):
         _replay_serving_env({"launch_recipe": str(_point(tmp_path, _NO_BLOCK))}, {})
 
 
@@ -111,5 +111,5 @@ def test_an_agentx_launch_is_restated_from_its_overrides(tmp_path: Path) -> None
 
 
 def test_a_launch_without_a_benchmark_block_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(PointError):
+    with pytest.raises(BenchmarkPointError):
         read_launch(_point(tmp_path, _NO_BLOCK))
