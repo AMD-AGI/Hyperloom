@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -39,7 +40,7 @@ def source(tmp_path) -> Path:
     return repo
 
 
-def _bootstrap(tmp_path, **env):
+def _bootstrap(tmp_path, *, umask=0o022, **env):
     state = Path(env.get("HYPERLOOM_STATE_DIR", tmp_path / "state"))
     if not state.exists():
         state.mkdir()
@@ -51,7 +52,7 @@ def _bootstrap(tmp_path, **env):
         "TMPDIR": str(tmp_path / "container-tmp"),
     }
     full.update(env)
-    done = subprocess.run([BASH, str(SCRIPT)], capture_output=True, text=True, env=full, timeout=120)
+    done = subprocess.run([BASH, str(SCRIPT)], capture_output=True, text=True, env=full, timeout=120, umask=umask)
     written = state / "exit.json"
     return done.returncode, (json.loads(written.read_text()) if written.is_file() else None), done.stderr
 
@@ -147,6 +148,21 @@ def test_an_exit_json_an_earlier_leg_left_is_replaced_never_rewritten(tmp_path):
     _expect_final(*_bootstrap(tmp_path, HYPERLOOM_SOURCE_SHA=_SHA), "HYPERLOOM_SOURCE_REPO is not set")
     assert (tmp_path / "the-old-inode").read_text() == "{}"
     assert sorted(path.name for path in state.iterdir()) == ["exit.json"]
+
+
+def test_the_exit_json_the_bootstrap_writes_is_the_groups_to_read_and_replace_under_an_owner_only_umask(tmp_path):
+    _expect_final(*_bootstrap(tmp_path, umask=0o077, HYPERLOOM_SOURCE_SHA=_SHA), "HYPERLOOM_SOURCE_REPO is not set")
+    assert stat.S_IMODE((tmp_path / "state" / "exit.json").stat().st_mode) == 0o664
+
+
+def test_a_directory_put_where_exit_json_goes_is_never_written_into(tmp_path):
+    state = tmp_path / "state"
+    (state / "exit.json").mkdir(parents=True)
+    code, exit_file, stderr = _bootstrap(tmp_path, HYPERLOOM_SOURCE_SHA=_SHA)
+    assert (code, exit_file) == (2, None)
+    assert f"cannot write {state}/exit.json" in stderr
+    assert list((state / "exit.json").iterdir()) == []
+    assert sorted(path.name for path in state.iterdir()) == ["exit.json"], "nothing of the attempt stays behind"
 
 
 _STUB = """#!/bin/bash
@@ -249,7 +265,8 @@ def _framework_run_again(tmp_path, source):
 def test_without_any_python_the_run_ends_for_good(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
-    (empty / "mv").symlink_to(shutil.which("mv"))  # the only tool the refusal itself needs
+    for tool in ("mktemp", "mv"):  # the only tools the refusal itself needs
+        (empty / tool).symlink_to(shutil.which(tool))
     _expect_final(
         *_bootstrap(tmp_path, PATH=str(empty), HYPERLOOM_SOURCE_REPO="o/r", HYPERLOOM_SOURCE_SHA=_SHA),
         "no framework Python was found",

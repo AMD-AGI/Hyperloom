@@ -400,6 +400,7 @@ def _mode(path: Path) -> int:
 
 
 async def test_a_clone_and_a_copy_are_the_group_s_to_write_and_the_shim_is_replaced_by_rename(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     repo = _agent_repo(tmp_path)
     tree = tmp_path / "vendored"
     (tree / "pkg").mkdir(parents=True)

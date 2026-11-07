@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json as _json
 import os
-import shutil
+import stat
 import tempfile
 from collections.abc import Iterator
 from contextlib import suppress
@@ -15,7 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared_append
+from hyperloom_common.shared_storage import (
+    SHARED_FILE_MODE,
+    Flush,
+    make_shared_dirs,
+    open_shared_append,
+    parent_is_shared,
+    write_shared_bytes,
+)
 
 _UTF8 = "utf-8"
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -81,12 +88,18 @@ class WriteOptions:
     A new file is owner-only (``0o600``). ``mode`` is applied with group/other bits
     stripped; ``preserve_mode`` instead keeps an existing file's permission bits and
     is ignored when ``mode`` is given.
-    ``shared`` is the one exception to owner-only: the new file is ``0o664``
+    ``shared`` is the one exception to owner-only, and only where the storage is set up to
+    be shared (the nearest existing directory is setgid, group-writable and not writable by
+    others): there the new file is ``0o664``
     (:data:`~hyperloom_common.shared_storage.SHARED_FILE_MODE`), for a tree the accounts of
     one group write in turn, and the rename replaces the file whoever owned it; the two
-    options above are then ignored, and the parents ``make_parents`` creates are ``2775``
-    (:func:`~hyperloom_common.shared_storage.make_shared_dirs`). Never use it for a file that holds a credential or
-    that anything executes or sources. ``fsync`` and ``fsync_dir`` raise the
+    options above are then ignored. The parents ``make_parents`` creates follow
+    :func:`~hyperloom_common.shared_storage.make_shared_dirs` (``2775`` there, the umask
+    elsewhere). Anywhere else ``shared`` widens nothing and the file has the mode the other
+    options ask for. Shared or not, no link is followed on the way below a directory other
+    accounts can write (:func:`~hyperloom_common.shared_storage.write_shared_bytes`). Never
+    use it for a file that holds a credential or that anything executes or sources.
+    ``fsync`` and ``fsync_dir`` raise the
     ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
     """
@@ -101,7 +114,8 @@ class WriteOptions:
 
 #: A crash-safe replace: parents created, the data and the rename flushed to disk, an existing file's mode kept.
 DURABLE = WriteOptions(make_parents=True, fsync=True, fsync_dir=True, preserve_mode=True)
-#: A replace in a tree the accounts of one group write in turn: the file ``664``, the parents it creates ``2775``.
+#: A replace in a tree the accounts of one group write in turn: below shared storage the file ``664`` and the parents it
+#: creates ``2775``, elsewhere as private as a plain write.
 SHARED = WriteOptions(make_parents=True, shared=True)
 
 
@@ -127,32 +141,49 @@ _JSON_WRITE = WriteOptions(make_parents=True)
 
 
 def _owner_mode(tmp: Path, path: Path, options: WriteOptions) -> None:
+    os.chmod(tmp, _private_mode(path, options))
+
+
+def _private_mode(path: Path, options: WriteOptions) -> int:
+    """The mode of a new file at ``path`` (a ``shared`` write's outside shared storage): owner-only, ``options.mode``
+    with group and other bits stripped, or an existing file's with ``preserve_mode``."""
     if options.mode is not None:
         # Strip group/other bits: written files may hold sensitive payloads, so never expose them beyond the owner
         # regardless of caller intent.
-        os.chmod(tmp, options.mode & 0o700)
-    elif options.preserve_mode and path.is_file():
-        shutil.copymode(path, tmp)
+        return options.mode & 0o700
+    if options.preserve_mode and path.is_file():
+        return stat.S_IMODE(path.stat().st_mode)
+    return stat.S_IRUSR | stat.S_IWUSR
 
 
 def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions = WriteOptions()) -> None:
     """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
-    if options.make_parents and options.shared:
-        make_shared_dirs(path.parent)
-    elif options.make_parents:
+    if options.shared:
+        # judged before the parents are made: a parent made under a umask that leaves group write in a setgid
+        # directory would look shared itself, and the file would be widened where the call alone would not be
+        widened = not options.make_parents or parent_is_shared(path)
+        if options.make_parents:
+            make_shared_dirs(path.parent)
+        private_mode = _private_mode(path, options)
+        write_shared_bytes(
+            path,
+            data,
+            mode=SHARED_FILE_MODE if widened else private_mode,
+            private_mode=private_mode,
+            flush=Flush(file=options.fsync, directory=options.fsync_dir),
+        )
+        return
+    if options.make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     tmp = Path(tmp_str)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-            if options.shared:
-                os.fchmod(fh.fileno(), SHARED_FILE_MODE)
             if options.fsync:
                 _fsync_handle(fh)
-        if not options.shared:
-            _owner_mode(tmp, path, options)
+        _owner_mode(tmp, path, options)
         os.replace(tmp, path)
         if options.fsync_dir:
             fsync_directory(path.parent)
@@ -198,12 +229,11 @@ def append_jsonl(
 
 
 def append_shared_jsonl(path: Path, row: Any, *, fsync: bool = False, fmt: JsonLineFormat = JsonLineFormat()) -> None:
-    """:func:`append_jsonl` to a file the accounts of one group append to in turn: a new file is ``664`` and the parents
-    it creates ``2775``, whatever the umask, and the file is never opened through a link
-    (:func:`~hyperloom_common.shared_storage.open_shared_append`)."""
-    path = Path(path)
-    make_shared_dirs(path.parent)
-    with os.fdopen(open_shared_append(path), "a", encoding=_UTF8) as fh:
+    """:func:`append_jsonl` to a file the accounts of one group append to in turn: below shared storage a new file is
+    ``664`` and the parents it creates ``2775``, whatever the umask, elsewhere as a plain append leaves them; the file is
+    reached as :func:`~hyperloom_common.shared_storage.open_shared_append` reaches it, never through a link a member of
+    the group could have put on the way."""
+    with os.fdopen(open_shared_append(Path(path), make_parents=True), "a", encoding=_UTF8) as fh:
         _write_line(fh, row, fsync, fmt)
 
 

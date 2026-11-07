@@ -99,6 +99,9 @@ def test_concurrent_requests_of_one_key_build_once(store: BuildStore, key, tmp_p
 def test_the_key_lock_is_the_runner_caches_lock_writable_by_the_group_and_never_opened_through_a_link(
     store: BuildStore, key, tmp_path: Path
 ) -> None:
+    # A store set up to be shared: setgid, group-writable, not writable by others.
+    (tmp_path / "store").mkdir()
+    (tmp_path / "store").chmod(0o2775)
     umask = os.umask(0o022)
     try:
         _publish(store, key, tmp_path)
@@ -114,6 +117,20 @@ def test_the_key_lock_is_the_runner_caches_lock_writable_by_the_group_and_never_
     with pytest.raises(BuildInfraError, match=f"cannot open the build lock {lock} for writing"):
         ensure_build(store, other, build, Signer(key))
     assert build.calls == 0
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o2755, 0o2777, 0o1777], ids=["0755", "2755", "2777", "1777"])
+def test_the_key_lock_stays_private_in_a_store_not_set_up_to_be_shared(
+    store: BuildStore, key, tmp_path: Path, mode: int
+) -> None:
+    (tmp_path / "store").mkdir()
+    (tmp_path / "store").chmod(mode)
+    umask = os.umask(0o022)
+    try:
+        _publish(store, key, tmp_path)
+    finally:
+        os.umask(umask)
+    assert stat.S_IMODE(store.lock_path(INPUTS).stat().st_mode) == 0o644
 
 
 def test_an_infra_failure_stores_nothing_and_the_next_request_builds(store: BuildStore, key, tmp_path: Path) -> None:
