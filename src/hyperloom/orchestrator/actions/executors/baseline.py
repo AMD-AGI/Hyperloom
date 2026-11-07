@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
+"""Real ``baseline`` ActionRunner — runs the benchmark rounds of a baseline measurement.
 
-``BenchmarkRunExecutor`` is the benchmark round shared by every action that runs one;
+A round runs on inference_suite when :func:`._suite_config.suite_route` routes its point there, and on the Magpie
+backend otherwise. ``BenchmarkRunExecutor`` is the benchmark round shared by every action that runs one;
 ``BaselineExecutor`` adds the baseline timeline event, the benchmark watchdog and the
 InferenceX eval patching.
 """
@@ -40,7 +41,11 @@ from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
     STOPPED_BY_THE_RUN,
 )
+from inference_suite import stop
+from inference_suite.contracts import FailedStep
+
 from . import _server_lifecycle as _lifecycle
+from ._suite_config import suite_route
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
@@ -216,6 +221,8 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
     @staticmethod
     def _is_eval_rooted_failure(result: dict[str, Any]) -> bool:
         """Whether a failed baseline result was caused by the accuracy eval."""
+        if result.get("error_class") == FailedStep.EVAL_FAILED.value:
+            return True
         return BenchmarkRunExecutor._failure_carries_markers(result, _EVAL_FAILURE_MARKERS)
 
     @staticmethod
@@ -262,11 +269,9 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             recorder.end_run(run_index=index, result=result)
         return result
 
-    async def _run_attempt_rounds(self, attempt: BenchmarkAttempt, output_dir: Path) -> dict[str, Any]:
-        params = attempt.params
+    async def _attempt_refusal(self, attempt: BenchmarkAttempt, output_dir: Path, shared_state: Any) -> dict | None:
+        """Why the attempt fails before any round: its AgentX client or, on the backend, its checkout cannot run it."""
         config_path = attempt.materialized_config_path
-        extra = getattr(attempt.ctx, "extra", None) or {}
-        shared_state = extra.get("shared_state") or self.shared_state
         # MLPerf prepares its delegated client off-loop; native AgentX is entirely managed by Magpie.
         agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
@@ -278,10 +283,21 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         if agx_err:
             agentx = {"error_class": AGENTX_PREFLIGHT_ERROR_CLASS, "error": agx_err}
             return {"status": "failed", **agentx, "output_dir": str(output_dir)}
-        if (hook_result := self._after_materialize_config(config_path, output_dir)) is not None:
+        # The hook readies the InferenceX checkout the backend runs; a suite round runs its own staged client.
+        if attempt.suite is None and (hook_result := self._after_materialize_config(config_path, output_dir)):
             hook_result.setdefault("materialized_config", str(config_path))
             hook_result.setdefault("output_dir", str(output_dir))
             return hook_result
+        return None
+
+    async def _run_attempt_rounds(self, attempt: BenchmarkAttempt, output_dir: Path) -> dict[str, Any]:
+        params = attempt.params
+        config_path = attempt.materialized_config_path
+        extra = getattr(attempt.ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or self.shared_state
+        attempt = replace(attempt, suite=suite_route(self.session_dir, config_path))
+        if (refusal := await self._attempt_refusal(attempt, output_dir, shared_state)) is not None:
+            return refusal
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
         # costs that inflate later gains into fictitious "improvements".
         lifecycle = _lifecycle.resolve_lifecycle_params(config_path)
@@ -311,8 +327,8 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         # Deep-clean any lingering server right before this round actually boots -- after every earlier gate that can
         # still bail out without starting a server (budget, warm-patch failure), so a round that will not run does not
         # pay for a scan it gets no benefit from.
-        framework, port = lifecycle["framework"], lifecycle["port"]
-        await self._pre_start_cleanup(pid_dir=output_dir, framework=framework, port=port)
+        if attempt.suite is None:
+            await self._pre_start_cleanup(pid_dir=output_dir, framework=lifecycle["framework"], port=lifecycle["port"])
         try:
             if double_run:
                 guarded = self._run_cold_start_guarded_rounds
@@ -328,11 +344,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             _stamp_warm_patch_outcome(result, application, params)
             return result
         finally:
-            if double_run:
-                # Defensive teardown so no persistent server leaks.
-                _lifecycle.teardown_lifecycle_server(pid_dir=output_dir, framework=framework, port=port)
-            else:
-                _lifecycle.stop_agentx_servers(output_dir)
+            self._release_attempt(attempt, output_dir, lifecycle, double_run=double_run)
             # Revert warm-replay patches to prevent state leakage into subsequent tasks that reuse the same
             # InferenceX checkout. A required timeline's tree is promoted by prelude after this returns, so it must
             # stay patched; reverting it here handed prelude a clean tree and silently lost the replay.
@@ -340,6 +352,24 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
                 _revert_legacy_warm_patch_trees(params)
             if lease is not None:
                 lease.close()
+
+    @staticmethod
+    def _release_attempt(
+        attempt: BenchmarkAttempt, output_dir: Path, lifecycle: Mapping[str, Any], *, double_run: bool
+    ) -> None:
+        """Reap the server the attempt's rounds left in ``output_dir``, their slot, so none leaks into the next."""
+        if attempt.suite is not None:
+            reaped = stop(output_dir)
+            if reaped.survivors:
+                log.error(
+                    "baseline_executor: pids %s outlived SIGKILL; %s keeps their record", reaped.survivors, output_dir
+                )
+        elif double_run:
+            _lifecycle.teardown_lifecycle_server(
+                pid_dir=output_dir, framework=lifecycle["framework"], port=lifecycle["port"]
+            )
+        else:
+            _lifecycle.stop_agentx_servers(output_dir)
 
     def _round_affordable_before_ignition(
         self,
@@ -480,13 +510,8 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         server_already_ready: bool = False,
         warmup_round: bool = False,
     ) -> dict[str, Any]:
-        """Run one Magpie benchmark subprocess and parse its result; ``warmup_round`` marks a discarded round."""
-        from ._multi_node_env import (
-            is_multi_node,
-            log_mn_banner,
-            magpie_remote_env,
-            mn_bench_warmup_enabled,
-        )
+        """Run one benchmark round and parse its result; ``warmup_round`` marks a discarded round."""
+        from ._multi_node_env import is_multi_node, log_mn_banner, magpie_remote_env, mn_bench_warmup_enabled
         from .magpie_agentx import bind_source_evidence
 
         await asyncio.to_thread(bind_source_evidence, config_path, attempt.params.get("patches") or [])
@@ -536,6 +561,8 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             server_already_ready=server_already_ready,
             run_eval_disabled=attempt.run_eval_disabled,
         )
+        if attempt.suite is not None:
+            return await self._suite_round_result(round_, attempt.suite, warmup=warmup_round)
         # Multi-node only: restart sglang/vllm per round for a fresh server.
         restart_failure = await self._restart_multi_node_server(
             round_, server_args=attempt.effective_extra_server_args, resolved_model=attempt.resolved_model

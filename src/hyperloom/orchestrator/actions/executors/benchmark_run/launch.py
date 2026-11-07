@@ -17,10 +17,13 @@ from hyperloom_common.env import is_truthy
 from hyperloom_common.jsonio import read_json
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import agentx_active
+from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineInvocation
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
+from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout
 from .._grid_runner import sanitize_result_dir, sanitize_script_name
 from .._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
-from .._subprocess_kill import DETOKENIZER_STALL_RETURNCODE, clear_server_ready_stamp
+from .._subprocess_kill import DETOKENIZER_STALL_RETURNCODE
 from .._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
@@ -34,6 +37,16 @@ from ..benchmark_result import (
     select_run_workspace,
     snapshot_workspaces,
 )
+from .._failed_step import failed_step_error_class
+from .._round_folder import RoundFolder
+from .._suite_config import (
+    SuiteRound,
+    SuiteRoundRefused,
+    SuiteRoute,
+    deadline_unix,
+    round_lifecycle,
+    run_suite_round,
+)
 from ..magpie_agentx import ServerArgvInvalidError
 from .bringup import _boot_failure, open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
 from .records import (
@@ -45,7 +58,7 @@ from .records import (
     _should_establish_quality_ref,
     _stopped_round_result,
 )
-from .rounds import _BENCHMARK_REPORT_NAME
+from .rounds import _BENCHMARK_REPORT_NAME, _round_report_path
 
 if TYPE_CHECKING:
     from ....bringup.argv_preflight import ArgvVerdict
@@ -183,6 +196,32 @@ def _attempt_options(ctx: RunnerContext, shared_state: Any, drop_moe_runner_back
         agentx_mode=agentx_active(benchmark_mode=getattr(shared_state, _BENCHMARK_MODE_ATTR, "")),
         grading=getattr(shared_state, "grading", None),
     )
+
+
+def _suite_round_failure(
+    round_: _BenchmarkRound, finished: _BenchProcess, measurement: dict[str, Any], warnings: list[str]
+) -> dict[str, Any]:
+    """The failed result of an inference_suite round: the step it stopped at, or a load that measured nothing."""
+    step = measurement.get("failed_step")
+    if step is not None:
+        error_class, error = failed_step_error_class(FailedStep(step)), measurement.get("failure_detail") or step
+    else:
+        error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
+    report_path = _round_report_path(finished.workspace)
+    return {
+        "status": "failed",
+        "error_class": error_class,
+        "error": redact_secret_values(error),
+        "returncode": finished.returncode,
+        "run_status": measurement.get("run_status"),
+        "output_dir": str(round_.output_dir),
+        "workspace": str(finished.workspace),
+        "report_path": str(report_path),
+        "subprocess_runtime_sec": round(finished.runtime_sec, 2),
+        "boot_observation_path": finished.boot_observation_ref,
+        "nonfatal_warnings": warnings,
+        **round_.capture_meta,
+    }
 
 
 class _BenchmarkLaunchMixin:
@@ -410,7 +449,7 @@ class _BenchmarkLaunchMixin:
         # happened.
         server_log = round_.output_dir / "server.log"
         attempt_index = open_bringup_attempt(round_.output_dir)
-        clear_server_ready_stamp(str(server_log))
+        RunLayout(round_.output_dir).clear_ready_stamp()
         refusal = self._preflight_server_argv(round_, attempt_index)
         if refusal is not None:
             return refusal
@@ -467,6 +506,51 @@ class _BenchmarkLaunchMixin:
             round_, finished._replace(workspace=workspace), boot, round_warnings
         )
 
+    async def _suite_round_result(self, round_: _BenchmarkRound, route: SuiteRoute, *, warmup: bool) -> dict[str, Any]:
+        """Run ``round_`` on inference_suite and read the run_dir it wrote into the round's result."""
+        # A lone round owns its server; a cold-start warmup boots the one the rounds after it reuse.
+        mode = (
+            LifecycleMode.REUSE if round_.server_already_ready else LifecycleMode.BOOT if warmup else LifecycleMode.OWN
+        )
+        request = SuiteRound(
+            config_path=round_.config_path,
+            round_dir=round_.output_dir,
+            lifecycle=round_lifecycle(round_.output_dir, mode),
+            warmup=warmup,
+            deadline_unix=deadline_unix(round_.session_deadline_sec),
+        )
+        attempt_index = open_bringup_attempt(round_.output_dir)
+        started_unix = time.time()
+        try:
+            async with heartbeat_while_output_flows(unit="baseline_round", label="benchmark") as activity:
+                ran = await asyncio.to_thread(run_suite_round, route, request, on_poll=activity.note)
+        except SuiteRoundRefused as exc:
+            log.error("baseline_executor: round refused before it ran: %s", exc)
+            return _attempt_failure(failed_step_error_class(exc.step), exc, round_.output_dir) | round_.capture_meta
+        layout = ran.layout
+        await asyncio.to_thread(
+            self._observe_bringup, round_, attempt_index, layout.server_log, ran.report.failure_detail or ""
+        )
+        RoundFolder.read(layout.root).write_gpu_metrics(round_.output_dir)
+        measurement = extract_benchmark_measurement(None, workspace=layout.root, subprocess_started_unix=started_unix)
+        finished = _BenchProcess(
+            returncode=0 if ran.report.failed_step is None else 1,
+            stdout="",
+            stderr="",
+            runtime_sec=max(0.0, time.time() - started_unix),
+            started_unix=started_unix,
+            boot_observation_ref=round_.capture_meta["boot_observation_path"],
+            workspace=layout.root,
+        )
+        # The run_dir is where this round's server log, ready stamp and eval results are.
+        ran_round = round_._replace(result_dir=layout.root, watchdog_server_log=str(layout.server_log))
+        warnings = list(measurement.pop("nonfatal_warnings", []) or [])
+        if ran.report.failed_step is not None or not self._measurement_succeeded(measurement):
+            return _suite_round_failure(ran_round, finished, measurement, warnings)
+        result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)
+        self._stamp_round_quality(ran_round, result, measurement, warnings)
+        return result
+
     def _record_bringup(
         self,
         round_: _BenchmarkRound,
@@ -475,11 +559,22 @@ class _BenchmarkLaunchMixin:
         wrapper_stderr: str = "",
         wrapper_stdout: str = "",
     ) -> str:
-        from ....bringup import observe_bringup, write_boot_observation
-
         # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
         workspace = select_run_workspace(round_.output_dir, known_before=workspaces_before)
         log_path = workspace / "server.log" if workspace is not None else round_.output_dir / "server.log"
+        return self._observe_bringup(round_, attempt_index, log_path, wrapper_stderr, wrapper_stdout)
+
+    def _observe_bringup(
+        self,
+        round_: _BenchmarkRound,
+        attempt_index: int,
+        log_path: Path,
+        wrapper_stderr: str = "",
+        wrapper_stdout: str = "",
+    ) -> str:
+        """Classify the round's bring-up from its server log, record the observation, and return the log read."""
+        from ....bringup import observe_bringup, write_boot_observation
+
         read = read_bringup_log(log_path)
         verdict = observe_bringup(
             server_log=read.text,
@@ -549,6 +644,19 @@ class _BenchmarkLaunchMixin:
         failure = self._failed_round_result(round_, finished, boot, measurement, warnings)
         if failure is not None:
             return failure
+        result = await self._succeeded_round_result(round_, finished, measurement, warnings)
+        self._stamp_round_quality(round_, result, report, warnings)
+        return result
+
+    async def _succeeded_round_result(
+        self,
+        round_: _BenchmarkRound,
+        finished: _BenchProcess,
+        measurement: dict[str, Any],
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        """The result of a round that measured, with the launch evidence of the server it measured attached."""
+        report_path = _round_report_path(finished.workspace)
         result = {
             "status": "succeeded",
             **measurement,
@@ -557,14 +665,14 @@ class _BenchmarkLaunchMixin:
             "output_dir": str(round_.output_dir),
             "result_dir": str(round_.result_dir),
             "report_path": str(report_path) if report_path.exists() else None,
-            "workspace": str(workspace),
+            "workspace": str(finished.workspace),
             # Materialized YAML for THIS baseline.
             "materialized_config": str(round_.materialized_config_path),
-            # Magpie subprocess wall-clock (success path only).
+            # The round's wall-clock (success path only).
             "subprocess_runtime_sec": round(finished.runtime_sec, 2),
             # That wall-clock after the boot: the benchmark, and the accuracy eval when this round ran one.
             "post_ready_runtime_sec": _round_post_ready_sec(
-                round_.watchdog_server_log,
+                None if round_.watchdog_server_log is None else Path(round_.watchdog_server_log).parent,
                 started_unix=finished.started_unix,
                 runtime_sec=finished.runtime_sec,
             ),
@@ -581,5 +689,4 @@ class _BenchmarkLaunchMixin:
             output_dir=round_.output_dir,
             framework=round_.framework,
         )
-        self._stamp_round_quality(round_, result, report, warnings)
         return result
