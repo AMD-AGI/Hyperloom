@@ -73,7 +73,6 @@ from inference_suite.argv import compact_json_server_args, remove_server_args
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.orchestrator.state.base_launch import session_server_base
-from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
 from ._profile_setup import fit_capture_to_speculative
@@ -1042,7 +1041,6 @@ def _merge_caller_overrides(
     bench: dict[str, Any], framework_env: str, server_args: str, replace_args: bool, extra_envs: dict[str, Any] | None
 ) -> None:
     envs = bench["envs"]
-    recipe_overwritten = launcher_overwritten_envs(bench)
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
@@ -1069,10 +1067,7 @@ def _merge_caller_overrides(
     if extra_envs:
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
-        combined_extra,
-        # A name the recipe re-exports unconditionally cannot be overridden
-        # here; carrying it into the YAML publishes a value the run never used.
-        allow_predicate=lambda key: is_allowed_variant_env_key(key) and key not in recipe_overwritten,
+        combined_extra, allow_predicate=is_allowed_variant_env_key
     )
     for _dk in dropped_extra_envs:
         log.warning("Dropping extra_envs key %s before benchmark materialization", _dk)
