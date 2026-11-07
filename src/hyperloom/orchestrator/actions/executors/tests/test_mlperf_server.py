@@ -168,16 +168,6 @@ def test_a_second_round_rewrites_the_config_without_leaking_its_names_into_the_s
     )
 
 
-def test_a_point_served_off_this_node_boots_nothing(tmp_path, env, prepared):
-    point = _write(tmp_path / "config.yaml", _point(BENCHMARK_BASE_URL="http://head:30000"))
-
-    ms.prepare_mlperf_round(point, env, str(tmp_path))
-
-    envs = yaml.safe_load(point.read_text())["benchmark"]["envs"]
-    assert MLPERF_SERVER_CONFIG_ENV not in envs
-    assert not (tmp_path / ms.MLPERF_SERVER_DIR).exists()
-
-
 def test_a_point_on_another_script_is_left_alone(tmp_path, env, prepared):
     document = _point()
     document["benchmark"]["benchmark_script"] = "benchmark_serving.sh"
@@ -213,7 +203,7 @@ def _executable(path: Path, text: str) -> Path:
     return path
 
 
-def _client(tmp_path: Path, boot_rc: int = 0, served_here: bool = True) -> tuple[subprocess.CompletedProcess, list]:
+def _client(tmp_path: Path, boot_rc: int = 0, configured: bool = True) -> tuple[subprocess.CompletedProcess, list]:
     bench = tmp_path / "benchmarks"
     bench.mkdir()
     shutil.copy(agentx_asset_dir() / "mlperf_agentic_client.sh", bench)
@@ -233,7 +223,7 @@ def _client(tmp_path: Path, boot_rc: int = 0, served_here: bool = True) -> tuple
         "PORT": "30000",
         **{key: value for key, value in _CLIENT_ENVS.items() if key.startswith(("MLPERF_", "AGENTIC_"))},
     }
-    if served_here:
+    if configured:
         env[MLPERF_SERVER_CONFIG_ENV] = "/slot/mlperf_server/config.yaml"
         env[MLPERF_SERVER_PID_DIR_ENV] = "/slot/mlperf_server/pid"
         env[MLPERF_SUITE_PYTHON_ENV] = str(_executable(tmp_path / "suite", _FAKE_SUITE))
@@ -263,11 +253,12 @@ def test_a_server_that_does_not_boot_runs_no_harness_and_is_still_reaped(tmp_pat
     assert [call.split()[3] for call in calls] == ["run", "stop"]
 
 
-def test_a_server_off_this_node_is_neither_booted_nor_reaped(tmp_path):
-    done, calls = _client(tmp_path, served_here=False)
+def test_a_client_without_a_server_config_refuses_before_the_harness(tmp_path):
+    done, calls = _client(tmp_path, configured=False)
 
-    assert done.returncode == 0, done.stderr
-    assert calls == ["harness smoke_test kimi-k3 mi355x perf"]
+    assert done.returncode != 0
+    assert MLPERF_SERVER_CONFIG_ENV in done.stderr
+    assert calls == []
 
 
 def test_the_client_no_longer_speaks_magpies_run_phase():
