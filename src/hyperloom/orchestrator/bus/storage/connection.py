@@ -89,21 +89,42 @@ def _apply_pragmas(conn: sqlite3.Connection, journal_mode: str) -> None:
         cur.close()
 
 
+#: What SQLite keeps beside the database. It gives the ones it creates the database's mode, but it reuses ones a killed
+#: process left as they are, so they are narrowed with the database.
+_SIDE_FILES = ("-wal", "-shm", "-journal")
+
+
+def _narrow(descriptor: int, path: Path, file_mode: int) -> None:
+    """Narrow the open file to what it has in common with ``file_mode``, or say that it is not this account's."""
+    current = stat.S_IMODE(os.fstat(descriptor).st_mode)
+    if current & ~file_mode:
+        try:
+            os.fchmod(descriptor, current & file_mode)
+        except PermissionError:
+            log.warning("%s is %04o, wider than %04o, and not this account's: narrow it", path, current, file_mode)
+
+
 def _make_database_file(db_path: Path, file_mode: int) -> None:
-    """Create the database ``file_mode`` before SQLite does, and narrow one that is wider (a credential has come into the
-    session since): SQLite gives its ``-wal``/``-shm``/``-journal`` files the mode the database has."""
+    """Create the database ``file_mode`` before SQLite does, and narrow it and the side files a killed process left when
+    they are wider (a credential has come into the session since). Each is opened without following a link."""
     descriptor = open_shared(db_path, os.O_RDWR, file_mode)
     try:
-        current = stat.S_IMODE(os.fstat(descriptor).st_mode)
-        if current & ~file_mode:
-            try:
-                os.fchmod(descriptor, current & file_mode)
-            except PermissionError:
-                log.warning(
-                    "%s is %04o, wider than %04o, and not this account's: narrow it", db_path, current, file_mode
-                )
+        _narrow(descriptor, db_path, file_mode)
     finally:
         os.close(descriptor)
+    for suffix in _SIDE_FILES:
+        side = db_path.with_name(db_path.name + suffix)
+        try:
+            descriptor = os.open(side, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            log.warning("%s cannot be opened to narrow it to %04o (%s): narrow it", side, file_mode, exc.strerror)
+            continue
+        try:
+            _narrow(descriptor, side, file_mode)
+        finally:
+            os.close(descriptor)
 
 
 def open_connection(

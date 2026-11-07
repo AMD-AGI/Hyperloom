@@ -364,6 +364,7 @@ _BUS_LEG = textwrap.dedent(
     """
     import asyncio, json, os, stat
     from pathlib import Path
+    from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
     from hyperloom.inference_optimizer.cli.parser import _build_parser
     from hyperloom.inference_optimizer.session import paths
     from hyperloom.inference_optimizer.session.manifest import write_manifest
@@ -378,7 +379,12 @@ _BUS_LEG = textwrap.dedent(
     session = paths.make_session_dir("m")
     write_manifest(session, args=_build_parser().parse_args(argv))
     state = SharedState()
-    state.operator_server_args, state.operator_extra_env = server_args, env
+    if {exported!r}:
+        # a resume with --reset-state: the state records no pins, the run still exports them
+        os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = server_args
+        os.environ[OPERATOR_EXTRA_ENV_VAR] = json.dumps(env)
+    else:
+        state.operator_server_args, state.operator_extra_env = server_args, env
     state.save(session)
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session)
     coordinator = Coordinator(session, backends={{name: object() for name in default_role_registry()}})
@@ -406,20 +412,31 @@ _BUS_LEG = textwrap.dedent(
 
 
 @pytest.mark.parametrize(
-    ("server_args", "env", "database_mode"),
+    ("server_args", "env", "exported", "database_mode"),
     [
-        ("--tp 8 --api-key SECRET-KEY-VALUE", {}, 0o600),
-        ("--tp 8", {"HF_TOKEN": "hf_live_value_123"}, 0o600),
-        ("--tp 8", {"HF_ENDPOINT": "https://alice:hf_live_value_123@hf-mirror"}, 0o600),
-        ("--tp 8 --max-total-tokens 120000", {"SGLANG_USE_AITER": "1"}, 0o664),
+        ("--tp 8 --api-key SECRET-KEY-VALUE", {}, False, 0o600),
+        ("--tp 8", {"HF_TOKEN": "hf_live_value_123"}, False, 0o600),
+        ("--tp 8", {"HF_ENDPOINT": "https://alice:hf_live_value_123@hf-mirror"}, False, 0o600),
+        ("--tp 8 --max-total-tokens 120000", {"SGLANG_USE_AITER": "1"}, False, 0o664),
+        ("--tp 8 --api-key SECRET-KEY-VALUE", {}, True, 0o600),
+        ("--tp 8", {"HF_TOKEN": "hf_live_value_123"}, True, 0o600),
+        ("--tp 8 --max-total-tokens 120000", {"SGLANG_USE_AITER": "1"}, True, 0o664),
     ],
-    ids=["server-args-api-key", "env-token", "env-url-userinfo", "no-credential"],
+    ids=[
+        "server-args-api-key",
+        "env-token",
+        "env-url-userinfo",
+        "no-credential",
+        "exported-server-args-api-key",
+        "exported-env-token",
+        "exported-no-credential",
+    ],
 )
 def test_the_operators_credential_reaches_no_file_the_group_can_read_and_the_database_is_600_then(
-    tmp_path, server_args, env, database_mode
+    tmp_path, server_args, env, exported, database_mode
 ):
     workspace = _setgid_workspace(tmp_path / "claw")
-    code = _BUS_LEG.format(server_args=server_args, env=env)
+    code = _BUS_LEG.format(server_args=server_args, env=env, exported=exported)
     seen = json.loads(_as_this_account(code, umask=0o077, workspace=workspace).splitlines()[-1])
     assert seen["database"] == dict.fromkeys(
         ("coordinator.db", "coordinator.db-wal", "coordinator.db-shm"), database_mode
@@ -438,6 +455,57 @@ def test_a_database_a_session_made_before_it_held_a_credential_is_narrowed_to_60
     assert _mode(database) == 0o600
     SqliteConnection(database).raw.close()
     assert _mode(database) == 0o600, "a wider mode asked later never widens it"
+
+
+_LEFT_BY_A_KILLED_WRITER = textwrap.dedent(
+    """
+    import os
+    from pathlib import Path
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+    connection = SqliteConnection(Path({database!r}))
+    connection.raw.execute("CREATE TABLE IF NOT EXISTS leftover (value TEXT)")
+    connection.raw.execute("INSERT INTO leftover VALUES ('written by the leg that was killed')")
+    os._exit(0)
+    """
+)
+
+
+def test_the_wal_and_shm_a_killed_664_writer_left_are_narrowed_with_the_database_and_hold_no_credential_after(tmp_path):
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+
+    workspace = _setgid_workspace(tmp_path / "claw")
+    database = workspace / "storage" / "coordinator.db"
+    _as_this_account(_LEFT_BY_A_KILLED_WRITER.format(database=str(database)), umask=0o022, workspace=workspace)
+    sides = [database.with_name(database.name + suffix) for suffix in ("", "-wal", "-shm")]
+    assert [_mode(path) for path in sides] == [0o664, 0o664, 0o664], "what the killed writer left"
+    connection = SqliteConnection(database, file_mode=0o600)
+    try:
+        connection.raw.execute("INSERT INTO leftover VALUES ('sk-live-after-the-narrowing')")
+        assert [_mode(path) for path in sides] == [0o600, 0o600, 0o600]
+        readable = [
+            path.name
+            for path in database.parent.iterdir()
+            if _mode(path) & (stat.S_IRGRP | stat.S_IROTH) and b"sk-live-after" in path.read_bytes()
+        ]
+        assert readable == []
+        assert b"sk-live-after" in (database.with_name(database.name + "-wal")).read_bytes()
+    finally:
+        connection.raw.close()
+
+
+def test_a_side_file_that_is_a_link_is_not_followed_and_is_named(tmp_path, caplog):
+    from hyperloom.orchestrator.bus.storage import connection as bus_connection
+
+    database = tmp_path / "storage" / "coordinator.db"
+    database.parent.mkdir()
+    target = tmp_path / "somebody-elses-file"
+    target.write_text("kept")
+    target.chmod(0o664)
+    database.with_name(database.name + "-wal").symlink_to(target)
+    with caplog.at_level("WARNING", logger=bus_connection.__name__):
+        bus_connection._make_database_file(database, 0o600)
+    assert _mode(target) == 0o664, "a link is never followed to narrow what it names"
+    assert [record.args[0] for record in caplog.records][:1] == [database.with_name("coordinator.db-wal")]
 
 
 def test_the_lock_a_foreign_account_left_unwritable_is_named_with_its_owner_and_mode(tmp_path, monkeypatch):
