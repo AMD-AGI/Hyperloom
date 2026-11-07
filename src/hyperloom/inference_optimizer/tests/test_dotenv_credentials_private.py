@@ -230,9 +230,9 @@ def _make_shared(checkout: Path, kind: str) -> str:
     if kind.endswith("another-account") and uid != 0:
         pytest.skip("only root can give an entry to another account")
     if kind == "group-writable-checkout":
-        checkout.chmod(0o2775)
+        checkout.chmod(0o775)
         _give_another_group(checkout)
-        return f"{checkout} can be written by its group or others (mode 2775)"
+        return f"{checkout} can be written by its group or others (mode 775)"
     if kind == "world-writable-checkout":
         checkout.chmod(0o777)
         return f"{checkout} can be written by its group or others (mode 777)"
