@@ -10,6 +10,8 @@ under which lease and cap, and that its failure never turns into a verdict.
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -25,7 +27,11 @@ from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import (
     run_accuracy_round,
     run_candidate_accuracy_round,
 )
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.tests._helpers import init_git_repo, integrate_extra
 
 _AGENTX = "agentx"
 
@@ -168,3 +174,98 @@ async def test_an_integrate_bench_below_the_threshold_runs_no_accuracy_round(tmp
 
     assert calls == []
     assert out["status"] == "reverted"
+
+
+_PATCH = """\
+diff --git a/src.py b/src.py
+index 0000000..1111111 100644
+--- a/src.py
++++ b/src.py
+@@ -1,2 +1,2 @@
+ def f():
+-    return 1
++    return 2
+"""
+_SPECIALIST = "t-spec-acc"
+
+
+def _enablement_bench(slot: Path, *, served: bool) -> dict:
+    return {
+        "status": "succeeded" if served else "failed",
+        "output_throughput": 137.0 if served else 0.0,
+        "completed_requests": 12 if served else 0,
+        "workspace": str(slot / "benchmark_1"),
+        "materialized_config": "",
+        "effective_config": {},
+    }
+
+
+def _enablement_round(tmp_path, monkeypatch, *, served=True, agentx=True, agentx_accuracy=True, ended=""):
+    """Gate one enablement round whose bench served or not; the gated result, the rounds it ran, and its slot."""
+    from hyperloom.orchestrator.actions.executors import _integrate_bench
+
+    session = tmp_path / "session"
+    specialist = session / "runs" / "specialist" / _SPECIALIST
+    (specialist / "worktree" / "patches").mkdir(parents=True)
+    (specialist / "worktree" / "patches" / "001.patch").write_text(_PATCH, encoding="utf-8")
+    (specialist / "specialist_done.json").write_text(
+        json.dumps({"proposal_set": [], "patches_written": ["patches/001.patch"]}), encoding="utf-8"
+    )
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    slot = tmp_path / "variant_00"
+    calls = []
+
+    async def run_round(slot, launch, state, *, session):
+        calls.append((slot, launch))
+        return AccuracyRoundOutcome(slot / ACCURACY_DIR, ended)
+
+    async def bench_patch(*_args, **_kwargs):
+        return _enablement_bench(slot, served=served), {"accuracy_pass": None, "enablement_accuracy": None}
+
+    async def no_kb(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(_integrate_bench, "run_candidate_accuracy_round", run_round)
+    monkeypatch.setattr(_integrate_bench, "_grade_bench_accuracy", lambda *args: None)
+    monkeypatch.setattr(accuracy, "is_mlperf_backend", lambda: False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    executor = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(executor, "_bench_patch", bench_patch)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", no_kb)
+    params = {"specialist_task_id": _SPECIALIST, "framework_source_root": str(repo), "enablement": True}
+    extra = integrate_extra(params)
+    extra["shared_state"].benchmark_mode = _AGENTX if agentx else ""
+    extra["shared_state"].agentx_accuracy = agentx_accuracy
+    task = Task(task_id="t-int-acc", kind="integrate_patch", state="queued", params=params, idempotency_key="t")
+    return asyncio.run(executor(RunnerContext(task=task, lease=None, extra=extra))), calls, slot
+
+
+def test_a_served_agentx_enablement_round_runs_its_accuracy_round(tmp_path, monkeypatch) -> None:
+    result, calls, slot = _enablement_round(tmp_path, monkeypatch)
+
+    assert result["status"] == "kept"
+    assert calls == [(slot, slot / VARIANT_CONFIG_FILE)]
+    assert result["bench_result"][ACCURACY_ROUND_KEY] == {"run_dir": str(slot / ACCURACY_DIR), "error_class": ""}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [{"served": False}, {"agentx_accuracy": False}, {"agentx": False}],
+    ids=["not_served", "switched_off", "fixed_workload"],
+)
+def test_an_enablement_round_that_did_not_serve_or_is_off_the_switch_runs_no_accuracy_round(
+    tmp_path, monkeypatch, case
+) -> None:
+    result, calls, _ = _enablement_round(tmp_path, monkeypatch, **case)
+
+    assert calls == []
+    assert ACCURACY_ROUND_KEY not in result["bench_result"]
+
+
+def test_a_failed_accuracy_round_keeps_the_enablement_verdict_with_a_warning(tmp_path, monkeypatch) -> None:
+    result, _, _ = _enablement_round(tmp_path, monkeypatch, ended="eval_failed")
+
+    assert result["status"] == "kept"
+    assert result["bench_result"][ACCURACY_ROUND_KEY]["error_class"] == "eval_failed"
+    assert "agentx_accuracy_round_failed" in result["bench_result"]["nonfatal_warnings"]
