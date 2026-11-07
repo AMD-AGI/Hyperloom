@@ -15,6 +15,8 @@ ENV_FAULT = "environment_fault"
 DIED_STOP_REASON = "supervisor_coordinator_died"
 WEDGED_STOP_REASON = "supervisor_tick_stalled"
 SUPERVISOR_RESTART_REASON = "supervisor_restart_requested"
+#: A resume found the session's InferenceX checkout missing; the client inference_suite pins replaced that checkout.
+INFERENCEX_CHECKOUT_MISSING_STOP_REASON = "active_inferencex_checkout_missing"
 
 #: AgentX is on but its benchmark client (aiperf) is missing or is not the
 #: pinned build, and the runtime install could not supply it. An
@@ -99,7 +101,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "prelude_budget_exhausted",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
-        "active_inferencex_checkout_missing",
+        INFERENCEX_CHECKOUT_MISSING_STOP_REASON,
         "sweep_done",
         "sweep_failed",
         "framework_agent_phase_done",
@@ -180,6 +182,7 @@ __all__ = [
     "BACKEND_UNHEALTHY_STOP_REASON",
     "DIED_STOP_REASON",
     "ENV_FAULT",
+    "INFERENCEX_CHECKOUT_MISSING_STOP_REASON",
     "INFRASTRUCTURE_STOP_REASONS",
     "MODEL_GATE_STOP_REASONS",
     "PATCH_RECOVERY_INCOMPLETE_STOP_REASON",
