@@ -1134,7 +1134,11 @@ refuses (`HYPERLOOM_AGENTX=maybe`) is recorded as failed with error class
 `benchmark_cap_error` and the sweep carries on with the next rung.
 
 Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
-fixed-sequence profiling. A profile round adds the profiler layer and the shape-tool
+fixed-sequence profiling. Configure capture steps and delay through
+`benchmark.profiler.torch_profiler` (`num_steps`, `start_seconds`); a missing setting
+becomes one capture of 256 steps, starting 300 seconds after measurement. A profile round
+captures one window, so a YAML whose `num_profiles` is not 1 is refused when the session
+starts. A profile round adds the profiler layer and the shape-tool
 environment to the round's launch, preserving the server's runtime paths, and opens its
 capture window once the replay reaches measurement. InferenceSuite owns the profiler
 flags and the capture and flush; each window remains a separate TraceLens input.

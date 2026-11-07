@@ -131,8 +131,11 @@ def _validate_agentx_benchmark(benchmark: dict) -> None:
     agentx = benchmark["agentx"]
     if isinstance(agentx, dict) and agentx.get("mode", _CANONICAL) != _CANONICAL:
         raise ValueError("Optimization requires canonical AgentX; fast runs are diagnostic only")
-    if benchmark.get("profiler", {}).get("torch_profiler", {}).get("enabled"):
+    capture = benchmark.get("profiler", {}).get("torch_profiler", {})
+    if capture.get("enabled"):
         raise ValueError("Disable torch_profiler in the benchmark YAML; the profile phase enables it separately")
+    if capture.get("num_profiles", 1) != 1:
+        raise ValueError(f"The YAML sets num_profiles {capture['num_profiles']}; a profile round captures one window")
     envs = benchmark.get("envs", {})
     required = ("framework", "model", "precision")
     if any(not benchmark.get(key) for key in required):

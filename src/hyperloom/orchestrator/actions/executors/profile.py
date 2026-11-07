@@ -34,6 +34,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_serving_patched,
 )
 from .benchmark_result import round_succeeded
+from ._round_folder import is_round_folder
 from inference_suite.contracts import RunLayout
 from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS, CAPTURE_TRACES_DIR, TORCH_TRACE_DIR
 from .baseline import BenchmarkRunExecutor
@@ -929,12 +930,13 @@ class ProfileExecutor(BenchmarkRunExecutor):
             default_config_path=default_config_path,
             session_dir=session_dir,
         )
-        # Set by ``_after_materialize_config`` once the probe is armed; read after the run to merge per-rank reports.
+        # Set by ``_prepare_point`` once the probe is armed; read after the run to merge per-rank reports.
         self._host_probe_dir: str = ""
         # Non-empty only when arming failed, and then says why (an empty probe dir cannot tell never-asked from failed).
         self._host_probe_status: str = ""
-        # Set by ``_after_materialize_config`` from the config the run will actually execute, so the post-hoc trace
-        # checks ship alongside the pre-run statement of whether their subject could have been produced.
+        # Set by ``_prepare_point`` from the config the run will actually execute, and restated with the patchers'
+        # outcomes by ``_after_materialize_config`` on the benchmark backend, so the post-hoc trace checks ship
+        # alongside the pre-run statement of whether their subject could have been produced.
         self._instrumentation_preflight: dict[str, Any] | None = None
 
     def _resolve_default_config(self) -> Path:
@@ -1010,17 +1012,13 @@ class ProfileExecutor(BenchmarkRunExecutor):
             deep=_evidence.deep_probe_enabled(),
         )
 
-    def _after_materialize_config(
-        self,
-        config_path: Path,
-        output_dir: Path,
-    ) -> dict[str, Any] | None:
-        """Arm the host probe, then patch the InferenceX checkout Magpie will execute."""
+    def _prepare_point(self, config_path: Path, output_dir: Path) -> None:
+        """Turn the AgentX profile on, or arm the host probe, in the point either backend then runs."""
         from .magpie_agentx import enable_profile, native_config
 
         if native_config(config_path):
             enable_profile(config_path)
-            return None
+            return
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
@@ -1028,6 +1026,15 @@ class ProfileExecutor(BenchmarkRunExecutor):
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
+        with contextlib.suppress(OSError, ValueError, yaml.YAMLError):
+            self._instrumentation_preflight = _instrumentation_preflight_row(read_benchmark_point(config_path).envs)
+
+    def _after_materialize_config(self, config_path: Path, output_dir: Path) -> dict[str, Any] | None:
+        """Patch the InferenceX checkout Magpie will execute."""
+        from .magpie_agentx import native_config
+
+        if native_config(config_path):
+            return None
         try:
             point = read_benchmark_point(config_path)
         except (OSError, ValueError, yaml.YAMLError) as exc:
@@ -1060,11 +1067,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             return None
         inferencex_path = point.inferencex_path.strip() or os.environ.get("INFERENCEX_PATH", "").strip()
         if not inferencex_path:
-            log.warning(
-                "profile_executor: no benchmark.inferencex_path / "
-                "INFERENCEX_PATH configured; skipping InferenceX profile "
-                "patch validation"
-            )
+            log.warning("profile_executor: no inferencex_path or INFERENCEX_PATH; skipping InferenceX profile patching")
             patchers["inferencex"] = None
             _note_instrumentation()
             return None
@@ -1218,11 +1221,16 @@ class ProfileExecutor(BenchmarkRunExecutor):
     _measurement_succeeded = staticmethod(round_succeeded)
 
     async def _run_native_profile(self, ctx) -> dict[str, Any]:
-        """Collect Magpie-owned captures and certify each time window separately."""
+        """Certify an AgentX profile round's traces: a run_dir's as a fixed round's, Magpie's per capture window."""
         import asyncio
 
         result = await super().__call__(ctx)
         if result.get("status") != "succeeded":
+            return result
+        if is_round_folder(Path(str(result.get("workspace") or ""))):
+            framework = str(result.get("framework") or "")
+            _record_workspace_traces(result, result["workspace"], framework, self._instrumentation_preflight)
+            result["trace_input_ready"] = bool(result.get("main_trace_path"))
             return result
         capture = result.get("agentx_metrics", {}).get("profile_capture", {})
         if capture.get("status") != "complete":

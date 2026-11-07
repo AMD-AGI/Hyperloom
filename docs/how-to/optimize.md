@@ -246,6 +246,9 @@ for the session.
 
 A profile round adds the profiler layer and the SGLang kernel-shape tool to the
 round's launch, and opens its capture window once the replay reaches measurement.
+A missing capture setting becomes one capture of 256 steps after a 300-second start
+delay. A profile round captures one window; a YAML whose `num_profiles` is not 1 is
+refused when the session starts.
 Profiled measurements never replace the unprofiled performance baseline.
 
 `hyperloom optimize --resume-from SESSION_DIR` reuses the archived `benchmark.yaml`

@@ -10,15 +10,17 @@ every other variable become the user layer on the frozen base, and the launcher'
 ATOM's ``--max-model-len`` default, sglang's radix-cache conflict) are applied to that layer. What the YAML does
 not hold -- where the round writes, its interpreter, lifecycle and telemetry -- comes in :class:`RoundSettings`.
 
-A point runs on inference_suite (:func:`suite_route`) once its session froze a base launch and the translation
-carries it. A client-only round -- multi-node, or one whose session or point names a ``BENCHMARK_BASE_URL`` -- holds
-its server as ``external``: it measures the server at that URL, which something else starts and stops, and samples no
-local GPU. A round with a Ray serving lease runs in the lease's actor on the GPUs Ray placed it on. The points
+An AgentX point runs the agentx-harness replay on the launch its ``agentx.launch_overrides`` composed on the session
+base, above the base's golden layer; a profile point turns the torch profiler on for the window it asks for.
+
+A point runs on inference_suite (:func:`suite_route`) once its session froze a base launch. A client-only round --
+multi-node, or one whose session or point names a ``BENCHMARK_BASE_URL`` -- holds its server as ``external``: it
+measures the server at that URL, which something else starts and stops, and samples no local GPU. A round with a Ray serving lease runs in the lease's actor on the GPUs Ray placed it on. The points
 :func:`backend_reason` names stay on the benchmark backend. :func:`run_suite_round` writes each round into a fresh
 run_dir below its round directory, so an attempt retried in the same directory never meets the run_dir before it.
 
-An AgentX point is not translated into a measured round, but :func:`run_accuracy_suite_round` serves the launch it ran
-for the D9 accuracy round: on a server of its own, without the base's golden layer, eval only, into ``<slot>/accuracy``.
+:func:`run_accuracy_suite_round` serves the launch an AgentX point ran for the D9 accuracy round: on a server of its
+own, without the base's golden layer, eval only, into ``<slot>/accuracy``.
 """
 
 from __future__ import annotations
@@ -39,7 +41,13 @@ from typing import Any
 import yaml
 
 from hyperloom_common.env import is_truthy
+from hyperloom.common.agentx_workload import (
+    CANON_WARMUP_PER_LANE,
+    agentx_profiling_requests,
+    is_agentx_client_script,
+)
 from hyperloom.common.benchmark_config import AgentxLaunch, BenchmarkPoint, is_agentx
+from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
@@ -61,7 +69,10 @@ from hyperloom.orchestrator.state.base_launch import frozen_base
 from inference_suite import EXIT_REFUSED, RoundResult, manifest_sha256, run_round
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
 from inference_suite.contracts import (
+    AGENTX_CLIENT_ENV_PREFIX,
+    AGENTX_FAST_MODE_ENV,
     DEFAULT_MAX_TOKENS_CAP,
+    AgentxWorkload,
     BaseLaunch,
     BaseRef,
     ConfigError,
@@ -76,6 +87,7 @@ from inference_suite.contracts import (
     LaunchDelta,
     Lifecycle,
     LifecycleMode,
+    ProfileConfig,
     Report,
     RunLayout,
     RunPaths,
@@ -91,6 +103,14 @@ from ._benchmark_interpreter import _resolve_probe_python
 from ._failed_step import failed_step_error_class
 from ._gpu_power import round_gpu_telemetry
 from ._multi_node_env import client_only_server_url
+from ._profile_setup import (
+    _DELAY_ITERATIONS,
+    _MAX_ITERATIONS,
+    SGLANG_NUM_STEPS,
+    SGLANG_START_STEP,
+    _profiler_flag_value,
+    vllm_profiler_fields,
+)
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from ._ray_backend import SuiteLeasedRound, strip_visible_devices_from_config
 from ._ray_serving import ServingLease
@@ -123,6 +143,8 @@ _PROBE_MIN_SAMPLES_ENV = "HYPERLOOM_EVAL_PROBE_MIN_SAMPLES"
 _PROBE_LENGTH_RATIO_ENV = "HYPERLOOM_EVAL_PROBE_LENGTH_RATIO"
 _EVAL_MAX_TOKENS_ENV = "HYPERLOOM_EVAL_MAX_TOKENS"
 _MODEL_PATH_ENV = "MODEL_PATH"
+_PROFILE_ENV = "PROFILE"
+_PROFILE_BODY_ENV = "PROFILE_EXTRA_BODY"
 
 #: The point knobs the config carries as fields; none of them reaches the server's environment.
 _CONSUMED_ENV = frozenset(
@@ -149,6 +171,8 @@ _CONSUMED_ENV = frozenset(
         _PROBE_LENGTH_RATIO_ENV,
         _EVAL_MAX_TOKENS_ENV,
         _REMOTE_SERVER_ENV,
+        _PROFILE_ENV,
+        _PROFILE_BODY_ENV,
     }
 )
 
@@ -256,10 +280,8 @@ def backend_reason(document: Mapping[str, object]) -> str | None:
     framework = _framework(bench)
     if framework_facts(framework).kind is not FrameworkKind.SERVING:
         return f"the point runs {framework.value}, which serves nothing"
-    if is_agentx(bench):
-        return "an AgentX point is not translated"
-    if ((bench.get("profiler") or {}).get("torch_profiler") or {}).get("enabled"):
-        return "a profile point is not translated"
+    if is_agentx_client_script(str(bench.get("benchmark_script") or "")):
+        return "the point runs the MLPerf agentic client, which boots its own server"
     return None
 
 
@@ -388,6 +410,263 @@ def _eval(point: _Point, enabled: bool) -> EvalConfig:
     )
 
 
+def _torch_profiler(bench: Mapping[str, Any]) -> Mapping[str, Any]:
+    return (bench.get("profiler") or {}).get("torch_profiler") or {}
+
+
+def _start_body(point: _Point) -> dict[str, Any]:
+    text = point.text(_PROFILE_BODY_ENV) or "{}"
+    try:
+        body = json.loads(text)
+    except ValueError:
+        raise ConfigError(f"the point's {_PROFILE_BODY_ENV} is not JSON: {text!r}") from None
+    if not isinstance(body, dict):
+        raise ConfigError(f"the point's {_PROFILE_BODY_ENV} is not a JSON object: {text!r}")
+    return body
+
+
+def _steps(value: object, what: str) -> int:
+    try:
+        return int(str(value))
+    except ValueError:
+        raise ConfigError(f"the profile point's {what} is not a step count: {value!r}") from None
+
+
+def _fixed_profile(bench: Mapping[str, Any], point: _Point) -> ProfileConfig:
+    """The capture window of a fixed point: the steps SGLang's start body or vLLM's profiler flags bound it to.
+
+    ATOM bounds no steps, so its capture is the profiled pass, which the window's step fields then count in prompts.
+    """
+    if not _torch_profiler(bench).get("enabled"):
+        if point.flag(_PROFILE_ENV, default=False):
+            raise ConfigError(f"the point sets {_PROFILE_ENV} without profiler.torch_profiler.enabled")
+        return ProfileConfig(enabled=False)
+    body = _start_body(point)
+    window = (body.pop(SGLANG_START_STEP, None), body.pop(SGLANG_NUM_STEPS, None))
+    num_prompts = point.integer(ENV_NUM_PROMPTS)
+    if point.framework is Framework.VLLM:
+        args = point.text(extra_args_env(point.framework.value)) or ""
+        window = (_profiler_flag_value(args, _DELAY_ITERATIONS), _profiler_flag_value(args, _MAX_ITERATIONS))
+    elif point.framework is Framework.ATOM:
+        window = (0, num_prompts)
+    if None in window:
+        raise ConfigError("the profile point bounds no capture window")
+    return ProfileConfig(
+        enabled=True,
+        start_body=body or None,
+        num_prompts=num_prompts,
+        delay_iters=_steps(window[0], "capture delay"),
+        max_iters=_steps(window[1], "captured steps"),
+    )
+
+
+#: The ``agentx`` keys a point may set: Magpie's recipe selection (``recipe``, ``selector`` ...) gives way to the base.
+_AGENTX_BLOCK_KEYS = frozenset({"enabled", "mode", "concurrency", "failed_request_threshold", "launch_overrides"})
+#: Every ``launch_overrides`` key Magpie read; ``remove_args`` edits the recipe argv a base-seeded launch replaces.
+_AGENTX_LAUNCH_KEYS = frozenset(
+    {"version", "append_args", "remove_args", "replace_args", "env", "unset_env", "executable"}
+    | {"source_files", "absent_source_files"}
+)
+_AGENTX_CANONICAL = "canonical"
+_AGENTX_THRESHOLD = AGENTX_ERROR_RATE_THRESHOLD_PCT / 100
+_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
+_DURATION_ENV = "DURATION"
+_EP_SIZE_ENV = "EP_SIZE"
+_WARMUP_PER_LANE_ENV = "AIPERF_WARMUP_REQUESTS_PER_LANE"
+#: The AgentX point's environment the config carries as fields, beside a fixed point's and the client's ``AIPERF_*``.
+_AGENTX_CONSUMED_ENV = _CONSUMED_ENV | {_MODEL_PATH_ENV, _EP_SIZE_ENV, _TRACE_ENV}
+#: The client knobs of Magpie's replay and the MLPerf client, which the agentx-harness replay does not read.
+_MAGPIE_CLIENT_PREFIXES = ("AGENTX_", "AGENTIC_")
+#: The keys an AgentX ``profiler.torch_profiler`` may set, and Magpie's defaults (``TorchProfilerConfig``) for two.
+#: ``interval_seconds`` spaces the captures after the first, and the round opens one.
+_AGENTX_PROFILE_KEYS = frozenset(
+    {"enabled", "num_steps", "num_profiles", "start_seconds", "interval_seconds", "detailed_annotations"}
+    | {"capture_timeout_seconds"}
+)
+_AGENTX_CAPTURE_STEPS = 20
+_AGENTX_CAPTURE_SEC = 300.0
+#: What Magpie's AgentX profile gave an annotated SGLang capture (``agentx_profile_config.py``): shapes and stacks
+#: in the trace, and the CUDA-graph replays profiled unless the server runs eager.
+_SGLANG_ANNOTATION_ENV = MappingProxyType(
+    dict.fromkeys(("SGLANG_PROFILE_WITH_STACK", "SGLANG_PROFILE_RECORD_SHAPES", "SGLANG_GRAPH_BATCH_CAPTURE"), "True")
+)
+_SGLANG_GRAPH_PROFILE_FLAG = "--enable-profile-cuda-graph"
+_SGLANG_EAGER_FLAG = "--disable-cuda-graph"
+
+
+def _agentx_block(bench: Mapping[str, Any]) -> Mapping[str, Any]:
+    block = bench.get("agentx")
+    return block if isinstance(block, Mapping) else {}
+
+
+def _refuse_keys(keys: object, known: frozenset[str], where: str) -> None:
+    unknown = sorted(set(keys) - known) if isinstance(keys, Mapping) else []
+    if unknown:
+        raise ConfigError(f"the AgentX point sets {where} {', '.join(unknown)}, which no inference_suite round carries")
+
+
+def _check_agentx_block(block: Mapping[str, Any], point: _Point) -> None:
+    _refuse_keys(block, _AGENTX_BLOCK_KEYS, "agentx")
+    _refuse_keys(block.get("launch_overrides"), _AGENTX_LAUNCH_KEYS, "agentx.launch_overrides")
+    if str(block.get("mode", _AGENTX_CANONICAL)).lower() != _AGENTX_CANONICAL:
+        raise ConfigError("the AgentX point asks for fast mode; a round replays canonically")
+    threshold = block.get("failed_request_threshold", _AGENTX_THRESHOLD)
+    if threshold != _AGENTX_THRESHOLD:
+        raise ConfigError(
+            f"the AgentX point's failed_request_threshold {threshold!r} is not Hyperloom's {_AGENTX_THRESHOLD}"
+        )
+    concurrency = block.get("concurrency", point.integer(ENV_CONC))
+    if concurrency != point.integer(ENV_CONC):
+        raise ConfigError(f"the AgentX point's concurrency {concurrency!r} is not its {ENV_CONC}")
+
+
+def _check_agentx_envs(point: _Point, base: BaseLaunch) -> None:
+    refused = sorted(name for name in point.envs if name == _DURATION_ENV or name.startswith(_MAGPIE_CLIENT_PREFIXES))
+    if refused:
+        raise ConfigError(
+            f"the AgentX point sets {', '.join(refused)}; the replay is a request count with its own knobs"
+        )
+    if point.flag(ENV_RUN_EVAL, default=False):
+        raise ConfigError(f"the AgentX point sets {ENV_RUN_EVAL}; its accuracy is a round of its own")
+    if point.text(_EP_SIZE_ENV) is not None and point.integer(_EP_SIZE_ENV) != base.topology.ep:
+        raise ConfigError(
+            f"the point runs {_EP_SIZE_ENV} {point.integer(_EP_SIZE_ENV)}, its base runs {base.topology.ep}"
+        )
+
+
+def _aiperf_env(env: Mapping[str, str]) -> dict[str, str]:
+    return {name: str(value) for name, value in env.items() if name.startswith(AGENTX_CLIENT_ENV_PREFIX)}
+
+
+def _lane_warmup(client_env: Mapping[str, str]) -> int:
+    value = client_env.get(_WARMUP_PER_LANE_ENV, "").strip()
+    try:
+        return int(value) if value else CANON_WARMUP_PER_LANE
+    except ValueError:
+        raise ConfigError(f"the AgentX client's {_WARMUP_PER_LANE_ENV} is not an integer: {value!r}") from None
+
+
+def _agentx_trace(point: _Point, base: BaseLaunch) -> str:
+    trace = point.text(_TRACE_ENV) or base.client.env.get(_TRACE_ENV)
+    if trace is None:
+        raise ConfigError(f"neither the AgentX point nor its base's client env names the trace corpus ({_TRACE_ENV})")
+    return trace
+
+
+def _agentx_workload(point: _Point, base: BaseLaunch) -> AgentxWorkload:
+    """The replay: the base's client environment under the point's, every knob the harness takes explicit."""
+    client_env = {AGENTX_FAST_MODE_ENV: "0", **_aiperf_env(base.client.env), **_aiperf_env(point.envs)}
+    concurrency = point.integer(ENV_CONC)
+    return AgentxWorkload(
+        concurrency=concurrency,
+        dataset=_agentx_trace(point, base),
+        num_prompts=point.integer(ENV_NUM_PROMPTS, agentx_profiling_requests(concurrency)),
+        warmup_requests_per_lane=_lane_warmup(client_env),
+        seed=MEASURED_SEED,
+        warmup_seed=MEASURED_SEED,
+        failed_request_threshold=_AGENTX_THRESHOLD,
+        client_env=client_env,
+    )
+
+
+def _agentx_profile(bench: Mapping[str, Any], framework: Framework) -> ProfileConfig:
+    """The capture window an AgentX point asks for, opened ``start_seconds`` into the replay's measured phase."""
+    settings = _torch_profiler(bench)
+    if not settings.get("enabled"):
+        return ProfileConfig(enabled=False)
+    _refuse_keys(settings, _AGENTX_PROFILE_KEYS, "profiler.torch_profiler")
+    if settings.get("num_profiles", 1) != 1:
+        raise ConfigError(f"the AgentX point asks for {settings['num_profiles']} captures; a round opens one")
+    annotated = framework is Framework.SGLANG and settings.get("detailed_annotations") is True
+    return ProfileConfig(
+        enabled=True,
+        start_body={"detailed_annotations": True} if annotated else None,
+        delay_iters=0,
+        max_iters=settings.get("num_steps", _AGENTX_CAPTURE_STEPS),
+        agentx_open_after_sec=settings.get("start_seconds", 0.0),
+        agentx_duration_sec=settings.get("capture_timeout_seconds", _AGENTX_CAPTURE_SEC),
+    )
+
+
+def _graph_disabled(user: LaunchDelta, base: BaseLaunch) -> bool:
+    golden_args = base.golden_al.args if base.golden_al is not None else ()
+    ran = {name for name, _ in argv_flag_occurrences((*base.args, *golden_args, *user.args_add))}
+    removed = {canonical_flag_name(flag) for flag in user.args_remove}
+    return canonical_flag_name(_SGLANG_EAGER_FLAG) in ran - removed
+
+
+def _agentx_profile_layer(
+    bench: Mapping[str, Any], framework: Framework, user: LaunchDelta, base: BaseLaunch
+) -> LaunchDelta:
+    """What an AgentX profile adds to the server's own layer ``user`` for the annotations it asks for."""
+    settings = _torch_profiler(bench)
+    if not settings.get("enabled"):
+        return LaunchDelta()
+    annotated = settings.get("detailed_annotations") is True
+    if framework is Framework.VLLM:
+        fields = vllm_profiler_fields(patched=annotated).items()
+        return LaunchDelta(
+            args_add=tuple(token for name, value in fields for token in (f"--profiler-config.{name}", value))
+        )
+    if not annotated:
+        return LaunchDelta()
+    graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
+    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
+
+
+def _profiled_server(server: ServerConfig, bench: Mapping[str, Any], base: BaseLaunch) -> ServerConfig:
+    user = server.user
+    layer = _agentx_profile_layer(bench, Framework(base.framework), user, base)
+    return replace(
+        server,
+        user=replace(user, args_add=(*user.args_add, *layer.args_add), env_set={**user.env_set, **layer.env_set}),
+    )
+
+
+def _agentx_server_env(point: _Point) -> dict[str, str]:
+    """The point's environment as Magpie layered it under the launch's: less what the config carries as fields."""
+    return {
+        name: value
+        for name, value in point.envs.items()
+        if name not in _AGENTX_CONSUMED_ENV and not name.startswith(AGENTX_CLIENT_ENV_PREFIX)
+    }
+
+
+def _agentx_server(point: _Point, bench: Mapping[str, Any], base: BaseLaunch, settings: RoundSettings) -> ServerConfig:
+    """The AgentX point's server: its launch over the base, on the interpreter and source files the launch names."""
+    launch = BenchmarkPoint.from_block(bench).agentx_launch
+    layer = _layer_over_base(launch, base, _agentx_server_env(point))
+    server = _server(point, base, settings, None, layer)
+    overrides = _agentx_block(bench).get("launch_overrides") or {}
+    return replace(
+        server,
+        framework_python=launch.executable or server.framework_python,
+        source_files={str(path): str(digest) for path, digest in launch.source_files.items()},
+        absent_source_files=tuple(str(path) for path in overrides.get("absent_source_files") or ()),
+    )
+
+
+def _agentx_config(
+    bench: Mapping[str, Any], point: _Point, base: BaseLaunch, settings: RoundSettings, boot_only: bool
+) -> SuiteConfig:
+    _check_agentx_block(_agentx_block(bench), point)
+    _check_agentx_envs(point, base)
+    point = replace(point, model=point.text(_MODEL_PATH_ENV) or point.model)
+    measures = not boot_only
+    server = _agentx_server(point, bench, base, settings)
+    return SuiteConfig(
+        server=_profiled_server(server, bench, base) if measures else server,
+        workload=WorkloadKind.AGENTX if measures else WorkloadKind.NONE,
+        agentx=_agentx_workload(point, base) if measures else None,
+        profile=_agentx_profile(bench, point.framework) if measures else ProfileConfig(enabled=False),
+        eval=_eval(point, enabled=False),
+        telemetry=settings.telemetry,
+        lifecycle=settings.lifecycle,
+        deadlines=_deadlines(point, settings),
+        paths=settings.paths,
+    )
+
+
 def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings) -> SuiteConfig:
     """The config one round of the point ``document`` runs from, composed on ``base``.
 
@@ -395,19 +674,25 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
     client-only round (``settings.server_url`` or the point's ``BENCHMARK_BASE_URL``) holds its server as ``external``.
 
     Raises:
-        ConfigError: When the point is one this translation does not carry (AgentX, profile or scriptable), names
-            another framework or topology than ``base``, lacks a knob its load needs, or names an external server
-            that is not plain HTTP.
+        ConfigError: When the point is one this translation does not carry (scriptable, the MLPerf client, or an
+            AgentX or profile setting no round has), names another framework or topology than ``base``, lacks a knob
+            its load needs, or names an external server that is not plain HTTP or serves an AgentX point.
     """
     point = _point(document)
     _check_base(point, base)
+    bench = _bench(document)
     boot_only = (point.text(_RUN_PHASE_ENV) or "").lower() == _SERVER_ONLY_PHASE
     url = point.text(_REMOTE_SERVER_ENV) or settings.server_url
+    if is_agentx(bench):
+        if url is not None:
+            raise ConfigError(f"an AgentX round serves its own launch, not the external server at {url}")
+        return _agentx_config(bench, point, base, settings, boot_only)
     external = None if url is None else _external_address(url)
     return SuiteConfig(
         server=_server(point, base, settings, external, _user_layer(point)),
         workload=WorkloadKind.NONE if boot_only else WorkloadKind.FIXED,
         fixed=None if boot_only else _fixed(point),
+        profile=ProfileConfig(enabled=False) if boot_only else _fixed_profile(bench, point),
         eval=_eval(point, enabled=not boot_only and point.flag(ENV_RUN_EVAL, default=False)),
         # An external server's GPUs are not this host's to sample.
         telemetry=settings.telemetry if external is None else replace(settings.telemetry, enabled=False),
@@ -440,12 +725,12 @@ def _flag_groups(argv: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
     return groups
 
 
-def _layer_over_base(launch: AgentxLaunch, base: BaseLaunch) -> LaunchDelta:
+def _layer_over_base(launch: AgentxLaunch, base: BaseLaunch, point_env: Mapping[str, str]) -> LaunchDelta:
     """The layer the AgentX ``launch`` runs above ``base`` and its golden layer.
 
     A launch composed on the session base replaces the recipe's argv with the base's, golden's and its own layers'
-    flags, and sets their environment; what differs from base plus golden is its own layer. A flag the base sets and
-    the launch dropped is removed.
+    flags, and sets their environment over ``point_env``, the point's own; what differs from base plus golden is its
+    own layer. A flag the base sets and the launch dropped is removed, and so is a variable the launch unsets.
     """
     if not launch.replace_args:
         raise ConfigError("the AgentX point does not run the session base; its launch extends the recipe's argv")
@@ -454,16 +739,14 @@ def _layer_over_base(launch: AgentxLaunch, base: BaseLaunch) -> LaunchDelta:
     below = _flag_groups(normalize_argv((*base.args, *golden_args)))
     ran = _flag_groups(normalize_argv(launch.append_args))
     below_env = {**base.env, **golden_env}
-    unset = tuple(sorted(set(launch.unset_env) & set(base.env)))
+    env = {**point_env, **{name: str(value) for name, value in launch.env.items()}}
     return LaunchDelta(
         args_add=tuple(token for name, group in ran.items() if below.get(name) != group for token in group),
         args_remove=tuple(f"--{name}" for name in _flag_groups(base.args) if name not in ran),
         env_set={
-            name: str(value)
-            for name, value in launch.env.items()
-            if name not in unset and below_env.get(name) != str(value)
+            name: value for name, value in env.items() if name not in launch.unset_env and below_env.get(name) != value
         },
-        env_unset=unset,
+        env_unset=tuple(sorted(set(launch.unset_env) & set(base.env))),
     )
 
 
@@ -487,8 +770,7 @@ def accuracy_config(
     point = _point_of(bench, timeout_sec, timeout_sec)
     point = replace(point, model=point.text(_MODEL_PATH_ENV) or point.model)
     _check_base(point, base)
-    layer = _layer_over_base(BenchmarkPoint.from_block(bench).agentx_launch, base)
-    server = _server(point, base, settings, None, layer)
+    server = _agentx_server(point, bench, base, settings)
     return SuiteConfig(
         server=replace(server, golden=GoldenUse.APPLY if base.golden_al is None else GoldenUse.EXCLUDE),
         workload=WorkloadKind.NONE,
@@ -716,6 +998,8 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
         raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     if request.warmup and config.fixed is not None:
         config = replace(config, fixed=replace(config.fixed, seed=WARMUP_SEED))
+    if request.warmup and config.agentx is not None:
+        config = replace(config, agentx=replace(config.agentx, seed=WARMUP_SEED, warmup_seed=WARMUP_SEED))
     checkpoint = None
     if request.checkpoint is not None:
         checkpoint = SuiteRoundCheckpoint(request.checkpoint, slot=request.round_dir, run_dir=Path(run_dir))
