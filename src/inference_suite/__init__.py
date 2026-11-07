@@ -23,7 +23,8 @@ the manifest's sha256, stages nothing into a cache that already verifies, and ex
 damaged cache or a failed staging. A runner that runs
 the round in another process runs ``python -m inference_suite run``, which exits :data:`EXIT_REFUSED` when it refuses
 the config before the round starts. :func:`inferencex_root` is the staged InferenceX in a tool cache, and
-:data:`CLIENT_FILE` its benchmark client under that root. A round's ``launch.json`` names the GPUs its server ran
+:data:`CLIENT_FILE` its benchmark client under that root; a harness that runs its client as a file runs
+:data:`CLIENT_SCRIPT` with :data:`CLIENT_ROOT_ENV` naming that root. A round's ``launch.json`` names the GPUs its server ran
 on under :data:`GPU_MASK_ENV`.
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
@@ -47,6 +48,8 @@ from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
 from inference_suite.contracts.normalised import NormalisedManifest
 from inference_suite.staging import (
     CLIENT_FILE,
+    CLIENT_ROOT_ENV,
+    CLIENT_SCRIPT,
     StagingError,
     inferencex_root,
     manifest_sha256,
@@ -57,6 +60,8 @@ from inference_suite.staging import (
 
 __all__ = [
     "CLIENT_FILE",
+    "CLIENT_ROOT_ENV",
+    "CLIENT_SCRIPT",
     "ClientPass",
     "ClientTarget",
     "ClientTool",
