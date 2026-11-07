@@ -15,11 +15,15 @@ base, above the base's golden layer; a profile point turns the torch profiler on
 point (``benchmark_script`` names the MLPerf agentic client) runs the MLPerf harness against the round's own server,
 which serves under the model name the harness requests.
 
-A point runs on inference_suite (:func:`suite_route`) once its session froze a base launch. A client-only round --
+A scriptable point (xDiT, or an operator's own script) runs its session base's script once, with the point's
+environment as the scriptable runner handed it before (:func:`scriptable_workload`); the quality gate the script
+writes is its eval, so it runs no GSM8K.
+
+Every point of a session that froze a base launch runs on inference_suite (:func:`suite_route`). A client-only round --
 multi-node, or one whose session or point names a ``BENCHMARK_BASE_URL`` -- holds its server as ``external``: it
-measures the server at that URL, which something else starts and stops, and samples no local GPU. A round with a Ray serving lease runs in the lease's actor on the GPUs Ray placed it on. The points
-:func:`backend_reason` names stay on the benchmark backend. :func:`run_suite_round` writes each round into a fresh
-run_dir below its round directory, so an attempt retried in the same directory never meets the run_dir before it.
+measures the server at that URL, which something else starts and stops, and samples no local GPU. A round with a Ray
+serving lease runs in the lease's actor on the GPUs Ray placed it on. :func:`run_suite_round` writes each round into a
+fresh run_dir below its round directory, so an attempt retried in the same directory never meets the run_dir before it.
 
 :func:`run_accuracy_suite_round` serves the launch an AgentX point ran for the D9 accuracy round: on a server of its
 own, without the base's golden layer, eval only, into ``<slot>/accuracy``.
@@ -95,6 +99,8 @@ from inference_suite.contracts import (
     Report,
     RunLayout,
     RunPaths,
+    ScriptableRunEnv,
+    ScriptableWorkload,
     ServerConfig,
     SuiteConfig,
     Telemetry,
@@ -107,6 +113,7 @@ from ._accuracy_gate import ACCURACY_DIR
 from ._benchmark_interpreter import _resolve_probe_python
 from ._failed_step import failed_step_error_class
 from ._gpu_power import round_gpu_telemetry
+from ._workload_envs import QUALITY_REF_ENVS
 from ._multi_node_env import client_only_server_url
 from ._profile_setup import (
     _DELAY_ITERATIONS,
@@ -280,27 +287,11 @@ def _envs(bench: Mapping[str, Any]) -> dict[str, str]:
     return {str(name): str(value) for name, value in (bench.get("envs") or {}).items() if value is not None}
 
 
-def backend_reason(document: Mapping[str, object]) -> str | None:
-    """Why the point ``document`` stays on the benchmark backend, or ``None`` when :func:`suite_config` carries it.
-
-    Raises:
-        ConfigError: When ``document`` holds no benchmark mapping or names a framework inference_suite does not know.
-    """
-    bench = _bench(document)
-    framework = _framework(bench)
-    if framework_facts(framework).kind is not FrameworkKind.SERVING:
-        return f"the point runs {framework.value}, which serves nothing"
-    return None
-
-
 def _point_of(bench: Mapping[str, Any], timeout: float, boot: float) -> _Point:
     return _Point(_framework(bench), str(bench.get("model") or "").strip(), _envs(bench), float(timeout), float(boot))
 
 
 def _point(document: Mapping[str, object]) -> _Point:
-    reason = backend_reason(document)
-    if reason is not None:
-        raise ConfigError(f"{reason}; it stays on the benchmark backend")
     bench = _bench(document)
     timeout = bench.get("timeout_seconds")
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
@@ -681,6 +672,47 @@ def _mlperf_config(
     )
 
 
+#: The ``benchmark`` keys a script reads from its environment, by the variable each fills.
+_SCRIPT_BLOCK_ENV = MappingProxyType({"RUNNER_TYPE": "runner_type", "PRECISION": "precision"})
+_SCRIPT_ROUND_SET = frozenset(item.value for item in ScriptableRunEnv)
+
+
+def scriptable_workload(bench: Mapping[str, Any], envs: Mapping[str, str]) -> ScriptableWorkload:
+    """The script's run of the point whose ``benchmark`` block is ``bench`` and whose environment is ``envs``.
+
+    The script sees every variable of the point, and ``RUNNER_TYPE`` and ``PRECISION`` from its block where the
+    environment names neither, less the names the round sets itself (the result's place, the model, the GPUs, the
+    profiler's switch). The quality reference is the point's ``HYPERLOOM_QUALITY_REF`` (or ``XDIT_QUALITY_REF``),
+    which stays in the environment for scripts that read either name.
+
+    Raises:
+        ConfigError: When a variable the point sets reads as an acceptance threshold, which the caller judges (D2).
+    """
+    block = {name: str(bench[key]) for name, key in _SCRIPT_BLOCK_ENV.items() if bench.get(key)}
+    params = {name: value for name, value in {**block, **envs}.items() if name not in _SCRIPT_ROUND_SET}
+    reference = next((envs[name] for name in QUALITY_REF_ENVS if envs.get(name, "").strip()), None)
+    return ScriptableWorkload(params=params, quality_reference=reference)
+
+
+def _scriptable_config(
+    bench: Mapping[str, Any], point: _Point, base: BaseLaunch, settings: RoundSettings, boot_only: bool
+) -> SuiteConfig:
+    """The scriptable point's round: its base's script, once, on a server-less round of its own."""
+    if boot_only or settings.lifecycle.mode is not LifecycleMode.OWN:
+        raise ConfigError("a scriptable point runs no server, so its round neither boots one nor reuses one")
+    return SuiteConfig(
+        server=_server(point, base, settings, None, LaunchDelta()),
+        workload=WorkloadKind.SCRIPTABLE,
+        scriptable=scriptable_workload(bench, point.envs),
+        profile=ProfileConfig(enabled=bool(torch_profiler(bench).get("enabled"))),
+        eval=_eval(point, enabled=False),
+        telemetry=settings.telemetry,
+        lifecycle=settings.lifecycle,
+        deadlines=_deadlines(point, settings),
+        paths=settings.paths,
+    )
+
+
 def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings) -> SuiteConfig:
     """The config one round of the point ``document`` runs from, composed on ``base``.
 
@@ -688,17 +720,22 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
     that sets ``EVAL_ONLY`` runs the eval and no load, as InferenceX's ``run_benchmark_serving`` does. A client-only round (``settings.server_url`` or the point's ``BENCHMARK_BASE_URL``) holds its server as ``external``.
 
     Raises:
-        ConfigError: When the point is one this translation does not carry (scriptable, or an AgentX, MLPerf or
-            profile setting no round has), names another framework or topology than ``base``, lacks a knob its load
-            needs, or names an external server that is not plain HTTP or serves an AgentX or MLPerf point.
+        ConfigError: When the point is one this translation does not carry (an AgentX, MLPerf or profile setting no
+            round has), names another framework or topology than ``base``, lacks a knob its load needs, or names an
+            external server that is not plain HTTP or serves an AgentX, MLPerf or scriptable point.
     """
     point = _point(document)
     _check_base(point, base)
     bench = _bench(document)
     boot_only = (point.text(_RUN_PHASE_ENV) or "").lower() == _SERVER_ONLY_PHASE
     url = point.text(_REMOTE_SERVER_ENV) or settings.server_url
-    if url is not None and (is_agentx(bench) or _is_mlperf(bench)):
-        raise ConfigError(f"an AgentX or MLPerf round serves its own launch, not the external server at {url}")
+    scriptable = framework_facts(point.framework).kind is FrameworkKind.SCRIPTABLE
+    if url is not None and (is_agentx(bench) or _is_mlperf(bench) or scriptable):
+        raise ConfigError(
+            f"an AgentX, MLPerf or scriptable round serves its own launch, not the external server at {url}"
+        )
+    if scriptable:
+        return _scriptable_config(bench, point, base, settings, boot_only)
     if is_agentx(bench):
         return _agentx_config(bench, point, base, settings, boot_only)
     if _is_mlperf(bench):
@@ -901,25 +938,14 @@ def _server_phase_point(document: Mapping[str, object]) -> Mapping[str, object]:
     return {**document, "benchmark": {**bench, "envs": {**_envs(bench), _RUN_PHASE_ENV: _SERVER_ONLY_PHASE}}}
 
 
-def _declined(config_path: Path) -> bool:
-    try:
-        return backend_reason(_read_point(config_path)) is not None
-    except ConfigError:
-        # Not declined: the round's translation refuses the point with this same error, as config_invalid.
-        return False
-
-
 def staged_tool_cache() -> Path:
     """Where the tools inference_suite runs are staged."""
     return resolve_dep_dir(TOOL_CACHE_DIR, TOOL_CACHE_ENV)
 
 
-def suite_route(session_dir: Path | None, config_path: Path) -> SuiteRoute | None:
-    """The route the point at ``config_path`` runs on inference_suite, or ``None`` while it stays on the backend."""
-    if session_dir is None:
-        return None
-    route = session_route(Path(session_dir))
-    return None if route is None or _declined(config_path) else route
+def suite_route(session_dir: Path | None) -> SuiteRoute | None:
+    """The route every round of the session at ``session_dir`` runs on inference_suite, ``None`` with no session."""
+    return None if session_dir is None else session_route(Path(session_dir))
 
 
 def session_route(session_dir: Path) -> SuiteRoute | None:
@@ -1141,7 +1167,6 @@ __all__ = [
     "SuiteRound",
     "SuiteRoundRefused",
     "SuiteRoute",
-    "backend_reason",
     "deadline_unix",
     "inherited_env_names",
     "point_server",
@@ -1151,5 +1176,6 @@ __all__ = [
     "session_route",
     "staged_tool_cache",
     "suite_config",
+    "scriptable_workload",
     "suite_route",
 ]

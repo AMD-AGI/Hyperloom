@@ -3,8 +3,8 @@
 
 """Shared helper for the ``explore`` executor's grid runs.
 
-A round runs on inference_suite when :func:`._suite_config.suite_route` routes its point there, and on the Magpie
-backend otherwise.
+A round runs on inference_suite when its session froze a base launch (:func:`._suite_config.suite_route`), and on
+the Magpie backend otherwise.
 """
 
 from __future__ import annotations
@@ -879,7 +879,7 @@ async def _unit_started(grid: list[GridVariant], idx: int, label: str) -> None:
 async def _reported_round(run: _GridRun, at: _VariantSlot, label: str, bench_round: GridRound) -> _RoundProcess:
     """Run one benchmark pass, announced on entry and kept alive by its progress."""
     await _unit_started(run.grid, at.idx, label)
-    route = await asyncio.to_thread(suite_route, _resolve_session_dir(), bench_round.config_path)
+    route = await asyncio.to_thread(suite_route, _resolve_session_dir())
     async with heartbeat_while_output_flows(
         unit="variant_step",
         label=f"{at.variant.name}:{label}",

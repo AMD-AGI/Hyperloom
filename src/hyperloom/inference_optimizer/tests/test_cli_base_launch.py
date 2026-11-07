@@ -24,6 +24,7 @@ import pytest
 import inference_suite
 from hyperloom.inference_optimizer.cli import base_launch as bl
 from hyperloom.inference_optimizer.cli.lineup_banners import print_lineup_banners
+from hyperloom.inference_optimizer.framework_paths import OPERATOR_SCRIPTS_DIR_ENV
 from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE, read_base_launch, shared_state_fields
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -117,7 +118,7 @@ def _args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
-def _resolve(session_dir: Path, args: argparse.Namespace, **overrides) -> BaseLaunch | None:
+def _resolve(session_dir: Path, args: argparse.Namespace, **overrides) -> BaseLaunch:
     kwargs = dict(framework="sglang", benchmark_mode="synthetic", concurrencies=(64, 4, 64))
     kwargs.update(overrides)
     return bl.resolve_base_launch(args, session_dir, **kwargs)
@@ -390,10 +391,41 @@ def test_a_session_without_a_board_exits_2(tmp_path, fetched, capsys):
     assert fetched == []
 
 
-def test_a_scriptable_session_resolves_no_base(tmp_path, fetched):
-    assert _resolve(tmp_path, _args(), framework="xdit") is None
-    assert fetched == []
-    assert read_base_launch(tmp_path) is None
+def test_an_xdit_session_freezes_the_shipped_script_as_its_base_without_reading_a_source(
+    tmp_path, fetched, monkeypatch
+):
+    monkeypatch.delenv(OPERATOR_SCRIPTS_DIR_ENV, raising=False)
+    args = _args(model="/models/FLUX.1-dev", operator_tp=None, operator_ep=None, tp=2, ep=1)
+
+    base = _resolve(tmp_path, args, framework="xdit", concurrencies=(1,))
+
+    assert fetched == [] and read_base_launch(tmp_path) == base
+    assert base.query.workload is Workload.SCRIPTABLE and base.framework == "xdit"
+    assert base.entrypoint == ("bash", "xdit") and base.source.kind is SourceKind.DEFAULT_TABLE
+    assert base.client is None and base.args == () and base.golden_al is None
+    assert base.topology == Topology(tp=2) and (args.tp, os.environ["TP"]) == (2, "2")
+    assert (base.model.id, base.model.path) == ("FLUX.1-dev", "/models/FLUX.1-dev")
+
+
+def test_a_custom_session_freezes_the_operator_script_with_its_content(tmp_path, fetched, monkeypatch):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    script = scripts / "custom_mi355x.sh"
+    script.write_text("exit 0\n")
+    monkeypatch.setenv(OPERATOR_SCRIPTS_DIR_ENV, str(scripts))
+    args = _args(model="/models/own", operator_tp=1, tp=1, ep=1)
+
+    base = _resolve(tmp_path / "s", args, framework="custom", concurrencies=(1,))
+
+    assert base.entrypoint == ("bash", str(script)) and base.source.kind is SourceKind.USER_FILE
+    script.write_text("exit 1\n")
+    assert _resolve(tmp_path / "t", args, framework="custom", concurrencies=(1,)).digest() != base.digest()
+
+
+def test_a_custom_session_without_a_script_exits_2(tmp_path, fetched, capsys, monkeypatch):
+    monkeypatch.delenv(OPERATOR_SCRIPTS_DIR_ENV, raising=False)
+    err = _refused(tmp_path, _args(operator_tp=1, tp=1, ep=1), capsys, framework="custom", concurrencies=(1,))
+    assert "custom ships no script" in err
 
 
 def test_an_mlperf_agentx_session_freezes_a_fixed_base_for_the_server_it_boots(tmp_path, fetched, monkeypatch):

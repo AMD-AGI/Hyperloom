@@ -86,7 +86,7 @@ def test_a_leased_round_runs_in_the_lease_and_its_report_is_read_back(session, t
     lease = _Lease(_rounds())
     point = _write_point(tmp_path / "slot" / "point.yaml")
 
-    result = run_suite_round(suite_route(session, point), _request(point, lease), on_poll=lambda: None)
+    result = run_suite_round(suite_route(session), _request(point, lease), on_poll=lambda: None)
 
     assert result.report.run_status is RunStatus.COMPLETED
     (leased,) = lease.leased
@@ -118,7 +118,7 @@ def test_a_leased_round_that_left_no_report_is_refused_under_why_it_never_ran(se
     point = _write_point(tmp_path / "slot" / "point.yaml")
 
     with pytest.raises(SuiteRoundRefused) as refused:
-        run_suite_round(suite_route(session, point), _request(point, lease), on_poll=lambda: None)
+        run_suite_round(suite_route(session), _request(point, lease), on_poll=lambda: None)
 
     assert refused.value.error_class == error_class
 
@@ -129,7 +129,7 @@ def test_the_leased_round_is_reaped_only_past_its_own_session_deadline(session, 
     request = replace(_request(point, lease), deadline_unix=int(time.time()) + 600)
 
     with pytest.raises(SuiteRoundRefused):
-        run_suite_round(suite_route(session, point), request, on_poll=lambda: None)
+        run_suite_round(suite_route(session), request, on_poll=lambda: None)
 
     (leased,) = lease.leased
     assert leased.session_remaining_sec == pytest.approx(600 + _suite_config._LEASED_BACKSTOP_SLACK_SEC, abs=5)
@@ -141,7 +141,7 @@ def test_a_leased_round_sizes_its_server_by_tp_not_by_the_gpu_mask_the_point_car
     lease = _Lease(_rounds())
     point = _write_point(tmp_path / "slot" / "point.yaml", ROCR_VISIBLE_DEVICES="0,1,2,3,4,5,6,7")
 
-    run_suite_round(suite_route(session, point), _request(point, lease), on_poll=lambda: None)
+    run_suite_round(suite_route(session), _request(point, lease), on_poll=lambda: None)
 
     (leased,) = lease.leased
     assert _gpus(leased) == (0, 1)
@@ -279,7 +279,7 @@ def test_a_leased_round_carries_its_checkpoint_to_the_actor(session, tmp_path, m
         checkpoint=AgentxCheckpoint(100.0, enforce=True),
     )
 
-    run_suite_round(suite_route(session, point), request, on_poll=lambda: None)
+    run_suite_round(suite_route(session), request, on_poll=lambda: None)
 
     (leased,) = lease.leased
     assert leased.checkpoint is not None and leased.checkpoint.slot == point.parent
@@ -307,7 +307,7 @@ def test_a_leased_round_its_checkpoint_stopped_ends_as_an_early_stop_with_or_wit
     point = _write_point(tmp_path / "slot" / "point.yaml")
 
     ended = run_grid_suite_round(
-        suite_route(session, point),
+        suite_route(session),
         _grid_round(point, AgentxCheckpoint(100.0, enforce=True)),
         env_drop=frozenset(),
         serving_lease=lease,

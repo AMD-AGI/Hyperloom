@@ -13,6 +13,7 @@ import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -33,6 +34,9 @@ from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.perf_metric import is_agentx_mode
 from inference_suite.contracts import ProbeOutcome, ReportError, RunLayout
 from inference_suite.contracts.launch import Launch
+from inference_suite.contracts.layout import REPORT_FILE
+
+from ._round_folder import MAGPIE_REPORT_FILE, RoundFolder, is_round_folder
 
 log = logging.getLogger(__name__)
 
@@ -233,18 +237,29 @@ def accuracy_keep_block(
     return False, "", True
 
 
+def _round_quality_gate(report: Path) -> object:
+    """The quality gate the report at ``report`` carries: an inference_suite round's, or Magpie's bench report's.
+
+    Raises:
+        OSError, ValueError: When the report cannot be read; a round report off its contract raises too.
+    """
+    if report.name == REPORT_FILE:
+        return RoundFolder.read(report.parent).measurement()["quality_gate"]
+    return json.loads(report.read_text(encoding="utf-8")).get("quality_gate")
+
+
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
-    """Read a scriptable (server-less) quality gate from the bench report."""
+    """Read a scriptable (server-less) quality gate from the newest round report under ``workspace``."""
     workspace = Path(workspace)
-    reports = [Path(f) for f in glob.glob(str(workspace / "**" / "benchmark_report.json"), recursive=True)]
+    reports = [Path(f) for f in glob.glob(str(workspace / "**" / MAGPIE_REPORT_FILE), recursive=True)]
+    reports += [path for path in workspace.glob(f"**/{REPORT_FILE}") if is_round_folder(path.parent)]
     if not reports:
-        return {"quality_gate": None, "error": f"no benchmark_report.json in {workspace}"}
+        return {"quality_gate": None, "error": f"no round report in {workspace}"}
     latest = max(reports, key=lambda p: p.stat().st_mtime)
     try:
-        data = json.loads(latest.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
+        qg = _round_quality_gate(latest)
+    except json.JSONDecodeError as exc:
         return {"quality_gate": None, "error": f"parse error: {exc}"}
-    qg = data.get("quality_gate")
     if not isinstance(qg, dict):
         return {"quality_gate": None, "error": f"no quality_gate in {latest}"}
     return {"quality_gate": qg, "source_file": str(latest)}
@@ -290,6 +305,13 @@ def _mlperf_inline_accuracy(result: dict[str, Any] | None) -> float | None:
     return float(score)
 
 
+#: The image-quality limits a scriptable gate is judged by when its script names none (D2: the script writes raw
+#: scores). xDiT's own tolerance: optimizations that keep precision pass, gross divergence does not.
+SCRIPTABLE_QUALITY_LIMITS: Mapping[str, float] = MappingProxyType(
+    {"lpips_max": 0.15, "ssim_min": 0.85, "mse_max": 0.006}
+)
+
+
 def quality_gate_passed(
     quality_gate: dict[str, Any] | None,
     require: bool = False,
@@ -315,7 +337,7 @@ def quality_gate_passed(
     evaluated = 0
     for metric_key, limit_key, ok in checks:
         val = quality_gate.get(metric_key)
-        lim = quality_gate.get(limit_key)
+        lim = quality_gate.get(limit_key, SCRIPTABLE_QUALITY_LIMITS[limit_key])
         if isinstance(val, (int, float)) and isinstance(lim, (int, float)):
             evaluated += 1
             if not ok(float(val), float(lim)):

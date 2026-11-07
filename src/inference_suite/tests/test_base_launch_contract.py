@@ -401,3 +401,65 @@ def test_a_wrong_schema_is_refused():
     document["schema"] = "hyperloom-base-launch/2"
     with pytest.raises(BaseLaunchError, match="schema"):
         BaseLaunch.from_document(document)
+
+
+def _scriptable(**changes) -> BaseLaunch:
+    base = _base(
+        query=LaunchQuery(
+            model_id="black-forest-labs/FLUX.1-dev",
+            framework="xdit",
+            board="mi355x",
+            workload=Workload.SCRIPTABLE,
+            concurrencies=(1,),
+        ),
+        source=LaunchSource(kind=SourceKind.DEFAULT_TABLE, path="/pkg/xdit.sh", files={"xdit": _SHA}),
+        point=LaunchPoint(conc=1, exact=True),
+        image=ImageFacts(run=None, recipe=None, framework_version=None, version_basis=VersionBasis.NOT_APPLICABLE),
+        framework="xdit",
+        entrypoint=("bash", "xdit"),
+        model=LaunchModel("black-forest-labs/FLUX.1-dev", "/models/FLUX.1-dev"),
+        args=(),
+        env={},
+        client=None,
+        golden_al=None,
+        runner_owned=RunnerOwned(),
+        stripped=(),
+        warnings=(),
+    )
+    return replace(base, **changes)
+
+
+def test_a_scriptable_base_round_trips_with_no_client_and_its_digest_follows_the_script_content():
+    base = _scriptable()
+    document = json.loads(json.dumps(base.to_document()))
+
+    assert document["client"] is None and document["entrypoint"] == ["bash", "xdit"]
+    assert BaseLaunch.from_document(document) == base
+    changed = replace(base, source=replace(base.source, files={"xdit": "c" * 64}))
+    assert changed.digest() != base.digest()
+    assert replace(base, source=replace(base.source, path="/elsewhere/xdit.sh")).digest() == base.digest()
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"client": ClientLaunch(tool="aiperf", commit=_COMMIT)}, "runs no client"),
+        ({"args": ("--steps", "4")}, "no args, env or golden layer"),
+        ({"env": {"XDIT_HEIGHT": "768"}}, "no args, env or golden layer"),
+        ({"golden_al": _golden(args=(), env={})}, "no args, env or golden layer"),
+        ({"source": LaunchSource(kind=SourceKind.DEFAULT_TABLE)}, "sha256 of its script"),
+    ],
+)
+def test_a_scriptable_base_runs_its_script_alone(changes, message):
+    with pytest.raises(BaseLaunchError, match=message):
+        _scriptable(**changes)
+
+
+def test_a_serving_base_runs_a_client():
+    with pytest.raises(BaseLaunchError, match="runs no client"):
+        _base(client=None)
+
+
+def test_a_scriptable_query_names_no_sequence_shape():
+    with pytest.raises(BaseLaunchError, match="any other query neither"):
+        replace(_scriptable().query, isl=1024, osl=128)

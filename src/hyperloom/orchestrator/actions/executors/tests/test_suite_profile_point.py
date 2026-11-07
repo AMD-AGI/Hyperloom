@@ -67,8 +67,8 @@ def test_the_point_is_prepared_before_its_route_is_read(tmp_path, monkeypatch, u
     class Routed(Exception):
         pass
 
-    def route(session_dir, config_path):
-        document = yaml.safe_load(Path(config_path).read_text())
+    def route(session_dir):
+        document = yaml.safe_load(point.read_text())
         routed.append(document["benchmark"]["profiler"]["torch_profiler"]["enabled"])
         raise Routed
 

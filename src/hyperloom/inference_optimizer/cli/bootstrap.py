@@ -831,7 +831,7 @@ def _benchmark_mode() -> str:
     return _AGENTX_MODE if _agentx_enabled() else _SYNTHETIC_MODE
 
 
-def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framework: str) -> BaseLaunch | None:
+def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framework: str) -> BaseLaunch:
     """Resolve a fresh session's base launch; it settles the TP and EP the manifest and the seeded state record."""
     benchmark_mode = _benchmark_mode()
     sweep = _parse_conc_sweep_concs(args, benchmark_mode) if _conc_sweep_enabled(args, benchmark_mode) else []

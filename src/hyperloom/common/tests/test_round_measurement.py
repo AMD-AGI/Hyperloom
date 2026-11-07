@@ -198,14 +198,14 @@ def test_an_agentx_round_served_with_the_prefix_cache_off_stays_a_valid_measurem
     assert measurement["framework"] == launch.framework.name.value
 
 
-def test_a_scriptable_round_maps_its_script_result_and_carries_the_quality_scores_raw() -> None:
+def test_a_scriptable_round_maps_its_script_result_and_carries_its_quality_gate() -> None:
     quality = {"reference": "ref.png", "image": "out.png", "mse": 0.01, "ssim": 0.98, "lpips": None}
     result = {
         "output_throughput": 0.5,
         "completed": 4,
         "latency_s": 2.0,
         "throughput_unit": "img/s",
-        "quality": quality,
+        "quality_gate": quality,
     }
     report = _fixed(
         workload_kind=WorkloadKind.SCRIPTABLE, fixed=None, scriptable=ScriptableResult("client/r.json", result)

@@ -6,7 +6,8 @@
 :meth:`BaseLaunch.digest` is the base's identity. It covers what decides how the server and the client run --
 framework, entrypoint, the model's id, topology, argv, environment, the golden layer and the client -- and leaves out
 where the launch came from, which image it was read from, and what the runner places on each host: the model's local
-path and the runner-owned flags and environment. Argv keeps its order: of two aliases of one flag, or a switch
+path and the runner-owned flags and environment. A scriptable base runs a script instead of a server and a client, so
+its identity is the script's: the entrypoint that names it and the sha256 of its content. Argv keeps its order: of two aliases of one flag, or a switch
 and its negation, the engine applies the last, so reordering may change the launch.
 """
 
@@ -49,6 +50,8 @@ _FIELDS = ContractFields(BaseLaunchError)
 class Workload(str, Enum):
     FIXED = "fixed"
     AGENTX = "agentx"
+    #: A server-less script (xDiT, or an operator's own), which the base names as its entrypoint.
+    SCRIPTABLE = "scriptable"
 
 
 class SourceKind(str, Enum):
@@ -95,7 +98,8 @@ def _sorted_strings(value: Mapping[str, str]) -> dict[str, str]:
 class LaunchQuery:
     """What a session asked for; ``tp`` and ``ep`` are set only when the operator gave them.
 
-    A fixed workload names its sequence shape (``isl``, ``osl``); an AgentX workload replays a trace and names none.
+    A fixed workload names its sequence shape (``isl``, ``osl``); an AgentX workload replays a trace and a scriptable
+    one runs a script, so neither names one.
     """
 
     model_id: str
@@ -124,7 +128,7 @@ class LaunchQuery:
         fixed = self.workload is Workload.FIXED
         if (self.isl is not None, self.osl is not None) != (fixed, fixed):
             raise BaseLaunchError(
-                f"a fixed query names its isl and osl and an AgentX query neither, got {self.workload.value} "
+                f"a fixed query names its isl and osl and any other query neither, got {self.workload.value} "
                 f"with isl {self.isl!r} and osl {self.osl!r}"
             )
 
@@ -575,6 +579,9 @@ class BaseLaunch:
 
     ``args`` and ``env`` hold neither runner-owned keys nor, when there is a golden layer, golden-owned ones.
     ``stripped`` names what was taken out of the source because the runner owns it; ``warnings`` are shown at launch.
+
+    A scriptable base (``query.workload`` scriptable) runs its entrypoint's last word, :attr:`script`, and nothing
+    else: no client, args, env or golden layer, and ``source.files`` records the script's sha256.
     """
 
     query: LaunchQuery
@@ -587,7 +594,7 @@ class BaseLaunch:
     topology: Topology
     args: tuple[str, ...]
     env: Mapping[str, EnvValue]
-    client: ClientLaunch
+    client: ClientLaunch | None
     resolved_unix: int
     golden_al: GoldenAcceptance | None = None
     runner_owned: RunnerOwned = field(default_factory=RunnerOwned)
@@ -605,6 +612,31 @@ class BaseLaunch:
         _FIELDS.integer(self.resolved_unix, "the resolve time", minimum=0)
         self._check_source()
         self._check_layers()
+        self._check_script()
+
+    @property
+    def script(self) -> str:
+        """The script a scriptable base runs: its entrypoint's last word."""
+        return self.entrypoint[-1]
+
+    @property
+    def scriptable(self) -> bool:
+        return self.query.workload is Workload.SCRIPTABLE
+
+    def _check_script(self) -> None:
+        if (self.client is None) != self.scriptable:
+            raise BaseLaunchError(
+                f"a scriptable base runs no client and any other base runs one, got {self.query.workload.value} "
+                f"with client {self.client!r}"
+            )
+        if not self.scriptable:
+            return
+        if self.args or self.env or self.golden_al is not None:
+            raise BaseLaunchError("a scriptable base runs its script alone: no args, env or golden layer")
+        if self.source.kind not in _IMAGELESS_SOURCES:
+            raise BaseLaunchError(f"a scriptable base is a user file or a shipped script, got {self.source.kind.value}")
+        if self.script not in self.source.files:
+            raise BaseLaunchError(f"a scriptable base records the sha256 of its script {self.script}")
 
     def _check_source(self) -> None:
         if (self.source.kind in _IMAGELESS_SOURCES) != (self.image.version_basis is VersionBasis.NOT_APPLICABLE):
@@ -642,7 +674,10 @@ class BaseLaunch:
 
     def _identity(self) -> dict[str, object]:
         identity = {key: value for key, value in self._body().items() if key in _DIGEST_KEYS}
-        return {**identity, "model": {"id": self.model.id}, "client": self.client.identity()}
+        identity["model"] = {"id": self.model.id}
+        if self.client is None:
+            return {**identity, "script_sha256": self.source.files[self.script]}
+        return {**identity, "client": self.client.identity()}
 
     def digest(self) -> str:
         return DIGEST_PREFIX + hashlib.sha256(_canonical(self._identity()).encode()).hexdigest()
@@ -661,7 +696,7 @@ class BaseLaunch:
             "args": list(self.args),
             "env": _env_document(self.env),
             "golden_al": None if self.golden_al is None else self.golden_al.to_document(),
-            "client": self.client.to_document(),
+            "client": None if self.client is None else self.client.to_document(),
             "runner_owned": self.runner_owned.to_document(),
             "stripped": list(self.stripped),
             "warnings": list(self.warnings),
@@ -679,6 +714,7 @@ class BaseLaunch:
         if fields.get("schema") != BASE_LAUNCH_SCHEMA:
             raise BaseLaunchError(f"base launch schema {fields.get('schema')!r} is not {BASE_LAUNCH_SCHEMA}")
         golden = fields.get("golden_al")
+        client = fields.get("client")
         base = cls(
             query=LaunchQuery.from_document(fields.get("query")),
             source=LaunchSource.from_document(fields.get("source")),
@@ -690,7 +726,7 @@ class BaseLaunch:
             topology=Topology.from_document(fields.get("topology")),
             args=_FIELDS.strings(fields.get("args"), "the args"),
             env=_env_from_document(fields.get("env"), "the env"),
-            client=ClientLaunch.from_document(fields.get("client")),
+            client=None if client is None else ClientLaunch.from_document(client),
             resolved_unix=fields.get("resolved_unix"),
             golden_al=None if golden is None else GoldenAcceptance.from_document(golden),
             runner_owned=RunnerOwned.from_document(fields.get("runner_owned", {})),
