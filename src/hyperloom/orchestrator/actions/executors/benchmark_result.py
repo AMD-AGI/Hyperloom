@@ -865,8 +865,11 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
         return False
     if result.get("submission_valid") is False:
         return False
-    if result.get("benchmark_backend") == "magpie_agentx":
-        return result.get("benchmark_valid") is True and result.get("diagnostic_only") is False
+    # ``diagnostic_only`` comes only from a report mapper, whose verdict on the report stands.
+    if result.get("diagnostic_only") is not None and (
+        result.get("diagnostic_only") is not False or result.get("valid_measurement") is not True
+    ):
+        return False
     if _is_scriptable_measurement(result):
         # A scriptable run whose image-quality gate failed is not selectable, regardless of throughput.
         from ._accuracy_gate import quality_gate_passed

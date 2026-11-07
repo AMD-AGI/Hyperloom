@@ -79,6 +79,20 @@ def _force_cold_decision(monkeypatch) -> None:
     )
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
+def _stamp_agentx_evidence(monkeypatch) -> None:
+    """Have each fake Magpie report read back as an AgentX round the mapper accepted, as a real one is."""
+    from hyperloom.orchestrator.actions.executors import _grid_runner
+
+    extract = _grid_runner.extract_benchmark_measurement
+    monkeypatch.setattr(
+        _grid_runner, "extract_benchmark_measurement", lambda *a, **k: {**extract(*a, **k), **_AGENTX_EVIDENCE}
+    )
+
+
 def _fake_workspace(slot: Path, *, tput: float = 800.0, perf_axes: dict[str, float] | None = None) -> Path:
     workspace = slot / "benchmark_sglang_20260519_001122"
     workspace.mkdir(parents=True)
@@ -1734,6 +1748,7 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
 ):
     """An incomparable variant fails closed and leaves the intvty anchor on the last KEEP."""
     _force_cold_decision(monkeypatch)
+    _stamp_agentx_evidence(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     sub, tr, _ = sub_agent_runner
@@ -1746,6 +1761,7 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
         "e2e_norm_intvty_p50": 300.0,
         "duration_seconds": 25.0,
         "request_error_rate": 0.0,
+        "workload_identity": _AGENTX_EVIDENCE["workload_identity"],
     }
     sub.shared_state = state
     base = tmp_path / "base.yaml"
@@ -1846,6 +1862,7 @@ async def test_an_agentx_explore_keep_is_promoted_by_writeback(sub_agent_runner,
     graded it dropped every AgentX explore KEEP at promotion from #1652 until #1790.
     """
     _force_cold_decision(monkeypatch)
+    _stamp_agentx_evidence(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     baseline_axes = {
@@ -1855,6 +1872,7 @@ async def test_an_agentx_explore_keep_is_promoted_by_writeback(sub_agent_runner,
         "e2e_norm_intvty_p50": 300.0,
         "duration_seconds": 25.0,
         "request_error_rate": 0.0,
+        "workload_identity": _AGENTX_EVIDENCE["workload_identity"],
     }
     sub, tr, _ = sub_agent_runner
     state = SharedState(framework="sglang", benchmark_mode="agentx")
@@ -1926,11 +1944,13 @@ async def test_explore_required_axes_output_modes_keep_legacy_behavior(
 ):
     """Missing total/interactivity stays irrelevant when output grading is requested."""
     _force_cold_decision(monkeypatch)
+    _stamp_agentx_evidence(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     sub, tr, _ = sub_agent_runner
     state = SharedState(framework="sglang", benchmark_mode="agentx" if mode == "explicit-output" else "")
     state.baseline_tput = 200.0
+    state.baseline_perf = {"workload_identity": _AGENTX_EVIDENCE["workload_identity"]}
     if mode == "explicit-output":
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     sub.shared_state = state

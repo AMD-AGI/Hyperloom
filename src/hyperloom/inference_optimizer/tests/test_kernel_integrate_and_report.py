@@ -186,7 +186,7 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
         "request_error_rate": 0.0,
         "tpot_p90_ms": 10.0,
         "completed_requests": 80,
-        "benchmark_valid": True,
+        "valid_measurement": True,
         "benchmark_backend": "magpie_agentx",
         "diagnostic_only": False,
         "workload_identity": "fixed-workload",
@@ -248,6 +248,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        "workload_identity": "fixed-workload",
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     state.save(session_dir)
@@ -263,7 +264,9 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
         "completed_requests": 80,
-        "benchmark_valid": True,
+        "valid_measurement": True,
+        "diagnostic_only": False,
+        "workload_identity": "fixed-workload",
         "accuracy": 0.80,
         "accuracy_task": "gsm8k",
         "accuracy_metric": "exact_match,strict-match",
@@ -376,7 +379,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
             "completed_requests": 80,
-            "benchmark_valid": True,
+            "valid_measurement": True,
         }
 
     monkeypatch.setattr(BaselineExecutor, "_run_single_benchmark", _measure)
@@ -646,6 +649,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        "workload_identity": "fixed-workload",
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     if stack:
@@ -689,7 +693,9 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
             "request_error_rate": 0.0,
             "tpot_p90_ms": round_tpot,
             "completed_requests": 80,
-            "benchmark_valid": True,
+            "valid_measurement": True,
+            "diagnostic_only": False,
+            "workload_identity": "fixed-workload",
             "workspace": str(workspace),
             "report_path": str(workspace / "benchmark_report.json"),
         }
@@ -924,7 +930,7 @@ async def test_integrate_handler_grades_stack_increment_on_live_intvty_anchor(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("gate", ["accuracy", "benchmark_valid"])
+@pytest.mark.parametrize("gate", ["accuracy", "valid_measurement"])
 async def test_integrate_handler_intvty_win_still_requires_valid_e2e_evidence(session_dir, graded_integrate_case, gate):
     _, payload, measurement, target = graded_integrate_case
     measurement[gate] = 0.60 if gate == "accuracy" else False

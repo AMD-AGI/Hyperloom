@@ -141,7 +141,7 @@ def _stub_gpu(monkeypatch, session, *, effective):
                 completed_requests=100,
                 request_error_rate=0,
                 benchmark_backend="magpie_agentx",
-                benchmark_valid=True,
+                valid_measurement=True,
                 diagnostic_only=False,
                 workload_identity="fixed-workload",
                 launch_evidence=evidence,

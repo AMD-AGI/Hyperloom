@@ -20,7 +20,7 @@ HICACHE_FLAGS = ["--enable-hierarchical-cache", "--hicache-ratio"]
 EAGLE_ARGS = "--tp 8 --speculative-algorithm EAGLE3 --speculative-num-steps 3 --speculative-num-draft-tokens 4"
 
 
-AGENTX_MEASUREMENT = {"benchmark_valid": True, "diagnostic_only": False, "workload_identity": "agentx:workload"}
+AGENTX_MEASUREMENT = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx:workload"}
 
 
 def _coord(tmp_path: Path, previous: dict, *, agentx_backend: str = "") -> Coordinator:
