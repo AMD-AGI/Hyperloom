@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -20,6 +21,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
 from kernelforge.workflows.forge_loop.iteration import campaign_runtime
 from kernelforge.workflows.forge_loop.iteration import lane_runtime
 from kernelforge.workflows.forge_loop.iteration.fanout import LaneResult
+from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.tests.conftest import patch_iteration_name
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _counting_plan,
@@ -172,6 +174,7 @@ async def test_a_fan_out_round_queues_one_candidate_per_lane(tmp_path, monkeypat
     subprocess.run(["git", "commit", "-m", "wide"], cwd=workspace, check=True, capture_output=True)
 
     await loop._fill_lane_queue(
+        iteration=3,
         agent_factory=_lane_agent_factory(
             {
                 "tune prefill": ("line_0 = 0", "line_0 = 100"),
@@ -182,8 +185,9 @@ async def test_a_fan_out_round_queues_one_candidate_per_lane(tmp_path, monkeypat
     )
 
     assert [item.plan for item in loop._lane_queue] == ["tune prefill", "tune decode"]
+    assert {(item.round_iteration, item.base_commit) for item in loop._lane_queue} == {(3, loop._canonical_commit())}
 
-    first = loop._take_lane_candidate()
+    first = loop._take_lane_candidate(1)
 
     assert first is not None and first.plan == "tune prefill"
     assert "line_0 = 100" in kernel.read_text()
@@ -463,7 +467,7 @@ async def test_a_lane_that_wrote_nothing_is_never_queued(tmp_path, monkeypatch):
     await loop._fill_lane_queue(agent_factory=factory, lane_plans=["a", "b"])
 
     assert loop._lane_queue == []
-    assert loop._take_lane_candidate() is None
+    assert loop._take_lane_candidate(1) is None
 
 
 def test_a_lane_candidate_that_edits_the_driver_never_reaches_the_tree(
@@ -485,11 +489,15 @@ def test_a_lane_candidate_that_edits_the_driver_never_reaches_the_tree(
     )
     loop._lane_queue = [campaign_runtime.LaneResult(lane_id="1", plan="tamper", diff=diff)]
 
-    assert loop._take_lane_candidate() is None
+    assert loop._take_lane_candidate(1) is None
     assert loop._lane_queue == []
     assert driver.read_text() == canonical
     output = capsys.readouterr().out
     assert "rejected" in output and "driver.py" in output
+    # A candidate that broke the measurement boundary is no evidence for a later round, so only the event is kept.
+    rejected = [event for event in loop.state_store.read_events() if event["type"] == "lane_candidate_rejected"]
+    assert [(event["lane"], "driver.py" in event["reason"]) for event in rejected] == [("1", True)]
+    assert not (workspace / "forge_experiments" / "unmeasured_lanes").exists()
 
 
 def test_a_lane_candidate_that_renames_the_driver_away_is_rejected(
@@ -511,7 +519,7 @@ def test_a_lane_candidate_that_renames_the_driver_away_is_rejected(
     diff = _diff_of(workspace, _rename)
     loop._lane_queue = [campaign_runtime.LaneResult(lane_id="1", plan="move it aside", diff=diff)]
 
-    assert loop._take_lane_candidate() is None
+    assert loop._take_lane_candidate(1) is None
     assert driver.is_file()
     assert not (workspace / "harmless.py").exists()
 
@@ -536,7 +544,7 @@ def test_a_lane_candidate_is_rejected_when_the_driver_stops_being_canonical(
         monkeypatch, "FORGE_PROTECTED_PATHS", SimpleNamespace(is_protected=lambda *_args, **_kwargs: False)
     )
 
-    assert loop._take_lane_candidate() is None
+    assert loop._take_lane_candidate(1) is None
     assert loop._validate_driver_integrity(loop.run_state)
     assert "driver integrity check failed" in capsys.readouterr().out
 
@@ -550,7 +558,7 @@ def test_a_tainted_workspace_driver_stops_the_lane_path(tmp_path, monkeypatch):
     loop._lane_queue = [campaign_runtime.LaneResult(lane_id="1", plan="tune it", diff=diff)]
 
     with pytest.raises(ValueError, match="driver integrity"):
-        loop._take_lane_candidate()
+        loop._take_lane_candidate(1)
 
 
 async def test_a_queued_candidate_that_no_longer_applies_is_dropped(
@@ -567,7 +575,7 @@ async def test_a_queued_candidate_that_no_longer_applies_is_dropped(
         )
     ]
 
-    assert loop._take_lane_candidate() is None
+    assert loop._take_lane_candidate(1) is None
     assert loop._lane_queue == []
 
 
@@ -608,7 +616,7 @@ def test_a_queued_candidate_survives_a_keep_that_only_moved_its_context(
     )
     loop._lane_queue = [campaign_runtime.LaneResult(lane_id="2", plan="tune y", diff=candidate)]
 
-    taken = loop._take_lane_candidate()
+    taken = loop._take_lane_candidate(1)
 
     assert taken is not None and taken.lane_id == "2"
     assert "y = 44" in kernel.read_text()
@@ -648,5 +656,46 @@ def test_a_queued_candidate_that_edits_the_same_lines_is_still_dropped(
     )
     loop._lane_queue = [campaign_runtime.LaneResult(lane_id="2", plan="tune y", diff=candidate)]
 
-    assert loop._take_lane_candidate() is None
+    assert loop._take_lane_candidate(1) is None
     assert kernel.read_text() == "def kernel():\n    y = 55\n    return y\n"
+
+
+def test_a_candidate_the_tree_moved_past_is_filed_where_later_planners_read(tmp_path, monkeypatch, capsys):
+    """Its session is finished and its lane copy deleted, so the archive is all that is left of what it found."""
+    loop, workspace = _reduction_loop(tmp_path, monkeypatch)
+    kernel = workspace / "kernel.py"
+    kernel.write_text("def kernel():\n    y = 4\n    return y\n")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "round base"], cwd=workspace, check=True, capture_output=True)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace, check=True, capture_output=True, text=True)
+    candidate = _diff_of(workspace, lambda: kernel.write_text(kernel.read_text().replace("y = 4", "y = 44")))
+    kernel.write_text(kernel.read_text().replace("y = 4", "y = 55"))
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "the sibling's KEEP"], cwd=workspace, check=True, capture_output=True)
+    loop._lane_queue = [
+        campaign_runtime.LaneResult(
+            lane_id="2",
+            plan="Summary: y is recomputed. This plan hoists it.\n# Lane 2 plan",
+            diff=candidate,
+            lesson=SummaryOutcome(text="lane 2 hoisted y; its own sweep read 3% faster"),
+            round_iteration=4,
+            base_commit=base.stdout.strip(),
+        )
+    ]
+
+    assert loop._take_lane_candidate(6) is None
+
+    filed = workspace / "forge_experiments" / "unmeasured_lanes" / "round_004_lane_2"
+    assert (filed / "change.diff").read_text() == candidate
+    assert (filed / "plan.md").read_text().startswith("Summary: y is recomputed.")
+    assert (filed / "lesson.md").read_text() == "lane 2 hoisted y; its own sweep read 3% faster"
+    meta = json.loads((filed / "meta.json").read_text())
+    assert meta["base_commit"] == base.stdout.strip()
+    assert meta["dropped_iteration"] == 6
+    assert meta["canonical_commit"] == loop._canonical_commit()
+    assert meta["summary"] == "y is recomputed. This plan hoists it."
+    (row,) = [json.loads(line) for line in (filed.parent / "index.jsonl").read_text().splitlines()]
+    assert (row["dir"], row["round_iteration"], row["lane_id"], row["has_lesson"]) == ("round_004_lane_2", 4, "2", True)
+    events = [event for event in loop.state_store.read_events() if event["type"] == "lane_candidate_unmeasured"]
+    assert [(event["iter"], event["lane"], event["round_iteration"]) for event in events] == [(6, "2", 4)]
+    assert "dropped unmeasured; filed under" in capsys.readouterr().out

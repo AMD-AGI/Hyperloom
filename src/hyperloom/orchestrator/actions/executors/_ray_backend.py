@@ -9,6 +9,7 @@ import os
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
@@ -20,6 +21,9 @@ from inference_suite import EXIT_REFUSED
 from inference_suite.contracts import SuiteConfig
 
 from . import _ray_runtime
+
+if TYPE_CHECKING:
+    from ._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +116,7 @@ class SessionKillRound:
     server_log_path: str | None = None
     server_already_ready: bool = False
     session_remaining_sec: float | None = None
+    checkpoint: AgentxCheckpoint | SuiteRoundCheckpoint | None = None
 
     def run(self) -> tuple[int, str, str]:
         """Ray worker body: run the subprocess under session-kill semantics."""
@@ -131,6 +136,7 @@ class SessionKillRound:
                 server_log_path=self.server_log_path,
                 server_already_ready=self.server_already_ready,
                 session_deadline_sec=session_remaining_to_deadline_sec(self.session_remaining_sec),
+                checkpoint=self.checkpoint,
             ),
         )
         return proc.returncode, proc.stdout or "", proc.stderr or ""
@@ -142,7 +148,8 @@ class SuiteLeasedRound:
 
     ``config_path`` holds the round's config. Only the actor knows which GPUs Ray gave it, so it names them in the
     config before the round starts; the round masks its server to them and samples them. The round holds itself to its
-    own deadlines, so ``timeout`` and ``session_remaining_sec`` only backstop the process running it.
+    own deadlines, so ``timeout`` and ``session_remaining_sec`` only backstop the process running it. ``checkpoint``
+    stops the round from outside it, the way a cancel does, when it trails its reference.
     """
 
     config_path: str
@@ -150,6 +157,7 @@ class SuiteLeasedRound:
     env: dict[str, str]
     timeout: float
     session_remaining_sec: float | None = None
+    checkpoint: SuiteRoundCheckpoint | None = None
 
     @property
     def cmd(self) -> list[str]:
@@ -161,7 +169,14 @@ class SuiteLeasedRound:
         if refusal is not None:
             return EXIT_REFUSED, "", refusal
         return SessionKillRound(
-            self.cmd, env=self.env, timeout=self.timeout, session_remaining_sec=self.session_remaining_sec
+            self.cmd,
+            env=self.env,
+            timeout=self.timeout,
+            session_remaining_sec=self.session_remaining_sec,
+            # The watchdog ticks its recorders only once it holds the server up; this round runs its own server and
+            # has no log for the watchdog to read that from.
+            server_already_ready=self.checkpoint is not None,
+            checkpoint=self.checkpoint,
         ).run()
 
 

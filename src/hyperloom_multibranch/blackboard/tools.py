@@ -53,6 +53,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     ClaimKey,
     DedupAnswer,
     Learning,
+    MapDirection,
     OpShares,
     REPLAY_TARGET,
     REPLAY_TOOL,
@@ -100,9 +101,12 @@ CODE_TITLE = (
     "Source and kernel changes (a draw of each family's commit odds x the ceiling of what it acts on / the cost of "
     "a test):"
 )
+MAP_TITLE = (
+    "Arbor's map, binding: do not work a direction a running Arbor branch holds, and reopen a set-aside one only if "
+    "your intent answers its reason, saying how:"
+)
 _UNFINISHED = {
     UnfinishedReason.NOT_STACKABLE: "committed, merge not stackable",
-    UnfinishedReason.NEAR_BAR: "kept accuracy, just short of its bar",
     UnfinishedReason.REPAIR_UNFINISHED: "blocked, its repair never finished",
     UnfinishedReason.WITHDRAWN: "withdrawn before its result",
 }
@@ -271,11 +275,39 @@ def _menu(menu: tuple[str, ...]) -> list[str]:
     return [text if text.startswith(" ") else f"- {text}" for text in menu]
 
 
+def _map_direction(item: MapDirection, holders: Mapping[str, str]) -> list[str]:
+    """One direction's lines: who holds it, or why the map set it aside, the why on a line of its own so that clipping
+    a long title never cuts it."""
+
+    if not item.open:
+        return [f"- {item.id} (set aside, {item.status}): {item.title}", f"  why: {item.why or 'not given'}"]
+    holder = holders.get(item.id)
+    state = f"held by {holder}" if holder else "open, it names your focus"
+    return [f"- {item.id} ({state}): {item.title}"]
+
+
+def _agent_map(brief: StartupBrief) -> list[str]:
+    """The directions of Arbor's map the brief shows, those a running Arbor branch holds first, then those that name
+    the focus, then those set aside, each in the map's order. Past :data:`MAX_LINES` the directions left over are
+    counted, not cut through, so the cap never drops a why or a held direction ahead of a set-aside one."""
+
+    ordered = sorted(brief.agent_map, key=lambda item: (not item.open, item.id not in brief.map_holders))
+    groups = [_map_direction(item, brief.map_holders) for item in ordered]
+    shown: list[str] = []
+    for index, group in enumerate(groups):
+        room = MAX_LINES if index == len(groups) - 1 else MAX_LINES - 1
+        if len(shown) + len(group) > room:
+            return [*shown, f"... {len(groups) - index} more directions of the map"]
+        shown += group
+    return shown
+
+
 def render_brief(brief: StartupBrief) -> str:
     sections = [f"Startup brief from {brief.start_commit}"]
     if brief.focus:
         sections.append(f"{FOCUS_LINE}{brief.focus}")
     for title, items in (
+        (MAP_TITLE, _agent_map(brief)),
         ("Ceilings (largest ops; claim with target_share_pct):", _ceilings(brief.op_shares)),
         ("Tried:", [_tried(item) for item in brief.tried]),
         (UNFINISHED_TITLE, [_unfinished(item) for item in brief.unfinished]),
@@ -695,6 +727,7 @@ __all__ = [
     "ERROR",
     "FOCUS_LINE",
     "LINE_CHARS",
+    "MAP_TITLE",
     "MAX_LINES",
     "MAX_REPLY_CHARS",
     "PATCH_PAGE_CHARS",

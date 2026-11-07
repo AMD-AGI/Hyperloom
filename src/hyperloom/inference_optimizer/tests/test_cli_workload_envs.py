@@ -171,7 +171,7 @@ def test_r9700_materialized_config_is_lifecycle_eligible(tmp_path, monkeypatch):
     """An R9700 session's materialized config may hold one server across rounds (baseline, explore, conc sweep)."""
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 
-    monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
+    monkeypatch.setattr(sl, "pick_server_port", lambda: 8888)
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm")
     out = materialize_config_with_envs(

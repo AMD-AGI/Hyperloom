@@ -14,14 +14,20 @@ from pathlib import Path
 
 from kernelforge.utils.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
+from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceRef, OrchestrationContext
-from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 from hyperloom_common.io import DURABLE, atomic_write_text
 
 
 log = logging.getLogger(__name__)
 
 ANALYSIS_DIFF_TIMEOUT_SEC = 60.0
+UNMEASURED_LANE_EVIDENCE = "unmeasured_lane_candidates"
+_UNMEASURED_LANES = (
+    "Lane candidates that were implemented but never measured: the canonical tree moved before their turn. Each "
+    "directory holds the diff against the commit its round was built on, the plan and the lane session's own record; "
+    "any numbers in that record are the lane's own, not canonical measurements."
+)
 
 
 @dataclass(frozen=True)
@@ -117,7 +123,11 @@ class AnalysisEvidenceMixin:
         )
 
     def _build_orchestration_context(self):
-        """Build one immutable planning context from current loop evidence."""
+        """Build the immutable evidence context for the current canonical commit.
+
+        It carries none of the loop's own state: the Supervisor and the search policy move after Analysis resolves,
+        so ``_with_loop_state`` attaches that state wherever a context is handed on.
+        """
         workspace = Path(self.ic.workspace_dir).resolve()
         canonical_commit = self._canonical_commit()
         cumulative_diff = self._analysis_cumulative_diff(
@@ -155,13 +165,6 @@ class AnalysisEvidenceMixin:
                 editable_sources=tuple(self._target_source_files()),
                 cases=cases,
                 knowledge_index=knowledge_index,
-                supervisor_guidance=self._supervisor_ruling,
-                last_critic_verdict=self._last_critic_verdict,
-                last_critic_review=self._last_critic_review,
-                search_mode=self.run_state.search_mode,
-                search_reason_codes=tuple(self.run_state.search_reason_codes),
-                search_objective=self.run_state.search_objective,
-                search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
                 evidence_refs=evidence_refs,
             )
         )
@@ -220,6 +223,7 @@ class AnalysisEvidenceMixin:
                 ("source_map", source_map_path, "Current source map or anchor source."),
                 ("candidate_archive", experiments / "candidates" / "index.jsonl", "Current index evidence."),
                 ("run_state", experiments / "run_state.json", "Current run state evidence."),
+                (UNMEASURED_LANE_EVIDENCE, ExperimentsLayout.of(workspace).unmeasured_lane_index, _UNMEASURED_LANES),
             )
             if path.is_file()
         ]
@@ -252,19 +256,6 @@ class AnalysisEvidenceMixin:
                     summary=f"Latest free-form Implementer session record from iteration {lesson_iterations[-1]}.",
                 )
             )
-        if self._supervisor_ruling:
-            supervisor_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
-            if supervisor_path.is_file():
-                refs.append(
-                    EvidenceRef(
-                        kind="supervisor_guidance",
-                        path=str(supervisor_path.resolve()),
-                        summary=(
-                            "Latest free-form Supervisor Ruling. It overrides subjective conclusions in historical "
-                            "lesson records but not objective measurements."
-                        ),
-                    )
-                )
         return tuple(refs)
 
     @staticmethod
@@ -437,7 +428,7 @@ class AnalysisEvidenceMixin:
             "latest_lesson",
             "lesson_directory",
             "run_state",
-            "supervisor_guidance",
+            UNMEASURED_LANE_EVIDENCE,
         }
         refs.update((ref.path, ref) for ref in previous.evidence_refs if ref.kind not in superseded_kinds)
         if stale:
@@ -524,8 +515,9 @@ class AnalysisEvidenceMixin:
             and self._active_analysis_context.analysis_commit == context.analysis_commit
         ):
             context = self._active_analysis_context
-        # After the bundle is applied, which rebuilds the context: the roofline standing is the planner's view too.
-        context = self._with_ceiling_standing(context)
+        # After the bundle is applied, which rebuilds the context: the roofline standing is the planner's view too, and
+        # the loop state is the one in force while the Supervisor reviews.
+        context = self._with_loop_state(self._with_ceiling_standing(context))
         orchestration_root = Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration"
         latest_lesson_path = ""
         if getattr(self, "lessons", None) is not None:

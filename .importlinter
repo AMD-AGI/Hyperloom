@@ -374,6 +374,8 @@ ignore_imports =
     # The round gate's KV recorder until run_round owns telemetry and unit 5.05a deletes _build_kv_recorder.
     hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_poll
     hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_record
+    # The AgentX checkpoint reads aiperf's per-request export with the parser the suite's timeline owns.
+    hyperloom.orchestrator.actions.executors._agentx_checkpoint -> inference_suite.telemetry.agentx_timeline
 unmatched_ignore_imports_alerting = none
 
 

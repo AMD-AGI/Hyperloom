@@ -20,7 +20,6 @@ import pytest
 from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.phases import SHORT_PROMPTS
-from hyperloom.measure.ports import DEV_SANDBOX_PORTS
 from hyperloom.measure.socket import RoundPlan
 from hyperloom.measure.long_context.held import FLUSHED
 from hyperloom.measure.short_prompts.outputs import FAILED, OK, read_outputs
@@ -40,13 +39,11 @@ NOT_HELD = "the test's server was not held up for the check"
 class _Servers:
     """The servers rounds bring up, each a real HTTP server; ``started`` names the rounds that booted one.
 
-    ``port`` is the lifecycle's own pick (a free port by default). The backend may not keep it, as it does not keep one a
-    dev sandbox serves on, so a server listens where the round's ``server_lifecycle`` says, as a real one would."""
+    ``port`` is the lifecycle's own pick, a free port; a server listens where the round's ``server_lifecycle`` says, as a
+    real one would."""
 
-    def __init__(
-        self, monkeypatch, *, eligible: bool = True, framework: str = "sglang", port: int | None = None
-    ) -> None:
-        self.port = free_port() if port is None else port
+    def __init__(self, monkeypatch, *, eligible: bool = True, framework: str = "sglang") -> None:
+        self.port = free_port()
         self.live: FakeServer | None = None
         self.started: list[str] = []
         self.teardowns = 0
@@ -126,19 +123,6 @@ def test_a_planned_test_answers_on_its_own_server_after_its_measured_round_and_b
     assert len(found.prompts) == 64
     assert grid.servers.flushes == 1 and FLUSHED in outcome.stderr, "the prefix cache is flushed before the check"
     assert (outcome.returncode, outcome.failure_class) == (0, None)
-
-
-def test_a_lifecycle_port_a_dev_sandbox_serves_on_is_replaced_and_the_check_asks_the_server_on_the_replacement(
-    monkeypatch, tmp_path, cache
-):
-    grid = _grid(monkeypatch, tmp_path, port=DEV_SANDBOX_PORTS.start)
-
-    outcome = _run(tmp_path, cache)
-
-    ports = [c["launch"].server_lifecycle["port"] for c in grid.calls]
-    assert len(ports) == 1 and not set(ports) & set(DEV_SANDBOX_PORTS), "the server is given a replacement"
-    assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK]
-    assert grid.servers.flushes == 1 and outcome.returncode == 0
 
 
 def test_the_check_is_apart_from_the_test_its_rounds_its_files_and_its_result_directory_are_the_tests_own(

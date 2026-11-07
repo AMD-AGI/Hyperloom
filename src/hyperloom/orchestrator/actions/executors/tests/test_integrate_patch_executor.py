@@ -2458,15 +2458,15 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
 @pytest.mark.parametrize(
     "grading_mode,total,intvty,output,missing,expected_status,expected_delta",
     [
-        pytest.param("agentx", 15000.0, 450.0, 200.0, None, "reverted", None, id="throughput-tradeoff"),
-        pytest.param("agentx", 25000.0, 300.0, 200.0, None, "reverted", None, id="interactivity-tradeoff"),
-        pytest.param("agentx", 15000.0, 300.0, 200.0, None, "reverted", None, id="both-axes-regress"),
-        pytest.param("agentx", 25000.0, 450.0, 200.0, None, "reverted", None, id="flat-interactivity"),
-        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "reverted", None, id="output-guard-breach"),
-        pytest.param("agentx", 19000.0, 459.0, 90.0, None, "reverted", None, id="median-below-bar-and-output-breach"),
+        pytest.param("agentx", 15000.0, 450.0, 200.0, None, "reverted", 0.0, id="throughput-tradeoff"),
+        pytest.param("agentx", 25000.0, 300.0, 200.0, None, "reverted", -100.0 / 3, id="interactivity-tradeoff"),
+        pytest.param("agentx", 15000.0, 300.0, 200.0, None, "reverted", -100.0 / 3, id="both-axes-regress"),
+        pytest.param("agentx", 25000.0, 450.0, 200.0, None, "reverted", 0.0, id="flat-interactivity"),
+        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "reverted", 10.0, id="output-guard-breach"),
+        pytest.param("agentx", 19000.0, 459.0, 90.0, None, "reverted", 2.0, id="median-below-bar-and-output-breach"),
         pytest.param("agentx", 18999.0, 495.0, 200.0, None, "kept", 10.0, id="total-no-longer-participates"),
         pytest.param("agentx", 25000.0, 463.5, 200.0, None, "kept", 3.0, id="median-at-the-bar"),
-        pytest.param("agentx", 25000.0, 458.9, 200.0, None, "reverted", None, id="median-below-the-bar"),
+        pytest.param("agentx", 25000.0, 458.9, 200.0, None, "reverted", 1.9777777777777727, id="median-below-the-bar"),
         pytest.param("synthetic", 15000.0, 300.0, 200.0, None, "kept", 100.0, id="synthetic-output-grading"),
         *[
             pytest.param(
@@ -2591,10 +2591,7 @@ async def test_executor_grades_real_patch_bench(
     result = await executor(ctx)
 
     assert result["status"] == expected_status
-    if expected_delta is None:
-        assert result["delta_pct"] is None
-    else:
-        assert result["delta_pct"] == pytest.approx(expected_delta)
+    assert result["delta_pct"] == pytest.approx(expected_delta)
     assert result["accuracy_pass"] is True
     assert result["base_tput"] == 100.0
     assert result["keep_threshold_pct"] == executor.keep_threshold_pct

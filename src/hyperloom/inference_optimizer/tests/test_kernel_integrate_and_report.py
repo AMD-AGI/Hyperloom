@@ -764,19 +764,19 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agentx_env", [True, False], ids=["env", "persisted-mode"])
 @pytest.mark.parametrize(
-    "output,total,intvty,decision",
+    "output,total,intvty,decision,reason",
     [
-        pytest.param(110.0, 900.0, 90.0, "REVERT", id="median-regresses"),
-        pytest.param(110.0, 1100.0, 100.0, "REVERT", id="median-flat"),
-        pytest.param(110.0, 1100.0, 102.99, "REVERT", id="median-just-below-the-bar"),
-        pytest.param(110.0, 1100.0, 103.0, "KEEP", id="median-exactly-at-the-bar"),
-        pytest.param(110.0, 1000.0, 110.0, "KEEP", id="median-clears-the-bar"),
-        pytest.param(90.0, 1000.0, 110.0, "REVERT", id="output-guard-breach"),
-        pytest.param(110.0, 949.9, 110.0, "KEEP", id="total-no-longer-participates"),
+        pytest.param(110.0, 900.0, 90.0, "REVERT", "p50_gain_below_threshold,p90_regressed", id="median-regresses"),
+        pytest.param(110.0, 1100.0, 100.0, "REVERT", "p50_gain_below_threshold", id="median-flat"),
+        pytest.param(110.0, 1100.0, 102.99, "REVERT", "p50_gain_below_threshold", id="median-just-below-the-bar"),
+        pytest.param(110.0, 1100.0, 103.0, "KEEP", None, id="median-exactly-at-the-bar"),
+        pytest.param(110.0, 1000.0, 110.0, "KEEP", None, id="median-clears-the-bar"),
+        pytest.param(90.0, 1000.0, 110.0, "REVERT", "output_regressed", id="output-guard-breach"),
+        pytest.param(110.0, 949.9, 110.0, "KEEP", None, id="total-no-longer-participates"),
     ],
 )
 async def test_integrate_handler_grades_full_e2e_measurement(
-    session_dir, graded_integrate_case, monkeypatch, agentx_env, output, total, intvty, decision
+    session_dir, graded_integrate_case, monkeypatch, agentx_env, output, total, intvty, decision, reason
 ):
     _, payload, measurement, target = graded_integrate_case
     if not agentx_env:
@@ -795,8 +795,7 @@ async def test_integrate_handler_grades_full_e2e_measurement(
     assert result["graded_objective"] == "e2e_norm_intvty_p50"
     assert result["gain_pct"] == pytest.approx(intvty - 100.0)
     assert ("accuracy_gate" in result) is (decision == "KEEP")
-    if decision == "REVERT":
-        assert result["decision_reason"] == "intvty_regression"
+    assert result.get("decision_reason") == reason
     assert result["base_tput"] == 100.0
     assert result["new_tput"] == output
     assert result["bench_result"] == measurement

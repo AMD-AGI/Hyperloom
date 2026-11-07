@@ -16,6 +16,7 @@ from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer, Verdict
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
+    MapDirection,
     OpShares,
     TestRecord,
     amdahl_ceiling_pct,
@@ -223,6 +224,37 @@ def test_a_code_line_of_a_large_operator_ranks_above_one_of_a_small_operator_wit
     lines = [item.family for item in menu.code]
     assert found[_line(norm)].odds > found[_line(gemm)].odds
     assert lines.index(_line(gemm)) < lines.index(_line(norm))
+
+
+def test_a_line_whose_ops_a_direction_arbors_map_set_aside_names_stays_on_its_list_and_says_why(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    gemm = Family("gemm", Mechanism.KERNEL_TUNING, KERNEL)
+    norm = Family("norm", Mechanism.FUSION, KERNEL)
+    evidence = MenuEvidence({gemm: FamilyStat(10.0, 2.0, (2.0,)), norm: FamilyStat(10.0, 8.0, (2.0,))})
+    profiled = _profiled(snapshot, gemm_a8w8=30.0, rmsnorm=3.0)
+    mapped = dataclasses.replace(
+        profiled,
+        agent_map=(
+            MapDirection("m-gemm", "Dense GEMMs", "done", "tuned to the roofline already", ops=("gemm_a8w8.kd",)),
+            MapDirection("m-tiles", "Dense GEMM tiles", "open", "gemm_a8w8 is 30%", holder="b7"),
+            MapDirection("m-norm", "Fold rmsnorm into its producer", "below_floor"),
+        ),
+    )
+
+    plain = {item.family: item for item in direction_menu(profiled, "s1", "c1", evidence, metric=METRIC).code}
+    marked = {item.family: item for item in direction_menu(mapped, "s1", "c1", evidence, metric=METRIC).code}
+
+    assert list(marked) == list(plain)
+    assert marked[_line(gemm)].lines() == (
+        *plain[_line(gemm)].lines(),
+        "  set aside by Arbor's map (m-gemm): tuned to the roofline already",
+    )
+    assert marked[_line(norm)].lines() == (
+        *plain[_line(norm)].lines(),
+        "  set aside by Arbor's map (m-norm): not given",
+    )
+    assert marked[_line(SCHEDULER)].lines() == plain[_line(SCHEDULER)].lines()
 
 
 def test_a_family_whose_ceiling_is_under_the_sessions_bar_is_on_no_list(snapshot: BlackboardSnapshot) -> None:

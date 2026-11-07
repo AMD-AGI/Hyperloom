@@ -73,9 +73,10 @@ ERROR_RATE_SLACK_PCT = 0.5
 # Duration and error rate are members because they are decision inputs, not decoration: ``incomparability_reason``
 # refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped too many requests,
 # and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
-# are here for the same reason -- every input the verdict reads is recoverable from one block. The exception is the
+# are here for the same reason -- every input the verdict reads is recoverable from one block. The exceptions are the
 # unserved and total request counts the guard prefers when both sides carry them: they join once a ``main`` producer
-# stamps them, together with dropping the error-rate fallback in ``_failure_rates_pct``.
+# stamps them, together with dropping the error-rate fallback in ``_failure_rates_pct``. The checkpoint median is
+# record-only: it gates the early stop, which ``agentx_checkpoint.json`` and the REVERT reason record, not the verdict.
 GRADED_AXIS_KEYS = (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
@@ -96,6 +97,12 @@ _DEFAULT_INTVTY_NOISE_PCT = 5.0
 
 # The median bar is a property of the objective, so the session's decaying threshold does not apply to it.
 AGENTX_KEEP_P50_THRESHOLD_PCT = 3.0
+
+# Median interactivity over the first half hour of profiling. On 808 graded rounds no KEEP trailed its reference here
+# by more than 0.47%, so a candidate behind by more than the drop is stopped instead of measured to the end.
+GRADED_INTVTY_P50_CHECKPOINT = "e2e_norm_intvty_p50_1800s"
+AGENTX_CHECKPOINT_SEC = 1800.0
+AGENTX_CHECKPOINT_MAX_DROP_PCT = 2.0
 
 VERDICT_KEEP = "KEEP"
 VERDICT_REVERT = "REVERT"
@@ -206,6 +213,7 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         ("ttft_p90_ms", optional_positive_float(source.get("ttft_p90_ms"))),
         ("tpot_p50_ms", optional_positive_float(source.get("tpot_p50_ms"))),
         (GRADED_OUTPUT_PER_GPU, optional_positive_float(source.get(GRADED_OUTPUT_PER_GPU))),
+        (GRADED_INTVTY_P50_CHECKPOINT, optional_positive_float(source.get(GRADED_INTVTY_P50_CHECKPOINT))),
         (GRADED_DURATION, duration),
         (GRADED_ERROR_RATE, error_rate),
         (GRADED_UNSERVED_REQUESTS, _non_negative(source.get(GRADED_UNSERVED_REQUESTS))),
@@ -275,6 +283,7 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
         "tpot_p50_ms",
         "tpot_p90_ms",
         GRADED_INTVTY_P50,
+        GRADED_INTVTY_P50_CHECKPOINT,
         GRADED_OUTPUT_PER_GPU,
         GRADED_REQUESTS_TOTAL,
     ):
@@ -556,6 +565,8 @@ class GradingAnchor:
 
 
 __all__ = [
+    "AGENTX_CHECKPOINT_MAX_DROP_PCT",
+    "AGENTX_CHECKPOINT_SEC",
     "AGENTX_KEEP_P50_THRESHOLD_PCT",
     "CONSTRAINT_FIELDS",
     "DURATION_DRIFT_PCT",
@@ -567,6 +578,7 @@ __all__ = [
     "GRADED_ERROR_RATE",
     "GRADED_INTVTY",
     "GRADED_INTVTY_P50",
+    "GRADED_INTVTY_P50_CHECKPOINT",
     "GRADED_OUTPUT",
     "GRADED_OUTPUT_PER_GPU",
     "GRADED_REQUESTS_TOTAL",

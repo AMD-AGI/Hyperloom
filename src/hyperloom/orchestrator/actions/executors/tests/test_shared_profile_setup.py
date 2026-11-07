@@ -297,6 +297,19 @@ def test_native_profile_drops_annotations_when_the_patch_did_not_apply(tmp_path,
     assert native["profiler"]["torch_profiler"]["detailed_annotations"] is False
 
 
+@pytest.mark.parametrize(("laid", "detailed"), [(None, False), (_PATCHED, True)])
+def test_native_sitecustomize_profile_annotates_only_with_the_graph_capture_patch(
+    tmp_path, monkeypatch, laid, detailed
+):
+    """Without the graph-capture patch, an annotated decode capture breaks on multi-variant (DSA) models."""
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: None)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: laid)
+    path = _native_config(tmp_path, "sglang")
+    enable_profile(path)
+    assert load_benchmark(path)["profiler"]["torch_profiler"]["detailed_annotations"] is detailed
+
+
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 def test_native_profile_keeps_the_operator_annotation_choice_through_a_failed_patch(tmp_path, monkeypatch, framework):
     monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda *checkout: None)

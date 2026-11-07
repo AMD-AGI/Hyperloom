@@ -16,7 +16,11 @@ Its brief has three parts:
   schema has no kernel family, so no recalled lead is a kernel change;
 * the menu: the direction families ranked for the branch on its start commit (:mod:`rsi.menu`), each with its best note
   under it, none for a branch of the menu's control. A claim's reply says the same of the claimed direction's family
-  (:meth:`direction_note`).
+  (:meth:`direction_note`);
+* Arbor's map, which binds the branch: in the map's order, the directions of the session's map that name the focus op
+  the branch's own ``OPEN`` names, those a running Arbor branch holds, and those the map set aside, each with why. An
+  open direction no running branch holds that does not name the focus is left out, and a session without a map shows
+  none.
 
 A champion the start commit is already, or builds on, is no lead: the lessons name it first, as :data:`ON_HEAD`, and
 ``blackboard_replay`` refuses to replay it, since its change would undo what the head did since.
@@ -50,11 +54,13 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard, St
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
+    MapDirection,
     PeerReplay,
     StartupBrief,
     UnfinishedLead,
     WarmReplay,
 )
+from hyperloom_multibranch.blackboard.families import direction_names_op
 from hyperloom_multibranch.blackboard.knowledge.learning_recall import LearningRecall, Notes
 from hyperloom_multibranch.blackboard.knowledge.replay_tables import StackSlot, stack_added_kernels
 from hyperloom_multibranch.blackboard.knowledge.lessons import MAX_ITEMS, clipped, listed
@@ -184,6 +190,23 @@ def _repeated(snapshot: BlackboardSnapshot, start_commit: str) -> list[str]:
         f"this session: {direction} failed {count} times on the states this one builds on"
         for direction, count in repeated_failures(on_line)
     ]
+
+
+def _focus_of(snapshot: BlackboardSnapshot, branch: str) -> str:
+    """The focus ``branch``'s ``OPEN`` names, empty for a branch opened without one."""
+
+    return next((node.focus for node in snapshot.lineage.branches if node.branch == branch), "")
+
+
+def _shown_map(snapshot: BlackboardSnapshot, branch: str) -> tuple[MapDirection, ...]:
+    """What ``branch`` is shown of Arbor's map, in the map's order: each direction that names its focus op, each a
+    running Arbor branch holds, and each the map set aside."""
+
+    focus = _focus_of(snapshot, branch)
+    holders = snapshot.map_holders()
+    return tuple(
+        item for item in snapshot.agent_map if not item.open or item.id in holders or direction_names_op(item, focus)
+    )
 
 
 def _learnt_lines(notes: Notes) -> list[str]:
@@ -482,6 +505,8 @@ class CrossSessionBriefing(StartupBriefProvider):
             focus=self.focus,
             settings_menu=lists.get(SETTINGS, ()),
             code_menu=lists.get(CODE, ()),
+            agent_map=_shown_map(snapshot, self.branch),
+            map_holders=snapshot.map_holders(),
         )
 
     def _record_brief(self, snapshot: BlackboardSnapshot, kept: Sequence[_Item], logged: Notes) -> None:

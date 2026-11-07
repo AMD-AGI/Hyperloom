@@ -645,7 +645,6 @@ def _check_tracelens_cli() -> dict[str, Any]:
             "target": "TraceLens",
             "message": None,
         }
-    session_dir = str(_workspace_root_resolve())
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
@@ -654,8 +653,7 @@ def _check_tracelens_cli() -> dict[str, Any]:
         f"before every launch (carve-out applies only to --resume-from in "
         f"the same shell that earlier ran install.sh). Re-run:\n"
         f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
-        f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
-        f"then retry `python -m hyperloom optimize`. Refusing to start.",
+        f"then retry `python -m hyperloom optimize` in the same container. Refusing to start.",
         file=sys.stderr,
     )
     raise SystemExit(2)

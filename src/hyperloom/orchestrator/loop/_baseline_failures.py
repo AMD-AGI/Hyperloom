@@ -12,7 +12,7 @@ from inference_suite.contracts import FailedStep
 
 from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
-from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON, HOST_GPUS_UNAVAILABLE
 
 from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
@@ -55,6 +55,9 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     # attempt runs the same client over the same workload, so it is refused the same way.
     MAGPIE_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
     FailedStep.CLIENT_FAILED.value: _BASELINE_FAILED_STOP_REASON,
+    # No server started: the host lacks the idle GPUs the round needs. Only the operator can free them, and
+    # ``_authorable_launch_log`` keeps it out of enablement.
+    HOST_GPUS_UNAVAILABLE: HOST_GPUS_UNAVAILABLE,
 }
 
 
@@ -75,6 +78,7 @@ def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: 
         "fast_exit_arg_error",
         AGENTX_PREFLIGHT_ERROR_CLASS,
         PREFIX_CACHE_OFF_ERROR_CLASS,
+        HOST_GPUS_UNAVAILABLE,
     ) or stopped_by_the_run_class(err_class):
         return ""
     parts: list[str] = []
@@ -454,6 +458,12 @@ class BaselineFailureMixin:
                 self.shared_state.baseline_failure_streak,
             )
         elif err_class in _STOPS_ON_FIRST_OCCURRENCE:
+            log.error(
+                "baseline %s failed with %s, which a retry cannot change; stopping the run: %s",
+                task.task_id,
+                err_class,
+                result_payload.get("error") or err_class,
+            )
             self.shared_state.set_stop_reason(_STOPS_ON_FIRST_OCCURRENCE[err_class])
         elif err_class == "fast_exit_arg_error":
             self.shared_state.baseline_arg_error_streak += 1

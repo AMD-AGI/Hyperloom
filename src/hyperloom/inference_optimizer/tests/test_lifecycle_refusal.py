@@ -18,7 +18,7 @@ _PORT = 8888
 
 @pytest.fixture(autouse=True)
 def _fixed_port(monkeypatch):
-    monkeypatch.setattr(sl, "_pick_free_port", lambda: _PORT)
+    monkeypatch.setattr(sl, "pick_server_port", lambda: _PORT)
 
 
 def _resolve(tmp_path: Path, bench: dict) -> dict:
@@ -66,3 +66,15 @@ def test_torch_profiler_is_refused(tmp_path):
 
 def test_refusal_does_not_read_the_benchmark_backend():
     assert "benchmark_backend" not in Path(sl.__file__).read_text(encoding="utf-8")
+
+
+def test_lifecycle_port_is_below_the_ephemeral_range(tmp_path, monkeypatch):
+    """The persistent server binds minutes after its port is picked; an ephemeral one is taken by then."""
+    from hyperloom.common import ports
+
+    monkeypatch.setattr(sl, "pick_server_port", ports.pick_server_port)
+    ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text(encoding="utf-8").split()[0])
+
+    port = _resolve(tmp_path, {"framework": "vllm", "benchmark_script": "vllm_mi300x.sh"})["port"]
+
+    assert port < ephemeral_start and port not in ports.DEV_SANDBOX_PORTS and port not in ports.RAY_WORKER_PORTS

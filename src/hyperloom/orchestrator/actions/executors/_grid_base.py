@@ -21,6 +21,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.coerce import to_str_list
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,
@@ -36,8 +37,10 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from inference_suite import stop
 from inference_suite.contracts import FailedStep
 
+from ._agentx_checkpoint import AgentxCheckpoint, read_checkpoint
 from ._failed_step import failed_step_error_class
 from ._subprocess_kill import (
+    AGENTX_EARLY_STOP_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     sync_agentx_phase_wait,
@@ -85,6 +88,7 @@ class GridRound:
     ``server_already_ready`` is whether an earlier round left the round's server up. ``boot_only`` is whether the
     round only brings its server up for the rounds after it, which an inference_suite round does without a load.
     ``magpie_python`` is the interpreter of a round on the Magpie backend; a round inference_suite runs takes its own.
+    ``checkpoint`` stops an AgentX round that trails its reference at the checkpoint.
     """
 
     magpie_python: str
@@ -98,6 +102,7 @@ class GridRound:
     session_deadline_sec: float | None = None
     warmup: bool = False
     boot_only: bool = False
+    checkpoint: AgentxCheckpoint | None = None
 
 
 _FAILED_RETURNCODE = 1
@@ -141,6 +146,7 @@ def run_grid_suite_round(
         deadline_unix=deadline_unix(round_.session_deadline_sec),
         env_drop=env_drop,
         serving_lease=serving_lease,
+        checkpoint=round_.checkpoint,
     )
     try:
         report = run_suite_round(route, request, on_poll=on_poll).report
@@ -149,8 +155,15 @@ def run_grid_suite_round(
             log.error("grid: pids %s outlived SIGKILL; %s keeps their record", survivors, server.stop_after)
     if report.failed_step is None:
         return SuiteRoundExit(0)
+    if report.failed_step is FailedStep.CANCELLED and _stopped_by_checkpoint(round_):
+        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, report.failure_detail or report.failed_step.value)
     returncode = _STOPPED_BY_THE_RUN.get(report.failed_step, _FAILED_RETURNCODE)
     return SuiteRoundExit(returncode, report.failure_detail or report.failed_step.value)
+
+
+def _stopped_by_checkpoint(round_: GridRound) -> bool:
+    """Whether the ruling the round's checkpoint wrote into its slot stopped it; the round runner clears a stale one."""
+    return round_.checkpoint is not None and bool((read_checkpoint(round_.output_dir) or {}).get("stopped"))
 
 
 def failed_step_class(measurement: Mapping[str, Any]) -> str | None:
@@ -216,6 +229,7 @@ class VariantResult:
     tpot_p90_ms: float | None = None
     intvty_p90: float | None = None
     intvty_p50: float | None = None
+    intvty_p50_checkpoint: float | None = None
     request_error_rate: float | None = None
     workspace: str | None = None
     report_path: str | None = None
@@ -266,6 +280,7 @@ class VariantResult:
             "tpot_p90_ms": self.tpot_p90_ms,
             "e2e_norm_intvty_p90": self.intvty_p90,
             "e2e_norm_intvty_p50": self.intvty_p50,
+            GRADED_INTVTY_P50_CHECKPOINT: self.intvty_p50_checkpoint,
             "request_error_rate": self.request_error_rate,
             "workspace": self.workspace,
             "report_path": self.report_path,

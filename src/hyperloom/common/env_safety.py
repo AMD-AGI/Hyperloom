@@ -17,6 +17,7 @@ from hyperloom_common.env import env_str
 from hyperloom_common.git_safety import trusted_admin_dir
 from hyperloom_common.fs_utils import rewrite_lines_nofollow
 
+from hyperloom.common.id_map import unmapped_ids
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
@@ -782,7 +783,10 @@ def resolve_run_as(user: str | None) -> RunAs | None:
 
     Raises:
         RunAsError: The user does not exist, is uid 0, is the app's own user,
-            or belongs to group 0.
+            belongs to group 0, or has an id this process's user namespace does
+            not map (its uid, its group or a supplementary group): there a
+            switch to it fails with EINVAL, or under a fakeroot preload seems to
+            succeed while the child stays root.
     """
     name = (user or "").strip()
     if not name:
@@ -799,6 +803,13 @@ def resolve_run_as(user: str | None) -> RunAs | None:
     if 0 in groups:
         root_group = grp.getgrgid(0).gr_name
         raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r} is in group {root_group!r} (gid 0)")
+    unmapped = unmapped_ids((entry.pw_uid,), (entry.pw_gid, *groups))
+    if unmapped is not None:
+        raise RunAsError(
+            f"{SPECIALIST_USER_ENV}={name!r}: {unmapped}; a switch to an id the namespace does not map fails with "
+            "EINVAL, or under a fakeroot preload seems to succeed while the child stays root, so the specialist would "
+            "not be isolated"
+        )
     drop_tool = shutil.which(_DROP_TOOL)
     if drop_tool is None:
         raise RunAsError(

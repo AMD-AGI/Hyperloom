@@ -17,11 +17,17 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _ray_serving, _suite_config
+from hyperloom.orchestrator.actions.executors import _agentx_checkpoint, _ray_serving, _suite_config
+from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
+    AgentxCheckpoint,
+    SuiteRoundCheckpoint,
+    read_checkpoint,
+)
 from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors._ray_backend import SessionKillRound, SuiteLeasedRound
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    AGENTX_EARLY_STOP_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
@@ -236,3 +242,39 @@ def test_a_grid_with_a_serving_lease_runs_its_rounds_in_the_lease(monkeypatch, g
 
     assert row.status == "succeeded", row
     assert len(actor.leased) == len(calls) == 1
+
+
+def test_the_actor_stops_a_leased_round_that_trails_its_checkpoint(tmp_path, monkeypatch) -> None:
+    """The leased round has no server log for the watchdog to read; its checkpoint still rules, and stops it."""
+    monkeypatch.setattr(_agentx_checkpoint, "AGENTX_CHECKPOINT_SEC", 0.0)
+    monkeypatch.setattr(_agentx_checkpoint, "workspace_checkpoint_p50", lambda root: 90.0)
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    checkpoint = SuiteRoundCheckpoint(AgentxCheckpoint(100.0, enforce=True), slot=slot, run_dir=slot / "run-1")
+    started = time.monotonic()
+
+    returncode, _out, _err = SessionKillRound(
+        ["sleep", "60"], env={}, timeout=120, server_already_ready=True, checkpoint=checkpoint
+    ).run()
+
+    assert returncode == AGENTX_EARLY_STOP_RETURNCODE
+    assert time.monotonic() - started < 30
+    assert read_checkpoint(slot)["stopped"] is True
+
+
+def test_a_leased_round_carries_its_checkpoint_to_the_actor(session, tmp_path, monkeypatch) -> None:
+    lease = _Lease(_rounds())
+    point = _write_point(tmp_path / "slot" / "point.yaml")
+    request = SuiteRound(
+        point,
+        point.parent,
+        round_lifecycle(point.parent, LifecycleMode.OWN),
+        serving_lease=lease,
+        checkpoint=AgentxCheckpoint(100.0, enforce=True),
+    )
+
+    run_suite_round(suite_route(session, point), request, on_poll=lambda: None)
+
+    (leased,) = lease.leased
+    assert leased.checkpoint is not None and leased.checkpoint.slot == point.parent
+    assert leased.checkpoint.run_dir == Path(leased.run_dir)

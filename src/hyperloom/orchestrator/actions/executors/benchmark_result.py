@@ -18,6 +18,7 @@ from typing import Any, Callable, NamedTuple
 from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom_common.coerce import first_float, first_int, to_float, to_int
 from hyperloom_common.jsonio import read_json
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 
 from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 from ._round_folder import RoundFolder, is_round_folder
@@ -684,6 +685,7 @@ def extract_benchmark_measurement(
     if report.get("scenario") == "agentx" or (config_path is not None and read_benchmark_point(config_path).agentx):
         measurement = agentx_measurement(report)
         measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
+        _add_agentx_timeline_fields(measurement, workspace)
         return measurement
     measurement = _measurement_from_report(report, workspace, subprocess_started_unix)
 
@@ -725,7 +727,20 @@ def _round_folder_measurement(run_dir: Path, subprocess_started_unix: float | No
     folder = RoundFolder.read(run_dir)
     measurement = folder.measurement()
     measurement.update(_round_gpu_power(folder.report.to_document(), run_dir, subprocess_started_unix))
+    if folder.report.agentx is not None:
+        _add_agentx_timeline_fields(measurement, run_dir)
     return measurement
+
+
+def _add_agentx_timeline_fields(measurement: dict[str, Any], workspace: Path | None) -> None:
+    """The checkpoint median and the replayed corpus shape, both read from the aiperf exports under ``workspace``."""
+    from hyperloom.inference_optimizer.agentx.report import measured_corpus_shape
+
+    from ._agentx_checkpoint import workspace_checkpoint_p50
+
+    measurement[GRADED_INTVTY_P50_CHECKPOINT] = workspace_checkpoint_p50(workspace)
+    if corpus_shape := measured_corpus_shape(workspace):
+        measurement["agentx_corpus_shape"] = corpus_shape
 
 
 def _measurement_from_report(

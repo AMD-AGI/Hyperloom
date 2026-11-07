@@ -155,7 +155,8 @@ class BenchStageMixin:
             bench_leg: The task params (config / model / bench knobs), the
                 per-task workspace root, the originating specialist task id
                 (names the variant), ``SharedState.model_path`` (the last rung
-                of the model-path precedence) and the session bounds. The
+                of the model-path precedence), the round's own launch controls
+                and the session bounds. The
                 caller owns the session context, so it resolves the bounds:
                 ``session_deadline_sec`` is the monotonic-clock session budget
                 deadline, or ``None`` when unbounded, and
@@ -340,8 +341,8 @@ def _integrate_variant(
     unset_envs: list[str] | None,
     variant_suffix: str,
 ) -> GridVariant:
-    """The one grid variant a bench leg runs: the applied server args and envs over the task's overlays."""
-    params = bench_leg.params
+    """The one grid variant a bench leg runs: the applied server args, envs and removals over the task's overlays."""
+    params, controls = bench_leg.params, bench_leg.launch_controls
     envs = dict(extra_envs_applied)
     # Eval-origin enablement needs a raw accuracy for its runnable gate, so
     # RUN_EVAL=true must survive any variant overlay.
@@ -351,7 +352,9 @@ def _integrate_variant(
         name=f"integrate-patch-{bench_leg.specialist_task_id[:8]}{variant_suffix}",
         extra_server_args=extra_server_args_applied,
         extra_envs=envs,
-        unset_envs=to_str_list(unset_envs),
+        remove_args=controls.get("remove_args"),
+        unset_envs=to_str_list(controls.get("unset_envs")) + to_str_list(unset_envs),
+        args_mode=controls.get("args_mode", "append"),
         note=f"integrate_patch:{bench_leg.specialist_task_id}{variant_suffix}",
     )
     variant.overlay_pythonpath = params.get("overlay_pythonpath", "")
@@ -389,7 +392,8 @@ def _bench_row(result: VariantResult, variant: GridVariant, base: LaunchLayer, c
     """The bench result dict for the variant's grid result, with the stack it launched with."""
     effective_unset = list(dict.fromkeys(to_str_list(base.unset_envs) + list(variant.unset_envs)))
     base_envs = dict(base.extra_envs or {})
-    base_remove = to_str_list(base.remove_args)
+    effective_remove = list(dict.fromkeys(to_str_list(base.remove_args) + list(variant.remove_args)))
+    args_mode = variant.args_mode if variant.args_mode == "replace" else base.args_mode
     return {
         **result.to_dict(),
         "status": result.status,
@@ -426,12 +430,12 @@ def _bench_row(result: VariantResult, variant: GridVariant, base: LaunchLayer, c
                 inherited_args="",
                 base_extra_args=base.extra_server_args,
                 variant_extra_args=variant.extra_server_args,
-                remove_args=base_remove,
-                args_mode=base.args_mode,
+                remove_args=effective_remove,
+                args_mode=args_mode,
             ),
-            "remove_args": base_remove,
+            "remove_args": effective_remove,
             "unset_envs": list(effective_unset),
-            "args_mode": base.args_mode,
+            "args_mode": args_mode,
         },
     }
 
