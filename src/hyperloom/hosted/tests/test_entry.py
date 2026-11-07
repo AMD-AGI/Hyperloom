@@ -15,7 +15,9 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from hyperloom_common import bwrap
 from hyperloom_common.bwrap import BwrapProbe
+from hyperloom_common.tests._bwrap_host import usable_bwrap
 
 from hyperloom.common import agent_isolation, confinement
 from hyperloom.common.agent_isolation import NO_LAYER_BWRAP, IsolationRefused
@@ -795,6 +797,42 @@ def test_the_state_directory_is_masked_wherever_an_agent_sandbox_would_show_it(r
     masked = confinement.credential_paths({}, app_environ={}, allowed=(shown,))
     policy = confinement.Confinement(readable=(shown,), masked=masked).policy()
     assert str(run.state) in policy.masked, policy.masked
+
+
+def _image_bwrap(tmp_path: Path, monkeypatch) -> None:
+    """Put first on ``PATH`` a ``bwrap`` that fails every probe, as a framework image's own might, and have the entry
+    probe for real."""
+    image_bin = tmp_path / "image-bin"
+    image_bin.mkdir()
+    (image_bin / "bwrap").write_text("#!/bin/sh\necho 'not the layer bubblewrap' >&2\nexit 1\n")
+    (image_bin / "bwrap").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{image_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(entry, "require_agent_isolation", agent_isolation.require_agent_isolation)
+    monkeypatch.setattr(bwrap, "_PROBES", {})
+
+
+@pytest.mark.agent_isolation
+def test_a_hosted_run_isolates_its_agents_with_a_real_layer_bubblewrap_and_never_the_one_on_path(
+    run, monkeypatch, tmp_path
+):
+    real = usable_bwrap()
+    (run.layer / "bin").mkdir(parents=True)
+    (run.layer / "bin" / "bwrap").symlink_to(str(real.path))
+    _image_bwrap(tmp_path, monkeypatch)
+    fake = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 0 and len(fake.calls) == 1
+    report = agent_isolation.agent_isolation_report()
+    assert (report.specialists, report.sandboxes, report.required) == ("bwrap", "bwrap", True)
+    assert report.bwrap == f"{'.'.join(map(str, real.version or ()))} {run.layer / 'bin' / 'bwrap'}"
+
+
+def test_a_hosted_run_whose_layer_has_no_bubblewrap_is_refused_naming_it(run, monkeypatch, tmp_path):
+    _image_bwrap(tmp_path, monkeypatch)
+    fake = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == entry.RETURNCODE_REFUSED and fake.calls == []
+    error = _exit(run)["error"]
+    assert f"bubblewrap at {run.layer / 'bin' / 'bwrap'}: No such file or directory" in error, error
+    assert "not the layer bubblewrap" not in error
 
 
 # -- the installer -----------------------------------------------------------------------------------------------
