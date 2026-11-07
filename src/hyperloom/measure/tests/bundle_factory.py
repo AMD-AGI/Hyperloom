@@ -61,7 +61,7 @@ def manifest_document(files: dict[str, bytes], public_pem: str, **overrides: Any
             "power_cap_w": 1400,
             "partition_mode": "SPX/NPS1",
             "hyperloom_version": "1.1.3+gtest",
-            "magpie_commit": "e" * 40,
+            "inference_suite_staging": "e" * 64,
             "inferencex_commit": "f" * 40,
             "gpu_ids": [0, 1],
             "ecc_delta": {"correctable": 0, "uncorrectable": 0},
