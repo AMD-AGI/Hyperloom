@@ -11,7 +11,7 @@ It also builds the aiter modules a stack touches before its test
 reads. So it also needs:
 
 - ``HYPERLOOM_BUILD_SIGNING_KEY``: the service's Ed25519 private key, a file of this user with mode 0600 (the compile
-  must not be able to read it: as another user it cannot, and under bubblewrap the key is not there or is masked); its
+  must not be able to read it: as another user it cannot, and under bubblewrap the key is not there); its
   public key must be in the trust file;
 - ``HYPERLOOM_BUILD_SOURCES``: the upstream checkouts, ``<dir>/<component>/<upstream_ref>`` (``<dir>/sgl_kernel/<ref>``
   is the SGLang repository, ``<dir>/vllm/<ref>`` vLLM's);

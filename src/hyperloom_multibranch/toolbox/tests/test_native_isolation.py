@@ -420,7 +420,7 @@ def test_under_bubblewrap_the_compile_has_no_egress_no_key_a_dev_null_and_writes
     assert seen == {
         "egress": "ENETUNREACH",
         "key": "ENOENT",
-        "bound_key": "EACCES",
+        "bound_key": "ENOENT",
         "dev_null": "ok",
         "dev_null_child": "0",
         "job": "ok",

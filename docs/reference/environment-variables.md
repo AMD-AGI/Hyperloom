@@ -902,8 +902,8 @@ runs as the service's own user with only its work directory writable, the toolch
 child imports from, the image's packages and the upstream build directory read-only (an aiter module build lays its
 farm in the work directory, and the image's aiter directories the farm links into are read-only), only
 `/sys/devices/system/cpu` of `/sys`, the base `/dev` nodes and no GPU, a network of its own (outside addresses give
-`ENETUNREACH`), and the signing key and trust file (registered as the app's private paths) absent, or masked where a
-bound tree holds them; its environment is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation`
+`ENETUNREACH`), and the signing key and trust file (registered as the app's private paths) absent, also where a
+bound tree holds them (that tree is bound entry by entry without them); its environment is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation`
 entry is `uid+netns`, `uid` or `bwrap+netns`. Where neither tier works, the toolbox refuses at start
 (`build_preflight`) and each build fails as the machine's, naming both reasons; a bubblewrap whose probe gives no
 answer in time is not refused but logged, and each build asks again.

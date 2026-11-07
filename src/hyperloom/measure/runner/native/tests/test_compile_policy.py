@@ -109,21 +109,20 @@ def test_its_command_line_has_its_own_network_dies_with_its_parent_and_binds_no_
     assert ("--ro-bind-try", "/sys", "/sys") not in pairs
 
 
-def test_the_signing_key_is_absent_and_masked_where_a_bound_tree_holds_it(
-    tmp_path: Path, registered: PrivatePaths
-) -> None:
+def test_the_signing_key_is_absent_where_a_bound_tree_holds_it_too(tmp_path: Path, registered: PrivatePaths) -> None:
     laid, work = _laid(tmp_path), tmp_path / "work"
     outside, inside = tmp_path / "service.key", laid.image_root / "service.key"
     for key in (outside, inside):
         key.write_text("not a key")
         registered.add(key, "the build service's signing key")
+    (laid.image_root / "package").mkdir()
 
     policy = compile_policy(work, ChildInterpreter(), laid, _environment(work))
 
-    assert str(inside) in policy.masked
+    assert not _shown(inside, policy) and _shown(laid.image_root / "package", policy), "the image is bound beside it"
     bound = (*policy.read_only, *policy.writable)
     assert not any(str(outside) == path or str(outside).startswith(path.rstrip("/") + "/") for path in bound)
-    assert str(outside) not in policy.masked, "nothing shows it, so there is nothing to mask"
+    assert str(outside) not in policy.masked and str(inside) not in policy.masked, "a file is left out, not masked"
 
 
 def test_a_path_the_compile_reads_through_its_own_work_is_refused(tmp_path: Path, registered: PrivatePaths) -> None:
@@ -175,22 +174,22 @@ def test_a_farm_laid_in_the_work_directory_is_its_own_and_the_image_it_links_to_
     assert _shown(image / "aiter/jit/core.py", policy)
 
 
-def test_a_credential_location_the_apps_own_environment_names_is_masked_where_a_bound_tree_holds_it(
+def test_a_credential_location_the_apps_own_environment_names_is_hidden_where_a_bound_tree_holds_it(
     tmp_path: Path, registered: PrivatePaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The compile's environment names no credential: the app's does, and its locations are masked all the same."""
     laid, work = _laid(tmp_path), tmp_path / "work"
     aws, hf = laid.image_root / "aws-credentials", laid.image_root / "hf"
     aws.write_text("SECRET aws")
-    hf.mkdir()
+    (hf / "hub").mkdir(parents=True)
     (hf / "token").write_text("SECRET hf")
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(aws))
     monkeypatch.setenv("HF_HOME", str(hf))
 
     policy = compile_policy(work, ChildInterpreter(), laid, _environment(work))
 
-    assert {str(aws), str(hf / "token")} <= set(policy.masked)
-    assert not _shown(aws, policy) and not _shown(hf / "token", policy) and _shown(hf, policy)
+    assert not {str(aws), str(hf / "token")} & set(policy.masked), "files are left out of the tree, not masked"
+    assert not _shown(aws, policy) and not _shown(hf / "token", policy) and _shown(hf / "hub", policy)
 
 
 def test_a_path_entry_that_is_the_apps_home_does_not_show_the_home(

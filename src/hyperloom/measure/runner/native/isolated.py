@@ -20,8 +20,8 @@ runner.native.service.ensure_build`).
    as root (:func:`account_problem`).
 2. Else a bubblewrap sandbox (:func:`compile_policy`, :data:`ISOLATION_BWRAP_NETNS`) as this process's own user, which
    starts from an empty root: only the work directory is writable, the toolchain, the image's packages and the tree the
-   child imports from are read-only, the signing key and this user's credential locations do not exist inside (or are
-   masked where a bound tree holds one), and it has a network of its own (loopback only).
+   child imports from are read-only, the signing key and this user's credential locations do not exist inside (a
+   directory a bound tree holds is masked, a file left out of it), and it has a network of its own (loopback only).
 
 Which one a build got is the ``isolation`` entry of its record's toolchain, written by this process, never by the
 child. A host where neither works builds nothing: the build fails as the machine's (``BuildInfraError``), naming both
@@ -224,8 +224,8 @@ def compile_policy(work: Path, child: ChildInterpreter, laid: LaidTree, environ:
     and the bind of ``work`` shows them), and the image's directories the laid tree links into (``laid.linked``).
     ``/sys`` is only the CPU tree, ``/dev`` only the base nodes (``/dev/null`` and the like, no GPU), and the network is
     its own (loopback only). Every credential location of this process and the files it registers (the signing key
-    among them) is absent, or masked where a bound tree holds it
-    (:func:`~hyperloom.common.confinement.credential_paths`).
+    among them) is absent: where a bound tree holds it, a directory is masked and a file left out of the tree, bound
+    entry by entry (:func:`~hyperloom.common.confinement.credential_paths`).
 
     ``--die-with-parent`` is kept on whatever thread starts the compile: that thread waits for it, so it cannot end
     first, and only that flag lets a timeout's kill of bubblewrap end the sandbox, which runs in a session of its own.
