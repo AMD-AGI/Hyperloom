@@ -146,6 +146,7 @@ def _stub_gpu(monkeypatch, session, *, effective):
                 workload_identity="fixed-workload",
                 launch_evidence=evidence,
                 launch_evidence_path=evidence_path,
+                workspace=str(config.parent / "benchmark_native"),
             )
         ]
 

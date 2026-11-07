@@ -64,7 +64,9 @@ from hyperloom.inference_optimizer.canonical_fingerprint import workload_signatu
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
+from ._grid_base import variant_config_of
 from .benchmark_result import double_run_requested
+from .benchmark_run.accuracy import accuracy_round_due, record_accuracy_round, run_candidate_accuracy_round
 from .explore_prefilter._prefilter import prefilter_round, record_decision_round
 from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, _is_config_replay_variant, is_stack_revalidation
 from ._grid_runner import (
@@ -91,18 +93,14 @@ from ._grid_variant_filter import (
     reorder_grid_for_multi_node,
     resolve_skip_spec,
 )
-from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from hyperloom.inference_optimizer.grid_server_args import (
-    compose_server_args,
-)
+from hyperloom.inference_optimizer.framework_registry import is_scriptable, server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from ._ray_serving import maybe_serving_lease
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
 from ._launch_restatement import Launch, config_envs, launch_change, observed_launch_after, read_launch
 from ._server_argv import ConfigUnreadable, config_point, config_server_argv
-from ._server_lifecycle import (
-    resolve_lifecycle_params,
-)
+from ._server_lifecycle import resolve_lifecycle_params
 from ._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
@@ -779,6 +777,7 @@ class _ExploreRound:
         self.lease: Any = None
 
     async def run(self, session_dir: Path | None = None) -> dict[str, Any]:
+        self.session_dir = session_dir
         self._resolve_grid()
         self._shape_runnable()
         self._open_schedule()
@@ -799,15 +798,14 @@ class _ExploreRound:
                     if self.run_stop is not None:
                         break
                     if measurement is not None:
-                        row = self._settle(gv, run_gv, measurement, slot)
+                        row = await self._settle(gv, run_gv, measurement, slot)
                         await record_decision_round(round_ctx, gv, measurement, row)
                 finally:
                     # The warmup and decision rounds share this slot's server; reap it on every exit path.
                     if self.lifecycle_eligible:
                         self._reap_variant_server(slot)
         finally:
-            # Release the round's Ray serving lease/actor exactly once (this was a per-variant ``ray.kill`` before
-            # -- the raylet worker churn that destabilised the single-node cluster).
+            # One lease spans the round; a per-variant ``ray.kill`` churns raylet workers on a single-node cluster.
             if self.lease is not None:
                 self.lease.close()
         return self._result()
@@ -1266,7 +1264,7 @@ class _ExploreRound:
 
     # ----- the verdict -----------------------------------------------------
 
-    def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> dict[str, Any]:
+    async def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> dict[str, Any]:
         # Rule on this variant's measurement and fold a KEEP onto the round's stack.
         #
         # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the threshold floor
@@ -1306,6 +1304,8 @@ class _ExploreRound:
             "validation_basis": "",
         }
         if row["outcome"] == TS_FAILED and not row["reason"]:
+            if accuracy_round_due(self.ss):
+                await self._run_accuracy_round(row, slot, r.workspace)
             self._apply_accuracy_gate(row, slot)
         self._record(gv, row)
         if row["outcome"] == "KEEP":
@@ -1390,14 +1390,19 @@ class _ExploreRound:
             "gates": gates,
         }
 
+    async def _run_accuracy_round(self, row: dict[str, Any], slot: Path, workspace: str) -> None:
+        if self.lifecycle_eligible:  # the round boots a server of its own on the variant's GPUs
+            self._reap_variant_server(slot)
+        launch = variant_config_of(workspace)
+        outcome = await run_candidate_accuracy_round(slot, launch, self.ss, session=self.session_dir, lease=self.lease)
+        record_accuracy_round(row, outcome)
+
     def _apply_accuracy_gate(self, row: dict[str, Any], slot: Path) -> None:
         # Rule on the round's accuracy evidence for a variant no earlier gate refused.
         #
         # A session with no baseline accuracy gates nothing, so its KEEPs rest on throughput alone -- a weaker
         # claim than one an accuracy gate ruled on, and ``validation_basis`` must not read alike for the two.
-        from hyperloom.inference_optimizer import framework_registry
-
-        scriptable = framework_registry.is_scriptable(self.framework)
+        scriptable = is_scriptable(self.framework)
         observed: Any = None
         reference: float | None = None
         passed = True
