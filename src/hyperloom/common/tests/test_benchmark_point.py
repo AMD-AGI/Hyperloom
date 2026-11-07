@@ -60,6 +60,8 @@ def test_reads_every_field_of_a_fixed_point(tmp_path: Path) -> None:
     )
     assert dict(point.agentx_launch.env) == {}
     assert point.agentx_launch.executable == ""
+    assert point.agentx_launch.unset_env == ()
+    assert not point.agentx_launch.composed
 
 
 def test_absent_fields_read_empty() -> None:
@@ -135,6 +137,14 @@ def test_agentx_launch_is_read_from_the_overrides() -> None:
     assert point.agentx_launch.replace_args is True
     assert point.agentx_launch.unset_env == ("B",)
     assert dict(point.agentx_launch.source_files) == {"/dst.py": "/src.py"}
+    assert point.agentx_launch.composed
+
+
+@pytest.mark.parametrize("append_args", [[], ["--x"]])
+def test_a_launch_is_composed_once_it_carries_append_args(append_args: list[str]) -> None:
+    point = BenchmarkPoint.from_document({"benchmark": {"agentx": {"launch_overrides": {"append_args": append_args}}}})
+
+    assert point.agentx_launch.composed
 
 
 def test_the_point_is_a_copy_the_reader_cannot_change() -> None:

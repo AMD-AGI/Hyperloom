@@ -26,7 +26,12 @@ class PointError(ValueError):
 
 @dataclass(frozen=True)
 class AgentxLaunch:
-    """``agentx.launch_overrides`` of a point: what Magpie launches an AgentX server with, beside the recipe's argv."""
+    """``agentx.launch_overrides`` of a point: what Magpie launches an AgentX server with, beside the recipe's argv.
+
+    ``unset_env`` names the inherited variables Magpie drops before applying ``env``. ``composed`` is whether the
+    overrides carry ``append_args``, which every launch Hyperloom composes writes and a workload YAML never
+    materialized does not.
+    """
 
     env: Mapping[str, Any]
     executable: str
@@ -35,6 +40,7 @@ class AgentxLaunch:
     replace_args: bool
     unset_env: tuple[str, ...]
     source_files: Mapping[str, Any]
+    composed: bool
 
 
 @dataclass(frozen=True)
@@ -86,6 +92,7 @@ class BenchmarkPoint:
                 replace_args=bool(launch.get("replace_args")),
                 unset_env=_strings(launch.get("unset_env"), source),
                 source_files=_mapping(launch.get("source_files"), source),
+                composed="append_args" in launch,
             ),
             torch_profiler=torch_profiler.get("enabled") is True,
             server_ready_timeout_s=_number(ready),

@@ -27,9 +27,13 @@ from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
     is_valid_measurement,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import bind_source_evidence, enable_profile, load_benchmark
+from hyperloom.orchestrator.actions.executors.magpie_agentx import bind_source_evidence, enable_profile
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
+
+
+def load_benchmark(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
 
 
 @pytest.fixture
