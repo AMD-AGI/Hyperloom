@@ -1423,7 +1423,7 @@ def materialize_benchmark_config(
     import yaml
 
     from hyperloom_common.coerce import to_str_list
-    from .magpie_agentx import (
+    from .agentx_point import (
         LaunchChanges,
         apply_launch_changes,
         materialize_agentx,

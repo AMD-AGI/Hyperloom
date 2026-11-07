@@ -57,7 +57,7 @@ from hyperloom.orchestrator.actions.executors import (
     default_baseline_config,
     materialize_benchmark_config,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, native_config
+from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile, native_config
 
 _UTF8 = "utf-8"
 
