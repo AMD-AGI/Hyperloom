@@ -204,17 +204,6 @@ def export_ray_address_to_os() -> None:
         os.environ["RAY_ADDRESS"] = addr
 
 
-def _remote_client_env(service_url: str) -> dict[str, str]:
-    """Build the multi-node Magpie client env for ``service_url``."""
-    from .benchmark_backend import resolve_benchmark_interpreter
-
-    return {
-        "MAGPIE_RUN_PHASE": "client",
-        _REMOTE_SERVER_ENV: service_url,
-        "MAGPIE_EVAL_PYTHON": resolve_benchmark_interpreter(),
-    }
-
-
 def _multi_node_service_url() -> str:
     """The multi-node cluster's benchmark URL as this host reaches it: the hand-off's, else the state's."""
     return external_service_url() or reachable_service_url(_read_state())
@@ -239,12 +228,6 @@ def _warn_no_service_url() -> None:
         os.environ.get("INFERENCE_OPTIMIZER_NODES"),
         resolve_state_file(),
     )
-
-
-def magpie_remote_env() -> dict[str, str]:
-    """Return env vars to inject into a Magpie ``benchmark`` subprocess."""
-    service_url = client_only_server_url() if is_multi_node() else None
-    return {} if service_url is None else _remote_client_env(service_url)
 
 
 def log_mn_banner(
@@ -287,7 +270,6 @@ __all__ = [
     "export_ray_address_to_os",
     "is_multi_node",
     "log_mn_banner",
-    "magpie_remote_env",
     "ray_gcs_address_from_state",
     "resolve_kb_topology",
 ]

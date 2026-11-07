@@ -9,7 +9,6 @@ the round's load; preparing the round preflights that harness.
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -22,9 +21,7 @@ from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_session_base
 
 from ._subprocess_kill import (
-    AGENTX_PREFLIGHT_RETURNCODE,
     BENCHMARK_TIMEOUT_ENV,
-    PreparationFailure,
     default_benchmark_timeout_sec,
     resolve_benchmark_timeouts,
 )
@@ -80,15 +77,6 @@ def composed_benchmark_timeout_sec(config_path: Path) -> float:
     if BENCHMARK_TIMEOUT_ENV in envs and BENCHMARK_TIMEOUT_ENV in os.environ:
         return resolve_benchmark_timeouts()[1]
     return default_benchmark_timeout_sec(envs)
-
-
-def prepare_mlperf_client(config_path: Path, env: dict[str, str]) -> PreparationFailure | None:
-    """Preflight the MLPerf client a backend round at ``config_path`` runs."""
-    error = prepare_agentx_runtime(env=env, config_path=config_path)
-    if not error:
-        return None
-    logging.getLogger(__name__).error("%s; failing this benchmark", error)
-    return PreparationFailure(AGENTX_PREFLIGHT_RETURNCODE, error)
 
 
 def prepare_agentx_runtime(

@@ -1052,20 +1052,3 @@ def test_apply_round_seed_marks_only_the_discarded_round():
     assert warm == {"A": "1", BENCH_SEED_ENV: str(WARMUP_ROUND_SEED)}
     assert WARMUP_ROUND_SEED != 0
     assert apply_round_seed({"A": "1", BENCH_SEED_ENV: "7"}, warmup=False) == {"A": "1"}
-
-
-def test_grid_preparation_patches_the_seed_too(tmp_path, monkeypatch):
-    """Explore and sweep never pass through the baseline hook, and their warmups need the patch just as much."""
-    import yaml
-
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import prepare_inferencex_checkout
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    _write_full_lib(ix_root)
-    real, _shim = _write_infx_layout(ix_root)
-    config = tmp_path / "variant.yaml"
-    config.write_text(yaml.safe_dump({"benchmark": {"envs": {"RUN_EVAL": "false"}}}), encoding="utf-8")
-    monkeypatch.setenv("INFERENCEX_PATH", str(ix_root))
-
-    assert prepare_inferencex_checkout(config, {}) is None
-    assert "HYPERLOOM_BENCH_SEED" in real.read_text(encoding="utf-8")

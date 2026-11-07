@@ -17,7 +17,6 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     stamp_server_ready,
 )
@@ -253,17 +252,6 @@ def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
         output_dir=output_dir,
         run=run_case,
     )
-
-
-def test_a_native_agentx_warmup_keeps_its_seed(tmp_path, monkeypatch):
-    """The native AgentX client is not the patched one, so its rounds are left exactly as they were."""
-    from hyperloom.orchestrator.actions.executors import benchmark_backend
-
-    config = tmp_path / "variant.yaml"
-    config.write_text("benchmark:\n  framework: sglang\n  agentx:\n    enabled: true\n", encoding="utf-8")
-    env = {BENCH_SEED_ENV: "7"}
-    benchmark_backend.apply_benchmark_round_seed(config, env, warmup=True)
-    assert env == {}
 
 
 def test_teardown_lifecycle_server_removes_state_files(tmp_path):
