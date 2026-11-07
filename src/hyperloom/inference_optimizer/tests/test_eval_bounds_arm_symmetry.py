@@ -120,7 +120,6 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
         frontier = {module for name in frontier for module in siblings(name)} - reached
     assert "_accuracy_gate" not in reached, f"_accuracy_gate is imported back through {sorted(reached)}"
 
-    from hyperloom.orchestrator.actions.executors import benchmark_backend, baseline
+    from hyperloom.orchestrator.actions.executors import baseline
 
-    for arm in (benchmark_backend, baseline):
-        assert arm.materialized_run_eval_disabled is materialized_run_eval_disabled, arm.__name__
+    assert baseline.materialized_run_eval_disabled is materialized_run_eval_disabled

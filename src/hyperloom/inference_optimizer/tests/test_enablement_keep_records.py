@@ -644,9 +644,6 @@ def test_an_override_rewriting_path_selects_that_pythons_closure(tmp_path: Path,
     monkeypatch.setenv("PATH", str(ambient_bin))
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.delenv("MAGPIE_PYTHON", raising=False)
-    # Force the branch that consults PATH: pin Magpie's own answer to the
-    # single-venv sentinel so resolution falls through to `which("vllm")`.
-    monkeypatch.setattr(_benchmark_interpreter, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
 
     seen: dict[str, str] = {}
     real_probe = _benchmark_interpreter._resolve_probe_python
@@ -692,7 +689,6 @@ def test_the_materialized_configs_envs_decide_the_probed_interpreter(tmp_path: P
     monkeypatch.setenv("FRAMEWORK", "sglang")  # outranked by the config's own framework
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.delenv("MAGPIE_PYTHON", raising=False)
-    monkeypatch.setattr(_benchmark_interpreter, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
 
     seen: dict[str, Any] = {}
     real_probe = _benchmark_interpreter._resolve_probe_python
