@@ -3,8 +3,8 @@
 
 """The signed result manifest (``MeasurementResult`` v2) a runner writes to ``/out/manifest.json``.
 
-A v2 runner states the inference_suite staging it ran (``runner.inference_suite_staging``, the staging manifest's
-sha256); a v1 runner stated the Magpie commit instead. The archive keeps v1 manifests, so they still load.
+A v2 runner states the inference_suite staging it ran (``runner.inference_suite_staging``, the sha256 of the
+staging's normalised manifest, which is the sheet's); a v1 runner stated the Magpie commit instead. The archive keeps v1 manifests, so they still load.
 
 The manifest is read only after its signature has been verified over the raw bytes (see
 :func:`hyperloom.measure.bundle.verify_bundle`); parsing here is strict all the same, because a manifest that is signed

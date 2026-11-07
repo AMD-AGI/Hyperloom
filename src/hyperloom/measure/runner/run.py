@@ -87,8 +87,14 @@ from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes, wait_for_file, write_status
 from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
-from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR, LOCAL_WHEELS_DIR
-from hyperloom.measure.runner.tools import ToolError, ensure_inference_suite, ensure_inferencex, ensure_magpie
+from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR
+from hyperloom.measure.runner.tools import (
+    StagingMismatch,
+    ToolError,
+    ensure_inference_suite,
+    ensure_inferencex,
+    ensure_magpie,
+)
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.spec import SPEC_SCHEMA, SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
@@ -96,7 +102,7 @@ from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, backend_reason, harvest_leaked_artifacts
 from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_image_own_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
-from inference_suite.contracts import ConfigError
+from inference_suite.contracts import ConfigError, NormalisedManifest
 
 __all__ = ["run"]
 
@@ -123,8 +129,6 @@ class _Context:
     out_dir: Path
     work: Path
     cache: Path
-    #: The sandbox's checked wheels, the only source an offline inference_suite staging installs from.
-    wheels: Path
     environ: MutableMapping[str, str]
     started: float
     #: Watches the visible cards for a process that is not this sandbox's; the signed result states what it saw.
@@ -136,8 +140,8 @@ class _Context:
     #: The directory the test's compilers write below, on this host's temporary disk; made once the sheet names the
     #: test (:func:`_compile_dir`) and removed when the run ends.
     compile: Path | None = None
-    #: The sha256 of the inference_suite staging manifest this runner staged for a v2 sheet (:func:`_prepare`).
-    staging: str | None = None
+    #: The normalised manifest of the published inference_suite staging this runner ran a v2 sheet on (:func:`_prepare`).
+    staging: NormalisedManifest | None = None
 
     @property
     def files(self) -> Path:
@@ -302,10 +306,12 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
         inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
         if spec.tools.staging is not None:
             runner_cache = Path(ctx.environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
-            staged = ensure_inference_suite(inferencex, runner_cache, ctx.wheels)
-            ctx.environ[TOOL_CACHE_ENV], ctx.staging = str(staged.tool_cache), staged.staging
+            staged = ensure_inference_suite(runner_cache, spec.tools.staging)
+            ctx.environ[TOOL_CACHE_ENV], ctx.staging = str(staged.tool_cache), staged.normalised
         if spec.procedure.benchmark_backend == _MAGPIE:
             ctx.environ["MAGPIE_PATH"] = str(ensure_magpie(spec.tools.magpie, ctx.cache))
+    except StagingMismatch as exc:
+        raise RunnerFailure("preflight_mismatch", str(exc)) from exc
     except ToolError as exc:
         raise RunnerFailure(_START_FAILED, str(exc)) from exc
     try:
@@ -530,12 +536,11 @@ class _Findings:
 
 
 def _tool_facts(ctx: _Context, spec: MeasurementSpec) -> dict[str, str | None]:
-    """What the manifest says the test ran: for a v2 sheet the staging this runner staged, which the sheet's (the
-    application's) never equals byte for byte, or the Magpie commit of a v1 sheet, which this runner still measures
-    through Magpie."""
+    """What the manifest says the test ran: for a v2 sheet the sha256 of the normalised manifest of this runner's
+    staging, or the Magpie commit of a v1 sheet, which this runner still measures through Magpie."""
     if spec.schema == SPEC_SCHEMA_V1:
         return {"magpie_commit": spec.tools.magpie}
-    return {"inference_suite_staging": ctx.staging}
+    return {"inference_suite_staging": None if ctx.staging is None else ctx.staging.sha256()}
 
 
 def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Findings) -> None:
@@ -771,7 +776,7 @@ def run(
         write_status(out_dir, state=_FAILED, error_class=failure.error_class, message=str(failure))
         return failure.exit_code
     watch = CardWatch(_visible(environ), own_sandbox_processes(environ), guard)
-    ctx = _Context(in_dir, out_dir, work, scratch / "cache", scratch / LOCAL_WHEELS_DIR, environ, time.time(), watch)
+    ctx = _Context(in_dir, out_dir, work, scratch / "cache", environ, time.time(), watch)
     _begin_phases(ctx)
     with Progress(out_dir, files_dir=ctx.files) as progress:
         try:

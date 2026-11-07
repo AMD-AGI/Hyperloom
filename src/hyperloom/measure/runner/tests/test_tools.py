@@ -3,20 +3,22 @@
 
 from __future__ import annotations
 
-import errno
 import subprocess
-import sys
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from dataclasses import replace
 
 import pytest
 
 from hyperloom.measure.runner import tools
-from hyperloom.measure.runner.tools import StagedSuite, ToolError, ensure_inference_suite, ensure_inferencex
-from hyperloom.measure.tests.bundle_factory import STAGING, STAGING_MANIFEST, stage_into
-from inference_suite import CLIENT_FILE, INFERENCEX_CLIENT_COMMIT
+from hyperloom.measure.runner.tools import (
+    StagedSuite,
+    StagingMismatch,
+    ToolError,
+    ensure_inference_suite,
+    ensure_inferencex,
+)
+from hyperloom.measure.tests.bundle_factory import STAGING, STAGING_MANIFEST, lm_eval_at_its_pin, stage_into
+from inference_suite import CLIENT_FILE, StagingError, staging_key
+from inference_suite.contracts import PackageIdentity
 
 
 def _git(path, *args):
@@ -104,108 +106,63 @@ def test_an_unknown_commit_is_refused(upstream, tmp_path, monkeypatch):
         ensure_inferencex("a" * 40, tmp_path / "cache")
 
 
-class _Stage:
-    """``python -m inference_suite stage`` as the runner calls it: lays a verifying staging into the tool cache it is
-    given, or exits ``returncode`` without one."""
+@pytest.fixture
+def identified(monkeypatch):
+    """This interpreter's normalised manifest of a staging is :data:`STAGING` (lm-eval is not installed in CI)."""
+    seen = []
 
-    def __init__(self, returncode: int = 0) -> None:
-        self.returncode, self.argv = returncode, []
+    def identify(tool_cache):
+        seen.append(tool_cache)
+        return STAGING
 
-    def __call__(self, argv, **kwargs):
-        self.argv.append(argv)
-        if self.returncode == 0:
-            cache = Path(argv[argv.index("--tool-cache") + 1])
-            stage_into(cache.parents[1])
-        return subprocess.CompletedProcess(argv, self.returncode, STAGING + "\n", "staging_missing: no wheel")
+    monkeypatch.setattr(tools, "normalised_manifest", identify)
+    return seen
 
 
-def _ensure(tmp_path):
-    return ensure_inference_suite(tmp_path / "ix", tmp_path / "runner-cache", tmp_path / "wheels")
+def _ensure(tmp_path, expected=STAGING):
+    return ensure_inference_suite(tmp_path / "runner-cache", expected)
 
 
-def _destination(tmp_path):
-    return tmp_path / "runner-cache" / "inference-suite" / INFERENCEX_CLIENT_COMMIT
-
-
-def test_a_staging_the_runner_cache_holds_intact_is_used_without_staging_again(tmp_path, monkeypatch):
+def test_the_published_staging_of_the_runners_pins_is_used_when_it_is_the_sheets(tmp_path, monkeypatch):
     held = stage_into(tmp_path / "runner-cache")
-    stage = _Stage()
-    monkeypatch.setattr(tools.subprocess, "run", stage)
+    monkeypatch.syspath_prepend(str(lm_eval_at_its_pin(tmp_path / "site")))
 
-    assert _ensure(tmp_path) == StagedSuite(held, STAGING) and held == _destination(tmp_path)
-    assert stage.argv == []
-
-
-def test_a_missing_staging_is_staged_offline_from_the_checkout_into_the_directory_of_the_pin(tmp_path, monkeypatch):
-    stage = _Stage()
-    monkeypatch.setattr(tools.subprocess, "run", stage)
-
-    staged = _ensure(tmp_path)
-
-    destination = _destination(tmp_path)
-    assert staged == StagedSuite(destination, STAGING)
-    assert stage.argv == [
-        [
-            sys.executable,
-            "-m",
-            "inference_suite",
-            "stage",
-            "--source",
-            str(tmp_path / "ix"),
-            "--tool-cache",
-            str(destination),
-            "--wheels",
-            str(tmp_path / "wheels"),
-        ]
-    ]
+    assert _ensure(tmp_path) == StagedSuite(held, STAGING)
+    assert held == tmp_path / "runner-cache" / "inference-suite" / staging_key()
 
 
-def test_a_damaged_staging_is_handed_to_stage_which_decides_and_the_runner_reports_its_own_manifest(
-    tmp_path, monkeypatch
-):
-    held = stage_into(tmp_path / "runner-cache")
-    (held / "staging_manifest.json").write_bytes(STAGING_MANIFEST.replace(b"inferencex", b"other"))
-    stage = _Stage()
-    monkeypatch.setattr(tools.subprocess, "run", stage)
+def test_a_staging_that_is_other_software_than_the_sheets_is_refused_naming_each_package(tmp_path, identified):
+    stage_into(tmp_path / "runner-cache")
+    theirs = replace(STAGING, packages=(PackageIdentity("agentx-harness", "1.0.12", "d" * 64), *STAGING.packages[1:]))
 
-    assert _ensure(tmp_path) == StagedSuite(held, STAGING) and len(stage.argv) == 1
+    with pytest.raises(StagingMismatch, match=r"agentx-harness 1\.0\.13 .* here, 1\.0\.12 .* there") as refused:
+        _ensure(tmp_path, theirs)
+    assert "lm-eval" not in str(refused.value)
 
 
-def test_a_failed_stage_is_a_tool_error_naming_its_stderr(tmp_path, monkeypatch):
-    monkeypatch.setattr(tools.subprocess, "run", _Stage(returncode=2))
+@pytest.mark.parametrize("held", ["none", "private", "damaged"])
+def test_no_published_staging_that_verifies_is_a_tool_error_and_nothing_is_staged_here(tmp_path, identified, held):
+    runner_cache = tmp_path / "runner-cache"
+    if held != "none":
+        published = stage_into(runner_cache)
+    if held == "private":
+        published.rename(published.with_name(f".staging-{staging_key()}-another-host"))
+    if held == "damaged":
+        (published / "staging_manifest.json").write_bytes(STAGING_MANIFEST.replace(b"inferencex", b"other"))
 
-    with pytest.raises(ToolError, match="exited 2.*staging_missing: no wheel"):
+    with pytest.raises(ToolError, match="no published staging .* that verifies; cache_build publishes it"):
         _ensure(tmp_path)
+    assert identified == []
+    assert not (runner_cache / "inference-suite" / staging_key()).exists() or held == "damaged"
 
 
-def test_two_runners_on_a_new_staging_stage_it_once_and_both_get_the_whole_tree(tmp_path, monkeypatch):
-    entered, release = threading.Event(), threading.Event()
-    stage = _Stage()
+def test_a_staging_this_interpreter_cannot_identify_is_a_tool_error(tmp_path, monkeypatch):
+    stage_into(tmp_path / "runner-cache")
 
-    def slow_stage(argv, **kwargs):
-        entered.set()
-        assert release.wait(10)
-        return stage(argv, **kwargs)
+    def unidentified(tool_cache):
+        raise StagingError("lm_eval None, not lm_eval[api]==0.4.13")
 
-    monkeypatch.setattr(tools.subprocess, "run", slow_stage)
-    with ThreadPoolExecutor(2) as pool:
-        first = pool.submit(_ensure, tmp_path)
-        assert entered.wait(10)
-        second = pool.submit(_ensure, tmp_path)
-        time.sleep(0.2)
-        assert not second.done()
-        release.set()
-        staged = {first.result(10), second.result(10)}
+    monkeypatch.setattr(tools, "normalised_manifest", unidentified)
 
-    assert staged == {StagedSuite(_destination(tmp_path), STAGING)} and len(stage.argv) == 1
-
-
-def test_a_runner_cache_that_cannot_be_written_is_a_tool_error(tmp_path, monkeypatch):
-    def read_only(self, *args, **kwargs):
-        raise OSError(errno.EROFS, "Read-only file system", str(self))
-
-    monkeypatch.setattr(tools.subprocess, "run", _Stage())
-    monkeypatch.setattr(Path, "mkdir", read_only)
-
-    with pytest.raises(ToolError, match="cannot be staged into"):
+    with pytest.raises(ToolError, match="cannot be identified: lm_eval None"):
         _ensure(tmp_path)

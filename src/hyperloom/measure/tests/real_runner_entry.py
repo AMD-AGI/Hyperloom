@@ -6,7 +6,7 @@
 Everything the runner does around a test is the shipped code: reading the sheet, checking it, preparing the tools, the
 rewritten YAML, the rebuilt framework, the inventory, the signed manifest and ``status.json``. Only the call that would
 boot an inference server is replaced by :class:`StubBackend`, which writes one report and records what the server would
-have been given, so the test can read it back.
+have been given, so the test can read it back, and lm-eval, which CI does not install, is reported at its pin.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import yaml
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.measure.runner import run as runner_flow
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
+from hyperloom.measure.tests.bundle_factory import lm_eval_at_its_pin
 
 PROBE = "import os, sys, yaml; print(os.path.exists(os.path.join(os.path.dirname(yaml.__file__), '_hl_marker.py')))"
 
@@ -53,6 +54,7 @@ class StubBackend:
 def main() -> int:
     root = Path(os.environ["HYPERLOOM_SANDBOX_ROOT"])
     runner_flow.LocalMeasurementBackend = StubBackend  # type: ignore[assignment,misc]
+    sys.path.insert(0, str(lm_eval_at_its_pin(root / "lm-eval-pin")))
     return runner_flow.run(root / "in", root / "out", scratch=root / "work" / "scratch", spec_wait_sec=60)
 
 
