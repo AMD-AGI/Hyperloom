@@ -26,11 +26,12 @@ import yaml
 
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.config import SuiteConfig
+from inference_suite.contracts.layout import RunDirError
 from inference_suite.contracts.report import FailedStep, RunStatus
 from inference_suite.recipe.resolve import Miss, resolve_base
 from inference_suite.recipe.sources import fetch_sources
 from inference_suite.recipe.user_file import parse_user_file
-from inference_suite.run import RunDirError, run_round
+from inference_suite.run import run_round
 from inference_suite.runtime.process import PidfileError
 from inference_suite.runtime.server import stop
 

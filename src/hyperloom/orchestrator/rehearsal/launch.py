@@ -37,7 +37,7 @@ from hyperloom.orchestrator.rehearsal.scenario import (
     ScenarioError,
 )
 from hyperloom_common.io import atomic_write_json
-from inference_suite import RoundResult, RunDirError
+from inference_suite import RoundResult
 from inference_suite.contracts import (
     ExitCodes,
     FailedStep,
@@ -283,15 +283,9 @@ def _write_artifacts(attempt: LaunchAttempt, slot: Path) -> None:
             path.write_text(str(content), encoding=_UTF8)
 
 
-#: The lifecycles whose server the round finds already running, so it boots none.
-_FOUND_SERVER = frozenset({LifecycleMode.REUSE, LifecycleMode.EXTERNAL})
 #: The lifecycles whose run_dir ``server.log`` is the stretch copied from a live log in ``pid_dir``.
 _COPIED_LOG = frozenset({LifecycleMode.BOOT, LifecycleMode.REUSE})
 _MEASURED_LOADS = frozenset({WorkloadKind.FIXED, WorkloadKind.SCRIPTABLE})
-
-
-def _not_cancelled() -> str:
-    return ""
 
 
 @dataclass(frozen=True)
@@ -330,7 +324,7 @@ def _serves(config: SuiteConfig) -> bool:
 
 
 def _boots(config: SuiteConfig) -> bool:
-    return _serves(config) and config.lifecycle.mode not in _FOUND_SERVER
+    return _serves(config) and not config.lifecycle.mode.finds_server
 
 
 def _watched_log(attempt: LaunchAttempt, config: SuiteConfig) -> str:
@@ -443,20 +437,6 @@ def _refuse_unscripted(config: SuiteConfig) -> None:
         raise ScenarioError(f"a scripted round plays no {' or '.join(unscripted)} yet")
 
 
-def _claim(layout: RunLayout) -> None:
-    if layout.root.exists() and any(layout.root.iterdir()):
-        raise RunDirError(f"the run_dir {layout.root} is not empty")
-    layout.root.mkdir(parents=True, exist_ok=True)
-
-
-def _status(stop: _Stop | None, load_measured: bool) -> RunStatus:
-    if stop is None:
-        return RunStatus.COMPLETED
-    if stop.step is FailedStep.CANCELLED:
-        return RunStatus.STOPPED
-    return RunStatus.PARTIAL if load_measured else RunStatus.FAILED
-
-
 def _load_section(attempt: LaunchAttempt, config: SuiteConfig, layout: RunLayout) -> dict[str, object]:
     """The report section the round's measured load fills, keyed by its report name."""
     if config.workload is WorkloadKind.FIXED:
@@ -495,8 +475,10 @@ class ScriptedRounds:
         """bool: Whether every attempt in the scenario has been played."""
         return len(self.calls) >= len(self.scenario.attempts)
 
-    def run_round(self, config: SuiteConfig, *, cancel: Callable[[], str] = _not_cancelled) -> RoundResult:
+    def run_round(self, config: SuiteConfig, *, cancel: Callable[[], str] | None = None) -> RoundResult:
         """Play the next attempt as the round ``config`` describes, into its run_dir.
+
+        ``cancel``, when given, is asked as the round runs; a non-empty answer stops it as it stops a real one.
 
         Raises:
             RunDirError: The run_dir already holds something.
@@ -514,7 +496,7 @@ class ScriptedRounds:
         attempt = self.scenario.attempts[len(self.calls)]
         course = _COURSES[attempt.outcome](attempt, config)
         layout = RunLayout(Path(config.paths.run_dir))
-        _claim(layout)
+        layout.claim()
         started = self.clock.wall()
         layout.config.write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding=_UTF8)
         played = self._play(started, course.end_sec, budget_left, cancel)
@@ -533,14 +515,16 @@ class ScriptedRounds:
             )
         return float(deadline_unix) - self.clock.wall()
 
-    def _play(self, started: float, seconds: float, budget_left: float | None, cancel: Callable[[], str]) -> _Played:
+    def _play(
+        self, started: float, seconds: float, budget_left: float | None, cancel: Callable[[], str] | None
+    ) -> _Played:
         """Charge the round to the clock until it ends, the session deadline passes or ``cancel`` answers."""
         target, cut = seconds, None
         if budget_left is not None and budget_left <= seconds:
             target, cut = max(0.0, budget_left), _Stop(FailedStep.DEADLINE_EXHAUSTED, "the session deadline passed")
         step = target / _OUTPUT_TICKS
         for tick in range(_OUTPUT_TICKS):
-            reason = cancel()
+            reason = cancel() if cancel is not None else ""
             if reason:
                 return _Played(started, tick * step, _Stop(FailedStep.CANCELLED, reason))
             self.clock.advance(step)
@@ -561,7 +545,7 @@ class ScriptedRounds:
             atomic_write_json(layout.launch, launch.to_document())
         workload = getattr(config, config.workload.value, None)
         return Report(
-            run_status=_status(stop, load_measured),
+            run_status=RunStatus.of(None if stop is None else stop.step, load_measured),
             workload_kind=config.workload,
             started_unix=round(played.started, 3),
             ended_unix=round(self.clock.wall(), 3),
@@ -601,4 +585,4 @@ def _server_facts(config: SuiteConfig, layout: RunLayout) -> ServerFacts | None:
     if mode in _COPIED_LOG:
         size = layout.server_log.stat().st_size if layout.server_log.exists() else 0
         log_range = LogRange(0, size)
-    return ServerFacts(server.host, server.port, server.served_model_name, mode in _FOUND_SERVER, log_range)
+    return ServerFacts(server.host, server.port, server.served_model_name, mode.finds_server, log_range)

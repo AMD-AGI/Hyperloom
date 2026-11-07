@@ -33,7 +33,7 @@ from hyperloom_common.io import atomic_write_json
 from inference_suite import framework_version, parser_check, staging
 from inference_suite.compose import Refusal, RoundFacts, compose
 from inference_suite.contracts.base_launch import DIGEST_PREFIX, BaseLaunch, EnvValue
-from inference_suite.contracts.config import ConfigError, LifecycleMode, SuiteConfig, WorkloadKind
+from inference_suite.contracts.config import ConfigError, SuiteConfig, WorkloadKind
 from inference_suite.contracts.launch import ClientInvocation, Launch, VersionCheck
 from inference_suite.contracts.layout import RunLayout
 from inference_suite.contracts.report import (
@@ -89,15 +89,9 @@ _GPU_PHASES: Mapping[Phase, GpuPhase] = {
     Phase.FINISHED: GpuPhase.FINISHED,
     Phase.EVAL: GpuPhase.EVAL,
 }
-#: The lifecycles whose server the round finds already running.
-_FOUND_SERVER = frozenset({LifecycleMode.REUSE, LifecycleMode.EXTERNAL})
 #: The ``config_envs`` key :class:`KvMetricsPoller` derives its ``/metrics`` URL from.
 _KV_BASE_URL_KEY = "BENCHMARK_BASE_URL"
 _UTF8 = "utf-8"
-
-
-class RunDirError(ValueError):
-    """The run_dir already holds something: one round writes one run_dir, from empty."""
 
 
 @dataclass(frozen=True)
@@ -125,12 +119,6 @@ def _file_sha256(path: Path) -> str | None:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except FileNotFoundError:
         return None
-
-
-def _claim(layout: RunLayout) -> None:
-    if layout.root.exists() and any(layout.root.iterdir()):
-        raise RunDirError(f"the run_dir {layout.root} is not empty")
-    layout.root.mkdir(parents=True, exist_ok=True)
 
 
 def _write_config(config: SuiteConfig, layout: RunLayout) -> str:
@@ -436,7 +424,7 @@ class _Round:
         finally:
             released = lifecycle.release()
             server = self.config.server
-            reused = self.config.lifecycle.mode in _FOUND_SERVER
+            reused = self.config.lifecycle.mode.finds_server
             self.server = ServerFacts(server.host, server.port, server.served_model_name, reused, released.log_range)
             if released.teardown is not None:
                 self.fail(released.teardown)
@@ -525,7 +513,7 @@ class _Round:
         workload = getattr(config, config.workload.value, None)
         stop = self.stop
         return Report(
-            run_status=_status(stop, self.load_measured),
+            run_status=RunStatus.of(None if stop is None else stop.step, self.load_measured),
             workload_kind=config.workload,
             started_unix=round(self.started_unix, 3),
             ended_unix=round(time.time(), 3),
@@ -552,14 +540,6 @@ def _profile_result(layout: RunLayout, capture: WindowCapture) -> ProfileResult:
         window_close_unix=capture.window_close_unix,
         running_requests_in_window=capture.running_requests_in_window,
     )
-
-
-def _status(stop: Stop | None, load_measured: bool) -> RunStatus:
-    if stop is None:
-        return RunStatus.COMPLETED
-    if stop.step is FailedStep.CANCELLED:
-        return RunStatus.STOPPED
-    return RunStatus.PARTIAL if load_measured else RunStatus.FAILED
 
 
 @dataclass(frozen=True)
@@ -617,7 +597,7 @@ def run_round(config: SuiteConfig, *, cancel: Cancel = _not_cancelled) -> RoundR
         RunDirError: The run_dir already holds something.
     """
     layout = RunLayout(Path(config.paths.run_dir))
-    _claim(layout)
+    layout.claim()
     config_sha256 = _write_config(config, layout)
     recorder = _recorder(config, layout)
     round_ = _Round(config, layout, recorder, cancel)
@@ -631,4 +611,4 @@ def run_round(config: SuiteConfig, *, cancel: Cancel = _not_cancelled) -> RoundR
     return RoundResult(report, layout)
 
 
-__all__ = ["EVAL_REQUEST_FILE", "LM_EVAL_DISTRIBUTION", "UNVERSIONED", "RoundResult", "RunDirError", "run_round"]
+__all__ = ["EVAL_REQUEST_FILE", "LM_EVAL_DISTRIBUTION", "UNVERSIONED", "RoundResult", "run_round"]
