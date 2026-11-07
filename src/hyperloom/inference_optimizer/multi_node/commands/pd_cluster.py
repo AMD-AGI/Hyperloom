@@ -440,11 +440,12 @@ def apply_tracelens_patch(args: argparse.Namespace) -> int:
                 row["host"] = ip
                 per_pod.append(row)
         else:
+            pod_errors = "; ".join(str(row["error"]) for row in rows or [] if isinstance(row, dict) and row.get("error"))
             failures.append(
                 {
                     "host": ip,
                     "sshPort": port,
-                    "error": parsed.get("error") or (completed.stderr or "")[-800:] or "unknown",
+                    "error": parsed.get("error") or pod_errors or (completed.stderr or "")[-800:] or "unknown",
                     "rc": completed.returncode,
                 }
             )

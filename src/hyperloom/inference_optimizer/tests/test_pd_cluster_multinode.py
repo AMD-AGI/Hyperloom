@@ -253,6 +253,34 @@ _PD_STATE = {
 }
 
 
+def test_tracelens_patch_failure_reports_the_pod_error(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import argparse
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.multi_node import cli as real_cli
+
+    pod_error = "cannot derive per-version patches subdir from version '0.5.23.dev1+g1'"
+    stdout = json.dumps({"status": "failed", "per_pod": [{"status": "failed", "error": pod_error}]})
+    fake = SimpleNamespace(
+        EXIT_CONFIG_ERROR=real_cli.EXIT_CONFIG_ERROR,
+        _SHAPE_GATE_DEPS=(),
+        _read_bundled_pod_python_script=lambda *_args: "print()",
+        _poll_timeout_from_args=lambda _args: 30,
+        _extract_pod_json=real_cli._extract_pod_json,
+        _infera_ssh_run_script=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["ssh"], 1, stdout=stdout, stderr="bash: warning: setlocale: LC_ALL: cannot change locale\n"
+        ),
+    )
+    monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
+    monkeypatch.setattr(pd_cmds, "_require_state", lambda: dict(_PD_STATE))
+
+    ns = argparse.Namespace(tracelens_root="/tl", sglang_version_pin=None, patch_set="roofline")
+    assert pd_cmds.apply_tracelens_patch(ns) == 1
+    out = capsys.readouterr().out
+    report = json.loads(out[out.index("{") :])
+    assert [failure["error"] for failure in report["failures"]] == [pod_error, pod_error]
+
+
 def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_GONE\n"})
     monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)

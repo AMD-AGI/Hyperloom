@@ -352,3 +352,32 @@ def test_pd_engine_profile_with_stack_follows_env(
     stops = [body for path, body in seen if path == "/stop_profile"]
     assert len(starts) == 2 and all(body["with_stack"] is expected for body in starts)
     assert stops == [{}, {}]
+
+
+def test_pd_role_traces_are_kept_when_the_trace_filesystem_clock_lags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    import os
+    import time
+
+    from hyperloom.inference_optimizer.multi_node._internal import pd_cluster
+    from hyperloom.orchestrator.actions.executors import profile
+
+    monkeypatch.setattr(pd_cluster, "record_profile_paths", lambda **_kwargs: None)
+    root = tmp_path / "torch_trace"
+    client_now = time.time() + 1260
+    round_start = profile._trace_fs_round_start(str(root), client_now)
+    for role in life.PD_PROFILE_ROLES:
+        (root / role).mkdir(parents=True)
+        (root / role / "2-TP-0.trace.json.gz").write_bytes(b"new")
+    stale = root / "decode" / "1-TP-0.trace.json.gz"
+    stale.write_bytes(b"stale-and-heavier")
+    os.utime(stale, (round_start - 600, round_start - 600))
+
+    result: dict = {}
+    profile._record_mn_round_traces(result, str(root), round_start)
+
+    assert result["role_traces"] == {
+        "prefill": str(root / "prefill" / "2-TP-0.trace.json.gz"),
+        "decode": str(root / "decode" / "2-TP-0.trace.json.gz"),
+    }

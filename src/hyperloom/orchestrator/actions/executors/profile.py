@@ -675,6 +675,25 @@ def _mn_round_trace_root() -> str:
     return str(scoped)
 
 
+def _trace_fs_round_start(round_trace_root: str, fallback_unix: float) -> float:
+    """Return the round start on the trace filesystem's clock, read from a marker file's mtime.
+
+    Trace mtimes are stamped by the filesystem that stores them, so this round's
+    traces are compared against a time from that same clock; ``fallback_unix``
+    is returned when the marker cannot be written.
+    """
+    marker = Path(round_trace_root) / ".round_start"
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{fallback_unix:.3f}\n", encoding="utf-8")
+        return marker.stat().st_mtime
+    except OSError as exc:
+        log.warning(
+            "profile_executor: cannot stamp round start under %s (%s); using the local clock", round_trace_root, exc
+        )
+        return fallback_unix
+
+
 # Restarts the multi-node server for this profiling round; returns the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
@@ -1225,6 +1244,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         round_trace_root = _mn_round_trace_root()
         log_mn_banner("profile_executor", log, trace_dir=round_trace_root)
         if round_trace_root:
+            task_started_unix = _trace_fs_round_start(round_trace_root, task_started_unix)
             refusal = await _restart_round_server(params, round_trace_root)
             if refusal is not None:
                 return refusal
