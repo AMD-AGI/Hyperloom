@@ -262,6 +262,8 @@ class _Rig:
         )
         self.staging = StagingReport(_SHA, dict(PINNED_TOOLS), ())
         monkeypatch.setattr(run.staging, "verify", lambda *_args: self.staging)
+        self.busy_gpus: str | None = None
+        monkeypatch.setattr(runtime_server, "unavailable_gpus", lambda gpus: self.busy_gpus)
 
     def _probe(self, python, framework, env):
         assert env["HF_TOKEN"] == _SECRET
@@ -573,6 +575,17 @@ def test_an_mlperf_harness_that_is_not_there_is_refused_before_the_server_starts
     assert result.report.failed_step is FailedStep.CONFIG_INVALID
     assert "run_agentic.sh" in result.report.failure_detail
     assert not result.layout.launch.exists() and not rig.calls.exists()
+
+
+def test_a_round_whose_gpus_another_process_holds_is_refused_before_its_server_starts(rig):
+    rig.busy_gpus = "GPU 3: held by pid 4242 (python3)"
+
+    result = run.run_round(rig.config("r1"))
+
+    report = result.report
+    assert report.run_status is RunStatus.FAILED and report.failed_step is FailedStep.GPUS_UNAVAILABLE
+    assert report.failure_detail == "GPU 3: held by pid 4242 (python3)"
+    assert result.layout.launch.exists() and not result.layout.server_log.exists() and not rig.calls.exists()
 
 
 def test_the_refusal_says_whether_the_host_holds_a_redacted_value(rig, monkeypatch):

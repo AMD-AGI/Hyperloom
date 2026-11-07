@@ -262,6 +262,7 @@ class TestFailedStepClasses:
         assert failed_step_error_class(FailedStep.SERVER_STALLED) == "detokenizer_stall"
         assert failed_step_error_class(FailedStep.CLIENT_OUTPUT_MISSING) == "benchmark_report_missing"
         assert failed_step_error_class(FailedStep.CONFIG_INVALID) == "yaml_build_error"
+        assert failed_step_error_class(FailedStep.GPUS_UNAVAILABLE) == "host_gpus_unavailable"
         for step in (FailedStep.DEADLINE_EXHAUSTED, FailedStep.CANCELLED):
             assert failed_step_error_class(step) in STOPPED_BY_THE_RUN
 
@@ -272,6 +273,7 @@ class TestFailedStepClasses:
 
         environment = {
             FailedStep.DISK_FULL,
+            FailedStep.GPUS_UNAVAILABLE,
             FailedStep.FRAMEWORK_VERSION_TOO_OLD,
             FailedStep.FRAMEWORK_VERSION_UNKNOWN,
             FailedStep.PORT_IN_USE,

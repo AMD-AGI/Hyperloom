@@ -79,6 +79,11 @@ def _fast_polls(monkeypatch):
     monkeypatch.setattr(server, "POLL_SEC", 0.05)
 
 
+@pytest.fixture(autouse=True)
+def _free_gpus(monkeypatch):
+    monkeypatch.setattr(server, "unavailable_gpus", lambda gpus: None)
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -271,6 +276,32 @@ def test_a_taken_port_is_refused_before_spawning(tmp_path):
         stopped = rig.lifecycle(rig.config("r1")).acquire()
     assert isinstance(stopped, Stop) and stopped.step is FailedStep.PORT_IN_USE
     assert not rig.worker_file.exists()
+
+
+@pytest.mark.parametrize("mode", [LifecycleMode.OWN, LifecycleMode.BOOT])
+def test_gpus_that_are_not_free_are_refused_before_spawning(tmp_path, monkeypatch, mode):
+    rig = _Rig(tmp_path)
+    asked: list[tuple[int, ...]] = []
+    monkeypatch.setattr(
+        server, "unavailable_gpus", lambda gpus: asked.append(gpus) or "GPU 0 (amd-smi card 0): held by pid 9 (vllm)"
+    )
+    config = rig.config("r1", mode)
+
+    stopped = rig.lifecycle(config).acquire()
+
+    assert isinstance(stopped, Stop) and stopped.step is FailedStep.GPUS_UNAVAILABLE
+    assert stopped.detail == "GPU 0 (amd-smi card 0): held by pid 9 (vllm)"
+    assert asked == [config.server.gpus]
+    assert not rig.worker_file.exists() and not (rig.pid_dir / "server.pid").exists()
+
+
+def test_reuse_and_external_rounds_start_no_server_so_check_no_gpus(booted, monkeypatch):
+    monkeypatch.setattr(server, "unavailable_gpus", lambda gpus: pytest.fail("checked the GPUs of a found server"))
+    external = replace(booted.config("r-external"), lifecycle=Lifecycle(LifecycleMode.EXTERNAL))
+    for config in (booted.config("r-reuse", LifecycleMode.REUSE), external):
+        lifecycle = booted.lifecycle(config)
+        assert isinstance(lifecycle.acquire(), Server)
+        lifecycle.release()
 
 
 def test_stop_reaps_the_workers_by_run_mark_once_the_leader_is_gone(booted):

@@ -999,15 +999,18 @@ executor refuses the retry unlaunched and the phase closes the run with
 Only the failures booked by the current leg count, so a session resumed past the
 line still gets the one baseline its new `--max-minutes` was granted for.
 
-An AgentX baseline the benchmark harness refuses to launch because
+A baseline refused before its server starts because its GPUs are not free fails
+with `error_class=host_gpus_unavailable`: inference_suite found one of its GPUs
+held by another process or missing from `amd-smi`
+(`failed_step=gpus_unavailable`), or, on an AgentX baseline, the harness's
 `gpu_selection.auto` found fewer idle GPUs than the round needs
-(`needed 8 idle GPU(s) but only found 7`) fails with
-`error_class=host_gpus_unavailable` and stops the run with
+(`needed 8 idle GPU(s) but only found 7`). It stops the run with
 `stop_reason='host_gpus_unavailable'` on the first occurrence, whatever
 `--enablement` says. No server started, so the ENABLEMENT lane has nothing to
 author against, and no patch frees a GPU another workload holds. The failure's
-`error_excerpt` in `last_action_failures` names each GPU the harness turned
-down and why (`rejected: ['GPU 0: has running compute process']`). Handle it
+`error_excerpt` in `last_action_failures` names each GPU turned down and why
+(`GPU 0: held by pid 4242 (python3)`, or
+`rejected: ['GPU 0: has running compute process']`). Handle it
 as IR-1 finding a foreign workload: ask the user before stopping the holder,
 then `--resume-from` the session.
 

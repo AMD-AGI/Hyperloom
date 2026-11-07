@@ -20,7 +20,7 @@ from inference_suite.contracts import FailedStep
 
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.failure_signature import SERVE_FLAG
-from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID, HOST_GPUS_UNAVAILABLE
 
 FAILURE_STAGE_WARMUP: str = "warmup"
 FAILURE_STAGE_DECISION: str = "decision"
@@ -71,6 +71,7 @@ FAILED_STEP_ERROR_CLASSES: Mapping[FailedStep, str] = {
     FailedStep.FLAG_UNKNOWN: ARGV_INVALID,
     FailedStep.GOLDEN_OWNED_TOUCHED: SERVE_FLAG,
     FailedStep.PORT_IN_USE: FailedStep.PORT_IN_USE.value,
+    FailedStep.GPUS_UNAVAILABLE: HOST_GPUS_UNAVAILABLE,
     FailedStep.SERVER_EXITED_BEFORE_READY: SERVER_INIT_DEAD,
     FailedStep.SERVER_SILENT_BEFORE_READY: FailedStep.SERVER_SILENT_BEFORE_READY.value,
     FailedStep.SERVER_BOOT_TIMEOUT: FailedStep.SERVER_BOOT_TIMEOUT.value,
@@ -97,6 +98,7 @@ _CANDIDATE_ERROR_CLASSES = frozenset(
 _ENVIRONMENT_ERROR_CLASSES = frozenset(
     {
         "mn_server_restart_failed",
+        HOST_GPUS_UNAVAILABLE,
         FailedStep.DISK_FULL.value,
         FailedStep.FRAMEWORK_VERSION_TOO_OLD.value,
         FailedStep.FRAMEWORK_VERSION_UNKNOWN.value,

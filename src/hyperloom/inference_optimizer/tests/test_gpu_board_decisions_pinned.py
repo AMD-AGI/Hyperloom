@@ -9,56 +9,40 @@ import pytest
 
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.roofline_ceiling import resolve_compute_peak_provenance
-from hyperloom.orchestrator.actions.executors._server_lifecycle import MAGPIE_BUILTIN_SCRIPTS
 
 _BOARDS = [
-    # product, runner, targeted build validated, bypass peak convention
-    ("mi300x", "mi300x", True, "achievable"),
-    ("mi308x", "mi300x", True, "vendor"),
-    ("mi325x", "mi300x", True, "achievable"),
-    ("mi350x", "mi355x", True, "vendor"),
-    ("mi355x", "mi355x", True, "vendor"),
-    ("r9700", "gfx12", False, "vendor"),
+    # product, targeted build validated, bypass peak convention
+    ("mi300x", True, "achievable"),
+    ("mi308x", True, "vendor"),
+    ("mi325x", True, "achievable"),
+    ("mi350x", True, "vendor"),
+    ("mi355x", True, "vendor"),
+    ("r9700", False, "vendor"),
 ]
 
 
-@pytest.mark.parametrize(("product", "runner", "build_validated", "convention"), _BOARDS)
-def test_board_decisions(product, runner, build_validated, convention):
-    assert gpu_types.gpu_runner_type(product) == runner
+@pytest.mark.parametrize(("product", "build_validated", "convention"), _BOARDS)
+def test_board_decisions(product, build_validated, convention):
     assert gpu_types.targeted_build_validated(product) is build_validated
     assert resolve_compute_peak_provenance(product, "bf16")["compute_peak_convention"] == convention
 
 
-def test_radeon8060s_has_its_own_runner_and_no_framework_restriction():
-    assert gpu_types.gpu_runner_type("radeon8060s") == "radeon8060s"
+def test_radeon8060s_has_no_framework_restriction():
     assert gpu_types.targeted_build_validated("radeon8060s") is True
-    assert gpu_types._runner_framework_error("radeon8060s", "sglang") is None
-
-
-def test_server_reuse_scripts():
-    assert MAGPIE_BUILTIN_SCRIPTS == {
-        "vllm_mi300x.sh",
-        "vllm_mi355x.sh",
-        "vllm_gfx12.sh",
-        "sglang_mi300x.sh",
-        "sglang_mi355x.sh",
-        "atom_mi300x.sh",
-        "atom_mi355x.sh",
-    }
+    assert gpu_types._board_framework_error("radeon8060s", "sglang") is None
 
 
 @pytest.mark.parametrize("product", ["mi300x", "mi308x", "mi325x", "mi350x", "mi355x"])
 @pytest.mark.parametrize("framework", ["vllm", "sglang", "atom", "xdit"])
 def test_instinct_boards_leave_the_framework_unconstrained(product, framework):
-    assert gpu_types._runner_framework_error(product, framework) is None
+    assert gpu_types._board_framework_error(product, framework) is None
 
 
 @pytest.mark.parametrize("framework", ["sglang", "atom", "xdit"])
-def test_the_gfx12_runner_is_validated_for_vllm_only(framework):
-    assert gpu_types._runner_framework_error("r9700", "vllm") is None
-    assert gpu_types._runner_framework_error("r9700", framework) == (
-        "Magpie runner 'gfx12' is currently validated only for vllm; "
-        f"framework {framework!r} has no validated gfx12 runner"
+def test_r9700_is_validated_for_vllm_only(framework):
+    assert gpu_types._board_framework_error("R9700", "vllm") is None
+    assert gpu_types._board_framework_error("r9700", framework) == (
+        f"r9700 is currently validated only for vllm; framework {framework!r} has not been validated on it"
     )
 
 

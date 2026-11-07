@@ -91,6 +91,20 @@ class TestEntrypointAndCheckout:
         we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert bench["benchmark_script"] == str(scripts / "custom_mi355x.sh")
 
+    def test_a_family_board_resolves_its_own_name_not_the_family_one(self, tmp_path, monkeypatch):
+        """The suffix is the board itself: mi325x is not folded into mi300x."""
+        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "custom_mi300x.sh").write_text("#!/bin/sh\n")
+        (scripts / "custom_mi325x.sh").write_text("#!/bin/sh\n")
+        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
+
+        bench, envs = self._bench(), {}
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi325x", explicit_benchmark_script=False)
+        assert bench["benchmark_script"] == str(scripts / "custom_mi325x.sh")
+
     def test_an_ambiguous_directory_picks_nothing(self, tmp_path, monkeypatch):
         """Two unnamed scripts is a question, not a default; let it surface."""
         from hyperloom.orchestrator.actions.executors import _workload_envs as we

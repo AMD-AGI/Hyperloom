@@ -28,6 +28,7 @@ from hyperloom_common.amd_smi import (
     AmdSmiError,
     gfx_clock_limits,
     gpu_rows,
+    gpus_in_rocm_order,
     metric_value,
     read_amd_smi_json,
     single_clock_limit,
@@ -146,20 +147,18 @@ def _first_mask(source: Mapping[str, str], names: tuple[str, ...]) -> list[int] 
 def visible_gpu_indices(env: Mapping[str, str] | None = None) -> set[int] | None:
     """The amd-smi indices of the cards the session's visible-device masks expose; ``None`` when no mask is set.
 
-    ROCm numbers GPUs in KFD node order and amd-smi in PCI order, and the two differ on MI300X/MI355X boards, so a mask
-    number is never an amd-smi index. ``ROCR_VISIBLE_DEVICES`` picks from the KFD-ordered cards and
-    ``HIP_VISIBLE_DEVICES`` (or ``CUDA_VISIBLE_DEVICES``) then indexes into what it left; each resulting card is matched
-    to amd-smi through its KFD node id.
+    A mask number is a ROCm number, never an amd-smi index (see :func:`gpus_in_rocm_order`). ``ROCR_VISIBLE_DEVICES``
+    picks from the ROCm-ordered cards and ``HIP_VISIBLE_DEVICES`` (or ``CUDA_VISIBLE_DEVICES``) then indexes into what
+    it left.
 
     Raises:
-        GpuPowerSettingsError: a mask is set but empty, not numeric, repeats a card or names one that does not exist,
-            or amd-smi lists a card without its KFD node.
-        AmdSmiError: amd-smi could not be read.
+        GpuPowerSettingsError: a mask is set but empty, not numeric, repeats a card or names one that does not exist.
+        AmdSmiError: amd-smi could not be read, or lists a card without its KFD node.
     """
     rocr, hip = _masks(env)
     if rocr is None and hip is None:
         return None
-    return _masked_cards(_read_gpu_kfd_nodes(), rocr, hip)
+    return _masked_cards(gpus_in_rocm_order(), rocr, hip)
 
 
 def gpus_outside_session(env: Mapping[str, str] | None = None) -> list[int]:
@@ -171,8 +170,8 @@ def gpus_outside_session(env: Mapping[str, str] | None = None) -> list[int]:
     rocr, hip = _masks(env)
     if rocr is None and hip is None:
         return []
-    nodes = _read_gpu_kfd_nodes()
-    return sorted(set(nodes) - _masked_cards(nodes, rocr, hip))
+    by_node = gpus_in_rocm_order()
+    return sorted(set(by_node) - _masked_cards(by_node, rocr, hip))
 
 
 def _masks(env: Mapping[str, str] | None) -> tuple[list[int] | None, list[int] | None]:
@@ -180,8 +179,7 @@ def _masks(env: Mapping[str, str] | None) -> tuple[list[int] | None, list[int] |
     return _first_mask(source, _ROCR_MASKS), _first_mask(source, _HIP_MASKS)
 
 
-def _masked_cards(nodes: Mapping[int, int], rocr: list[int] | None, hip: list[int] | None) -> set[int]:
-    by_node = [gpu for gpu, _ in sorted(nodes.items(), key=lambda item: item[1])]
+def _masked_cards(by_node: list[int], rocr: list[int] | None, hip: list[int] | None) -> set[int]:
     visible = list(range(len(by_node))) if rocr is None else rocr
     if hip is not None:
         if any(index >= len(visible) for index in hip):
@@ -246,20 +244,6 @@ def reading_matches(got: Any, want: float) -> bool:
         and not isinstance(got, bool)
         and abs(float(got) - float(want)) <= _READING_TOLERANCE
     )
-
-
-def _read_gpu_kfd_nodes() -> dict[int, int]:
-    """``{amd-smi index: KFD node id}`` for every card ``amd-smi list`` reports.
-
-    Raises:
-        GpuPowerSettingsError: ``amd-smi`` reported a card without its KFD node.
-        AmdSmiError: ``amd-smi`` failed.
-    """
-    rows = gpu_rows(read_amd_smi_json("list"))
-    nodes = {row["gpu"]: row["node_id"] for row in rows if isinstance(row.get("node_id"), int)}
-    if len(nodes) != len(rows):
-        raise GpuPowerSettingsError("amd-smi list reports a card without its KFD node, so its ROCm number is unknown")
-    return nodes
 
 
 def read_gpu_power_settings() -> dict[int, dict[str, Any]]:
