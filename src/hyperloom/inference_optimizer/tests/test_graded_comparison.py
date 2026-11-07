@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from unittest.mock import AsyncMock
 
@@ -22,6 +23,8 @@ from hyperloom.common.perf_metric import (
     graded_axes_of,
     perf_snapshot_from_mapping,
 )
+from inference_suite.contracts import LaunchDelta, RunLayout
+from inference_suite.tests.test_compose import _launch as _compose_launch
 from hyperloom.orchestrator.state.shared_state import (
     resolve_graded_comparison,
     resolve_grading_anchor_tput,
@@ -619,6 +622,12 @@ async def test_accepted_baseline_without_axes_clears_stale_perf(baseline_writer,
     state.baseline_config_path = str(old_config)
     state.optimization_stack = [{"action": "integrate_patch"}] if stacked else []
     state.current_best = dict(_ANCHOR)
+    for name, launch in (
+        ("old-measurement", _compose_launch()),
+        ("new-measurement", _compose_launch(user=LaunchDelta(args_add=("--tp", "4")))),
+    ):
+        RunLayout(tmp_path / name).root.mkdir()
+        RunLayout(tmp_path / name).launch.write_text(json.dumps(launch.to_document()), encoding="utf-8")
     writer._stamp_current_best_measurement({"workspace": str(tmp_path / "old-measurement")})
     prior_best = deepcopy(state.current_best)
     result = {

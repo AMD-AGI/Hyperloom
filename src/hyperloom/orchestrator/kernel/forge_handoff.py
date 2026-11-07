@@ -120,7 +120,7 @@ def build_serving_context_md(
         "",
         f"- **Framework:** `{_display(context.get('framework') or getattr(state, 'framework', ''))}`",
         f"- **Framework version:** `{_display(getattr(state, 'framework_version', ''))}`",
-        f"- **Launch recipe:** `{_display(_absolute_path(spec.get('launch_recipe') or getattr(state, 'baseline_config_path', '')))}`",
+        f"- **Launch record:** `{_display(_absolute_path(spec.get('launch_json')))}`",
         f"- **Overlay Python path:** `{_display(_absolute_path(spec.get('overlay_pythonpath')))}`",
         # Reported with the commit each one currently sits at, which the caller
         # sealed just before this was written. That object id is the base every
