@@ -167,9 +167,10 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded measurements incomparable. Epoch 2 is the move of every round onto
-# inference_suite. The MLPerf client is a different AgentX workload, but it is opt-in: the backend name is what resume
-# compares for it, so a bump does not invalidate unchanged sessions of the other client.
-MEASUREMENT_EPOCH = 2
+# inference_suite; epoch 3 judges AgentX evidence by the report mapper's ``valid_measurement`` constraint field. The
+# MLPerf client is a different AgentX workload, but it is opt-in: the backend name is what resume compares for it, so
+# a bump does not invalidate unchanged sessions of the other client.
+MEASUREMENT_EPOCH = 3
 
 
 def _requested_framework(args: Any) -> str:
