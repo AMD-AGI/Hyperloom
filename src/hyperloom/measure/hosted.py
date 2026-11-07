@@ -86,7 +86,7 @@ from hyperloom.measure.sandboxes import (
 )
 from hyperloom.measure.signing import SigningError, verify
 from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall, TestOutcome
-from hyperloom.measure.spec import MeasurementSpec, blob_input_path, fingerprint, spec_sha256
+from hyperloom.measure.spec import SPEC_SCHEMA, MeasurementSpec, blob_input_path, fingerprint, spec_sha256
 from inference_suite.contracts.layout import REPORT_FILE
 from hyperloom.sandbox.socket import (
     Sandbox,
@@ -113,6 +113,8 @@ __all__ = [
 STOPPED_RETURNCODE = -917
 STOPPED_REASON = "orchestrator_cancelled"
 RUNNER_LOST = "runner_lost"
+#: An unfinished attempt journalled with a sheet of an older version, which a restart does not resume.
+PRE_SWITCH = "pre_switch_sheet"
 #: The platform made a test's sandbox and it failed before it ran (``SandboxCreateFailed``); the reason carries the
 #: platform's message.
 SANDBOX_CREATE_FAILED = "sandbox_create_failed"
@@ -528,6 +530,9 @@ class HostedMeasurementBackend:
                 return _refusal(
                     call, HOSTED_SPEC_REJECTED_RC, "resume_failed", f"the journalled sheet is unusable: {exc}"
                 )
+            if spec.schema != SPEC_SCHEMA:
+                self._drop_pre_switch(previous, spec.schema)
+                return None
             started = float(previous.extra.get("submitted_unix", self._clock()))
             attempt = _Attempt(call, previous.request_id, previous.attempt, spec, raw, runner, started, stop, timeline)
             if not runner.public_key_pem:
@@ -860,6 +865,14 @@ class HostedMeasurementBackend:
             raise ResultRejected(RejectReason.RECORD_MISMATCH, "the acceptance kept no sheet fingerprint or sandbox")
         sheet = self.journal.load_spec(record.request_id, record.attempt)
         return BundleExpectation(key, record.request_id, fingerprint, spec_sha256(sheet), record.sandbox_id)
+
+    def _drop_pre_switch(self, previous: Record, schema: str) -> None:
+        """End an attempt journalled with a sheet of an older version: its sandbox measures what the session no longer
+        asks for, so the test starts a fresh attempt instead."""
+        self._pool.discard(str(previous.sandbox_id))
+        self._mark_finished(
+            previous, {"verdict": PRE_SWITCH, "reason": f"the journalled sheet is {schema}, not {SPEC_SCHEMA}"}
+        )
 
     # -- journal and events -------------------------------------------------------------------------------------
 
