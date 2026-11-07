@@ -82,6 +82,7 @@ def test_layers_apply_in_the_fixed_order():
         ("--port", ("30000",), "guard", ()),
         ("--served-model-name", ("glm",), "guard", ()),
         ("--watchdog-timeout", ("600",), "runner", ("candidate",)),
+        ("--enable-metrics", (), "runner", ()),
     ]
     assert launch.removed == (Removal("--disable-radix-cache", LayerSource.CANDIDATE),)
     assert launch.argv[:3] == ("python3", "-m", "sglang.launch_server")
@@ -161,6 +162,8 @@ def test_without_a_golden_layer_the_draft_is_open():
         (LaunchDelta(args_add=("--port", "1")), "--port"),
         (LaunchDelta(args_add=("--model-path", "/other")), "--model-path"),
         (LaunchDelta(env_set={GPU_MASK_ENV: "0"}), GPU_MASK_ENV),
+        (LaunchDelta(args_add=("--enable-metrics",)), "--enable-metrics"),
+        (LaunchDelta(args_remove=("--enable-metrics",)), "--enable-metrics"),
     ],
 )
 def test_a_candidate_setting_a_runner_owned_key_is_refused(delta, named):
@@ -174,6 +177,36 @@ def test_a_base_naming_a_guard_flag_is_refused():
     refusal = _refusal(base=_base(args=("--model-path", "/m")))
 
     assert (refusal.step, refusal.source) == (FailedStep.CONFIG_INVALID, LayerSource.BASE)
+
+
+def test_a_base_setting_the_metrics_flag_is_refused():
+    refusal = _refusal(base=_base(args=("--tp", "8", "--enable-metrics")))
+
+    assert (refusal.step, refusal.source) == (FailedStep.CONFIG_INVALID, LayerSource.BASE)
+    assert "--enable-metrics" in refusal.detail
+
+
+def _kv_launch(framework: str, kv: bool) -> Launch:
+    base = _base()
+    if framework != "sglang":
+        base = _base(framework=framework, entrypoint=("vllm", "serve"), args=("--tensor-parallel-size", "8"))
+    config = _config()
+    server = replace(config.server, base=replace(config.server.base, digest=base.digest()))
+    launch = compose(replace(config, server=server, telemetry=replace(config.telemetry, kv=kv)), base, _FACTS)
+    assert isinstance(launch, Launch), launch
+    return launch
+
+
+def test_kv_telemetry_has_the_runner_turn_on_the_sglang_metrics_endpoint():
+    on, off = _kv_launch("sglang", kv=True), _kv_launch("sglang", kv=False)
+
+    assert ("--enable-metrics", (), "runner", ()) in _sources(on)
+    assert "--enable-metrics" in on.argv
+    assert "--enable-metrics" not in off.argv
+
+
+def test_vllm_serves_its_metrics_without_a_flag():
+    assert _kv_launch("vllm", kv=True).argv == _kv_launch("vllm", kv=False).argv
 
 
 def test_a_base_with_another_digest_is_refused():

@@ -70,7 +70,7 @@ _ACCEPTED_LAUNCH = _launch(
 #: Its flags GEAK reproduces: no topology (GEAK owns it), no structured value, no round layer.
 _ACCEPTED_FLAGS = (
     "--disable-radix-cache --context-length 65536 --accepted-flag 1 --speculative-algorithm EAGLE"
-    " --speculative-num-steps 3 --watchdog-timeout 600"
+    " --speculative-num-steps 3 --watchdog-timeout 600 --enable-metrics"
 )
 
 

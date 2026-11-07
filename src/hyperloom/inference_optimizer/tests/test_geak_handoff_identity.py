@@ -236,7 +236,7 @@ def test_env_spec_reproduces_the_measured_launch_without_the_rounds_own_layers(t
     assert (spec["launch_json"], spec["launch_digest"]) == (str(launch_json), launch.digest())
     assert shlex.split(spec["config"]["server_launch_flags"]) == [
         "--tp", "8", "--cuda-graph-max-bs", "64", "--speculative-algorithm", "EAGLE", "--speculative-num-steps", "3",
-        "--watchdog-timeout", "600",
+        "--watchdog-timeout", "600", "--enable-metrics",
     ]  # fmt: skip
     assert spec["config"]["extra_envs"] == {
         "ATOM_FORCE_ATTN_TRITON": "1",
