@@ -25,6 +25,8 @@ DEFAULT_PRE_READY_SILENCE_SEC = 900
 #: The only client environment an AgentX round passes through, and the fast mode it must pin off.
 AGENTX_CLIENT_ENV_PREFIX = "AIPERF_"
 AGENTX_FAST_MODE_ENV = "AIPERF_EXPERIMENTAL_FAST"
+#: The profiling window InferenceX's agentx scenario replays when the caller names none.
+AGENTX_DEFAULT_DURATION_SEC = 3600
 
 _BASE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 #: A scriptable parameter that reads as an acceptance threshold (``XDIT_QUALITY_LPIPS_MAX``); D2 keeps those with
@@ -347,21 +349,24 @@ _FIXED_KEYS = field_names(FixedWorkload)
 
 @dataclass(frozen=True)
 class AgentxWorkload:
-    """An AgentX trace replay. ``client_env`` is the client's ``AIPERF_*`` environment, fast mode pinned off."""
+    """An AgentX trace replay for ``duration_sec`` of profiling, as InferenceX runs it; no request count bounds it.
+
+    ``client_env`` is the client's ``AIPERF_*`` environment, fast mode pinned off.
+    """
 
     concurrency: int
     dataset: str
-    num_prompts: int
     warmup_requests_per_lane: int
     seed: int
     warmup_seed: int
     failed_request_threshold: float
     client_env: Mapping[str, str]
+    duration_sec: int = AGENTX_DEFAULT_DURATION_SEC
 
     def __post_init__(self) -> None:
         _FIELDS.integer(self.concurrency, "the AgentX concurrency", minimum=1)
         _FIELDS.text(self.dataset, "the AgentX dataset")
-        _FIELDS.integer(self.num_prompts, "the AgentX num_prompts", minimum=1)
+        _FIELDS.integer(self.duration_sec, "the AgentX duration_sec", minimum=1)
         for name in ("warmup_requests_per_lane", "seed", "warmup_seed"):
             _FIELDS.integer(getattr(self, name), f"the AgentX {name}", minimum=0)
         _fraction(self.failed_request_threshold, "the AgentX failed_request_threshold")
@@ -791,6 +796,7 @@ class SuiteConfig:
 
 __all__ = [
     "AGENTX_CLIENT_ENV_PREFIX",
+    "AGENTX_DEFAULT_DURATION_SEC",
     "AGENTX_FAST_MODE_ENV",
     "CONFIG_SCHEMA",
     "DEFAULT_MAX_TOKENS_CAP",

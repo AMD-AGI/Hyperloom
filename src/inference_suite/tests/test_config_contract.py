@@ -12,6 +12,7 @@ from dataclasses import replace
 import pytest
 
 from inference_suite.contracts import (
+    AGENTX_DEFAULT_DURATION_SEC,
     CONFIG_SCHEMA,
     DEFAULT_PRE_READY_SILENCE_SEC,
     AgentxWorkload,
@@ -53,12 +54,12 @@ _FIXED = FixedWorkload(
 _AGENTX = AgentxWorkload(
     concurrency=8,
     dataset="agentx-v1",
-    num_prompts=40,
     warmup_requests_per_lane=2,
     seed=42,
     warmup_seed=43,
     failed_request_threshold=0.1,
     client_env={"AIPERF_EXPERIMENTAL_FAST": "0"},
+    duration_sec=600,
 )
 
 _MLPERF = MlperfWorkload(
@@ -319,6 +320,23 @@ def test_pid_dir_is_set_exactly_for_boot_and_reuse(mode, pid_dir):
 def test_agentx_client_env_is_aiperf_only_with_fast_mode_off(client_env, match):
     with pytest.raises(ConfigError, match=match):
         replace(_AGENTX, client_env=client_env)
+
+
+def test_agentx_replays_an_hour_unless_told_otherwise():
+    fields = {key: value for key, value in _AGENTX.to_document().items() if key != "duration_sec"}
+    assert AgentxWorkload(**fields).duration_sec == AGENTX_DEFAULT_DURATION_SEC == 3600
+    assert AgentxWorkload.from_document(_AGENTX.to_document()) == _AGENTX
+
+
+@pytest.mark.parametrize("duration", [0, -1, 600.0, True, "600", None])
+def test_agentx_duration_is_a_positive_whole_second_count(duration):
+    with pytest.raises(ConfigError, match="duration_sec"):
+        replace(_AGENTX, duration_sec=duration)
+
+
+def test_agentx_workload_carries_no_request_count():
+    with pytest.raises(ConfigError, match="num_prompts"):
+        AgentxWorkload.from_document({**_AGENTX.to_document(), "num_prompts": 40})
 
 
 @pytest.mark.parametrize("name", ["XDIT_QUALITY_LPIPS_MAX", "XDIT_QUALITY_SSIM_MIN", "quality_threshold"])

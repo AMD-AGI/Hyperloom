@@ -45,7 +45,6 @@ import yaml
 from hyperloom_common.env import is_truthy
 from hyperloom.common.agentx_workload import (
     CANON_WARMUP_PER_LANE,
-    agentx_profiling_requests,
     is_agentx_client_key,
     is_agentx_client_script,
 )
@@ -74,6 +73,7 @@ from inference_suite import EXIT_REFUSED, RoundResult, manifest_sha256, run_roun
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv, remove_server_args
 from inference_suite.contracts import (
     AGENTX_CLIENT_ENV_PREFIX,
+    AGENTX_DEFAULT_DURATION_SEC,
     AGENTX_FAST_MODE_ENV,
     DEFAULT_MAX_TOKENS_CAP,
     AgentxWorkload,
@@ -477,7 +477,7 @@ _DURATION_ENV = "DURATION"
 _EP_SIZE_ENV = "EP_SIZE"
 _WARMUP_PER_LANE_ENV = "AIPERF_WARMUP_REQUESTS_PER_LANE"
 #: The AgentX point's environment the config carries as fields, beside a fixed point's and the client's ``AIPERF_*``.
-_AGENTX_CONSUMED_ENV = _CONSUMED_ENV | {_MODEL_PATH_ENV, _EP_SIZE_ENV, _TRACE_ENV}
+_AGENTX_CONSUMED_ENV = _CONSUMED_ENV | {_MODEL_PATH_ENV, _EP_SIZE_ENV, _TRACE_ENV, _DURATION_ENV}
 #: The client knobs of Magpie's replay and the MLPerf client, which the agentx-harness replay does not read.
 _MAGPIE_CLIENT_PREFIXES = ("AGENTX_", "AGENTIC_")
 
@@ -503,11 +503,9 @@ def _check_agentx_block(block: Mapping[str, Any], point: _Point) -> None:
 
 
 def _check_agentx_envs(point: _Point, base: BaseLaunch) -> None:
-    refused = sorted(name for name in point.envs if name == _DURATION_ENV or name.startswith(_MAGPIE_CLIENT_PREFIXES))
+    refused = sorted(name for name in point.envs if name.startswith(_MAGPIE_CLIENT_PREFIXES))
     if refused:
-        raise ConfigError(
-            f"the AgentX point sets {', '.join(refused)}; the replay is a request count with its own knobs"
-        )
+        raise ConfigError(f"the AgentX point sets {', '.join(refused)}; the agentx-harness replay has its own knobs")
     if point.flag(ENV_RUN_EVAL, default=False):
         raise ConfigError(f"the AgentX point sets {ENV_RUN_EVAL}; its accuracy is a round of its own")
     if point.text(_EP_SIZE_ENV) is not None and point.integer(_EP_SIZE_ENV) != base.topology.ep:
@@ -538,11 +536,10 @@ def _agentx_trace(point: _Point, base: BaseLaunch) -> str:
 def _agentx_workload(point: _Point, base: BaseLaunch) -> AgentxWorkload:
     """The replay: the base's client environment under the point's, every knob the harness takes explicit."""
     client_env = {AGENTX_FAST_MODE_ENV: "0", **_aiperf_env(base.client.env), **_aiperf_env(point.envs)}
-    concurrency = point.integer(ENV_CONC)
     return AgentxWorkload(
-        concurrency=concurrency,
+        concurrency=point.integer(ENV_CONC),
         dataset=_agentx_trace(point, base),
-        num_prompts=point.integer(ENV_NUM_PROMPTS, agentx_profiling_requests(concurrency)),
+        duration_sec=point.integer(_DURATION_ENV, AGENTX_DEFAULT_DURATION_SEC),
         warmup_requests_per_lane=_lane_warmup(client_env),
         seed=MEASURED_SEED,
         warmup_seed=MEASURED_SEED,
