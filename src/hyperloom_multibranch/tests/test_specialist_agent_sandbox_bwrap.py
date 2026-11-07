@@ -115,6 +115,23 @@ print(json.dumps(seen))
 """
 
 
+#: Run inside: each named read (``ok:<text>`` or the errno's name) at start, and again once the trigger file exists,
+#: which the test makes when the app has replaced and made its logins.
+LOGIN_WATCH = r"""
+import errno, json, os, sys, time
+def outcome(path):
+    try:
+        return "ok:" + open(path).read()
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno, str(exc.errno))
+paths, trigger = json.loads(sys.argv[1]), sys.argv[2]
+print("before " + json.dumps({name: outcome(path) for name, path in paths.items()}), flush=True)
+while not os.path.exists(trigger):
+    time.sleep(0.05)
+print("after " + json.dumps({name: outcome(path) for name, path in paths.items()}), flush=True)
+"""
+
+
 #: Arbor's end of a turn (its ``arbor/execute/turns.py``, F9): SIGTERM every process of its own uid, itself aside,
 #: whose environment carries ``ARBOR_TURN=<tag>``, then wait for them; print the pids found, whether each also carries
 #: the variable its command was given, and those still running.
@@ -400,7 +417,7 @@ async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_o
     assert seen == {
         "app_login": "ENOENT",
         "state": "ENOENT",
-        "hf_token": "EACCES",
+        "hf_token": "ENOENT",
         "hf_model": "ok:weights",
         "worktree": "ok:source",
         "worktree_link": "ok:header",
@@ -720,3 +737,44 @@ async def test_the_image_s_venv_takes_neither_a_user_install_nor_one_into_itself
     assert user.returncode != 0, user.output
     assert "Can not perform a '--user' install. User site-packages are not visible in this virtualenv." in user.output
     assert into.returncode != 0 and "Read-only file system" in into.output, into.output
+
+
+@pytest.mark.parametrize("logged_in", [True, False], ids=["replaced", "made"])
+async def test_a_login_the_app_replaces_or_makes_while_a_command_runs_never_shows_in_it(
+    area: Path, probe: BwrapProbe, logged_in: bool
+) -> None:
+    """The app's Hugging Face home, which a sandbox reads for its hub cache, holds its token beside the cache, or no
+    login yet. While a command runs in the sandbox, the app writes the token by rename (as a login does) and
+    ``stored_tokens`` too: the command sees neither, before or after, and still reads the cache."""
+    hf = area / "hf"
+    token = hf / "token"
+    (hf / "hub").mkdir(parents=True)
+    (hf / "hub" / "model.txt").write_text("weights")
+    if logged_in:
+        token.write_text("SECRET-HF")
+    sandbox = _sandbox(area, probe, HF_HOME=str(hf))
+    agent = area / "agent"
+    trigger, watch = agent / "go", agent / "watch.py"
+    watch.write_text(LOGIN_WATCH)
+    paths = {"token": str(token), "stored": str(hf / "stored_tokens"), "model": str(hf / "hub" / "model.txt")}
+    try:
+        command = await sandbox.start(f"{PYTHON} -I -S {watch} {shlex.quote(json.dumps(paths))} {trigger}", agent, {})
+        await _until(lambda: "before " in read_tail(command.log))
+        for path, text in ((token, "NEW-SECRET-HF"), (hf / "stored_tokens", "NEW-SECRET-STORED")):
+            fresh = path.with_name(path.name + ".lock")
+            fresh.write_text(text)
+            os.replace(fresh, path)
+        trigger.write_text("")
+        await _until(lambda: command.returncode is not None)
+    finally:
+        await sandbox.stop()
+
+    assert command.returncode == 0, read_tail(command.log)
+    seen = {
+        line.split(" ", 1)[0]: json.loads(line.split(" ", 1)[1])
+        for line in read_tail(command.log).splitlines()
+        if line.startswith(("before ", "after "))
+    }
+    expected = {"token": "ENOENT", "stored": "ENOENT", "model": "ok:weights"}
+    assert seen == {"before": expected, "after": expected}
+    assert token.read_text() == "NEW-SECRET-HF"
