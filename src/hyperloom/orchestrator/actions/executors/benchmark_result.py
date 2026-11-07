@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom_common.coerce import first_float, first_int, to_float, to_int
 from hyperloom_common.jsonio import read_json
 
@@ -680,9 +681,7 @@ def extract_benchmark_measurement(
     report = report or {}
     from hyperloom.inference_optimizer.agentx.report import agentx_measurement
 
-    from .magpie_agentx import native_config
-
-    if report.get("scenario") == "agentx" or (config_path is not None and native_config(config_path)):
+    if report.get("scenario") == "agentx" or (config_path is not None and read_benchmark_point(config_path).agentx):
         measurement = agentx_measurement(report)
         measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
         return measurement
