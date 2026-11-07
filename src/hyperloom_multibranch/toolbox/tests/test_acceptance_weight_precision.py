@@ -23,7 +23,8 @@ SAME_PRECISION = "the weight precision of the session cannot change"
 
 
 def _recipe(server_args: str = "", **launch: object) -> Recipe:
-    return Recipe(base_image_digest=IMAGE, launch=LaunchConfig(server_args=server_args, **launch))  # type: ignore[arg-type]
+    launch_config = LaunchConfig(server_args=server_args, **launch)  # type: ignore[arg-type]
+    return Recipe(base_image_digest=IMAGE, launch=launch_config)
 
 
 def _repo(root_args: str = "", parent_args: str | None = None) -> FakeRepo:
@@ -86,6 +87,8 @@ SETTINGS = [
     ("--modelopt-quant", "fp8", "nvfp4", "--modelopt-quant"),
     ("--torchao-config", "int4wo-128", "int8wo", "--torchao-config"),
     ("--quantize-and-serve", "true", "false", "--quantize-and-serve"),
+    ("--hf-config-path", "/cfg/a", "/cfg/b", "--hf-config-path"),
+    ("--decrypted-config-file", "/cfg/a.json", "/cfg/b.json", "--decrypted-config-file"),
 ]
 
 
@@ -167,6 +170,15 @@ OTHER_FORMS = [
     ("--quantize_and_serve", "--quantize-and-serve: (not set) -> (on)"),
     ("--quantize", "--quantize-and-serve: (not set) -> (on)"),
     ("--quantize-and-serve.x 1", "--quantize-and-serve: (not set) -> .x 1"),
+    # And for the files the model's config is read from.
+    ("--hf-config-path=/cfg/b", "--hf-config-path: (not set) -> /cfg/b"),
+    ("--hf_config_path /cfg/b", "--hf-config-path: (not set) -> /cfg/b"),
+    ("--hf-config /cfg/b", "--hf-config-path: (not set) -> /cfg/b"),
+    ("--hf-config-path.x /cfg/b", "--hf-config-path: (not set) -> .x /cfg/b"),
+    ("--decrypted-config-file=/cfg/b.json", "--decrypted-config-file: (not set) -> /cfg/b.json"),
+    ("--decrypted_config_file /cfg/b.json", "--decrypted-config-file: (not set) -> /cfg/b.json"),
+    ("--decrypted-config /cfg/b.json", "--decrypted-config-file: (not set) -> /cfg/b.json"),
+    ("--decrypted-config-file.x /cfg/b.json", "--decrypted-config-file: (not set) -> .x /cfg/b.json"),
 ]
 
 
@@ -306,7 +318,11 @@ def _changes(before: str, after: str) -> list[str]:
         ('--quantization-config {"b":1,"a":2}', '--quantization-config {"a":2,"b":1}', []),
         ("--max-num-seqs 8 --kv-cache-dtype fp8", "--kv-cache-dtype auto", []),
         ("", "--quantization", ["--quantization: (not set) -> (on)"]),
-        ("--dtype bfloat16", "--dtype bfloat16 --dtype float16", ["--dtype: bfloat16 -> bfloat16 | float16"]),
+        (
+            "--dtype bfloat16",
+            "--dtype bfloat16 --dtype float16",
+            ["--dtype: bfloat16 -> bfloat16 | float16 (float16 in effect)"],
+        ),
         ("--model /a", "--model-path /b", ["the checkpoint: /a -> /b"]),
         ("--quantization-config a.json", "--quantization-config b.json", ["--quantization-config: a.json -> b.json"]),
         ("--quantization-config [1,2]", "--quantization-config [2,1]", ["--quantization-config: [1,2] -> [2,1]"]),
@@ -340,8 +356,8 @@ def test_a_removal_is_read_in_every_form_of_its_flag() -> None:
 
 # --- the override flags: what they set under a weight-precision key -------------------------------------------------
 
-HF = "--hf-overrides (dtype, quantization_config, torch_dtype)"
-JSON_ARGS = "--json-model-override-args (dtype, quantization_config, torch_dtype)"
+HF = "--hf-overrides (compression_config, dtype, quantization_config, torch_dtype)"
+JSON_ARGS = "--json-model-override-args (compression_config, dtype, quantization_config, torch_dtype)"
 
 #: A candidate launch that sets a weight-precision key through an override flag, on a root that sets none, and the
 #: change it is refused for.
@@ -351,6 +367,27 @@ OVERRIDES_ADDED = [
     (
         '--hf-overrides \'{"quantization_config": {"quant_method": "fp8"}}\'',
         f'{HF}: (not set) -> quantization_config={{"quant_method":"fp8"}}',
+    ),
+    # compressed-tensors' key, which vLLM and SGLang read when quantization_config is absent.
+    (
+        '--hf-overrides \'{"compression_config": {"format": "float-quantized"}}\'',
+        f'{HF}: (not set) -> compression_config={{"format":"float-quantized"}}',
+    ),
+    (
+        '--json-model-override-args \'{"compression_config": {"format": "float-quantized"}}\'',
+        f'{JSON_ARGS}: (not set) -> compression_config={{"format":"float-quantized"}}',
+    ),
+    (
+        '--hf-overrides \'{"text_config": {"compression_config": {"format": "float-quantized"}}}\'',
+        f'{HF}: (not set) -> text_config.compression_config={{"format":"float-quantized"}}',
+    ),
+    (
+        "--hf-overrides.compression_config.format float-quantized",
+        f'{HF}: (not set) -> compression_config={{"format":"float-quantized"}}',
+    ),
+    (
+        "--hf-overrides.text_config.compression_config.format float-quantized",
+        f'{HF}: (not set) -> text_config.compression_config={{"format":"float-quantized"}}',
     ),
     # At any depth of the value, through objects and arrays.
     (
@@ -444,7 +481,7 @@ async def test_an_override_flag_removed_from_the_resolved_launch_is_refused(tmp_
         # A JSON key that only contains a key's name is not that key; only a value that is not JSON counts by its text.
         ("", '--hf-overrides \'{"kv_cache_dtype": "fp8"}\''),
         ("", "--hf-overrides max_position_embeddings=65536"),
-        # vLLM reads a dotted value that is not JSON as its text, so these set a string under a key that is none of them.
+        # vLLM reads a dotted value that is not JSON as its text: these set a string under a key that is none of them.
         ("", "--hf-overrides.text_config torch_dtype=float16"),
         ("", "--hf-overrides.max_position_embeddings dtype"),
         (
@@ -487,7 +524,7 @@ DROPPED = 'torch_dtype="bfloat16" -> (no key) | torch_dtype="bfloat16"'
         (ROOT_DTYPE, "--hf-overrides.max_position_embeddings 4096", f"{HF}: {DROPPED}"),
         # It merges the dotted occurrences of each spelling apart, and gives them in turn.
         ("--hf-overrides.torch_dtype bfloat16", "--hf-over.max_position_embeddings 4096", f"{HF}: {DROPPED}"),
-        # Which occurrence a framework keeps is not read: vLLM would keep the dotted one here.
+        # An occurrence that sets no key is a value even where vLLM keeps another one: here the dotted one.
         (
             "--hf-overrides.torch_dtype bfloat16",
             "--hf_overrides '{\"max_position_embeddings\": 4096}'",
@@ -536,6 +573,176 @@ def test_dotted_occurrences_merge_as_vllm_merges_them() -> None:
     assert _changes(nested, "--hf-overrides.text_config.torch_dtype bfloat16 --hf-overrides.text_config.x 1") == []
 
 
+async def test_a_later_dotted_key_replaces_an_earlier_one_as_vllm_merges_them(tmp_path: Path) -> None:
+    """The candidate's launch gives the root's ``bfloat16`` and then ``float16`` under one key, under two spellings
+    that vLLM reads as one flag: it merges them into one value of ``--hf-overrides`` holding the later, float16."""
+    repo = _repo("--hf-overrides.torch_dtype bfloat16")
+    change = _delta("--hf_overrides.torch_dtype float16")
+    await _refused_naming(tmp_path, repo, change, f'{HF}: torch_dtype="bfloat16" -> torch_dtype="float16"')
+
+
+async def test_a_later_dotted_key_that_gives_the_root_value_is_accepted(tmp_path: Path) -> None:
+    """The launch composed is ``--hf-overrides.torch_dtype float16 --hf_overrides.torch_dtype bfloat16``: vLLM serves
+    the later, the root's bfloat16."""
+    repo = _repo("--hf-overrides.torch_dtype bfloat16")
+    change = _delta("--hf-overrides.torch_dtype float16 --hf_overrides.torch_dtype bfloat16")
+    assert await _refusal(tmp_path, repo, change) is None
+
+
+# --- two values of a setting: the one in effect ----------------------------------------------------------------------
+
+#: A root whose dtype override vLLM serves after an occurrence that sets no key.
+KEYED_LAST = '--hf_overrides \'{"max_position_embeddings": 4096}\' --hf-overrides \'{"torch_dtype": "bfloat16"}\''
+#: A root that gives two dtype overrides, bfloat16 last.
+TWO_DTYPES = '--hf-overrides \'{"torch_dtype": "float16"}\' --hf_overrides \'{"torch_dtype": "bfloat16"}\''
+#: The dtype override those roots serve.
+BF16_IN_EFFECT = '(torch_dtype="bfloat16" in effect)'
+
+
+#: Each candidate below also changes something besides the order: an explore whose recipe differs from its parent's
+#: only in the order of its flags is refused before this check, as one that changes nothing.
+@pytest.mark.parametrize(
+    ("root_args", "change", "named"),
+    [
+        # The candidate drops the occurrence that sets no key and gives one again after the dtype override: its launch
+        # gives the root's values and serves no dtype override.
+        (
+            KEYED_LAST,
+            _delta("--hf_overrides '{\"max_position_embeddings\": 8192}'", remove_args=("--hf_overrides",)),
+            f'{HF}: (no key) | torch_dtype="bfloat16" {BF16_IN_EFFECT} -> '
+            '(no key) | torch_dtype="bfloat16" ((no key) in effect)',
+        ),
+        # It drops the float16 override and gives it again last (with another key): float16 is served.
+        (
+            TWO_DTYPES,
+            _delta(
+                '--hf-overrides \'{"torch_dtype": "float16", "max_position_embeddings": 4096}\'',
+                remove_args=("--hf-overrides",),
+            ),
+            f'{HF}: torch_dtype="bfloat16" | torch_dtype="float16" {BF16_IN_EFFECT} -> '
+            'torch_dtype="bfloat16" | torch_dtype="float16" (torch_dtype="float16" in effect)',
+        ),
+        # argparse keeps a plain flag's last value too.
+        (
+            "--dtype float16 --dty bfloat16",
+            _delta("--dtype float16 --max-num-seqs 64", remove_args=("--dtype",)),
+            "--dtype: bfloat16 | float16 (bfloat16 in effect) -> bfloat16 | float16 (float16 in effect)",
+        ),
+        # The root's launch, composed, keeps the last of its two; the candidate gives the other after it.
+        (
+            "--dtype float16 --dtype bfloat16",
+            _delta("--dty float16"),
+            "--dtype: bfloat16 -> bfloat16 | float16 (float16 in effect)",
+        ),
+    ],
+)
+async def test_a_candidate_that_changes_which_value_takes_effect_is_refused(
+    tmp_path: Path, root_args: str, change: RecipeDelta, named: str
+) -> None:
+    await _refused_naming(tmp_path, _repo(root_args), change, named)
+
+
+@pytest.mark.parametrize(
+    ("root_args", "change"),
+    [
+        # The occurrence that sets no key is given again where it was: the dtype override still comes last.
+        (
+            '--hf-overrides \'{"max_position_embeddings": 4096}\' --hf_overrides \'{"torch_dtype": "bfloat16"}\'',
+            _delta("--hf-overrides '{\"max_position_embeddings\": 8192}'"),
+        ),
+        # vLLM gives a dotted occurrence after the others wherever the launch gives it: float16 both times.
+        (
+            '--hf-overrides.torch_dtype float16 --hf_overrides \'{"torch_dtype": "bfloat16"}\'',
+            _delta("--hf-overrides.torch_dtype float16 --max-num-seqs 64", remove_args=("--hf-overrides.torch_dtype",)),
+        ),
+        # The root serves its dotted float16; the candidate gives float16 as a plain occurrence after bfloat16.
+        (
+            '--hf-overrides \'{"torch_dtype": "bfloat16"}\' --hf-overrides.torch_dtype float16',
+            _delta('--hf_overrides \'{"torch_dtype": "float16"}\'', remove_args=("--hf-overrides.torch_dtype",)),
+        ),
+        (KEYED_LAST, _delta("--max-num-seqs 64")),
+        ("--dtype float16 --dty bfloat16", _delta("--max-num-seqs 64")),
+    ],
+)
+async def test_a_candidate_that_keeps_the_value_in_effect_is_accepted(
+    tmp_path: Path, root_args: str, change: RecipeDelta
+) -> None:
+    assert await _refusal(tmp_path, _repo(root_args), change) is None
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        (
+            "--dtype float16 --dtype bfloat16",
+            "--dtype float16 --dtype bfloat16 --dty float16",
+            ["--dtype: bfloat16 | float16 (bfloat16 in effect) -> bfloat16 | float16 (float16 in effect)"],
+        ),
+        (
+            "--dtype float16 --dtype bfloat16",
+            "--dtype bfloat16 --dtype float16",
+            ["--dtype: bfloat16 | float16 (bfloat16 in effect) -> bfloat16 | float16 (float16 in effect)"],
+        ),
+        ("--dtype float16 --dtype bfloat16", "--dty float16 --dtype bfloat16", []),
+        # A value given twice is one value: its place is not compared.
+        ("--dtype bfloat16 --dty bfloat16", "--dty bfloat16 --dtype bfloat16", []),
+        # A value that begins with a dot is a value, not a dotted key.
+        (
+            "--model ./a --model ./b",
+            "--model ./b --model ./a",
+            ["the checkpoint: ./a | ./b (./b in effect) -> ./a | ./b (./a in effect)"],
+        ),
+        # vLLM merges a spelling's dotted occurrences into one value, the later key replacing the earlier, and gives
+        # it after the others.
+        (
+            "--quantization-config.a 1 --quantization-config.b 2",
+            "--quantization-config.b 2 --quantization-config.a 1",
+            [],
+        ),
+        (
+            "--quantization-config.linear fp8 --quantization-config.linear mxfp8",
+            "--quantization-config.linear mxfp8 --quantization-config.linear fp8",
+            [
+                '--quantization-config: .linear fp8 | .linear mxfp8 ({"linear":"mxfp8"} in effect) -> '
+                '.linear fp8 | .linear mxfp8 ({"linear":"fp8"} in effect)'
+            ],
+        ),
+        (
+            '--quantization-config.linear fp8 --quantization-config {"linear":"mxfp8"}',
+            '--quantization-config {"linear":"mxfp8"} --quantization-config.linear fp8',
+            [],
+        ),
+        (
+            "--hf-overrides.torch_dtype bfloat16",
+            "--hf-overrides.torch_dtype float16 --hf_overrides.torch_dtype bfloat16",
+            [],
+        ),
+        # The dotted float16 is served, though given before; then the plain bfloat16, given last.
+        (
+            '--hf-overrides {"torch_dtype":"bfloat16"} --hf-overrides.torch_dtype float16',
+            '--hf_overrides {"torch_dtype":"float16"} --hf-overrides {"torch_dtype":"bfloat16"}',
+            [
+                f'{HF}: torch_dtype="bfloat16" | torch_dtype="float16" (torch_dtype="float16" in effect) -> '
+                'torch_dtype="bfloat16" | torch_dtype="float16" (torch_dtype="bfloat16" in effect)'
+            ],
+        ),
+    ],
+)
+def test_two_values_of_a_setting_compare_by_the_one_in_effect(before: str, after: str, expected: list[str]) -> None:
+    assert _changes(before, after) == expected
+
+
+def test_a_removal_from_the_resolved_launch_comes_before_the_launch_own_flags() -> None:
+    """The launch's own flags come after the resolved launch's, whatever it removes from that: float16 is served, then
+    bfloat16."""
+    before = LaunchConfig(server_args="--dty bfloat16 --dtyp float16", remove_args=("--dtype",))
+    after = LaunchConfig(server_args="--dtyp float16 --dty bfloat16", remove_args=("--dtype",))
+    assert weight_precision_changes(before, after) == [
+        "--dtype: <removed> | bfloat16 | float16 (float16 in effect) -> "
+        "<removed> | bfloat16 | float16 (bfloat16 in effect)"
+    ]
+
+
 # --- options of the frameworks that a spelling only begins, or that only begin one ---------------------------------
 
 
@@ -549,7 +756,6 @@ def test_dotted_occurrences_merge_as_vllm_merges_them() -> None:
         "--code-revision abc",
         "--tokenizer-revision abc",
         "--hf-token x",
-        "--hf-config-path /c",
         # SGLang's server
         "--model-checksum x",
         "--model-config-parser x",
