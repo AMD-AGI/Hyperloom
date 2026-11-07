@@ -110,7 +110,11 @@ def test_a_first_leg_makes_every_directory_2775_and_every_file_664_whatever_the_
         "reports/optimization_journal.json": 0o664,
         "reports/bringup/trees.json": 0o664,
     }
-    assert {_mode(workspace / name) for name in ("runtime", "runtime/recipe_kb", "logs")} == {0o2775}
+    assert {name: _mode(workspace / name) for name in ("runtime", "runtime/recipe_kb", "logs")} == {
+        "runtime": 0o2755,  # the installer's: the group enters it, only its owner changes what is in it
+        "runtime/recipe_kb": 0o2775,
+        "logs": 0o2775,
+    }
 
 
 def test_the_database_files_sqlite_makes_beside_a_664_database_are_664_too(tmp_path):
@@ -138,10 +142,22 @@ def test_the_database_files_sqlite_makes_beside_a_664_database_are_664_too(tmp_p
         ({"operator_server_args": "--tp 8 --max-total-tokens 120000 --tokenizer-path /models/m"}, 0o664),
         ({"operator_extra_env": {"HF_TOKEN": "hf_live_value_123"}}, 0o600),
         ({"operator_extra_env": {"NOTES": "Authorization: Bearer abcdefghijklmnop"}}, 0o600),
+        ({"operator_extra_env": {"HF_ENDPOINT": "https://alice:s3cret-tok3n@hf-mirror"}}, 0o600),
+        ({"operator_extra_env": {"HF_ENDPOINT": "https://hf-mirror.example/models"}}, 0o664),
         ({"operator_server_args": "--tp 8 --api-key not-a-pattern"}, 0o600),
         ({"operator_server_args": "--tp 8 --admin-api-key=not-a-pattern"}, 0o600),
     ],
-    ids=["no-pins", "env-knobs", "server-args-knobs", "env-token", "env-bearer", "flag-api-key", "flag-admin-api-key"],
+    ids=[
+        "no-pins",
+        "env-knobs",
+        "server-args-knobs",
+        "env-token",
+        "env-bearer",
+        "env-url-userinfo",
+        "env-url-without-userinfo",
+        "flag-api-key",
+        "flag-admin-api-key",
+    ],
 )
 def test_state_json_is_664_unless_the_operators_pins_hold_a_credential(tmp_path, pins, mode):
     workspace = _setgid_workspace(tmp_path / "claw")
@@ -229,7 +245,45 @@ def test_a_session_made_below_a_parent_with_group_write_is_2775_all_the_way_up(t
     code = "from hyperloom.inference_optimizer.session import paths\nprint(paths.make_session_dir('DeepSeek-V4.1-Flash'))\n"
     session = Path(_as_this_account(code, umask=0o077, workspace=workspace).splitlines()[-1])
     assert (session.parent.parent, session.parent, session) == (workspace, workspace / session.parent.name, session)
-    assert {_mode(session.parent), _mode(session), _mode(workspace / "runtime"), _mode(workspace / "logs")} == {0o2775}
+    assert {_mode(session.parent), _mode(session), _mode(workspace / "logs")} == {0o2775}
+    assert _mode(workspace / "runtime") == 0o2755
+
+
+def test_the_install_owned_runtime_and_the_workspace_root_are_not_group_writable_but_the_session_subtree_is(tmp_path):
+    """Two ``runtime/`` directories: the workspace's (the installer writes the env files a run sources there) and the
+    session's (the lock, the ledger and the breakdown spool): only the second one is shared for writing."""
+    workspace = tmp_path / "claw"
+    code = textwrap.dedent(
+        """
+        from hyperloom.inference_optimizer.session import paths
+        from hyperloom.inference_optimizer.session.lock import SessionLock
+        session = paths.make_session_dir("DeepSeek-V4.1-Flash")
+        with SessionLock(session):
+            pass
+        print(session)
+        """
+    )
+    session = Path(_as_this_account(code, umask=0o077, workspace=workspace).splitlines()[-1])
+    modes = {
+        "workspace root": _mode(workspace),
+        "workspace runtime/": _mode(workspace / "runtime"),
+        "workspace runtime/recipe_kb": _mode(workspace / "runtime" / "recipe_kb"),
+        "workspace logs": _mode(workspace / "logs"),
+        "model directory": _mode(session.parent),
+        "session": _mode(session),
+        "session runtime/": _mode(session / "runtime"),
+    }
+    assert modes == {
+        "workspace root": 0o2755,
+        "workspace runtime/": 0o2755,
+        "workspace runtime/recipe_kb": 0o2775,
+        "workspace logs": 0o2775,
+        "model directory": 0o2775,
+        "session": 0o2775,
+        "session runtime/": 0o2775,
+    }
+    for name in ("workspace root", "workspace runtime/"):
+        assert not modes[name] & (stat.S_IWGRP | stat.S_IWOTH), name
 
 
 @pytest.mark.parametrize("name", ["manifest.json", "state.json"])
@@ -301,6 +355,89 @@ def test_the_next_account_reads_state_and_manifest_unless_they_hold_a_credential
             else:
                 assert all(isinstance(size, int) and size > 0 for size in seen.values()), seen
                 assert (_mode(session / "manifest.json"), _mode(session / "state.json")) == (0o664, 0o664)
+
+
+#: A first leg, its coordinator, and a refused launch the bus stores with the operator's argv in it (what
+#: ``dispatcher.reap_dispatched_task`` appends as a ``delegated_result``); then every file of the session that the group
+#: or others can read, and the ones that hold the key, while the database is still open (its ``-wal`` and ``-shm`` too).
+_BUS_LEG = textwrap.dedent(
+    """
+    import asyncio, json, os, stat
+    from pathlib import Path
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+    from hyperloom.inference_optimizer.session import paths
+    from hyperloom.inference_optimizer.session.manifest import write_manifest
+    from hyperloom.orchestrator.bus.message_bus import Message
+    from hyperloom.orchestrator.loop.coordinator import Coordinator, default_role_registry
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    argv = ["optimize", "--model", "/models/m", "--framework", "sglang"]
+    server_args, env = {server_args!r}, {env!r}
+    if server_args:
+        argv += ["--server-args", server_args]
+    session = paths.make_session_dir("m")
+    write_manifest(session, args=_build_parser().parse_args(argv))
+    state = SharedState()
+    state.operator_server_args, state.operator_extra_env = server_args, env
+    state.save(session)
+    os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session)
+    coordinator = Coordinator(session, backends={{name: object() for name in default_role_registry()}})
+    announcement = {{
+        "task_id": "t1",
+        "kind": "benchmark_run",
+        "state": "failed",
+        "result": {{"server_argv": server_args.split(), "server_env": env, "enablement_launch_log": "x"}},
+    }}
+    asyncio.run(coordinator.bus.append_and_seq(Message.new("coordinator", "*", "delegated_result", announcement)))
+    shared, holders, database = [], [], {{}}
+    for path in sorted(session.rglob("*")):
+        if not path.is_file():
+            continue
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if path.name.startswith("coordinator.db"):
+            database[path.name] = mode
+        if mode & (stat.S_IRGRP | stat.S_IROTH):
+            shared.append(path.relative_to(session).as_posix())
+            if b"SECRET-KEY-VALUE" in path.read_bytes() or b"hf_live_value_123" in path.read_bytes():
+                holders.append(path.relative_to(session).as_posix())
+    print(json.dumps({{"database": database, "readable": shared, "holders": holders}}))
+    """
+)
+
+
+@pytest.mark.parametrize(
+    ("server_args", "env", "database_mode"),
+    [
+        ("--tp 8 --api-key SECRET-KEY-VALUE", {}, 0o600),
+        ("--tp 8", {"HF_TOKEN": "hf_live_value_123"}, 0o600),
+        ("--tp 8", {"HF_ENDPOINT": "https://alice:hf_live_value_123@hf-mirror"}, 0o600),
+        ("--tp 8 --max-total-tokens 120000", {"SGLANG_USE_AITER": "1"}, 0o664),
+    ],
+    ids=["server-args-api-key", "env-token", "env-url-userinfo", "no-credential"],
+)
+def test_the_operators_credential_reaches_no_file_the_group_can_read_and_the_database_is_600_then(
+    tmp_path, server_args, env, database_mode
+):
+    workspace = _setgid_workspace(tmp_path / "claw")
+    code = _BUS_LEG.format(server_args=server_args, env=env)
+    seen = json.loads(_as_this_account(code, umask=0o077, workspace=workspace).splitlines()[-1])
+    assert seen["database"] == dict.fromkeys(
+        ("coordinator.db", "coordinator.db-wal", "coordinator.db-shm"), database_mode
+    )
+    assert seen["holders"] == []
+    assert ("storage/coordinator.db" in seen["readable"]) == (database_mode == 0o664)
+
+
+def test_a_database_a_session_made_before_it_held_a_credential_is_narrowed_to_600_by_its_owner(tmp_path):
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+
+    database = tmp_path / "storage" / "coordinator.db"
+    SqliteConnection(database).raw.close()
+    assert _mode(database) == 0o664
+    SqliteConnection(database, file_mode=0o600).raw.close()
+    assert _mode(database) == 0o600
+    SqliteConnection(database).raw.close()
+    assert _mode(database) == 0o600, "a wider mode asked later never widens it"
 
 
 def test_the_lock_a_foreign_account_left_unwritable_is_named_with_its_owner_and_mode(tmp_path, monkeypatch):

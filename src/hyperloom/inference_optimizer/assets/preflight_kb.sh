@@ -16,9 +16,10 @@
 # records recipe-KB enablement from --degraded-kb directly.
 #
 # Writes a marker JSON to $USER_DATA_PATH/runtime/recipe_kb/.kb_preflight.json
-# capturing reachability + skip + failure_reason per branch. The directory may be shared with other accounts of one
-# group (setgid, 2775): the marker is written 664 to a new file and renamed over the old one, so a marker another
-# account left there never blocks this one.
+# capturing reachability + skip + failure_reason per branch. recipe_kb/ may be shared with other accounts of one group
+# (setgid, 2775): the marker is written 664 to a new file and renamed over the old one, so a marker another account
+# left there never blocks this one. runtime/ above it holds what the installer writes and later steps source, so it is
+# 2755: the group can enter it, only its owner can change what is in it.
 
 set -u
 umask 002
@@ -46,7 +47,8 @@ fi
 : "${SKIP_PR_PROBE:=}"
 
 marker_dir="${USER_DATA_PATH}/runtime/recipe_kb"
-mkdir -p -m 2775 -- "${USER_DATA_PATH}/runtime" "${marker_dir}"
+mkdir -p -m 2755 -- "${USER_DATA_PATH}/runtime"
+mkdir -p -m 2775 -- "${marker_dir}"
 marker="${marker_dir}/.kb_preflight.json"
 marker_tmp=""
 trap '[ -z "${marker_tmp}" ] || rm -f -- "${marker_tmp}"' EXIT

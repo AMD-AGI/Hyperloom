@@ -30,6 +30,7 @@ from hyperloom.common.outside_facts import (
     ENV_RUN_EVAL,
     ENV_TP,
 )
+from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 import json
@@ -432,14 +433,18 @@ def _is_env_field(key: object) -> bool:
 
 
 def holds_credentials(value: object, *, in_env: bool = False) -> bool:
-    """Whether a JSON-shaped ``value`` carries a credential: a string :func:`redact_secret_values` would change or with
-    a ``--flag`` named like one, or a value under a credential-shaped name in an environment mapping (a field named
+    """Whether a JSON-shaped ``value`` carries a credential: a string :func:`redact_secret_values` would change, with a
+    URL that has userinfo (``https://user:token@host``) or with a ``--flag`` named like one, or a value under a credential-shaped name in an environment mapping (a field named
     ``env``, ``extra_envs``, ...: any other key is a field of the document, and ``authored`` is not a secret)."""
     if isinstance(value, str):
         flags = (
             token.lstrip("-").partition("=")[0].replace("-", "_") for token in value.split() if token.startswith("-")
         )
-        return redact_secret_values(value) != value or any(_is_credential_env_name(flag) for flag in flags)
+        return (
+            redact_secret_values(value) != value
+            or CREDENTIALED_URL_RE.search(value) is not None
+            or any(_is_credential_env_name(flag) for flag in flags)
+        )
     if isinstance(value, Mapping):
         return any(
             (in_env and _is_credential_env_name(key) and bool(item))

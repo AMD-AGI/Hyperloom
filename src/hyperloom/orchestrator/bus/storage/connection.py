@@ -10,12 +10,13 @@ import contextlib
 import logging
 import os
 import sqlite3
+import stat
 import threading
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import make_shared_dirs, open_shared
+from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared
 
 from .schema import ensure_schema
 
@@ -88,7 +89,26 @@ def _apply_pragmas(conn: sqlite3.Connection, journal_mode: str) -> None:
         cur.close()
 
 
-def open_connection(db_path: str | Path, *, journal_mode: str | None = None) -> sqlite3.Connection:
+def _make_database_file(db_path: Path, file_mode: int) -> None:
+    """Create the database ``file_mode`` before SQLite does, and narrow one that is wider (a credential has come into the
+    session since): SQLite gives its ``-wal``/``-shm``/``-journal`` files the mode the database has."""
+    descriptor = open_shared(db_path, os.O_RDWR, file_mode)
+    try:
+        current = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        if current & ~file_mode:
+            try:
+                os.fchmod(descriptor, current & file_mode)
+            except PermissionError:
+                log.warning(
+                    "%s is %04o, wider than %04o, and not this account's: narrow it", db_path, current, file_mode
+                )
+    finally:
+        os.close(descriptor)
+
+
+def open_connection(
+    db_path: str | Path, *, journal_mode: str | None = None, file_mode: int = SHARED_FILE_MODE
+) -> sqlite3.Connection:
     """Open one synchronous connection with the durability pragmas + schema applied.
 
     Creates the parent directory if needed, opens with autocommit
@@ -99,6 +119,9 @@ def open_connection(db_path: str | Path, *, journal_mode: str | None = None) -> 
         db_path (str | Path): Path to the SQLite database file.
         journal_mode (str | None): Journal mode to enforce; resolved from the
             environment when omitted.
+        file_mode (int): The most the database file's permission bits may be:
+            ``664`` so the next account of the group can open it, ``600`` when
+            the session holds a credential the bus then stores.
 
     Returns:
         sqlite3.Connection: A ready-to-use connection.
@@ -110,9 +133,7 @@ def open_connection(db_path: str | Path, *, journal_mode: str | None = None) -> 
     mode = resolve_journal_mode(journal_mode)
     db_path = Path(db_path)
     make_shared_dirs(db_path.parent)
-    # SQLite gives the database 0644 under the umask, and its -wal/-shm/-journal files the mode the database has: made
-    # 664 here, any account of the group can open them, as the next leg of a run may be another.
-    os.close(open_shared(db_path, os.O_RDWR))
+    _make_database_file(db_path, file_mode)
     conn = sqlite3.connect(
         db_path,
         timeout=30.0,
@@ -132,7 +153,7 @@ def open_connection(db_path: str | Path, *, journal_mode: str | None = None) -> 
 class SqliteConnection:
     """Async-friendly wrapper over a single SQLite connection."""
 
-    def __init__(self, db_path: str | Path, *, journal_mode: str | None = None):
+    def __init__(self, db_path: str | Path, *, journal_mode: str | None = None, file_mode: int = SHARED_FILE_MODE):
         """Open the wrapped connection and create its locks.
 
         Args:
@@ -140,9 +161,10 @@ class SqliteConnection:
                 opened via :func:`open_connection`.
             journal_mode (str | None): Journal mode to enforce; resolved from
                 the environment when omitted.
+            file_mode (int): See :func:`open_connection`.
         """
         self.db_path = Path(db_path)
-        self._conn = open_connection(self.db_path, journal_mode=journal_mode)
+        self._conn = open_connection(self.db_path, journal_mode=journal_mode, file_mode=file_mode)
         self._async_lock = asyncio.Lock()
         self._sync_lock = threading.RLock()
 

@@ -466,6 +466,8 @@ def test_launch_provided_names_cover_the_rank_topology_and_the_schedulers():
         {"env": {"HF_TOKEN": ""}},
         {"authored_framework_levers": ["a"], "baseline_last_failure_signature": "x", "reauthor_attempts": 3},
         {"HF_TOKEN": "a field of the document, not an environment"},
+        {"operator_extra_env": {"HF_ENDPOINT": "https://hf-mirror.example/models?revision=main"}},
+        {"note": "write to ops@example.com, or see user@host without a scheme"},
     ],
     ids=[
         "empty",
@@ -476,6 +478,8 @@ def test_launch_provided_names_cover_the_rank_topology_and_the_schedulers():
         "credential-name-without-a-value",
         "field-names-that-contain-auth-or-signature",
         "credential-name-outside-an-env-mapping",
+        "url-without-userinfo",
+        "an-at-sign-outside-a-url",
     ],
 )
 def test_holds_credentials_is_false_for_knobs_and_numbers(document):
@@ -494,8 +498,26 @@ def test_holds_credentials_is_false_for_knobs_and_numbers(document):
         {"note": "Authorization: Bearer abcdefghijklmnop"},
         ["--header", "sk-abcdefghijkl"],
         ("ghp_abcdef",),
+        {"operator_extra_env": {"HF_ENDPOINT": "https://alice:s3cret-tok3n@hf-mirror"}},
+        {"operator_extra_env": {"HF_ENDPOINT": "https://tok3n@hf-mirror/models"}},
+        {"operator_server_args": "--tp 8 --model-url http://user:pw@host:8000/m"},
+        {"dependencies": {"remote": "git+https://user:pw@example.com/org/repo.git"}},
     ],
-    ids=["name", "nested-name", "pins", "flag", "flag-equals", "flag-token", "bearer", "list-of-strings", "tuple"],
+    ids=[
+        "name",
+        "nested-name",
+        "pins",
+        "flag",
+        "flag-equals",
+        "flag-token",
+        "bearer",
+        "list-of-strings",
+        "tuple",
+        "url-user-and-password",
+        "url-token-as-user",
+        "url-in-server-args",
+        "vcs-url",
+    ],
 )
-def test_holds_credentials_is_true_for_a_credential_by_name_flag_or_value(document):
+def test_holds_credentials_is_true_for_a_credential_by_name_flag_value_or_url_userinfo(document):
     assert common_env_safety.holds_credentials(document) is True

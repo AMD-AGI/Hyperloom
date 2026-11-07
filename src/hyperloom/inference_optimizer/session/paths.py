@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from hyperloom_common.shared_storage import make_shared_dirs, ownership, writable_problems
+from hyperloom_common.shared_storage import SHARED_DIR_MODE, make_shared_dirs, ownership, writable_problems
 from hyperloom_common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
@@ -63,14 +63,20 @@ ARCHIVE_MODE = 0o2770
 #: shown to a specialist.  Whatever copies a session directory elsewhere must leave these out.
 PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 
-# Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by install.sh + reused for every session_dir
-# launched from this workspace.
-_WORKSPACE_SKELETON: tuple[str, ...] = (
-    "runtime",  # install-generated env files (kernel-agent.env.sh, GEAK litellm config)
-    # Workspace-level KB root; it only coincides with the KB path when session_dir == workspace_root.
-    "runtime/recipe_kb",
-    "logs",  # launcher stdout (workspace-shared)
-)
+#: The workspace root and its ``runtime/``, where the installer puts the env files that later steps source: the group
+#: may enter and read them, only their owner may change them, so no other account can swap what a run sources. The
+#: session directory below the root, with its own ``runtime/`` (lock, ledger, breakdown), is ``2775`` instead.
+_INSTALL_OWNED_MODE = 0o2755
+
+# Workspace-shared layout (one copy per $USER_DATA_PATH), with each entry's mode. mkdir-ed by install.sh + reused for
+# every session_dir launched from this workspace.
+_WORKSPACE_SKELETON: dict[str, int] = {
+    "runtime": _INSTALL_OWNED_MODE,  # install-generated env files (kernel-agent.env.sh, GEAK litellm config)
+    # Workspace-level KB root; it only coincides with the KB path when session_dir == workspace_root. What the accounts
+    # of a run write there is a marker nothing sources.
+    "runtime/recipe_kb": SHARED_DIR_MODE,
+    "logs": SHARED_DIR_MODE,  # launcher stdout (workspace-shared)
+}
 
 # Filename-safety regex for model_basename (ROCm/Magpie/Claude CLI choke on ``:`` / ``/`` / whitespace).
 _MODEL_BASENAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -175,11 +181,11 @@ def ensure_archive_root(session_dir: Path) -> Path:
     return root
 
 
-def _make_dirs(path: Path) -> None:
+def _make_dirs(path: Path, mode: int = SHARED_DIR_MODE) -> None:
     """:func:`~hyperloom_common.shared_storage.make_shared_dirs`, with a refusal that names the directory this account
     cannot create in, its owner and mode, and what it needs to be."""
     try:
-        make_shared_dirs(path)
+        make_shared_dirs(path, mode=mode)
     except PermissionError as exc:
         failed = Path(str(exc.filename or path))
         parent = failed.parent
@@ -209,9 +215,9 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
     generated one.
     """
     ws = workspace_root()
-    _make_dirs(ws)
-    for sub in _WORKSPACE_SKELETON:
-        _make_dirs(ws / sub)
+    _make_dirs(ws, _INSTALL_OWNED_MODE)
+    for sub, mode in _WORKSPACE_SKELETON.items():
+        _make_dirs(ws / sub, mode)
 
     if target is not None:
         sd = Path(target)

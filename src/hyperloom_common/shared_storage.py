@@ -106,9 +106,9 @@ def open_shared_append(path: Path) -> int:
     return descriptor
 
 
-def open_shared(path: Path, access: int) -> int:
+def open_shared(path: Path, access: int, mode: int = SHARED_FILE_MODE) -> int:
     """Open ``path`` for ``access`` (``os.O_RDWR``, ``os.O_WRONLY | os.O_APPEND``) without following a link, creating it
-    with mode ``664`` when it is not there, and return the descriptor.
+    with ``mode`` (default ``664``) when it is not there, and return the descriptor.
 
     A file that exists is opened as it is, never truncated, chmodded or replaced by rename: a lock or a log that
     another process holds open would be left on an unlinked inode. Another account's ``0600`` file therefore raises
@@ -119,7 +119,7 @@ def open_shared(path: Path, access: int) -> int:
     except FileExistsError:
         return os.open(path, access | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        os.fchmod(descriptor, SHARED_FILE_MODE)
+        os.fchmod(descriptor, mode)
     except BaseException:
         os.close(descriptor)
         raise

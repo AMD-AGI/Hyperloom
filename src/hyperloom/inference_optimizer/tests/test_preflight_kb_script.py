@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``preflight_kb.sh`` on shared storage: its directories are ``2775`` and its marker ``664`` whatever umask it runs
-under, and a marker another account left (``0600``, not writable) is replaced by rename instead of failing the write."""
+"""``preflight_kb.sh`` on shared storage: ``runtime/`` is ``2755`` (the installer's), ``recipe_kb/`` ``2775`` and its
+marker ``664`` whatever umask it runs under, and a marker another account left (``0600``, not writable) is replaced by
+rename instead of failing the write."""
 
 from __future__ import annotations
 
@@ -60,7 +61,7 @@ def test_the_directories_are_2775_and_the_marker_664_whatever_the_umask(tmp_path
     user_data = _setgid(tmp_path / "claw")
     done = _run(user_data, umask=umask)
     assert (done.returncode, done.stderr) == (0, "")
-    assert (_mode(user_data / "runtime"), _mode(user_data / "runtime" / "recipe_kb")) == (0o2775, 0o2775)
+    assert (_mode(user_data / "runtime"), _mode(user_data / "runtime" / "recipe_kb")) == (0o2755, 0o2775)
     kb = user_data / "runtime" / "recipe_kb"
     assert sorted(path.name for path in kb.iterdir()) == [".kb_preflight.json"], "no temporary file is left behind"
     assert _mode(kb / ".kb_preflight.json") == 0o664
@@ -104,7 +105,7 @@ def test_a_marker_the_next_account_of_the_group_cannot_write_is_still_replaced_b
         marker = user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
         assert (marker.stat().st_uid, _mode(marker.parent.parent), _mode(marker.parent)) == (
             accounts.first,
-            0o2775,
+            0o2755,
             0o2775,
         )
         marker.chmod(0o600)  # as the other account's umask leaves a file it made without this script
