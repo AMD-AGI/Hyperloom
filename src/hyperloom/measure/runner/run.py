@@ -93,10 +93,10 @@ from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.spec import SPEC_SCHEMA, SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
-from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, backend_reason, harvest_leaked_artifacts
+from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, harvest_leaked_artifacts
 from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_image_own_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
-from inference_suite.contracts import ConfigError
+from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 __all__ = ["run"]
 
@@ -205,19 +205,22 @@ def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
             raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} differs from the recorded hash")
 
 
+_SERVING = frozenset(item.value for item in Framework if framework_facts(item).kind is FrameworkKind.SERVING)
+
+
 def _check_runs_on_inference_suite(spec: MeasurementSpec) -> None:
-    """A v2 sheet's points all run on inference_suite: this runner stages no Magpie for one, so a point the suite
-    declines is refused here rather than handed to the benchmark backend."""
+    """A v2 sheet measures a server on inference_suite: this runner stages no Magpie, and a scriptable session writes
+    no sheet, so a point that serves nothing is refused here rather than handed to the benchmark backend."""
     if spec.schema == SPEC_SCHEMA_V1:
         return
     for index, point in enumerate(spec.config):
         try:
-            reason = backend_reason(yaml.safe_load(point.yaml) or {})
-        except ConfigError as exc:
-            reason = str(exc)
-        if reason is not None:
+            framework = BenchmarkPoint.from_document(yaml.safe_load(point.yaml), source=f"point {index}").framework
+        except BenchmarkPointError as exc:
+            raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
+        if framework.strip().lower() not in _SERVING:
             raise RunnerFailure(
-                _SPEC_REJECTED, f"point {index}: {reason}; a {SPEC_SCHEMA} sheet runs only on inference_suite"
+                _SPEC_REJECTED, f"point {index}: {framework!r} serves nothing; a {SPEC_SCHEMA} sheet measures a server"
             )
 
 
