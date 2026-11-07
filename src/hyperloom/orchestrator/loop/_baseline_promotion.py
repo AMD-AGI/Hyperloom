@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 import yaml
 
 from ..actions.executors._accuracy_gate import (
+    ACCURACY_DEFINITION_DIGEST_KEY,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
     BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
@@ -380,6 +381,7 @@ class BaselinePromotionMixin:
         accuracy = result.get("accuracy")
         if isinstance(accuracy, (int, float)):
             state.baseline_accuracy = float(accuracy)
+            state.baseline_accuracy_definition_digest = str(result.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
         # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
         materialized = result.get("materialized_config")
         if isinstance(materialized, str) and materialized:

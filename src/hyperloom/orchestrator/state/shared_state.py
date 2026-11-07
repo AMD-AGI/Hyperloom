@@ -403,6 +403,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     baseline_accuracy: float = 0.0
+    # The eval definition digest ``baseline_accuracy`` was taken under; "" for a score no inference_suite round took.
+    baseline_accuracy_definition_digest: str = ""
     baseline_failure_streak: int = 0
     # The live leg's share of ``baseline_failure_streak``; ``begin_leg`` and every reset of the streak zero it.
     baseline_failures_this_leg: int = 0
