@@ -88,7 +88,7 @@ def workload_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     """The process environment the canonical point and the request points are rendered from."""
     for name in _CLEARED:
         monkeypatch.delenv(name, raising=False)
-    for name, value in {**_WORKLOAD, "MAGPIE_EVAL_LIMIT": EVAL_LIMIT, "USER_DATA_PATH": str(tmp_path)}.items():
+    for name, value in {**_WORKLOAD, "HYPERLOOM_EVAL_LIMIT": EVAL_LIMIT, "USER_DATA_PATH": str(tmp_path)}.items():
         monkeypatch.setenv(name, value)
 
 

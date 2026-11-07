@@ -64,9 +64,9 @@ def clean_process_env(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(name, raising=False)
     for name in (
-        "MAGPIE_EVAL_TASKS",
-        "MAGPIE_EVAL_LIMIT",
-        "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+        "HYPERLOOM_EVAL_TASKS",
+        "HYPERLOOM_EVAL_LIMIT",
+        "HYPERLOOM_EVAL_TOKENIZED_REQUESTS",
         "INFERENCE_OPTIMIZER_SERVER_ARGS",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -155,7 +155,7 @@ def test_kernel_table_reaches_the_yaml_as_an_attachment_placeholder(canonical, b
     assert value == "${HL_ATTACH:" + env.attachments[0].id + "}"
 
 
-@pytest.mark.parametrize("name", ["ISL", "MAGPIE_EVAL_LIMIT", "RUN_EVAL", "NUM_PROMPTS"])
+@pytest.mark.parametrize("name", ["ISL", "HYPERLOOM_EVAL_LIMIT", "RUN_EVAL", "NUM_PROMPTS"])
 def test_recipe_that_sets_a_workload_or_eval_variable_is_refused_before_rendering(canonical, blobs, tmp_path, name):
     delta = RecipeDelta(config=ConfigDelta(envs={name: "1"}))
     env = environment(blobs, tmp_path, delta=delta)
@@ -165,7 +165,7 @@ def test_recipe_that_sets_a_workload_or_eval_variable_is_refused_before_renderin
     assert not list((tmp_path / "points").glob("*.yaml"))
 
 
-@pytest.mark.parametrize(("name", "value"), [("ISL", "16"), ("MAGPIE_EVAL_LIMIT", "5"), ("OSL", "8")])
+@pytest.mark.parametrize(("name", "value"), [("ISL", "16"), ("HYPERLOOM_EVAL_LIMIT", "5"), ("OSL", "8")])
 def test_a_point_whose_surface_drifted_from_the_canonical_one_is_refused(
     canonical, blobs, tmp_path, monkeypatch, name, value
 ):
