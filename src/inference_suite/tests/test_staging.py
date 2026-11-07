@@ -16,9 +16,16 @@ from pathlib import Path
 import pytest
 
 import inference_suite
-from inference_suite import staging
+from inference_suite import cli, staging
 from inference_suite.contracts import FailedStep
-from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL, PINNED_TOOLS
+from inference_suite.pins import (
+    INFERENCEX_CLIENT_COMMIT,
+    INFERENCEX_TOOL,
+    LM_EVAL_DISTRIBUTION,
+    LM_EVAL_REQUIREMENT,
+    LM_EVAL_VERSION,
+    PINNED_TOOLS,
+)
 from inference_suite.staging import (
     AGENTX_AGGREGATOR_FILE,
     AGENTX_PYTHON,
@@ -83,17 +90,28 @@ def _checkout(tmp_path: Path, *, without: str | None = None) -> tuple[Path, str]
     return repo, _git(repo, "rev-parse", "HEAD").strip()
 
 
+_REAL_STAGING_STEP = staging._run_staging_step
+
+
 class _FakeInstall:
-    """Stands in for ``python -m venv`` and ``pip install``: lays down the files a real venv would, and records argv."""
+    """Stands in for ``python -m venv`` and ``pip install``: lays down the files a real venv would, and records argv.
+
+    git runs for real, so a fetch reads the fixture checkout.
+    """
 
     def __init__(self, *, fail: str | None = None) -> None:
         self.calls: list[list[str]] = []
         self.fail = fail
 
     def __call__(self, argv: list[str], what: str) -> None:
+        if argv[0] == "git":
+            _REAL_STAGING_STEP(argv, what)
+            return
         self.calls.append(list(argv))
         if self.fail is not None and self.fail in what:
             raise StagingError(f"{what} exited with code 1: no network")
+        if argv[0] == sys.executable and argv[1:3] == ["-m", "pip"]:
+            return
         if argv[1:3] == ["-m", "venv"]:
             venv = Path(argv[3])
             (venv / "bin").mkdir(parents=True)
@@ -421,3 +439,136 @@ def test_install_stages_after_ensure_inferencex() -> None:
     text = _INSTALL_SH.read_text(encoding="utf-8")
 
     assert text.index("\nensure_inference_suite_staging\n") > text.index("\nensure_inferencex\n")
+
+
+def _lm_eval_install() -> list[str]:
+    return [sys.executable, "-m", "pip", "install", "--no-input", "--disable-pip-version-check", LM_EVAL_REQUIREMENT]
+
+
+@pytest.fixture
+def pinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install: _FakeInstall) -> tuple[Path, Path]:
+    """A fixture checkout pinned, lm-eval installed at its pin, and an empty tool cache: what ``stage`` starts from."""
+    repo, commit = _checkout(tmp_path)
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
+    monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: LM_EVAL_VERSION}.get)
+    return repo, tmp_path / "tools"
+
+
+def _stage_cli(cache: Path, *source: str) -> int:
+    return cli.main(["stage", *source, "--tool-cache", str(cache)])
+
+
+def test_stage_prints_the_manifest_sha256_and_a_second_run_stages_nothing(pinned, install, capsys) -> None:
+    repo, cache = pinned
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_OK
+    digest = capsys.readouterr().out.strip()
+    assert digest == staging.manifest_sha256(cache)
+    assert verify(cache, digest).failed_step is None
+    calls = len(install.calls)
+    manifest_mtime = (cache / MANIFEST_FILE).stat().st_mtime_ns
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_OK
+    assert capsys.readouterr().out.strip() == digest
+    assert len(install.calls) == calls
+    assert (cache / MANIFEST_FILE).stat().st_mtime_ns == manifest_mtime
+
+
+def test_stage_without_a_source_fetches_inferencex_at_its_pin(pinned, monkeypatch, capsys) -> None:
+    repo, cache = pinned
+    monkeypatch.setattr(staging, "INFERENCEX_REPO_URL", str(repo))
+
+    assert _stage_cli(cache) == cli.EXIT_OK
+    assert capsys.readouterr().out.strip() == staging.manifest_sha256(cache)
+    assert (inferencex_root(cache) / _CLIENT).read_text() == _CLIENT_TEXT
+    assert sorted(path.name for path in cache.iterdir()) == [INFERENCEX_TOOL, MANIFEST_FILE]
+
+
+def test_stage_refuses_a_fetch_that_fails_with_staging_missing(pinned, monkeypatch, capsys) -> None:
+    _, cache = pinned
+    monkeypatch.setattr(staging, "INFERENCEX_REPO_URL", str(cache.parent / "no-such-repo"))
+
+    assert _stage_cli(cache) == cli.EXIT_REFUSED
+    assert capsys.readouterr().err.startswith(f"{FailedStep.STAGING_MISSING.value}: fetching InferenceX ")
+    assert not (cache / MANIFEST_FILE).exists()
+    assert [path.name for path in cache.iterdir()] == []
+
+
+@pytest.mark.parametrize(
+    ("damage", "state"),
+    [(lambda path: path.unlink(), "absent"), (lambda path: path.write_text("edited\n"), "changed since staging")],
+)
+def test_stage_refuses_a_damaged_cache_naming_staging_missing_and_leaves_it_as_found(
+    pinned, install, capsys, damage, state
+) -> None:
+    repo, cache = pinned
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_OK
+    capsys.readouterr()
+    task = inferencex_root(cache) / GSM8K_TASK
+    damage(task)
+    calls = len(install.calls)
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
+    assert capsys.readouterr().err.strip() == f"{FailedStep.STAGING_MISSING.value}: {task} ({state})"
+    assert len(install.calls) == calls
+    assert task.exists() == (state != "absent")
+
+
+def test_stage_refuses_an_unreadable_manifest(pinned, capsys) -> None:
+    repo, cache = pinned
+    cache.mkdir()
+    (cache / MANIFEST_FILE).write_text("not json")
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
+    assert "readable staging manifest" in capsys.readouterr().err
+    assert (cache / MANIFEST_FILE).read_text() == "not json"
+
+
+def test_stage_restages_a_cache_staged_at_a_pin_no_longer_in_force(pinned, monkeypatch, capsys) -> None:
+    repo, cache = pinned
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_OK
+    old = capsys.readouterr().out.strip()
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "bump")
+    commit = _git(repo, "rev-parse", "HEAD").strip()
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_OK
+    digest = capsys.readouterr().out.strip()
+    assert digest != old
+    assert verify(cache, digest).pins == {INFERENCEX_TOOL: commit}
+
+
+def test_stage_refuses_a_source_off_the_pin_with_staging_missing(pinned, monkeypatch, capsys) -> None:
+    repo, cache = pinned
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: "b" * 40})
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and f"pinned at {'b' * 40}" in err
+
+
+@pytest.mark.parametrize(("installed", "installs"), [(None, True), ("0.4.11", True), (LM_EVAL_VERSION, False)])
+def test_stage_installs_lm_eval_at_its_pin_into_the_staging_interpreter_unless_it_is_there(
+    pinned, install, monkeypatch, capsys, installed, installs
+) -> None:
+    repo, cache = pinned
+    monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: installed}.get)
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_OK
+    assert (_lm_eval_install() in install.calls) is installs
+
+
+def test_a_failed_lm_eval_install_is_refused_and_stages_nothing(pinned, monkeypatch, capsys) -> None:
+    repo, cache = pinned
+    monkeypatch.setattr(staging, "_distribution_version", {}.get)
+    monkeypatch.setattr(staging, "_run_staging_step", _FakeInstall(fail=LM_EVAL_REQUIREMENT))
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
+    assert LM_EVAL_REQUIREMENT in capsys.readouterr().err
+    assert not (cache / MANIFEST_FILE).exists()
+
+
+def test_the_lm_eval_pin_is_the_release_the_runner_extra_locks() -> None:
+    pyproject = (_SRC.parent / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert f'"{LM_EVAL_REQUIREMENT}",' in pyproject
