@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_common.git_safety import recorded_admin_dir, trusted_admin_dir, worktree_head
+from hyperloom_common.git_safety import app_git, recorded_admin_dir, trusted_admin_dir, worktree_head
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom.common.agent_isolation import BwrapIsolation
 from hyperloom.common.deadline import Deadline
@@ -36,7 +36,7 @@ from hyperloom.orchestrator.specialists.tests._agent_fixtures import (
     make_spec,
     wait_finished,
 )
-from hyperloom.orchestrator.specialists.worktrees import _setup_worktree
+from hyperloom.orchestrator.specialists.worktrees import _setup_worktree, link_worktree
 from hyperloom.orchestrator.tests._helpers import init_git_repo
 
 pytestmark = pytest.mark.agent_isolation
@@ -56,6 +56,14 @@ cat > got_prompt
 }} > reach.txt
 echo '{{"summary": "sandboxed", "proposal_set": []}}' > specialist_done.json
 """
+#: The stand-in CLI that leaves a link to a directory of the host where its worktree was, and names a file there.
+_SWAPS = """#!/bin/sh
+cat > /dev/null
+cd {workspace}
+mv worktree worktree.orig && ln -s {host} worktree && echo swapped > swapped
+echo '{{"summary": "swapped", "proposal_set": [], "targets": ["creds.txt"]}}' > specialist_done.json
+"""
+_CANARY = "APP-SECRET-CANARY"
 _TRAPPED = """#!/bin/sh
 trap 'echo stopped > "{out}"; exit 0' TERM
 sleep 1000 &
@@ -156,6 +164,37 @@ async def test_the_harvest_of_a_sandboxed_specialist_never_takes_the_git_dir_it_
     assert len(result.patches) == 1 and result.patch_roots == {result.patches[0]: str(repo)}
     patch = Path(result.patches[0]).read_text(encoding="utf-8")
     assert "--- a/mod.py\n+++ b/mod.py\n" in patch and "+new = 2" in patch
+
+
+async def test_a_worktree_swapped_for_a_link_to_a_host_directory_leaves_the_app_nothing_to_read_or_write_there(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    """The agent is the app's uid and writes the workspace its worktree sits in, so it can leave a link to any host
+    directory there. The app's git, its patch scan and its patch write reach the worktree by path, as the app, outside
+    the sandbox: after the swap none of them runs, the link is removed, and the result says why."""
+    repo, workspace, host = tmp_path / "repo", tmp_path / "ws", tmp_path / "app-secrets"
+    host.mkdir()
+    (host / "creds.txt").write_text(f"{_CANARY}\n", encoding="utf-8")
+    init_git_repo(repo, seed_file="mod.py", seed_text="old = 1\n")
+    linked = link_worktree(repo, workspace / "worktree", "specialist-t-sandboxed")
+    assert linked.path is not None and linked.admin is not None, linked.error
+    cli = _script(tmp_path / "cli" / "bin" / "claude", _SWAPS.format(workspace=workspace, host=host))
+
+    result = await _dispatcher(cli).run(
+        _spawn(workspace, worktree=linked.path, worktree_base=repo, worktree_admin=linked.admin)
+    )
+
+    assert (workspace / "swapped").read_text(encoding="utf-8") == "swapped\n"  # the premise: the agent can swap it
+    assert result.done_payload["summary"] == "swapped" and result.patches == [] and result.patch_roots == {}
+    assert result.worktree_refused == (
+        f"worktree_refused: {linked.path} is no longer the directory the specialist was given; "
+        "the link left in its place was removed"
+    )
+    assert result.worktree_refused in result.error and _CANARY not in repr(result)
+    assert not os.path.lexists(linked.path) and (workspace / "worktree.orig" / "mod.py").is_file()
+    assert sorted(p.name for p in host.iterdir()) == ["creds.txt"]  # nothing written there
+    # The app's git never ran over that directory: the index the repository records holds none of its paths.
+    assert app_git(workspace / "worktree.orig", "ls-files", admin=linked.admin).stdout.split() == ["mod.py"]
 
 
 async def test_a_specialist_killed_at_its_deadline_runs_its_own_stop_first(

@@ -901,7 +901,11 @@ path, where a Ray head always runs, can reach the Ray head and dashboard ports o
 
 The app's own git over a specialist's worktree (the commit it starts from and the harvested patch) goes through the
 admin directory the repository recorded when the worktree was made, in every tier; a worktree the repository does not
-record (a directory left at its path, say) is not used, and the specialist runs in its workspace.
+record (a directory left at its path, say) is not used, and the specialist runs in its workspace. After the run the
+app collects patches, by git or from `patches/`, only while the worktree's path still names the directory it had when
+the specialist started: a specialist that writes its workspace can leave a link to any directory of the host there,
+which the app's git and patch write would otherwise follow. Otherwise no patch, harvested, scanned or claimed, is
+taken from the run, a link at that path is removed, and the task's error says `worktree_refused: <path> ...`.
 
 Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch in a hosted
 run (its entry calls `require_agent_isolation()` once at start-up, so a host where neither works refuses before

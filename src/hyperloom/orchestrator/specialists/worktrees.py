@@ -12,13 +12,15 @@ ownership check tells an admin directory it made from the app's.
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom_common.git_safety import recorded_admin_dir
+from hyperloom_common.git_safety import recorded_admin_dir, worktree_head
 
-__all__ = ["LinkedWorktree", "PinnedGit", "link_worktree"]
+__all__ = ["HeldWorktree", "LinkedWorktree", "PinnedGit", "link_worktree"]
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +42,73 @@ class PinnedGit:
 
     admin: Path
     start: str = ""
+
+
+@dataclass(frozen=True)
+class HeldWorktree:
+    """A specialist's worktree as it stood before the agent ran: its path, the device and inode of the directory there
+    (``None`` when the path was not a directory of its own: missing, or a link), and ``git``, how the app's git reads
+    it (``None``: it does not).
+
+    The app's git, its patch scan and its patch write reach the worktree by path, as the app and outside any sandbox.
+    An agent of the app's own uid writes the workspace the worktree sits in, so it can rename the worktree and leave a
+    link to any directory of the host in its place, which the app would then diff, scan and write. So the app reads
+    the worktree after the run only while its path still names the directory recorded here.
+    """
+
+    path: Path
+    inode: tuple[int, int] | None
+    git: PinnedGit | None = None
+
+    @classmethod
+    def before_launch(cls, path: Path, admin: Path | None = None) -> HeldWorktree:
+        """Record the directory at ``path`` and, through ``admin`` (its admin directory as its repository records it)
+        when given, the commit it sits at, before anything of the agent's runs. No git runs over a path that is not a
+        directory of its own."""
+        inode = _directory_inode(path)
+        if admin is None or inode is None:
+            return cls(path, inode)
+        return cls(path, inode, PinnedGit(admin, worktree_head(path, admin=admin)))
+
+    def refusal(self) -> str:
+        """``""`` while ``path`` names the directory recorded; else why nothing may be read through it.
+
+        A link found at ``path`` then is removed (never what it names), so nothing that reads the workspace later
+        reaches the directory it named either.
+        """
+        if self.inode is not None and _directory_inode(self.path) == self.inode:
+            return ""
+        if self.inode is None:
+            reason = f"worktree_refused: {self.path} was not a directory of its own when the specialist started"
+        else:
+            reason = f"worktree_refused: {self.path} is no longer the directory the specialist was given"
+        if _remove_link(self.path):
+            reason += "; the link left in its place was removed"
+        log.warning("specialist %s; nothing is collected from it", reason)
+        return reason
+
+
+def _directory_inode(path: Path) -> tuple[int, int] | None:
+    """The device and inode of the directory at ``path`` itself, or ``None`` when there is none (a link is none)."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
+
+
+def _remove_link(path: Path) -> bool:
+    """Remove ``path`` when it is a symbolic link; whether one was removed."""
+    try:
+        if not stat.S_ISLNK(os.lstat(path).st_mode):
+            return False
+        os.unlink(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        log.warning("specialist worktree: cannot remove the link at %s: %r", path, exc)
+        return False
+    return True
 
 
 def link_worktree(base: Path, path: Path, branch: str) -> LinkedWorktree:
