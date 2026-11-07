@@ -91,6 +91,9 @@ Before the entry is renamed into place, the builder asks pip whether the require
 failing in the sandbox. A hosted session names the runner's interpreter in ``$HYPERLOOM_RUNNER_WHEEL_TARGET``
 (:func:`runner_wheel_target`); it never builds for its own.
 
+After the entry, the command publishes the commit's inference_suite staging into ``<cache>/inference-suite/<staging
+key>/`` (:mod:`hyperloom.measure.runner.suite_publish`); a sandbox runs that staging offline and never builds one.
+
 The pins come from the lock of the target's Python (:func:`~hyperloom.measure.runner.cache_layout.lock_file`):
 ``requirements/runner-cp314.lock`` for ``--python-version 3.14``, ``requirements/runner.lock`` for a version without a
 lock of its own or when no ``--python-version`` is given. A build for a Python that has its own lock must therefore name
@@ -124,6 +127,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
+from hyperloom.measure.runner.suite_publish import SuitePublishError, publish_inference_suite
 from hyperloom.measure.runner.cache_layout import (
     BOOTSTRAP_NAME,
     CACHE_ENV,
@@ -851,17 +855,21 @@ def _target(args: argparse.Namespace) -> WheelTarget:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """The command line: print one JSON line about the entry and exit 0, or say why not on stderr and exit 1."""
+    """The command line: build the entry, publish its commit's inference_suite staging
+    (:func:`~hyperloom.measure.runner.suite_publish.publish_inference_suite`), print one JSON line about both and exit
+    0, or say why not on stderr and exit 1."""
     args = _arguments(argv)
     try:
         options = BuildOptions(
             _target(args), WheelSource(args.index_url, tuple(args.find_links), args.no_index), args.lock_timeout_sec
         )
         entry = ensure_runner_cache(args.repo, args.sha, args.out, options)
-    except (CacheError, OSError) as exc:
+        suite = publish_inference_suite(entry.path / SOURCE_DIR, args.out)
+    except (CacheError, SuitePublishError, OSError) as exc:
         print(f"runner cache not built: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps({"path": str(entry.path), "manifest_sha256": entry.manifest_sha256, "reused": entry.reused}))
+    document = {"path": str(entry.path), "manifest_sha256": entry.manifest_sha256, "reused": entry.reused}
+    print(json.dumps({**document, "inference_suite": str(suite)}))
     return 0
 
 
