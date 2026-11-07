@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import magpie_confined
-from hyperloom.orchestrator.actions.executors.benchmark_backend import MagpieBackend
+from hyperloom.orchestrator.actions.executors.benchmark_backend import build_benchmark_command
 
 OURS, THEIRS, UNTAGGED = 101, 202, 303
 ENVIRONS = {
@@ -78,8 +78,8 @@ def test_a_magpie_without_the_sweep_runs_unconfined_and_says_so(capsys: pytest.C
     assert "BenchmarkMode._cleanup_server_processes not found" in capsys.readouterr().err
 
 
-def test_the_magpie_backend_runs_magpie_through_the_confinement(tmp_path: Path) -> None:
-    argv = MagpieBackend().build_command(python_exe="py", config_path=tmp_path / "c.yaml", output_dir=tmp_path)
+def test_a_magpie_round_runs_magpie_through_the_confinement(tmp_path: Path) -> None:
+    argv = build_benchmark_command(python_exe="py", config_path=tmp_path / "c.yaml", output_dir=tmp_path)
 
     assert argv[:2] == ["py", str(Path(magpie_confined.__file__))]
     assert argv[2:4] == ["-v", "benchmark"]
@@ -132,9 +132,7 @@ def test_magpie_run_by_the_backend_imports_the_standard_library_s_profile(tmp_pa
         (package / "__init__.py").write_text("")
     (magpie / "modes" / "benchmark" / "benchmarker.py").write_text("")
     (magpie / "__main__.py").write_text("import cProfile\nimport profile\nprint(profile.__file__)\n")
-    argv = MagpieBackend().build_command(
-        python_exe=sys.executable, config_path=tmp_path / "c.yaml", output_dir=tmp_path
-    )
+    argv = build_benchmark_command(python_exe=sys.executable, config_path=tmp_path / "c.yaml", output_dir=tmp_path)
 
     done = subprocess.run(argv, env={**os.environ, "PYTHONPATH": str(tmp_path)}, capture_output=True, text=True)
 

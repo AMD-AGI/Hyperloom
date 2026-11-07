@@ -1634,7 +1634,6 @@ async def run_grid(
     silence_timeout_sec = resolve_benchmark_timeouts()[0]
     magpie_python = launch.magpie_python
     if not magpie_python:
-        # Backend-aware: bypass uses a plain python3, not Magpie's venv.
         from .benchmark_backend import resolve_benchmark_interpreter
 
         magpie_python = resolve_benchmark_interpreter()

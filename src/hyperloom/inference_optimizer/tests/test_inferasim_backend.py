@@ -18,20 +18,12 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.benchmark_config import BenchmarkPoint
-from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_anchors as ia
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_bridge as ib
 
 
 def _point_spec(bench: dict, **kwargs) -> ib.ServingSpec:
     return ib.spec_from_point(BenchmarkPoint.from_document({"benchmark": bench}), **kwargs)
-
-
-def test_inferasim_is_not_a_benchmark_backend(monkeypatch):
-    """Baseline, integrate and rebench must never be answered by a projection."""
-    assert "inferasim" not in bb.KNOWN_BENCHMARK_BACKENDS
-    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "inferasim")
-    assert bb.resolve_backend_name() == "magpie"
 
 
 def test_spec_from_point_parses_envs():

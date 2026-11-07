@@ -1025,30 +1025,25 @@ def _ensure_magpie(
     install_event: Any,
     *,
     magpie_python: str,
-    benchmark_backend: str,
-    magpie_active: bool,
     pip_extra: list[str],
 ) -> None:
-    """Install Magpie and resolve MAGPIE_PATH, unless another benchmark backend is active."""
+    """Install Magpie and resolve MAGPIE_PATH."""
     magpie_installed = False
     magpie_spec: str | None = None
     try:
-        if not magpie_active:
-            print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
-        else:
-            magpie_ref = os.environ.get("MAGPIE_REF") or MAGPIE_DEFAULT_REF
-            checker = _ASSETS / "check_magpie.py"
-            check = subprocess.run([magpie_python, str(checker), magpie_ref], capture_output=True)
-            if check.returncode != 0 and not os.environ.get("MAGPIE_PATH"):
-                magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
-                magpie_spec = os.environ.get("MAGPIE_PACKAGE_SPEC", f"magpie-eval @ git+{magpie_repo}@{magpie_ref}")
-                print(f"Preflight: Magpie revision is missing; installing {magpie_spec} ...")
-                subprocess.run(
-                    [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
-                    check=True,
-                )
-                magpie_installed = True
-        if magpie_active and not os.environ.get("MAGPIE_PATH", "").strip():
+        magpie_ref = os.environ.get("MAGPIE_REF") or MAGPIE_DEFAULT_REF
+        checker = _ASSETS / "check_magpie.py"
+        check = subprocess.run([magpie_python, str(checker), magpie_ref], capture_output=True)
+        if check.returncode != 0 and not os.environ.get("MAGPIE_PATH"):
+            magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
+            magpie_spec = os.environ.get("MAGPIE_PACKAGE_SPEC", f"magpie-eval @ git+{magpie_repo}@{magpie_ref}")
+            print(f"Preflight: Magpie revision is missing; installing {magpie_spec} ...")
+            subprocess.run(
+                [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
+                check=True,
+            )
+            magpie_installed = True
+        if not os.environ.get("MAGPIE_PATH", "").strip():
             magpie_root = subprocess.run(
                 [
                     magpie_python,
@@ -1070,15 +1065,8 @@ def _ensure_magpie(
         InstallStep(
             "ensure_magpie",
             "install",
-            "skipped" if not magpie_active else "applied" if magpie_installed else "already_present",
-            skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
-            message=(
-                f"installed {magpie_spec}"
-                if magpie_installed
-                else f"benchmark backend is {benchmark_backend!r}"
-                if not magpie_active
-                else None
-            ),
+            "applied" if magpie_installed else "already_present",
+            message=f"installed {magpie_spec}" if magpie_installed else None,
         ),
         target="magpie-eval",
         interpreter=magpie_python,
@@ -1363,11 +1351,6 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     _normalize_preflight_env(args, install_event)
 
     from hyperloom.orchestrator.actions.executors._benchmark_interpreter import _resolve_probe_python
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend_name
-
-    # A bypass-only host has no Magpie; the active backend decides whether preflight installs it.
-    benchmark_backend = resolve_backend_name()
-    _magpie_backend_active = benchmark_backend == "magpie"
 
     # The load client runs on the server's interpreter, so the client and Ray installs go there.
     benchmark_python = _resolve_probe_python(_selected_framework(args))
@@ -1417,8 +1400,6 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     _ensure_magpie(
         install_event,
         magpie_python=magpie_python,
-        benchmark_backend=benchmark_backend,
-        magpie_active=_magpie_backend_active,
         pip_extra=pip_extra,
     )
 
