@@ -280,6 +280,9 @@ class SourceBase:
         return layout
 
 
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
 def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
     """Link ``target`` at ``prefix`` in ``worktree`` unless something is there, making the directories on the way.
 
@@ -289,20 +292,34 @@ def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
     Raises:
         WorktreeError: A directory on the way is a symlink or no directory.
     """
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    with contextlib.ExitStack() as stack:
-        fd = os.open(worktree, flags)
-        stack.callback(os.close, fd)
-        for part in prefix.parts[:-1]:
-            with contextlib.suppress(FileExistsError):
-                os.mkdir(part, dir_fd=fd)
-            try:
-                fd = os.open(part, flags, dir_fd=fd)
-            except OSError as error:
-                raise WorktreeError(f"{worktree / prefix} cannot be linked: {part} is no directory: {error}") from error
-            stack.callback(os.close, fd)
+    fd = os.open(worktree, _DIRECTORY_FLAGS)
+    try:
+        _link_below(fd, worktree / prefix, prefix.parts[:-1], target)
+    finally:
+        os.close(fd)
+
+
+def _link_below(dir_fd: int, link: Path, parts: tuple[str, ...], target: str) -> None:
+    """Link ``target`` at ``link``, whose directories still to make and open below ``dir_fd`` are ``parts``.
+
+    Raises:
+        WorktreeError: A directory on the way is a symlink or no directory.
+    """
+    if not parts:
         with contextlib.suppress(FileExistsError):
-            os.symlink(target, prefix.name, dir_fd=fd)
+            os.symlink(target, link.name, dir_fd=dir_fd)
+        return
+    part = parts[0]
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(part, dir_fd=dir_fd)
+    try:
+        fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=dir_fd)
+    except OSError as error:
+        raise WorktreeError(f"{link} cannot be linked: {part} is no directory: {error}") from error
+    try:
+        _link_below(fd, link, parts[1:], target)
+    finally:
+        os.close(fd)
 
 
 def _file_sections(patch: str) -> list[tuple[tuple[str, ...], str]]:
