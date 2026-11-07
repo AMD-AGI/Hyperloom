@@ -72,6 +72,8 @@ def test_absent_fields_read_empty() -> None:
     )
     assert (point.agentx, point.torch_profiler, point.server_ready_timeout_s) == (False, False, None)
     assert (point.agentx_launch.append_args, point.agentx_launch.remove_args) == ((), ())
+    assert (point.agentx_launch.replace_args, point.agentx_launch.unset_env) == (False, ())
+    assert dict(point.agentx_launch.source_files) == {}
 
 
 @pytest.mark.parametrize("enabled", ["true", 1, None])
@@ -106,6 +108,9 @@ def test_agentx_launch_is_read_from_the_overrides() -> None:
                         "executable": "/py",
                         "append_args": ["--a", 2],
                         "remove_args": ["--b"],
+                        "replace_args": True,
+                        "unset_env": ["B"],
+                        "source_files": {"/dst.py": "/src.py"},
                     }
                 }
             }
@@ -117,6 +122,9 @@ def test_agentx_launch_is_read_from_the_overrides() -> None:
     assert point.agentx_launch.executable == "/py"
     assert point.agentx_launch.append_args == ("--a", "2")
     assert point.agentx_launch.remove_args == ("--b",)
+    assert point.agentx_launch.replace_args is True
+    assert point.agentx_launch.unset_env == ("B",)
+    assert dict(point.agentx_launch.source_files) == {"/dst.py": "/src.py"}
 
 
 def test_the_point_is_a_copy_the_reader_cannot_change() -> None:
@@ -140,6 +148,8 @@ def test_the_point_is_a_copy_the_reader_cannot_change() -> None:
         {"benchmark": {"envs": "x"}},
         {"benchmark": {"agentx": {"launch_overrides": []}}},
         {"benchmark": {"agentx": {"launch_overrides": {"append_args": "--a"}}}},
+        {"benchmark": {"agentx": {"launch_overrides": {"unset_env": "B"}}}},
+        {"benchmark": {"agentx": {"launch_overrides": {"source_files": ["/src.py"]}}}},
         {"benchmark": {"profiler": {"torch_profiler": True}}},
         {"benchmark": {"server_lifecycle": "on"}},
     ],
