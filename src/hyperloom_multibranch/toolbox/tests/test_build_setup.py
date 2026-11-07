@@ -268,7 +268,7 @@ def test_a_short_ref_is_set_up_at_its_full_commit_the_toolbox_accepts_and_settin
     # The toolbox's start: what the launcher sources configures its native builds, host check included.
     monkeypatch.setattr(preflight, "geteuid", lambda: 0)
     monkeypatch.setattr(preflight, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(preflight, "isolation_problem", lambda: None)
+    monkeypatch.setattr(preflight, "account_problem", lambda: None)
     monkeypatch.setattr(preflight, "tracelens_problem", lambda: None)
     native = native_builds(environ, LocalBlobStore(tmp_path / "blobs"), "sha256:" + "a" * 64, isolation=lambda: None)
     assert native is not None
