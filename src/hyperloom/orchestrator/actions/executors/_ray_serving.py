@@ -253,8 +253,8 @@ def _pdeathsig_preexec() -> None:
     the server is ``setsid``'d into its own process group, so the only in-band teardown that can reach it is the
     wrapper's own ``trap cleanup EXIT INT TERM``. SIGKILL cannot be trapped, so arming it here killed the one process
     that knew how to stop the server and orphaned a multi-GPU vLLM tree. A no-op where prctl is unavailable, and no
-    guarantee either way -- the durable backstop is the pidfile scanned by
-    :func:`._server_lifecycle.reap_orphaned_servers`.
+    guarantee either way -- the durable backstop is the session's ``server.pid`` files, which
+    :func:`._server_lifecycle.reap_orphaned_servers` stops through :func:`inference_suite.stop`.
     """
     try:
         import ctypes
