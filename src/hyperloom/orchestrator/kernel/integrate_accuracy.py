@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Grading a re-baselined patch's serving accuracy against the session baseline."""
+"""Grading a re-baselined patch's serving accuracy against the session baseline, after its AgentX accuracy round."""
 
 from __future__ import annotations
 
@@ -140,18 +140,31 @@ def grade_integrate_accuracy(
     }
 
 
-def _integrate_accuracy_verdict(
+async def _integrate_accuracy_verdict(
     payload: dict,
     bench_result: dict[str, Any],
     rebaseline: _IntegrateRebaseline,
     performance: Any,
-    baseline_accuracy: float,
+    state: Any,
 ) -> tuple[dict[str, Any] | None, str]:
+    from ..actions.executors.benchmark_run.accuracy import (
+        accuracy_round_due,
+        record_accuracy_round,
+        run_candidate_accuracy_round,
+    )
+
     if performance.decision != "KEEP":
         return None, performance.decision
+    if accuracy_round_due(state):
+        launch = Path(bench_result["materialized_config"])
+        session = rebaseline.executor.session_dir
+        outcome = await run_candidate_accuracy_round(rebaseline.workspace, launch, state, session=session)
+        record_accuracy_round(bench_result, outcome)
+    # Read after the re-baseline and its accuracy round, not before them: the executor shares this state object and
+    # a salvaged sibling accuracy during the run republishes the reference this candidate is graded against.
     gate = grade_integrate_accuracy(
         bench_result,
-        baseline_accuracy=baseline_accuracy,
+        baseline_accuracy=float(state.baseline_accuracy or 0.0),
         workspace=rebaseline.workspace,
         strict=_applyback_verdict_pending(payload),
         server_args=rebaseline.server_args,

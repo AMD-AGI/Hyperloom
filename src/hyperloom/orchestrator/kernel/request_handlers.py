@@ -176,7 +176,7 @@ async def integrate_handler(
         bench_result=bench_result,
         rebuild_check=rebuild_check,
     )
-    return _graded_integration(measured, state, performance_policy, preapplied_git_patch=preapplied_git_patch)
+    return await _graded_integration(measured, state, performance_policy, preapplied_git_patch=preapplied_git_patch)
 
 
 def _apply_for_integrate(payload: dict, *, session_dir: Path, mode: str, preapplied_git_patch: bool) -> dict:
@@ -229,7 +229,7 @@ class _MeasuredIntegration:
     rebuild_check: HandlerResult
 
 
-def _graded_integration(
+async def _graded_integration(
     measured: _MeasuredIntegration,
     state: Any,
     performance_policy: dict[str, float],
@@ -247,11 +247,8 @@ def _graded_integration(
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
     if performance.graded.degrade_reason:
         log.info("integrate_handler: grading unavailable (%s)", performance.graded.degrade_reason)
-    # Read after the re-baseline, not before it: the executor shares this state
-    # object and a salvaged sibling accuracy during the run republishes the
-    # reference this candidate is graded against.
-    accuracy_gate, accuracy_decision = _integrate_accuracy_verdict(
-        payload, bench_result, rebaseline, performance, float(state.baseline_accuracy or 0.0)
+    accuracy_gate, accuracy_decision = await _integrate_accuracy_verdict(
+        payload, bench_result, rebaseline, performance, state
     )
     if accuracy_gate is not None and accuracy_gate["blocked"] and accuracy_gate["infeasible"]:
         # A gate that cannot run under this serving configuration measured nothing
