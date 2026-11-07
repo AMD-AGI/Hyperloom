@@ -3,8 +3,11 @@
 # SPDX-License-Identifier: MIT
 
 # Source this asset, then load missing exports from $REPO_ROOT/.env.
+# A .env another account can write (runtime_env_dotenv_not_private) never names the workspace: that account would drop
+# the caller's USER_DATA_PATH, PYTHONPATH and runtime paths by writing one line, and the .env lends none of them back.
 setup_dotenv_is_authoritative() {
   [ -f "$REPO_ROOT/.env" ] || return 1
+  [ -z "$(runtime_env_dotenv_not_private "$REPO_ROOT/.env")" ] || return 1
   [ "${HYPERLOOM_SETUP_ENV_AUTHORITATIVE:-0}" = 1 ] ||
     grep -q '^HYPERLOOM_RUN_MODE=' "$REPO_ROOT/.env" 2>/dev/null
 }

@@ -445,10 +445,11 @@ def _workspace_selection() -> Mapping[str, str]:
     That is the environment, which ``_load_dotenv_fallback`` has already filled from ``.env``, except where a ``.env``
     written by ``hyperloom setup`` names the workspace itself and the shell's copies are stale. This mirrors
     ``runtime_env.sh`` (``setup_dotenv_is_authoritative`` and ``runtime_env_forget_stale_workspace``), which install.sh
-    runs; ``test_install_session_paths.py`` holds the two to the same answer.
+    runs; ``test_install_session_paths.py`` holds the two to the same answer. A ``.env`` another account can write
+    never names the workspace (``_dotenv_not_private``).
     """
     env_file = _resolve_dotenv_file()
-    if env_file is None:
+    if env_file is None or _dotenv_not_private(env_file) is not None:
         return os.environ
     text = _read_dotenv_text(env_file)
     if os.environ.get("HYPERLOOM_SETUP_ENV_AUTHORITATIVE") != "1" and not _AUTHORITATIVE_DOTENV_LINE.search(text):

@@ -205,6 +205,8 @@ def _plant(root: Path) -> tuple[Path, Path, dict[str, str]]:
         "KERNEL_AGENT_ENV": f"{planted}/kernel-agent.env.sh",
         "GEAK_CLAUDE_BIN": f"{planted}/claude",
         **_FETCH_AND_ENDPOINT_VALUES,
+        # Read in the loader's first pass, before the others: a listed name with a value that is not listed.
+        "HYPERLOOM_RUN_MODE": "planted",
     }
     files = {
         "hook": hook,
@@ -274,7 +276,9 @@ def test_a_shared_dotenv_another_account_planted_lends_none_of_it_to_the_install
         assert warning, proc.stderr
         assert warning.group(1) == f"{checkout}/.env"
         assert proc.stderr.count("[runtime-env WARN] not loaded from") == 1
-        assert f": {' '.join(values)}; export any of them you need in this shell" in warning.group(0)
+        # The run mode is read in the first pass, so it is named first.
+        named = ["HYPERLOOM_RUN_MODE", *(key for key in values if key != "HYPERLOOM_RUN_MODE")]
+        assert f": {' '.join(named)}; export any of them you need in this shell" in warning.group(0)
         assert not [value for value in values.values() if value in proc.stdout + proc.stderr]
         assert _credentials_in(_kernel_env(workspace)) == _CREDENTIALS
         # Nor does the install write there what such a .env would not lend: the kernel-agent env file carries it.
@@ -300,6 +304,37 @@ def test_preflight_lends_none_of_a_planted_shared_dotenv(capsys):
         for key in values:
             assert f"ignoring .env key {key} from {checkout}/.env, which another account can write" in err
         assert not [value for value in values.values() if value in err]
+    finally:
+        shutil.rmtree(root)
+
+
+def test_a_shared_dotenv_never_names_the_workspace(tmp_path):
+    """A ``hyperloom setup`` .env (one with a HYPERLOOM_RUN_MODE line) names the workspace and drops the caller's; one
+    another account can write does not, though the line and its value are lent."""
+    root = _shared_root()
+    try:
+        checkout = root / "hyperloom"
+        checkout.mkdir()
+        checkout.chmod(0o777)
+        planted = {"USER_DATA_PATH": "/planted/workspace", "KERNEL_AGENT_ENV": "/planted/kernel-agent.env.sh"}
+        text = "HYPERLOOM_RUN_MODE=baremetal\n" + "".join(f"{k}={v}\n" for k, v in planted.items())
+        (checkout / ".env").write_text(text, encoding="utf-8")
+        os.chown(checkout / ".env", _OTHER_UID, _OTHER_UID)
+        workspace = tmp_path / "our-workspace"
+        env = _launch_env(checkout, workspace)
+
+        proc = _shell(
+            "setup_dotenv_is_authoritative && echo authoritative; runtime_env_forget_stale_workspace; "
+            'load_dotenv_no_clobber; printf "%s\\n" "$USER_DATA_PATH" "${KERNEL_AGENT_ENV-}" "$HYPERLOOM_RUN_MODE"',
+            env=env,
+        )
+        with mock.patch.dict(os.environ, env, clear=True):
+            selection = dict(preflight_env._workspace_selection())
+
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.splitlines() == [str(workspace), "", "baremetal"]
+        assert selection["USER_DATA_PATH"] == str(workspace)
+        assert "KERNEL_AGENT_ENV" not in selection
     finally:
         shutil.rmtree(root)
 
