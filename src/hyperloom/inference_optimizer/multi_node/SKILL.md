@@ -35,7 +35,7 @@ re-provisioned cluster rewrites them).
 | Kill server    | `kill-inference`  | `pkill -f sglang`                         |
 
 Bypassing loses the stable exit codes, cross-subcommand state, and the
-service URL every benchmark round measures (`BENCHMARK_BASE_URL` for Magpie).
+service URL every benchmark round measures.
 
 ## Backends
 
@@ -216,12 +216,10 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
 ## Hard Rules
 
 * **Sandbox never runs the inference server.** When `nodes >= 2`, sglang/vllm
-  live only on the pods; the sandbox is the client. A serving round runs
+  live only on the pods; the sandbox is the client. Every round runs
   client-only against `state.service_url` (`run_round` with
-  `lifecycle: external`, which neither starts nor stops a server). A profile
-  round still runs on Magpie and MUST inherit
-  `BENCHMARK_BASE_URL=<state.service_url>` (forces `PHASE=client`).
-  A round that finds no service URL starts a local server on the CPU sandbox →
+  `lifecycle: external`, which neither starts nor stops a server). A round
+  that finds no service URL starts a local server on the CPU sandbox →
   `ModuleNotFoundError`. Fix the hand-off env propagation
   (`HYPERLOOM_MN_EXT_SERVICE_URL`); never `pip install sglang` in the sandbox.
 * **Credentials stay in the sandbox** — never forward LLM keys into pod env /
