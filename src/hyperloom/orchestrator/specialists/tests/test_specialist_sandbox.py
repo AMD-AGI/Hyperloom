@@ -63,6 +63,15 @@ cd {workspace}
 mv worktree worktree.orig && ln -s {host} worktree && echo swapped > swapped
 echo '{{"summary": "swapped", "proposal_set": [], "targets": ["creds.txt"]}}' > specialist_done.json
 """
+#: The stand-in CLI that moves its worktree aside, makes a directory of its own in its place and writes a patch there,
+#: which its done file claims.
+_MOVES = """#!/bin/sh
+cat > /dev/null
+cd {workspace}
+mv worktree worktree.orig && mkdir -p worktree/patches && echo moved > moved
+printf '%s\\n' '--- a/mod.py' '+++ b/mod.py' '@@ -1 +1 @@' '-old = 1' '+new = 2' > worktree/patches/x.patch
+echo '{{"summary": "moved", "proposal_set": [], "patches_written": ["worktree/patches/x.patch"]}}' > specialist_done.json
+"""
 _CANARY = "APP-SECRET-CANARY"
 _TRAPPED = """#!/bin/sh
 trap 'echo stopped > "{out}"; exit 0' TERM
@@ -194,6 +203,33 @@ async def test_a_worktree_swapped_for_a_link_to_a_host_directory_leaves_the_app_
     assert not os.path.lexists(linked.path) and (workspace / "worktree.orig" / "mod.py").is_file()
     assert sorted(p.name for p in host.iterdir()) == ["creds.txt"]  # nothing written there
     # The app's git never ran over that directory: the index the repository records holds none of its paths.
+    assert app_git(workspace / "worktree.orig", "ls-files", admin=linked.admin).stdout.split() == ["mod.py"]
+
+
+async def test_a_worktree_moved_aside_for_a_directory_of_the_agents_own_gives_no_patch_harvested_scanned_or_claimed(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    """Not a link: a directory the agent made at the worktree's path. It is not the tree the specialist was given,
+    so the app's git does not diff it, its ``patches/`` is not scanned, and the done file's claim is not read."""
+    repo, workspace = tmp_path / "repo", tmp_path / "ws"
+    init_git_repo(repo, seed_file="mod.py", seed_text="old = 1\n")
+    linked = link_worktree(repo, workspace / "worktree", "specialist-t-sandboxed")
+    assert linked.path is not None and linked.admin is not None, linked.error
+    cli = _script(tmp_path / "cli" / "bin" / "claude", _MOVES.format(workspace=workspace))
+
+    result = await _dispatcher(cli).run(
+        _spawn(workspace, worktree=linked.path, worktree_base=repo, worktree_admin=linked.admin)
+    )
+
+    assert (workspace / "moved").read_text(encoding="utf-8") == "moved\n"  # the premise: the agent can move it
+    assert (linked.path / "patches" / "x.patch").is_file() and (workspace / "worktree.orig" / "mod.py").is_file()
+    assert result.done_payload["summary"] == "moved" and result.done_payload["patches_written"]
+    assert result.patches == [] and result.patch_roots == {} and result.patch_claims_ignored
+    assert result.worktree_refused == (
+        f"worktree_refused: {linked.path} is no longer the directory the specialist was given"
+    )
+    assert result.worktree_refused in result.error
+    assert sorted(p.name for p in (linked.path / "patches").iterdir()) == ["x.patch"]  # no harvest written there
     assert app_git(workspace / "worktree.orig", "ls-files", admin=linked.admin).stdout.split() == ["mod.py"]
 
 
