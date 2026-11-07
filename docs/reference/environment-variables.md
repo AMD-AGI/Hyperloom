@@ -800,7 +800,10 @@ record (a directory left at its path, say) is not used, and the specialist runs 
 app collects patches, by git or from `patches/`, only while the worktree's path still names the directory it had when
 the specialist started: a specialist that writes its workspace can leave a link to any directory of the host there,
 which the app's git and patch write would otherwise follow. Otherwise no patch, harvested, scanned or claimed, is
-taken from the run, a link at that path is removed, and the task's error says `worktree_refused: <path> ...`.
+taken from the run, a link at that path is removed, and the task's error says `worktree_refused: <path> ...`. While
+the specialist runs, its checkpoint in the worktree (`specialist_done.partial.json`) is read only through that same
+directory, and none is read while the path names another; the session's resource record gives no disk use
+(`worktree_disk_bytes: null`) for a worktree path that is a link.
 
 Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch in a hosted
 run (its entry calls `require_agent_isolation()` once at start-up, so a host where neither works refuses before
