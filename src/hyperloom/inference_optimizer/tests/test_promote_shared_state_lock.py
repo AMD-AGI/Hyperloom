@@ -32,6 +32,10 @@ from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from .conftest import heartbeat_orchestration_with_mock_critic
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -480,6 +484,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     anchor = {
         "action": "explore",
@@ -489,6 +494,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "e2e_norm_intvty_p50": 110.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "extra_server_args": "",
         "extra_envs": {},
     }
@@ -505,6 +511,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "e2e_norm_intvty_p50": 50.0 if vetoed else 120.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "tpot_p90_ms": 10.0,
         "ttft_mean_ms": 12.0,
         "e2el_mean_ms": 23.0,
@@ -535,6 +542,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "tpot_p90_ms": 99.0,
         "ttft_mean_ms": 99.0,
         "e2el_mean_ms": 99.0,
@@ -2036,6 +2044,7 @@ class TestWritebackRequiredAxes:
             "e2e_norm_intvty_p50": 100.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         }
         state.current_best = {
             "action": "explore",
@@ -2046,6 +2055,7 @@ class TestWritebackRequiredAxes:
             "e2e_norm_intvty_p50": 120.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
             "extra_server_args": "--page-size 16",
             "extra_envs": {"PRIOR_ENV": "1"},
         }
@@ -2077,6 +2087,7 @@ class TestWritebackRequiredAxes:
             "e2e_norm_intvty_p50": 150.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
             "extra_server_args": "--page-size 32",
             "extra_envs": {"NEXT_ENV": "1"},
             "unset_envs": ["PRIOR_ENV"],
@@ -2285,6 +2296,7 @@ class TestWritebackRequiredAxes:
                 "e2e_norm_intvty_p50": intvty,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
             }
             assert coord.writeback.lift_to_current_best("explore", 150.0, candidate)
             assert coord.writeback.validate(150.0, candidate)
@@ -2436,6 +2448,7 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     s.current_best = {
         "action": "baseline",
@@ -2445,6 +2458,7 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     first = {
         "name": "first",
@@ -2456,6 +2470,7 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "e2e_norm_intvty_p50": 120.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "tpot_p90_ms": 10.0,
         "gain_pct": 20.0,
         "candidate_extra_server_args": "--flag-a 1",
@@ -2474,6 +2489,7 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "e2e_norm_intvty_p50": last_intvty,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "tpot_p90_ms": 9.0,
         "gain_pct": 4.0,
         "candidate_extra_server_args": "--flag-b 2",

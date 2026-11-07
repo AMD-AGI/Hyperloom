@@ -2533,6 +2533,9 @@ async def test_executor_grades_real_patch_bench(
         duration_seconds=900.0,
         request_error_rate=0.0,
         tpot_p90_ms=3.0,
+        valid_measurement=True,
+        diagnostic_only=False,
+        workload_identity="agentx-workload",
         workspace=str(workspace),
     )
 
@@ -2555,6 +2558,7 @@ async def test_executor_grades_real_patch_bench(
             "e2e_norm_intvty_p50": 450.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            "workload_identity": "agentx-workload",
         },
         baseline_accuracy=0.9,
         get_specialist_patch_verdict=lambda _sid: "approve",

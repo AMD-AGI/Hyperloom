@@ -163,7 +163,7 @@ def _non_negative(value: Any) -> float | None:
     return coerced if coerced >= 0 else None
 
 
-_AGENTX_EVIDENCE = ("benchmark_backend", "benchmark_valid", "diagnostic_only", "workload_identity")
+_AGENTX_EVIDENCE = ("valid_measurement", "diagnostic_only", "workload_identity")
 
 
 def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
@@ -447,10 +447,18 @@ def power_veto_reason(
 
 
 def native_agentx_veto(source: Mapping[str, Any], state: Any) -> str:
-    """Refuse diagnostic, invalid or differently configured AgentX evidence."""
-    if getattr(state, "agentx_backend", "") != "magpie" and source.get("benchmark_backend") != "magpie_agentx":
+    """Refuse diagnostic, invalid or differently configured evidence in an AgentX session.
+
+    Validity is the report mapper's verdict, ``round_measurement`` for a round and ``agentx_measurement`` for a v1
+    archive. An MLPerf session's rounds are not AgentX trace replays and are not judged here.
+    """
+    from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
+
+    if not is_agentx_mode(getattr(state, "benchmark_mode", "")) or is_mlperf_backend(
+        {BACKEND_ENV: str(getattr(state, "agentx_backend", "") or "")}
+    ):
         return ""
-    if source.get("benchmark_valid") is not True or source.get("diagnostic_only") is not False:
+    if source.get("valid_measurement") is not True or source.get("diagnostic_only") is not False:
         return "agentx_evidence_invalid"
     anchor = getattr(state, "current_best", None) or getattr(state, _BASELINE_PERF_ATTR, None) or {}
     identity = source.get("workload_identity")
@@ -479,8 +487,7 @@ CONSTRAINT_FIELDS = (
     "e2el_mean_ms",
     "gpu_power_avg_w",
     "gpu_power_by_gpu_w",
-    "benchmark_backend",
-    "benchmark_valid",
+    "valid_measurement",
     "diagnostic_only",
     "workload_identity",
 )

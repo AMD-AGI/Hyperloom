@@ -282,7 +282,12 @@ def test_native_power_reaches_baseline_and_keep_budgets(report, tmp_path, watts,
     )
     report["gpu_monitor"] = {"sample_count": 10, "power_watts": {"avg": 100.0}}
     measurement = extract_benchmark_measurement(report, workspace=workspace, subprocess_started_unix=1000.0)
-    state = SimpleNamespace(agentx_backend="magpie", baseline_perf=graded_axes_of(measurement), power_budget_w=900.0)
+    state = SimpleNamespace(
+        benchmark_mode="agentx",
+        agentx_backend="magpie",
+        baseline_perf=graded_axes_of(measurement),
+        power_budget_w=900.0,
+    )
     assert constraint_veto_reason(measurement, state) == veto
     assert baseline_budget_stop_reason(state, measurement) == ("baseline_over_power_budget" if veto else "")
     if watts is not None and started == 1000.0:
@@ -294,7 +299,7 @@ def test_public_metrics_and_identity_reach_keep_guards(report):
     measured = extract_benchmark_measurement(report)
     assert measured["e2e_norm_intvty_p50"] == 25
     assert measured["ttft_p50_ms"] == 200
-    state = SimpleNamespace(agentx_backend="magpie", baseline_perf=graded_axes_of(measured))
+    state = SimpleNamespace(benchmark_mode="agentx", agentx_backend="magpie", baseline_perf=graded_axes_of(measured))
     assert constraint_veto_reason(measured, state) == ""
     changed = deepcopy(report)
     changed["agentx_metrics"]["recipe"]["conc"] = 16
@@ -338,7 +343,9 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     measured = extract_benchmark_measurement(report)
     assert measured["round_succeeded"] is True
     assert not is_valid_measurement(measured)
-    assert constraint_veto_reason(measured, SimpleNamespace()) == "agentx_evidence_invalid"
+    assert constraint_veto_reason(measured, SimpleNamespace(benchmark_mode="agentx", agentx_backend="magpie")) == (
+        "agentx_evidence_invalid"
+    )
 
 
 @pytest.mark.parametrize("checkout", ["default", "yaml", "environment"])

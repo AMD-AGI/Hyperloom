@@ -1544,6 +1544,7 @@ def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
         completed_requests=measurement.get("completed_requests"),
         duration_seconds=measurement.get("duration_seconds"),
         ttft_mean_ms=measurement.get("ttft_mean_ms"),
+        benchmark_backend=measurement.get("benchmark_backend"),
         **constraint_fields(measurement),
         tpot_mean_ms=measurement.get("tpot_mean_ms"),
         input_throughput=measurement.get("input_throughput"),

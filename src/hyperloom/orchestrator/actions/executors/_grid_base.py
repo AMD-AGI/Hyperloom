@@ -196,7 +196,7 @@ class VariantResult:
     extra_envs: dict[str, str]
     status: str
     benchmark_backend: str | None = None
-    benchmark_valid: bool | None = None
+    valid_measurement: bool | None = None
     diagnostic_only: bool | None = None
     workload_identity: str | None = None
     output_throughput: float | None = None
@@ -242,7 +242,7 @@ class VariantResult:
         """Serialize this result to a plain JSON-friendly dict."""
         return {
             "benchmark_backend": self.benchmark_backend,
-            "benchmark_valid": self.benchmark_valid,
+            "valid_measurement": self.valid_measurement,
             "diagnostic_only": self.diagnostic_only,
             "workload_identity": self.workload_identity,
             "name": self.name,

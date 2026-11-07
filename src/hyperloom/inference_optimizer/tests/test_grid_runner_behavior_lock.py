@@ -264,7 +264,7 @@ class TestADiagnosticAgentxRoundIsAVerdict:
         )
 
         assert (result.status, result.error_class) == ("succeeded", "")
-        assert result.diagnostic_only is True and result.benchmark_valid is False
+        assert result.diagnostic_only is True and result.valid_measurement is False
 
     def test_a_replay_that_is_neither_valid_nor_diagnostic_still_fails(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, monkeypatch, benchmark_valid=False, publishable=False)
@@ -274,7 +274,7 @@ class TestADiagnosticAgentxRoundIsAVerdict:
     def test_a_valid_replay_succeeds(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, monkeypatch, benchmark_valid=True, publishable=True)
 
-        assert result.status == "succeeded" and result.benchmark_valid is True and result.diagnostic_only is False
+        assert result.status == "succeeded" and result.valid_measurement is True and result.diagnostic_only is False
 
 
 # keep_going_on_failure asymmetry

@@ -29,6 +29,10 @@ from hyperloom.orchestrator.state.task_registry import Task
 from ._geak_helpers import resume_pending, set_resume_pending
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 def integrated_count(ext: dict) -> int:
     """How many of the visit's candidates the timeline shows as integrated."""
     return sum(1 for row in ext["attempts"] if (row.get("e2e") or {}).get("integrated"))
@@ -58,6 +62,7 @@ def promotion(tmp_path, monkeypatch, request):
             "e2e_norm_intvty_p50": 100.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         },
         current_best={
             "action": "explore",
@@ -67,6 +72,7 @@ def promotion(tmp_path, monkeypatch, request):
             "e2e_norm_intvty_p50": 100.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         },
         model_path="/models/test",
         gpu_type="mi355x",
@@ -90,6 +96,7 @@ def promotion(tmp_path, monkeypatch, request):
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
     }
     with session_scope(tmp_path):
@@ -152,6 +159,7 @@ async def test_geak_acceptance_requires_native_retention(
         "fingerprint": "candidate",
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     if fresh_intvty is not None:
         measurement.update(
