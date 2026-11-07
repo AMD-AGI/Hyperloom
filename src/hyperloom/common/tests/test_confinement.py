@@ -366,6 +366,59 @@ def test_a_well_known_login_location_in_the_home_is_not_bound_whole_though_no_va
     assert [login for login in logins if not _absent_inside(login, policy)] == []
 
 
+@pytest.mark.parametrize("variable", ["MODEL_PATH", "SSL_CERT_FILE", "PYTHONPATH", "PATH"])
+@pytest.mark.parametrize(
+    "named", [".ssh/id_rsa", ".config/gh/hosts.yml", ".aws/credentials", ".claude/x.json", "xdg/gh/hosts.yml", "link"]
+)
+def test_a_file_a_variable_names_below_a_login_location_is_not_bound(
+    tmp_path, monkeypatch, caplog, no_child_python, variable, named
+):
+    """``MODEL_PATH=~/.ssh/id_rsa``, ``SSL_CERT_FILE=~/.config/gh/hosts.yml``, a file in ``~/.aws``, ``~/.claude``
+    or ``$XDG_CONFIG_HOME/gh``, or a link elsewhere to one: a file below a login location is a login, so it is not
+    bound, and one warning names it; a file in the home outside every login location, and the program folders
+    below one (``~/.config/tool/bin``, ``~/.claude/local``), still are."""
+    monkeypatch.setattr(confinement, "_SAID", set())
+    home, xdg = tmp_path / "users" / "u", tmp_path / "xdg"
+    secret = _write({"xdg/gh/hosts.yml": xdg / "gh/hosts.yml", "link": home / ".ssh/id_rsa"}.get(named, home / named))
+    shown = tmp_path / "ca.pem" if named == "link" else secret
+    if named == "link":
+        shown.symlink_to(secret)
+    model = _write(home / "models/m.bin")
+    tools = [_write(home / ".config/tool/bin/tool"), _write(home / ".claude/local/claude")]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    environ = {"HOME": str(home), "PATH": "/usr/bin", "XDG_CONFIG_HOME": str(xdg), "HF_HOME": str(tmp_path / "hf")}
+    environ[variable] = os.pathsep.join(map(str, (shown, model, *(tool.parent for tool in tools))))
+
+    with caplog.at_level("WARNING", logger=confinement.__name__):
+        found = toolchain_paths(environ, "sh", writable=())
+        toolchain_paths(environ, "sh", writable=())
+
+    assert shown not in found
+    assert secret not in found
+    assert {model, *(tool.parent for tool in tools)} <= set(found)
+    said = [record.getMessage() for record in caplog.records if str(shown) in record.getMessage()]
+    assert len(said) == 1, said
+    assert "a file in a tool's login location" in said[0]
+    policy = Confinement(readable=found, masked=credential_paths(environ, app_environ={}, allowed=found)).policy()
+    assert _absent_inside(secret, policy)
+
+
+def test_the_program_the_child_runs_from_a_login_location_is_still_bound(tmp_path, monkeypatch, no_child_python):
+    """The program the launch runs is its choice, not a variable's: a program file kept right in ``~/.config`` is
+    still bound, though another file there a variable names is not."""
+    home = tmp_path / "users" / "u"
+    program, other = _write(home / ".config/tool"), _write(home / ".config/token.json")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    environ = {"HOME": str(home), "PATH": "/usr/bin", "MODEL_PATH": str(other)}
+
+    found = toolchain_paths(environ, str(program), writable=())
+
+    assert program in found
+    assert other not in found
+
+
 def test_the_system_roots_stay_whole_whatever_credential_location_lies_below_them(tmp_path, monkeypatch):
     """A home or login under ``/etc`` or ``/opt`` (baked into an image) leaves the system roots as they are: the
     masks hide it there."""

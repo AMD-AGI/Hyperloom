@@ -383,3 +383,54 @@ def test_a_path_entry_that_is_or_holds_the_home_shows_none_of_its_logins(outside
         "write": "ok:written",
         "mark": "mark-1",
     }
+
+
+@pytest.mark.parametrize("bedrock", [False, True])
+def test_a_file_a_variable_names_in_a_login_location_is_absent_inside_but_bedrock_s_given_one_reads(
+    outside_tmp, monkeypatch, bedrock
+):
+    """``MODEL_PATH=~/.ssh/id_rsa`` and ``SSL_CERT_FILE=~/.config/gh/hosts.yml`` name logins: neither is readable
+    inside, while a program in ``~/.config/tool/bin`` on ``PATH`` runs. The AWS files a Bedrock-backed launch hands
+    the child on purpose (``AWS_SHARED_CREDENTIALS_FILE``, ``AWS_CONFIG_FILE``, given and bound read-only) do read,
+    and nothing else of ``~/.aws`` does."""
+    isolation = BwrapIsolation(usable_bwrap())
+    home, work = outside_tmp / "users" / "u", outside_tmp / "work"
+    work.mkdir()
+    paths = {
+        "ssh": _write(home / ".ssh/id_rsa", "SECRET-SSH"),
+        "gh": _write(home / ".config/gh/hosts.yml", "SECRET-GH"),
+        "sso": _write(home / ".aws/sso/cache/token.json", "SECRET-SSO"),
+    }
+    aws = {
+        "AWS_SHARED_CREDENTIALS_FILE": _write(home / ".aws/credentials", "aws-credentials"),
+        "AWS_CONFIG_FILE": _write(home / ".aws/config", "aws-config"),
+    }
+    tool = _write(home / ".config/tool/bin/tool", "#!/bin/sh\necho tool ran\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tool.parent}:/usr/bin:/bin",
+        "MODEL_PATH": str(paths["ssh"]),
+        "SSL_CERT_FILE": str(paths["gh"]),
+    }
+    given: tuple[Path, ...] = ()
+    if bedrock:
+        env.update({"CLAUDE_CODE_USE_BEDROCK": "1", **{name: str(path) for name, path in aws.items()}})
+        given = tuple(aws.values())
+    readable = (*toolchain_paths(env, "tool", writable=(work,)), *given)
+    masked = credential_paths(env, given=given, allowed=(*readable, work), writable=(work,))
+    confinement = Confinement(writable=(work,), readable=readable, masked=masked)
+
+    seen = _run(isolation, confinement, env, {**paths, **aws}, work)
+
+    assert seen == {
+        **dict.fromkeys(paths, "ENOENT"),
+        "AWS_SHARED_CREDENTIALS_FILE": "ok:aws-credentials" if bedrock else "ENOENT",
+        "AWS_CONFIG_FILE": "ok:aws-config" if bedrock else "ENOENT",
+        "tool": "tool ran",
+        "write": "ok:written",
+        "mark": "mark-1",
+    }
+    assert not {str(paths["ssh"]), str(paths["gh"])} & set(confinement.policy().read_only)
