@@ -53,7 +53,7 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
     monkeypatch.setattr(gr, "build_benchmark_command", lambda **kwargs: [sys.executable, "scripted-benchmark"])
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._inferencex_patcher.ensure_eval_probe_patched", lambda *args: True
+        "hyperloom.orchestrator.actions.executors.benchmark_backend.ensure_eval_probe_patched", lambda *args: True
     )
     monkeypatch.setattr(conc_sweep, "_build_roofline_ceiling", lambda *args, **kwargs: None)
     base = tmp_path / "baseline.yaml"

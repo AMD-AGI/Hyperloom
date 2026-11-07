@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _inferencex_patcher as inferencex_patcher
 from hyperloom.orchestrator.actions.executors import _magpie_patcher as patcher
-from hyperloom.orchestrator.actions.executors.benchmark_config import prepare_benchmark_runtime
+from hyperloom.orchestrator.actions.executors import benchmark_backend
+from hyperloom.orchestrator.actions.executors.benchmark_backend import prepare_inferencex_checkout
 
 REF = "b315ef3b05176acc9732bb7fdec116abe1ecc476"
 LIB = f"""#!/usr/bin/env bash
@@ -57,9 +57,9 @@ def test_the_benchmark_preparation_patches_the_runner_s_own_inferencex_checkout(
     config = tmp_path / "point.yaml"
     config.write_text("benchmark:\n  framework: sglang\n  envs:\n    RUN_EVAL: 'false'\n")
     monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
-    monkeypatch.setattr(inferencex_patcher, "ensure_eval_probe_patched", lambda root: True)
+    monkeypatch.setattr(benchmark_backend, "ensure_eval_probe_patched", lambda root: True)
 
-    assert prepare_benchmark_runtime(config, {}) is None
+    assert prepare_inferencex_checkout(config, {}) is None
 
     assert patcher._LM_EVAL_ONCE_SENTINEL in (checkout / "benchmarks" / "benchmark_lib.sh").read_text()
 

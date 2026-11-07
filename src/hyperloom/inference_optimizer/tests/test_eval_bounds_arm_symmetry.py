@@ -29,7 +29,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 
 _PATCHER = "hyperloom.orchestrator.actions.executors._grid_runner"
-_EVAL_PATCHER = "hyperloom.orchestrator.actions.executors._inferencex_patcher"
+_EVAL_PATCHER = "hyperloom.orchestrator.actions.executors.benchmark_backend"
 
 
 def _write_config(path: Path, **envs) -> Path:
@@ -268,7 +268,7 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
     }
     assert siblings == set(), f"_accuracy_gate must stay a leaf, but it imports {sorted(siblings)}"
 
-    from hyperloom.orchestrator.actions.executors import benchmark_config, baseline
+    from hyperloom.orchestrator.actions.executors import benchmark_backend, baseline
 
-    for arm in (benchmark_config, baseline):
+    for arm in (benchmark_backend, baseline):
         assert arm.materialized_run_eval_disabled is materialized_run_eval_disabled, arm.__name__

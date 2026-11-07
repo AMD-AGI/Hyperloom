@@ -1315,8 +1315,7 @@ def test_grid_preparation_patches_the_seed_too(tmp_path, monkeypatch):
     """Explore and sweep never pass through the baseline hook, and their warmups need the patch just as much."""
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import benchmark_config
-    from hyperloom.orchestrator.actions.executors.benchmark_config import prepare_benchmark_runtime
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import prepare_inferencex_checkout
 
     ix_root = tmp_path / "InferenceX@deadbeef"
     _write_full_lib(ix_root)
@@ -1324,7 +1323,6 @@ def test_grid_preparation_patches_the_seed_too(tmp_path, monkeypatch):
     config = tmp_path / "variant.yaml"
     config.write_text(yaml.safe_dump({"benchmark": {"envs": {"RUN_EVAL": "false"}}}), encoding="utf-8")
     monkeypatch.setenv("INFERENCEX_PATH", str(ix_root))
-    monkeypatch.setattr(benchmark_config, "prepare_agentx_runtime", lambda **_kw: None)
 
-    assert prepare_benchmark_runtime(config, {}) is None
+    assert prepare_inferencex_checkout(config, {}) is None
     assert "HYPERLOOM_BENCH_SEED" in real.read_text(encoding="utf-8")
