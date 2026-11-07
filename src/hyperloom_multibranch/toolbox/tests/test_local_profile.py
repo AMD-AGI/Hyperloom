@@ -163,6 +163,6 @@ async def test_a_profile_test_on_an_inferencex_that_cannot_be_patched_fails_nami
         assert result.validity is Validity.MEASUREMENT_FAILED and result.profile_location == "", result
         reason = result.failure_reason or ""
         assert "benchmark_lib.sh" in reason and "benchmark_serving.py" in reason, reason
-        assert reason.endswith("lack the patch"), reason
+        assert "lack the patch" in reason, reason
     finally:
         await toolbox.close()

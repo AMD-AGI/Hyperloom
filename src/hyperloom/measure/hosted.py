@@ -658,6 +658,8 @@ class HostedMeasurementBackend:
         text = f"{error_class}: {reported['message']}"
         if rc == HOSTED_INFRA_FAILURE_RC:  # where it failed matters for the node; a refused sheet is the sheet's
             text = f"{text} ({where(*_place(attempt.runner))})"
+        elif error_class == "spec_rejected":  # a runner of an older version names only the versions it reads
+            text = f"{text} (the sheet is {attempt.spec.schema})"
         outcome = _outcome(call, rc, facts=_facts_of(attempt.runner, None), stderr=text, failure=verdict)
         self._finish_record(attempt, outcome, {"verdict": error_class, "runner_status": reported})
         return outcome
