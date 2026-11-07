@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
 from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
@@ -339,7 +340,7 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     assert not {"NUM_PROMPTS", "NUM_WARMUPS", "EXTRA_SGLANG_ARGS", "HSA_FORCE_FINE_GRAIN_PCIE"} & envs.keys()
     launch = rendered["benchmark"]["agentx"]["launch_overrides"]
     assert launch["append_args"] == SERVER_ARGS.split()
-    assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1"}
+    assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1", AITER_LOG_TUNED_CONFIG_ENV: "1"}
 
 
 #: An option of the launch Magpie resolves from the InferenceX recipe, which the recipe's own arguments lack.
