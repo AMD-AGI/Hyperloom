@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import replace
 
@@ -12,9 +13,12 @@ import pytest
 
 from hyperloom.measure.hosted_spec import SpecRefused, build_spec
 from hyperloom.measure.socket import SessionFacts
+from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
 from hyperloom.measure.tests.hosted_fixtures import make_call, point_yaml, spec_context
+from inference_suite.contracts import Redacted
+from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
 
-OTHER_COMMIT = "b" * 40
+OTHER_STAGING = "d" * 64
 
 
 def _tools(tmp_path, **overrides):
@@ -23,18 +27,69 @@ def _tools(tmp_path, **overrides):
     return ctx, build_spec(call, request_id="req-1", ctx=ctx, deadline_unix=time.time() + 60).tools
 
 
-def test_the_sheet_names_the_magpie_commit_of_the_session_facts_over_the_contexts(tmp_path):
-    ctx, tools = _tools(tmp_path, session_facts=SessionFacts(magpie_commit=OTHER_COMMIT))
+def test_the_sheet_names_the_staging_and_the_inferencex_commit_its_carried_base_is_measured_with(tmp_path):
+    base = replace(base_launch(), client=replace(base_launch().client, commit="e" * 40))
+    _, tools = _tools(tmp_path, session_facts=SessionFacts(staging=OTHER_STAGING, base_launch=base))
 
-    assert (tools.magpie, tools.inferencex) == (OTHER_COMMIT, ctx.inferencex_commit)
-    assert OTHER_COMMIT != ctx.magpie_commit
+    assert (tools.staging, tools.inferencex, tools.magpie) == (OTHER_STAGING, "e" * 40, None)
 
 
-def test_the_sheet_names_the_contexts_magpie_commit_when_the_session_facts_name_none(tmp_path):
-    ctx, without_facts = _tools(tmp_path)
-    _, facts_without_commit = _tools(tmp_path, session_facts=SessionFacts())
+def test_a_frozen_base_names_the_inferencex_commit_the_inference_suite_staging_requires(tmp_path):
+    _, tools = _tools(tmp_path)
 
-    assert without_facts.magpie == facts_without_commit.magpie == ctx.magpie_commit
+    assert tools.inferencex == PINNED_TOOLS[INFERENCEX_TOOL]
+
+
+@pytest.mark.parametrize("facts", [None, SessionFacts(), SessionFacts(staging="sha256:" + "d" * 64)])
+def test_a_call_whose_facts_name_no_staging_is_refused_not_sent_with_a_guess(tmp_path, facts):
+    with pytest.raises(SpecRefused, match="tools_unknown"):
+        _tools(tmp_path, session_facts=facts and replace(facts, base_launch=base_launch()))
+
+
+def test_a_call_whose_facts_carry_no_frozen_base_is_refused_naming_the_sheet_version(tmp_path):
+    with pytest.raises(SpecRefused, match="base_launch_missing: a hyperloom.measurement-spec/v2 sheet"):
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING))
+
+
+def test_the_sheet_carries_the_frozen_base_whole(tmp_path):
+    procedure = _procedure(tmp_path)
+
+    assert procedure.base_launch == base_launch() and procedure.benchmark_backend is None
+
+
+def test_a_base_launch_over_64_kib_is_refused_when_the_sheet_is_written(tmp_path):
+    big = replace(base_launch(), warnings=("w" * 70_000,))
+
+    with pytest.raises(SpecRefused, match=r"sheet_invalid: .*base_launch too large \(\d+ bytes > 65536\)"):
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=big))
+
+
+_HF_TOKEN = "hf_" + "q" * 34
+
+
+@pytest.mark.parametrize(
+    ("unredacted", "named"),
+    [
+        (lambda base: replace(base, env={**base.env, "HF_TOKEN": _HF_TOKEN}), "env HF_TOKEN"),
+        (lambda base: replace(base, env={**base.env, "SGLANG_EXTRA": "Bearer " + "q" * 20}), "env SGLANG_EXTRA"),
+        (lambda base: replace(base, args=(*base.args, "--api-key=sk-" + "q" * 20)), "credential in arg "),
+        (lambda base: replace(base, client=replace(base.client, env={"OPENAI_API_KEY": "x"})), "client env"),
+    ],
+    ids=["secret-named env", "credential-shaped env value", "credential-shaped arg", "secret-named client env"],
+)
+def test_a_base_carrying_an_unredacted_credential_is_refused_naming_where_never_the_value(tmp_path, unredacted, named):
+    with pytest.raises(SpecRefused, match="base_launch_secret") as refused:
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=unredacted(base_launch())))
+
+    assert named in str(refused.value) and "qqqqqq" not in str(refused.value)
+
+
+def test_a_base_whose_secret_named_env_is_redacted_is_carried(tmp_path):
+    base = replace(base_launch(), env={**base_launch().env, "HF_TOKEN": Redacted(hashlib.sha256(b"t").hexdigest())})
+
+    procedure = _procedure(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=base))
+
+    assert procedure.base_launch == base
 
 
 def _procedure(tmp_path, **overrides):

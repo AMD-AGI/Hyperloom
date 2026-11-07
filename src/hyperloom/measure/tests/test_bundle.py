@@ -105,7 +105,7 @@ def test_an_unusable_public_key_is_not_reported_as_tampering(bundle) -> None:
 
 
 def test_a_signed_manifest_of_another_schema_is_rejected(bundle) -> None:
-    bundle.write_manifest(bundle.document | {"schema": "hyperloom.measurement-result/v2"})
+    bundle.write_manifest(bundle.document | {"schema": "hyperloom.measurement-result/v3"})
     assert _reason(bundle.staging, bundle) is RejectReason.SCHEMA_MISMATCH
 
 

@@ -39,7 +39,7 @@ from hyperloom.measure.failures import (
 )
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.magpie_launchers import install_launchers
-from hyperloom.measure.manifest import encode_manifest, manifest_notes, ManifestFile, RESULT_SCHEMA
+from hyperloom.measure.manifest import encode_manifest, manifest_notes, ManifestFile, RESULT_SCHEMA, RESULT_SCHEMA_V1
 from hyperloom.measure.phases import (
     BOOTSTRAP,
     ENV_REBUILD,
@@ -87,14 +87,16 @@ from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes, wait_for_file, write_status
 from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
-from hyperloom.measure.runner.tools import ToolError, ensure_inferencex, ensure_magpie
+from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR, LOCAL_WHEELS_DIR
+from hyperloom.measure.runner.tools import ToolError, ensure_inference_suite, ensure_inferencex, ensure_magpie
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
-from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
+from hyperloom.measure.spec import SPEC_SCHEMA, SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
-from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
+from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, backend_reason, harvest_leaked_artifacts
 from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_image_own_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
+from inference_suite.contracts import ConfigError
 
 __all__ = ["run"]
 
@@ -121,6 +123,8 @@ class _Context:
     out_dir: Path
     work: Path
     cache: Path
+    #: The sandbox's checked wheels, the only source an offline inference_suite staging installs from.
+    wheels: Path
     environ: MutableMapping[str, str]
     started: float
     #: Watches the visible cards for a process that is not this sandbox's; the signed result states what it saw.
@@ -132,6 +136,8 @@ class _Context:
     #: The directory the test's compilers write below, on this host's temporary disk; made once the sheet names the
     #: test (:func:`_compile_dir`) and removed when the run ends.
     compile: Path | None = None
+    #: The sha256 of the inference_suite staging manifest this runner staged for a v2 sheet (:func:`_prepare`).
+    staging: str | None = None
 
     @property
     def files(self) -> Path:
@@ -197,6 +203,22 @@ def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
             raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} unreadable: {exc}") from exc
         if actual != wanted:
             raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} differs from the recorded hash")
+
+
+def _check_runs_on_inference_suite(spec: MeasurementSpec) -> None:
+    """A v2 sheet's points all run on inference_suite: this runner stages no Magpie for one, so a point the suite
+    declines is refused here rather than handed to the benchmark backend."""
+    if spec.schema == SPEC_SCHEMA_V1:
+        return
+    for index, point in enumerate(spec.config):
+        try:
+            reason = backend_reason(yaml.safe_load(point.yaml) or {})
+        except ConfigError as exc:
+            reason = str(exc)
+        if reason is not None:
+            raise RunnerFailure(
+                _SPEC_REJECTED, f"point {index}: {reason}; a {SPEC_SCHEMA} sheet runs only on inference_suite"
+            )
 
 
 def _check_runtime(spec: MeasurementSpec) -> None:
@@ -278,6 +300,10 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
     """Tools, attachments, farm and the rewritten YAML; returns the point path and the InferenceX checkout."""
     try:
         inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
+        if spec.tools.staging is not None:
+            runner_cache = Path(ctx.environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
+            staged = ensure_inference_suite(inferencex, runner_cache, ctx.wheels)
+            ctx.environ[TOOL_CACHE_ENV], ctx.staging = str(staged.tool_cache), staged.staging
         if spec.procedure.benchmark_backend == _MAGPIE:
             ctx.environ["MAGPIE_PATH"] = str(ensure_magpie(spec.tools.magpie, ctx.cache))
     except ToolError as exc:
@@ -389,7 +415,6 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         rounds = RoundPlan(warmup_rounds=p.warmup_rounds, measure_rounds=p.measure_rounds)
     except ValueError as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
-    ctx.environ["HYPERLOOM_BENCHMARK_BACKEND"] = p.benchmark_backend
     ctx.files.mkdir(parents=True, exist_ok=True)
     return TestCall(
         points=tuple(points),
@@ -407,7 +432,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         on_output=progress.touch,
         env_overrides=dict(spec.process_env),
         unset_envs=spec.unset_envs,
-        session_facts=SessionFacts((), str(inferencex), spec.tools.magpie),
+        session_facts=SessionFacts((), str(inferencex), ctx.staging, p.base_launch),
         attachments=_case_attachments(spec),
         phases=ctx.phases,
         short_prompts=p.short_prompts,
@@ -504,6 +529,15 @@ class _Findings:
     jit_cache: dict | None = None
 
 
+def _tool_facts(ctx: _Context, spec: MeasurementSpec) -> dict[str, str | None]:
+    """What the manifest says the test ran: for a v2 sheet the staging this runner staged, which the sheet's (the
+    application's) never equals byte for byte, or the Magpie commit of a v1 sheet, which this runner still measures
+    through Magpie."""
+    if spec.schema == SPEC_SCHEMA_V1:
+        return {"magpie_commit": spec.tools.magpie}
+    return {"inference_suite_staging": ctx.staging}
+
+
 def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Findings) -> None:
     spec, raw, key = signed.spec, signed.raw, signed.key
     files, facts, changed, timing, visible = found.files, found.facts, found.changed, found.timing, found.visible
@@ -513,7 +547,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
     document: dict = {"outcome": outcome}
     document.update(
         {
-            "schema": RESULT_SCHEMA,
+            "schema": RESULT_SCHEMA_V1 if spec.schema == SPEC_SCHEMA_V1 else RESULT_SCHEMA,
             "request_id": spec.request_id,
             "spec_fingerprint": fingerprint(spec, hyperloom_version=_version()),
             "spec_sha256": spec_sha256(raw),
@@ -527,7 +561,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
                 "power_cap_w": first.power_cap_w if first else None,
                 "partition_mode": first.partition_mode if first else None,
                 "hyperloom_version": _version(),
-                "magpie_commit": spec.tools.magpie,
+                **_tool_facts(ctx, spec),
                 "inferencex_commit": spec.tools.inferencex,
                 "gpu_ids": visible,
                 "rule_pack": rule_pack_identity(),
@@ -624,6 +658,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     spec = _parse(raw)
     visible = _visible(ctx.environ)
     _check_model(spec.config[0].yaml, dict(spec.model_hashes))
+    _check_runs_on_inference_suite(spec)
     _check_runtime(spec)
     facts = _preflight(ctx, spec, visible)
     before = hardware.ecc_counts(visible)
@@ -736,7 +771,7 @@ def run(
         write_status(out_dir, state=_FAILED, error_class=failure.error_class, message=str(failure))
         return failure.exit_code
     watch = CardWatch(_visible(environ), own_sandbox_processes(environ), guard)
-    ctx = _Context(in_dir, out_dir, work, scratch / "cache", environ, time.time(), watch)
+    ctx = _Context(in_dir, out_dir, work, scratch / "cache", scratch / LOCAL_WHEELS_DIR, environ, time.time(), watch)
     _begin_phases(ctx)
     with Progress(out_dir, files_dir=ctx.files) as progress:
         try:

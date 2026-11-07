@@ -8,8 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from hyperloom.inference_optimizer.session.base_launch import write_base_launch
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state import base_launch as state_base_launch
 from inference_suite.contracts import (
     BaseLaunch,
     ClientLaunch,
@@ -69,8 +68,4 @@ def freeze_session_base(
 
 def freeze_base(session_dir: Path, base: BaseLaunch) -> BaseLaunch:
     """Write ``base`` as ``session_dir``'s ``base_launch.json`` and record its digest in the session's state."""
-    write_base_launch(session_dir, base)
-    state = SharedState.load_or_init(session_dir)
-    state.base_launch_digest = base.digest()
-    state.save(session_dir)
-    return base
+    return state_base_launch.freeze_base(session_dir, base).launch

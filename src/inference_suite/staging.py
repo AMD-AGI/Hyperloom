@@ -229,6 +229,15 @@ def manifest_sha256(tool_cache: Path) -> str | None:
         return None
 
 
+def verified_manifest_sha256(tool_cache: Path) -> str | None:
+    """The sha256 of the manifest ``tool_cache`` holds when the cache verifies against the pins in force; ``None``
+    when it does not, or holds no manifest."""
+    digest = manifest_sha256(tool_cache)
+    if digest is None or verify(tool_cache, digest).failed_step is not None:
+        return None
+    return digest
+
+
 def _parse_manifest(path: Path, data: bytes) -> StagingManifest | str:
     """The manifest in ``data``, or what to report when it does not parse."""
     try:
@@ -283,7 +292,13 @@ def _run_staging_step(argv: Sequence[str], what: str) -> None:
         raise StagingError(f"{what} exited with code {done.returncode}: {done.stderr.strip()[-2000:]}")
 
 
-def _install_agentx_runtime(root: Path) -> dict[str, str]:
+def _pip_install(python: Path | str, wheels: Path | None) -> list[str]:
+    """``pip install`` under ``python``; with ``wheels``, from that directory's wheels alone, never from an index."""
+    install = [str(python), "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
+    return install if wheels is None else [*install, "--no-index", "--find-links", str(wheels), "--only-binary=:all:"]
+
+
+def _install_agentx_runtime(root: Path, wheels: Path | None) -> dict[str, str]:
     """Build the harness venv under ``root`` from InferenceX's pinned requirements; returns its manifest files.
 
     The venv is built in place: its scripts carry their interpreter's absolute path, so it cannot be moved after.
@@ -294,7 +309,7 @@ def _install_agentx_runtime(root: Path) -> dict[str, str]:
     venv = root / AGENTX_VENV_DIR
     _run_staging_step([sys.executable, "-m", "venv", str(venv)], "creating the AgentX harness venv")
     python = root / AGENTX_PYTHON
-    install = [str(python), "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
+    install = _pip_install(python, wheels)
     _run_staging_step([*install, "-r", str(root / AGENTX_REQUIREMENTS)], "installing the AgentX harness")
     staged = [python, *sorted(venv.glob(f"lib/python*/site-packages/*.dist-info/{_DIST_RECORD}"))]
     return {path.relative_to(root).as_posix(): _sha256(path.read_bytes()) for path in staged}
@@ -306,9 +321,9 @@ def _write_atomically(path: Path, data: bytes) -> None:
     os.replace(partial, path)
 
 
-def stage(source: Path, tool_cache: Path) -> str:
+def stage(source: Path, tool_cache: Path, wheels: Path | None = None) -> str:
     """Copy InferenceX's subset from the checkout ``source`` into ``tool_cache`` and build the AgentX harness venv
-    beside it; returns the manifest's sha256.
+    beside it, from the wheel directory ``wheels`` alone when one is given; returns the manifest's sha256.
 
     Raises:
         StagingError: ``source`` is not a checkout at the pinned commit, lacks part of the subset, or the harness
@@ -331,7 +346,7 @@ def stage(source: Path, tool_cache: Path) -> str:
         files[relative.as_posix()] = _sha256(target.read_bytes())
     shutil.rmtree(root, ignore_errors=True)
     os.replace(partial, root)
-    files.update(_install_agentx_runtime(root))
+    files.update(_install_agentx_runtime(root, wheels))
     manifest = StagingManifest({INFERENCEX_TOOL: StagedTool(pin, files)})
     data = manifest.to_bytes()
     _write_atomically(tool_cache / MANIFEST_FILE, data)
@@ -345,10 +360,17 @@ def _distribution_version(name: str) -> str | None:
         return None
 
 
-def _install_lm_eval() -> None:
-    """Install the pinned lm-eval into this interpreter, the one a round runs its eval under, unless it is there."""
-    if _distribution_version(LM_EVAL_DISTRIBUTION) == LM_EVAL_VERSION:
+def _install_lm_eval(wheels: Path | None) -> None:
+    """Install the pinned lm-eval into this interpreter, the one a round runs its eval under, unless it is there.
+
+    An offline staging (``wheels``) installs nothing into this interpreter: a sealed runner's lm-eval is the one its
+    own lock installed, so one off the pin is refused.
+    """
+    installed = _distribution_version(LM_EVAL_DISTRIBUTION)
+    if installed == LM_EVAL_VERSION:
         return
+    if wheels is not None:
+        raise StagingError(f"{sys.executable} has {LM_EVAL_DISTRIBUTION} {installed}, not {LM_EVAL_REQUIREMENT}")
     install = [sys.executable, "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
     _run_staging_step([*install, LM_EVAL_REQUIREMENT], f"installing {LM_EVAL_REQUIREMENT}")
 
@@ -379,7 +401,7 @@ def _fetch_inferencex(checkout: Path) -> None:
     _run_staging_step([*git, "checkout", "-q", "FETCH_HEAD"], f"checking out InferenceX {pin}")
 
 
-def ensure_staged(tool_cache: Path, source: Path | None) -> str:
+def ensure_staged(tool_cache: Path, source: Path | None, wheels: Path | None = None) -> str:
     """Stage the pinned tools into ``tool_cache`` unless it holds them intact; returns the manifest's sha256.
 
     A cache whose manifest verifies stages nothing. One staged at a pin no longer in force, or without a file a load
@@ -387,24 +409,29 @@ def ensure_staged(tool_cache: Path, source: Path | None) -> str:
     refused as it stands, never overwritten. InferenceX is staged from the checkout ``source``, or with none,
     fetched at its pin. lm-eval is installed at its pin into the interpreter running this.
 
+    With ``wheels`` the staging is offline: nothing is fetched, the harness is installed from that directory's wheels
+    alone, ``source`` is required, and an lm-eval off its pin is refused rather than installed.
+
     Raises:
         StagingError: the cache is damaged, or a tool cannot be fetched, staged or installed, including when git or
             the cache directory is unavailable.
     """
     try:
-        return _stage_unless_intact(tool_cache, source)
+        return _stage_unless_intact(tool_cache, source, wheels)
     except OSError as exc:
         raise StagingError(f"staging into {tool_cache} failed: {exc}") from exc
 
 
-def _stage_unless_intact(tool_cache: Path, source: Path | None) -> str:
+def _stage_unless_intact(tool_cache: Path, source: Path | None, wheels: Path | None) -> str:
     digest = _intact_digest(tool_cache)
-    _install_lm_eval()
+    _install_lm_eval(wheels)
     if digest is not None:
         return digest
+    if source is None and wheels is not None:
+        raise StagingError("an offline staging (--wheels) fetches nothing; name the InferenceX checkout with --source")
     tool_cache.mkdir(parents=True, exist_ok=True)
     if source is not None:
-        return stage(source, tool_cache)
+        return stage(source, tool_cache, wheels)
     checkout = tool_cache / f".source-{PINNED_TOOLS[INFERENCEX_TOOL]}"
     shutil.rmtree(checkout, ignore_errors=True)
     try:
@@ -469,6 +496,7 @@ __all__ = [
     "manifest_sha256",
     "stage",
     "tool_root",
+    "verified_manifest_sha256",
     "verify",
 ]
 

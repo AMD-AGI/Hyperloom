@@ -72,9 +72,9 @@ def clean_process_env(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(name, raising=False)
     for name in (
-        "MAGPIE_EVAL_TASKS",
-        "MAGPIE_EVAL_LIMIT",
-        "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+        "HYPERLOOM_EVAL_TASKS",
+        "HYPERLOOM_EVAL_LIMIT",
+        "HYPERLOOM_EVAL_TOKENIZED_REQUESTS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SERVER_ARGS", raising=False)
@@ -321,7 +321,9 @@ def test_the_copy_of_magpies_filter_is_magpies(tmp_path):
         "EVAL_X": "1",
         "RESULT_DIR": "x",
     }
-    envs.update({"MAGPIE_EVAL_LIMIT": "5", "ROCR_VISIBLE_DEVICES": "0", "MAGPIE_RUN_PHASE": "server", "PORT": "8123"})
+    envs.update(
+        {"HYPERLOOM_EVAL_LIMIT": "5", "ROCR_VISIBLE_DEVICES": "0", "MAGPIE_RUN_PHASE": "server", "PORT": "8123"}
+    )
     config = SimpleNamespace(envs=envs, inferencex_path=str(tmp_path), framework="sglang", model="m", run_mode="local")
 
     desired = benchmarker.BenchmarkMode._desired_reuse_server_meta(SimpleNamespace(config=config), PORT)

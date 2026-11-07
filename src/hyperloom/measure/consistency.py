@@ -56,9 +56,11 @@ from typing import Any
 from hyperloom.measure.hosted import HOSTED_DIR_NAME
 from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
 from hyperloom.measure.runner.inventory import FARM_INVENTORY_FILE
-from hyperloom.measure.socket import MeasurementBackend, TestCall, TestOutcome
-from hyperloom.orchestrator.actions.executors import RoundFolder, is_round_folder
+from hyperloom.measure.socket import MeasurementBackend, SessionFacts, TestCall, TestOutcome
+from hyperloom.orchestrator.actions.executors import RoundFolder, is_round_folder, staged_tool_cache
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_base
+from inference_suite import manifest_sha256
 
 __all__ = [
     "Criteria",
@@ -712,8 +714,6 @@ def build_backends(config_path: Path) -> Backends:
         image_ref=cfg["image_ref"],
         image_digest=cfg["image_digest"],
         gpu_type=cfg["gpu_type"],
-        magpie_commit=cfg["magpie_commit"],
-        inferencex_commit=cfg["inferencex_commit"],
         blobs=LocalBlobStore(blobs_dir),
         power_cap_w=cfg.get("power_cap_w"),
         partition_mode=cfg.get("partition_mode"),
@@ -721,7 +721,6 @@ def build_backends(config_path: Path) -> Backends:
         shared_roots=tuple(Path(p) for p in cfg.get("shared_roots", ())),
         model_dir=Path(cfg["model_dir"]) if cfg.get("model_dir") else None,
         blob_root=str(blobs_dir),
-        **({"benchmark_backend": cfg["benchmark_backend"]} if cfg.get("benchmark_backend") else {}),
     )
     hosted_config = HostedConfig(
         session_dir=session,
@@ -757,12 +756,35 @@ def build_parser(prog: str = "python -m hyperloom.measure.consistency") -> argpa
     return parser
 
 
+def session_facts(config_path: Path) -> SessionFacts:
+    """What both sides of every test take from the session the config names: its frozen base launch, and the
+    inference_suite staging the application's tool cache holds.
+
+    Raises:
+        BaseLaunchMismatch: The session's ``base_launch.json`` is not the base it recorded.
+    """
+    session = Path(json.loads(Path(config_path).read_text(encoding=_UTF8))["session_dir"])
+    frozen = frozen_base(session)
+    return SessionFacts(
+        staging=manifest_sha256(staged_tool_cache()), base_launch=None if frozen is None else frozen.launch
+    )
+
+
+def _with_facts(item: ChecklistItem, facts: SessionFacts) -> ChecklistItem:
+    call = item.call
+    return dataclasses.replace(
+        item, call=lambda output_dir, task_id: dataclasses.replace(call(output_dir, task_id), session_facts=facts)
+    )
+
+
 def items_from_arguments(args: argparse.Namespace) -> list[ChecklistItem] | None:
-    """The checklist of the command line with ``--repeats`` applied; ``None`` (after a message) when it is unusable."""
+    """The checklist of the command line with ``--repeats`` and the session's facts applied; ``None`` (after a message)
+    when it is unusable."""
     try:
-        items = load_checklist(args.checklist)
-    except (OSError, ValueError) as exc:
-        print(f"checklist unusable: {exc}", file=sys.stderr)
+        facts = session_facts(args.config)
+        items = [_with_facts(item, facts) for item in load_checklist(args.checklist)]
+    except (OSError, ValueError, KeyError, BaseLaunchMismatch) as exc:
+        print(f"checklist or session unusable: {exc}", file=sys.stderr)
         return None
     if args.repeats is not None:
         if args.repeats < 1:
