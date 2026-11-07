@@ -106,7 +106,7 @@ def _runner_facts(key: Any, sandbox_id: str, mode: str) -> dict[str, Any]:
         "power_cap_w": 500,
         "partition_mode": "SPX/NPS1",
         "hyperloom_version": _version(),
-        "magpie_commit": "e" * 40,
+        "inference_suite_staging": "e" * 64,
         "inferencex_commit": "f" * 40,
         "gpu_ids": _visible_cards(),
         "ecc_delta": {"correctable": 0, "uncorrectable": 0},

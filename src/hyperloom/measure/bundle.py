@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from hyperloom.measure import fsafe
 from hyperloom.measure.docs import DocumentError, parse_json_object
-from hyperloom.measure.manifest import RESERVED_NAMES, RESULT_SCHEMA, ManifestFile, ResultManifest, manifest_sha256
+from hyperloom.measure.manifest import RESERVED_NAMES, RESULT_SCHEMAS, ManifestFile, ResultManifest, manifest_sha256
 from hyperloom.measure.signing import SigningError, public_key_fingerprint, verify
 
 MANIFEST_NAME, SIGNATURE_NAME = RESERVED_NAMES
@@ -229,8 +229,8 @@ def _check_signature(manifest_raw: bytes, signature: bytes, public_key_pem: str)
 def _parse_manifest(manifest_raw: bytes) -> tuple[ResultManifest, dict[str, Any]]:
     try:
         document = parse_json_object(manifest_raw, what="manifest")
-        if document.get("schema") != RESULT_SCHEMA:
-            raise ResultRejected(RejectReason.SCHEMA_MISMATCH, f"expected {RESULT_SCHEMA}")
+        if document.get("schema") not in RESULT_SCHEMAS:
+            raise ResultRejected(RejectReason.SCHEMA_MISMATCH, f"expected one of {', '.join(RESULT_SCHEMAS)}")
         return ResultManifest.from_document(document), document
     except DocumentError as exc:
         raise ResultRejected(RejectReason.MANIFEST_INVALID, str(exc)) from None
