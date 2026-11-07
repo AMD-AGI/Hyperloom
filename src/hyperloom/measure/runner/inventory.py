@@ -26,7 +26,7 @@ __all__ = [
 
 
 _UNSAFE = "unsafe_output"
-#: Where Magpie installs the replay client of an AgentX round, inside the round's workspace: a Python environment
+#: Where the replay client of an AgentX round is installed, inside the round's workspace: a Python environment
 #: with links and the wheels it downloaded. It is the tool's installation, not a result of the test.
 AGENTX_RUNTIME_DIR = ".agentx-runtime"
 
