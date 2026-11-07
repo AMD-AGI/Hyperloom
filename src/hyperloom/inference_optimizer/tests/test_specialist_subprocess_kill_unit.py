@@ -22,7 +22,10 @@ import pytest
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
+from hyperloom.common.agent_isolation import AccountIsolation
+from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
+from hyperloom.orchestrator.specialists.launch_env import PreparedLaunch
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
     SpecialistSpawn,
@@ -173,11 +176,11 @@ def test_demoted_reap_signals_only_pids_the_specialist_account_owns(monkeypatch)
 
     own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     roots: list[list[int]] = []
-    monkeypatch.setattr(ss, "_LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
+    monkeypatch.setattr(launch_env, "LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
     monkeypatch.setattr(ss, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
     monkeypatch.setattr(ss, "kill_tree", lambda tree: True)
     try:
-        SpecialistSubprocessDispatcher._reap_marked("mark", _SameUidRunAs())
+        SpecialistSubprocessDispatcher._reap_marked("mark", PreparedLaunch(AccountIsolation(_SameUidRunAs())))
     finally:
         own.kill()
         own.wait(timeout=5)
@@ -220,10 +223,10 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
 
     monkeypatch.setattr(ss.subprocess, "Popen", spawn)
     if demoted:
-        monkeypatch.setattr(ss, "resolve_launch_user", lambda lease: _SameUidRunAs())
-        monkeypatch.setattr(ss, "prepare_demote", lambda *args: {})
+        monkeypatch.setattr(ss, "resolve_launch_isolation", lambda lease: AccountIsolation(_SameUidRunAs()))
+        monkeypatch.setattr(launch_env, "_demote", lambda *args: {})
         # The app's uid cannot read a demoted child's environ.
-        monkeypatch.setattr(ss, "marked_pids", lambda key, value: [])
+        monkeypatch.setattr(launch_env, "marked_pids", lambda key, value: [])
     dispatcher = SpecialistSubprocessDispatcher(
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )

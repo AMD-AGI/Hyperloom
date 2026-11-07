@@ -738,8 +738,8 @@ deployments.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
-| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0, or its uid, its group or a supplementary group is not mapped in the app's user namespace (`/proc/self/uid_map`, `/proc/self/gid_map`: in a container that maps only its root, a switch to any other id fails with `EINVAL`, or under a fakeroot `LD_PRELOAD` appears to succeed while the child stays root); so does a GPU specialist on the Ray actor path, which cannot be demoted. The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. The multi-branch specialist launcher (`LocalAgentRunner`) demotes the same way, sharing the session's working directory as the worktree; there an unusable account fails the launch with `AgentConfigError`. For the isolation chooser below, setting the variable also makes a specialist's isolation required (see [Agent isolation](#agent-isolation)). |
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed; a specialist in a bubblewrap sandbox cannot read that config, so where bubblewrap would sandbox it the launch runs unconfined, or is refused where it must be isolated (see [Agent isolation](#agent-isolation)). Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0, or its uid, its group or a supplementary group is not mapped in the app's user namespace (`/proc/self/uid_map`, `/proc/self/gid_map`: in a container that maps only its root, a switch to any other id fails with `EINVAL`, or under a fakeroot `LD_PRELOAD` appears to succeed while the child stays root); so does a GPU specialist on the Ray actor path, which cannot be demoted, unless bubblewrap isolates it (see [Agent isolation](#agent-isolation)). The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. The agent runner (`LocalAgentRunner`, `orchestrator/specialists/agent_runner.py`) demotes the same way, sharing the session's working directory as the worktree; there an unusable account fails the launch with `AgentConfigError`. For the isolation chooser below, setting the variable also makes a specialist's isolation required (see [Agent isolation](#agent-isolation)). |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ### Agent isolation
@@ -767,13 +767,71 @@ deployments.
    counts as a tree the agent writes. The masks come from the app's own environment and home as well as the child's. Everything under the readable
    system roots (`/etc`, `/opt`, `/usr`) is readable: an image must not keep a credential there.
 
-Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch in a hosted
-run (its entry calls `require_agent_isolation()` once at start-up, so a host where neither works refuses before
+Only an agent launched through the chooser is isolated: every specialist (the dispatcher, its Ray GPU actor path and the
+agent runner). Agents started elsewhere that can run shell commands run as the app and can read what it can, in a
+hosted run too: the TraceLens skill runner's (`orchestrator/trace_analysis/tracelens_skill_runner.py`, whose agent may
+use `Bash`), GEAK's (`orchestrator/kernel/geak_runner.py`) and kernelforge's forge loops'. A hosted run whose spec's
+`flow` is `multibranch` is handed to `hyperloom-multibranch` before the entry's isolation check (below).
+
+**Specialists in a bubblewrap sandbox** (`orchestrator/specialists/launch_env.py`; the dispatcher, its Ray GPU actor
+path and the agent runner) write their workspace and worktree, and a private `/tmp` and `/dev/shm` (directories of
+mode 0700 on the host's `/tmp` and `/dev/shm`; with a bubblewrap older than 0.12, a fresh tmpfs where the workspace
+lies below `/tmp`). `HOME`, and `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME` and the compiler caches
+(`TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`, `AITER_JIT_DIR`, `FLYDSL_RUNTIME_CACHE_DIR`) when they name a
+directory elsewhere, point into the workspace, and `TMPDIR` at `/tmp`; `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR`
+are set into the workspace when unset too, since AITER otherwise builds its JIT modules in its installed tree, which
+is read-only there (a GPU specialist so compiles them afresh). With neither `HF_HOME` nor `HF_HUB_CACHE` set, Hugging
+Face's default directory under the app's home (`$XDG_CACHE_HOME/huggingface`, else `~/.cache/huggingface`) becomes the
+child's `HF_HOME`, read-only and without its login files, so a model downloaded there stays visible once `HOME` has
+moved. They read their toolchain, the git metadata of the worktree's repository (the one whose admin directory the
+repository records for the worktree, never the one the worktree's `.git` file names: the agent can rewrite that file,
+and runs as the app's own uid, so no ownership check tells a directory it made from the app's), the framework source
+roots, the task's model when it is a local path, the programs of the stdio MCP servers they start (each named in one
+WARNING: nothing else such a server reads is bound unless the confinement shows it), and, for an agent runner launch,
+`AgentLaunchSpec.readable` (a multi-branch specialist's: the session's `MB-reference/<name>` directories, the
+directory its workload's model is served from, the files its worktree links and its branch's own dev lease area,
+`branch-sandboxes/<branch>` of a local toolbox or the branch's `dev` directory of a hosted one, so it applies a Forge
+patch from its lease's root and sees no other branch's lease); a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
+`HYPERLOOM_BUILD_STORE` and `HYPERLOOM_BUILD_TRUST` name are masked wherever a bind would show them (a hosted run's
+entry, which takes `HYPERLOOM_STATE_DIR` out of its environment, registers its state directory so it stays masked). The `claude` CLI
+runs there only with a login in its environment: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
+`CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token` prints one), or `CLAUDE_CODE_USE_BEDROCK=1` with `AWS_ACCESS_KEY_ID`
+and `AWS_SECRET_ACCESS_KEY`, or with `AWS_SHARED_CREDENTIALS_FILE` or `AWS_CONFIG_FILE` naming a file, which is then
+bound read-only. Its own login file is not shown, since that would show it to the agent: without one of those, a launch
+that must be isolated (below) is refused, and any other runs unconfined, as on a host without bubblewrap, with the
+WARNING and the session report's line below naming why (`a claude CLI with no login in its environment runs
+unconfined: ...`). `codex` runs with its
+own sandbox off whatever `HYPERLOOM_CODEX_SANDBOX_MODE` says, since bubblewrap confines it and codex's own sandbox
+cannot map a user namespace inside. bubblewrap ends a sandbox on a SIGTERM of its own without passing it on, so a
+deadline, stale-heartbeat, done-file or cancel kill first TERMs the sandbox's processes that carry the launch's reap
+mark and waits for them, then kills what is left. A sandbox bubblewrap could not set up fails the task with
+bubblewrap's line (`specialist sandbox could not be set up: bwrap: ...`) rather than as the agent's exit, read from
+its `--json-status-fd`; an agent killed by signal `n` exits `128 + n`. A Ray GPU actor's sandbox is built from the
+driver's probe and paths, so it is for a single-node Ray cluster only, and its status goes to a file a shell in the
+actor opens for bubblewrap. The sandbox keeps the host's network, loopback included, so a specialist on the Ray actor
+path, where a Ray head always runs, can reach the Ray head and dashboard ports on this host, as an unconfined one can.
+
+The app's own git over a specialist's worktree (the commit it starts from and the harvested patch) goes through the
+admin directory the repository recorded when the worktree was made, in every tier; a worktree the repository does not
+record (a directory left at its path, say) is not used, and the specialist runs in its workspace. After the run the
+app collects patches, by git or from `patches/`, only while the worktree's path still names the directory it had when
+the specialist started: a specialist that writes its workspace can leave a link to any directory of the host there,
+which the app's git and patch write would otherwise follow. Otherwise no patch, harvested, scanned or claimed, is
+taken from the run, a link at that path is removed, and the task's error says `worktree_refused: <path> ...`. While
+the specialist runs, its checkpoint in the worktree (`specialist_done.partial.json`) is read only through that same
+directory, and none is read while the path names another; the session's resource record gives no disk use
+(`worktree_disk_bytes: null`) for a worktree path that is a link.
+
+Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch through the
+chooser in a hosted run (its entry calls `require_agent_isolation()` once at start-up, so a host where neither works refuses before
 anything runs), and a specialist's wherever `HYPERLOOM_SPECIALIST_USER` is set. Any other launch runs unconfined as
-before; `announce_agent_isolation()` then logs one WARNING at start-up (`agents run unconfined on this host, as before:
-they can read this account's files and credentials (<reasons>)`), and `agent_isolation_report()` gives the session
-report its line (`agent isolation: specialists <account|bwrap|none|refused>, sandboxes <...> (bubblewrap X.Y.Z
-PATH): <reasons>`).
+before; `announce_agent_isolation()`, which the optimize command calls at start-up, then logs one WARNING
+(`agents run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`), and
+the session report (`reports/final.md` and `final.json`'s `agent_isolation`) carries its line (`agent isolation:
+specialists <account|bwrap|none|refused>, sandboxes <...> (bubblewrap X.Y.Z PATH): <reasons>`). A launch that runs
+unconfined although start-up found bubblewrap usable (its probe gave no answer in time on a loaded host, say, or a
+`claude` CLI with no login in its environment) logs that WARNING itself, once per process, and the report adds
+`agent isolation: N agent launches ran unconfined: <reasons>`.
 
 A multi-branch session's local agent sandboxes (autonomous branches, the dossier pass, dev leases) run every command
 of one sandbox in one bubblewrap sandbox whose user and pid namespaces all its commands share, so a server one command
@@ -795,7 +853,15 @@ bubblewrap cannot bind safely (before 0.12, nothing may be bound below the share
 `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run refuses it.
 
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
-framework image may carry its own); a local run uses the `bwrap` on `PATH`. The probe (`python -I -m
+framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` names `bin/bwrap` in
+the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it ignored), which the layer's `start.sh` sets to its
+own; with the variable unset, blank or relative, no launch of the run uses bubblewrap. It checks before its installer or `optimize` runs: where neither tier
+works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
+answer in time ends the leg without one, so the host starts it again. Where the account is chosen, it probes the layer's
+bubblewrap too: the Ray GPU actor path never starts a specialist as an account, so where that bubblewrap cannot confine
+one, one WARNING says so (`specialists run as the account <name>, but the Ray GPU actor path cannot run the specialist
+as another user and bubblewrap cannot confine one here, so that path refuses its specialists: <reason>`), and the run
+goes on. The probe (`python -I -m
 hyperloom_common.bwrap probe [--bwrap PATH]`) refuses a setuid bubblewrap and one older than 0.5.0, then runs a canary
 sandbox and checks from inside that its masks, read-only binds, pid namespace, capabilities and `no_new_privs` hold. It
 runs once per process for each binary, interpreter, ids, namespaces and user-namespace sysctls; one that gives no
@@ -807,7 +873,7 @@ bubblewrap's own line; the usual causes:
 | `bwrap: setting up uid map: Permission denied` | The kernel created the user namespace without capabilities: with `kernel.apparmor_restrict_unprivileged_userns=1` it does so for a process without `CAP_SYS_ADMIN`. |
 | `bwrap: Creating new namespace failed: ...` | `user.max_user_namespaces` is 0 or used up, or a seccomp or AppArmor profile denies `unshare`. |
 | `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | The container's `/proc` has entries mounted over it (masked paths). |
-| `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`. |
+| `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`: the `unshare` on `PATH` for the `bwrap` on `PATH`, and for a `bwrap` named by path (a hosted run's layer's) only an `unshare` beside it, never one from `PATH`. Without one the probe refuses, and the host must make the root mount private first (`mount --make-rprivate /`), as the layer's `start.sh` does. |
 
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
@@ -1181,7 +1247,8 @@ stay, because other code reads them. The sandbox keys, the MCP token and the arc
 packaged `src/hyperloom/inference_optimizer/assets/install.sh` (no flags; the installer of the legacy launchers, from the same
 wheel as the running code; it provisions TraceLens, GEAK, ray and the container-local `kernel-agent.env.sh`, see `KERNEL_AGENT_ENV`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
 output in `$HYPERLOOM_STATE_DIR/install.log`, then runs `optimize` in the same process. An installer that exits non-zero ends the run
-with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. The session directory is
+with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. Before the installer, the entry checks that
+the run's specialists can be isolated, and ends the run the same way, naming why, where they cannot (see [Agent isolation](#agent-isolation)). The session directory is
 `$USER_DATA_PATH/<model directory name>/<HYPERLOOM_RUN_CREATED_AT as YYYYMMDDTHHMMSSZ>-<first 8 hex of sha256(HYPERLOOM_RUN_ID)>`; a
 restart finds the same directory and resumes it when it holds `manifest.json` and `state.json`. The entry writes two files in
 `$HYPERLOOM_STATE_DIR`: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
@@ -1196,13 +1263,14 @@ Each leg of a run may be another host account than the one before it, the accoun
 
 `scripts/hosted_app_image/build.sh --tag <ref> [--base <image>] [--claude-version V] [--push]` builds that image: a framework base image (`--base`), the script as the image's command, the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`, and the claude CLI that specialists spawn (`/usr/local/bin/claude` -> `/opt/claude-code`). The CLI's version is `--claude-version`; when it is not passed the build takes `latest`, so two builds of one tag can carry different CLI versions. Pass a version to pin it. The codex CLI is not installed separately: it comes with the wheel (`openai-codex-cli-bin`).
 
-The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> [--claude-version V] [--ca-file PEM]` builds a layer directory `<dir>/<short sha>-claude<version>/` (`start.sh`, `app_bootstrap.sh`, `bin/claude`, and `ca.pem` with `--ca-file`), and `scripts/hosted_app_image/Dockerfile.layer` makes it a small image (the directory is its build context; the content is under `/layer`). The image also carries `/layer/bin/bwrap`, bubblewrap built from a pinned, checksummed source tarball and linked statically (musl), not setuid: it runs on any framework image and needs only unprivileged user namespaces; `build_layer.sh` itself does not put it in the directory. An application pod copies `/layer` into a volume with an init container (`cp -a /layer/. /opt/hyperloom-host/` into an `emptyDir`), and the main container runs `sh /opt/hyperloom-host/start.sh` on any framework image, unchanged. `start.sh` runs as the container's root and reads only its own directory (the layer may be mounted read-only): it creates `hl-specialist` (uid/gid 2000) when missing, puts `bin/claude` on `PATH`, writes a CA bundle (the image's plus `ca.pem`) to `${TMPDIR:-/tmp}/hyperloom-host/ca-bundle.pem` (directory 0755, file 0644, local to the container; nothing goes to the state dir) for `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO`, makes the container's root mount private once (`mount --make-rprivate /`, so `bwrap` can bind `/` where the runtime marks the root unbindable; when that fails or the image has no `mount`, one line goes to stderr and the start goes on), and execs `app_bootstrap.sh`. The image must already have `git`, `setpriv` and `bash`; `start.sh` refuses by name when one is missing and installs nothing. uid 2000 must not belong to another account, and the container's user namespace must map uid and gid 2000: `start.sh` reads `/proc/self/uid_map` and `/proc/self/gid_map` and refuses, naming the map, when it does not (a container that maps only its root cannot switch the specialists to any other account).
+The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> [--claude-version V] [--ca-file PEM]` builds a layer directory `<dir>/<short sha>-claude<version>/` (`start.sh`, `app_bootstrap.sh`, `bin/claude`, and `ca.pem` with `--ca-file`), and `scripts/hosted_app_image/Dockerfile.layer` makes it a small image (the directory is its build context; the content is under `/layer`). The image also carries `/layer/bin/bwrap`, bubblewrap built from a pinned, checksummed source tarball and linked statically (musl), not setuid: it runs on any framework image and needs only unprivileged user namespaces; `build_layer.sh` itself does not put it in the directory. An application pod copies `/layer` into a volume with an init container (`cp -a /layer/. /opt/hyperloom-host/` into an `emptyDir`), and the main container runs `sh /opt/hyperloom-host/start.sh` on any framework image, unchanged. `start.sh` runs as the container's user (root, where it makes the specialist account) and reads only its own directory (the layer may be mounted read-only): it creates `hl-specialist` (uid/gid 2000) when missing where a process there can become that account, and otherwise makes no account and leaves the specialists to the layer's bubblewrap (below), names its own directory in `HYPERLOOM_HOST_LAYER`, puts `bin/claude` on `PATH`, writes a CA bundle (the image's plus `ca.pem`) to `${TMPDIR:-/tmp}/hyperloom-host/ca-bundle.pem` (directory 0755, file 0644, local to the container; nothing goes to the state dir) for `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO`, makes the container's root mount private once, after the account is decided and right before the bootstrap (`mount --make-rprivate /`, so `bwrap` can bind `/` where the runtime marks the root unbindable; when that fails or the image has no `mount`, one line goes to stderr and the start goes on), and execs `app_bootstrap.sh`. The image must already have `git` and `bash`; `start.sh` refuses by name when one is missing and installs nothing. It makes the account only where it runs as root, the image has `setpriv`, the container's user namespace maps uid and gid 2000 (it reads `/proc/self/uid_map` and `/proc/self/gid_map`, and refuses, naming the map, one it cannot read) and root holds `CAP_KILL`, `CAP_SETGID` and `CAP_SETUID` (the capability bounding set in `/proc/self/status`, which is root's effective set in the application); uid 2000 must then not belong to another account. Where one of those does not hold (a container that maps only its root cannot switch the specialists to any other account), `start.sh` unsets `HYPERLOOM_SPECIALIST_USER`, says why in one line on stderr, and the specialists run under the layer's `bin/bwrap`, which the entry probes before anything runs (see [Agent isolation](#agent-isolation)); where the layer has no `bin/bwrap` either (a `build_layer.sh` directory alone has none), `start.sh` refuses, naming both reasons.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
 | `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built in a new mode-0700 directory below the container's temporary directory, never on the shared storage, where another account of the group could put a wheel of its own in its place, and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing, and a new container builds the wheel again (a depth-1 fetch of the commit and a `pip wheel` of it). |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
+| `HYPERLOOM_HOST_LAYER` | Set by `start.sh` | The layer's own directory. The entry launches agents under bubblewrap only with its `bin/bwrap`, never one on `PATH`; whitespace around the value is ignored, and unset, blank or relative, no launch of the run uses bubblewrap (see [Agent isolation](#agent-isolation)). |
 
 ### The host's guarantee about containers, and the resume that relies on it
 

@@ -507,7 +507,8 @@ def _opened_up(directory: Path, visible: tuple[Path, ...], depth: int) -> list[P
 def _masks_for(path: Path, visible: tuple[Path, ...], later: frozenset[Path]) -> list[Path]:
     """``path`` itself when nothing of ``visible`` is at or below it; else its entries, opened up around them. A path
     of ``later`` (a login file a tool writes when it logs in) counts while nothing is there yet, in a directory that
-    is."""
+    is. None for any other path this process cannot look at (below a directory it cannot search): no bind of its shows
+    it either."""
     real = _real(path)
     if real == _ROOT:
         return []

@@ -16,6 +16,7 @@ from __future__ import annotations
 import http.client
 import importlib.metadata
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -36,6 +37,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
+from hyperloom_common.fs_utils import read_text_nofollow
 from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, SHARED_DIR_MODE, make_shared_dirs, share_new_directory
 from hyperloom_multibranch.repo.isolated_git import (
     INIT,
@@ -332,7 +334,32 @@ class SourceBase:
             if not (path / prefix).exists():
                 make_shared_dirs((path / prefix).parent)
                 (path / prefix).symlink_to(target)
-        return self._worktrees.setdefault(path, BranchWorktree(path, self._native, self._linked()))
+        found = self._worktrees.get(path)
+        if found is None:
+            made = BranchWorktree(path, self._native, self._linked(), self._admin(path))
+            found = self._worktrees.setdefault(path, made)
+        return found
+
+    def _admin(self, worktree: Path) -> Path | None:
+        """The admin directory of ``worktree`` in this base's repository: the one entry of its ``worktrees`` whose
+        ``gitdir`` names the worktree's ``.git``, read from the base, never from the worktree, whose ``.git`` file
+        whoever writes the worktree decides; ``None``, said, when not exactly one does."""
+        gitfile = os.path.realpath(worktree / _GIT_DIR)
+        entries = self.path / _GIT_DIR / "worktrees"
+        try:
+            listed = sorted(entry for entry in entries.iterdir() if entry.is_dir() and not entry.is_symlink())
+        except OSError:
+            listed = []
+        found = [entry for entry in listed if _names_gitfile(entry, gitfile)]
+        if len(found) == 1:
+            return found[0]
+        logger.warning(
+            "%d admin directories of %s name the worktree %s: a sandbox shows its specialist no git metadata there",
+            len(found),
+            self.path,
+            worktree,
+        )
+        return None
 
     def _linked(self) -> tuple[Path, ...]:
         """What every worktree's links point at, read from this base's own record, never from a worktree, whose
@@ -370,6 +397,15 @@ def _file_sections(patch: str) -> list[tuple[tuple[str, ...], str]]:
 
 def _within(path: str, trees: Sequence[str]) -> bool:
     return any(path == tree or path.startswith(f"{tree}/") for tree in trees)
+
+
+def _names_gitfile(entry: Path, gitfile: str) -> bool:
+    """Whether the admin directory ``entry`` belongs to the worktree whose resolved ``.git`` is ``gitfile``."""
+    try:
+        named = read_text_nofollow(entry / "gitdir").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return os.path.realpath(os.path.join(entry, named)) == gitfile
 
 
 def linked_paths(worktree: Path) -> list[tuple[str, str]]:
@@ -449,12 +485,16 @@ class BranchWorktree:
         path: Path,
         native: Mapping[str, NativeTree] | None = None,
         linked: Sequence[Path] = (),
+        admin: Path | None = None,
     ) -> None:
         self.path = path
         self._native = dict(native or {})
         #: The installed files and trees the worktree's links point at, as its source base recorded them: a sandbox
         #: that binds the worktree binds them too, so the links resolve inside.
         self.linked = tuple(linked)
+        #: The worktree's admin directory, as the source base's repository records it (``None`` when unknown): a
+        #: sandbox shows that repository read-only, so git works in the worktree there.
+        self.admin = admin
         self.lock = threading.Lock()
 
     def holds(self, component: str) -> bool:
