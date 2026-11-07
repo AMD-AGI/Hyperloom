@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -16,18 +17,25 @@ from pathlib import Path
 import pytest
 
 from inference_suite.contracts import (
+    BaseLaunch,
+    BaseLaunchError,
     Deadlines,
     EvalConfig,
     EvalProbe,
     FailedStep,
     FixedWorkload,
+    LaunchModel,
+    LaunchQuery,
     LifecycleMode,
     Lifecycle,
     ProfileConfig,
     RunLayout,
     RunPaths,
     ScriptableWorkload,
+    SourceKind,
     SuiteConfig,
+    Topology,
+    Workload,
     WorkloadKind,
 )
 from inference_suite.contracts.launch import ClientInvocation
@@ -37,6 +45,7 @@ from inference_suite.load.scriptable import (
     run_scriptable,
     script_env,
     script_path,
+    scriptable_base,
 )
 from inference_suite.runtime.phases import Phase, PhaseClock
 from inference_suite.runtime.server import Server
@@ -206,6 +215,14 @@ def _scriptable_config(tmp_path: Path, workload: ScriptableWorkload) -> SuiteCon
     return _round_config(tmp_path, WorkloadKind.SCRIPTABLE, scriptable=workload)
 
 
+def _query() -> LaunchQuery:
+    return LaunchQuery("FLUX.1-dev", "custom", "mi355x", Workload.SCRIPTABLE, (1,))
+
+
+def _script_base(script: str) -> BaseLaunch:
+    return scriptable_base(_query(), script, LaunchModel("FLUX.1-dev", "/models/FLUX.1-dev"), Topology(tp=8))
+
+
 def test_the_xdit_script_ships_and_parses():
     assert script_path("xdit") == ShippedScript.XDIT.path
     subprocess.run(["bash", "-n", str(ShippedScript.XDIT.path)], check=True)
@@ -219,10 +236,35 @@ def test_a_script_is_a_shipped_name_or_an_existing_absolute_path(tmp_path: Path)
     assert script_path(str(tmp_path / "missing.sh")) is None
 
 
+def test_a_scriptable_base_freezes_a_shipped_script_by_name_and_an_operator_script_by_path(tmp_path: Path):
+    shipped = _script_base("xdit")
+    assert shipped.entrypoint == ("bash", "xdit") and shipped.source.kind is SourceKind.DEFAULT_TABLE
+    assert shipped.source.files == {"xdit": hashlib.sha256(ShippedScript.XDIT.path.read_bytes()).hexdigest()}
+    own = tmp_path / "custom_mi355x.sh"
+    own.write_text("exit 0\n")
+    base = _script_base(str(own))
+    assert base.entrypoint == ("bash", str(own)) and base.source.kind is SourceKind.USER_FILE
+    assert base.client is None and base.topology == Topology(tp=8) and base.args == ()
+    own.write_text("exit 1\n")
+    assert _script_base(str(own)).digest() != base.digest()
+
+
+@pytest.mark.parametrize(
+    ("query", "script", "match"),
+    [
+        (replace(_query(), workload=Workload.AGENTX), "xdit", "answers a scriptable query"),
+        (_query(), "bench.sh", "no shipped script"),
+    ],
+)
+def test_a_scriptable_base_needs_a_scriptable_query_and_a_script_that_exists(query, script, match):
+    with pytest.raises(BaseLaunchError, match=match):
+        scriptable_base(query, script, LaunchModel("FLUX.1-dev"), Topology(tp=1))
+
+
 def test_script_env_takes_params_and_keeps_run_scoped_names_for_the_round(tmp_path: Path):
-    workload = ScriptableWorkload("xdit", {"XDIT_USE_TORCH_COMPILE": True, "XDIT_HEIGHT": 768}, "/refs/cat.png")
+    workload = ScriptableWorkload({"XDIT_USE_TORCH_COMPILE": True, "XDIT_HEIGHT": 768}, "/refs/cat.png")
     config = _scriptable_config(tmp_path, workload)
-    env = script_env(workload, config.server, RunLayout(Path(config.paths.run_dir)))
+    env = script_env(workload, config.server, RunLayout(Path(config.paths.run_dir)), False)
     assert env == {
         "XDIT_USE_TORCH_COMPILE": "1",
         "XDIT_HEIGHT": "768",
@@ -235,18 +277,32 @@ def test_script_env_takes_params_and_keeps_run_scoped_names_for_the_round(tmp_pa
     }
 
 
-def _run_script(tmp_path: Path, body: str):
+def test_a_profile_round_hands_the_script_its_trace_directory(tmp_path: Path):
+    layout = RunLayout(tmp_path / "run")
+    env = script_env(ScriptableWorkload(), _scriptable_config(tmp_path, ScriptableWorkload()).server, layout, True)
+    trace = str(layout.profile_torch_trace)
+    assert env["PROFILE"] == "1"
+    assert env["VLLM_TORCH_PROFILER_DIR"] == trace and env["SGLANG_TORCH_PROFILER_DIR"] == trace
+
+
+def _script(tmp_path: Path, body: str) -> Path:
     script = tmp_path / "bench.sh"
     script.write_text(body)
+    return script
+
+
+def _run_script(tmp_path: Path, body: str):
+    base = _script_base(str(_script(tmp_path, body)))
     clock = PhaseClock()
-    config = _scriptable_config(tmp_path, ScriptableWorkload(str(script), {"STEPS": 3}))
-    return run_scriptable(config, RoundGate(_DEADLINES, lambda: "", time.monotonic()), clock), clock
+    config = _scriptable_config(tmp_path, ScriptableWorkload({"STEPS": 3}))
+    return run_scriptable(config, base, RoundGate(_DEADLINES, lambda: "", time.monotonic()), clock), clock
 
 
 def test_scriptable_keeps_the_result_the_script_writes(tmp_path: Path):
     body = 'echo "{\\"img_per_s\\": 2.5, \\"steps\\": $STEPS}" > "$RESULT_DIR/$RESULT_FILENAME.json"\n'
     outcome, clock = _run_script(tmp_path, body)
     assert outcome.stop is None and outcome.returncode == 0
+    assert outcome.invocation.argv == ("bash", str(tmp_path / "bench.sh"))
     assert outcome.result.to_document() == {
         "result_file": "client/inferencex_result.json",
         "result": {"img_per_s": 2.5, "steps": 3},
@@ -263,7 +319,26 @@ def test_scriptable_fails_on_a_bad_exit_or_no_result(tmp_path: Path, body: str, 
     assert outcome.stop.step is step and outcome.result is None
 
 
+def test_scriptable_refuses_a_script_that_changed_since_the_base_froze_it(tmp_path: Path):
+    script = _script(tmp_path, "exit 0\n")
+    base = _script_base(str(script))
+    script.write_text("exit 0  # edited\n")
+    config = _scriptable_config(tmp_path, ScriptableWorkload())
+    outcome = run_scriptable(config, base, RoundGate(_DEADLINES, lambda: "", time.monotonic()), PhaseClock())
+    assert outcome.invocation is None and outcome.stop.step is FailedStep.SOURCE_FILES_CHANGED
+
+
 def test_scriptable_refuses_a_script_it_cannot_find(tmp_path: Path):
-    config = _scriptable_config(tmp_path, ScriptableWorkload("nonesuch"))
-    outcome = run_scriptable(config, RoundGate(_DEADLINES, lambda: "", time.monotonic()), PhaseClock())
+    script = _script(tmp_path, "exit 0\n")
+    base = _script_base(str(script))
+    script.unlink()
+    config = _scriptable_config(tmp_path, ScriptableWorkload())
+    outcome = run_scriptable(config, base, RoundGate(_DEADLINES, lambda: "", time.monotonic()), PhaseClock())
     assert outcome.invocation is None and outcome.stop.step is FailedStep.CONFIG_INVALID
+
+
+def test_a_scriptable_base_without_a_script_runs_the_one_its_framework_ships():
+    base = scriptable_base(replace(_query(), framework="xdit"), None, LaunchModel("FLUX.1-dev"), Topology(tp=1))
+    assert base.script == ShippedScript.XDIT.value
+    with pytest.raises(BaseLaunchError, match="custom ships no script"):
+        scriptable_base(_query(), None, LaunchModel("FLUX.1-dev"), Topology(tp=1))

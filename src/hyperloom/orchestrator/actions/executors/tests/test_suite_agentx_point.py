@@ -175,7 +175,7 @@ def test_a_discarded_warmup_replay_draws_its_trajectories_with_the_warmup_seed(
     point = tmp_path / "slot" / "point.yaml"
     point.parent.mkdir()
     point.write_text(yaml.safe_dump(_point()), encoding="utf-8")
-    route = suite_route(session, point)
+    route = suite_route(session)
     assert route is not None
 
     run_suite_round(route, SuiteRound(point, point.parent, Lifecycle(LifecycleMode.OWN), warmup), on_poll=lambda: None)

@@ -128,8 +128,9 @@ def _scriptable_metrics(result: ScriptableResult) -> dict[str, Any]:
     document: Mapping[str, Any] = result.result
     metrics: dict[str, Any] = {key: coerce(document.get(raw)) for key, raw, coerce in _SCRIPTABLE_FIELDS}
     metrics["throughput_unit"] = document.get("throughput_unit")
-    # The script writes its quality scores raw; the scriptable quality gate judges them.
-    metrics["quality_gate"] = document.get("quality")
+    # The script writes its quality gate, its scores raw unless it judges them itself; the scriptable quality gate
+    # judges what it leaves open.
+    metrics["quality_gate"] = document.get("quality_gate")
     return metrics
 
 

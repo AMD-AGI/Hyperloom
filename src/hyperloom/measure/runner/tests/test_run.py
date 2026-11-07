@@ -243,7 +243,7 @@ def test_a_v2_sheet_whose_point_inference_suite_does_not_run_is_refused_and_neve
     backend = _Backend(_ok)
     monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
     monkeypatch.setattr(runner, "ensure_magpie", lambda *args: pytest.fail("a v2 sheet staged Magpie"))
-    reason = "the point runs xdit, which serves nothing"
+    reason = "'xdit' serves nothing; a hyperloom.measurement-spec/v2 sheet measures a server"
 
     assert _go(tmp_path, env, _sheet_v2(config=_point_config({"framework": "xdit"}))) == 3
 

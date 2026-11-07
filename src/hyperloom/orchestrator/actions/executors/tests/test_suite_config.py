@@ -19,7 +19,6 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors._suite_config import (
     RoundSettings,
-    backend_reason,
     point_server,
     suite_config,
 )
@@ -261,7 +260,7 @@ def test_an_explicit_context_length_replaces_the_launcher_default() -> None:
     ("change", "message"),
     [
         ({"framework": "vllm"}, "the point runs vllm, its base runs sglang"),
-        ({"framework": "xdit"}, "serves nothing"),
+        ({"framework": "xdit"}, "the point runs xdit, its base runs sglang"),
         ({"benchmark_script": "mlperf_agentic_client.sh"}, "the harness scores its accuracy inline"),
         ({"profiler": {"torch_profiler": {"enabled": True}}}, "bounds no capture window"),
         ({"envs": {"PROFILE": "1"}}, "PROFILE without profiler.torch_profiler.enabled"),
@@ -280,23 +279,6 @@ def test_a_point_the_translation_does_not_carry_is_refused(change: dict, message
 
     with pytest.raises(ConfigError, match=message):
         suite_config(point, _base("sglang"), _settings())
-
-
-@pytest.mark.parametrize(
-    ("change", "reason"),
-    [
-        ({"framework": "xdit"}, "serves nothing"),
-        ({"benchmark_script": "mlperf_agentic_client.sh"}, None),
-        ({"agentx": {"enabled": True}}, None),
-        ({"profiler": {"torch_profiler": {"enabled": True}}}, None),
-    ],
-)
-def test_only_a_point_serving_nothing_stays_on_the_backend(change: dict, reason) -> None:
-    point = _point("sglang")
-    assert backend_reason(point) is None
-    point["benchmark"].update(change)
-
-    assert backend_reason(point) == reason or reason in (backend_reason(point) or "")
 
 
 def _profile_point(framework: str, **envs: str) -> dict:
@@ -334,7 +316,7 @@ def test_a_point_naming_an_unknown_framework_is_refused_not_routed() -> None:
     point["benchmark"]["framework"] = "tgi"
 
     with pytest.raises(ConfigError, match="not one inference_suite runs"):
-        backend_reason(point)
+        suite_config(point, _base("sglang"), _settings())
 
 
 _PID_DIR = "/session/arm"

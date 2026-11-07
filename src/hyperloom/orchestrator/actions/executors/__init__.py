@@ -41,7 +41,7 @@ from .benchmark_result import harvest_leaked_artifacts
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
 from ._launch_evidence import RequestedLaunch, build_launch_evidence
 from ._round_folder import RoundFolder, is_round_folder
-from ._suite_config import TOOL_CACHE_ENV, backend_reason, staged_tool_cache
+from ._suite_config import TOOL_CACHE_ENV, staged_tool_cache
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
 from ._patch_laying import PatchedServer, is_patched_copy
@@ -77,7 +77,6 @@ __all__ = [
     "TOOL_CACHE_ENV",
     "TargetAnalysisExecutor",
     "VariantResult",
-    "backend_reason",
     "baseline_executor",
     "benchmark_serving_path_in",
     "build_launch_evidence",

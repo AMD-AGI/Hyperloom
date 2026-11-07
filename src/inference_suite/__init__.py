@@ -9,7 +9,8 @@ contracts that keep it so, and names the modules other packages may import.
 A host resolves a session's base in two steps: :func:`fetch_sources` reads every source once, the only step that
 reaches the network or runs a source's own code, and :func:`resolve_base` reads that :class:`SourceSnapshot` alone.
 The operator's own launch file enters both as the :class:`UserFile` :func:`parse_user_file` reads from its bytes;
-:func:`fetch_response` reads one at a URL.
+:func:`fetch_response` reads one at a URL. A scriptable session's base is its script, which :func:`scriptable_base`
+freezes with its content.
 
 A runner runs one round with :func:`run_round`, and reaps a server a round left running with :func:`stop`. The round
 names the staged tools it runs by :func:`manifest_sha256`, the digest of the tool cache's manifest;
@@ -35,6 +36,7 @@ from inference_suite.contracts.layout import RunDirError
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import SourceFetchError, fetch_response, fetch_sources
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
+from inference_suite.load.scriptable import scriptable_base
 from inference_suite.run import RoundResult, run_round
 from inference_suite.runtime.server import stop
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
@@ -72,6 +74,7 @@ __all__ = [
     "parse_user_file",
     "resolve_base",
     "run_round",
+    "scriptable_base",
     "staging_key",
     "stop",
     "verified_manifest_sha256",
