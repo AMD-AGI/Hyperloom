@@ -5,8 +5,9 @@
 
 Two scores compare only under one definition digest. The eval runs in the context the server serves: the
 framework's context flag in the launch's final argv, the last one winning, else the model's native context. Every
-generation may take ``max_tokens_cap`` tokens after a prompt of up to :data:`PROMPT_ROOM_TOKENS`, so a served
-context shorter than both together is refused (``eval_context_too_short``) instead of being answered 400 per request.
+generation may take what that context leaves after :data:`PROMPT_ROOM_TOKENS`, as InferenceX's ``run_lm_eval``
+budgets it, and never more than ``max_tokens_cap``; a launch whose context is unknown is refused
+(``eval_context_too_short``).
 """
 
 from __future__ import annotations
@@ -141,14 +142,10 @@ def plan_eval(config: SuiteConfig, launch: Launch, staged: StagedEval, layout: R
     model_path = Path(server.model_path)
     model_dir = model_path if model_path.is_dir() else None
     context = served_context(launch, model_dir)
-    needed = PROMPT_ROOM_TOKENS + settings.max_tokens_cap
-    if context is None or context < needed:
-        served = "an unknown context" if context is None else f"a context of {context} tokens"
-        detail = (
-            f"the launch serves {served}; the eval needs {needed}: {PROMPT_ROOM_TOKENS} for the prompt and "
-            f"max_tokens_cap {settings.max_tokens_cap} for the completion"
-        )
+    if context is None:
+        detail = "the launch serves an unknown context, so no completion budget fits it"
         return EvalRefusal(FailedStep.EVAL_CONTEXT_TOO_SHORT, detail)
+    max_tokens = min(settings.max_tokens_cap, _completion_room(context))
     definition = EvalDefinition(
         task_yaml_sha256=_sha256(staged.task_yaml.read_bytes()),
         lm_eval_version=staged.lm_eval_version,
@@ -156,7 +153,7 @@ def plan_eval(config: SuiteConfig, launch: Launch, staged: StagedEval, layout: R
         chat_template_sha256=chat_template_sha256(model_dir),
         concurrency=settings.concurrency,
         max_length=context,
-        max_tokens_cap=settings.max_tokens_cap,
+        max_tokens_cap=max_tokens,
         limit=settings.limit,
         num_fewshot=settings.num_fewshot,
         golden_applied=launch.forced_acceptance,
@@ -170,7 +167,7 @@ def plan_eval(config: SuiteConfig, launch: Launch, staged: StagedEval, layout: R
         probe_file=str(layout.eval_probe),
         concurrency=settings.concurrency,
         max_length=context,
-        max_tokens=settings.max_tokens_cap,
+        max_tokens=max_tokens,
         num_fewshot=settings.num_fewshot,
         probe_enabled=settings.probe.enabled,
         probe_min_samples=settings.probe.min_samples,
@@ -179,6 +176,11 @@ def plan_eval(config: SuiteConfig, launch: Launch, staged: StagedEval, layout: R
         model_dir=None if model_dir is None else str(model_dir),
     )
     return EvalPlan(definition, request)
+
+
+def _completion_room(context: int) -> int:
+    """InferenceX's ``run_lm_eval`` output budget for a served ``context``."""
+    return context - PROMPT_ROOM_TOKENS if context > PROMPT_ROOM_TOKENS else context // 2
 
 
 __all__ = [
