@@ -48,10 +48,10 @@ subtrees:
     title: Optimize your own workload
   - file: how-to/quantization-quark.md
     title: Enable quantization with AMD Quark
-  - file: how-to/run-multibranch.md
-    title: Run a multi-branch session
   - file: how-to/hosted-multibranch-new-cluster.md
     title: Run hosted multi-branch on a new cluster
+  - file: how-to/run-multibranch.md
+    title: Run a multi-branch session
 
 - caption: Reference
   entries:
