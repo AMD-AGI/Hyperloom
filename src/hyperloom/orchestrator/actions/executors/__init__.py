@@ -41,11 +41,7 @@ from .benchmark_result import harvest_leaked_artifacts
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
 from ._launch_evidence import RequestedLaunch, build_launch_evidence
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
-from ._spec_decode_pin import (
-    SPECULATIVE_DECODING_PINNED,
-    SpeculativeDecodingPinnedError,
-    refuse_unpinned_speculative_change,
-)
+from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
 from ._patch_laying import PatchedServer, is_patched_copy
 from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
 from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
@@ -75,7 +71,6 @@ __all__ = [
     "RequestedLaunch",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
-    "SPECULATIVE_DECODING_PINNED",
     "SpeculativeDecodingPinnedError",
     "TargetAnalysisExecutor",
     "VariantResult",

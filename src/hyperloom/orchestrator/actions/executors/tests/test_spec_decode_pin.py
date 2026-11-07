@@ -17,8 +17,8 @@ from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml, run_grid
 from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
 from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_benchmark_config
+from hyperloom.common.failure_signature import SERVE_FLAG
 from hyperloom.orchestrator.actions.executors._spec_decode_pin import (
-    SPECULATIVE_DECODING_PINNED,
     SpeculativeDecodingPinnedError,
     refuse_unpinned_speculative_change,
 )
@@ -132,9 +132,9 @@ DSPARK_RECIPE_ARGS = [
     ],
 )
 def test_a_candidate_changing_the_pinned_draft_is_refused(base_args, base_envs, candidate_args, candidate_envs):
-    with pytest.raises(SpeculativeDecodingPinnedError, match=SPECULATIVE_DECODING_PINNED) as refused:
+    with pytest.raises(SpeculativeDecodingPinnedError, match=SERVE_FLAG) as refused:
         refuse_unpinned_speculative_change(base_args, base_envs, candidate_args, candidate_envs)
-    assert refused.value.error_class == SPECULATIVE_DECODING_PINNED
+    assert refused.value.error_class == SERVE_FLAG
 
 
 @pytest.mark.parametrize(
@@ -353,9 +353,32 @@ async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypa
         output_root=tmp_path / "out",
         recipe=GridRecipe(base_yaml_path=base),
     )
-    assert [(r.status, r.error_class) for r in results] == [("failed", SPECULATIVE_DECODING_PINNED)]
+    assert [(r.status, r.error_class) for r in results] == [("failed", SERVE_FLAG)]
     assert "num_speculative_tokens" in results[0].error
     assert not results[0].launch_evidence
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("candidate", "key"),
+    [
+        pytest.param(_spec_config(num_speculative_tokens=5), "num_speculative_tokens", id="draft-length"),
+        pytest.param(
+            "--speculative-config.enable_adaptive_verification true",
+            "enable_adaptive_verification",
+            id="adaptive-verification",
+        ),
+    ],
+)
+async def test_a_variant_touching_golden_fails_as_serve_flag_naming_the_key(tmp_path, monkeypatch, candidate, key):
+    monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: pytest.fail("a refused variant must not reach Magpie"))
+    results = await run_grid(
+        grid=[GridVariant("touches-golden", extra_server_args=candidate)],
+        output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=_base_yaml(tmp_path, "vllm", VLLM_SYNTHETIC, {})),
+    )
+    assert [(r.status, r.error_class) for r in results] == [("failed", SERVE_FLAG)]
+    assert f"{SERVE_FLAG}: golden-owned --speculative-config.{key}" in results[0].error
 
 
 def _native_recipe(
@@ -427,9 +450,9 @@ def _build_native(tmp_path: Path, config: Path, variant: GridVariant, stack: Lau
 )
 def test_building_a_native_variant_refuses_a_change_to_the_recipes_pinned_draft(tmp_path, variant):
     config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, SGLANG_SYNTHETIC_ENV)
-    with pytest.raises(SpeculativeDecodingPinnedError, match=SPECULATIVE_DECODING_PINNED) as refused:
+    with pytest.raises(SpeculativeDecodingPinnedError, match=SERVE_FLAG) as refused:
         _build_native(tmp_path, config, variant)
-    assert refused.value.error_class == SPECULATIVE_DECODING_PINNED
+    assert refused.value.error_class == SERVE_FLAG
 
 
 def test_building_a_native_variant_keeps_other_knobs_open(tmp_path):
