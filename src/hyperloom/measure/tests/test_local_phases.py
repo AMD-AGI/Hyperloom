@@ -89,14 +89,20 @@ def test_a_graded_test_goes_through_its_phases_in_order_and_they_add_up_to_the_t
     assert recorder.phases == outcome.phases, "a recorder the runner passed in is the one the backend stamped"
 
 
-def test_the_time_before_the_first_round_is_the_kernel_tables_the_rebuilt_framework_and_the_launchers(
+def test_the_time_before_the_first_round_is_the_kernel_tables_and_the_rebuilt_framework(
     monkeypatch, clock, tmp_path
 ) -> None:
     def slow_round(slot: Path, kwargs: dict[str, Any]):
         clock.advance(2.0)
         return result("test", slot)
 
-    monkeypatch.setattr(local, "install_launchers", lambda points: clock.advance(1.5))
+    traced = local._traced
+
+    def slow_traced(*args):
+        clock.advance(1.5)
+        return traced(*args)
+
+    monkeypatch.setattr(local, "_traced", slow_traced)
 
     outcome, _ = _run(monkeypatch, clock, _call(tmp_path), {"test": slow_round})
 

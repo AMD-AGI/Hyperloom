@@ -469,27 +469,12 @@ def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canoni
     assert rendered["benchmark"]["envs"]["RUN_EVAL"] == "true" and "NUM_PROMPTS" in rendered["benchmark"]["envs"]
 
 
-# --- the launcher on a cold InferenceX checkout ---------------------------------------------------------------------
-
-LAUNCHER = "sglang_mi355x.sh"
-MAGPIE_LAUNCHER = b"magpie launcher\n"
-
-
-@pytest.fixture()
-def magpie(tmp_path, monkeypatch):
-    """The Magpie the session runs, which ships the launcher; the process names no checkout of its own."""
-
-    shipped = tmp_path / "magpie" / "Magpie" / "scripts" / "benchmark"
-    shipped.mkdir(parents=True)
-    (shipped / LAUNCHER).write_bytes(MAGPIE_LAUNCHER)
-    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "magpie"))
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    return shipped / LAUNCHER
+# --- a canonical names no benchmark script --------------------------------------------------------------------------
 
 
 @pytest.fixture()
 def cold_checkout(tmp_path):
-    """A fresh InferenceX cache: the pinned commit does not track the launcher, so it is not in the tree yet."""
+    """A fresh InferenceX cache with its benchmark library and no launcher."""
 
     benchmarks = tmp_path / "InferenceX" / "benchmarks"
     benchmarks.mkdir(parents=True)
@@ -498,7 +483,7 @@ def cold_checkout(tmp_path):
 
 
 def cold_canonical(tmp_path, model, checkout):
-    """The canonical measurement as a session takes it at start, on the runner type that names the launcher."""
+    """The canonical measurement as a session takes it at start."""
 
     return default_canonical(
         tmp_path / "canonical",
@@ -510,18 +495,10 @@ def cold_canonical(tmp_path, model, checkout):
     )
 
 
-def test_a_canonical_names_no_launcher_so_the_checkout_is_left_as_it_is(tmp_path, model, magpie, cold_checkout):
-    """inference_suite drives load itself: no point names a Magpie launcher, so none is copied or hashed."""
+@pytest.mark.parametrize("checkout", ["InferenceX", "not-a-checkout"])
+def test_a_canonical_names_no_benchmark_script_so_none_is_hashed(tmp_path, model, cold_checkout, checkout):
+    """inference_suite drives load itself, so a point names no benchmark script whatever the checkout holds."""
 
-    canonical = cold_canonical(tmp_path, model, cold_checkout)
-
-    assert canonical.surface.fields["benchmark_script_sha256"] is None
-    assert not (cold_checkout / "benchmarks" / LAUNCHER).exists()
-
-
-def test_a_checkout_with_nowhere_to_put_the_launcher_is_left_to_the_host_check(tmp_path, model, magpie):
-    """A test cannot see a launcher there either, and the host refuses a tree without the benchmark library."""
-
-    canonical = cold_canonical(tmp_path, model, tmp_path / "not-a-checkout")
+    canonical = cold_canonical(tmp_path, model, tmp_path / checkout)
 
     assert canonical.surface.fields["benchmark_script_sha256"] is None
