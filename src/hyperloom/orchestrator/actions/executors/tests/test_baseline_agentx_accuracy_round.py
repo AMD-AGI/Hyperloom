@@ -40,9 +40,9 @@ def _baseline(
     result = {"status": status, "output_dir": str(slot / "measure_round"), "materialized_config": str(config)}
     calls = []
 
-    async def run_accuracy_round(slot, launch, **kwargs):
-        calls.append((slot, launch))
-        return AccuracyRoundOutcome(slot / ACCURACY_DIR, ended)
+    async def run_accuracy_round(request, *, session):
+        calls.append((request.slot, request.config_path))
+        return AccuracyRoundOutcome(request.slot / ACCURACY_DIR, ended)
 
     monkeypatch.setattr(accuracy, "run_accuracy_round", run_accuracy_round)
     monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)

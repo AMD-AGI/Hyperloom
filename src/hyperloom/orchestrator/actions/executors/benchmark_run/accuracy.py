@@ -4,7 +4,8 @@
 """Eval-failure routing, the accuracy stop and the AgentX accuracy round of ``BenchmarkRunExecutor``.
 
 :func:`run_accuracy_round` is the one entry to the D9 accuracy round of a slot, which the baseline runs here once its
-throughput round succeeded. Its score is not read yet: the gates still take AgentX accuracy from
+throughput round succeeded, and a candidate gate through :func:`run_candidate_accuracy_round` once its throughput
+cleared the KEEP threshold. Its score is not read yet: the gates still take AgentX accuracy from
 ``parse_eval_results``.
 """
 
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,7 +25,8 @@ from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
 from .._failed_step import failed_step_error_class
 from .._grid_runner import _num_gpus_for_config, session_grid_bounds
-from .._ray_serving import maybe_serving_lease
+from .._ray_serving import ServingLease, maybe_serving_lease
+from .._subprocess_kill import resolve_benchmark_timeouts
 from .._suite_config import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
 from .records import (
     _BENCHMARK_MODE_ATTR,
@@ -73,20 +75,30 @@ class AccuracyRoundOutcome:
         return {"run_dir": str(self.run_dir), "error_class": self.error_class}
 
 
-async def run_accuracy_round(
-    slot: Path, launch: Path, *, session: Path, timeout_sec: float, deadline: int | None
-) -> AccuracyRoundOutcome:
-    """Run the D9 accuracy round of ``slot``, whose AgentX point is ``launch``, into ``<slot>/accuracy``.
+def accuracy_round_due(state: Any) -> bool:
+    """Whether the session ``state`` runs the D9 accuracy round: native AgentX outside MLPerf, and not opted out."""
+    return (
+        agentx_active(benchmark_mode=getattr(state, _BENCHMARK_MODE_ATTR, ""))
+        and not is_mlperf_backend()
+        and state.agentx_accuracy
+    )
+
+
+async def run_accuracy_round(request: AccuracyRound, *, session: Path) -> AccuracyRoundOutcome:
+    """Run the D9 accuracy round ``request`` names into ``<slot>/accuracy``.
 
     The round serves the slot's launch on a server of its own with the base's golden layer left out, and runs only the
-    eval; ``timeout_sec`` bounds its boot and its eval each, and ``deadline`` is the session's, in unix seconds.
+    eval. A request without a serving lease runs on one of its own when Ray manages the GPUs.
     """
+    slot = request.slot
     route = session_route(session)
     if route is None:
         log.error("accuracy_round: %s froze no base launch to serve the accuracy round on", session)
         return AccuracyRoundOutcome(slot, failed_step_error_class(FailedStep.CONFIG_INVALID))
-    lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(launch))
-    request = AccuracyRound(launch, slot, timeout_sec, deadline, lease)
+    owned = None
+    if request.serving_lease is None:
+        owned = maybe_serving_lease(num_gpus=_num_gpus_for_config(request.config_path))
+        request = replace(request, serving_lease=owned)
     try:
         async with heartbeat_while_output_flows(unit="accuracy_round", label="eval") as activity:
             ran = await asyncio.to_thread(run_accuracy_suite_round, route, request, on_poll=activity.note)
@@ -94,10 +106,30 @@ async def run_accuracy_round(
         log.error("accuracy_round: refused before it ran: %s", exc)
         return AccuracyRoundOutcome(slot, exc.error_class)
     finally:
-        if lease is not None:
-            lease.close()
+        if owned is not None:
+            owned.close()
     step = ran.report.failed_step
     return AccuracyRoundOutcome(ran.layout.root, "" if step is None else failed_step_error_class(step))
+
+
+async def run_candidate_accuracy_round(
+    slot: Path, launch: Path, state: Any, *, session: Path, lease: ServingLease | None = None
+) -> AccuracyRoundOutcome:
+    """Run the accuracy round of a candidate whose throughput cleared the KEEP threshold, capped as a benchmark round.
+
+    ``launch`` is the AgentX point the candidate ran in ``slot``; ``lease`` is the serving lease its gate still holds.
+    """
+    timeout_sec = resolve_benchmark_timeouts()[1]
+    deadline = deadline_unix(session_grid_bounds(state)[0])
+    return await run_accuracy_round(AccuracyRound(launch, slot, timeout_sec, deadline, lease), session=session)
+
+
+def record_accuracy_round(result: dict[str, Any], outcome: AccuracyRoundOutcome) -> None:
+    """Record ``outcome`` in ``result``: a round that failed leaves a warning, never a verdict of its own."""
+    result[ACCURACY_ROUND_KEY] = outcome.to_record()
+    if outcome.error_class:
+        log.warning("accuracy_round: the AgentX accuracy round ended %s in %s", outcome.error_class, outcome.run_dir)
+        result.setdefault("nonfatal_warnings", []).append(_ACCURACY_ROUND_FAILED)
 
 
 class _BaselineAccuracyMixin:
@@ -273,26 +305,18 @@ class _BaselineAccuracyMixin:
         ):
             return
         state = self._resolve_shared_state(ctx.extra.get("shared_state"))
-        if not (
-            agentx_active(benchmark_mode=getattr(state, _BENCHMARK_MODE_ATTR, ""))
-            and not is_mlperf_backend()
-            and state.agentx_accuracy
-        ):
+        if not accuracy_round_due(state):
             return
         slot = Path(result["output_dir"])
         if slot.name in _DOUBLE_RUN_ROUND_DIRS:
             slot = slot.parent
-        outcome = await run_accuracy_round(
-            slot,
+        request = AccuracyRound(
             Path(result["materialized_config"]),
-            session=self.session_dir,
-            timeout_sec=self._resolve_timeout(params),
-            deadline=deadline_unix(session_grid_bounds(state)[0]),
+            slot,
+            self._resolve_timeout(params),
+            deadline_unix(session_grid_bounds(state)[0]),
         )
-        result[ACCURACY_ROUND_KEY] = outcome.to_record()
-        if outcome.error_class:
-            log.warning("baseline_executor: the AgentX accuracy round ended %s in %s", outcome.error_class, slot)
-            result.setdefault("nonfatal_warnings", []).append(_ACCURACY_ROUND_FAILED)
+        record_accuracy_round(result, await run_accuracy_round(request, session=self.session_dir))
 
     @staticmethod
     def _accuracy_stop_death_evidence(result: dict[str, Any]) -> str:
