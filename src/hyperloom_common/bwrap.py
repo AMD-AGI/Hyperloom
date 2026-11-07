@@ -5,9 +5,10 @@
 
 The sandbox starts from an empty root. A path exists inside only when the policy binds it, so what is not bound (the
 app's state, its keys, other tasks' trees) is absent rather than forbidden; read-only binds refuse writes and metadata
-changes (``EROFS``); a mask hides the directory that holds a credential inside a bound tree (``EACCES``). The agent gets
-its own user, pid and IPC namespaces, a fresh ``/proc``, no capabilities and ``no_new_privs``; it shares the network
-unless the policy asks for its own.
+changes (``EROFS``), and so does the root once everything is mounted (a name made beside a bind, in a directory
+bubblewrap made to hold it, would land in no tree and be gone with the sandbox); a mask hides the directory that holds
+a credential inside a bound tree (``EACCES``). The agent gets its own user, pid and IPC namespaces, a fresh ``/proc``,
+no capabilities and ``no_new_privs``; it shares the network unless the policy asks for its own.
 
 bubblewrap prints the namespaces' ``child-pid`` on ``--json-status-fd`` as soon as it has cloned, before it mounts
 anything, and an ``exit-code`` only when the command ran: :class:`BwrapStatus` reads that difference.
@@ -105,6 +106,9 @@ _VERSION = re.compile(r"bubblewrap (\d+)\.(\d+)\.(\d+)")
 #: unbindable (as some container runtimes leave it) otherwise refuses to every bind with ``EINVAL``.
 _PRIVATE_MOUNTS = ("--mount", "--")
 _HOLD = "import signal; print('ready', flush=True); signal.pause()"
+#: Remounts the sandbox's root tmpfs read-only after the last mount: the directories bubblewrap made to hold the binds
+#: (a directory bound entry by entry, the parents of a bind) take no new name; every bind and tmpfs keeps its own mode.
+_SEAL_ROOT = ("--remount-ro", "/")
 #: Finds the ``unshare`` for a launch of a bubblewrap: its path, else ``None`` and why.
 _FindUnshare = Callable[[str], tuple[str | None, str]]
 
@@ -197,15 +201,15 @@ class BwrapPolicy:
     cover it later, so below a bound tree only a directory may be masked). The mount stays on the directory it
     was made on: one the host removes or renames away, or whose parent it renames or replaces (with a link, say),
     is unmasked, and what is put in its place is readable; a credential whose tool swaps directories so is kept out
-    by binding only what is needed beside it, not by a mask. ``devices`` are bound with device access (``/dev/kfd``, ``/dev/dri``). ``tmp`` and
-    ``shm`` are bound at ``/tmp`` and ``/dev/shm`` (a :class:`Scratch`; a sandbox whose commands share files there
-    passes the same pair to each, so before :data:`NESTED_SAFE` nothing may be mounted below them), else each is a
-    fresh tmpfs. ``sys_paths`` are bound read-only (a compile narrows ``/sys`` to the CPU tree).
-    ``own_network`` gives the sandbox a network of its own (loopback only). ``die_with_parent`` kills the sandbox when
-    the *thread* that started it ends (``PR_SET_PDEATHSIG``), so it is only for a launch made on a thread that
-    outlives it; without it, killing bubblewrap's own process leaves the sandbox running (kill its pid 1, the
-    status's ``child_pid``, or the whole process tree). ``join`` holds the user and pid namespace descriptors of a
-    :class:`Holder` to join instead of making new ones. ``marks`` are set in the command's environment only, so
+    by binding only what is needed beside it, not by a mask. ``devices`` are bound with device access (``/dev/kfd``,
+    ``/dev/dri``). ``tmp`` and ``shm`` are bound at ``/tmp`` and ``/dev/shm`` (a :class:`Scratch`; a sandbox whose
+    commands share files there passes the same pair to each, so before :data:`NESTED_SAFE` nothing may be mounted
+    below them), else each is a fresh tmpfs. ``sys_paths`` are bound read-only (a compile narrows ``/sys`` to the CPU
+    tree). ``own_network`` gives the sandbox a network of its own (loopback only). ``die_with_parent`` kills the
+    sandbox when the *thread* that started it ends (``PR_SET_PDEATHSIG``), so it is only for a launch made on a
+    thread that outlives it; without it, killing bubblewrap's own process leaves the sandbox running (kill its pid 1,
+    the status's ``child_pid``, or the whole process tree). ``join`` holds the user and pid namespace descriptors of
+    a :class:`Holder` to join instead of making new ones. ``marks`` are set in the command's environment only, so
     bubblewrap's own processes do not carry them (they show in bubblewrap's command line: never a secret).
     ``app_only`` paths are never bound, nor anything above them.
     """
@@ -322,8 +326,9 @@ class BwrapPolicy:
     def argv(self, bwrap: BwrapProbe, command: Sequence[str], *, status_fd: int | None = None) -> list[str]:
         """The command line that runs ``command`` in this sandbox with the probed ``bwrap``: its
         :attr:`BwrapProbe.launcher`, the namespace flags, every mount sorted by destination depth with the masks last
-        (so a bind below ``/tmp`` or a mask below a bind is not hidden by the mount above it), then ``--chdir``, the
-        marks and ``--json-status-fd``. The masks and symlinked roots are read from the filesystem now.
+        (so a bind below ``/tmp`` or a mask below a bind is not hidden by the mount above it), the root made read-only
+        (:data:`_SEAL_ROOT`), then ``--chdir``, the marks and ``--json-status-fd``. The masks and symlinked roots are
+        read from the filesystem now.
 
         Raises:
             BwrapPolicyError: :meth:`problems` names any for ``bwrap``'s version.
@@ -339,7 +344,7 @@ class BwrapPolicy:
         if status_fd is not None:
             tail += ["--json-status-fd", str(status_fd)]
         mounts = [arg for mount in self._mounts() for arg in mount.args]
-        return [*launcher, *self._namespace_flags(), *mounts, *tail, "--", *command]
+        return [*launcher, *self._namespace_flags(), *mounts, *_SEAL_ROOT, *tail, "--", *command]
 
     def _namespace_flags(self) -> list[str]:
         if self.join is None:
@@ -796,7 +801,8 @@ def _identity(path: str | None) -> tuple[int, ...] | None:
 
 
 def _namespace(name: str) -> int | None:
-    """This process's namespace ``name`` (its nsfs inode number; the inode's times change when it is re-instantiated)."""
+    """This process's namespace ``name`` (its nsfs inode number; the inode's times change when it is
+    re-instantiated)."""
     try:
         return os.stat(f"/proc/self/ns/{name}").st_ino
     except OSError:
