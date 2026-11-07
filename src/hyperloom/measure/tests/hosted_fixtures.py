@@ -18,8 +18,7 @@ from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.socket import SessionFacts, TestCall
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
-from hyperloom.inference_optimizer.session.base_launch import shared_state_fields, write_base_launch
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
 
 FAKE_RUNNER = (sys.executable, "-m", "hyperloom.measure.tests.fake_runner")
@@ -75,8 +74,7 @@ class Rig:
 
 def freeze_session_base(session: Path) -> None:
     """Freeze :func:`base_launch` as ``session``'s base, as a fresh launch does."""
-    write_base_launch(session, base_launch())
-    SharedState(**shared_state_fields(base_launch())).save(session)
+    freeze_base(session, base_launch())
 
 
 def staged_tool_cache(tmp: Path, monkeypatch: Any) -> str:
