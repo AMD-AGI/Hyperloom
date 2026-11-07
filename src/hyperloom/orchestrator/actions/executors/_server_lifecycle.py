@@ -340,9 +340,11 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
 
     Scans only the current session's ``runs/`` pidfiles and reaps each pid whose cmdline still matches a serving
     process (SIGTERM -> grace -> SIGKILL on the group), so a co-located session's server and a recycled pid are never
-    touched.
+    touched. A server inference_suite booted is reaped through its own ``stop``.
     """
-    return reap_recorded_servers(Path(session_dir) / "runs").reaped
+    runs = Path(session_dir) / "runs"
+    reaped = reap_recorded_servers(runs).reaped
+    return reaped + [pid for pid_dir in _suite_pid_dirs(runs) for pid in stop(pid_dir).reaped]
 
 
 def stop_agentx_servers(root: Path | str) -> list[int]:
@@ -351,7 +353,12 @@ def stop_agentx_servers(root: Path | str) -> list[int]:
     inference_suite booted it and records it in its pid_dir's ``server.pid``, the only handle on it once the client's
     tree is gone.
     """
-    return [pid for pidfile in sorted(Path(root).rglob(SERVER_PID)) for pid in stop(pidfile.parent).survivors]
+    return [pid for pid_dir in _suite_pid_dirs(Path(root)) for pid in stop(pid_dir).survivors]
+
+
+def _suite_pid_dirs(root: Path) -> list[Path]:
+    """Every pid_dir under ``root`` holding an inference_suite ``server.pid``."""
+    return [pidfile.parent for pidfile in sorted(root.rglob(SERVER_PID))]
 
 
 def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> ServerReap:
@@ -359,7 +366,8 @@ def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> Serv
 
     Nothing is signalled on the recorded pid alone: a live pid must still look like a serving process, and a gone
     leader's group is signalled only while a live member of it does, so a recycled pid or pgid is left untouched. A
-    pidfile is removed once nothing it names is left; a survivor's stays for the next reap.
+    pidfile is removed once nothing it names is left; a survivor's stays for the next reap. An inference_suite
+    ``server.pid`` is not one of these pidfiles: only its ``stop`` reads it.
     """
     reap = ServerReap(reaped=[], survivors=[])
     root = Path(root)
@@ -367,7 +375,7 @@ def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> Serv
         return reap
 
     own_pgid = os.getpgrp()
-    for pid_file in sorted(root.rglob(pidfile_glob)):
+    for pid_file in _lifecycle_pidfiles(root, pidfile_glob):
         recorded = _read_pidfile(pid_file)
         if recorded is None:
             continue
@@ -431,6 +439,11 @@ def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> Serv
         _remove_pidfile(pid_file)
 
     return reap
+
+
+def _lifecycle_pidfiles(root: Path, pidfile_glob: str) -> list[Path]:
+    """The pidfiles under ``root`` matching ``pidfile_glob`` that are not an inference_suite ``server.pid``."""
+    return [pid_file for pid_file in sorted(root.rglob(pidfile_glob)) if pid_file.name != SERVER_PID]
 
 
 def _remove_pidfile(pid_file: Path) -> None:

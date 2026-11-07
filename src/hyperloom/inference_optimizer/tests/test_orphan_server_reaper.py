@@ -73,6 +73,16 @@ def _write_pidfile(session_dir: Path, tag: str, pid: int) -> Path:
     return pidfile
 
 
+def _write_suite_pidfile(session_dir: Path, pid: int) -> Path:
+    """Record ``pid`` the way inference_suite records an MLPerf round's booted server."""
+    pid_dir = session_dir / "runs" / "explore" / "v0" / "mlperf_server" / "pid"
+    pid_dir.mkdir(parents=True)
+    pidfile = pid_dir / SERVER_PID
+    start_time = proc_identity(pid)[1]
+    ServerPidfile(pid, pid, start_time, uuid.uuid4().hex, 30000, Framework.SGLANG, "sha256:x").write(pidfile)
+    return pidfile
+
+
 def _proc_state(pid: int) -> str:
     """The ``/proc/<pid>/stat`` state letter, or ``""`` once the pid is gone."""
     try:
@@ -312,13 +322,7 @@ def test_stop_agentx_servers_stops_the_suite_server_and_leaves_other_pidfiles_al
     """A lifecycle server kept warm for the next round is recorded under its own name and must keep running."""
     client_booted = _spawn_marker_process("sglang.launch_server")
     warm = _spawn_marker_process("vllm.entrypoints.openai.api_server")
-    pid_dir = tmp_path / "runs" / "explore" / "v0" / "mlperf_server" / "pid"
-    pid_dir.mkdir(parents=True)
-    client_pidfile = pid_dir / SERVER_PID
-    start_time = proc_identity(client_booted.pid)[1]
-    ServerPidfile(
-        client_booted.pid, client_booted.pid, start_time, uuid.uuid4().hex, 30000, Framework.SGLANG, "sha256:x"
-    ).write(client_pidfile)
+    client_pidfile = _write_suite_pidfile(tmp_path, client_booted.pid)
     warm_pidfile = _write_pidfile(tmp_path, "vllm_8888", warm.pid)
     try:
         assert stop_agentx_servers(tmp_path) == []
@@ -335,6 +339,21 @@ def test_stop_agentx_servers_stops_the_suite_server_and_leaves_other_pidfiles_al
                 # Either may already have exited.
                 pass
             proc.wait(timeout=5)
+
+
+def test_reap_orphaned_servers_stops_a_suite_server_through_its_own_pidfile(tmp_path):
+    """The session reaper must not discard an inference_suite server.pid as malformed and leave its server up."""
+    server = _spawn_marker_process("sglang.launch_server")
+    pidfile = _write_suite_pidfile(tmp_path, server.pid)
+    try:
+        assert server.pid in reap_orphaned_servers(tmp_path)
+
+        server.wait(timeout=5)
+        assert not pidfile.exists()
+    finally:
+        if server.poll() is None:
+            server.kill()
+            server.wait(timeout=5)
 
 
 def test_reap_never_signals_its_own_process_group(tmp_path, monkeypatch):
