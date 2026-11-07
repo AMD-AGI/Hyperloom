@@ -12,7 +12,11 @@ The operator's own launch file enters both as the :class:`UserFile` :func:`parse
 :func:`fetch_response` reads one at a URL.
 
 A runner runs one round with :func:`run_round`, and reaps a server a round left running with :func:`stop`. The round
-names the staged tools it runs by :func:`manifest_sha256`, the digest of the tool cache's manifest. A runner that runs
+names the staged tools it runs by :func:`manifest_sha256`, the digest of the tool cache's manifest. ``install.sh
+<tool-cache-dir>``, shipped in this package, is the published entry point that stages those tools for a runner or a
+local setup: it runs ``python -m inference_suite stage`` under ``$PYTHON``, the interpreter rounds run under, prints
+the manifest's sha256, stages nothing into a cache that already verifies, and exits 2 with ``staging_missing`` on a
+damaged cache or a failed staging. A runner that runs
 the round in another process runs ``python -m inference_suite run``, which exits :data:`EXIT_REFUSED` when it refuses
 the config before the round starts. :func:`inferencex_root` is the staged InferenceX in a tool cache, and
 :data:`CLIENT_FILE` its benchmark client under that root. A round's ``launch.json`` names the GPUs its server ran on
