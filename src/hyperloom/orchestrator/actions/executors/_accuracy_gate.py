@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.benchmark_config import PointError, read_benchmark_point
 from hyperloom.common.gain_math import (
     ACCURACY_METRICS,
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
@@ -80,10 +81,9 @@ BASELINE_ACCURACY_STOP_REASON = "baseline_accuracy_failed"
 def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     """Report whether lm-eval is disabled in the materialized benchmark config."""
     try:
-        cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+        envs = read_benchmark_point(Path(config_path)).envs
+    except (OSError, yaml.YAMLError, PointError):
         return False
-    envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
     return not is_truthy(envs.get("RUN_EVAL"), default=True)
 
 
@@ -142,12 +142,10 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
         p = Path(config_path)
         if not p.is_file():
             return {}
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        point = read_benchmark_point(p)
     except (OSError, ValueError, yaml.YAMLError):
         return {}
-
-    bench = data.get("benchmark") or {}
-    envs: dict = bench.get("envs") or {}
+    envs = point.envs
 
     # Eval-contract keys in benchmark.envs; all others are excluded.
     _EVAL_CONTRACT_ENV_KEYS = (
@@ -171,10 +169,10 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
         "RANDOM_RANGE_RATIO",
     )
     contract: dict[str, str] = {
-        "framework": str(bench.get("framework") or ""),
-        "model": str(bench.get("model") or ""),
-        "benchmark_script": str(bench.get("benchmark_script") or ""),
-        "precision": str(bench.get("precision") or ""),
+        "framework": point.framework,
+        "model": point.model,
+        "benchmark_script": point.benchmark_script,
+        "precision": point.precision,
     }
     for k in _EVAL_CONTRACT_ENV_KEYS + _WORKLOAD_SHAPE_ENV_KEYS:
         v = envs.get(k)

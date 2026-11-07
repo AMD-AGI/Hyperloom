@@ -17,9 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom_common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import launch_flag_setting_name
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
@@ -138,22 +137,21 @@ def read_launch(config_path: Path, unset_envs: Iterable[str] = ()) -> Launch:
     Raises:
         ConfigUnreadable, OSError, ValueError, yaml.YAMLError: When the config or its argv cannot be read.
     """
-    bench = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
-    framework = str(bench.get("framework") or "")
+    point = read_benchmark_point(config_path)
     controls: dict[str, Any] = {"unset_envs": sorted(set(to_str_list(unset_envs)))}
-    if not is_magpie_agentx(bench):
+    if not point.agentx:
         argv = config_server_argv(config_path).text
-        return Launch(named_settings(argv, framework), config_envs(config_path), controls)
-    overrides = (bench.get("agentx") or {}).get("launch_overrides") or {}
-    envs = {**config_envs(config_path), **{str(k): str(v) for k, v in (overrides.get("env") or {}).items()}}
+        return Launch(named_settings(argv, point.framework), config_envs(config_path), controls)
+    overrides = point.agentx_launch
+    envs = {**config_envs(config_path), **{str(k): str(v) for k, v in overrides.env.items()}}
     controls.update(
-        remove_args=sorted(overrides.get("remove_args") or []),
-        replace_args=bool(overrides.get("replace_args")),
-        unset_env=sorted(overrides.get("unset_env") or []),
-        executable=str(overrides.get("executable") or ""),
-        source_files=dict(overrides.get("source_files") or {}),
+        remove_args=sorted(overrides.remove_args),
+        replace_args=overrides.replace_args,
+        unset_env=sorted(overrides.unset_env),
+        executable=overrides.executable,
+        source_files=dict(overrides.source_files),
     )
-    return Launch(_settings_of_tokens(list(overrides.get("append_args") or []), framework), envs, controls)
+    return Launch(_settings_of_tokens(list(overrides.append_args), point.framework), envs, controls)
 
 
 def launch_change(
