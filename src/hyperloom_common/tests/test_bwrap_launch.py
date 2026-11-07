@@ -212,8 +212,16 @@ def test_a_masked_directory_holds_while_the_app_replaces_and_creates_credentials
     assert credentials.read_text() == "after-" + CANARY and token.read_text() == "login-" + CANARY
 
 
-def test_read_only_binds_and_the_root_refuse_writes_and_metadata(probe: BwrapProbe, tmp_path: Path) -> None:
-    tree, work = tmp_path / "tree", tmp_path / "wt"
+@pytest.fixture
+def outside_tmp() -> Iterator[Path]:
+    """A directory below no ``/tmp`` of the host's: there the directories bubblewrap makes to hold a bind are in the
+    sandbox's root, not in its own ``/tmp``, which it writes."""
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as base:
+        yield Path(base)
+
+
+def test_read_only_binds_and_the_root_refuse_writes_and_metadata(probe: BwrapProbe, outside_tmp: Path) -> None:
+    tree, work = outside_tmp / "tree", outside_tmp / "wt"
     tree.mkdir()
     work.mkdir()
     (tree / "file").write_text("kept")
