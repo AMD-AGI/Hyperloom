@@ -995,3 +995,19 @@ def test_baseline_names_the_script_from_the_config(tmp_path):
 
     cfg.write_text(yaml.safe_dump({"benchmark": {}}), encoding="utf-8")
     assert bl.BaselineExecutor._client_script_from_config(cfg) is None
+
+
+def test_baseline_reads_model_and_checkout_from_the_point_and_nothing_from_a_non_point(tmp_path, monkeypatch):
+    import yaml
+    from hyperloom.orchestrator.actions.executors import baseline as bl
+
+    monkeypatch.setenv("INFERENCEX_PATH", "/ambient")
+    cfg = tmp_path / "b.yaml"
+    cfg.write_text(yaml.safe_dump({"benchmark": {"model": " /m ", "inferencex_path": "/ix"}}), encoding="utf-8")
+    assert bl.BaselineExecutor._model_from_config(cfg) == "/m"
+    assert bl.BaselineExecutor._inferencex_root_from_config(cfg) == "/ix"
+
+    cfg.write_text(yaml.safe_dump({"other": {}}), encoding="utf-8")
+    assert bl.BaselineExecutor._client_script_from_config(cfg) is None
+    assert bl.BaselineExecutor._model_from_config(cfg) == ""
+    assert bl.BaselineExecutor._inferencex_root_from_config(cfg) == "/ambient"

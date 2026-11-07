@@ -30,6 +30,7 @@ from typing import Any, Mapping, NamedTuple
 
 import yaml
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.common.agentx_workload import is_agentx_client_key, pin_mlperf_round_concurrency
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
@@ -1458,7 +1459,6 @@ def materialize_benchmark_config(
     """Resolve the workload owner before applying server candidate changes."""
     import yaml
 
-    from hyperloom.common.benchmark_config import is_magpie_agentx
     from hyperloom_common.coerce import to_str_list
     from .magpie_agentx import (
         LaunchChanges,
@@ -1469,7 +1469,7 @@ def materialize_benchmark_config(
     )
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    if not is_magpie_agentx(config["benchmark"]):
+    if not BenchmarkPoint.from_document(config, source=str(config_path)).agentx:
         return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
     replacing = launch.args_mode == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
