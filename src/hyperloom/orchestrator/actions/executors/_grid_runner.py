@@ -69,7 +69,6 @@ from .benchmark_result import (
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
 from ._round_folder import RoundFolder, is_round_folder, round_report_path
-from ._failed_step import failed_step_error_class
 from ._suite_config import SuiteRoundRefused, suite_route
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import apply_benchmark_round_seed, composed_benchmark_timeout_sec, prepare_benchmark_runtime
@@ -886,7 +885,7 @@ async def _reported_round(run: _GridRun, at: _VariantSlot, label: str, bench_rou
                     run_grid_suite_round, route, bench_round, env_drop=unset, on_poll=activity.note
                 )
             except SuiteRoundRefused as exc:
-                _abort_variant(at, _VariantFailure(failed_step_error_class(exc.step), exc.detail))
+                _abort_variant(at, _VariantFailure(exc.error_class, exc.detail))
             return _RoundProcess(ended.returncode, "", ended.detail)
         returncode, stdout, stderr = await asyncio.to_thread(
             _run_magpie,
