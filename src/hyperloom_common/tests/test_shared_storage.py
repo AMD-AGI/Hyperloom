@@ -212,6 +212,80 @@ def test_two_accounts_of_one_group_continue_each_others_tree_and_nothing_else(tm
         assert (_mode(dev), dev.stat().st_uid, dev.stat().st_gid) == (0o2775, accounts.second, accounts.group)
 
 
+_SWAP_FOR_A_LINK = """
+import os
+os.rename({shared!r}, {shared!r} + ".old")
+os.symlink({target!r}, {shared!r})
+"""
+
+_WRITE_THROUGH_IT = """
+import errno, json
+from pathlib import Path
+from hyperloom_common.shared_storage import write_shared_bytes
+try:
+    write_shared_bytes(Path({path!r}), b"from the owner of the home, through this account")
+except OSError as exc:
+    print(json.dumps([errno.errorcode[exc.errno], exc.filename]))
+else:
+    print(json.dumps("written"))
+"""
+
+
+@pytest.fixture
+def closed_to_others() -> Iterator[Path]:
+    """A new ``0755`` directory of root's whose every directory above is root's and written by root alone: below
+    ``/tmp`` a link would be refused for ``/tmp`` already, whoever owns the directories after it."""
+    for candidate in map(Path, ("/srv", "/opt", "/var/lib", "/usr/local")):
+        chain = (candidate, *candidate.parents)
+        try:
+            closed = all(
+                (info := os.stat(path)).st_uid == 0 and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                for path in chain
+            )
+        except OSError:
+            continue
+        if closed and os.access(candidate, os.W_OK):
+            base = Path(tempfile.mkdtemp(prefix=".hl-shared-storage-test-", dir=candidate))
+            break
+    else:
+        pytest.skip("no directory here whose way is root's alone")
+    try:
+        base.chmod(0o755)
+        yield base
+    finally:
+        shutil.rmtree(base)
+
+
+def test_a_link_in_a_directory_another_account_owns_is_not_followed_though_only_that_account_can_write_it(
+    closed_to_others,
+):
+    """A member's own home (``0755``, only that member writes it) holding the shared tree: the member can swap the tree
+    for a link to a directory only the next account may enter, and so must not be followed there."""
+    with other_accounts() as accounts:
+        home = closed_to_others / "home-of-first"
+        home.mkdir(mode=0o755)
+        os.chown(home, accounts.first, accounts.group)
+        shared = home / "shared"
+        shared.mkdir()
+        os.chown(shared, accounts.first, accounts.group)
+        shared.chmod(0o2775)
+        private = closed_to_others / "private-of-second"
+        private.mkdir(mode=0o700)
+        settings = private / "settings.json"
+        settings.write_text("orig")
+        settings.chmod(0o600)
+        os.chown(settings, accounts.second, accounts.second)
+        os.chown(private, accounts.second, accounts.second)
+        accounts.run(accounts.first, _SWAP_FOR_A_LINK.format(shared=str(shared), target=str(private)))
+        assert shared.is_symlink() and shared.lstat().st_uid == accounts.first
+
+        seen = json.loads(accounts.run(accounts.second, _WRITE_THROUGH_IT.format(path=str(shared / "settings.json"))))
+
+        assert seen == ["ELOOP", str(shared)]
+        assert (settings.read_text(), _mode(settings), settings.stat().st_uid) == ("orig", 0o600, accounts.second)
+        assert sorted(path.name for path in private.iterdir()) == ["settings.json"]
+
+
 def test_an_account_outside_the_group_gets_no_setgid_and_is_warned(tmp_path):
     with other_accounts() as accounts:
         shared = accounts.shared_dir("shared")

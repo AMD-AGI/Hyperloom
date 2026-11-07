@@ -62,7 +62,8 @@ def open_directory(path: Path, *, make: int | None = None) -> int:
 
     Each directory of the path is opened below the one before it, never following another account's link once the way
     has passed a directory that accounts other than its owner can write (:data:`_OPEN_TO_OTHERS`, the shared tree
-    itself, ``/tmp``): any member of the group could have put one there, to any directory the account that follows it
+    itself, ``/tmp``) or that another account than this one and root owns (a member's home or project directory):
+    any member of the group, or that owner, could have put one there, to any directory the account that follows it
     can write. Links above that point (``/var/run``, a mount reached through a link of the host's), and this account's
     and root's own anywhere, are followed. With ``make``, each missing directory is made with that mode
     (:func:`make_shared_dirs`).
@@ -92,9 +93,15 @@ def open_directory(path: Path, *, make: int | None = None) -> int:
     return walk.descriptor
 
 
+def _trusted(uid: int) -> bool:
+    """Whether what ``uid`` owns is this account's or root's: no other account can make or change it."""
+    return uid in (0, os.geteuid())
+
+
 class _Walk:
     """Where :func:`open_directory` is on its way: the directory open as :attr:`descriptor` (``O_PATH``) is
-    :attr:`here`, and :attr:`shared` once a directory passed can be written by accounts other than its owner."""
+    :attr:`here`, and :attr:`shared` once a directory passed can be written by accounts other than its owner, or is
+    owned by an account other than this one and root (which can put any link there)."""
 
     def __init__(self, descriptor: int) -> None:
         self.descriptor = descriptor
@@ -105,7 +112,8 @@ class _Walk:
     def look_up(self, name: str, make: int | None) -> os.stat_result | None:
         """``lstat`` of ``name`` here, made first with ``make`` when it is missing; ``None`` when another process
         made it meanwhile."""
-        self.shared = self.shared or bool(os.fstat(self.descriptor).st_mode & _OPEN_TO_OTHERS)
+        here = os.fstat(self.descriptor)
+        self.shared = self.shared or bool(here.st_mode & _OPEN_TO_OTHERS) or not _trusted(here.st_uid)
         try:
             return os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
         except FileNotFoundError:
@@ -127,7 +135,7 @@ class _Walk:
         link = os.open(name, _LINK, dir_fd=self.descriptor)
         try:
             owner = os.fstat(link).st_uid
-            if self.shared and owner not in (0, os.geteuid()):
+            if self.shared and not _trusted(owner):
                 raise OSError(
                     errno.ELOOP,
                     f"a link of uid {owner} in a directory other accounts can write is not followed",

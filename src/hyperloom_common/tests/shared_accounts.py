@@ -18,6 +18,7 @@ import grp
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -153,12 +154,23 @@ _ANOTHER_ACCOUNT = 60999
 
 
 def theirs(link: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Make ``link`` another account's: chowned to one where this is root, else this account seen as another."""
+    """Make ``link`` another account's: chowned to one where this is root, else seen as one by ``fstat`` (only that
+    inode: the directories around it stay this account's)."""
     if os.geteuid() == 0:
         os.lchown(link, _ANOTHER_ACCOUNT, _ANOTHER_ACCOUNT)
-    else:
-        euid = os.geteuid()
-        monkeypatch.setattr(os, "geteuid", lambda: euid + 1)
+        return link
+    planted = os.lstat(link)
+    real_fstat = os.fstat
+
+    def as_another_accounts(descriptor: int) -> os.stat_result:
+        info = real_fstat(descriptor)
+        if (info.st_dev, info.st_ino) != (planted.st_dev, planted.st_ino):
+            return info
+        fields = list(info)
+        fields[stat.ST_UID] = _ANOTHER_ACCOUNT
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", as_another_accounts)
     return link
 
 
