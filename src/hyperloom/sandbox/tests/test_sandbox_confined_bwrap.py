@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import shlex
 import shutil
+import signal
 import socket
 import sys
 import tempfile
@@ -308,14 +310,21 @@ def test_a_test_s_server_reaches_its_own_tree_and_key_and_nothing_of_the_app_or_
     assert SECRET not in json.dumps(env) and "HF_HOME" not in env
 
 
+@pytest.mark.parametrize("sealed", [True, False], ids=["sealed-runner", "commands-in-a-holder"])
 def test_a_kill_reaps_the_whole_tree_after_its_grace_and_frees_the_cards(
-    area: Path, probe: BwrapProbe, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch
+    area: Path, probe: BwrapProbe, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch, sealed: bool
 ) -> None:
+    """Sealed, the runner has a pid namespace of its own; else its commands share a holder's, which the kill ends only
+    after the reap, so that a command's TERM handler still runs to its end."""
     name = f"hl-test-{os.getpid()}-{time.monotonic_ns()}"
     script = area / "family.sh"
     script.write_text(FAMILY)
-    template = LocalTemplate(
-        "runner", "measurement", command=("/bin/bash", str(script), name), gpus=1, sealed=True, signing=True
+    template = (
+        LocalTemplate(
+            "runner", "measurement", command=("/bin/bash", str(script), name), gpus=1, sealed=True, signing=True
+        )
+        if sealed
+        else LocalTemplate("dev", "dev", gpus=1)
     )
     provider = LocalSandboxProvider(
         [template], gpus=(0,), base_dir=area / "sandboxes", users=ProcessUsers(plan=RunnerPlan(readable=(script,)))
@@ -330,7 +339,9 @@ def test_a_kill_reaps_the_whole_tree_after_its_grace_and_frees_the_cards(
             shutil.copytree(out, kept)
         real_rmtree(path, *args, **kwargs)  # type: ignore[arg-type]
 
-    sandbox = provider.create("runner", role="measurement", timeout_sec=120, metadata={})
+    sandbox = provider.create(template.name, role=template.role, timeout_sec=120, metadata={})
+    if not sealed:
+        sandbox.run(f"exec /bin/bash {shlex.quote(str(script))} {name}", background=True)
     _read(sandbox, "/out/ready")
     family = [f"{name}-{part}" for part in ("child", "daemon", "stripped")]
     _wait(lambda: all(_named(member) for member in family))
@@ -343,6 +354,7 @@ def test_a_kill_reaps_the_whole_tree_after_its_grace_and_frees_the_cards(
         SANDBOX_TAG_ENV.encode() in _environ(_named(family[2])[0]),
     )
     scratch = sandbox._confined.scratch if sandbox._confined else None
+    holder = sandbox._confined.holder if sandbox._confined else None
     monkeypatch.setattr(local_sandbox.shutil, "rmtree", keep_out)
     sandbox.kill()
     monkeypatch.setattr(local_sandbox.shutil, "rmtree", real_rmtree)
@@ -354,6 +366,7 @@ def test_a_kill_reaps_the_whole_tree_after_its_grace_and_frees_the_cards(
     assert (kept / "stopped").read_text().strip() == "stopped", "the runner's TERM handler ran to its end"
     assert provider.pool.free_cards() == (0,) and not provider.quarantined
     assert scratch is not None and not os.path.exists(scratch.tmp) and not os.path.exists(scratch.shm)
+    assert (holder is None) == sealed and (holder is None or not os.path.exists(f"/proc/{holder.pid}/ns"))
 
 
 def test_an_unsealed_sandbox_s_commands_share_one_holder_and_its_kill_ends_it(
@@ -398,6 +411,27 @@ def test_an_unsealed_sandbox_s_commands_share_one_holder_and_its_kill_ends_it(
     assert after_timeout == ([], True), "a command's timeout killed its tree alone"
     assert stopped.stdout.split() == ["pkill=0"], "a later command stops what an earlier one started"
     assert not _named(f"{name}-left") and not os.path.exists(f"/proc/{holder.pid}/ns"), "the kill ended the holder"
+
+
+def test_a_command_after_its_holder_ended_gets_a_new_holder(
+    area: Path, probe: BwrapProbe, providers: list[LocalSandboxProvider]
+) -> None:
+    provider = LocalSandboxProvider(
+        [LocalTemplate("dev", "dev")], base_dir=area / "sandboxes", users=ProcessUsers(plan=RunnerPlan())
+    )
+    providers.append(provider)
+    sandbox = provider.create("dev", role="dev", timeout_sec=120, metadata={})
+    first = sandbox.run("echo first", settings=RunSettings(timeout_sec=60))
+    ended = sandbox._confined.holder if sandbox._confined else None
+    assert ended is not None
+    signal.pidfd_send_signal(ended.pidfd, signal.SIGKILL)  # the holder's pid 1, which this test's sandbox started
+    _wait(lambda: select.select([ended.pidfd], [], [], 0)[0])
+    later = sandbox.run("echo again", settings=RunSettings(timeout_sec=60))
+    holder = sandbox._confined.holder if sandbox._confined else None
+    sandbox.kill()
+
+    assert (first.exit_code, first.stdout.strip(), later.exit_code, later.stdout.strip()) == (0, "first", 0, "again")
+    assert holder is not None and holder is not ended and holder.pid != ended.pid
 
 
 def test_a_hosted_run_confines_its_tests_with_its_layer_bubblewrap(
