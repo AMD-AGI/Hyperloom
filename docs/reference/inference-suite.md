@@ -88,6 +88,13 @@ accuracy round, on its own server and without the golden layer, at the baseline 
 at each candidate that passes the KEEP threshold. `hyperloom optimize
 --no-agentx-accuracy` turns it off for the session.
 
+An AgentX round replays the trace corpus for a fixed profiling duration, as
+InferenceX does: the point's `DURATION` in seconds, 3600 when it sets none, passed
+as `--benchmark-duration`. The harness's `agentx` scenario holds the replay to 95%
+latency coverage of that duration, so no request count bounds it. Below 900 s, the
+scenario's minimum, the round adds `--unsafe-override`; use 600 s or 900 s for
+quick tests.
+
 ## Server lifecycle
 
 A round holds its server in one of four modes:
