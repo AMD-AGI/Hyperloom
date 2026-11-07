@@ -43,6 +43,7 @@ from inference_suite.contracts import (
     RunPaths,
     RunStatus,
     SuiteConfig,
+    Telemetry,
     WorkloadKind,
 )
 from inference_suite.contracts.base_launch import Workload
@@ -283,7 +284,7 @@ class _Rig:
             fixed=_FIXED,
             profile=ProfileConfig(enabled=False),
             eval=_eval(enabled=False),
-            telemetry=GpuTelemetry(enabled=True, interval_sec=0.05),
+            telemetry=Telemetry(GpuTelemetry(enabled=True, interval_sec=0.05), kv=True),
             deadlines=Deadlines(boot_sec=60, round_sec=120, eval_sec=60, silence_sec=60),
             paths=RunPaths(str(self.tmp / run_dir), str(self.tools), _SHA),
         )
@@ -368,6 +369,14 @@ def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
     phases = {row["phase"] for row in kv["samples"]}
     assert {Phase.WARMUP.value, Phase.MEASURED.value, Phase.FINISHED.value, Phase.EVAL.value} <= phases
     assert all(row["capacity_tokens"] == 4096 for row in kv["samples"])
+
+
+def test_a_round_with_kv_telemetry_off_scrapes_no_metrics(rig):
+    config = rig.config("r1", telemetry=replace(rig.config("r1").telemetry, kv=False))
+    result = run.run_round(config)
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    assert not result.layout.kv_metrics.exists()
 
 
 _FIXED_WINDOW = ProfileConfig(
@@ -563,7 +572,7 @@ def test_the_refusal_says_whether_the_host_holds_a_redacted_value(rig, monkeypat
 
 
 def test_a_round_writes_only_into_an_empty_run_dir(rig):
-    config = rig.config("r1", telemetry=GpuTelemetry(enabled=False, interval_sec=1))
+    config = rig.config("r1", telemetry=Telemetry(GpuTelemetry(enabled=False, interval_sec=1), kv=True))
     rig.staging = StagingReport(_SHA, {}, ("inferencex at its pin (not staged)",))
     run.run_round(config)
 
@@ -657,7 +666,7 @@ def test_a_reuse_round_runs_on_the_server_a_boot_round_left_and_the_cli_stops_it
 
 
 def test_cli_run_round_trips_the_config_and_exits_by_the_round_status(rig, tmp_path, capsys):
-    config = rig.config("ignored", telemetry=GpuTelemetry(enabled=False, interval_sec=1))
+    config = rig.config("ignored", telemetry=Telemetry(GpuTelemetry(enabled=False, interval_sec=1), kv=True))
     rig.staging = StagingReport(_SHA, {}, ("inferencex at its pin (not staged)",))
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.safe_dump(config.to_document()))

@@ -138,7 +138,7 @@ def _gpu_listener(recorder: GpuPowerRecorder) -> PhaseListener:
 
 
 def _recorder(config: SuiteConfig, layout: RunLayout) -> GpuPowerRecorder | None:
-    telemetry = config.telemetry
+    telemetry = config.telemetry.gpu
     if not telemetry.enabled:
         return None
     return GpuPowerRecorder(
@@ -436,7 +436,8 @@ class _Round:
                 self.sections["profile"] = _profile_result(self.layout, self.capture)
 
     def _sampled(self, server: Server, prepared: _Prepared) -> None:
-        self.kv.start()
+        if self.config.telemetry.kv:
+            self.kv.start()
         try:
             self._on_server(server, prepared)
         finally:

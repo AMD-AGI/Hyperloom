@@ -34,6 +34,7 @@ from inference_suite.contracts import (
     LifecycleMode,
     RunPaths,
     SuiteConfig,
+    Telemetry,
     Workload,
     WorkloadKind,
 )
@@ -134,7 +135,7 @@ def _settings(mode: LifecycleMode = LifecycleMode.OWN) -> RoundSettings:
         paths=RunPaths("/session/runs/r0", "/tools", _SHA),
         framework_python="/opt/venv/bin/python",
         lifecycle=Lifecycle(mode, None if mode is LifecycleMode.OWN else "/session/server"),
-        telemetry=GpuTelemetry(True, 1.0),
+        telemetry=Telemetry(GpuTelemetry(True, 1.0), kv=True),
         silence_sec=600,
         env_inherit=("HOME",),
     )
@@ -370,7 +371,7 @@ def test_a_client_only_round_measures_the_external_server_and_samples_no_local_g
 
     assert config.lifecycle == Lifecycle(LifecycleMode.EXTERNAL)
     assert (config.server.host, config.server.port) == address
-    assert not config.telemetry.enabled
+    assert not config.telemetry.gpu.enabled
     assert "BENCHMARK_BASE_URL" not in config.server.user.env_set
 
 
@@ -378,7 +379,7 @@ def test_a_round_without_an_external_server_keeps_its_own_lifecycle_and_telemetr
     config = suite_config(_point("sglang"), _base("sglang"), _settings(LifecycleMode.BOOT))
 
     assert config.lifecycle == _settings(LifecycleMode.BOOT).lifecycle
-    assert (config.server.host, config.telemetry.enabled) == ("127.0.0.1", True)
+    assert (config.server.host, config.telemetry.gpu.enabled) == ("127.0.0.1", True)
 
 
 #: What the AgentX switch writes into an MLPerf point (``_workload_envs.apply_agentx_switch``).
