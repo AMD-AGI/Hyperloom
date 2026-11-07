@@ -317,17 +317,15 @@ def test_a_yaml_sequence_mask_is_not_stringified_into_junk() -> None:
     assert pin["ids"] == [4, 5]
 
 
-def test_gpu_ids_are_logical_for_a_recipe_only_rocr_pin() -> None:
-    """A recipe mask reaches the servers even though it never reaches GEAK.
+def test_a_recipe_only_rocr_pin_names_absolute_cards() -> None:
+    """The measured round turned the recipe mask into the absolute cards its server ran on.
 
-    The phase launches GEAK with ``dict(os.environ)``, so a recipe-only mask
-    does not renumber GEAK's own devices — but GEAK starts its servers from
-    ``handoff["launch_recipe"]``, which carries it, so it renumbers theirs.
-    Forwarding ``"6,7"`` here would re-export ordinals 6 and 7 into a
-    two-element set.
+    GEAK launches its servers from that round's launch.json under its own environment, so a recipe-only mask
+    renumbers nothing: re-exporting ``"0,1"`` would move the servers onto cards 0 and 1.
     """
     pin = resolve_gpu_pin(recipe_envs={"TP": 2, "ROCR_VISIBLE_DEVICES": "6,7"}, environ={})
-    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2) == "0,1"
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "absolute"
+    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2) == "6,7"
 
 
 # --------------------------------------------------------------------------- #
@@ -476,48 +474,16 @@ def test_gpu_ids_space_is_absolute_when_unpinned() -> None:
     assert _resolve_handoff_gpu_ids_space(gpu_pin=None) == "absolute"
 
 
-def test_a_recipe_rocr_pin_renumbers_the_servers_so_its_ids_are_logical() -> None:
-    """The recipe reaches the servers even though it never reaches GEAK itself.
-
-    GEAK starts its servers from ``handoff["launch_recipe"]``, which carries the
-    recipe's ``benchmark.envs``, so a recipe ROCr mask renumbers them exactly
-    like a process-env one. Reporting these ids as absolute made the mask index
-    out of its own slice.
-    """
-    pin = resolve_gpu_pin(recipe_envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "6"}, environ={})
-    assert pin["source"] == "baseline_recipe"
-    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "logical"
-    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=1) == "0"
-
-
-def test_a_recipe_rocr_pin_still_emits_the_merge_base_gpu_ids() -> None:
-    """Regression guard, not a new edge case.
-
-    Before this PR ``gpu_ids`` read HIP/CUDA only, so a recipe-sourced ROCr mask
-    was not a pin at all and the handoff carried ``0..tp-1`` -- which composes
-    correctly with the recipe-applied mask and lands on cards 4-7. Emitting
-    ``"4,5,6,7"`` here instead would re-export 4..7 into a four-element set.
-    """
-    pin = resolve_gpu_pin(recipe_envs={"TP": 4, "ROCR_VISIBLE_DEVICES": "4,5,6,7"}, environ={})
-    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=4) == ",".join(str(i) for i in range(4))
-
-
-def test_an_inner_hip_mask_is_forwarded_for_a_recipe_sourced_rocr_pin() -> None:
-    """The payload must not advertise a nesting the resolver then ignores.
-
-    ``pin["inner"]`` is documented as "the HIP-level mask nested inside a
-    winning ROCr-level pin", so a consumer composing ``ROCR=4,5,6,7`` with
-    ``HIP=1`` lands on card 5. The resolver has to agree.
-    """
+def test_a_recipe_rocr_pin_carries_no_nested_process_mask() -> None:
+    """A process HIP mask does not index into a recipe ROCr pin: GEAK's servers never see that ROCr slice."""
     pin = resolve_gpu_pin(
         recipe_envs={"TP": 4, "ROCR_VISIBLE_DEVICES": "4,5,6,7"},
         environ={"HIP_VISIBLE_DEVICES": "1"},
     )
-    assert pin["inner"]["value"] == "1"
+    assert (pin["source"], "inner" in pin) == ("baseline_recipe", False)
     ids = _resolve_handoff_gpu_ids(gpu_pin=pin, tp=4)
-    assert ids == "1"
-    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "logical"
-    assert _resolve_handoff_tp(gpu_ids=ids, tp=4) == 1
+    assert (ids, _resolve_handoff_gpu_ids_space(gpu_pin=pin)) == ("4,5,6,7", "absolute")
+    assert _resolve_handoff_tp(gpu_ids=ids, tp=4) == 4
 
 
 def test_a_nested_hip_mask_cannot_inflate_the_device_count() -> None:

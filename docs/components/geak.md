@@ -62,7 +62,7 @@ coordinate systems:
 
 | Field | Coordinate system | Value |
 |-------|-------------------|-------|
-| `gpu_ids` | HIP-level device list — HIP indexes into the ROCr-visible set | logical positions inside an in-force ROCr-level mask (process env **or** baseline recipe), capped at `tp` and at the mask width (`ROCR=6` → `"0"`); a HIP-level mask nested inside that slice is already logical and is forwarded instead (`ROCR=4,5,6,7` + `HIP=2,3` → `"2,3"`, i.e. cards 6 and 7); any other mask passes through uncapped (`HIP=4,5` → `"4,5"`); `0..tp-1` when the run is unpinned. Never empty — a falsy `gpu_ids` sends GEAK back to its own `0..tp-1` fallback |
+| `gpu_ids` | HIP-level device list — HIP indexes into the ROCr-visible set | logical positions inside a ROCr-level mask in the process env, which GEAK inherits, capped at `tp` and at the mask width (`ROCR=6` → `"0"`); a HIP-level mask nested inside that slice is already logical and is forwarded instead (`ROCR=4,5,6,7` + `HIP=2,3` → `"2,3"`, i.e. cards 6 and 7); any other mask, a baseline-recipe ROCr mask included, passes through uncapped (`HIP=4,5` → `"4,5"`); `0..tp-1` when the run is unpinned. Never empty — a falsy `gpu_ids` sends GEAK back to its own `0..tp-1` fallback |
 | `gpu_ids_space` | — | `"logical"` when `gpu_ids` indexes into a ROCr mask that is in force for the launched servers, `"absolute"` when they are whole-machine ids, `"none"` when the mask is set but empty. The one field that makes the coordinate systems distinguishable from the payload alone |
 | `gpu_pin` | absolute device ids | `{"var", "value", "ids", "count", "source"}` for the winning mask, plus `"inner"` (the same shape) when a HIP-level mask is nested inside a ROCr-level one. Omitted entirely only when no mask is set anywhere, which means "whole machine visible", not "pinned to card 0"; a mask that is *set but empty* is reported with `count: 0` (zero devices visible). `value` is the mask as authored, only whitespace-trimmed and (for a YAML sequence) comma-joined, so a UUID mask can be re-exported as-is; `ids` are its numeric ids and `count` how many devices it exposes — both derived from the same effective token list, with duplicate and negative ordinals dropped, so `count >= len(ids)` always and they differ only for a (partly) non-numeric mask |
 
@@ -87,9 +87,9 @@ into every materialized recipe when the mask is absent or narrower than `TP`.
 A recipe ROCR value byte-identical to that default is therefore ignored, so a
 `HIP`-pinned or genuinely unpinned run is not silently re-pinned to cards
 `0..tp-1`. A recipe mask that differs from the default *is* honoured, and its ids are
-forwarded **logical**, exactly like a process-env one: GEAK starts its servers
-from `launch_recipe`, which carries that mask, so the servers see a renumbered
-set even though the GEAK process itself never does.
+forwarded **absolute**: the measured round turned that mask into the card list
+its server ran on, and GEAK starts its servers from that round's `launch.json`
+under its own environment, so only a process-env ROCr mask renumbers them.
 
 `tp` in the handoff is read from the same resolved recipe as `gpu_ids`, so the
 two cannot disagree when the materializer clamps `TP` to the visible GPU count.
