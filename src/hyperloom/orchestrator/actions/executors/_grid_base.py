@@ -40,13 +40,14 @@ from inference_suite.contracts import FailedStep
 from ._agentx_checkpoint import AgentxCheckpoint, read_checkpoint
 from ._failed_step import failed_step_error_class
 from ._subprocess_kill import (
+    AGENTX_EARLY_STOP_ERROR_CLASS,
     AGENTX_EARLY_STOP_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     sync_agentx_phase_wait,
 )
 from ._ray_serving import ServingLease
-from ._suite_config import SuiteRound, SuiteRoute, deadline_unix, point_server, run_suite_round
+from ._suite_config import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, point_server, run_suite_round
 
 log = logging.getLogger(__name__)
 
@@ -150,12 +151,17 @@ def run_grid_suite_round(
     )
     try:
         report = run_suite_round(route, request, on_poll=on_poll).report
+    except SuiteRoundRefused as exc:
+        if exc.error_class != AGENTX_EARLY_STOP_ERROR_CLASS:
+            raise
+        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, exc.detail)
     finally:
         if server.stop_after is not None and (survivors := stop(server.stop_after).survivors):
             log.error("grid: pids %s outlived SIGKILL; %s keeps their record", survivors, server.stop_after)
     if report.failed_step is None:
         return SuiteRoundExit(0)
-    if report.failed_step is FailedStep.CANCELLED and _stopped_by_checkpoint(round_):
+    # A leased round's client takes the checkpoint's SIGTERM with its CLI, so its report may name any step.
+    if _stopped_by_checkpoint(round_):
         return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, report.failure_detail or report.failed_step.value)
     returncode = _STOPPED_BY_THE_RUN.get(report.failed_step, _FAILED_RETURNCODE)
     return SuiteRoundExit(returncode, report.failure_detail or report.failed_step.value)

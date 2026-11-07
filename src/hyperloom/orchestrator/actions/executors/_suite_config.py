@@ -96,6 +96,8 @@ from ._ray_backend import SuiteLeasedRound, strip_visible_devices_from_config
 from ._ray_serving import ServingLease
 from ._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
 from ._subprocess_kill import (
+    AGENTX_EARLY_STOP_ERROR_CLASS,
+    AGENTX_EARLY_STOP_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     AgentxCheckpointMissed,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -534,6 +536,7 @@ _UNRUN_LEASED_CLASSES: Mapping[int, str] = MappingProxyType(
         EXIT_REFUSED: failed_step_error_class(FailedStep.CONFIG_INVALID),
         ORCHESTRATOR_CANCELLED_RETURNCODE: ORCHESTRATOR_CANCELLED_CLASS,
         SESSION_TIME_EXHAUSTED_RETURNCODE: SESSION_TIME_EXHAUSTED_CLASS,
+        AGENTX_EARLY_STOP_RETURNCODE: AGENTX_EARLY_STOP_ERROR_CLASS,
     }
 )
 
@@ -803,7 +806,7 @@ def _run_leased(config: SuiteConfig, lease: ServingLease, checkpoint: SuiteRound
 
     Raises:
         SuiteRoundRefused: When the actor ran no round: the CLI refused its config, a cancel came before it started,
-            or Ray could not place it.
+            or Ray could not place it; or when a stop killed the CLI before it wrote its report.
     """
     run_dir = Path(config.paths.run_dir)
     config_path = run_dir.with_name(f"{run_dir.name}{LEASED_CONFIG_SUFFIX}")
