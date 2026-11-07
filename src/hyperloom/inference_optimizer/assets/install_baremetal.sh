@@ -15,7 +15,7 @@
 # Phase 5  runtime env     — persist bare-metal runtime vars into .env
 #
 # Scope: bare-metal base setup only. Open-source deps and the optimizer runtime
-# (io pkg, Magpie, InferenceX, kernel-agent Ray/GEAK/TraceLens, fa) are installed
+# (io pkg, InferenceX, kernel-agent Ray/GEAK/TraceLens, fa) are installed
 # by the inference_optimizer skill, not here. It STOPS before launching.
 
 set -euo pipefail
@@ -1093,8 +1093,8 @@ PY
 }
 
 # Symlink the isolated-venv `vllm` console script into the shared venv's bin
-# dir. Magpie runs a bare `vllm serve` under a PATH that only lists the shared
-# bin; the symlink's target shebang still pins the isolated python, so the
+# dir. A bare `vllm serve` under a PATH that only lists the shared bin must
+# find it; the symlink's target shebang still pins the isolated python, so the
 # shared env stays uncontaminated. Idempotent; non-fatal on failure.
 link_vllm_into_shared_bin() {
   local base_py="$1" iso_py="$2" shared_bin iso_vllm
@@ -1107,7 +1107,7 @@ link_vllm_into_shared_bin() {
   if ln -sfnT "$iso_vllm" "${shared_bin}/vllm" 2>/dev/null || ln -sfn "$iso_vllm" "${shared_bin}/vllm" 2>/dev/null; then
     log "linked isolated vllm into shared bin: ${shared_bin}/vllm -> ${iso_vllm}"
   else
-    warn "failed to symlink ${iso_vllm} into ${shared_bin}; Magpie may not find 'vllm'"
+    warn "failed to symlink ${iso_vllm} into ${shared_bin}; a bare 'vllm serve' may not find it"
   fi
 }
 
@@ -1523,9 +1523,8 @@ PY
       die "vLLM isolated install failed. Try a VLLM_VERSION/VLLM_ROCM_VARIANT available from ${VLLM_ROCM_INDEX}."
     fi
     verify_vllm_rocm "$py" || die "vLLM isolated install completed but did not verify as a ROCm build"
-    # Isolated venv holds `vllm` only under $VLLM_VENV_ROOT/bin, but Magpie's
-    # benchmark wrapper runs a bare `vllm serve` with a YAML-fixed PATH that
-    # lists the shared venv bin only. Symlink the isolated vllm into the shared
+    # Isolated venv holds `vllm` only under $VLLM_VENV_ROOT/bin, but a bare
+    # `vllm serve` under a PATH that lists the shared venv bin only must find it. Symlink the isolated vllm into the shared
     # bin so `which vllm` resolves; its shebang keeps using the isolated python.
     link_vllm_into_shared_bin "$base_py" "$py"
     log "vLLM framework install complete (isolated: ${VLLM_VENV_ROOT})"
