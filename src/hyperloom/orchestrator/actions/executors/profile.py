@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 
 import yaml
 
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.orchestrator.trace_analysis._capture_shapes import is_capture_fragment
 from hyperloom.orchestrator.trace_analysis._trace_rank import (
     select_primary_trace,
@@ -119,7 +120,9 @@ def _check_row(
     return {"check_id": check_id, "status": status, "skip_reason": skip_reason, "detail": detail}
 
 
-def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def _instrumentation_preflight_row(
+    envs: Mapping[str, Any], patchers: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """State, before the run, whether the annotations the trace checks look for can land at all.
 
     When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
@@ -131,13 +134,6 @@ def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | Non
     is not the same as which patcher ran and what it returned: a successful patch records its outcome too, so
     "instrumentation was fine" and "nobody looked" are different records.
     """
-    envs = (bench or {}).get("envs") if isinstance(bench, dict) else None
-    if not isinstance(envs, dict):
-        return _check_row(
-            CHECK_INSTRUMENTATION_PREFLIGHT,
-            status="skipped",
-            skip_reason="materialized config carries no benchmark.envs block",
-        )
     degraded = str(envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") or "")
     patchers = dict(patchers or {})
     try:
@@ -1033,19 +1029,18 @@ class ProfileExecutor(BenchmarkRunExecutor):
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
         try:
-            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            point = read_benchmark_point(config_path)
         except (OSError, ValueError, yaml.YAMLError) as exc:
             return {
                 "status": "failed",
                 "error_class": "profile_config_unreadable",
                 "error": f"cannot read materialized profile config {config_path}: {exc}",
             }
-        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
         patchers: dict[str, Any] = {}
 
         def _note_instrumentation() -> None:
             """Re-state the instrumentation report. Called before every exit below, so no path leaves it unset."""
-            self._instrumentation_preflight = _instrumentation_preflight_row(bench, patchers)
+            self._instrumentation_preflight = _instrumentation_preflight_row(point.envs, patchers)
             detail = self._instrumentation_preflight["detail"]
             if self._instrumentation_preflight["status"] != "failed":
                 return
@@ -1059,18 +1054,11 @@ class ProfileExecutor(BenchmarkRunExecutor):
             )
 
         _note_instrumentation()
-        framework = ""
-        if isinstance(bench, dict):
-            framework = str(bench.get("framework") or "").strip().lower()
         from hyperloom.inference_optimizer import framework_registry
 
-        if framework_registry.is_scriptable(framework):
+        if framework_registry.is_scriptable(point.framework.strip().lower()):
             return None
-        inferencex_path = ""
-        if isinstance(bench, dict):
-            inferencex_path = str(bench.get("inferencex_path") or "").strip()
-        if not inferencex_path:
-            inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+        inferencex_path = point.inferencex_path.strip() or os.environ.get("INFERENCEX_PATH", "").strip()
         if not inferencex_path:
             log.warning(
                 "profile_executor: no benchmark.inferencex_path / "

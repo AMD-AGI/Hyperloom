@@ -2042,6 +2042,11 @@ class TestLoadMaterializedWorkloadMetadata:
     def test_empty_when_path_missing(self, tmp_path):
         assert ta._load_materialized_workload_metadata(str(tmp_path / "no.yaml")) == {}
 
+    def test_empty_when_the_config_has_no_benchmark_block(self, tmp_path):
+        cfg = tmp_path / "other.yaml"
+        cfg.write_text("other: {}\n")
+        assert ta._load_materialized_workload_metadata(str(cfg)) == {}
+
     def test_parses_sglang_metadata(self, tmp_path):
         cfg = tmp_path / "magpie.yaml"
         cfg.write_text(
@@ -2058,7 +2063,7 @@ class TestLoadMaterializedWorkloadMetadata:
         )
         out = ta._load_materialized_workload_metadata(str(cfg))
         runtime = out["runtime_args"]
-        assert runtime["framework"] == "sglang"
+        assert (runtime["framework"], runtime["model"], runtime["precision"]) == ("sglang", "/weights/m", "bf16")
         assert runtime["server_args"] == "--foo 1"
         assert runtime["server_args_argv"] == ["--foo", "1"]
         workload = runtime["workload"]
