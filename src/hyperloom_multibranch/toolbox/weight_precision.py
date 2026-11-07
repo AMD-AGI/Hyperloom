@@ -33,12 +33,20 @@ removes from the resolved launch (``LaunchConfig.remove_args``) has the value
 Beyond Arbor's, a setting a launch gives two or more distinct values also compares by the value that takes effect
 (:func:`_in_order`): the server keeps one, so two launches that give the same values in another order, or that drop
 one occurrence and give its value again, can serve another precision.
+
+vLLM reads a word ``-O<rest>`` other than ``-O`` itself as ``--optimization-level <rest>`` before anything else, and so
+does the comparison. A word that begins with ``-`` and holds a ``.`` but no ``=`` (``--flag.key``, ``-0.5``) followed
+by a word that begins with ``-`` is read in two ways: vLLM takes it as a dotted flag whose value is that next word,
+argparse in the other frameworks reads that next word as a flag. The comparison reads such a pair as before (a dotted
+flag takes the next word, a number is a value), and :func:`ambiguous_words` names each one a launch adds or changes
+(``-O3.0`` among them), which the toolbox refuses instead of reading it either way.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from itertools import islice
 from typing import NamedTuple
@@ -95,6 +103,9 @@ _OVERRIDE_SETTINGS = frozenset(WEIGHT_PRECISION_OVERRIDE_FLAGS.values())
 #: vLLM's ``serve`` or of SGLang's servers begins a spelling here without being one.
 _OWN_OPTIONS = frozenset({"--mode"})
 
+#: The option vLLM reads a word ``-O<rest>`` as, ``<rest>`` its value.
+_OPTIMIZATION_LEVEL = "--optimization-level"
+
 _NOT_SET = "(not set)"
 _ON = "(on)"
 _EMPTY = "''"
@@ -131,6 +142,28 @@ def weight_precision_changes(before: LaunchConfig, after: LaunchConfig) -> list[
     ]
 
 
+def ambiguous_words(before: LaunchConfig, after: LaunchConfig) -> list[str]:
+    """Each pair of words of ``after``'s launch that the frameworks read in two ways and that ``before``'s does not give
+    as often, as ``"word next"``, in the order ``after`` gives them; ``[]`` when ``after`` adds or changes none.
+
+    A pair is a word that begins with ``-`` and holds a ``.`` but no ``=`` (a dotted flag written without its value,
+    ``-O3.0``, a number such as ``-0.5``) and the word after it, which begins with ``-``. vLLM takes a dotted flag's
+    value to be the next word, whatever it is (``--hf-overrides.foo -qfp8`` sets ``foo`` to ``-qfp8``), and so a
+    number's too, where argparse in the other frameworks reads the number as a value and the next word as a flag. A
+    pair counts as a whole and each time it is given: ``after`` adds one where it gives a word of ``before`` before
+    another word, or gives a pair of ``before`` once more.
+    """
+    added = Counter(_ambiguous_pairs(after.server_args)) - Counter(_ambiguous_pairs(before.server_args))
+    return [" ".join(pair) for pair in added]
+
+
+def _ambiguous_pairs(server_args: str) -> Iterator[tuple[str, str]]:
+    words = _words(server_args)
+    for word, after in zip(words, words[1:]):
+        if word.startswith("-") and "." in word and "=" not in word and after.startswith("-"):
+            yield word, after
+
+
 def _settings(launch: LaunchConfig) -> dict[str, _Setting]:
     """The weight-precision settings ``launch`` makes, by name, each read from its occurrences in the order the server
     is given them: a removal from the resolved launch first, since the launch's own words come after the resolved
@@ -156,8 +189,7 @@ def _flags(server_args: str) -> list[_Occurrence]:
     ``--hf-overrides.foo -qfp8`` sets ``foo`` to ``-qfp8`` and quantizes nothing. A word after that value is read with
     the flag before the dotted one, as argparse reads what is left.
     """
-    parsed = tokenize_server_args_preserving_json(server_args)
-    words = iter(parsed[1] if parsed is not None else server_args.split())
+    words = _vllm_words(_words(server_args))
     found: list[tuple[_Occurrence, list[str]]] = []
     dotted: list[_Occurrence] = []
     for word in words:
@@ -173,6 +205,23 @@ def _flags(server_args: str) -> list[_Occurrence]:
         dotted.append(occurrence._replace(values=(*occurrence.values, *taken)))
     plain = [occurrence._replace(values=(*occurrence.values, *more)) for occurrence, more in found]
     return [occurrence._replace(values=tuple(map(_canonical, occurrence.values))) for occurrence in [*plain, *dotted]]
+
+
+def _words(server_args: str) -> list[str]:
+    """``server_args`` as its words, a JSON value one word."""
+    parsed = tokenize_server_args_preserving_json(server_args)
+    return parsed[1] if parsed is not None else server_args.split()
+
+
+def _vllm_words(words: list[str]) -> Iterator[str]:
+    """``words`` with each ``-O<rest>`` other than ``-O`` itself as ``--optimization-level <rest>`` (``-O=<rest>``
+    too), as vLLM reads them before anything else."""
+    for word in words:
+        if word.startswith("-O") and word != "-O":
+            yield _OPTIMIZATION_LEVEL
+            yield word[3:] if word[2] == "=" else word[2:]
+        else:
+            yield word
 
 
 def _flag(word: str) -> _Occurrence:
@@ -366,5 +415,6 @@ __all__ = [
     "WEIGHT_PRECISION_FLAGS",
     "WEIGHT_PRECISION_KEYS",
     "WEIGHT_PRECISION_OVERRIDE_FLAGS",
+    "ambiguous_words",
     "weight_precision_changes",
 ]
