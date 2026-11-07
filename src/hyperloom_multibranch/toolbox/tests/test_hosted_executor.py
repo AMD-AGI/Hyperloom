@@ -526,7 +526,7 @@ async def test_a_session_that_froze_no_base_is_refused_before_anything_is_sent(t
 async def test_a_tool_cache_without_a_staging_is_refused_before_anything_is_sent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tmp_path / "empty-tools"))
     backend = _Stub(_outcome())
-    with pytest.raises(MeasurementRefused, match="holds no staging manifest"):
+    with pytest.raises(MeasurementRefused, match="empty-tools cannot be identified"):
         await HostedExecutor(backend, tmp_path / "session").run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
     assert backend.calls == []
 
