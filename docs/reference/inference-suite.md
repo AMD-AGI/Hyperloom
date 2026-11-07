@@ -101,7 +101,9 @@ A round holds its server in one of four modes:
 
 Before `own` or `boot` starts a server, the round refuses a port something already
 listens on (`port_in_use`) and GPUs that `amd-smi` does not list or that another
-process holds (`gpus_unavailable`, naming each GPU and its holder). Hyperloom stops
+process holds (`gpus_unavailable`, naming each GPU, its amd-smi card and its holder; a
+round's GPU numbers are `HIP_VISIBLE_DEVICES` numbers, matched to amd-smi cards through
+their KFD node). Hyperloom stops
 the session on the first `gpus_unavailable` with `stop_reason=host_gpus_unavailable`.
 
 A server is ready when `/health` answers 200, its process is alive and its log

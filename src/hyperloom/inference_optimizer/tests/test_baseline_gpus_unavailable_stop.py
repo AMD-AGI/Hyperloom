@@ -16,7 +16,7 @@ from hyperloom.orchestrator.state.task_registry import Task
 
 from .conftest import make_coordinator
 
-_DETAIL = "GPU 3: held by pid 4242 (python3); GPU 9: not visible (the host lists GPUs 0, 1, 2, 3, 4, 5, 6, 7)"
+_DETAIL = "GPU 3 (amd-smi card 1): held by pid 4242 (python3); GPU 9: not visible (the host has GPUs 0-7)"
 
 
 @pytest.mark.asyncio
@@ -35,5 +35,5 @@ async def test_a_baseline_refused_for_its_gpus_stops_the_run_on_the_first_occurr
     assert error_class == HOST_GPUS_UNAVAILABLE
     assert state.stop_reason == HOST_GPUS_UNAVAILABLE
     assert state.last_action_failures[-1]["error_class"] == HOST_GPUS_UNAVAILABLE
-    assert "GPU 3: held by pid 4242" in state.last_action_failures[-1]["error_excerpt"]
+    assert "GPU 3 (amd-smi card 1): held by pid 4242" in state.last_action_failures[-1]["error_excerpt"]
     assert not (state.enablement.launch_log or "").strip()
