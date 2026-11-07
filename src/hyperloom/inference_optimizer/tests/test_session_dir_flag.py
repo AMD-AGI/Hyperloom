@@ -130,6 +130,7 @@ def _mode(path):
 
 
 def test_the_archive_root_is_shared_by_the_runs_group_and_closed_to_everyone_else(tmp_path):
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     root = paths.ensure_archive_root(tmp_path / "session")
     assert root == paths.archive_root(tmp_path / "session") == tmp_path / "session" / "archive"
     assert (_mode(root), _mode(tmp_path / "session")) == (0o2770, 0o2775)
@@ -185,6 +186,7 @@ def test_another_accounts_archive_root_is_taken_when_this_account_can_write_it_a
 
 
 def test_the_session_skeleton_is_group_shared_whatever_the_umask(workspace):
+    workspace.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     code = (
         "import os, sys\nos.umask(0o077)\nsys.path.insert(0, sys.argv[1])\n"
         "from hyperloom.inference_optimizer.session import paths\n"
