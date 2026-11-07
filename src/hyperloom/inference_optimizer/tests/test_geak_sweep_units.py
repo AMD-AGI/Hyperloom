@@ -8,22 +8,22 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 from hyperloom.orchestrator.actions.executors import _geak_sweep
 from hyperloom.orchestrator.actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
 from hyperloom.orchestrator.kernel.conc_sweep import _budget_limited_without_valid_pair
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.actions.executors._gpu_pin import (
-    resolve_gpu_pin,
-    _resolve_handoff_gpu_ids,
-    _resolve_handoff_gpu_ids_space,
-)
 from hyperloom.orchestrator.state.shared_state import SharedState
+from inference_suite.contracts import Topology
+from inference_suite.tests.test_base_launch_contract import _base
+from inference_suite.tests.test_compose import _launch
+
+from ._geak_helpers import measured_in_suite_round, replay_env_spec
 
 
 def _bench_script(tmp_path: Path) -> Path:
@@ -61,9 +61,6 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
 ) -> None:
     """No ``bench_protocol`` -> fall back to the first ``validated_regimes`` entry, whose NUM_PROMPTS reaches the point."""
     bench = _bench_script(tmp_path)
-    monkeypatch.setenv("MODEL_PATH", "/models/x")
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setenv("TP", "1")
 
     def _fake_run(_cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         env = kwargs["env"]
@@ -97,6 +94,7 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
         },
         spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30, repeats=1),
         output_root=tmp_path / "sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
 
     assert result["status"] == "succeeded"
@@ -123,7 +121,6 @@ async def test_sweep_via_geak_prefers_executable_final_launch_script(
     final = tmp_path / "final_launch.sh"
     final.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     final.chmod(0o755)
-    monkeypatch.setenv("MODEL_PATH", "/models/x")
     captured: dict[str, Any] = {}
 
     def _fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
@@ -145,6 +142,7 @@ async def test_sweep_via_geak_prefers_executable_final_launch_script(
         },
         spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30, repeats=3),
         output_root=tmp_path / "sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
 
     out_dir = tmp_path / "sweep" / "variant_0_conc1_isl16_osl16"
@@ -175,6 +173,7 @@ async def test_tuning_cannot_fall_back_without_its_deployment(
         },
         spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=10),
         output_root=tmp_path / "sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
     assert result["status"] == "failed"
     assert result["error_class"] == "missing_deployment_launcher"
@@ -191,6 +190,7 @@ async def test_flags_only_can_still_replay_without_a_final_launcher(tmp_path: Pa
         result={"bench_script": str(bench), "final_launch_script": str(tmp_path / "missing.sh")},
         spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=10, repeats=1),
         output_root=tmp_path / "sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
     assert marker.is_file()
     assert result["replay_mode"] == "bench_e2e_fallback"
@@ -205,7 +205,6 @@ async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
 ) -> None:
     """A raising ``subprocess.run`` is caught and recorded as a failed variant."""
     bench = _bench_script(tmp_path)
-    monkeypatch.setenv("MODEL_PATH", "/models/x")
 
     def _boom(*_a: Any, **_k: Any) -> Any:
         raise OSError("cannot spawn bench process")
@@ -216,6 +215,7 @@ async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
         result={"bench_script": str(bench), "output_dir": str(tmp_path), "accepted_config": {}},
         spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30),
         output_root=tmp_path / "sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
 
     assert result["status"] == "failed"
@@ -249,6 +249,7 @@ async def test_sweep_keeps_point_artifacts_and_continues_after_accuracy_parse_fa
         result={"bench_script": str(bench), "accepted_config": {}},
         spec=GeakSweepSpec(conc_values=[1, 2], isl_osl_configs=["16:16"], variant_timeout_sec=30),
         output_root=tmp_path / "sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
 
     failed, succeeded = result["points"]
@@ -261,65 +262,42 @@ async def test_sweep_keeps_point_artifacts_and_continues_after_accuracy_parse_fa
     assert result["promotion_measurement"] == succeeded
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("identity_source", ["handoff", "baseline_recipe"])
-@pytest.mark.parametrize("pin_var", ["HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"])
-async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    identity_source: str,
-    pin_var: str,
-) -> None:
-    """Replay keeps the run's devices and serving identity after ambient drift."""
-    for name in VISIBLE_DEVICE_VARS:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    monkeypatch.setenv("MODEL_PATH", "/models/stale-shell-model")
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setenv("TP", "8")
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+def _two_card_base():
+    base = _base()
+    return _base(query=replace(base.query, tp=2), topology=Topology(tp=2))
 
-    recipe = tmp_path / "baseline.yaml"
-    recipe_env = {"TP": 2, pin_var: "4,5"}
-    recipe.write_text(
-        json.dumps({"benchmark": {"framework": "vllm", "model": "/models/validated", "envs": recipe_env}}),
-        encoding="utf-8",
-    )
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handed_off", [True, False])
+async def test_geak_harness_replay_serves_the_measured_round_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, handed_off: bool
+) -> None:
+    """The replay serves the model, framework, TP and cards the measured round's launch.json records.
+
+    Ambient masks do not move it: the round's server saw only its own absolute card list.
+    """
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(
         benchmark_mode="synthetic",
-        framework="vllm",
-        model_path="/models/validated",
-        tp=2,
-        baseline_config_path=str(recipe),
+        framework="sglang",
+        model_path="/models/stale",
         baseline_tput=100.0,
         current_best={"action": "explore", "tput": 150.0},
         isl=16,
         osl=16,
         conc=1,
     )
-    pin = resolve_gpu_pin(recipe_envs=recipe_env, environ={})
-    gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2)
-    gpu_ids_space = _resolve_handoff_gpu_ids_space(gpu_pin=pin)
-    assert gpu_ids == ("0,1" if pin_var == "ROCR_VISIBLE_DEVICES" else "4,5")
-    assert gpu_ids_space == ("logical" if pin_var == "ROCR_VISIBLE_DEVICES" else "absolute")
+    measured_in_suite_round(
+        coord.shared_state,
+        tmp_path / "round",
+        _launch(base=_two_card_base(), model_path="/models/validated", gpus=(4, 5)),
+    )
     geak_dir = tmp_path / "geak"
     bench = _bench_script(geak_dir)
-    if identity_source == "handoff":
-        handoff = {
-            "schema_version": 3,
-            "model_path": "/models/validated",
-            "framework": "vllm",
-            "tp": 2,
-            "gpu_pin": pin,
-            "gpu_ids": gpu_ids,
-            "gpu_ids_space": gpu_ids_space,
-            "launch_recipe": str(recipe),
-            "baseline_env_spec": coord.writeback.build_env_spec(),
-            "bench_client": "native",
-            "workload": {"isl": 16, "osl": 16, "conc": 1},
-        }
+    if handed_off:
+        handoff = {"baseline_env_spec": coord.writeback.build_env_spec(), "gpu_ids": "0,1", "tp": 8}
         (geak_dir / "handoff.json").write_text(json.dumps(handoff), encoding="utf-8")
     coord.shared_state.geak_result = {
         "status": "ok",
@@ -341,13 +319,32 @@ async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
     outcome = await coord.writeback.validate_geak_via_geak_harness(reason="unit")
 
-    assert captured["GPU"] == gpu_ids
-    if gpu_ids_space == "logical":
-        assert captured["ROCR_VISIBLE_DEVICES"] == "4,5"
-    else:
-        assert "ROCR_VISIBLE_DEVICES" not in captured
-    assert (captured["MODEL"], captured["BACKEND"], captured["TP"]) == ("/models/validated", "vllm", "2")
+    assert (captured["GPU"], captured["HIP_VISIBLE_DEVICES"], captured["CUDA_VISIBLE_DEVICES"]) == ("4,5",) * 3
+    assert "ROCR_VISIBLE_DEVICES" not in captured
+    assert (captured["MODEL"], captured["BACKEND"], captured["TP"]) == ("/models/validated", "sglang", "2")
     assert outcome["validated"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_spec", [{}, {"launch_json": "missing"}, {"launch_json": "not_a_launch"}])
+async def test_a_replay_without_a_readable_launch_is_refused_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_spec: dict[str, str]
+) -> None:
+    (tmp_path / "not_a_launch").write_text("{}", encoding="utf-8")
+    env_spec = {key: str(tmp_path / value) for key, value in env_spec.items()}
+
+    def _must_not_launch(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("a replay with no serving identity must not launch")
+
+    monkeypatch.setattr(_geak_sweep.subprocess, "run", _must_not_launch)
+    result = await sweep_via_geak(
+        result={"bench_script": str(_bench_script(tmp_path)), "accepted_config": {}},
+        spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30),
+        output_root=tmp_path / "sweep",
+        env_spec=env_spec,
+    )
+
+    assert (result["status"], result["error_class"]) == ("failed", "invalid_replay_identity")
 
 
 @pytest.mark.asyncio
@@ -369,16 +366,10 @@ async def test_geak_replay_uses_existing_client_contract(
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
     outcome = await sweep_via_geak(
         result={"status": "ok", "bench_script": str(bench), "bench_client": bench_client, "accepted_config": {}},
-        handoff={
-            "model_path": "/models/validated",
-            "framework": "sglang",
-            "tp": 1,
-            "gpu_ids": "4",
-            "gpu_ids_space": "absolute",
-            "bench_client": bench_client,
-        },
+        handoff={"bench_client": bench_client},
         spec=GeakSweepSpec(conc_values=[4], isl_osl_configs=["16:16"], variant_timeout_sec=30, repeats=3),
         output_root=tmp_path / "sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
 
     assert captured["BENCH_CLIENT"] == bench_client
@@ -425,6 +416,7 @@ async def test_sweep_replays_normalized_return_environment_and_fresh_accuracy(
         result={"bench_script": str(bench), "accepted_config": accepted_config, "accuracy": 0.99},
         spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30),
         output_root=tmp_path / "sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
 
     assert dict(token.split("=", 1) for token in shlex.split(captured["EXTRA_ENV"])) == expected_env
@@ -450,6 +442,7 @@ async def test_sweep_rejects_malformed_structured_environment_before_launch(
         result={"bench_script": str(bench), "accepted_config": {"env_map": env_map, "env": "VALID=1"}},
         spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30),
         output_root=tmp_path / "sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
     assert result["status"] == "failed"
     assert result["error_class"] == "invalid_accepted_config"
@@ -481,6 +474,7 @@ async def test_sweep_reads_only_fresh_native_quality(
         result={"bench_script": str(bench), "accuracy": 0.99, "eval_dir": str(tmp_path)},
         spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30),
         output_root=tmp_path / "fresh_sweep",
+        env_spec=replay_env_spec(tmp_path / "round"),
     )
     assert result["promotion_measurement"]["accuracy"] == native_accuracy
 

@@ -11,7 +11,6 @@ import yaml
 from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors._accuracy_gate import materialized_run_eval_disabled
-from hyperloom.orchestrator.actions.executors._geak_sweep import _replay_serving_env
 from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors._launch_restatement import read_launch
 
@@ -32,22 +31,6 @@ def test_the_eval_switch_reads_the_point(tmp_path: Path) -> None:
     path = _point(tmp_path, {"benchmark": {"framework": "vllm", "model": "/m", "envs": {"RUN_EVAL": "0", "TP": 4}}})
 
     assert materialized_run_eval_disabled(path) is True
-
-
-def test_a_replay_recipe_that_is_not_a_point_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(BenchmarkPointError):
-        _replay_serving_env({"launch_recipe": str(_point(tmp_path, _NO_BLOCK))}, {})
-
-
-def test_a_replay_takes_model_and_framework_from_the_recipe(tmp_path: Path) -> None:
-    recipe = _point(
-        tmp_path,
-        {"benchmark": {"framework": "vllm", "model": "/m", "envs": {"TP": 2, "HIP_VISIBLE_DEVICES": "0,1"}}},
-    )
-
-    env = _replay_serving_env({"launch_recipe": str(recipe)}, {})
-
-    assert (env["MODEL"], env["BACKEND"], env["TP"]) == ("/m", "vllm", "2")
 
 
 def test_grid_readers_of_a_point(tmp_path: Path) -> None:
