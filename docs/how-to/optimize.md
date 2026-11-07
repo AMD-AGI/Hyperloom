@@ -248,9 +248,10 @@ the same canonical Magpie workload and Hyperloom's KEEP gate.
 
 The profile phase prepares the TraceLens runtime patch and SGLang kernel-shape tool
 using the same helpers as fixed-sequence profiling, on a separate copy of the YAML.
-The copy enables `profiler.torch_profiler` and preserves explicit capture steps, count,
-start delay, interval, and detailed-annotation settings. A missing capture setting
-becomes one capture of 256 steps, a 300-second start delay, and a 900-second interval.
+The copy enables `profiler.torch_profiler` and preserves explicit capture steps,
+start delay, and detailed-annotation settings. A missing capture setting becomes one
+capture of 256 steps after a 300-second start delay. A profile round captures one
+window; a YAML whose `num_profiles` is not 1 is refused when the session starts.
 When annotation settings are absent, the profile copy sets `detailed_annotations` to true,
 or to false when the TraceLens runtime patch was attempted and did not apply.
 The shape tool is prepended to the server's existing Python path, preserving candidate
