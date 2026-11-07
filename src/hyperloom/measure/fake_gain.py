@@ -28,7 +28,6 @@ from hyperloom.inference_optimizer.agentx.report import agentx_measurement, nati
 from hyperloom.orchestrator.actions.executors import (
     PREFIX_CACHE_OFF_ERROR_CLASS,
     CONTEXT_COPY_REFUSAL,
-    SPECULATIVE_DECODING_PINNED,
     RequestedLaunch,
     SpeculativeDecodingPinnedError,
     build_launch_evidence,
@@ -36,6 +35,10 @@ from hyperloom.orchestrator.actions.executors import (
     refuse_cacheless_agentx_baseline,
     refuse_unpinned_speculative_change,
 )
+
+#: The ``RequestRejected`` code a candidate is refused under when it changes the draft or simulated acceptance its
+#: parent pins; main's grid records the same refusal as a candidate ``serve_flag`` failure.
+SPECULATIVE_DECODING_PINNED = "speculative_decoding_pinned"
 
 __all__ = [
     "CONTEXT_COPY_REFUSAL",
@@ -133,7 +136,7 @@ FAKE_GAINS = (
         where="acceptance",
     ),
     FakeGain(
-        name="speculative_decoding_pinned",
+        name=SPECULATIVE_DECODING_PINNED,
         shows_as="Changing a draft whose acceptance length the parent simulates moves the number without a real draft.",
         refusal_code=SPECULATIVE_DECODING_PINNED,
         check=pinned_speculative_refusal,
