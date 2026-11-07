@@ -620,7 +620,8 @@ def _point_into_sandbox(place: LaunchPlace, env: dict[str, str]) -> None:
 
 def _default_hf_home(env: Mapping[str, str]) -> Path | None:
     """Hugging Face's directory as ``env`` leaves it to its default (``$XDG_CACHE_HOME/huggingface``, else
-    ``~/.cache/huggingface``), when that is a directory; ``None`` when ``env`` names one of :data:`HF_VARIABLES`."""
+    ``~/.cache/huggingface``), when that is a directory; ``None`` when ``env`` names one of :data:`HF_VARIABLES`, and
+    when the app cannot look there (a home it cannot search): a cache it cannot read is no cache to show."""
     if any(env.get(name) for name in HF_VARIABLES):
         return None
     cache, home = env.get("XDG_CACHE_HOME", ""), env.get("HOME", "")
@@ -630,7 +631,7 @@ def _default_hf_home(env: Mapping[str, str]) -> Path | None:
         found = Path(home, ".cache", "huggingface")
     else:
         return None
-    return found if found.is_dir() else None
+    return found if os.path.isdir(found) else None
 
 
 def _scratch_where_free(policy: BwrapPolicy, version: tuple[int, int, int] | None) -> BwrapPolicy:
@@ -682,13 +683,13 @@ def specialist_confinement(place: LaunchPlace, argv0: str, env: Mapping[str, str
 
 def _readable_extras(place: LaunchPlace) -> list[Path]:
     """``place.readable`` and the framework source roots that exist, but not those in a tree the specialist writes,
-    which shows them already."""
+    which shows them already; one the app cannot look at (below a directory it cannot search) is none."""
     found = [*place.readable, *map(Path, resolve_kernel_search_roots())]
     trees = [str(tree) for tree in place.writable]
     return [
         path
         for path in found
-        if path.is_absolute() and path.exists() and not any(_at_or_under(str(path), tree) for tree in trees)
+        if path.is_absolute() and os.path.exists(path) and not any(_at_or_under(str(path), tree) for tree in trees)
     ]
 
 
