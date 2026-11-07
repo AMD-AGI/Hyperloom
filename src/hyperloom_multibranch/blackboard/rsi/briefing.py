@@ -17,10 +17,13 @@ Its brief has three parts:
 * the menu: the direction families ranked for the branch on its start commit (:mod:`rsi.menu`), each with its best note
   under it, none for a branch of the menu's control. A claim's reply says the same of the claimed direction's family
   (:meth:`direction_note`);
-* Arbor's map, which binds the branch: in the map's order, the directions of the session's map that name the focus op
-  the branch's own ``OPEN`` names, those a running Arbor branch holds, and those the map set aside, each with why. An
-  open direction no running branch holds that does not name the focus is left out, and a session without a map shows
-  none.
+* the focus history: every stopped branch whose ``OPEN`` names the focus the branch's own ``OPEN`` names, with its
+  tests, its commits and its latest exhausted record, so that a branch reopened on that focus starts where those ended.
+  An ``OPEN`` names the profile op the scheduler read in the judge's words, or those words when they named none, the
+  key :mod:`rsi.open_areas` counts a focus by;
+* Arbor's map, which binds the branch: in the map's order, the directions of the session's map that name that focus
+  op, those a running Arbor branch holds, and those the map set aside, each with why. An open direction no running
+  branch holds that does not name the focus is left out, and a session without a map shows none.
 
 A champion the start commit is already, or builds on, is no lead: the lessons name it first, as :data:`ON_HEAD`, and
 ``blackboard_replay`` refuses to replay it, since its change would undo what the head did since.
@@ -52,8 +55,10 @@ from typing import Protocol
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard, StartupBriefProvider
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer
+from hyperloom_multibranch.contracts.blackboard.exhausted import latest_exhausted
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
+    FocusBranch,
     MapDirection,
     PeerReplay,
     StartupBrief,
@@ -196,6 +201,36 @@ def _focus_of(snapshot: BlackboardSnapshot, branch: str) -> str:
     """The focus ``branch``'s ``OPEN`` names, empty for a branch opened without one."""
 
     return next((node.focus for node in snapshot.lineage.branches if node.branch == branch), "")
+
+
+def _focus_history(snapshot: BlackboardSnapshot, branch: str, start_commit: str) -> tuple[FocusBranch, ...]:
+    """The branches other than ``branch`` whose ``OPEN`` named the focus ``branch``'s names and that stopped, newest
+    first; none for a branch opened without a focus."""
+
+    focus = _focus_of(snapshot, branch)
+    if not focus:
+        return ()
+    tests = {item.branch: item.tests for item in snapshot.progress}
+    under = set(snapshot.lineage.ancestry(start_commit))
+    stopped = [
+        node
+        for node in snapshot.lineage.branches
+        if node.branch != branch and node.stop_reason is not None and node.focus == focus
+    ]
+    stopped.sort(key=lambda node: node.stopped_at or 0.0, reverse=True)
+    return tuple(
+        FocusBranch(
+            node.branch,
+            node.start_commit,
+            node.head_commit,
+            tests.get(node.branch, 0),
+            tuple(item.gain_pct for item in snapshot.committed if item.branch == node.branch),
+            node.stop_reason or "",
+            latest_exhausted(record.entry for record in snapshot.branch_logs.get(node.branch, ())),
+            node.head_commit in under,
+        )
+        for node in stopped
+    )
 
 
 def _shown_map(snapshot: BlackboardSnapshot, branch: str) -> tuple[MapDirection, ...]:
@@ -505,6 +540,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             focus=self.focus,
             settings_menu=lists.get(SETTINGS, ()),
             code_menu=lists.get(CODE, ()),
+            focus_history=_focus_history(snapshot, self.branch, start_commit),
             agent_map=_shown_map(snapshot, self.branch),
             map_holders=snapshot.map_holders(),
         )
