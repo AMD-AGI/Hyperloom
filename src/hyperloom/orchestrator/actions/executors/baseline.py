@@ -211,12 +211,15 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             return resolve_benchmark_timeouts()[1]
         return float(params.get("timeout_sec") or self.default_timeout_sec)
 
+    def _prepare_point(self, config_path: Path, output_dir: Path) -> None:
+        """Hook that finishes the materialized point before it is routed, so both backends run what it writes."""
+
     def _after_materialize_config(
         self,
         config_path: Path,
         output_dir: Path,
     ) -> dict[str, Any] | None:
-        """Hook after YAML materialization, before launch; a returned dict aborts the round with it."""
+        """Hook that readies the backend's checkout for the point; a returned dict aborts the round with it."""
         return None
 
     @staticmethod
@@ -296,6 +299,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         config_path = attempt.materialized_config_path
         extra = getattr(attempt.ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
+        await asyncio.to_thread(self._prepare_point, config_path, output_dir)
         attempt = replace(attempt, suite=suite_route(self.session_dir, config_path))
         if (refusal := await self._attempt_refusal(attempt, output_dir, shared_state)) is not None:
             return refusal
