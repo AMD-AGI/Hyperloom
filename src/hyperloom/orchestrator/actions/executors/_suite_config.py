@@ -11,8 +11,9 @@ ATOM's ``--max-model-len`` default, sglang's radix-cache conflict) are applied t
 not hold -- where the round writes, its interpreter, lifecycle and telemetry -- comes in :class:`RoundSettings`.
 
 A point runs on inference_suite (:func:`suite_route`) once its session froze a base launch and the translation
-carries it. Multi-node and Ray-leased rounds stay on the benchmark backend until the multi-node path moves (unit
-4.09), and so do the points :func:`backend_reason` names. :func:`run_suite_round` writes each round into a fresh
+carries it. A client-only round -- multi-node, or one whose session or point names a ``BENCHMARK_BASE_URL`` -- holds
+its server as ``external``: it measures the server at that URL, which something else starts and stops, and samples no
+local GPU. Ray-leased rounds stay on the benchmark backend, and so do the points :func:`backend_reason` names. :func:`run_suite_round` writes each round into a fresh
 run_dir below its round directory, so an attempt retried in the same directory never meets the run_dir before it.
 """
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -76,7 +78,7 @@ from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 from ..cancel_channel import cancel_scope_listener
 from ._benchmark_interpreter import _resolve_probe_python
 from ._gpu_power import round_gpu_telemetry
-from ._multi_node_env import is_multi_node
+from ._multi_node_env import client_only_server_url
 from ._ray_backend import ray_exec_enabled
 from ._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
 
@@ -122,11 +124,13 @@ _CONSUMED_ENV = frozenset(
         _PROBE_MIN_SAMPLES_ENV,
         _PROBE_LENGTH_RATIO_ENV,
         _EVAL_MAX_TOKENS_ENV,
+        _REMOTE_SERVER_ENV,
     }
 )
 
 # Magpie's launcher defaults (scripts/benchmark/*_mi3*.sh at 06b7cf6), and the eval probe's in _inferencex_patcher.
 _LAUNCHER_PORT = 8888
+_HTTP_PORT = 80
 _LAUNCHER_MAX_MODEL_LEN = 4096
 _CLIENT_TOKENIZER_MODE = "auto"
 _PROBE_MIN_SAMPLES = 128
@@ -148,7 +152,8 @@ class RoundSettings:
     """What one round runs with that its point YAML does not hold.
 
     ``base_path`` is where the frozen base the round composes on is stored; ``silence_sec`` bounds how long the
-    server may log nothing once ready; ``env_inherit`` names the host environment the server and client may see.
+    server may log nothing once ready; ``env_inherit`` names the host environment the server and client may see;
+    ``server_url`` is the server a client-only round measures, which a point's own ``BENCHMARK_BASE_URL`` overrides.
     """
 
     base_path: str
@@ -159,6 +164,7 @@ class RoundSettings:
     silence_sec: float
     env_inherit: tuple[str, ...] = ()
     deadline_unix: int | None = None
+    server_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -229,8 +235,6 @@ def backend_reason(document: Mapping[str, object]) -> str | None:
         return "an AgentX point is not translated"
     if ((bench.get("profiler") or {}).get("torch_profiler") or {}).get("enabled"):
         return "a profile point is not translated"
-    if _envs(bench).get(_REMOTE_SERVER_ENV, "").strip():
-        return f"a point with {_REMOTE_SERVER_ENV} serves off this node"
     return None
 
 
@@ -278,7 +282,25 @@ def _gpus(point: _Point, tp: int) -> tuple[int, ...]:
         raise ConfigError(f"the point's {_GPU_MASK_ENV} is not a list of GPU indices: {mask!r}") from None
 
 
-def _server(point: _Point, base: BaseLaunch, settings: RoundSettings) -> ServerConfig:
+@dataclass(frozen=True)
+class _Address:
+    host: str
+    port: int
+
+
+def _external_address(url: str) -> _Address:
+    """The host and port of the server at ``url``, which a round reaches over plain HTTP at its root."""
+    parts = urllib.parse.urlsplit(url)
+    try:
+        port = parts.port or _HTTP_PORT
+    except ValueError:
+        raise ConfigError(f"the external server URL {url!r} names no valid port") from None
+    if parts.scheme != "http" or not parts.hostname or parts.path.strip("/") or parts.query:
+        raise ConfigError(f"the external server URL {url!r} is not http://<host>[:<port>]")
+    return _Address(parts.hostname, port)
+
+
+def _server(point: _Point, base: BaseLaunch, settings: RoundSettings, external: _Address | None) -> ServerConfig:
     args_add, args_remove = _user_args(point)
     env = {name: value for name, value in point.envs.items() if name not in _CONSUMED_ENV}
     env.pop(extra_args_env(point.framework.value), None)
@@ -288,8 +310,8 @@ def _server(point: _Point, base: BaseLaunch, settings: RoundSettings) -> ServerC
         base=BaseRef(settings.base_path, base.digest()),
         model_path=point.model,
         served_model_name=point.model,
-        host=SERVER_HOST,
-        port=point.integer(_PORT_ENV, _LAUNCHER_PORT),
+        host=SERVER_HOST if external is None else external.host,
+        port=point.integer(_PORT_ENV, _LAUNCHER_PORT) if external is None else external.port,
         gpus=_gpus(point, base.topology.tp),
         framework_python=settings.framework_python,
         user=LaunchDelta(args_add=args_add, args_remove=args_remove, env_set=env),
@@ -334,24 +356,29 @@ def _eval(point: _Point, enabled: bool) -> EvalConfig:
 def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings) -> SuiteConfig:
     """The config one round of the point ``document`` runs from, composed on ``base``.
 
-    A point whose ``MAGPIE_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval.
+    A point whose ``MAGPIE_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval. A
+    client-only round (``settings.server_url`` or the point's ``BENCHMARK_BASE_URL``) holds its server as ``external``.
 
     Raises:
-        ConfigError: When the point is one this translation does not carry (AgentX, profile, scriptable or
-            off-node), names another framework or topology than ``base``, or lacks a knob its load needs.
+        ConfigError: When the point is one this translation does not carry (AgentX, profile or scriptable), names
+            another framework or topology than ``base``, lacks a knob its load needs, or names an external server
+            that is not plain HTTP.
     """
     point = _point(document)
     if point.framework.value != base.framework:
         raise ConfigError(f"the point runs {point.framework.value}, its base runs {base.framework}")
     _check_topology(point, base)
     boot_only = (point.text(_RUN_PHASE_ENV) or "").lower() == _SERVER_ONLY_PHASE
+    url = point.text(_REMOTE_SERVER_ENV) or settings.server_url
+    external = None if url is None else _external_address(url)
     return SuiteConfig(
-        server=_server(point, base, settings),
+        server=_server(point, base, settings, external),
         workload=WorkloadKind.NONE if boot_only else WorkloadKind.FIXED,
         fixed=None if boot_only else _fixed(point),
         eval=_eval(point, enabled=not boot_only and point.flag(ENV_RUN_EVAL, default=False)),
-        telemetry=settings.telemetry,
-        lifecycle=settings.lifecycle,
+        # An external server's GPUs are not this host's to sample.
+        telemetry=settings.telemetry if external is None else replace(settings.telemetry, enabled=False),
+        lifecycle=settings.lifecycle if external is None else Lifecycle(LifecycleMode.EXTERNAL),
         deadlines=Deadlines(
             boot_sec=point.boot_timeout_sec,
             round_sec=point.timeout_sec,
@@ -384,13 +411,17 @@ class SuiteRoundRefused(ValueError):
 
 @dataclass(frozen=True)
 class SuiteRoute:
-    """What every inference_suite round of one attempt runs on; ``manifest_sha256`` is ``None`` when nothing is staged."""
+    """What every inference_suite round of one attempt runs on; ``manifest_sha256`` is ``None`` when nothing is staged.
+
+    ``server_url`` is the server the attempt's rounds measure without starting it, ``None`` when they serve locally.
+    """
 
     base: BaseLaunch
     base_path: Path
     tool_cache: Path
     manifest_sha256: str | None
     framework_python: str
+    server_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -431,7 +462,7 @@ def _declined(config_path: Path) -> bool:
 
 def suite_route(session_dir: Path | None, config_path: Path) -> SuiteRoute | None:
     """The route the point at ``config_path`` runs on inference_suite, or ``None`` while it stays on the backend."""
-    if session_dir is None or is_multi_node() or ray_exec_enabled():
+    if session_dir is None or ray_exec_enabled():
         return None
     base = read_base_launch(Path(session_dir))
     if base is None or _declined(config_path):
@@ -443,6 +474,7 @@ def suite_route(session_dir: Path | None, config_path: Path) -> SuiteRoute | Non
         tool_cache=tool_cache,
         manifest_sha256=manifest_sha256(tool_cache),
         framework_python=_resolve_probe_python(base.framework),
+        server_url=client_only_server_url(),
     )
 
 
@@ -496,6 +528,7 @@ def _settings(route: SuiteRoute, request: SuiteRound, manifest: str) -> RoundSet
         silence_sec=resolve_benchmark_timeouts()[0],
         env_inherit=inherited_env_names({k: v for k, v in os.environ.items() if k not in request.env_drop}),
         deadline_unix=request.deadline_unix,
+        server_url=route.server_url,
     )
 
 

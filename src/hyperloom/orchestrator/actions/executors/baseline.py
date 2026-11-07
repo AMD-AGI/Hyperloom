@@ -45,7 +45,8 @@ from inference_suite import stop
 from inference_suite.contracts import FailedStep
 
 from . import _server_lifecycle as _lifecycle
-from ._suite_config import suite_route
+from ._grid_base import GridRound, run_grid_suite_round
+from ._suite_config import SuiteRoundRefused, SuiteRoute, suite_route
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
@@ -111,6 +112,9 @@ _RECORDER_PRODUCER = "orchestrator"
 # The measured pass ran as the first traffic against a freshly restarted server, because the warmup that exists to
 # drive it did not.
 _MN_WARMUP_DID_NOT_WARM_WARNING = "baseline_mn_warmup_did_not_run"
+#: The multi-node warmup pass: its directory below the round's and its progress label.
+_MN_WARMUP = "mn_warmup"
+_PROGRESS_UNIT = "baseline_round"
 
 
 # Markers identifying a MoE quant scheme with no implementation for the ``--moe-runner-backend`` in use:
@@ -436,8 +440,10 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         }
         return headroom_sec >= cost, priced
 
-    async def _mn_warmup_pass(self, round_: _BenchmarkRound, round_warnings: list[str]) -> dict[str, Any] | None:
-        """Run the discarded multi-node client warmup against the restarted server."""
+    async def _mn_warmup_pass(
+        self, round_: _BenchmarkRound, round_warnings: list[str], suite: SuiteRoute | None
+    ) -> dict[str, Any] | None:
+        """Run the discarded multi-node client warmup against the restarted server, on ``suite`` when it is routed."""
         # A multi-node round is two client passes of the same shape against a server the round did not boot, and the
         # session's measured figure is one of them -- the round's wall-clock is taken after this pass -- so the pair
         # costs twice it.
@@ -449,8 +455,21 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         )
         if not affordable:
             return _unaffordable_mn_round_result(round_, evidence)
-        warm_dir = round_.output_dir / "mn_warmup"
+        warm_dir = round_.output_dir / _MN_WARMUP
         started_unix = time.time()
+        if suite is None:
+            warm_rc = await self._mn_magpie_warmup(round_, warm_dir, round_warnings)
+        else:
+            warm_rc = await self._mn_suite_warmup(round_, warm_dir, suite, round_warnings)
+        return _stopped_round_result(
+            warm_rc,
+            round_label="multi-node warmup pass",
+            runtime_sec=max(0.0, time.time() - started_unix),
+            output_dir=round_.output_dir,
+            capture_meta=round_.capture_meta,
+        )
+
+    async def _mn_magpie_warmup(self, round_: _BenchmarkRound, warm_dir: Path, round_warnings: list[str]) -> int | None:
         # The measurement is discarded, but the returncode is not: this pass is a full benchmark round, so a stop here
         # ends the baseline round.
         warm_rc: int | None = None
@@ -465,8 +484,8 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             warm_env["SERVER_LOG"] = str(warm_dir / "server.log")
             warm_env["GPU_METRICS_CSV"] = str(warm_dir / "gpu_metrics.csv")
             async with heartbeat_while_output_flows(
-                unit="baseline_round",
-                label="mn_warmup",
+                unit=_PROGRESS_UNIT,
+                label=_MN_WARMUP,
             ) as warm_activity:
                 warm_proc = await asyncio.to_thread(
                     run_with_session_kill,
@@ -490,13 +509,35 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         except (OSError, ValueError) as exc:
             log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
             round_warnings.append(_MN_WARMUP_DID_NOT_WARM_WARNING)
-        return _stopped_round_result(
-            warm_rc,
-            round_label="multi-node warmup pass",
-            runtime_sec=max(0.0, time.time() - started_unix),
-            output_dir=round_.output_dir,
-            capture_meta=round_.capture_meta,
+        return warm_rc
+
+    async def _mn_suite_warmup(
+        self, round_: _BenchmarkRound, warm_dir: Path, suite: SuiteRoute, round_warnings: list[str]
+    ) -> int:
+        """Run the warmup pass as an external inference_suite round; a pass that fails warms nothing."""
+        warm_round = GridRound(
+            magpie_python=self.magpie_python,
+            config_path=round_.config_path,
+            output_dir=warm_dir,
+            timeout_sec=int(round_.timeout_sec),
+            cwd=str(warm_dir),
+            server_already_ready=True,
+            session_deadline_sec=round_.session_deadline_sec,
+            warmup=True,
         )
+        try:
+            async with heartbeat_while_output_flows(unit=_PROGRESS_UNIT, label=_MN_WARMUP) as activity:
+                ended = await asyncio.to_thread(
+                    run_grid_suite_round, suite, warm_round, env_drop=frozenset(), on_poll=activity.note
+                )
+        except SuiteRoundRefused as exc:
+            log.warning("baseline_executor: MN warmup pass refused (ignored): %s", exc)
+            round_warnings.append(_MN_WARMUP_DID_NOT_WARM_WARNING)
+            return 1
+        log.info("baseline_executor: MN warmup pass done (discarded) rc=%s", ended.returncode)
+        if ended.returncode:
+            round_warnings.append(_MN_WARMUP_DID_NOT_WARM_WARNING)
+        return ended.returncode
 
     async def _run_single_benchmark(
         self,
@@ -558,8 +599,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             server_already_ready=server_already_ready,
             run_eval_disabled=attempt.run_eval_disabled,
         )
-        if attempt.suite is not None:
-            return await self._suite_round_result(round_, attempt.suite, warmup=warmup_round)
         # Multi-node only: restart sglang/vllm per round for a fresh server.
         restart_failure = await self._restart_multi_node_server(
             round_, server_args=attempt.effective_extra_server_args, resolved_model=attempt.resolved_model
@@ -567,12 +606,14 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         if restart_failure is not None:
             return restart_failure
         log_mn_banner("baseline_executor", log, output_dir=str(output_dir))
-        log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s", round_.cmd, output_dir)
         round_warnings: list[str] = []
         if is_multi_node() and mn_bench_warmup_enabled() and not ctx_extra.get("mn_round_restarted"):
-            warmup = await self._mn_warmup_pass(round_, round_warnings)
+            warmup = await self._mn_warmup_pass(round_, round_warnings, attempt.suite)
             if warmup is not None:
                 return warmup
+        if attempt.suite is not None:
+            return await self._suite_round_result(round_, attempt.suite, warmup=warmup_round, warnings=round_warnings)
+        log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s", round_.cmd, output_dir)
         return await self._measured_round_result(round_, round_warnings)
 
     async def _launch_benchmark(
@@ -608,7 +649,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
                 ),
             )
         else:
-            async with heartbeat_while_output_flows(unit="baseline_round", label="benchmark") as activity:
+            async with heartbeat_while_output_flows(unit=_PROGRESS_UNIT, label="benchmark") as activity:
                 proc = await asyncio.to_thread(
                     run_with_session_kill,
                     round_.cmd,

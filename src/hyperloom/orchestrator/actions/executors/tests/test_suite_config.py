@@ -12,6 +12,7 @@ from the same launchers.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -249,7 +250,7 @@ def test_an_explicit_context_length_replaces_the_launcher_default() -> None:
         ({"framework": "xdit"}, "serves nothing"),
         ({"agentx": {"enabled": True}}, "AgentX point"),
         ({"profiler": {"torch_profiler": {"enabled": True}}}, "profile point"),
-        ({"envs": {"BENCHMARK_BASE_URL": "http://head:8888"}}, "serves off this node"),
+        ({"envs": {"BENCHMARK_BASE_URL": "https://head:8888"}}, "is not http://<host>"),
         ({"envs": {"TP": "4"}}, "the point runs TP 4, its base runs 2"),
         ({"envs": {"CONC": None}}, "the point sets no CONC"),
         ({"envs": {"MAGPIE_EVAL_TASKS": "mmlu"}}, "evaluates 'mmlu'"),
@@ -272,7 +273,6 @@ def test_a_point_the_translation_does_not_carry_is_refused(change: dict, message
         ({"framework": "xdit"}, "serves nothing"),
         ({"agentx": {"enabled": True}}, "AgentX point"),
         ({"profiler": {"torch_profiler": {"enabled": True}}}, "profile point"),
-        ({"envs": {"BENCHMARK_BASE_URL": "http://head:8888"}}, "serves off this node"),
     ],
 )
 def test_a_point_the_suite_does_not_run_names_why_it_stays_on_the_backend(change: dict, reason: str) -> None:
@@ -321,3 +321,29 @@ def test_a_points_server_lifecycle_block_says_how_its_round_holds_the_server(
     assert server.lifecycle.mode is mode
     assert server.lifecycle.pid_dir == (_PID_DIR if mode in (LifecycleMode.BOOT, LifecycleMode.REUSE) else None)
     assert server.stop_after == stop_after
+
+
+@pytest.mark.parametrize(
+    ("point_url", "session_url", "address"),
+    [
+        (None, "http://10.0.0.2:30000", ("10.0.0.2", 30000)),
+        ("http://head:8888/", "http://10.0.0.2:30000", ("head", 8888)),
+        ("http://head", None, ("head", 80)),
+    ],
+)
+def test_a_client_only_round_measures_the_external_server_and_samples_no_local_gpu(point_url, session_url, address):
+    point = _point("sglang", **({} if point_url is None else {"BENCHMARK_BASE_URL": point_url}))
+
+    config = suite_config(point, _base("sglang"), replace(_settings(LifecycleMode.BOOT), server_url=session_url))
+
+    assert config.lifecycle == Lifecycle(LifecycleMode.EXTERNAL)
+    assert (config.server.host, config.server.port) == address
+    assert not config.telemetry.enabled
+    assert "BENCHMARK_BASE_URL" not in config.server.user.env_set
+
+
+def test_a_round_without_an_external_server_keeps_its_own_lifecycle_and_telemetry() -> None:
+    config = suite_config(_point("sglang"), _base("sglang"), _settings(LifecycleMode.BOOT))
+
+    assert config.lifecycle == _settings(LifecycleMode.BOOT).lifecycle
+    assert (config.server.host, config.telemetry.enabled) == ("127.0.0.1", True)
