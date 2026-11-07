@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -391,14 +392,22 @@ def bwrap_tier(monkeypatch: pytest.MonkeyPatch) -> Isolation:
     return bwrap_compile_isolation(monkeypatch)
 
 
+@pytest.fixture
+def outside_tmp() -> Iterator[Path]:
+    """A directory below no ``/tmp`` of the host's: there a tree bound entry by entry is in the sandbox's root, not in
+    its own ``/tmp``, which it writes."""
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as base:
+        yield Path(base)
+
+
 @pytest.mark.agent_isolation
 def test_under_bubblewrap_the_compile_has_no_egress_no_key_a_dev_null_and_writes_only_its_work(
-    tmp_path: Path, bwrap_tier: Isolation, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, outside_tmp: Path, bwrap_tier: Isolation, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HYPERLOOM_TEST_SERVICE_TOKEN", "SECRET token of the build service")
     registered = confinement.PRIVATE_PATHS  # this test's own (conftest)
     key = tmp_path / "service.key"
-    tree = tmp_path / "tree"
+    tree = outside_tmp / "tree"  # it holds the key, so it is bound entry by entry
     bound_key = tree / "service.key"
     child = _SANDBOX_CHILD.format(
         outside=_OUTSIDE, key=str(key), bound_key=str(bound_key), read_only=str(tree / "written")

@@ -78,7 +78,9 @@ def test_the_compile_writes_only_its_work_and_reads_its_toolchain_source_and_ima
 
     assert policy.writable == (str(work),)
     read_only = set(policy.read_only)
-    assert {str(SOURCE_ROOT), str(laid.image_root), str(laid.tracked), "/usr", "/etc"} <= read_only
+    assert {str(SOURCE_ROOT), str(laid.image_root), str(laid.tracked)} <= read_only
+    for root in ("/usr", "/etc"):  # bound entry by entry where the environment names a credential file in it
+        assert root in read_only or any(path.startswith(f"{root}/") for path in read_only), root
     assert set(interpreter_roots()) <= read_only, "the child's interpreter, wherever it is installed"
     image_bin = tmp_path / "image-python/bin"
     assert any(image_bin == Path(path) or Path(path) in image_bin.parents for path in read_only), "the image's python"
