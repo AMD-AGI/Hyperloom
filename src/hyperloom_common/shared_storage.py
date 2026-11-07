@@ -114,8 +114,9 @@ def open_shared(path: Path, access: int, mode: int = SHARED_FILE_MODE) -> int:
     another process holds open would be left on an unlinked inode. Another account's ``0600`` file therefore raises
     ``PermissionError``.
     """
+    flags = access | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
-        descriptor = os.open(path, access | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        descriptor = os.open(path, flags, mode)  # the umask never decides it: fchmod below
     except FileExistsError:
         return os.open(path, access | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
