@@ -16,7 +16,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from hyperloom.common.env_safety import is_allowed_external_env_key
-from hyperloom.inference_optimizer.session.base_launch import base_launch_path, read_base_launch
+from hyperloom.inference_optimizer.session.base_launch import base_launch_path, read_base_launch, write_base_launch
 from hyperloom.inference_optimizer.session.paths import session_dir
 from inference_suite.contracts import BaseLaunch
 
@@ -82,6 +82,16 @@ def frozen_base(session: Path) -> FrozenBase | None:
     return None if base is None else FrozenBase(base_launch_path(session), base)
 
 
+def freeze_base(session: Path, base: BaseLaunch) -> FrozenBase:
+    """Freeze ``base`` as the base of the session at ``session``: its ``base_launch.json`` and the digest its state
+    records, so :func:`frozen_base` reads it back."""
+    path = write_base_launch(session, base)
+    state = SharedState.load_or_init(session)
+    state.base_launch_digest = base.digest()
+    state.save(session)
+    return FrozenBase(path, base)
+
+
 def session_server_base() -> ServerBase:
     """The current session's server base; raises :class:`BaseLaunchMismatch` when the file and the state disagree."""
     frozen = frozen_session_base()
@@ -92,6 +102,7 @@ __all__ = [
     "BaseLaunchMismatch",
     "FrozenBase",
     "ServerBase",
+    "freeze_base",
     "frozen_base",
     "frozen_session_base",
     "session_server_base",

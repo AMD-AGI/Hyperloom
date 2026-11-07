@@ -566,6 +566,32 @@ def test_the_session_base_the_old_flow_keeps_reads_empty_in_the_test_session(tmp
     assert seen == [ServerBase()]
 
 
+def test_the_test_session_holds_the_calls_frozen_base_and_never_the_applications(tmp_path, monkeypatch):
+    """The base a call carries reaches its rounds through the test's own session, frozen as a session freezes it, so
+    the point routes to inference_suite with it; the application's session, with another base, is not read."""
+    from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
+    from hyperloom.orchestrator.state.base_launch import frozen_session_base
+    from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
+
+    real = tmp_path / "real"
+    real.mkdir()
+    freeze_session_base(real, args=("--from-the-application",))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(real))
+    seen = []
+
+    async def probe(**kwargs):
+        seen.append(frozen_session_base())
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", probe)
+
+    _run(_call(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=base_launch())))
+
+    (frozen,) = seen
+    assert frozen.launch == base_launch() and frozen.path.parent != real
+    assert not frozen.path.exists(), "the test session is removed with the test"
+
+
 def test_the_per_round_cap_and_the_leak_scope_come_from_the_call(grid, tmp_path, monkeypatch):
     captured: dict[str, str | None] = {}
 
