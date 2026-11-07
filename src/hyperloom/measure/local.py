@@ -125,10 +125,7 @@ from hyperloom.orchestrator.actions.executors import (
     teardown_variant_server,
 )
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
-from hyperloom.orchestrator.actions.stop_attribution import (
-    ORCHESTRATOR_CANCELLED_CLASS,
-    SESSION_TIME_EXHAUSTED_CLASS,
-)
+from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 
 __all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
 
