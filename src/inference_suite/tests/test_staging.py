@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import inference_suite
 from inference_suite import staging
 from inference_suite.contracts import FailedStep
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL, PINNED_TOOLS
@@ -333,6 +334,15 @@ def test_check_exits_one_naming_staging_missing_then_zero_with_the_digest_once_s
     assert capsys.readouterr().err.startswith(f"{FailedStep.STAGING_MISSING.value}: ")
     assert staging.main(["check", "--tool-cache", str(cache)]) == 0
     assert capsys.readouterr().out.strip() == digest
+
+
+def test_the_manifest_digest_a_host_names_is_the_one_stage_printed_and_none_without_a_manifest(
+    staged, tmp_path
+) -> None:
+    cache, _, digest = staged
+
+    assert inference_suite.manifest_sha256(cache) == digest
+    assert inference_suite.manifest_sha256(tmp_path / "empty") is None
 
 
 def test_pinned_tools_name_the_client_the_base_launch_records() -> None:
