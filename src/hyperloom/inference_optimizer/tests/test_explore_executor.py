@@ -4194,6 +4194,75 @@ async def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner,
     assert accuracy["observed"] == 0.0, "an unscored turn scores the run 0.0 rather than skipping the gate"
 
 
+async def _accuracy_round_explore(sub_agent_runner, tmp_path, monkeypatch, *, due: bool) -> tuple[dict, list]:
+    """Run a +10% variant and a -10% one, with the session running the D9 accuracy round when ``due``."""
+    from hyperloom.orchestrator.actions.executors import explore
+    from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import AccuracyRoundOutcome
+
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    calls = []
+
+    async def run_candidate_accuracy_round(slot, launch, state, *, session, lease):
+        calls.append((slot, launch, session))
+        return AccuracyRoundOutcome(slot / "accuracy", "")
+
+    monkeypatch.setattr(explore, "accuracy_round_due", lambda state: due)
+    monkeypatch.setattr(explore, "run_candidate_accuracy_round", run_candidate_accuracy_round)
+    sub, tr, _ = sub_agent_runner
+    sub.shared_state = SharedState(framework="sglang", baseline_tput=200.0)
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=220.0 if "faster" in str(slot) else 180.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-accuracy"),
+                "base_tput": 200.0,
+                "grid": [{"name": "faster", "extra_args": "--faster"}, {"name": "slower", "extra_args": "--slower"}],
+            },
+            idempotency_key="ex-accuracy-round",
+        ),
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_fake_run):
+        out = (await sub.run_task(task)).result
+    return out["explore_search_update"]["tested"], calls
+
+
+@pytest.mark.asyncio
+async def test_explore_runs_the_accuracy_round_only_for_a_variant_that_cleared_the_keep_threshold(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    tested, calls = await _accuracy_round_explore(sub_agent_runner, tmp_path, monkeypatch, due=True)
+
+    faster = tested[canonical_fingerprint("--faster", {})]
+    slower = tested[canonical_fingerprint("--slower", {})]
+    ((slot, launch, session),) = calls
+    assert slot == tmp_path / "explore-accuracy" / "v00_faster"
+    assert launch == slot / "variant_00_faster" / "config.yaml" and launch.exists()
+    assert session == tmp_path
+    assert faster["agentx_accuracy_round"] == {"run_dir": str(slot / "accuracy"), "error_class": ""}
+    assert faster["outcome"] == "KEEP"
+    assert slower["outcome"] == "REVERT" and "agentx_accuracy_round" not in slower
+
+
+@pytest.mark.asyncio
+async def test_explore_runs_no_accuracy_round_when_the_session_runs_none(sub_agent_runner, tmp_path, monkeypatch):
+    tested, calls = await _accuracy_round_explore(sub_agent_runner, tmp_path, monkeypatch, due=False)
+
+    assert calls == []
+    assert tested[canonical_fingerprint("--faster", {})]["outcome"] == "KEEP"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("power_w", "expected_outcome"),
