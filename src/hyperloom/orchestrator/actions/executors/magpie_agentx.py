@@ -16,7 +16,7 @@ from typing import Any, Mapping, NamedTuple, Sequence
 
 import yaml
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import is_magpie_agentx, read_benchmark_point
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.orchestrator.state.base_launch import ServerBase
@@ -46,12 +46,8 @@ class LaunchChanges:
 REPLACE = "replace"
 
 
-def load_benchmark(path: Path) -> dict[str, Any]:
-    return dict(yaml.safe_load(path.read_text(encoding=_ENCODING))["benchmark"])
-
-
 def native_config(path: Path) -> bool:
-    return is_magpie_agentx(load_benchmark(path))
+    return read_benchmark_point(path).agentx
 
 
 class RecipeLaunch(NamedTuple):

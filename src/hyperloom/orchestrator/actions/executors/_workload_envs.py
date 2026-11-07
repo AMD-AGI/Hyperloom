@@ -30,7 +30,7 @@ from typing import Any, Mapping, NamedTuple
 
 import yaml
 
-from hyperloom.common.benchmark_config import BenchmarkPoint
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.agentx_workload import is_agentx_client_key, pin_mlperf_round_concurrency
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
@@ -1437,10 +1437,9 @@ def prepare_grid_benchmark_config(
     A native workload YAML that was never materialized (the pre-baseline fallback) is
     materialized first, so the operator ``--server-args`` reach every candidate.
     """
-    from .magpie_agentx import is_composed, load_benchmark, native_config
-
-    if native_config(config_path):
-        if is_composed(load_benchmark(config_path)):
+    point = read_benchmark_point(config_path)
+    if point.agentx:
+        if point.agentx_launch.composed:
             return config_path
         return materialize_benchmark_config(
             config_path, output_dir, launch=LaunchLayer(args_mode=launch.args_mode), target=target, options=options

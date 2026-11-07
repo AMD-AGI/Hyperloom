@@ -6,6 +6,7 @@
 from copy import deepcopy
 import os
 import shlex
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,8 +29,11 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     LaunchLayer,
     BenchmarkTarget,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import load_benchmark
 from hyperloom.orchestrator.state.shared_state import SharedState, stack_base_params
+
+
+def load_benchmark(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
 
 
 _MODEL = "Qwen/Qwen3-0.6B"

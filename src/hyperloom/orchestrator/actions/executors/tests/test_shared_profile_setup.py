@@ -14,7 +14,11 @@ from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.actions.executors import PatchedServer, _server_patcher
 from hyperloom.orchestrator.actions.executors._profile_setup import prepare_profile, speculative_tokens_per_step
 from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_config_with_envs
-from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime, enable_profile, load_benchmark
+from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime, enable_profile
+
+
+def load_benchmark(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
 
 
 #: A patch laid where this host's server needs no copy of its framework, so the launch's ``PYTHONPATH`` is the one under

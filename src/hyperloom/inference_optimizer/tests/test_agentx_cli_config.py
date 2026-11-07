@@ -3,7 +3,10 @@
 
 """CLI workloads and explicit YAML converge on one native Magpie contract."""
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom.common.perf_metric import agentx_enabled
@@ -21,7 +24,11 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     LaunchLayer,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, load_benchmark
+from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+
+
+def load_benchmark(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
 
 
 @pytest.fixture(autouse=True)
