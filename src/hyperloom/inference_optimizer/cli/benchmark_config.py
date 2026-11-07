@@ -22,7 +22,6 @@ from hyperloom.common.benchmark_config import (
 from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom_common.env import env_bool
 from hyperloom.inference_optimizer import framework_registry
-from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 
 
 _SESSION_CONFIG = "benchmark.yaml"
@@ -157,7 +156,6 @@ class AgentXWorkload:
     ep: int
     conc: int
     model_path: str = ""
-    gpu_type: str | None = None
     docker_image: str | None = None
 
 
@@ -174,11 +172,6 @@ def write_agentx_benchmark(target: Path, workload: AgentXWorkload) -> None:
     }
     if workload.model_path and Path(workload.model_path).is_dir():
         benchmark["envs"]["MODEL_PATH"] = str(Path(workload.model_path).resolve())
-    if workload.gpu_type:
-        # Magpie resolves {framework}_{runner_type}.sh and ships no script for mi308x or
-        # mi325x; both run the mi300x one. ``gpu_type`` is the real board, so the
-        # runner label has to be derived here the way $GPU_TYPE already is.
-        benchmark["runner_type"] = gpu_runner_type(workload.gpu_type)
     if workload.docker_image:
         benchmark["docker_image"] = workload.docker_image
     _validate_agentx_benchmark(benchmark)
@@ -201,7 +194,6 @@ def bind_benchmark(session_dir: Path, args: argparse.Namespace) -> None:
             ep=args.ep,
             conc=args.conc,
             model_path=os.environ.get("MODEL_PATH", ""),
-            gpu_type=args.gpu_type,
             docker_image=args.docker_image,
         )
         write_agentx_benchmark(target, workload)

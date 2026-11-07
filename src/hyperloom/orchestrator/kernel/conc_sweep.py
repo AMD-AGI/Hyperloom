@@ -9,7 +9,6 @@ from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid
 import csv
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1206,14 +1205,7 @@ def _prepare_sweep_setup(state: SharedState, session_dir: Path, recorder: Any) -
 
     # Re-materialize (idempotent) in case we fell back to the shipped asset.
     resolved_model = resolve_session_model_path(state_model_path=str(getattr(state, "model_path", "") or ""))
-    # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py canonicalizes mi325x/mi308x -> mi300x), fall
-    # back to state.gpu_type, then canonicalize through gpu_runner_type so the selected Magpie script is a shipped
-    # runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
-    from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
-
-    resolved_gpu = gpu_runner_type(
-        os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
-    )
+    resolved_gpu = str(state.gpu_type or "").strip().lower()
     benchmark_script = state.accepted_baseline_script()
     try:
         base_yaml_path = prepare_grid_benchmark_config(

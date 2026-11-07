@@ -62,14 +62,13 @@ def cpu_benchmark(tmp_path):
     """Replace the GPU harness with a child that executes the YAML-selected script."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for script, tput in (("sglang_custom.sh", 105.0), ("sglang_mi355x.sh", 140.0)):
-        report = {
-            "success": True,
-            "framework": "sglang",
-            "script": script,
-            "throughput": {"output_throughput": tput, "completed_requests": 8, "duration_seconds": 1.0},
-        }
-        (scripts / script).write_text(f"printf '%s\\n' {shlex.quote(json.dumps(report))}\n", encoding="utf-8")
+    report = {
+        "success": True,
+        "framework": "sglang",
+        "script": "sglang_custom.sh",
+        "throughput": {"output_throughput": 105.0, "completed_requests": 8, "duration_seconds": 1.0},
+    }
+    (scripts / "sglang_custom.sh").write_text(f"printf '%s\\n' {shlex.quote(json.dumps(report))}\n", encoding="utf-8")
     harness = tmp_path / "cpu_benchmark.py"
     harness.write_text(
         textwrap.dedent(
@@ -94,7 +93,7 @@ def cpu_benchmark(tmp_path):
             workspace = args.output_dir / "benchmark_sglang_cpu"
             workspace.mkdir(parents=True)
             (workspace / "benchmark_report.json").write_text(json.dumps(report))
-            receipt = {"script": script.name, "runner_type": bench["runner_type"], "report": report}
+            receipt = {"script": script.name, "report": report}
             (args.output_dir / "child_receipt.json").write_text(json.dumps(receipt))
             result_dir = Path(env["RESULT_DIR"])
             result_dir.mkdir(parents=True, exist_ok=True)
@@ -169,8 +168,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
         assert task_id
         task = await coordinator.tasks.get(task_id)
 
-    expected_script = "sglang_custom.sh" if script_source in {"accepted", "legacy"} else "sglang_mi355x.sh"
-    expected_tput = 105.0 if expected_script == "sglang_custom.sh" else 140.0
+    expected_script, expected_tput = "sglang_custom.sh", 105.0
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.build_benchmark_command", cpu_benchmark)
     executor = BaselineExecutor(magpie_python=sys.executable, session_dir=coordinator.session_dir, shared_state=state)
     monkeypatch.setattr(executor, "_after_materialize_config", lambda *_args: None)
@@ -181,7 +179,6 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     baseline_receipt = json.loads((Path(result["output_dir"]) / "child_receipt.json").read_text())
     measured_yaml = yaml.safe_load(Path(result["materialized_config"]).read_text())["benchmark"]
     assert baseline_receipt["script"] == measured_yaml["benchmark_script"] == expected_script
-    assert baseline_receipt["runner_type"] == "mi355x"
     assert result["output_throughput"] == baseline_receipt["report"]["throughput"]["output_throughput"] == expected_tput
     assert result["accuracy"] == 0.95
 
@@ -191,7 +188,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     assert state.baseline_tput == expected_tput
     assert state.baseline_accuracy == 0.95
     assert state.baseline_config_path == result["materialized_config"]
-    assert state.baseline_benchmark_script == ("sglang_custom.sh" if expected_script == "sglang_custom.sh" else "")
+    assert state.baseline_benchmark_script == ("sglang_custom.sh" if script_source in {"accepted", "legacy"} else "")
     assert state.enablement.succeeded
     assert not state.enablement.validation_pending
 

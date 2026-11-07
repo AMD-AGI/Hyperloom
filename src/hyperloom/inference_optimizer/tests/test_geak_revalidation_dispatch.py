@@ -1218,7 +1218,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
 
     assert len(calls) == 1
     assert calls[0][1]["benchmark_script"] == "sglang_custom.sh"
-    assert calls[0][1]["runner_type"] == "mi355x"
+    assert "runner_type" not in calls[0][1]
     assert calls[0][0]["launch"].server_lifecycle is not None
 
 

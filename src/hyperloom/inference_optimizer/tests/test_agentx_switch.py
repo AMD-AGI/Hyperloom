@@ -57,11 +57,11 @@ def _materialize(src, out, **kw):
 
 
 # ── OFF path: zero regression ────────────────────────────────────────────────
-def test_switch_off_keeps_synthetic_script(tmp_path, monkeypatch):
+def test_switch_off_keeps_the_point_script(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
-    src = _write(tmp_path / "base.yaml")
+    src = _write(tmp_path / "base.yaml", benchmark_script="vllm_custom.sh")
     bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m"))
-    assert bench["benchmark_script"] == "vllm_mi300x.sh"
+    assert bench["benchmark_script"] == "vllm_custom.sh"
     assert not any(k.startswith("AGENTX") for k in bench.get("envs", {}))
 
 
@@ -73,7 +73,7 @@ def test_switch_off_no_agentx_leakage(tmp_path, monkeypatch):
     dumped = yaml.safe_dump(bench).lower()
     assert "aiperf" not in dumped
     assert "agentx" not in dumped
-    assert bench["benchmark_script"] == "vllm_mi300x.sh"
+    assert "benchmark_script" not in bench
 
 
 # ── ON path: authoritative overwrite + env injection ─────────────────────────
@@ -99,15 +99,15 @@ def test_switch_off_omits_workload_spec(tmp_path, monkeypatch):
 # ── Regression: the shared grid/baseline/profile rebuild path (E1 bug) ────────
 
 
-def test_runtime_overrides_off_keeps_synthetic(monkeypatch):
+def test_runtime_overrides_off_keeps_the_point_script(monkeypatch):
     _clear_env(monkeypatch)  # HYPERLOOM_AGENTX cleared => OFF
     from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
         apply_runtime_benchmark_overrides,
     )
 
-    bench = {"framework": "vllm"}
+    bench = {"framework": "vllm", "benchmark_script": "vllm_custom.sh"}
     apply_runtime_benchmark_overrides(bench, model_path="/m", gpu_type="mi300x")
-    assert bench["benchmark_script"] == "vllm_mi300x.sh"
+    assert bench["benchmark_script"] == "vllm_custom.sh"
 
 
 # ── A2: OFF path never imports the agentx package (lazy-import guarantee) ─────

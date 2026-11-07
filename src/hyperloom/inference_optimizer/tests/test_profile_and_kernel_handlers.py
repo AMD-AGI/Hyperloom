@@ -211,94 +211,34 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     assert rendered["benchmark"]["envs"]["BENCH_FOO"] == "bar"
 
 
-def test_materialize_config_injects_runner_type(tmp_path):
-    """gpu_type kwarg must land in benchmark.runner_type as-is."""
-    import yaml
-
-    out = materialize_benchmark_config(
-        _PROFILE_SGLANG_CONFIG,
-        tmp_path,
-        target=BenchmarkTarget(gpu_type="mi355x"),
-    )
-    with out.open() as f:
-        rendered = yaml.safe_load(f)
-    assert rendered["benchmark"]["runner_type"] == "mi355x"
-
-
-def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch):
+def test_shipped_points_materialize_without_a_runner_label_or_script(tmp_path, monkeypatch):
     import yaml
 
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    for config_path in (default_baseline_config(), _PROFILE_VLLM_CONFIG):
+    for config_path in (default_baseline_config(), _PROFILE_VLLM_CONFIG, _PROFILE_SGLANG_CONFIG):
         out = materialize_benchmark_config(
             config_path,
             tmp_path / config_path.stem,
             target=BenchmarkTarget(gpu_type="r9700"),
         )
         rendered = yaml.safe_load(out.read_text())["benchmark"]
-        assert rendered["runner_type"] == "gfx12"
-        assert rendered["benchmark_script"] == "vllm_gfx12.sh"
+        assert "runner_type" not in rendered
+        assert "benchmark_script" not in rendered
 
 
-def test_materialize_config_forces_generic_benchmark_script(tmp_path):
-    """`gpu_type` pins `benchmark_script` to the generic `{framework}_{gpu_type}.sh` (Magpie priority 1)."""
+@pytest.mark.parametrize("script", [None, "sglang_custom.sh"])
+def test_the_board_leaves_the_point_script_as_written(tmp_path, script):
     import yaml
 
+    bench = {"framework": "sglang", "model": "/m", **({"benchmark_script": script} if script else {})}
     src_yaml = tmp_path / "src.yaml"
-    src_yaml.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": "sglang",
-                    "model": "/m",
-                    "benchmark_script": "sglang_mi300x.sh",  # legacy field
-                },
-            }
-        )
-    )
+    src_yaml.write_text(yaml.safe_dump({"benchmark": bench}))
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    out = materialize_benchmark_config(
-        src_yaml,
-        out_dir,
-        target=BenchmarkTarget(gpu_type="mi355x"),
-    )
-    with out.open() as f:
-        rendered = yaml.safe_load(f)
-    assert rendered["benchmark"]["runner_type"] == "mi355x"
-    assert rendered["benchmark"]["benchmark_script"] == "sglang_mi355x.sh", (
-        "gpu_type must pin the generic {framework}_{gpu_type}.sh"
-    )
-
-
-def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
-    tmp_path,
-):
-    """Even with no source `benchmark_script`, the renderer must write one explicitly."""
-    import yaml
-
-    src_yaml = tmp_path / "src.yaml"
-    src_yaml.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": "vllm",
-                    "model": "/m",
-                    # No benchmark_script field at all.
-                },
-            }
-        )
-    )
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    out = materialize_benchmark_config(
-        src_yaml,
-        out_dir,
-        target=BenchmarkTarget(gpu_type="mi300x"),
-    )
-    with out.open() as f:
-        rendered = yaml.safe_load(f)
-    assert rendered["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
+    out = materialize_benchmark_config(src_yaml, out_dir, target=BenchmarkTarget(gpu_type="mi325x"))
+    rendered = yaml.safe_load(out.read_text())["benchmark"]
+    assert "runner_type" not in rendered
+    assert rendered.get("benchmark_script") == script
 
 
 # TP / CONC env must override yaml hardcode.

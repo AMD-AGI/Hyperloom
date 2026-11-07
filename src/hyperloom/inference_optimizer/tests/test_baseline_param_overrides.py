@@ -137,7 +137,7 @@ def _write_yaml(
         yaml.safe_dump(cfg, f)
 
 
-def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
+def test_materialize_config_with_envs_pins_the_explicit_benchmark_script(
     tmp_path,
 ):
     base = tmp_path / "base.yaml"
@@ -153,13 +153,12 @@ def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
         ),
     )
     cfg = yaml.safe_load(materialized.read_text())
-    # Override re-pins benchmark_script after the gpu_type pop.
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
-    assert cfg["benchmark"]["runner_type"] == "mi300x"
+    assert "runner_type" not in cfg["benchmark"]
 
 
-def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
-    """Without an override, gpu_type force-pins the generic ``{framework}_{gpu_type}.sh`` so Magpie never falls through to the InferenceX native script."""
+def test_materialize_config_with_envs_keeps_the_point_script_without_override(tmp_path):
+    """The board names no script: without an override the point keeps the one it carries."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, benchmark_script="dsr1_fp8_mi300x.sh")
     out = tmp_path / "out"
@@ -171,8 +170,8 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
         target=BenchmarkTarget(gpu_type="mi300x"),
     )
     cfg = yaml.safe_load(materialized.read_text())
-    # framework in the _write_yaml fixture is "sglang".
-    assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
+    assert cfg["benchmark"]["benchmark_script"] == "dsr1_fp8_mi300x.sh"
+    assert "runner_type" not in cfg["benchmark"]
 
 
 def test_materialize_writes_operator_extra_env_but_not_its_credentials_into_vllm_yaml(tmp_path, monkeypatch):
@@ -498,7 +497,7 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
     assert result["status"] == "succeeded"
     bench = captured["cfg"]["benchmark"]
     assert bench["benchmark_script"] == "sglang_mi300x.sh"
-    assert bench["runner_type"] == "mi300x"
+    assert "runner_type" not in bench
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "redirect_leak")
 
 

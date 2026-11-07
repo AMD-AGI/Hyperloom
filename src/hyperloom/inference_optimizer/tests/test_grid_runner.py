@@ -756,7 +756,7 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
     return workspace
 
 
-def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
+def test_apply_runtime_overrides_pins_the_explicit_benchmark_script():
     bench = {
         "framework": "sglang",
         "benchmark_script": "dsr1_fp8_mi300x.sh",
@@ -768,14 +768,15 @@ def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
         benchmark_script="sglang_mi300x.sh",
     )
     assert bench["benchmark_script"] == "sglang_mi300x.sh"
-    assert bench["runner_type"] == "mi300x"
+    assert "runner_type" not in bench
 
 
-def test_apply_runtime_overrides_routes_r9700_vllm_to_gfx12():
-    bench = {"framework": "vllm", "envs": {}}
+@pytest.mark.parametrize("script", [None, "vllm_custom.sh"])
+def test_apply_runtime_overrides_derives_nothing_from_the_board(script):
+    bench = {"framework": "vllm", "envs": {}, **({"benchmark_script": script} if script else {})}
     apply_runtime_benchmark_overrides(bench, gpu_type="r9700")
-    assert bench["runner_type"] == "gfx12"
-    assert bench["benchmark_script"] == "vllm_gfx12.sh"
+    assert "runner_type" not in bench
+    assert bench.get("benchmark_script") == script
 
 
 def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
@@ -812,7 +813,7 @@ def test_build_variant_yaml_propagates_benchmark_script(tmp_path):
     )
     cfg = yaml.safe_load(out.read_text())
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
-    assert cfg["benchmark"]["runner_type"] == "mi300x"
+    assert "runner_type" not in cfg["benchmark"]
 
 
 def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
