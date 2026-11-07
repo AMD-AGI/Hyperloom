@@ -27,7 +27,7 @@ the config before the round starts. :func:`inferencex_root` is the staged Infere
 on under :data:`GPU_MASK_ENV`.
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
-:func:`client_env`, the discarded :func:`warmup_pass` before the measured one.
+:func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from inference_suite.cli import EXIT_REFUSED
 from inference_suite.compose import GPU_MASK_ENV
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.layout import RunDirError
-from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, client_env, warmup_pass
+from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, fixed_client_env, warmup_pass
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import SourceFetchError, fetch_response, fetch_sources
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
@@ -74,7 +74,7 @@ __all__ = [
     "UserFile",
     "UserFileError",
     "client_argv",
-    "client_env",
+    "fixed_client_env",
     "fetch_response",
     "fetch_sources",
     "inferencex_root",
