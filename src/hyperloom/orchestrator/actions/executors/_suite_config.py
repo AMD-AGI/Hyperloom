@@ -381,6 +381,11 @@ def _server(
     )
 
 
+def fixed_workload(document: Mapping[str, object]) -> FixedWorkload:
+    """The fixed load a round of the point ``document`` sends its server."""
+    return _fixed(_point_of(_bench(document), 0.0, 0.0))
+
+
 def _fixed(point: _Point) -> FixedWorkload:
     return FixedWorkload(
         concurrency=point.integer(ENV_CONC),
@@ -1140,6 +1145,7 @@ __all__ = [
     "SuiteRoute",
     "backend_reason",
     "deadline_unix",
+    "fixed_workload",
     "inherited_env_names",
     "point_server",
     "round_lifecycle",
