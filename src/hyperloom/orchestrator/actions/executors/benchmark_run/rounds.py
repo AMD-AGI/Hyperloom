@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
-from inference_suite.contracts import FailedStep, RunLayout
+from inference_suite.contracts import FailedStep
 
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import incremental_gain_pct
@@ -36,7 +36,7 @@ from ....state.failure_evidence import (
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from .. import _server_lifecycle as _lifecycle
 from .._failed_step import failed_step_error_class
-from .._round_folder import is_round_folder
+from .._round_folder import round_report_path
 from ..benchmark_result import served_complete_protocol
 from .bringup import _classify_subprocess_error, _disable_cuda_graph_flag, _with_cuda_graph_disabled
 from .records import (
@@ -59,15 +59,6 @@ from .warm_patches import (
 )
 
 log = logging.getLogger(__name__)
-
-#: The file Magpie writes its own measurement to, inside the workspace it creates.
-_BENCHMARK_REPORT_NAME = "benchmark_report.json"
-
-
-def _round_report_path(workspace: Path) -> Path:
-    """The report a round left in ``workspace``: an inference_suite run_dir's, else Magpie's."""
-    return RunLayout(workspace).report if is_round_folder(workspace) else workspace / _BENCHMARK_REPORT_NAME
-
 
 # Above this cold-start delta the measured round is unlikely to have settled either: the observed pathological case
 # climbed 14,202 -> 19,374 -> 22,425 tok/s across three rounds of one unchanged config, i.e. +36% into round 2 and
@@ -740,7 +731,7 @@ class _BenchmarkRoundsMixin:
         warnings: list[str],
     ) -> dict[str, Any] | None:
         workspace = round_.output_dir if finished.workspace is None else finished.workspace
-        report_path = _round_report_path(workspace)
+        report_path = round_report_path(workspace)
         tail = (finished.stderr or finished.stdout)[-2000:]
         failed = {
             "status": "failed",
