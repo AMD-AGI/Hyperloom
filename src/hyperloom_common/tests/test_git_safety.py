@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common import git_safety
-from hyperloom_common.git_safety import NO_PROGRAMS, app_git, app_git_diff
+from hyperloom_common.git_safety import NO_PROGRAMS, app_git, app_git_diff, trusted_admin_dir
 
 
 def _plain_env() -> dict[str, str]:
@@ -599,10 +599,15 @@ def test_a_worktree_of_another_repository_than_the_caller_names_runs_nothing(tmp
     other.change()
 
     with pytest.raises(OSError, match="is not one of the repository"):
-        app_git(other.worktree, "add", "-A", common=mine.base / ".git")
+        app_git(other.worktree, "add", "-A", admin=trusted_admin_dir(other.worktree, mine.base / ".git"))
 
     assert not other.canary.exists()
-    assert app_git(mine.worktree, "status", "--porcelain", common=mine.base / ".git").returncode == 0
+    assert (
+        app_git(
+            mine.worktree, "status", "--porcelain", admin=trusted_admin_dir(mine.worktree, mine.base / ".git")
+        ).returncode
+        == 0
+    )
     assert app_git(other.worktree, "status", "--porcelain").returncode == 0
 
 
@@ -622,20 +627,24 @@ def test_an_admin_directory_another_account_made_is_trusted_only_in_a_shared_rep
     _chown_tree(common, another, group)
 
     with pytest.raises(OSError, match="not a directory owned by the app"):
-        app_git(tree.worktree, "status", "--porcelain", common=common)  # not setgid: not shared
+        app_git(
+            tree.worktree, "status", "--porcelain", admin=trusted_admin_dir(tree.worktree, common)
+        )  # not setgid: not shared
     for path in (common, *common.rglob("*")):
         if path.is_dir() and not path.is_symlink():
             path.chmod(path.stat().st_mode | stat.S_ISGID)
-    assert app_git(tree.worktree, "status", "--porcelain", common=common).returncode == 0
+    assert (
+        app_git(tree.worktree, "status", "--porcelain", admin=trusted_admin_dir(tree.worktree, common)).returncode == 0
+    )
     with pytest.raises(OSError, match="not a directory owned by the app"):
         app_git(tree.worktree, "status", "--porcelain")  # no common: the uid alone
     os.lchown(admin, another, stranger)
     with pytest.raises(OSError, match="not a directory owned by the app"):
-        app_git(tree.worktree, "status", "--porcelain", common=common)
+        app_git(tree.worktree, "status", "--porcelain", admin=trusted_admin_dir(tree.worktree, common))
     os.lchown(admin, another, group)
     os.lchown(admin / "gitdir", another, stranger)
     with pytest.raises(OSError, match="not an admin dir of a linked worktree"):
-        app_git(tree.worktree, "status", "--porcelain", common=common)
+        app_git(tree.worktree, "status", "--porcelain", admin=trusted_admin_dir(tree.worktree, common))
 
 
 def test_the_caller_s_environment_never_outranks_what_keeps_the_config_out(tmp_path):
@@ -691,7 +700,9 @@ def test_a_symlink_on_the_way_to_the_admin_dir_flipped_after_the_check_reaches_n
 
     monkeypatch.setattr(git_safety, "trusted_admin_dir", check_then_flip)
 
-    done = app_git(tree.worktree, "add", "-A", common=git if common else None)
+    done = app_git(
+        tree.worktree, "add", "-A", admin=git_safety.trusted_admin_dir(tree.worktree, git) if common else None
+    )
 
     assert done.returncode == 0, done.stderr
     assert not tree.canary.exists()

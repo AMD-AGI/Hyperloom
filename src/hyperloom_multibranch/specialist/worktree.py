@@ -276,7 +276,7 @@ def _worktree_git(worktree: Path, common: Path, args: Sequence[str], pinned: Map
             *args,
             timeout=GIT_TIMEOUT_S,
             env=env,
-            common=common,
+            admin=trusted_admin_dir(worktree, common),
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise WorktreeError(f"git {args[0]} in {worktree} was refused: {error}") from error
