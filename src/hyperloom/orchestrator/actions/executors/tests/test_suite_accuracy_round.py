@@ -194,6 +194,28 @@ def test_the_round_writes_its_run_dir_into_the_slots_accuracy_dir(session, tmp_p
     assert config.server.golden is GoldenUse.EXCLUDE
 
 
+def test_a_leased_round_sizes_its_server_by_tp_not_by_the_gpu_mask_the_point_carries(session, tmp_path) -> None:
+    configs = []
+
+    class _Lease:
+        def run_session_kill(self, leased):
+            configs.append(yaml.safe_load(Path(leased.config_path).read_text(encoding="utf-8")))
+            return 1, "", "stopped after the config"
+
+    slot = tmp_path / "slot"
+    document = _agentx_point(_agentx_base())
+    document["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+    point = _write(slot / "point.yaml", document)
+    route = session_route(session)
+    assert route is not None
+
+    with pytest.raises(SuiteRoundRefused):
+        run_accuracy_suite_round(route, AccuracyRound(point, slot, 900.0, serving_lease=_Lease()), on_poll=lambda: None)
+
+    (config,) = configs
+    assert config["server"]["gpus"] == [0]
+
+
 def test_a_slot_run_again_replaces_the_accuracy_round_an_earlier_attempt_left(session, tmp_path, monkeypatch) -> None:
     slot = tmp_path / "slot"
     point = _write(slot / "point.yaml", _agentx_point(_agentx_base()))
