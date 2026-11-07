@@ -113,7 +113,10 @@ from ._profile_setup import (
     SGLANG_NUM_STEPS,
     SGLANG_START_STEP,
     _profiler_flag_value,
-    vllm_profiler_fields,
+    agentx_profile,
+    profiled_server,
+    refuse_agentx_keys,
+    torch_profiler,
 )
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from ._ray_backend import SuiteLeasedRound, strip_visible_devices_from_config
@@ -412,10 +415,6 @@ def _eval(point: _Point, enabled: bool) -> EvalConfig:
     )
 
 
-def _torch_profiler(bench: Mapping[str, Any]) -> Mapping[str, Any]:
-    return (bench.get("profiler") or {}).get("torch_profiler") or {}
-
-
 def _start_body(point: _Point) -> dict[str, Any]:
     text = point.text(_PROFILE_BODY_ENV) or "{}"
     try:
@@ -439,7 +438,7 @@ def _fixed_profile(bench: Mapping[str, Any], point: _Point) -> ProfileConfig:
 
     ATOM bounds no steps, so its capture is the profiled pass, which the window's step fields then count in prompts.
     """
-    if not _torch_profiler(bench).get("enabled"):
+    if not torch_profiler(bench).get("enabled"):
         if point.flag(_PROFILE_ENV, default=False):
             raise ConfigError(f"the point sets {_PROFILE_ENV} without profiler.torch_profiler.enabled")
         return ProfileConfig(enabled=False)
@@ -479,21 +478,6 @@ _WARMUP_PER_LANE_ENV = "AIPERF_WARMUP_REQUESTS_PER_LANE"
 _AGENTX_CONSUMED_ENV = _CONSUMED_ENV | {_MODEL_PATH_ENV, _EP_SIZE_ENV, _TRACE_ENV}
 #: The client knobs of Magpie's replay and the MLPerf client, which the agentx-harness replay does not read.
 _MAGPIE_CLIENT_PREFIXES = ("AGENTX_", "AGENTIC_")
-#: The keys an AgentX ``profiler.torch_profiler`` may set, and Magpie's defaults (``TorchProfilerConfig``) for two.
-#: ``interval_seconds`` spaces the captures after the first, and the round opens one.
-_AGENTX_PROFILE_KEYS = frozenset(
-    {"enabled", "num_steps", "num_profiles", "start_seconds", "interval_seconds", "detailed_annotations"}
-    | {"capture_timeout_seconds"}
-)
-_AGENTX_CAPTURE_STEPS = 20
-_AGENTX_CAPTURE_SEC = 300.0
-#: What Magpie's AgentX profile gave an annotated SGLang capture (``agentx_profile_config.py``): shapes and stacks
-#: in the trace, and the CUDA-graph replays profiled unless the server runs eager.
-_SGLANG_ANNOTATION_ENV = MappingProxyType(
-    dict.fromkeys(("SGLANG_PROFILE_WITH_STACK", "SGLANG_PROFILE_RECORD_SHAPES", "SGLANG_GRAPH_BATCH_CAPTURE"), "True")
-)
-_SGLANG_GRAPH_PROFILE_FLAG = "--enable-profile-cuda-graph"
-_SGLANG_EAGER_FLAG = "--disable-cuda-graph"
 
 
 def _agentx_block(bench: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -501,15 +485,9 @@ def _agentx_block(bench: Mapping[str, Any]) -> Mapping[str, Any]:
     return block if isinstance(block, Mapping) else {}
 
 
-def _refuse_keys(keys: object, known: frozenset[str], where: str) -> None:
-    unknown = sorted(set(keys) - known) if isinstance(keys, Mapping) else []
-    if unknown:
-        raise ConfigError(f"the AgentX point sets {where} {', '.join(unknown)}, which no inference_suite round carries")
-
-
 def _check_agentx_block(block: Mapping[str, Any], point: _Point) -> None:
-    _refuse_keys(block, _AGENTX_BLOCK_KEYS, "agentx")
-    _refuse_keys(block.get("launch_overrides"), _AGENTX_LAUNCH_KEYS, "agentx.launch_overrides")
+    refuse_agentx_keys(block, _AGENTX_BLOCK_KEYS, "agentx")
+    refuse_agentx_keys(block.get("launch_overrides"), _AGENTX_LAUNCH_KEYS, "agentx.launch_overrides")
     if str(block.get("mode", _AGENTX_CANONICAL)).lower() != _AGENTX_CANONICAL:
         raise ConfigError("the AgentX point asks for fast mode; a round replays canonically")
     threshold = block.get("failed_request_threshold", _AGENTX_THRESHOLD)
@@ -571,60 +549,6 @@ def _agentx_workload(point: _Point, base: BaseLaunch) -> AgentxWorkload:
     )
 
 
-def _agentx_profile(bench: Mapping[str, Any], framework: Framework) -> ProfileConfig:
-    """The capture window an AgentX point asks for, opened ``start_seconds`` into the replay's measured phase."""
-    settings = _torch_profiler(bench)
-    if not settings.get("enabled"):
-        return ProfileConfig(enabled=False)
-    _refuse_keys(settings, _AGENTX_PROFILE_KEYS, "profiler.torch_profiler")
-    if settings.get("num_profiles", 1) != 1:
-        raise ConfigError(f"the AgentX point asks for {settings['num_profiles']} captures; a round opens one")
-    annotated = framework is Framework.SGLANG and settings.get("detailed_annotations") is True
-    return ProfileConfig(
-        enabled=True,
-        start_body={"detailed_annotations": True} if annotated else None,
-        delay_iters=0,
-        max_iters=settings.get("num_steps", _AGENTX_CAPTURE_STEPS),
-        agentx_open_after_sec=settings.get("start_seconds", 0.0),
-        agentx_duration_sec=settings.get("capture_timeout_seconds", _AGENTX_CAPTURE_SEC),
-    )
-
-
-def _graph_disabled(user: LaunchDelta, base: BaseLaunch) -> bool:
-    golden_args = base.golden_al.args if base.golden_al is not None else ()
-    ran = {name for name, _ in argv_flag_occurrences((*base.args, *golden_args, *user.args_add))}
-    removed = {canonical_flag_name(flag) for flag in user.args_remove}
-    return canonical_flag_name(_SGLANG_EAGER_FLAG) in ran - removed
-
-
-def _agentx_profile_layer(
-    bench: Mapping[str, Any], framework: Framework, user: LaunchDelta, base: BaseLaunch
-) -> LaunchDelta:
-    """What an AgentX profile adds to the server's own layer ``user`` for the annotations it asks for."""
-    settings = _torch_profiler(bench)
-    if not settings.get("enabled"):
-        return LaunchDelta()
-    annotated = settings.get("detailed_annotations") is True
-    if framework is Framework.VLLM:
-        fields = vllm_profiler_fields(patched=annotated).items()
-        return LaunchDelta(
-            args_add=tuple(token for name, value in fields for token in (f"--profiler-config.{name}", value))
-        )
-    if not annotated:
-        return LaunchDelta()
-    graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
-    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
-
-
-def _profiled_server(server: ServerConfig, bench: Mapping[str, Any], base: BaseLaunch) -> ServerConfig:
-    user = server.user
-    layer = _agentx_profile_layer(bench, Framework(base.framework), user, base)
-    return replace(
-        server,
-        user=replace(user, args_add=(*user.args_add, *layer.args_add), env_set={**user.env_set, **layer.env_set}),
-    )
-
-
 def _agentx_server_env(point: _Point) -> dict[str, str]:
     """The point's environment as Magpie layered it under the launch's: less what the config carries as fields."""
     return {
@@ -657,10 +581,10 @@ def _agentx_config(
     measures = not boot_only
     server = _agentx_server(point, bench, base, settings)
     return SuiteConfig(
-        server=_profiled_server(server, bench, base) if measures else server,
+        server=profiled_server(server, bench, base) if measures else server,
         workload=WorkloadKind.AGENTX if measures else WorkloadKind.NONE,
         agentx=_agentx_workload(point, base) if measures else None,
-        profile=_agentx_profile(bench, point.framework) if measures else ProfileConfig(enabled=False),
+        profile=agentx_profile(bench, point.framework) if measures else ProfileConfig(enabled=False),
         eval=_eval(point, enabled=False),
         telemetry=settings.telemetry,
         lifecycle=settings.lifecycle,
@@ -735,7 +659,7 @@ def _mlperf_config(
     A boot-only round serves the harness's model name too, so the measured round that reuses its server composes the
     same launch.
     """
-    if _torch_profiler(bench).get("enabled"):
+    if torch_profiler(bench).get("enabled"):
         raise ConfigError("the MLPerf point asks for a torch profile; an MLPerf round is not profiled")
     if point.flag(ENV_RUN_EVAL, default=False):
         raise ConfigError(f"the MLPerf point sets {ENV_RUN_EVAL}; the harness scores its accuracy inline")
