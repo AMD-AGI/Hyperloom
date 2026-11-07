@@ -335,3 +335,10 @@ def test_scriptable_refuses_a_script_it_cannot_find(tmp_path: Path):
     config = _scriptable_config(tmp_path, ScriptableWorkload())
     outcome = run_scriptable(config, base, RoundGate(_DEADLINES, lambda: "", time.monotonic()), PhaseClock())
     assert outcome.invocation is None and outcome.stop.step is FailedStep.CONFIG_INVALID
+
+
+def test_a_scriptable_base_without_a_script_runs_the_one_its_framework_ships():
+    base = scriptable_base(replace(_query(), framework="xdit"), None, LaunchModel("FLUX.1-dev"), Topology(tp=1))
+    assert base.script == ShippedScript.XDIT.value
+    with pytest.raises(BaseLaunchError, match="custom ships no script"):
+        scriptable_base(_query(), None, LaunchModel("FLUX.1-dev"), Topology(tp=1))
