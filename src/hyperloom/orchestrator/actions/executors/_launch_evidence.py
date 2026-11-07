@@ -14,7 +14,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
-from hyperloom.common.benchmark_config import BenchmarkPoint, PointError
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.launch_log_evidence import (
     engine_adjusted_settings_from_log,
     launch_argv_from_log,
@@ -85,7 +85,7 @@ def _read_config_recipe(config_path: Path) -> _ConfigRecipe:
     try:
         raw = config_path.read_bytes()
         point = BenchmarkPoint.from_document(yaml.safe_load(raw.decode("utf-8")), source=str(config_path))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError, PointError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, BenchmarkPointError):
         log.debug("launch evidence could not read materialized config %s", config_path, exc_info=True)
     return _ConfigRecipe(raw, point)
 

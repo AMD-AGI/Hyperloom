@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.benchmark_config import PointError, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
 from hyperloom.common.gain_math import (
     ACCURACY_METRICS,
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
@@ -82,7 +82,7 @@ def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     """Report whether lm-eval is disabled in the materialized benchmark config."""
     try:
         envs = read_benchmark_point(Path(config_path)).envs
-    except (OSError, yaml.YAMLError, PointError):
+    except (OSError, yaml.YAMLError, BenchmarkPointError):
         return False
     return not is_truthy(envs.get("RUN_EVAL"), default=True)
 

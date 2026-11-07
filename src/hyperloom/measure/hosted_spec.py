@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.env import env_bool
-from hyperloom.common.benchmark_config import BenchmarkPoint, PointError
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.outside_facts import ENV_TP
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.common.env_safety import (
@@ -121,7 +121,7 @@ def _load_yaml(path: Path) -> tuple[str, dict[str, Any]]:
 def _read_point(document: Mapping[str, Any], path: Path) -> BenchmarkPoint:
     try:
         return BenchmarkPoint.from_document(document, source=Path(path).name)
-    except PointError as exc:
+    except BenchmarkPointError as exc:
         raise SpecRefused(_POINT_UNREADABLE, str(exc)) from None
 
 

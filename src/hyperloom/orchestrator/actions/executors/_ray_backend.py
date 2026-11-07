@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 
 from hyperloom_common.env import env_flag
-from hyperloom.common.benchmark_config import BenchmarkPoint, PointError
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 from inference_suite import EXIT_REFUSED
@@ -233,7 +233,7 @@ def strip_visible_devices_from_config(config_path: Path | str) -> Path:
         with src.open(encoding=_UTF8) as fp:
             cfg = yaml.safe_load(fp) or {}
         owned = [key for key in _RAY_OWNED_VISIBLE_DEVICE_VARS if key in BenchmarkPoint.from_document(cfg).envs]
-    except (OSError, yaml.YAMLError, PointError):
+    except (OSError, yaml.YAMLError, BenchmarkPointError):
         return src
     if not owned:
         return src

@@ -12,7 +12,7 @@ from typing import Any, Mapping
 
 from hyperloom_common.coerce import optional_positive_float, to_float
 from hyperloom_common.env import is_truthy
-from hyperloom.common.benchmark_config import PointError, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
 from hyperloom.common.gain_math import accuracy_meets_floor
 from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
@@ -77,7 +77,7 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     """Extract KB workload-tag fields from a baseline-materialized Magpie YAML."""
     try:
         point = read_benchmark_point(Path(yaml_path))
-    except (OSError, PointError, yaml.YAMLError):
+    except (OSError, BenchmarkPointError, yaml.YAMLError):
         return {}
     out: dict[str, Any] = {
         key: value

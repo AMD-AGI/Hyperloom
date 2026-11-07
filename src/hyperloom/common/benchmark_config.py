@@ -20,7 +20,7 @@ _BLOCK = "benchmark"
 _AGENTX = "agentx"
 
 
-class PointError(ValueError):
+class BenchmarkPointError(ValueError):
     """A point YAML whose ``benchmark`` block is missing or not shaped as Magpie reads it."""
 
 
@@ -72,7 +72,7 @@ class BenchmarkPoint:
 
     @classmethod
     def from_document(cls, document: object, *, source: str = "the point") -> BenchmarkPoint:
-        """Read the ``benchmark`` block of a loaded point YAML; ``source`` names it in a :class:`PointError`."""
+        """Read the ``benchmark`` block of a loaded point YAML; ``source`` names it in a :class:`BenchmarkPointError`."""
         return cls.from_block(_benchmark_block(document, source), source=source)
 
     @classmethod
@@ -116,7 +116,7 @@ def read_benchmark_point(path: Path) -> BenchmarkPoint:
     Raises:
         OSError: ``path`` cannot be read.
         yaml.YAMLError: It is not YAML.
-        PointError: It holds no ``benchmark`` mapping, or a part of it is not shaped as Magpie reads it.
+        BenchmarkPointError: It holds no ``benchmark`` mapping, or a part of it is not shaped as Magpie reads it.
     """
     return BenchmarkPoint.from_document(yaml.safe_load(path.read_text(encoding="utf-8")), source=str(path))
 
@@ -124,7 +124,7 @@ def read_benchmark_point(path: Path) -> BenchmarkPoint:
 def _benchmark_block(document: object, source: str) -> Mapping[str, Any]:
     block = document.get(_BLOCK) if isinstance(document, Mapping) else None
     if not isinstance(block, Mapping):
-        raise PointError(f"{source} must contain a {_BLOCK} mapping")
+        raise BenchmarkPointError(f"{source} must contain a {_BLOCK} mapping")
     return block
 
 
@@ -132,7 +132,7 @@ def _mapping(value: object, source: str) -> Mapping[str, Any]:
     if value is None:
         return MappingProxyType({})
     if not isinstance(value, Mapping):
-        raise PointError(f"{source} holds {value!r} where Magpie reads a mapping")
+        raise BenchmarkPointError(f"{source} holds {value!r} where Magpie reads a mapping")
     return MappingProxyType(dict(value))
 
 
@@ -140,7 +140,7 @@ def _strings(value: object, source: str) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, (list, tuple)):
-        raise PointError(f"{source} holds {value!r} where Magpie reads a list")
+        raise BenchmarkPointError(f"{source} holds {value!r} where Magpie reads a list")
     return tuple(str(item) for item in value)
 
 

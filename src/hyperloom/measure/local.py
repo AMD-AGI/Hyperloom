@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.benchmark_config import BenchmarkPoint, PointError, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
 from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
@@ -328,7 +328,7 @@ def _point_config(point: Path) -> dict[str, Any]:
 def _point(point: Path) -> BenchmarkPoint:
     try:
         return read_benchmark_point(Path(point))
-    except PointError as exc:
+    except BenchmarkPointError as exc:
         raise TestCallRefused(str(exc)) from exc
 
 

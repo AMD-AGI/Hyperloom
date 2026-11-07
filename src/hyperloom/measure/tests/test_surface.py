@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.benchmark_config import PointError
+from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.measure.surface import (
     POINT_ENV_KEYS,
     REQUEST_ENV_KEYS,
@@ -155,7 +155,7 @@ def test_a_field_the_point_leaves_out_is_none_in_the_surface(config: dict) -> No
 
 def test_a_configuration_with_no_benchmark_block_is_refused() -> None:
     for read in (extract_surface, point_values, lambda c: check_point(c, concurrency=1, accuracy=False, reference={})):
-        with pytest.raises(PointError, match="benchmark mapping"):
+        with pytest.raises(BenchmarkPointError, match="benchmark mapping"):
             read({"model": "m"})
 
 

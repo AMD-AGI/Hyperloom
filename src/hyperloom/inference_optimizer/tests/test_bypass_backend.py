@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.common.benchmark_config import PointError
+from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.orchestrator.actions.executors import _server_lifecycle
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors import bypass_engine
@@ -470,7 +470,7 @@ def test_bypass_run_refuses_a_config_that_is_not_a_point(tmp_path, document):
     cfg_path = tmp_path / "bad.yaml"
     cfg_path.write_text(yaml.safe_dump(document), encoding="utf-8")
 
-    with pytest.raises(PointError, match=str(cfg_path)):
+    with pytest.raises(BenchmarkPointError, match=str(cfg_path)):
         bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert not (tmp_path / "out").exists()
 

@@ -19,7 +19,7 @@ from typing import Any, NamedTuple
 import yaml
 
 from hyperloom.common import rocm_smi
-from hyperloom.common.benchmark_config import PointError, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom_common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
@@ -151,7 +151,7 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     }
     try:
         point = read_benchmark_point(Path(materialized_config_path))
-    except (OSError, yaml.YAMLError, PointError) as exc:
+    except (OSError, yaml.YAMLError, BenchmarkPointError) as exc:
         info["reason"] = f"could not read materialized config: {exc}"
         return info
     info["framework"] = point.framework.lower()

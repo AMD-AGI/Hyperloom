@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.benchmark_config import PointError
+from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.inference_optimizer.framework_registry import FRAMEWORKS
 from hyperloom.measure.points import launch_carriers
 
@@ -38,5 +38,5 @@ def test_an_agentx_point_carries_its_launch_in_the_overrides_not_the_envs() -> N
 
 
 def test_a_rendered_point_without_a_benchmark_block_is_refused() -> None:
-    with pytest.raises(PointError):
+    with pytest.raises(BenchmarkPointError):
         launch_carriers({})

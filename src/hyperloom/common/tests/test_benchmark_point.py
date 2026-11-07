@@ -11,7 +11,7 @@ import yaml
 from hyperloom.common.benchmark_config import (
     BENCHMARK_CONFIG_ENV,
     BenchmarkPoint,
-    PointError,
+    BenchmarkPointError,
     configured_benchmark,
     read_benchmark_point,
 )
@@ -190,14 +190,14 @@ def test_the_point_is_a_copy_the_reader_cannot_change() -> None:
     ],
 )
 def test_a_misshapen_point_is_refused(document: object) -> None:
-    with pytest.raises(PointError, match="the point"):
+    with pytest.raises(BenchmarkPointError, match="the point"):
         BenchmarkPoint.from_document(document)
 
 
 def test_a_refusal_names_the_file(tmp_path: Path) -> None:
     path = _write(tmp_path, {"other": {}})
 
-    with pytest.raises(PointError, match=str(path)):
+    with pytest.raises(BenchmarkPointError, match=str(path)):
         read_benchmark_point(path)
 
 

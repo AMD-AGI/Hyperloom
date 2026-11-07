@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom.common.benchmark_config import BenchmarkPoint, PointError, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import AttachmentRef, FailureClass
@@ -186,7 +186,7 @@ def _parse(raw: bytes) -> MeasurementSpec:
 def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
     try:
         model = BenchmarkPoint.from_document(yaml.safe_load(yaml_text), source="the sheet's point").model
-    except PointError as exc:
+    except BenchmarkPointError as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
     if hashes and not model:
         raise RunnerFailure(_SPEC_REJECTED, "the sheet hashes model files but its point names no model")
