@@ -35,14 +35,15 @@ json_text() {
   printf '%s' "${text//[[:cntrl:]]/?}"
 }
 
-# exit.json is written beside its place under a name of this process's own and renamed over it: a file another leg's
-# account left there can be replaced, never rewritten. When the directory takes no file, stderr is all there is.
+# exit.json is written beside its place under a name of this process's own (mode 0664, as the entry writes it) and
+# renamed over it: a file another leg's account left there can be replaced, never rewritten. When the directory takes
+# no file, stderr is all there is.
 fail_final() {
   local written
   echo "hosted bootstrap: $1" >&2
   if [[ -n "$state_dir" && -d "$state_dir" ]]; then
     written="$state_dir/.exit.json.$$.$RANDOM"
-    { (set -C && printf '{"final": true, "returncode": 2, "error": "%s"}\n' "$(json_text "$1")" >"$written") &&
+    { (umask 002 && set -C && printf '{"final": true, "returncode": 2, "error": "%s"}\n' "$(json_text "$1")" >"$written") &&
       mv -f "$written" "$state_dir/exit.json"; } 2>/dev/null || echo "hosted bootstrap: cannot write $state_dir/exit.json" >&2
   fi
   exit 2
