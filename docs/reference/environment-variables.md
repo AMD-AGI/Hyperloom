@@ -788,6 +788,23 @@ app's `~/.claude`. A sandbox whose paths bubblewrap cannot bind safely (before 0
 shared `/tmp`, so a session directory under `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run
 refuses it.
 
+A multi-branch session measured on this host's cards runs each test's runner, and the server it starts with the
+branch's patches, in a local sandbox (`hyperloom.sandbox.confined`) under the same rule: where its provider names no
+account for it (`ProcessUsers`), bubblewrap where `choose_test_isolation()` gives it, else as before with one WARNING
+(`tests run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`); a
+hosted run refuses to build the toolbox instead. Each sandbox writes its own `fs/` (`/in`, `/out`, `/work`), a private
+`/tmp` and a full-size `/dev/shm`, and a sealed one its own `private/`, where the runner reads its signing key and
+removes it; it reads its toolchain, its interpreter, the model and what its links point into, the Hugging Face hub
+cache, and the trees its template names (the framework snapshot, the staged rule pack, the compiled-code store, the
+runner cache, the native build store and trust file, a local InferenceX or Magpie repository); the app's credential
+locations those show are masked. Nothing else of the host is there: not the session's other files, another sandbox's
+directory or key, the app's state, nor any process of the app's (its own pid namespace; a sandbox that runs several
+commands shares one holder's, as an agent sandbox does). A sandbox with cards gets `/dev/kfd` and `/dev/dri`, `/sys`
+is read-only, the network is the app's (its server listens on loopback for the benchmark client). The sandbox's id
+(`E2B_SANDBOX_ID`) is set inside only, so the reap, the card guard and the tag sweep find its processes and never
+bubblewrap's own, and a reap's SIGTERM reaches them with their grace. Before bubblewrap 0.12 a sealed runner whose
+session directory is below `/tmp` gets a fresh `/tmp` of its own instead of the bound one.
+
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
 framework image may carry its own); a local run uses the `bwrap` on `PATH`. The probe (`python -I -m
 hyperloom_common.bwrap probe [--bwrap PATH]`) refuses a setuid bubblewrap and one older than 0.5.0, then runs a canary
