@@ -60,7 +60,7 @@ async def test_a_bench_whose_server_port_was_taken_is_unmeasured_not_reverted(tm
             "status": "failed",
             "output_throughput": None,
             "error": PORT_TAKEN,
-            "error_class": "magpie_nonzero_invalid_measurement",
+            "error_class": "round_nonzero_invalid_measurement",
         },
         switched=True,
     )
@@ -69,7 +69,7 @@ async def test_a_bench_whose_server_port_was_taken_is_unmeasured_not_reverted(tm
         "failed",
         "bench_unmeasured",
         "environment",
-        "magpie_nonzero_invalid_measurement",
+        "round_nonzero_invalid_measurement",
     )
     assert recorded == []
 
@@ -82,7 +82,7 @@ async def test_a_bench_the_candidates_arguments_broke_is_still_reverted(tmp_path
             "status": "failed",
             "output_throughput": None,
             "error": ARG_REFUSED,
-            "error_class": "magpie_nonzero_invalid_measurement",
+            "error_class": "round_nonzero_invalid_measurement",
         },
         switched=False,
     )

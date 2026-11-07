@@ -25,8 +25,7 @@ from hyperloom.orchestrator.state.failure_evidence import (
 class TestClassifyFailureAttribution:
     def test_known_invalid_measurement_is_harness_failure(self):
         assert (
-            classify_failure_attribution(error_class="magpie_nonzero_invalid_measurement")
-            == FAILURE_ATTRIBUTION_HARNESS
+            classify_failure_attribution(error_class="round_nonzero_invalid_measurement") == FAILURE_ATTRIBUTION_HARNESS
         )
 
     def test_explicit_candidate_class_is_publishable(self):
@@ -53,7 +52,7 @@ class TestClassifyFailureAttribution:
     def test_a_taken_server_port_is_the_environments(self):
         assert (
             classify_failure_attribution(
-                error_class="magpie_nonzero_invalid_measurement",
+                error_class="round_nonzero_invalid_measurement",
                 error_excerpt="AgentX server port 8888 is unavailable; existing servers are not reused",
             )
             == FAILURE_ATTRIBUTION_ENVIRONMENT
@@ -70,7 +69,7 @@ class TestClassifyFailureAttribution:
     )
     def test_a_server_that_died_is_not_the_harnesss(self, excerpt):
         assert (
-            classify_failure_attribution(error_class="magpie_nonzero_invalid_measurement", error_excerpt=excerpt)
+            classify_failure_attribution(error_class="round_nonzero_invalid_measurement", error_excerpt=excerpt)
             == FAILURE_ATTRIBUTION_UNKNOWN
         )
 
@@ -80,7 +79,7 @@ class TestClassifyFailureAttribution:
     def test_valid_explicit_attribution_wins(self):
         assert (
             classify_failure_attribution(
-                error_class="magpie_timeout",
+                error_class="round_timeout",
                 explicit=FAILURE_ATTRIBUTION_CANDIDATE,
             )
             == FAILURE_ATTRIBUTION_CANDIDATE
@@ -323,18 +322,13 @@ class TestNoMagpieClassOnTheSuitePath:
         for step in (FailedStep.CLIENT_FAILED, FailedStep.ROUND_TIMEOUT):
             assert failed_step_error_class(step) == step.value
 
-    def test_archived_magpie_classes_keep_their_attribution(self):
-        for error_class in (
-            "magpie_nonzero_invalid_measurement",
-            "magpie_nonzero_after_valid_measurement",
-            "magpie_timeout",
-            "warmup_magpie_timeout",
-        ):
+    def test_a_nonzero_round_is_attributed_to_the_harness(self):
+        for error_class in ("round_nonzero_invalid_measurement", "round_nonzero_after_valid_measurement"):
             assert classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_HARNESS
 
-    def test_a_failed_client_is_signed_by_its_output_like_the_magpie_class_it_replaces(self):
+    def test_a_failed_client_is_signed_by_its_output_like_a_nonzero_round(self):
         from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
 
         client = nonzero_output_signature("client_failed", "", "Traceback: boom at port 8001")
-        magpie = nonzero_output_signature("magpie_nonzero_invalid_measurement", "", "Traceback: boom at port 8001")
-        assert client.startswith("client_failed|") and client.split("|")[1] == magpie.split("|")[1]
+        nonzero = nonzero_output_signature("round_nonzero_invalid_measurement", "", "Traceback: boom at port 8001")
+        assert client.startswith("client_failed|") and client.split("|")[1] == nonzero.split("|")[1]

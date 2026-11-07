@@ -74,7 +74,7 @@ def test_write_variant_abort_marker_truncates_huge_error_summary(tmp_path):
     _grid_runner._write_variant_abort_marker(
         slot,
         variant_name="big",
-        error_class="magpie_timeout",
+        error_class="round_timeout",
         error_summary=huge,
     )
     marker = _read_marker(slot)
@@ -135,12 +135,11 @@ def test_grid_runner_emits_expected_error_class_labels():
     expected = {
         "yaml_build_error",
         "mn_server_restart_failed",
-        "magpie_timeout",
         "no_benchmark_workspace",
-        "magpie_nonzero_invalid_measurement",
+        "round_nonzero_invalid_measurement",
         "benchmark_report_missing",
         "benchmark_report_invalid_metric",
-        "magpie_nonzero_after_valid_measurement",
+        "round_nonzero_after_valid_measurement",
     }
     missing = [label for label in expected if f'"{label}"' not in src]
     assert not missing, f"missing error_class labels in run_grid: {missing}"

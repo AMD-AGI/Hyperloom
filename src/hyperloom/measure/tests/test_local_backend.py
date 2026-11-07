@@ -446,7 +446,7 @@ def test_a_server_that_dies_in_the_evaluation_fails_the_accuracy_and_keeps_the_m
         status="failed",
         returncode=1,
         error="server died",
-        error_class="magpie_nonzero_invalid_measurement",
+        error_class="round_nonzero_invalid_measurement",
         server_log_path=str(workspace / "server.log"),
     )
 
@@ -1882,7 +1882,7 @@ def _failed_evaluation(grid: _Grid, tmp_path: Path, server_log: str, stderr: str
         status="failed",
         returncode=1,
         error=error,
-        error_class="magpie_nonzero_invalid_measurement",
+        error_class="round_nonzero_invalid_measurement",
         server_log_path=str(workspace / "server.log"),
     )
 

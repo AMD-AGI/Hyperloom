@@ -44,19 +44,16 @@ UNMEASURED_OUTCOMES: frozenset[str] = frozenset({"FAILED", "KILLED_OVERTIME"})
 
 # The error class of a subprocess that exited nonzero for no recognised cause.
 SUBPROCESS_NONZERO: str = "subprocess_nonzero"
-# The error class of a Magpie benchmark that served its whole protocol and still left no
-# usable measurement behind: the round ran to the end, so the nonzero exit came from the
-# harness around it. Archived ledgers carry it, and so do the Magpie rounds until that path goes.
-MAGPIE_NONZERO_INVALID_MEASUREMENT: str = "magpie_nonzero_invalid_measurement"
+# The error class of a round that exited nonzero and left no usable measurement behind.
+ROUND_NONZERO_INVALID_MEASUREMENT: str = "round_nonzero_invalid_measurement"
 SERVER_INIT_DEAD: str = "server_init_dead"
 DETOKENIZER_STALL: str = "detokenizer_stall"
 BENCHMARK_REPORT_MISSING: str = "benchmark_report_missing"
-MAGPIE_TIMEOUT: str = "magpie_timeout"
 YAML_BUILD_ERROR: str = "yaml_build_error"
 
 # The class each inference_suite failed step is recorded under. A step that replaces a
 # failure Hyperloom names independently of the runner keeps that class, so readers of the
-# ledgers see one class per cause; a new step, or one replacing a Magpie class, is its own.
+# ledgers see one class per cause; a new step is its own.
 # The steps whose class an action module owns (the run's own stops, the speculative
 # pin) are mapped beside that owner in the grid runner.
 FAILED_STEP_ERROR_CLASSES: Mapping[FailedStep, str] = {
@@ -113,13 +110,9 @@ _HARNESS_ERROR_CLASSES = frozenset(
         "benchmark_cap_error",
         "benchmark_report_invalid_metric",
         BENCHMARK_REPORT_MISSING,
-        "eval_probe_unpatchable",
-        "inferencex_checkout_invalid",
-        "magpie_nonzero_after_valid_measurement",
-        MAGPIE_NONZERO_INVALID_MEASUREMENT,
-        MAGPIE_TIMEOUT,
+        "round_nonzero_after_valid_measurement",
+        ROUND_NONZERO_INVALID_MEASUREMENT,
         "no_benchmark_workspace",
-        "warmup_magpie_timeout",
         "warmup_round_failed",
         "warmup_yaml_build_error",
         YAML_BUILD_ERROR,
@@ -198,7 +191,7 @@ _SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
 # whose exit Hyperloom cannot explain, so the output is all there is to compare; the other
 # classes carry a fixed sentence that two unrelated failures share.
 _SIGNED_FAILURE_CLASSES = frozenset(
-    {SUBPROCESS_NONZERO, MAGPIE_NONZERO_INVALID_MEASUREMENT, FailedStep.CLIENT_FAILED.value}
+    {SUBPROCESS_NONZERO, ROUND_NONZERO_INVALID_MEASUREMENT, FailedStep.CLIENT_FAILED.value}
 )
 
 

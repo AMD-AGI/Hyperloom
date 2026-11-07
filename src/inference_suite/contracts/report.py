@@ -83,7 +83,6 @@ class FailedStep(str, Enum):
     CLIENT_OUTPUT_MISSING = "client_output_missing"
     #: ``eval_returncode``, ``lm_eval_http_400``.
     EVAL_FAILED = "eval_failed"
-    #: ``magpie_timeout``.
     ROUND_TIMEOUT = "round_timeout"
     #: -915.
     DEADLINE_EXHAUSTED = "deadline_exhausted"

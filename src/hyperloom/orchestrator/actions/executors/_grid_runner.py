@@ -476,7 +476,7 @@ def _invalid_measurement_error(
             error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
         if not error.strip():
             error = redact_secret_values(_report_errors_summary(report))
-        return _RoundError(error, failure_evidence.MAGPIE_NONZERO_INVALID_MEASUREMENT)
+        return _RoundError(error, failure_evidence.ROUND_NONZERO_INVALID_MEASUREMENT)
     if not report:
         return _RoundError(death_excerpt or "benchmark_report missing", failure_evidence.BENCHMARK_REPORT_MISSING)
     return _RoundError(
@@ -1280,7 +1280,7 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
     measurement = outcome.measurement
     if not served_complete_protocol(measurement):
         log.warning(
-            "grid_runner: variant %s aborted: magpie_nonzero_after_valid_measurement (rc=%d, served %s of %s requests)",
+            "grid_runner: variant %s aborted: round_nonzero_after_valid_measurement (rc=%d, served %s of %s requests)",
             at.variant.name,
             returncode,
             measurement.get("completed_requests"),
@@ -1290,7 +1290,7 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
         report_path = round_report_path(workspace)
         _abort_variant(
             at,
-            _VariantFailure("magpie_nonzero_after_valid_measurement", nonzero_error),
+            _VariantFailure("round_nonzero_after_valid_measurement", nonzero_error),
             workspace=str(workspace),
             report_path=str(report_path) if report_path.exists() else None,
             raw_result_path=measurement.get("raw_result_path"),
