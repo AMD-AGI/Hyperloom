@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """The tools a test runs: clean checkouts of InferenceX (and, for a v1 sheet, Magpie) at the commits the instruction
 sheet names, and for a v2 sheet the inference_suite staging of this runner's own pins.
 
