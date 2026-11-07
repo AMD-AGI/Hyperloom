@@ -331,3 +331,106 @@ def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(outsid
     seen = json.loads(out)
     assert seen == {"kube": "ENOENT", "token": "ENOENT", "model": "ok:weights", "visible": "ok:shown", "write": "EROFS"}
     assert not (hf / "new").exists()
+
+
+@pytest.mark.parametrize("variable", ["PATH", "PYTHONPATH"])
+@pytest.mark.parametrize("entry", ["home", "ancestor", "root", "ssh", "config", "config_link", "config_gh", "claude"])
+def test_a_path_entry_that_is_or_holds_the_home_shows_none_of_its_logins(outside_tmp, monkeypatch, entry, variable):
+    """``PATH=$HOME:...``, an ancestor of the home, ``/``, or a login directory in the home no variable names
+    (``~/.ssh``, ``~/.config`` or a link to it, ``~/.config/gh``, ``~/.claude``), on ``PATH`` or ``PYTHONPATH``: the
+    app's home holds its logins (an SSH key, a netrc, the GitHub CLI's, Claude's, git's), and none is readable
+    inside, while the program on ``PATH`` still runs; the home, the ancestor and the login directory are never bound
+    whole."""
+    isolation = BwrapIsolation(usable_bwrap())
+    home, work = outside_tmp / "users" / "u", outside_tmp / "work"
+    work.mkdir()
+    paths = {
+        "ssh": _write(home / ".ssh/id_rsa", "SECRET-SSH"),
+        "netrc": _write(home / ".netrc", "SECRET-NETRC"),
+        "gh": _write(home / ".config/gh/hosts.yml", "SECRET-GH"),
+        "claude": _write(home / ".claude/.credentials.json", "SECRET-CLAUDE"),
+        "claude_json": _write(home / ".claude.json", "SECRET-CLAUDE"),
+        "git": _write(home / ".git-credentials", "SECRET-GIT"),
+    }
+    tool = _write(home / "bin/tool", "#!/bin/sh\necho tool ran\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    (outside_tmp / "config-link").symlink_to(home / ".config")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    shown = {
+        "home": home,
+        "ancestor": outside_tmp / "users",
+        "root": Path("/"),
+        "ssh": home / ".ssh",
+        "config": home / ".config",
+        "config_link": outside_tmp / "config-link",
+        "config_gh": home / ".config/gh",
+        "claude": home / ".claude",
+    }[entry]
+    env = {"HOME": str(home), "PATH": f"{home / 'bin'}:/usr/bin:/bin"}
+    env[variable] = f"{shown}:{env['PATH']}" if variable == "PATH" else str(shown)
+    readable = toolchain_paths(env, "tool", writable=(work,))
+    masked = credential_paths(env, allowed=(*readable, work), writable=(work,))
+    confinement = Confinement(writable=(work,), readable=readable, masked=masked)
+    whole = {home, outside_tmp / "users", *(path.parent for path in paths.values())}
+    assert not {str(path) for path in whole} & set(confinement.policy().read_only)
+
+    seen = _run(isolation, confinement, env, paths, work)
+
+    assert seen == {
+        **dict.fromkeys(paths, "ENOENT"),
+        "tool": "tool ran",
+        "write": "ok:written",
+        "mark": "mark-1",
+    }
+
+
+@pytest.mark.parametrize("bedrock", [False, True])
+def test_a_file_a_variable_names_in_a_login_location_is_absent_inside_but_bedrock_s_given_one_reads(
+    outside_tmp, monkeypatch, bedrock
+):
+    """``MODEL_PATH=~/.ssh/id_rsa`` and ``SSL_CERT_FILE=~/.config/gh/hosts.yml`` name logins: neither is readable
+    inside, while a program in ``~/.config/tool/bin`` on ``PATH`` runs. The AWS files a Bedrock-backed launch hands
+    the child on purpose (``AWS_SHARED_CREDENTIALS_FILE``, ``AWS_CONFIG_FILE``, given and bound read-only) do read,
+    and nothing else of ``~/.aws`` does."""
+    isolation = BwrapIsolation(usable_bwrap())
+    home, work = outside_tmp / "users" / "u", outside_tmp / "work"
+    work.mkdir()
+    paths = {
+        "ssh": _write(home / ".ssh/id_rsa", "SECRET-SSH"),
+        "gh": _write(home / ".config/gh/hosts.yml", "SECRET-GH"),
+        "sso": _write(home / ".aws/sso/cache/token.json", "SECRET-SSO"),
+    }
+    aws = {
+        "AWS_SHARED_CREDENTIALS_FILE": _write(home / ".aws/credentials", "aws-credentials"),
+        "AWS_CONFIG_FILE": _write(home / ".aws/config", "aws-config"),
+    }
+    tool = _write(home / ".config/tool/bin/tool", "#!/bin/sh\necho tool ran\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tool.parent}:/usr/bin:/bin",
+        "MODEL_PATH": str(paths["ssh"]),
+        "SSL_CERT_FILE": str(paths["gh"]),
+    }
+    given: tuple[Path, ...] = ()
+    if bedrock:
+        env.update({"CLAUDE_CODE_USE_BEDROCK": "1", **{name: str(path) for name, path in aws.items()}})
+        given = tuple(aws.values())
+    readable = (*toolchain_paths(env, "tool", writable=(work,)), *given)
+    masked = credential_paths(env, given=given, allowed=(*readable, work), writable=(work,))
+    confinement = Confinement(writable=(work,), readable=readable, masked=masked)
+
+    seen = _run(isolation, confinement, env, {**paths, **aws}, work)
+
+    assert seen == {
+        **dict.fromkeys(paths, "ENOENT"),
+        "AWS_SHARED_CREDENTIALS_FILE": "ok:aws-credentials" if bedrock else "ENOENT",
+        "AWS_CONFIG_FILE": "ok:aws-config" if bedrock else "ENOENT",
+        "tool": "tool ran",
+        "write": "ok:written",
+        "mark": "mark-1",
+    }
+    assert not {str(paths["ssh"]), str(paths["gh"])} & set(confinement.policy().read_only)
