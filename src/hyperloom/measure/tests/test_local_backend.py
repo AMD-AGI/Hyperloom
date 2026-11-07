@@ -534,9 +534,10 @@ def test_the_session_is_a_fresh_empty_directory_and_the_environment_is_put_back(
     assert not Path(seen["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] or "x").exists()
 
 
-def test_the_environment_is_put_back_when_the_test_raises(grid, tmp_path, monkeypatch):
+@pytest.mark.parametrize("timeout_class", ["round_timeout", "magpie_timeout"])
+def test_the_environment_is_put_back_when_the_test_raises(grid, tmp_path, monkeypatch, timeout_class):
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
-    grid.answers["test"] = grid.result("test", status="failed", error_class="magpie_timeout")
+    grid.answers["test"] = grid.result("test", status="failed", error_class=timeout_class)
 
     with pytest.raises(subprocess.TimeoutExpired):
         _run(_call(tmp_path, env_overrides={"HL_TEST_FLAG": "on"}))

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from inference_suite.contracts import FailedStep
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
 from hyperloom_common.env import is_truthy
@@ -132,7 +133,7 @@ from hyperloom.orchestrator.actions.stop_attribution import (
 __all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
 
 #: ``VariantResult.error_class`` of a round the per-round cap reaped.
-_TIMEOUT_CLASSES = frozenset({"magpie_timeout", "warmup_magpie_timeout"})
+_TIMEOUT_CLASSES = frozenset({FailedStep.ROUND_TIMEOUT.value, "magpie_timeout", "warmup_magpie_timeout"})
 #: Return codes of rounds the run itself stopped, keyed by the class the result carries.
 _STOP_RETURNCODES = {
     SESSION_TIME_EXHAUSTED_CLASS: SESSION_TIME_EXHAUSTED_RETURNCODE,
