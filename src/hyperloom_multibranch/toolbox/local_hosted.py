@@ -62,7 +62,14 @@ from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output_below
 from hyperloom.measure.local import SUPPORTED_KINDS
-from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, SNAPSHOT_ENV, framework_envs, image_configs
+from hyperloom.measure.framework.base import (
+    SESSION_SNAPSHOT_DIR,
+    SNAPSHOT_ENV,
+    FrameworkBaseError,
+    framework_envs,
+    image_configs,
+    load_snapshot,
+)
 from hyperloom.measure.jit.native.config import BUILD_STORE_ENV, BUILD_TRUST_ENV
 from hyperloom.measure.local_templates import image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
@@ -589,7 +596,9 @@ def runner_plan(
     interpreter's, this process's), its own tree and its key: the interpreter ``python`` its template starts it with,
     the trees its template's variables ``envs`` name (:data:`RUNNER_READS`; a repository named by URL names none), the
     session's model and what its entries link to (:func:`_model_trees`), and this host's Hugging Face hub cache
-    (:func:`hub_cache` of ``environ``, this process's by default). No bind may show the session's directory whole: it
+    (:func:`hub_cache` of ``environ``, this process's by default), and the shared tuned tables the framework snapshot
+    was taken from (:func:`_snapshot_source`), which each test hashes to show it changed none of them, read-only as
+    every other tree here. No bind may show the session's directory whole: it
     holds the blackboard, every sandbox and key, and the leases. A model link into a credential location is refused
     (:attr:`~hyperloom.sandbox.local.RunnerPlan.refused`), so no test sandbox of the plan runs confined with it."""
     named = [_named_path(envs.get(name, "")) for name in RUNNER_READS]
@@ -598,12 +607,23 @@ def runner_plan(
     refused: tuple[str, ...] = ()
     if model_dir is not None:
         model, refused = _model_trees(model_dir, _link_rule(model_dir, hub, envs, environ))
-    found = (_named_path(python), *named, *model, hub)
+    found = (_named_path(python), *named, *_snapshot_source(envs), *model, hub)
     return RunnerPlan(
         readable=tuple(dict.fromkeys(path for path in found if path is not None)),
         app_only=(Path(session_dir),),
         refused=refused,
     )
+
+
+def _snapshot_source(envs: Mapping[str, str]) -> tuple[Path, ...]:
+    """The directory of shared tuned tables the framework snapshot ``envs`` names was taken from; none without one."""
+    directory = envs.get(SNAPSHOT_ENV, "")
+    if not directory:
+        return ()
+    try:
+        return (load_snapshot(Path(directory)).source,)
+    except FrameworkBaseError:
+        return ()  # no snapshot was taken: each test says so in its result
 
 
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
