@@ -413,17 +413,25 @@ def test_geak_replay_without_launch_fields_preserves_stack_controls(promotion, a
     assert best["extra_envs"] == {"SGLANG_AITER_MLA_PERSIST": "3"}
 
 
-def test_geak_replay_removal_retains_other_inherited_flags(promotion):
+def test_geak_removal_is_a_delta_that_keeps_the_other_base_flags(promotion):
+    """The promoted launch stays a delta over the base: the removal travels, the base's own flags are not copied in."""
+    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+
     coord, result, _ = promotion
-    recipe = coord.session_dir / "baseline.yaml"
-    recipe.write_text("benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: --disable-radix-cache --mem-fraction-static 0.7\n")
-    coord.shared_state.baseline_config_path = str(recipe)
     coord.shared_state.current_best["extra_server_args"] = "--chunked-prefill-size 1024"
     result["accepted_config"] = {"remove_args": ["--disable-radix-cache"]}
     assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     best = coord.shared_state.current_best
-    assert best["extra_server_args"] == "--mem-fraction-static 0.7 --chunked-prefill-size 1024"
-    assert best["args_mode"] == "replace"
+    assert (best["extra_server_args"], best["args_mode"]) == ("--chunked-prefill-size 1024", "append")
+    assert best["remove_args"] == ["--disable-radix-cache"]
+    assert (
+        compose_server_args(
+            inherited_args="--disable-radix-cache --mem-fraction-static 0.7",
+            base_extra_args=best["extra_server_args"],
+            remove_args=best["remove_args"],
+        )
+        == "--mem-fraction-static 0.7 --chunked-prefill-size 1024"
+    )
 
 
 @pytest.mark.parametrize("returned_removals", [None, [], ["--disable-radix-cache"]])
