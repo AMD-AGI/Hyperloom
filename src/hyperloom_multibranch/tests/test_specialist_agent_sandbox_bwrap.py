@@ -227,11 +227,11 @@ def frameworks(area: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str
     installed_frameworks.cache_clear()
 
 
-def _sandbox(area: Path, probe: BwrapProbe, **base: str) -> LocalAgentSandbox:
+def _sandbox(area: Path, probe: BwrapProbe, *, readable: tuple[Path, ...] = (), **base: str) -> LocalAgentSandbox:
     agent, worktree = area / "agent", area / "worktree"
     agent.mkdir(exist_ok=True)
     worktree.mkdir(exist_ok=True)
-    paths = SandboxPaths(writable=(agent,), readable=(worktree,), home=agent / "sandbox" / "home")
+    paths = SandboxPaths(writable=(agent,), readable=(worktree, *readable), home=agent / "sandbox" / "home")
     return LocalAgentSandbox(
         cards=(0,),
         python_path=(),
@@ -739,24 +739,34 @@ async def test_the_image_s_venv_takes_neither_a_user_install_nor_one_into_itself
     assert into.returncode != 0 and "Read-only file system" in into.output, into.output
 
 
+@pytest.mark.parametrize("named", [False, True], ids=["searched", "named"])
 @pytest.mark.parametrize("logged_in", [True, False], ids=["replaced", "made"])
 async def test_a_login_the_app_replaces_or_makes_while_a_command_runs_never_shows_in_it(
-    area: Path, probe: BwrapProbe, logged_in: bool
+    area: Path, probe: BwrapProbe, logged_in: bool, named: bool
 ) -> None:
     """The app's Hugging Face home, which a sandbox reads for its hub cache, holds its token beside the cache, or no
     login yet. While a command runs in the sandbox, the app writes the token by rename (as a login does) and
-    ``stored_tokens`` too: the command sees neither, before or after, and still reads the cache."""
+    ``stored_tokens`` too: the command sees neither, before or after, and still reads the cache and the file beside
+    it. That holds whether the home is reached through ``HF_HOME`` (:func:`toolchain_paths` binds what is beside its
+    logins) or named for the sandbox to read whole (:meth:`Confinement.policy` binds it entry by entry without
+    them)."""
     hf = area / "hf"
     token = hf / "token"
     (hf / "hub").mkdir(parents=True)
     (hf / "hub" / "model.txt").write_text("weights")
+    (hf / "note").write_text("beside")
     if logged_in:
         token.write_text("SECRET-HF")
-    sandbox = _sandbox(area, probe, HF_HOME=str(hf))
+    sandbox = _sandbox(area, probe, readable=(hf,) if named else (), HF_HOME=str(hf))
     agent = area / "agent"
     trigger, watch = agent / "go", agent / "watch.py"
     watch.write_text(LOGIN_WATCH)
-    paths = {"token": str(token), "stored": str(hf / "stored_tokens"), "model": str(hf / "hub" / "model.txt")}
+    paths = {
+        "token": str(token),
+        "stored": str(hf / "stored_tokens"),
+        "model": str(hf / "hub" / "model.txt"),
+        "note": str(hf / "note"),
+    }
     try:
         command = await sandbox.start(f"{PYTHON} -I -S {watch} {shlex.quote(json.dumps(paths))} {trigger}", agent, {})
         await _until(lambda: "before " in read_tail(command.log))
@@ -775,6 +785,6 @@ async def test_a_login_the_app_replaces_or_makes_while_a_command_runs_never_show
         for line in read_tail(command.log).splitlines()
         if line.startswith(("before ", "after "))
     }
-    expected = {"token": "ENOENT", "stored": "ENOENT", "model": "ok:weights"}
+    expected = {"token": "ENOENT", "stored": "ENOENT", "model": "ok:weights", "note": "ok:beside"}
     assert seen == {"before": expected, "after": expected}
     assert token.read_text() == "NEW-SECRET-HF"
