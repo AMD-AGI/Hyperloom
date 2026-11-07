@@ -77,7 +77,7 @@ def parse_removal_specs(remove_args: Any) -> list[tuple[str, str | None]]:
 def removal_option_names(remove_args: Any) -> list[str]:
     """The bare long option names a removal spec names, in order, each one once.
 
-    Only for a consumer whose contract is option names, such as Magpie's ``launch_overrides.remove_args``:
+    Only for a consumer whose contract is option names, such as an AgentX point's ``launch_overrides.remove_args``:
     the value a spec is scoped to is dropped here, so this must not stand in for a removal composed against
     args we build ourselves -- ``remove_server_args`` keeps the scope there.
     """
@@ -112,7 +112,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     if not args or not removes:
         return args
     # Non-POSIX split plus the wrapper strip: a plain operand written as ``--tool-call-parser 'kimi_k3'`` -- or
-    # ``--tool-call-parser='kimi_k3'`` -- must not keep its quotes, because Magpie expands EXTRA_*_ARGS unquoted and
+    # ``--tool-call-parser='kimi_k3'`` -- must not keep its quotes, because EXTRA_*_ARGS travel unquoted and
     # they would reach argv literally. _unwrap_shell_quotes only touches whitespace-free content, and on a
     # leading-dash token only the value side of the first ``=``, so a JSON blob (starts with ``{``/``[``) is never
     # affected and token boundaries cannot shift.
@@ -163,7 +163,7 @@ def _repair_unquoted_json(blob: str) -> str | None:
 
 
 def compact_json_server_args(server_args: str | None) -> str:
-    """Normalize JSON-valued server args for unquoted Magpie expansion."""
+    """Normalize JSON-valued server args for unquoted EXTRA_*_ARGS transport."""
     args = str(server_args or "").strip()
     if not args or ("{" not in args and "[" not in args):
         return args
