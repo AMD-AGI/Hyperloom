@@ -245,7 +245,7 @@ class VariantResult:
     # Short failure-classification tag; empty for successes.
     error_class: str = ""
     note: str = ""
-    # Wall-clock seconds the Magpie subprocess consumed.
+    # Wall-clock seconds the round consumed.
     runtime_sec: float | None = None
     # True iff reaped by the overtime soft deadline.
     killed_overtime: bool = False

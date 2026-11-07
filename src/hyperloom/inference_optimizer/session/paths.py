@@ -67,7 +67,7 @@ _WORKSPACE_SKELETON: tuple[str, ...] = (
     "logs",  # launcher stdout (workspace-shared)
 )
 
-# Filename-safety regex for model_basename (ROCm/Magpie/Claude CLI choke on ``:`` / ``/`` / whitespace).
+# Filename-safety regex for model_basename (ROCm/Claude CLI choke on ``:`` / ``/`` / whitespace).
 _MODEL_BASENAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
