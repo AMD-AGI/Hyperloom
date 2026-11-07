@@ -63,6 +63,8 @@ _SHELL_LANGUAGES = frozenset({"bash", "sh", "shell"})
 _AGENTX_HEADING = re.compile(r"agentic|agentx", re.IGNORECASE)
 _CONCURRENCY = re.compile(r"concurrency\s+(\d+)(?:\s*[-\u2013]\s*(\d+))?", re.IGNORECASE)
 _SHELL_SYNTAX = re.compile(r"[$`|;<>]|&&|\bexport\b")
+#: A page's braced value, such as ``{max-running-requests}``, which the page's prose, not its command, fills in.
+_PAGE_PLACEHOLDER = re.compile(r"{[\w-]+}")
 _PROSE_FLAG = re.compile(r"`(--[\w-]+)")
 _PROSE_IMAGE = re.compile(r"lmsysorg/sglang(?:-rocm)?:[\w.-]+")
 #: The flags a cookbook AgentX worker lists first, in this order; the rest follow sorted (``_agentx.jsx``).
@@ -670,7 +672,12 @@ def _block_command(block: _PageBlock) -> _Command:
     entrypoint = next((start for start in _ENTRYPOINTS if tuple(words[: len(start)]) == start), None)
     if entrypoint is None:
         raise RecipeSourceError("it does not start an sglang server")
-    return _command(_flag_groups(words[len(entrypoint) :]), env)
+    groups = _flag_groups(words[len(entrypoint) :])
+    for flag, *values in groups:
+        placeholder = next((value for value in values if _PAGE_PLACEHOLDER.fullmatch(value)), None)
+        if placeholder is not None:
+            raise RecipeSourceError(f"it sets {flag} from the placeholder {placeholder}")
+    return _command(groups, env)
 
 
 def _block_fit(block: _PageBlock, target: int) -> _Fit:

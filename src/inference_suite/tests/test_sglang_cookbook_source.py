@@ -243,6 +243,20 @@ python -m sglang.launch_server --model-path org/model --tp-size $TP
     assert "Model.mdx:5: it uses shell syntax beyond one literal command" in reason
 
 
+def test_a_page_block_naming_a_braced_placeholder_is_refused():
+    page = """## Agentic deployment
+
+### MI355X launch
+
+```bash Serve (concurrency 1–8)
+python -m sglang.launch_server --model-path org/model --tp 8 --max-running-requests {max-running-requests}
+```
+"""
+    reason = _miss(_agentx("org/model", concurrencies=(4,)), _bundle({"docs/cookbook/org/Model.mdx": page}))
+
+    assert "Model.mdx:5: it sets --max-running-requests from the placeholder {max-running-requests}" in reason
+
+
 def test_only_verified_agentx_launches_serve():
     data = json.loads(gzip.decompress(_FIXTURE.read_bytes()))["files"][_KIMI_AGENTX]
     unverified = data.replace('"status": "verified"', '"status": "in-progress"')
