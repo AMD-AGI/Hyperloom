@@ -657,6 +657,7 @@ these.
 | Prompt field | Env name | Consumer |
 |---|---|---|
 | `INFERENCE_SUITE_TOOL_CACHE: <path>` | `$INFERENCE_SUITE_TOOL_CACHE` | `src/hyperloom/inference_optimizer/assets/install.sh:ensure_inference_suite_staging` |
+| `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `hyperloom optimize` preflight (`cli/preflight.py:_ensure_inferencex`) |
 | `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh:ensure_tracelens` (public) |
 | `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh:ensure_tracelens` (internal; only when set) |
 
