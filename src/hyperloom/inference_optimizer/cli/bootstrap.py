@@ -57,6 +57,7 @@ log = logging.getLogger(__name__)
 
 _AGENTX_MODE = "agentx"
 _SYNTHETIC_MODE = "synthetic"
+_RESEARCH_SCOUT_INTERVAL = 3
 
 
 @dataclass(frozen=True)
@@ -812,7 +813,9 @@ def _phase_toggle_fields(args: argparse.Namespace) -> dict[str, Any]:
         # Enablement self-heal lanes; --enablement off opts out.
         "enablement_mode": str(getattr(args, "enablement", "all")),
         "research_scout_enabled": bool(getattr(args, "research_scout", True)),
-        "research_scout_interval": max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
+        "research_scout_interval": max(
+            1, int(getattr(args, "research_scout_interval", _RESEARCH_SCOUT_INTERVAL) or _RESEARCH_SCOUT_INTERVAL)
+        ),
         "static_recon_enabled": bool(getattr(args, "static_recon", True)),
         "target_advisory_enabled": bool(getattr(args, "target_advisory", True)),
         "recipe_sediment_enabled": bool(getattr(args, "recipe_sediment", True)),
