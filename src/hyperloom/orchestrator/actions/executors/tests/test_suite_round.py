@@ -13,6 +13,7 @@ import yaml
 from hyperloom.inference_optimizer.session.base_launch import write_base_launch
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import _suite_config
+from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors._suite_config import MEASURED_SEED, WARMUP_SEED
 from hyperloom.orchestrator.actions.executors._suite_config import (
     RUN_DIR_PREFIX,
@@ -163,7 +164,7 @@ def test_a_cache_with_nothing_staged_refuses_the_round_as_staging_missing(sessio
     with pytest.raises(SuiteRoundRefused) as refused:
         run_suite_round(suite_route(session, point), SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
 
-    assert refused.value.step is FailedStep.STAGING_MISSING
+    assert refused.value.error_class == failed_step_error_class(FailedStep.STAGING_MISSING)
 
 
 def test_a_point_that_does_not_translate_refuses_the_round_as_config_invalid(session, tmp_path) -> None:
@@ -175,7 +176,7 @@ def test_a_point_that_does_not_translate_refuses_the_round_as_config_invalid(ses
     with pytest.raises(SuiteRoundRefused) as refused:
         run_suite_round(route, SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
 
-    assert refused.value.step is FailedStep.CONFIG_INVALID
+    assert refused.value.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID)
     assert "TP 4" in refused.value.detail
 
 
@@ -209,4 +210,4 @@ def test_a_point_naming_an_unknown_framework_runs_on_the_suite_and_is_refused_th
     with pytest.raises(SuiteRoundRefused) as refused:
         run_suite_round(route, SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
 
-    assert refused.value.step is FailedStep.CONFIG_INVALID
+    assert refused.value.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID)

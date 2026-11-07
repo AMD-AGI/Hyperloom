@@ -77,6 +77,7 @@ from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 from ..cancel_channel import cancel_scope_listener
 from ._benchmark_interpreter import _resolve_probe_python
+from ._failed_step import failed_step_error_class
 from ._gpu_power import round_gpu_telemetry
 from ._multi_node_env import client_only_server_url
 from ._ray_backend import ray_exec_enabled
@@ -401,12 +402,17 @@ _GPU_MASK_ENVS = frozenset({"HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA
 
 
 class SuiteRoundRefused(ValueError):
-    """The host refused a round before it ran: its point does not translate, or nothing is staged to run it with."""
+    """The host refused a round before it ran, recorded under ``error_class``: its point does not translate, or
+    nothing is staged to run it with."""
 
-    def __init__(self, step: FailedStep, detail: str) -> None:
-        super().__init__(f"{step.value}: {detail}")
-        self.step = step
+    def __init__(self, error_class: str, detail: str) -> None:
+        super().__init__(f"{error_class}: {detail}")
+        self.error_class = error_class
         self.detail = detail
+
+
+def _refused_at(step: FailedStep, detail: str) -> SuiteRoundRefused:
+    return SuiteRoundRefused(failed_step_error_class(step), detail)
 
 
 @dataclass(frozen=True)
@@ -541,13 +547,13 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
         SuiteRoundRefused: When the point does not translate or the tool cache holds no staging manifest.
     """
     if route.manifest_sha256 is None:
-        raise SuiteRoundRefused(FailedStep.STAGING_MISSING, f"{route.tool_cache} holds no staging manifest")
+        raise _refused_at(FailedStep.STAGING_MISSING, f"{route.tool_cache} holds no staging manifest")
     try:
         config = suite_config(
             _read_point(request.config_path), route.base, _settings(route, request, route.manifest_sha256)
         )
     except ConfigError as exc:
-        raise SuiteRoundRefused(FailedStep.CONFIG_INVALID, str(exc)) from exc
+        raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     if request.warmup and config.fixed is not None:
         config = replace(config, fixed=replace(config.fixed, seed=WARMUP_SEED))
     with cancel_scope_listener() as scope:

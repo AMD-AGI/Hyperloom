@@ -452,7 +452,7 @@ class _BenchmarkLaunchMixin:
                 ran = await asyncio.to_thread(run_suite_round, route, request, on_poll=activity.note)
         except SuiteRoundRefused as exc:
             log.error("baseline_executor: round refused before it ran: %s", exc)
-            return _attempt_failure(failed_step_error_class(exc.step), exc, round_.output_dir) | round_.capture_meta
+            return _attempt_failure(exc.error_class, exc, round_.output_dir) | round_.capture_meta
         layout = ran.layout
         if ran.report.failed_step is FailedStep.FLAG_UNKNOWN:
             self._record_argv_refusal(round_, attempt_index, ran.report.failure_detail or "")
