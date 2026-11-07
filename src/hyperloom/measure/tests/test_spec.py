@@ -79,6 +79,11 @@ def test_the_valid_sheet_passes_the_json_schema() -> None:
     assert list(VALIDATOR.iter_errors(spec_document())) == []
 
 
+def _other_staging(document: dict[str, Any]) -> None:
+    other = dataclasses.replace(STAGING, interpreter_version="3.12.16")
+    document["tools"]["inference_suite"] = {"staging": other.sha256(), "normalised": other.to_document()}
+
+
 NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
     "unknown top-level key": lambda d: d.update(surprise=1),
     "missing section": lambda d: d.pop("outputs"),
@@ -90,7 +95,12 @@ NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
     "confirm without retest_of": lambda d: d["meta"].update(purpose="confirm"),
     "bad image digest": lambda d: d["image"].update(digest="sha256:xyz"),
     "short commit": lambda d: d["tools"]["inferencex"].update(commit="abc"),
-    "staging not a sha256": lambda d: d["tools"]["inference_suite"].update(staging="sha256:" + STAGING),
+    "staging not a sha256": lambda d: d["tools"]["inference_suite"].update(staging="sha256:" + STAGING.sha256()),
+    "staging without its normalised manifest": lambda d: d["tools"]["inference_suite"].pop("normalised"),
+    "normalised manifest with a path": lambda d: d["tools"]["inference_suite"]["normalised"].update(path="/opt/x"),
+    "normalised package without its wheel": lambda d: d["tools"]["inference_suite"]["normalised"]["packages"][0].pop(
+        "wheel_sha256"
+    ),
     "magpie commit in a v2 sheet": lambda d: d["tools"].update(magpie={"commit": "a" * 40}),
     "benchmark backend in a v2 sheet": lambda d: d["procedure"].update(benchmark_backend="magpie"),
     "no base launch": lambda d: d["procedure"].pop("base_launch"),
@@ -227,7 +237,7 @@ def test_the_fingerprint_ignores_what_is_not_measurement_content(change) -> None
     [
         lambda d: d["hardware"].update(gpu_count=2),
         lambda d: d["image"].update(digest="sha256:" + "99" * 32),
-        lambda d: d["tools"]["inference_suite"].update(staging="d" * 64),
+        _other_staging,
         lambda d: d["process_env"].update(AITER_LOG_LEVEL="DEBUG"),
         lambda d: d["platform_env"].update(NCCL_IB_SL="4"),
         lambda d: d["unset_envs"].append("OTHER"),
@@ -518,6 +528,17 @@ def test_a_v2_sheet_without_a_base_launch_is_refused_naming_both_versions() -> N
         MeasurementSpec.from_document(_edit(lambda d: d["procedure"].pop("base_launch")))
 
     assert "hyperloom.measurement-spec/v2" in str(refused.value) and "hyperloom-base-launch/1" in str(refused.value)
+
+
+def test_a_staging_sha256_that_is_not_the_one_of_the_normalised_manifest_carried_is_refused() -> None:
+    with pytest.raises(DocumentError, match="is not the sha256 of the normalised manifest it carries"):
+        MeasurementSpec.from_document(_edit(lambda d: d["tools"]["inference_suite"].update(staging="d" * 64)))
+
+
+def test_the_fingerprint_keeps_the_staging_sha256_and_not_the_normalised_manifest_it_stands_for() -> None:
+    canonical = canonical_for_fingerprint(MeasurementSpec.from_document(spec_document()))
+
+    assert canonical["tools"]["inference_suite"] == {"staging": STAGING.sha256()}
 
 
 def test_a_v2_sheet_carries_the_frozen_base_whole_and_names_the_staging() -> None:

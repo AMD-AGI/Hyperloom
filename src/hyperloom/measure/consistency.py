@@ -60,7 +60,7 @@ from hyperloom.measure.socket import MeasurementBackend, SessionFacts, TestCall,
 from hyperloom.orchestrator.actions.executors import RoundFolder, is_round_folder, staged_tool_cache
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_base
-from inference_suite import manifest_sha256
+from inference_suite import StagingError, normalised_manifest
 
 __all__ = [
     "Criteria",
@@ -759,24 +759,27 @@ def build_parser(prog: str = "python -m hyperloom.measure.consistency") -> argpa
 
 
 class SessionNotMeasurable(ValueError):
-    """The session froze no base launch, or the application's tool cache holds no staging manifest."""
+    """The session froze no base launch, or the application's tool cache holds no staging this interpreter can identify."""
 
 
 def session_facts(session: Path) -> SessionFacts:
-    """What every test of the session at ``session`` carries: its frozen base launch, and the inference_suite staging
-    the application's tool cache holds. A v2 sheet needs both, so a session missing either is refused before any test.
+    """What every test of the session at ``session`` carries: its frozen base launch, and the normalised manifest of the
+    inference_suite staging the application's tool cache holds. A v2 sheet needs both, so a session missing either is
+    refused before any test.
 
     Raises:
-        SessionNotMeasurable: The session froze no base, or the tool cache holds no staging manifest.
+        SessionNotMeasurable: The session froze no base, or the tool cache holds no staging this interpreter can
+            identify: none, one that is not what its lock pins, or this interpreter's lm-eval is off the pin.
         BaseLaunchMismatch: The session's ``base_launch.json`` is not the base it recorded.
     """
     frozen = frozen_base(session)
     if frozen is None:
         raise SessionNotMeasurable(f"the session {session} froze no base launch")
     tool_cache = staged_tool_cache()
-    staging = manifest_sha256(tool_cache)
-    if staging is None:
-        raise SessionNotMeasurable(f"the inference_suite tool cache {tool_cache} holds no staging manifest")
+    try:
+        staging = normalised_manifest(tool_cache)
+    except StagingError as exc:
+        raise SessionNotMeasurable(f"the inference_suite staging in {tool_cache} cannot be identified: {exc}") from exc
     return SessionFacts(staging=staging, base_launch=frozen.launch)
 
 

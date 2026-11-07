@@ -17,10 +17,11 @@ from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.runner.tools import INFERENCE_SUITE_DIR
-from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
-from inference_suite.contracts import BaseLaunch, Workload
-from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
+from inference_suite import LaunchQuery, SourceSnapshot, resolve_base, staging_key
+from inference_suite.contracts import BaseLaunch, NormalisedManifest, PackageIdentity, Workload
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL, LM_EVAL_VERSION, LM_EVAL_WHEEL_SHA256
 from inference_suite.recipe.resolve import UnreadSource
+from inference_suite.client_env import BUILD_FILE, CLIENT_DIR, STAGED_LOCK
 from inference_suite.staging import INFERENCEX_REQUIRED, MANIFEST_FILE, StagedTool, StagingManifest, tool_root
 
 REQUEST_ID = "6c0e0000-0000-5000-8000-000000000001"
@@ -137,29 +138,55 @@ def point_document(yaml_text: str) -> dict[str, Any]:
     return {"yaml": yaml_text, "sha256": hashlib.sha256(yaml_text.encode()).hexdigest()}
 
 
-#: The bytes of each file :func:`stage_into` stages, and the manifest naming them.
-_STAGED_FILE = b"staged\n"
+#: What :func:`stage_into` stages below the staged InferenceX root, by relative path: the files a load runs, and a
+#: client environment whose build record, lock and one installed distribution give :data:`STAGING`.
+_HARNESS_SHA256 = "c" * 64
+_STAGED_FILES = {
+    **dict.fromkeys(INFERENCEX_REQUIRED, b"staged\n"),
+    BUILD_FILE: json.dumps({"version": "3.12.15", "sha256": "b" * 64, "bundled": ["pip"]}).encode(),
+    STAGED_LOCK: f"agentx-harness==1.0.13 --hash=sha256:{_HARNESS_SHA256}\n".encode(),
+    f"{CLIENT_DIR}/lib/python3.12/site-packages/agentx_harness-1.0.13.dist-info/RECORD": b"agentx_cli.py,,\n",
+    f"{CLIENT_DIR}/lib/python3.12/site-packages/pip-26.2.2.dist-info/RECORD": b"pip/__init__.py,,\n",
+}
 STAGING_MANIFEST = StagingManifest(
     {
         INFERENCEX_TOOL: StagedTool(
-            INFERENCEX_CLIENT_COMMIT, {path: hashlib.sha256(_STAGED_FILE).hexdigest() for path in INFERENCEX_REQUIRED}
+            INFERENCEX_CLIENT_COMMIT, {path: hashlib.sha256(data).hexdigest() for path, data in _STAGED_FILES.items()}
         )
     }
 ).to_bytes()
-#: The sha256 of :data:`STAGING_MANIFEST`, which is how a sheet names the staging.
-STAGING = hashlib.sha256(STAGING_MANIFEST).hexdigest()
+#: The normalised manifest of that staging with lm-eval at its pin, which is how a sheet names it and how both sides
+#: compare theirs.
+STAGING = NormalisedManifest(
+    INFERENCEX_CLIENT_COMMIT,
+    "3.12.15",
+    "b" * 64,
+    (
+        PackageIdentity("agentx-harness", "1.0.13", _HARNESS_SHA256),
+        PackageIdentity("lm-eval", LM_EVAL_VERSION, LM_EVAL_WHEEL_SHA256),
+    ),
+)
 
 
 def stage_into(runner_cache: Path) -> Path:
     """Lay a staging that verifies, with :data:`STAGING_MANIFEST`, where a runner whose cache is ``runner_cache``
-    stages its inference_suite tools; returns that tool cache."""
-    tools = runner_cache / INFERENCE_SUITE_DIR / INFERENCEX_CLIENT_COMMIT
-    for path in INFERENCEX_REQUIRED:
+    finds the published inference_suite staging of its pins; returns that tool cache."""
+    tools = runner_cache / INFERENCE_SUITE_DIR / staging_key()
+    for path, data in _STAGED_FILES.items():
         staged = tool_root(tools, INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT) / path
         staged.parent.mkdir(parents=True, exist_ok=True)
-        staged.write_bytes(_STAGED_FILE)
+        staged.write_bytes(data)
     (tools / MANIFEST_FILE).write_bytes(STAGING_MANIFEST)
     return tools
+
+
+def lm_eval_at_its_pin(directory: Path) -> Path:
+    """A directory that, first on ``sys.path``, makes this interpreter report lm-eval at its pin, as a runner's does;
+    CI installs no lm-eval."""
+    info = directory / f"lm_eval-{LM_EVAL_VERSION}.dist-info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: lm_eval\nVersion: {LM_EVAL_VERSION}\n")
+    return directory
 
 
 @functools.lru_cache(maxsize=None)
@@ -175,10 +202,11 @@ def base_launch() -> BaseLaunch:
 
 
 def spec_document() -> dict[str, Any]:
-    """A v2 sheet: the frozen base carried whole and the inference_suite staging named by its manifest's sha256."""
+    """A v2 sheet: the frozen base carried whole and the inference_suite staging as its normalised manifest."""
     document = spec_document_v1()
     document["schema"] = "hyperloom.measurement-spec/v2"
-    document["tools"] = {"inference_suite": {"staging": STAGING}, "inferencex": {"commit": "b" * 40}}
+    staging = {"staging": STAGING.sha256(), "normalised": STAGING.to_document()}
+    document["tools"] = {"inference_suite": staging, "inferencex": {"commit": "b" * 40}}
     del document["procedure"]["benchmark_backend"]
     document["procedure"]["base_launch"] = base_launch().to_document()
     return document
