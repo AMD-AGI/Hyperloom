@@ -93,15 +93,15 @@ WEIGHT_PRECISION_FLAGS: Mapping[str, tuple[str, ...]] = {
 #: tensors as stored and differs only in the files it picks (``*.safetensors`` else ``*.bin``, ``*.safetensors``,
 #: ``*.pt``, ``*.bin`` through numpy). Any other value may quantize what it loads (SGLang's ``flash_rl`` serves a BF16
 #: checkpoint in FP8) or load no checkpoint (``dummy``), so a change to, from or between them is a change;
-#: ``runai_streamer`` among them, since SGLang does not route it to ModelOpt's loader, which quantizes the weights. The
-#: default loaders refuse an extra config with keys other than their threading ones, so where both launches load in one
-#: of these formats a change of ``--model-loader-extra-config`` is none; under any other format a key can set what is
-#: quantized (SGLang's ``bitsandbytes`` reads ``qlora_adapter_name_or_path``), and a change of it is a change.
+#: ``runai_streamer`` among them, since SGLang does not route it to ModelOpt's loader, which quantizes the weights.
 SPEED_ONLY_LOAD_FORMATS = frozenset({"auto", "pt", "safetensors", "npcache", "fastsafetensors"})
 
 _LOAD_FORMAT = "--load-format"
 
-#: The settings whose change is none when both launches load in :data:`SPEED_ONLY_LOAD_FORMATS`.
+#: The settings whose change is none when both launches load in :data:`SPEED_ONLY_LOAD_FORMATS`. Their default loaders
+#: refuse an extra config with keys other than their threading ones, so there a change of the extra config is none;
+#: under any other format a key can set what is quantized (SGLang's ``bitsandbytes`` reads
+#: ``qlora_adapter_name_or_path``), and a change of it is a change.
 _SPEED_ONLY_WHERE_LOADED_SO = frozenset({_LOAD_FORMAT, "--model-loader-extra-config"})
 
 #: The keys of a model's config that set its weights' dtype or quantization: vLLM and SGLang read
