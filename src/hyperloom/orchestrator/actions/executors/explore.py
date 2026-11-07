@@ -57,7 +57,7 @@ from ..stop_attribution import (
     stopped_by_the_run_class,
     variant_budget_stop,
 )
-from ._accuracy_gate import parse_eval_results
+from ._accuracy_gate import AccuracyReference, parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
 from .explore_prefilter.declared_levers import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
@@ -735,12 +735,11 @@ class _ExploreRound:
         self.running_tput = self.base_tput
         self.running_perf: Any = None
         self.keep_threshold_pct = float(params["keep_threshold_pct"])
-        # The measured baseline outranks a proposed one.
-        self.baseline_accuracy = to_float(getattr(self.ss, "baseline_accuracy", 0.0), 0.0) or 0.0
-        if self.baseline_accuracy <= 0:
-            self.baseline_accuracy = (
-                to_float(params.get("accuracy_baseline"), 0.0) or to_float(params.get("baseline_accuracy"), 0.0) or 0.0
-            )
+        # The measured baseline outranks a proposed one, whose score no inference_suite round took.
+        self.accuracy_reference = AccuracyReference.of_baseline(self.ss)
+        if self.accuracy_reference.score <= 0:
+            proposed = to_float(params.get("accuracy_baseline"), 0.0) or to_float(params.get("baseline_accuracy"), 0.0)
+            self.accuracy_reference = AccuracyReference(proposed or 0.0, "")
         # A context-copying draft is refused on the synthetic benchmark, whose repetition loops it would copy.
         self.refuse_context_copy = not agentx_active(
             benchmark_mode=getattr(self.ss, "benchmark_mode", "")
@@ -829,7 +828,7 @@ class _ExploreRound:
         """
         return {
             "throughput": self.running_tput,
-            "accuracy": self.baseline_accuracy or None,
+            "accuracy": self.accuracy_reference.score or None,
             "extra_server_args": self.args,
             "extra_envs": dict(self.envs),
             "remove_args": list(self.remove_args),
@@ -1407,13 +1406,14 @@ class _ExploreRound:
         reference: float | None = None
         passed = True
         # Serving still needs a measured baseline to compare against; scriptable compares against a fixed 1.0.
-        gated = scriptable or self.baseline_accuracy > 0
+        gated = scriptable or self.accuracy_reference.score > 0
         if gated:
-            observed = parse_eval_results(
+            results = parse_eval_results(
                 slot, framework=self.framework, benchmark_mode=str(getattr(self.ss, "benchmark_mode", "") or "")
-            ).get("accuracy")
+            )
+            observed = results.get("accuracy") if scriptable else self.accuracy_reference.comparable(results)
             if isinstance(observed, (int, float)):
-                reference = 1.0 if scriptable else self.baseline_accuracy
+                reference = 1.0 if scriptable else self.accuracy_reference.score
                 passed = accuracy_passed(reference, float(observed))
             else:
                 passed = False

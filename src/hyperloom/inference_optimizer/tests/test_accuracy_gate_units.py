@@ -348,7 +348,10 @@ class TestTheAgentXAccuracyGate:
         rate."""
         _error_rate(tmp_path, request_error_rate=0.0)
         _accuracy_round(tmp_path, 0.0)
-        assert ag.grade_accuracy(str(tmp_path), 0.945, framework="vllm", benchmark_mode="agentx") is False
+        assert (
+            ag.grade_accuracy(str(tmp_path), ag.AccuracyReference(0.945, ""), framework="vllm", benchmark_mode="agentx")
+            is False
+        )
 
     def test_a_slot_without_an_accuracy_round_has_no_accuracy(self, tmp_path):
         """The error rate no longer stands in for a score: a clean rate alone grades nothing."""

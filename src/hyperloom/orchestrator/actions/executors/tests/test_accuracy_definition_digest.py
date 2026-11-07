@@ -85,3 +85,69 @@ def test_a_salvaged_sibling_score_publishes_its_digest_with_it(tmp_path):
 def test_the_digest_survives_a_resume():
     state = SharedState(baseline_accuracy=0.945, baseline_accuracy_definition_digest=BASELINE_DIGEST)
     assert SharedState.from_dict(state.to_dict()).baseline_accuracy_definition_digest == BASELINE_DIGEST
+
+
+@pytest.mark.parametrize(
+    ("digest", "expected"),
+    [(BASELINE_DIGEST, False), (OTHER_DIGEST, None)],
+    ids=["same_definition", "other_definition"],
+)
+def test_a_candidate_is_graded_only_under_the_baselines_definition(tmp_path, digest, expected):
+    """A drop to 0.0 under the baseline's definition is a regression; under another it is no score at all."""
+    suite_eval(tmp_path / ag.ACCURACY_DIR, 0.0, digest)
+    reference = ag.AccuracyReference(0.945, BASELINE_DIGEST)
+    assert ag.grade_accuracy(str(tmp_path), reference, framework="vllm", benchmark_mode="agentx") is expected
+
+
+def test_a_reference_no_inference_suite_round_took_does_not_compare_with_one_that_did(tmp_path):
+    suite_eval(tmp_path / ag.ACCURACY_DIR, 0.94, BASELINE_DIGEST)
+    results = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
+    assert ag.AccuracyReference(0.945, "").comparable(results) is None
+    assert ag.AccuracyReference(0.945, BASELINE_DIGEST).comparable(results) == 0.94
+
+
+def test_the_baseline_reference_is_the_states_score_and_digest():
+    state = SharedState(baseline_accuracy=0.945, baseline_accuracy_definition_digest=BASELINE_DIGEST)
+    assert ag.AccuracyReference.of_baseline(state) == ag.AccuracyReference(0.945, BASELINE_DIGEST)
+
+
+@pytest.mark.parametrize(
+    ("digest", "outcome", "reason"),
+    [(BASELINE_DIGEST, "KEEP", ""), (OTHER_DIGEST, "REVERT", "accuracy_unavailable")],
+    ids=["same_definition", "other_definition"],
+)
+def test_an_explore_slot_under_another_definition_is_reverted(tmp_path, digest, outcome, reason):
+    from hyperloom.orchestrator.actions.executors.explore import _ExploreRound
+
+    slot = tmp_path / "variant_00"
+    suite_eval(slot / ag.ACCURACY_DIR, 0.94, digest)
+    explore = object.__new__(_ExploreRound)
+    explore.framework = "sglang"
+    explore.ss = SharedState(
+        benchmark_mode="agentx", baseline_accuracy=0.945, baseline_accuracy_definition_digest=BASELINE_DIGEST
+    )
+    explore.accuracy_reference = ag.AccuracyReference.of_baseline(explore.ss)
+    row: dict = {"gates": [], "reason": ""}
+    explore._apply_accuracy_gate(row, slot)
+    assert (row["outcome"], row["gates"][0]["reason"]) == (outcome, reason)
+
+
+@pytest.mark.parametrize(
+    ("digest", "expected"), [(BASELINE_DIGEST, False), (OTHER_DIGEST, None)], ids=["same_definition", "other"]
+)
+def test_an_integrate_bench_is_graded_only_under_the_baselines_definition(tmp_path, digest, expected):
+    from hyperloom.orchestrator.actions.executors._integrate_bench import _grade_bench_accuracy
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+
+    slot = tmp_path / "variant_00"
+    suite_eval(slot / ag.ACCURACY_DIR, 0.0, digest)
+    bench_leg = _PatchBench(
+        params={"accuracy_baseline": 0.945, "framework": "vllm"},
+        output_root=tmp_path,
+        specialist_task_id="t",
+        benchmark_mode="agentx",
+        accuracy_definition_digest=BASELINE_DIGEST,
+    )
+    gate_evidence: dict = {}
+    _grade_bench_accuracy({"status": "succeeded"}, bench_leg, str(slot), gate_evidence)
+    assert gate_evidence["accuracy_pass"] is expected

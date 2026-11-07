@@ -531,7 +531,7 @@ def test_warm_decision_gated_variant_grades_from_warmup_round(tmp_path):
 
 def test_integrate_patch_grade_ignores_discarded_warmup_round(tmp_path):
     """``grade_accuracy`` grades from the grid slot (the parent of the measured ``benchmark_*`` workspace)."""
-    from hyperloom.orchestrator.actions.executors._accuracy_gate import grade_accuracy
+    from hyperloom.orchestrator.actions.executors._accuracy_gate import AccuracyReference, grade_accuracy
 
     slot = tmp_path / "variant_00_integrate-patch"
     # Measured round (slot root): high score that PASSES the gate vs baseline.
@@ -543,7 +543,7 @@ def test_integrate_patch_grade_ignores_discarded_warmup_round(tmp_path):
         0.50,
     )
     # baseline 0.90: measured 0.95 is within tolerance (pass); warmup 0.50 is not.
-    passed = grade_accuracy(str(slot), 0.90, framework="vllm")
+    passed = grade_accuracy(str(slot), AccuracyReference(0.90, ""), framework="vllm")
     assert passed is True
 
 

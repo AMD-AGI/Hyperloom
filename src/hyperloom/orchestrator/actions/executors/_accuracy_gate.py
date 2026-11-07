@@ -11,6 +11,8 @@ import json
 import logging
 import math
 import shlex
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,7 @@ from hyperloom.common.gain_math import (
     accuracy_passed,
     finite_score,
 )
-from hyperloom_common.coerce import optional_positive_float
+from hyperloom_common.coerce import optional_positive_float, to_float
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom_common.io import safe_mtime
 from hyperloom_common.jsonio import read_json_strict
@@ -568,29 +570,61 @@ def eval_probe_summary(probe: dict[str, Any] | None) -> str:
     )
 
 
+@dataclass(frozen=True)
+class AccuracyReference:
+    """The baseline score candidates are graded against, and the eval definition digest it was taken under.
+
+    ``score`` is 0.0 when there is no baseline score; ``definition_digest`` is "" for a score no inference_suite round
+    took, which compares only with scores taken outside one too.
+    """
+
+    score: float
+    definition_digest: str
+
+    @classmethod
+    def of_baseline(cls, state: Any) -> AccuracyReference:
+        """The reference the session ``state`` measured at its baseline; no score without a state."""
+        return cls(
+            to_float(getattr(state, "baseline_accuracy", 0.0), 0.0) or 0.0,
+            str(getattr(state, "baseline_accuracy_definition_digest", "") or ""),
+        )
+
+    def comparable(self, eval_results: Mapping[str, Any]) -> float | None:
+        """The score ``eval_results`` holds when taken under this reference's definition; ``None`` otherwise.
+
+        Scores under different eval definitions do not compare, so a score under another one is no score.
+        """
+        score = finite_score(eval_results.get("accuracy"))
+        digest = str(eval_results.get(EVAL_DEFINITION_DIGEST_KEY) or "")
+        if score is not None and digest != self.definition_digest:
+            log.warning(
+                "accuracy_gate: score %.4f was taken under eval definition %r, the baseline's under %r; not compared",
+                score,
+                digest,
+                self.definition_digest,
+            )
+            return None
+        return score
+
+
 def grade_accuracy(
     result_dir: str,
-    baseline_accuracy: Any,
+    reference: AccuracyReference,
     framework: str | None = None,
     benchmark_mode: str = "",
 ) -> bool | None:
-    """Grade a bench's accuracy against the baseline.
+    """Grade a bench's accuracy against the baseline ``reference``.
 
-    With a recorded baseline the measured drop is enforced; without one
-    (or no eval result) the check is skipped (``None``) and warned loudly.
+    With a recorded baseline the measured drop is enforced; without one, or without a score taken under the
+    baseline's eval definition, the check is skipped (``None``) and warned loudly.
     For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
     a missing quality gate instead of falling back to GSM8K.
     """
-    # Accept numeric strings in addition to int/float; non-numeric / missing
-    # values fall back to 0.0 (skip).
-    try:
-        baseline_value = float(baseline_accuracy)
-    except (TypeError, ValueError):
-        baseline_value = 0.0
+    baseline_value = reference.score
     eval_results = parse_eval_results(result_dir, framework=framework, benchmark_mode=benchmark_mode)
-    new_accuracy = eval_results.get("accuracy")
+    new_accuracy = reference.comparable(eval_results)
     if new_accuracy is not None and baseline_value > 0:
-        return accuracy_passed(baseline_value, float(new_accuracy))
+        return accuracy_passed(baseline_value, new_accuracy)
     if baseline_value <= 0:
         log.warning(
             "integrate_patch: no baseline accuracy; accuracy gate skipped "
@@ -698,6 +732,7 @@ __all__ = [
     "BASELINE_EVAL_FAILED_KEY",
     "BASELINE_EVAL_FAILURE_KIND_KEY",
     "BASELINE_EVAL_OBSERVED_ACCURACY_KEY",
+    "AccuracyReference",
     "ENABLEMENT_MODES",
     "ENABLEMENT_MODE_ALL",
     "ENABLEMENT_REVALIDATION_REASON",
