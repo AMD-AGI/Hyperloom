@@ -264,7 +264,7 @@ class Summary:
 
 
 def _measurement_of(directory: Path) -> dict[str, Any] | None:
-    """The round's measurement: an inference_suite run_dir's from its report, a Magpie round's from the first readable
+    """The round's measurement: an inference_suite run_dir's from its report, an archived v1 Magpie round's from the first readable
     ``benchmark_report.json`` below it; ``None`` when it has none."""
     if is_round_folder(directory):
         try:
