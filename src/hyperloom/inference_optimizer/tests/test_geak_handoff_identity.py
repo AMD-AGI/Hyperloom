@@ -16,7 +16,8 @@ from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite.compose import GPU_MASK_ENV
 from inference_suite.contracts import LaunchDelta, RunLayout
-from inference_suite.contracts.launch import Launch, LayerSource
+from inference_suite.contracts.base_launch import Redacted
+from inference_suite.contracts.launch import Launch
 from inference_suite.tests.test_compose import _launch as _compose_launch
 
 from ._geak_helpers import stop_geak_before_launch
@@ -226,22 +227,42 @@ def _measured_in(tmp_path: Path, state: SharedState, launch: Launch) -> Path:
 
 
 def test_env_spec_reproduces_the_measured_launch_without_the_rounds_own_layers(tmp_path: Path) -> None:
-    launch = _compose_launch(user=LaunchDelta(env_unset=("SGLANG_USE_AITER",)))
+    launch = _compose_launch(user=LaunchDelta(env_unset=("SGLANG_USE_AITER",), env_set={"ATOM_FORCE_ATTN_TRITON": "1"}))
     state = SharedState(current_best={"tput": 100.0, "extra_envs": {"ACCEPTED": "1"}, "optimization_stack": []})
     launch_json = _measured_in(tmp_path, state, launch)
 
     spec = _writeback(tmp_path, state).build_env_spec()
 
     assert (spec["launch_json"], spec["launch_digest"]) == (str(launch_json), launch.digest())
-    round_layers = {LayerSource.GUARD, LayerSource.PROFILE}
-    kept = [token for arg in launch.args if arg.source not in round_layers for token in arg.tokens()]
-    assert shlex.split(spec["config"]["server_launch_flags"]) == kept
-    assert not {"--model-path", "--host", "--port"} & set(kept)
-    envs = spec["config"]["extra_envs"]
-    assert envs["ACCEPTED"] == "1"
-    assert GPU_MASK_ENV not in envs
-    assert "HF_TOKEN" not in envs, "a redacted value is not handed on"
+    assert shlex.split(spec["config"]["server_launch_flags"]) == [
+        "--tp", "8", "--cuda-graph-max-bs", "64", "--speculative-algorithm", "EAGLE", "--speculative-num-steps", "3",
+        "--watchdog-timeout", "600",
+    ]  # fmt: skip
+    assert spec["config"]["extra_envs"] == {
+        "ATOM_FORCE_ATTN_TRITON": "1",
+        "SGLANG_SIMULATE_ACC_LEN": "3.48",
+        "ACCEPTED": "1",
+    }
     assert spec["config"]["unset_envs"] == ["SGLANG_USE_AITER"]
+
+
+def test_env_spec_hands_on_no_structured_flag_and_no_credential_or_loader_env(tmp_path: Path) -> None:
+    """GEAK's native launchers expand args unquoted, and env_safety owns which names may leave the session."""
+    launch = _compose_launch(
+        user=LaunchDelta(env_set={"OPENAI_API_KEY": "sk-secret", "LD_PRELOAD": "/evil.so", "PATH": "/evil/bin"})
+    )
+    assert any(arg.flag == "--json-model-override-args" for arg in launch.args)
+    assert isinstance(launch.env["HF_TOKEN"], Redacted)
+    state = SharedState(current_best={"tput": 100.0, "optimization_stack": []})
+    _measured_in(tmp_path, state, launch)
+
+    config = _writeback(tmp_path, state).build_env_spec()["config"]
+
+    assert "--json-model-override-args" not in config["server_launch_flags"]
+    assert (
+        not {"OPENAI_API_KEY", "LD_PRELOAD", "PATH", "HF_TOKEN", "PYTHONPATH", GPU_MASK_ENV}
+        & config["extra_envs"].keys()
+    )
 
 
 def test_a_round_without_launch_json_hands_on_no_launch_record(tmp_path: Path) -> None:
