@@ -307,7 +307,6 @@ def test_a_variable_the_launcher_exports_is_kept_or_dropped_alike_in_every_round
 
 def test_on_bypass_the_boot_round_is_the_same_one_request_round_with_no_evaluation(rounds, tmp_path, monkeypatch):
     """No backend names a server-only phase: a bypass boot runs its server and one request, as a Magpie boot does."""
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
 
     LocalMeasurementBackend().run_test(_sweep(tmp_path))
 

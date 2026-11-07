@@ -113,13 +113,6 @@ def test_a_bare_resume_notes_the_default_only_when_the_leg_runs_on_it(
 
 
 # --- explicit-flag detection --------------------------------------------------
-def test_guard_ignores_the_retired_backend_switch(native_benchmark, monkeypatch):
-    """HYPERLOOM_BENCHMARK_BACKEND no longer selects anything, so AgentX does not refuse it."""
-    _on(monkeypatch, native_benchmark)
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
-    _preflight_agentx_backend(argparse.Namespace(framework="vllm"))  # must not raise
-
-
 def test_guard_rejects_agentx_with_a_scriptable_framework(native_benchmark, monkeypatch):
     """The other way for the switch to no-op while every gate still fires."""
     _on(monkeypatch, native_benchmark)

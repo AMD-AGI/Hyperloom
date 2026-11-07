@@ -23,8 +23,11 @@ the manifest's sha256, stages nothing into a cache that already verifies, and ex
 damaged cache or a failed staging. A runner that runs
 the round in another process runs ``python -m inference_suite run``, which exits :data:`EXIT_REFUSED` when it refuses
 the config before the round starts. :func:`inferencex_root` is the staged InferenceX in a tool cache, and
-:data:`CLIENT_FILE` its benchmark client under that root. A round's ``launch.json`` names the GPUs its server ran on
-under :data:`GPU_MASK_ENV`.
+:data:`CLIENT_FILE` its benchmark client under that root. A round's ``launch.json`` names the GPUs its server ran
+on under :data:`GPU_MASK_ENV`.
+
+A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
+:func:`client_env`, the discarded :func:`warmup_pass` before the measured one.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from inference_suite.cli import EXIT_REFUSED
 from inference_suite.compose import GPU_MASK_ENV
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.layout import RunDirError
+from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, client_env, warmup_pass
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import SourceFetchError, fetch_response, fetch_sources
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
@@ -53,6 +57,9 @@ from inference_suite.staging import (
 
 __all__ = [
     "CLIENT_FILE",
+    "ClientPass",
+    "ClientTarget",
+    "ClientTool",
     "EXIT_REFUSED",
     "GPU_MASK_ENV",
     "INFERENCEX_CLIENT_COMMIT",
@@ -66,6 +73,8 @@ __all__ = [
     "StagingError",
     "UserFile",
     "UserFileError",
+    "client_argv",
+    "client_env",
     "fetch_response",
     "fetch_sources",
     "inferencex_root",
@@ -78,4 +87,5 @@ __all__ = [
     "staging_key",
     "stop",
     "verified_manifest_sha256",
+    "warmup_pass",
 ]

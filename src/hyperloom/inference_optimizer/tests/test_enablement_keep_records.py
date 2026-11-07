@@ -598,26 +598,6 @@ def test_an_in_place_enablement_with_no_override_still_observes(tmp_path: Path, 
     assert assertions.get("pytest"), "a named package is asserted at its observed version"
 
 
-def test_the_bypass_backend_probes_the_server_python_too(tmp_path: Path, monkeypatch):
-    """The benchmark backend never picks the interpreter: bypass resolves the server's ``framework_python``."""
-    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import BENCHMARK_BACKEND_ENV
-
-    monkeypatch.setenv(BENCHMARK_BACKEND_ENV, "bypass")
-    monkeypatch.setattr(
-        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
-    )
-    params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
-    closure, assertions = probe_keep_environment(
-        params,
-        KeepEvidence(
-            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
-        ),
-        framework="vllm",
-    )
-    assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
-
-
 def test_the_closure_follows_the_framework_interpreter_not_magpies(tmp_path: Path, monkeypatch):
     """A split-venv host: Magpie runs from one venv, the server from another.
 
