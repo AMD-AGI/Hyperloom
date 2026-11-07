@@ -206,13 +206,7 @@ def export_ray_address_to_os() -> None:
 
 def _remote_client_env(service_url: str) -> dict[str, str]:
     """Build the multi-node Magpie client env for ``service_url``."""
-    from .benchmark_backend import resolve_benchmark_interpreter
-
-    return {
-        "MAGPIE_RUN_PHASE": "client",
-        _REMOTE_SERVER_ENV: service_url,
-        "MAGPIE_EVAL_PYTHON": resolve_benchmark_interpreter(),
-    }
+    return {"MAGPIE_RUN_PHASE": "client", _REMOTE_SERVER_ENV: service_url}
 
 
 def _multi_node_service_url() -> str:

@@ -39,7 +39,7 @@ from hyperloom.measure.failures import (
 )
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.magpie_launchers import install_launchers
-from hyperloom.measure.manifest import encode_manifest, manifest_notes, ManifestFile, RESULT_SCHEMA, RESULT_SCHEMA_V1
+from hyperloom.measure.manifest import encode_manifest, manifest_notes, ManifestFile, result_schema_for
 from hyperloom.measure.phases import (
     BOOTSTRAP,
     ENV_REBUILD,
@@ -556,7 +556,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
     document: dict = {"outcome": outcome}
     document.update(
         {
-            "schema": RESULT_SCHEMA_V1 if spec.schema == SPEC_SCHEMA_V1 else RESULT_SCHEMA,
+            "schema": result_schema_for(spec.schema),
             "request_id": spec.request_id,
             "spec_fingerprint": fingerprint(spec, hyperloom_version=_version()),
             "spec_sha256": spec_sha256(raw),

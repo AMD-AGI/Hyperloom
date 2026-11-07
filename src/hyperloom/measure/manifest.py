@@ -27,6 +27,7 @@ from hyperloom.contracts.measurement import (
     PhaseTiming,
 )
 from hyperloom.measure.jit_kinds import STATES as JIT_STATES
+from hyperloom.measure.spec import SPEC_SCHEMA_V1
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
     SHA256_RE,
@@ -40,6 +41,13 @@ from hyperloom.measure.docs import (
 RESULT_SCHEMA_V1 = "hyperloom.measurement-result/v1"
 RESULT_SCHEMA = "hyperloom.measurement-result/v2"
 RESULT_SCHEMAS = (RESULT_SCHEMA_V1, RESULT_SCHEMA)
+
+
+def result_schema_for(spec_schema: str) -> str:
+    """The result schema a runner answers a sheet of ``spec_schema`` with."""
+    return RESULT_SCHEMA_V1 if spec_schema == SPEC_SCHEMA_V1 else RESULT_SCHEMA
+
+
 FAILURE_CLASSES = ("infra", "unclear", "candidate")
 #: Names the bundle itself owns; a manifest never lists them as result files.
 RESERVED_NAMES = ("manifest.json", "manifest.sig")

@@ -557,6 +557,23 @@ def test_a_base_launch_whose_digest_does_not_match_its_content_is_refused() -> N
         MeasurementSpec.from_document(document)
 
 
+@pytest.mark.parametrize(
+    ("credential", "named"),
+    [
+        (lambda b: dataclasses.replace(b, env={**b.env, "HF_TOKEN": "hf_" + "q" * 34}), "env HF_TOKEN"),
+        (lambda b: dataclasses.replace(b, args=(*b.args, "--api-key", "qqqqqqqq")), "arg "),
+    ],
+    ids=["env", "arg"],
+)
+def test_a_v2_sheet_whose_base_holds_a_credential_in_the_clear_is_refused_naming_where(credential, named) -> None:
+    base = credential(base_launch()).to_document()
+
+    with pytest.raises(DocumentError, match=f"unredacted credential in {named}") as refused:
+        MeasurementSpec.from_document(_edit(lambda d: d["procedure"].update(base_launch=base)))
+
+    assert "qqqq" not in str(refused.value)
+
+
 def test_a_base_launch_over_64_kib_is_refused_when_the_sheet_is_written() -> None:
     def oversized(d: dict[str, Any]) -> None:
         d["procedure"]["base_launch"]["warnings"] = ["w" * spec_module.MAX_BASE_LAUNCH_BYTES]

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import hashlib
 import os
 import sys
 from collections.abc import Sequence
@@ -24,7 +23,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from hyperloom.common.agentx_workload import is_mlperf_backend
-from hyperloom.common.env_safety import is_secret_shaped_env_name
+from hyperloom.common.launch_credentials import credentials_in_the_clear, redact_credential_env
 from hyperloom.common.model_paths import hf_repo_id
 from hyperloom.common.perf_metric import is_agentx_mode
 from inference_suite import (
@@ -39,7 +38,7 @@ from inference_suite import (
     resolve_base,
     scriptable_base,
 )
-from inference_suite.contracts import BaseLaunch, BaseLaunchError, LaunchModel, Redacted, Topology, Workload
+from inference_suite.contracts import BaseLaunch, BaseLaunchError, LaunchModel, Topology, Workload
 
 from ..framework_paths import operator_benchmark_script
 from ..framework_registry import is_scriptable
@@ -120,15 +119,16 @@ def _run_at_base_topology(args: argparse.Namespace, base: BaseLaunch) -> None:
     os.environ["TP"], os.environ["EP"] = str(base.topology.tp), str(base.topology.ep)
 
 
-def _redacted(base: BaseLaunch) -> BaseLaunch:
-    """``base`` with every credential-shaped env value kept out of the file it is frozen in."""
-    env = {
-        name: Redacted(hashlib.sha256(value.encode()).hexdigest())
-        if isinstance(value, str) and is_secret_shaped_env_name(name)
-        else value
-        for name, value in base.env.items()
-    }
-    return base if env == base.env else dataclasses.replace(base, env=env)
+def _without_credentials(base: BaseLaunch) -> BaseLaunch:
+    """``base`` with its credential-named env frozen as sha256s; a credential it holds anywhere else exits 2."""
+    redacted = redact_credential_env(base)
+    found = credentials_in_the_clear(redacted)
+    if found:
+        _refuse(
+            f"the base launch holds a credential in {', '.join(found)}; pass it through the environment instead, "
+            "which is frozen as its sha256 and read from the runner host's variable of the same name"
+        )
+    return redacted
 
 
 def _announce(base: BaseLaunch) -> None:
@@ -177,7 +177,9 @@ def resolve_base_launch(
         _refuse(f"the base launch could not be resolved: {exc}")
     if isinstance(found, Miss):
         _refuse("no source serves this session's base launch:\n  " + "\n  ".join(found.reasons()))
-    base = _redacted(dataclasses.replace(found, model=dataclasses.replace(found.model, path=_model_path(args))))
+    base = _without_credentials(
+        dataclasses.replace(found, model=dataclasses.replace(found.model, path=_model_path(args)))
+    )
     return _freeze(args, session_dir, base)
 
 

@@ -1252,37 +1252,25 @@ def test_infera_ssh_env_empty_without_pods_or_key(tmp_path, monkeypatch):
     assert _multi_node_env.infera_ssh_env_from_state() == {}
 
 
-# magpie_remote_env accuracy-gate interpreter tests.
+# magpie_remote_env tests.
 
 
-def test_magpie_remote_env_pins_eval_interpreter(tmp_path, monkeypatch):
-    """The eval must run in the benchmark interpreter."""
-    _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 2, "service_url": "http://h:8888"})
-    monkeypatch.setattr(mne, "external_service_url", lambda: "")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.benchmark_backend.resolve_benchmark_interpreter",
-        lambda: "/opt/venv/bin/python",
-    )
+@pytest.mark.parametrize(
+    ("state", "external", "url"),
+    [
+        ({"backend": "rayjob", "nodes": 2, "service_url": "http://h:8888"}, "", "http://h:8888"),
+        ({"nodes": 2}, "http://frontend:8000", "http://frontend:8000"),
+    ],
+    ids=["state", "hand-off"],
+)
+def test_magpie_remote_env_points_the_client_at_the_cluster_and_pins_no_eval_interpreter(
+    tmp_path, monkeypatch, state, external, url
+):
+    """The evaluation runs in the inference_suite staging, so the client phase is told nothing about one."""
+    _write_mn_state(tmp_path, monkeypatch, state)
+    monkeypatch.setattr(mne, "external_service_url", lambda: external)
 
-    env = mne.magpie_remote_env()
-
-    assert env["MAGPIE_EVAL_PYTHON"] == "/opt/venv/bin/python"
-    assert env["BENCHMARK_BASE_URL"] == "http://h:8888"
-
-
-def test_magpie_remote_env_pins_eval_interpreter_external(tmp_path, monkeypatch):
-    """The platform hand-off path needs the same pin as the state-file path."""
-    _write_mn_state(tmp_path, monkeypatch, {"nodes": 2})
-    monkeypatch.setattr(mne, "external_service_url", lambda: "http://frontend:8000")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.benchmark_backend.resolve_benchmark_interpreter",
-        lambda: "/opt/venv/bin/python",
-    )
-
-    env = mne.magpie_remote_env()
-
-    assert env["MAGPIE_EVAL_PYTHON"] == "/opt/venv/bin/python"
-    assert env["BENCHMARK_BASE_URL"] == "http://frontend:8000"
+    assert mne.magpie_remote_env() == {"MAGPIE_RUN_PHASE": "client", "BENCHMARK_BASE_URL": url}
 
 
 def test_magpie_remote_env_empty_for_single_node(tmp_path, monkeypatch):

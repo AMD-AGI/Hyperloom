@@ -397,21 +397,59 @@ SENSITIVE_ENV_NAME_MARKERS: tuple[str, ...] = (
     "CUSTOM_HEADERS",
 )
 
-# As a substring TOKEN also hits tuning knobs (``MAX_NUM_BATCHED_TOKENS``, ``TOKENIZERS_PARALLELISM``), so a record of
-# launch knobs treats it as a credential only as a whole name segment (``HF_TOKEN``, ``HF_TOKEN_2``,
-# ``GITHUB_TOKEN_BACKUP``), and never in ``PER_TOKEN`` (``SGLANG_USE_AITER_FP8_PER_TOKEN``).
+# Knobs whose names carry a credential marker in a phrase that can also name one (an auth token's cache, a header that
+# carries Authorization), matched whole in the form :func:`is_credential_name` compares.
+_CREDENTIAL_MARKED_KNOBS: frozenset[str] = frozenset(
+    {"SGLANG_CHAT_SEGMENT_TOKEN_CACHE", "SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", "ALLOWED_HEADERS"}
+)
+# As a substring TOKEN also hits counts and tokenizers (``MAX_NUM_BATCHED_TOKENS``, ``TOKENIZERS_PARALLELISM``), so it
+# names a credential only where a word ends in it (``HF_TOKEN``, ``HFTOKEN``, ``GITHUB_TOKEN_BACKUP``), and never in a
+# phrase that sizes, selects or balances tokens (``SGLANG_USE_AITER_FP8_PER_TOKEN``, ``--long-prefill-token-threshold``,
+# ``SGLANG_SIMULATE_ACC_TOKEN_MODE``, ``--prefill-delayer-token-usage-low-watermark``, ``DEEPEP_COMBINE_TOKEN_BALANCED``).
 _SUBSTRING_MARKERS_EXCEPT_TOKEN: tuple[str, ...] = tuple(m for m in SENSITIVE_ENV_NAME_MARKERS if m != "TOKEN")
-_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)TOKEN(?=_|$)")
-_PER_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)PER_TOKEN(?=_|$)")
+_TOKEN_WORD_END_RE = re.compile(r"TOKEN(?=_|$)")
+_TOKEN_KNOB_PHRASE_RE = re.compile(
+    r"(?:^|_)(?:PER_TOKEN|TOKEN_(?:THRESHOLD|NUM|BUDGETS?|PROB|IDS|MAP|MODE|REUSE|USAGE|BALANCED))(?=_|$)"
+)
+_KEY_LAST_SEGMENT_RE = re.compile(r"(?:^|_)KEY$")
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
-def _is_credential_env_name(key: object) -> bool:
-    upper = str(key or "").strip().upper()
+def is_credential_name(name: object) -> bool:
+    """True when an env name or a flag says its value is a credential.
+
+    A flag is compared as the env name it spells (``--hf-auth`` and ``--hfAuth`` as ``HF_AUTH``), so an env and a flag
+    of the same name are never classified apart.
+    """
+    text = str(name or "").strip().lstrip("-")
+    upper = _CAMEL_BOUNDARY_RE.sub("_", text).replace("-", "_").upper()
     if upper in BENCHMARK_SECRET_ENV_NAMES:
         return True
-    if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN):
+    if upper in _CREDENTIAL_MARKED_KNOBS:
+        return False
+    if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN) or _KEY_LAST_SEGMENT_RE.search(upper):
         return True
-    return bool(_TOKEN_SEGMENT_RE.search(_PER_TOKEN_SEGMENT_RE.sub("", upper)))
+    return bool(_TOKEN_WORD_END_RE.search(_TOKEN_KNOB_PHRASE_RE.sub("", upper)))
+
+
+def _is_credential_flag(word: str) -> bool:
+    return word.startswith("-") and is_credential_name(word)
+
+
+def credential_arg_indices(argv: Sequence[str]) -> list[int]:
+    """The indices of the words of ``argv`` that hold a credential.
+
+    A credential-named flag's value counts in both its ``--flag=value`` and ``--flag value`` forms, and so does any word
+    :func:`redact_secret_values` would change.
+    """
+    found = []
+    for index, word in enumerate(argv):
+        flag, joined, _ = word.partition("=")
+        if (joined and _is_credential_flag(flag)) or redact_secret_values(word) != word:
+            found.append(index)
+        elif index and _is_credential_flag(argv[index - 1]) and not word.startswith("-"):
+            found.append(index)
+    return found
 
 
 def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, object]:
@@ -421,7 +459,7 @@ def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, obje
     """
     return {
         key: "[REDACTED]"
-        if _is_credential_env_name(key)
+        if is_credential_name(key)
         else (redact_secret_values(value) if isinstance(value, str) and value else value)
         for key, value in (env or {}).items()
     }
@@ -868,12 +906,14 @@ __all__ = [
     "OPERATOR_EXTRA_ENV_VAR",
     "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
+    "credential_arg_indices",
     "env_file_list_elements",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_allowed_variant_env_key",
+    "is_credential_name",
     "is_file_referencing_env_name",
     "is_launch_provided_env_name",
     "is_python_package_root",
