@@ -596,6 +596,11 @@ def _declined(config_path: Path) -> bool:
         return False
 
 
+def staged_tool_cache() -> Path:
+    """Where the tools inference_suite runs are staged."""
+    return resolve_dep_dir(TOOL_CACHE_DIR, TOOL_CACHE_ENV)
+
+
 def suite_route(session_dir: Path | None, config_path: Path) -> SuiteRoute | None:
     """The route the point at ``config_path`` runs on inference_suite, or ``None`` while it stays on the backend."""
     if session_dir is None:
@@ -609,7 +614,7 @@ def session_route(session_dir: Path) -> SuiteRoute | None:
     frozen = frozen_base(session_dir)
     if frozen is None:
         return None
-    tool_cache = resolve_dep_dir(TOOL_CACHE_DIR, TOOL_CACHE_ENV)
+    tool_cache = staged_tool_cache()
     return SuiteRoute(
         base=frozen.launch,
         base_path=frozen.path,
@@ -807,6 +812,7 @@ __all__ = [
     "run_accuracy_suite_round",
     "run_suite_round",
     "session_route",
+    "staged_tool_cache",
     "suite_config",
     "suite_route",
 ]

@@ -22,7 +22,7 @@ from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
 from .conftest import make_mock_critic_coordinator
-from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
+from ._geak_helpers import forbid_geak_launch, measured_in_suite_round, stop_geak_before_launch
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
@@ -71,6 +71,7 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
     st.agentx_backend = "mlperf"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     st.current_best = {"action": "explore", "tput": 120.0}
     st.cumulative_gain_validated = 20.0
@@ -903,6 +904,7 @@ def _arm_settled_candidate(coordinator, tmp_path) -> dict:
     st = coordinator.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     settled = {
         "status": "ok",
@@ -1038,6 +1040,7 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
     st.agentx_backend = "mlperf"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir()
@@ -1255,13 +1258,13 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
 
 @pytest.mark.asyncio
 async def test_native_geak_proxy_refusal_is_not_an_invalid_env_spec(coordinator, monkeypatch):
-    """A native-AgentX proposal refusing an unverified Magpie launch is its own fault, not a serialization one.
+    """A native-AgentX proposal refusing a round without launch.json is its own fault, not a serialization one.
 
     ``invalid_env_spec`` names exactly one failure: the accepted launch configuration could not be
     serialized. A refusal raised further down the handoff build must reach the caller instead of being
     relabelled as one.
     """
-    refusal = "Native AgentX GEAK proposals require a Magpie-verified server launch"
+    refusal = "Native AgentX GEAK proposals require the measured round's launch.json"
 
     def refuse(*_args, **_kwargs):
         raise ValueError(refusal)
@@ -1455,6 +1458,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     st.current_best = {"action": "explore", "tput": 120.0, "extra_server_args": "--incumbent", "extra_envs": {}}
     result = {
@@ -1505,6 +1509,7 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     result = {
         "status": "ok",

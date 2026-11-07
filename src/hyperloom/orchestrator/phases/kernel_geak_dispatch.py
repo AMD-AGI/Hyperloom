@@ -25,7 +25,9 @@ from .kernel_round_budget import rebench_round_sec
 from hyperloom_common.env import env_float, env_int
 from hyperloom_common.jsonio import read_json
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
-from ..actions.executors._recipe_script import resolve_launch_server_script
+from inference_suite.staging import CLIENT_FILE, inferencex_root
+from ..actions.executors._round_folder import read_round_launch
+from ..actions.executors._suite_config import staged_tool_cache
 from ..actions.executors._workload_envs import geak_metric_axis
 from ..bus.message_bus import Message
 from ..kernel.geak_config import _geak_has_accepted_kernel
@@ -50,6 +52,33 @@ _NO_RECIPE = BenchmarkPoint.from_block({})
 
 # How long the GEAK handoff waits for the servers it stopped to release their VRAM.
 _GEAK_GPU_FREE_WAIT_SEC: float = 120.0
+
+#: GEAK's names for the workload a handoff measures (``run_e2e.WORKLOAD_KIND_*``) and for its InferenceX client.
+_AGENTX_WORKLOAD = "agentx_trace_replay"
+_SYNTHETIC_WORKLOAD = "synthetic_isl_osl"
+_INFERENCEX_CLIENT = "inferencex"
+
+
+def _staged_inferencex() -> Path:
+    return inferencex_root(staged_tool_cache())
+
+
+def _geak_client_env(handoff: Mapping[str, Any]) -> dict[str, str]:
+    """The client script GEAK's InferenceX adapter runs; the adapter cannot find it in the staged layout by itself."""
+    if handoff.get("bench_client") != _INFERENCEX_CLIENT:
+        return {}
+    return {"INFERENCEX_BENCH_SERVING": str(Path(handoff["inferencex_path"]) / CLIENT_FILE)}
+
+
+def _with_framework_on_path(env_spec: dict[str, Any]) -> dict[str, Any]:
+    """``env_spec`` with the measured round's framework interpreter first on ``PATH``, for GEAK's native launcher."""
+    launch_json = str(env_spec.get("launch_json") or "")
+    launch = read_round_launch(Path(launch_json).parent) if launch_json else None
+    if launch is None or not Path(launch.framework.python).is_absolute():
+        return env_spec
+    path = os.pathsep.join(part for part in (str(Path(launch.framework.python).parent), os.environ.get("PATH")) if part)
+    config = env_spec["config"]
+    return {**env_spec, "config": {**config, "extra_envs": {**config["extra_envs"], "PATH": path}}}
 
 
 def _served_replay_result(path: str, root: Path) -> dict[str, Any] | None:
@@ -222,46 +251,6 @@ class _GeakDispatchMixin:
             log.warning("workload_spec: could not derive observed replay shape", exc_info=True)
             return {}
 
-    @staticmethod
-    def _resolve_launch_server_script(recipe: BenchmarkPoint) -> str:
-        """Name the server-phase script GEAK should launch through Magpie.
-
-        GEAK infers its launcher from the recipe's ``benchmark_script``, which on
-        every non-AgentX run IS a server launcher. The MLPerf switch replaces
-        that field with its client, which boots no server under
-        ``MAGPIE_RUN_PHASE=server``, so GEAK's bench would get no pid and abort
-        before it measures a single repeat.
-
-        Naming the framework's builtin launcher keeps GEAK on the Magpie launch
-        path -- the reason that launcher exists, since the platform kernel
-        preset, ``--trust-remote-code`` and the gpu-mem-util default are not
-        flags and so cannot be recovered from the accepted-flags handoff --
-        while letting its own bench repeats run again.
-
-        Resolution takes the ``AGENTX_SERVER_SCRIPT`` override, else the
-        ``{framework}_{gpu}.sh`` fallback, in the ``<checkout>/benchmarks/``
-        directory and deliberately no recursive search, so what we advertise
-        is a launcher on disk rather than merely a plausible one.
-        Recipe-recorded values beat the ambient env because the recipe is the
-        record of what actually ran.
-
-        Returns "" for any non-AgentX recipe -- there GEAK's own derivation names
-        the script that really launched the baseline, which is strictly better
-        than anything re-derived here -- and "" whenever the builtin cannot be
-        confirmed on disk, leaving current behaviour untouched. Never raises.
-        """
-        try:
-            from hyperloom.common.agentx_workload import is_agentx_client_script
-
-            # Only the AgentX client misleads the inference; anything else in
-            # this field is the launcher GEAK should keep deriving for itself.
-            if not is_agentx_client_script(recipe.benchmark_script.strip()):
-                return ""
-            return resolve_launch_server_script(recipe)
-        except OSError:
-            log.warning("launch_server_script: could not resolve from the recipe", exc_info=True)
-            return ""
-
     def _geak_timeouts(self) -> tuple[int, int, bool]:
         """Resolve the GEAK e2e timeouts from the live run budget."""
         # Standalone fallback ONLY: the 12h (43200s) default applies when no run deadline is set (budget_known=False).
@@ -337,7 +326,7 @@ class _GeakDispatchMixin:
             log.warning("geak rebench: cannot confirm GPUs %s are free (%s)", cards, gpus.unverified)
 
     async def _launch_geak_runner(
-        self, handoff_path: Path, *, timeouts: tuple[int, int, bool], from_phase: str
+        self, handoff_path: Path, *, timeouts: tuple[int, int, bool], from_phase: str, client_env: Mapping[str, str]
     ) -> subprocess.CompletedProcess:
         """Run geak_runner on ``handoff_path`` under :meth:`_geak_timeouts`; raise TimeoutExpired at its kill cap.
 
@@ -372,7 +361,7 @@ class _GeakDispatchMixin:
             benchmark_mode=str(self.shared_state.benchmark_mode or ""),
             grading=self.shared_state.grading or None,
         )
-        runner_env = dict(os.environ)
+        runner_env = {**os.environ, **client_env}
         runner_env["E2E_METRIC"] = metric
         runner_env[REAP_MARK_ENV] = uuid.uuid4().hex
         # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full
@@ -497,16 +486,15 @@ class _GeakDispatchMixin:
             state_max_model_len=int(self.shared_state.max_model_len or 0),
         )
 
-    def _geak_workload_spec(self, spec: Mapping[str, Any]) -> dict[str, Any]:
-        # Only AgentX materializations carry ``benchmark.workload_spec``; every other recipe
-        # omits it so GEAK keeps today's synthetic path unchanged.
-        if not spec:
-            return {}
+    def _geak_workload_spec(self, spec: Mapping[str, Any], *, agentx: bool) -> dict[str, Any]:
+        # GEAK selects its client and its measurement protocol from the kind.
+        if not agentx:
+            return {"kind": _SYNTHETIC_WORKLOAD}
         # Give the kernel agents the shape they must actually optimize for;
         # absence leaves GEAK on the handoff's synthetic isl/osl.
         observed = self._observed_replay_shape(float(self.shared_state.baseline_tput or 0.0))
         if not observed:
-            return dict(spec)
+            return {**spec, "kind": _AGENTX_WORKLOAD}
         log.info(
             "workload_spec: observed replay shape isl=%d osl=%d over %d requests (%s)",
             observed["observed_isl"],
@@ -514,7 +502,7 @@ class _GeakDispatchMixin:
             observed["observed_requests"],
             observed["observed_source"],
         )
-        return {**spec, **observed}
+        return {**spec, **observed, "kind": _AGENTX_WORKLOAD}
 
     def _geak_session_fields(self, *, agentx: bool) -> dict[str, Any]:
         state = self.shared_state
@@ -529,17 +517,15 @@ class _GeakDispatchMixin:
             "framework": str(state.framework or os.environ.get("FRAMEWORK", "") or "sglang"),
             **_resolve_handoff_gpu_identity(state.gpu_type or os.environ.get("GPU_TYPE", "")),
             "workload": {"isl": int(state.isl), "osl": int(state.osl), "conc": int(state.conc or 64)},
-            "launch_recipe": str(state.baseline_config_path or ""),
             # AgentX canonical throughput is not a reference for GEAK's proxy workload.
             "raw_baseline_tput": 0.0 if agentx else float(state.baseline_tput or 0.0),
             "exp_root": str(self.session_dir / "geak"),
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
             # cycle gets a fresh dir.
             "eval_dir": str(self.session_dir / "geak" / f"e2e_cycle{int(state.macro_cycle or 0)}"),
-            # GEAK owns client selection; AgentX results are proposal proxies.
-            "bench_client": "auto",
             "e2e_metric": e2e_metric,
-            "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
+            # GEAK picks its AgentX replay client from the workload kind, and forces it back over any client named.
+            **({} if agentx else {"bench_client": _INFERENCEX_CLIENT, "inferencex_path": str(_staged_inferencex())}),
         }
 
     def _build_geak_handoff(self, *, agentx: bool) -> dict[str, Any]:
@@ -551,9 +537,6 @@ class _GeakDispatchMixin:
         extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
         recipe = self._recipe_point(str(self.shared_state.baseline_config_path or ""))
         recipe_envs = recipe.envs
-        # Absent => GEAK keeps deriving the launcher from the recipe, which is
-        # correct everywhere except AgentX (see _resolve_launch_server_script).
-        launch_server_script = self._resolve_launch_server_script(recipe)
         handoff = {
             **self._geak_session_fields(agentx=agentx),
             **self._geak_device_fields(recipe_envs),
@@ -564,31 +547,18 @@ class _GeakDispatchMixin:
             ),
             "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
             **self._geak_serving_fidelity(spec_config, accepted_flags),
+            # GEAK launches the server itself from the env spec, which carries the measured round's launch.json.
+            "bench_launcher": "native",
+            "workload_spec": self._geak_workload_spec(recipe.workload_spec, agentx=agentx),
+            "baseline_env_spec": _with_framework_on_path(env_spec),
         }
-        for key, value in (
-            ("bench_protocol", self._resolve_bench_protocol(recipe_envs)),
-            ("workload_spec", self._geak_workload_spec(recipe.workload_spec)),
-            ("launch_server_script", launch_server_script),
-            # Full layered environment and its matching measurement identity.
-            ("baseline_env_spec", env_spec),
-        ):
-            if value:
-                handoff[key] = value
+        if protocol := self._resolve_bench_protocol(recipe_envs):
+            handoff["bench_protocol"] = protocol
         if agentx:
             log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
-            # Force native only when the recipe builtin could not be named. The
-            # AgentX client delegates its server phase to that builtin, so with it
-            # in hand (set as ``launch_server_script`` above) GEAK derives the
-            # Magpie launcher -- which writes a pid and recovers the non-flag
-            # presets -- instead of its adapter default; without it there is no
-            # Magpie server phase to launch. Flags/env stay aligned either way:
-            # baseline_env_spec still folds the recorded EXTRA_ATOM_ARGS.
-            if not launch_server_script:
-                handoff["bench_launcher"] = "native"
+            from hyperloom.inference_optimizer.agentx.geak_proxy import seed_native_geak_proxy
 
-        from hyperloom.inference_optimizer.agentx.geak_proxy import seed_native_geak_proxy
-
-        seed_native_geak_proxy(handoff, point=recipe, measurement=measurement)
+            seed_native_geak_proxy(handoff)
         return handoff
 
     def _geak_result_path(self) -> Path:
@@ -748,6 +718,7 @@ class _GeakDispatchMixin:
                 out_dir / "handoff.json",
                 timeouts=(runner_timeout, kill_timeout, budget_known),
                 from_phase=from_phase,
+                client_env=_geak_client_env(handoff),
             )
         except subprocess.TimeoutExpired:
             log.warning(
