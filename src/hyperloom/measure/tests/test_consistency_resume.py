@@ -17,6 +17,7 @@ from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.measure import consistency, consistency_resume as resume
 from hyperloom.measure.consistency import ChecklistItem
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
+from hyperloom.measure.tests.hosted_fixtures import freeze_session_base, staged_tool_cache
 
 NODE = "node-a"
 
@@ -269,6 +270,8 @@ def test_the_entry_point_resumes_from_the_file_and_exits_by_the_verdict(
     checklist.write_text(json.dumps({"items": [{"id": "base", "points": [str(point)], "repeats": 2}]}))
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"session_dir": str(tmp_path / "session")}))
+    freeze_session_base(tmp_path / "session")
+    staged_tool_cache(tmp_path, monkeypatch)
     built = []
 
     def build(_config: Path) -> consistency.Backends:
@@ -376,6 +379,8 @@ def test_the_entry_point_stops_with_12_and_measures_nothing_while_another_run_ho
     checklist, config = tmp_path / "checklist.json", tmp_path / "config.json"
     checklist.write_text(json.dumps({"items": [{"id": "base", "points": [str(point)]}]}))
     config.write_text(json.dumps({"session_dir": str(tmp_path / "session")}))
+    freeze_session_base(tmp_path / "session")
+    staged_tool_cache(tmp_path, monkeypatch)
     monkeypatch.setattr(resume, "build_backends", lambda _c: pytest.fail("a locked file must not start a backend"))
     held = resume.RunLock(Path(f"{rig.jsonl}.lock"), node="node-b", pid=7)
     taken = held.acquire()

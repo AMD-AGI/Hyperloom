@@ -716,6 +716,16 @@ def test_every_test_of_the_checklist_carries_the_sessions_frozen_base_and_the_st
     assert (facts.staging, facts.base_launch) == (staging, base_launch())
 
 
+def test_a_session_that_froze_no_base_is_refused_before_any_test(tmp_path, capsys) -> None:
+    config = _write_config(tmp_path)
+    (tmp_path / "session" / "base_launch.json").unlink()
+    (tmp_path / "session" / "state.json").unlink()
+    point = point_yaml(tmp_path, "p.yaml")
+
+    assert consistency.main(["--checklist", str(_write_checklist(tmp_path, point)), "--config", str(config)]) == 2
+    assert "froze no base launch" in capsys.readouterr().err
+
+
 def test_a_session_whose_base_launch_changed_after_it_was_frozen_is_refused_before_any_test(
     tmp_path, monkeypatch, capsys
 ) -> None:
