@@ -23,7 +23,7 @@ from ...bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...kernel import kernel_decisions
-from ...state.failure_evidence import classify_root_cause_type
+from ...state.failure_evidence import classify_root_cause_type, engine_capacity_cause
 from ...state.shared_state import SharedState, resolve_graded_comparison
 from ..stop_reason_explanations import STOP_REASON_EXPLANATIONS
 
@@ -73,6 +73,9 @@ def _pick_failure_headline(text: str) -> str:
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     if not lines:
         return ""
+    for ln in lines:
+        if engine_capacity_cause(ln) is not None:
+            return ln
     priority = (
         "out of memory",
         "fatal",

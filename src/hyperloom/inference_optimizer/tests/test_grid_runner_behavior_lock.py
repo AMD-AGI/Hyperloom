@@ -341,6 +341,27 @@ class TestKeepGoingAsymmetry:
         assert results[0].error_class == "magpie_nonzero_invalid_measurement"
         assert results[0].returncode == 1
 
+    def test_rc_nonzero_invalid_measurement_with_a_capacity_cause_is_engine_capacity(self, tmp_path, monkeypatch):
+        """A server that died on a capacity error is a config limit even when Magpie left a workspace."""
+        monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+        cause = "ValueError: No available memory for the cache blocks. Try increasing `gpu_memory_utilization`."
+
+        def _dead_rc1(cmd, *a, **k):
+            slot = Path(cmd[cmd.index("--output-dir") + 1])
+            _invalid_rc0_workspace(slot)
+            (slot / "server.log").write_text(
+                f"EngineCore failed to start.\nTraceback (most recent call last):\n{cause}\n"
+            )
+            return subprocess.CompletedProcess(cmd, 1, "out", "err")
+
+        results = self._run(_dead_rc1, base, tmp_path / "out")
+        assert len(results) == 1
+        assert results[0].error_class == "engine_capacity"
+        assert cause in (results[0].error or "")
+
     def test_rc_nonzero_blank_pipe_uses_report_errors(self, tmp_path, monkeypatch):
         """Last-resort: empty pipe and no log files, diagnostic only in report.errors."""
         monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)

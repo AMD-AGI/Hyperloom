@@ -83,7 +83,9 @@ from ._workload_envs import BenchmarkTarget, LaunchLayer
 from ._grid_base import (
     GridVariant,
     VariantResult,
+    _RoundError,
     apply_variant_env,
+    death_error,
     importable_overlay_dir,
     pin_xdit_tool_path,
     runnable_moe_backend_args,
@@ -622,13 +624,6 @@ class _RoundProcess(NamedTuple):
     stderr: str
 
 
-class _RoundError(NamedTuple):
-    """Why a grid round measured nothing, and under which class it is recorded."""
-
-    summary: str
-    error_class: str
-
-
 def _invalid_measurement_error(
     proc: _RoundProcess,
     *,
@@ -643,7 +638,7 @@ def _invalid_measurement_error(
             error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
         if not error.strip():
             error = redact_secret_values(_report_errors_summary(report))
-        return _RoundError(error, "magpie_nonzero_invalid_measurement")
+        return death_error(error, "magpie_nonzero_invalid_measurement")
     if not report:
         return _RoundError(death_excerpt or "benchmark_report missing", "benchmark_report_missing")
     return _RoundError(
@@ -1400,7 +1395,7 @@ def _abort_without_workspace(
             AGENTX_PREFLIGHT_ERROR_CLASS,
         )
     else:
-        found = _RoundError(
+        found = death_error(
             server_log_death_excerpt(str(server_log))
             or (
                 redact_secret_values((proc.stderr or proc.stdout)[-2000:])

@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom_common.coerce import to_str_list
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
@@ -23,6 +23,8 @@ from hyperloom.inference_optimizer.grid_server_args import (
     moe_runner_requires_aiter,
     remove_moe_runner_backend_arg,
 )
+
+from ...state.failure_evidence import engine_capacity_cause
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +165,18 @@ class VariantResult:
             "launch_evidence_path": self.launch_evidence_path,
             "granted_cap_sec": self.granted_cap_sec,
         }
+
+
+class _RoundError(NamedTuple):
+    """Why a grid round measured nothing, and under which class it is recorded."""
+
+    summary: str
+    error_class: str
+
+
+def death_error(summary: str, error_class: str) -> _RoundError:
+    """A dead server's round error; a capacity error in ``summary`` is a config limit, so it outranks ``error_class``."""
+    return _RoundError(summary, "engine_capacity" if engine_capacity_cause(summary) else error_class)
 
 
 def apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
