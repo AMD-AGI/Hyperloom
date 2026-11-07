@@ -20,7 +20,7 @@ from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
 
 if TYPE_CHECKING:
-    from ._ray_backend import SessionKillRound
+    from ._ray_backend import LeasedRound
 
 log = logging.getLogger(__name__)
 
@@ -425,13 +425,12 @@ def _serving_actor_body() -> Any:
             import subprocess as _sp
 
             from ..cancel_channel import CancelScope, use_cancel_scope
-            from ._ray_backend import _run_subprocess_worker
 
             scope = CancelScope()
             self._round_scope = scope
             try:
                 with use_cancel_scope(scope):
-                    return _run_subprocess_worker(bench_round)
+                    return bench_round.run()
             except _sp.TimeoutExpired as exc:
                 return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
             finally:
@@ -513,7 +512,7 @@ class ServingLease:
             )
             _note_lease_actor_submitted()
 
-    def run_session_kill(self, bench_round: SessionKillRound) -> tuple[int, str, str]:
+    def run_session_kill(self, bench_round: LeasedRound) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener
 

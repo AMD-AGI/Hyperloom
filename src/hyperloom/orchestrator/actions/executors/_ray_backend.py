@@ -6,13 +6,18 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
+
+import yaml
 
 from hyperloom_common.env import env_flag
 from hyperloom.common.benchmark_config import BenchmarkPoint, PointError
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import hip_mask_within_rocr
+from inference_suite import EXIT_REFUSED
+from inference_suite.contracts import SuiteConfig
 
 from . import _ray_runtime
 
@@ -24,6 +29,9 @@ _RAY_OWNED_VISIBLE_DEVICE_VARS = (
     "HIP_VISIBLE_DEVICES",
     "CUDA_VISIBLE_DEVICES",
 )
+#: The variable Ray narrows to the GPUs it placed a worker on.
+_RAY_PLACED_GPUS_VAR = _RAY_OWNED_VISIBLE_DEVICE_VARS[0]
+_UTF8 = "utf-8"
 
 
 def ray_exec_enabled() -> bool:
@@ -105,28 +113,78 @@ class SessionKillRound:
     server_already_ready: bool = False
     session_remaining_sec: float | None = None
 
+    def run(self) -> tuple[int, str, str]:
+        """Ray worker body: run the subprocess under session-kill semantics."""
+        from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+            RoundWatch,
+            run_with_session_kill,
+            session_remaining_to_deadline_sec,
+        )
 
-def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str]:
-    """Ray worker body: run the subprocess under session-kill semantics."""
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-        session_remaining_to_deadline_sec,
-    )
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import RoundWatch, run_with_session_kill
+        proc = run_with_session_kill(
+            self.cmd,
+            env=_merge_worker_env(self.env),
+            cwd=self.cwd,
+            watch=RoundWatch(
+                timeout=self.timeout,
+                silence_timeout_sec=self.silence_timeout_sec,
+                server_log_path=self.server_log_path,
+                server_already_ready=self.server_already_ready,
+                session_deadline_sec=session_remaining_to_deadline_sec(self.session_remaining_sec),
+            ),
+        )
+        return proc.returncode, proc.stdout or "", proc.stderr or ""
 
-    worker_env = _merge_worker_env(bench_round.env)
-    proc = run_with_session_kill(
-        bench_round.cmd,
-        env=worker_env,
-        cwd=bench_round.cwd,
-        watch=RoundWatch(
-            timeout=bench_round.timeout,
-            silence_timeout_sec=bench_round.silence_timeout_sec,
-            server_log_path=bench_round.server_log_path,
-            server_already_ready=bench_round.server_already_ready,
-            session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
-        ),
-    )
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+@dataclass(frozen=True)
+class SuiteLeasedRound:
+    """One inference_suite round a serving lease's actor runs, on the GPUs Ray placed the actor on.
+
+    ``config_path`` holds the round's config. Only the actor knows which GPUs Ray gave it, so it names them in the
+    config before the round starts; the round masks its server to them and samples them. The round holds itself to its
+    own deadlines, so ``timeout`` is only the backstop of the process running it.
+    """
+
+    config_path: str
+    run_dir: str
+    env: dict[str, str]
+    timeout: float
+    session_remaining_sec: float | None = None
+
+    @property
+    def cmd(self) -> list[str]:
+        return [sys.executable, "-m", "inference_suite", "run", "--config", self.config_path, "--run-dir", self.run_dir]
+
+    def run(self) -> tuple[int, str, str]:
+        """Ray worker body: pin the config to the actor's GPUs, then run the round's CLI under session-kill."""
+        refusal = _pin_to_placed_gpus(Path(self.config_path))
+        if refusal is not None:
+            return EXIT_REFUSED, "", refusal
+        return SessionKillRound(
+            self.cmd, env=self.env, timeout=self.timeout, session_remaining_sec=self.session_remaining_sec
+        ).run()
+
+
+def _pin_to_placed_gpus(config_path: Path) -> str | None:
+    """Name the GPUs Ray placed this worker on as the round's server GPUs; why not, when the round cannot run there."""
+    placed = os.environ.get(_RAY_PLACED_GPUS_VAR, "").strip()
+    if not placed:
+        # Ray narrowed nothing, so the GPUs the config names are the machine's own.
+        return None
+    try:
+        config = SuiteConfig.from_document(yaml.safe_load(config_path.read_text(encoding=_UTF8)))
+        gpus = tuple(int(gpu) for gpu in placed.split(","))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return f"config_invalid: the leased round's config cannot be pinned to GPUs {placed}: {exc}"
+    if len(gpus) != len(config.server.gpus):
+        return f"config_invalid: Ray placed the round on GPUs {placed}, its server runs on {len(config.server.gpus)}"
+    pinned = replace(config, server=replace(config.server, gpus=gpus))
+    config_path.write_text(yaml.safe_dump(pinned.to_document(), sort_keys=False), encoding=_UTF8)
+    return None
+
+
+#: A round either the lease's actor runs: a benchmark subprocess, or an inference_suite round.
+LeasedRound = SessionKillRound | SuiteLeasedRound
 
 
 class RayExecutionBackend:
@@ -172,7 +230,7 @@ def strip_visible_devices_from_config(config_path: Path | str) -> Path:
 
     src = Path(config_path)
     try:
-        with src.open(encoding="utf-8") as fp:
+        with src.open(encoding=_UTF8) as fp:
             cfg = yaml.safe_load(fp) or {}
         owned = [key for key in _RAY_OWNED_VISIBLE_DEVICE_VARS if key in BenchmarkPoint.from_document(cfg).envs]
     except (OSError, yaml.YAMLError, PointError):
@@ -183,7 +241,7 @@ def strip_visible_devices_from_config(config_path: Path | str) -> Path:
         del cfg["benchmark"]["envs"][key]
     out = src.with_name(f"{src.stem}.ray{src.suffix or '.yaml'}")
     try:
-        with out.open("w", encoding="utf-8") as fp:
+        with out.open("w", encoding=_UTF8) as fp:
             yaml.safe_dump(cfg, fp, sort_keys=False)
     except OSError:
         return src
@@ -217,7 +275,10 @@ def mark_ray_backend_unhealthy() -> None:
 
 
 __all__ = [
+    "LeasedRound",
     "RayExecutionBackend",
+    "SessionKillRound",
+    "SuiteLeasedRound",
     "ray_exec_enabled",
     "get_ray_backend",
     "mark_ray_backend_unhealthy",
