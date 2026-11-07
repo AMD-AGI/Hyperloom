@@ -31,11 +31,13 @@ from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
     is_secret_shaped_env_name,
+    redact_secret_values,
 )
 from hyperloom.measure.compile import BlobError
 from hyperloom.measure.docs import DocumentError, canonical_json
 from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES, PLATFORM_ENV_NAMES, SPEC_SCHEMA, MeasurementSpec
 from hyperloom.measure.socket import TestCall
+from inference_suite.contracts import BaseLaunch
 
 __all__ = [
     "MAX_ATTACHMENT_BYTES",
@@ -377,10 +379,34 @@ def _tools_section(call: TestCall, ctx: SpecContext) -> dict[str, Any]:
     }
 
 
+def _unredacted_credentials(base: BaseLaunch) -> list[str]:
+    """Where ``base`` holds a credential in the clear: an env value under a secret-shaped name, or any env value or
+    arg that looks like one. A sheet leaves the application, so only a :class:`Redacted` value may stand for one."""
+    layers = [("env", base.env, base.args), ("client env", base.client.env, base.client.args)]
+    if base.golden_al is not None:
+        layers.append(("golden env", base.golden_al.env, base.golden_al.args))
+    found = []
+    for what, env, args in layers:
+        found += [
+            f"{what} {name}"
+            for name, value in env.items()
+            if isinstance(value, str) and (is_secret_shaped_env_name(name) or redact_secret_values(value) != value)
+        ]
+        found += [
+            f"{what.replace('env', 'arg')} {index}"
+            for index, arg in enumerate(args)
+            if redact_secret_values(arg) != arg
+        ]
+    return found
+
+
 def _base_launch_document(call: TestCall) -> dict[str, Any]:
     base = call.session_facts.base_launch if call.session_facts else None
     if base is None:
         raise SpecRefused("base_launch_missing", f"a {SPEC_SCHEMA} sheet carries the session's frozen base launch")
+    found = _unredacted_credentials(base)
+    if found:
+        raise SpecRefused("base_launch_secret", f"the frozen base holds an unredacted credential in {', '.join(found)}")
     return base.to_document()
 
 
