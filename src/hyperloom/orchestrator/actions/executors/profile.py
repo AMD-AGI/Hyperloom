@@ -930,12 +930,13 @@ class ProfileExecutor(BenchmarkRunExecutor):
             default_config_path=default_config_path,
             session_dir=session_dir,
         )
-        # Set by ``_after_materialize_config`` once the probe is armed; read after the run to merge per-rank reports.
+        # Set by ``_prepare_point`` once the probe is armed; read after the run to merge per-rank reports.
         self._host_probe_dir: str = ""
         # Non-empty only when arming failed, and then says why (an empty probe dir cannot tell never-asked from failed).
         self._host_probe_status: str = ""
-        # Set by ``_after_materialize_config`` from the config the run will actually execute, so the post-hoc trace
-        # checks ship alongside the pre-run statement of whether their subject could have been produced.
+        # Set by ``_prepare_point`` from the config the run will actually execute, and restated with the patchers'
+        # outcomes by ``_after_materialize_config`` on the benchmark backend, so the post-hoc trace checks ship
+        # alongside the pre-run statement of whether their subject could have been produced.
         self._instrumentation_preflight: dict[str, Any] | None = None
 
     def _resolve_default_config(self) -> Path:
