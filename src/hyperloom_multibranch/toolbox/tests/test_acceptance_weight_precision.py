@@ -377,6 +377,8 @@ OVERRIDES_ADDED = [
         '--json-model-override-args \'{"compression_config": {"format": "float-quantized"}}\'',
         f'{JSON_ARGS}: (not set) -> compression_config={{"format":"float-quantized"}}',
     ),
+    # A null counts too: it drops a compressed-tensors checkpoint's quantization config.
+    ("--hf-overrides '{\"compression_config\": null}'", f"{HF}: (not set) -> compression_config=null"),
     (
         '--hf-overrides \'{"text_config": {"compression_config": {"format": "float-quantized"}}}\'',
         f'{HF}: (not set) -> text_config.compression_config={{"format":"float-quantized"}}',
@@ -418,6 +420,7 @@ OVERRIDES_ADDED = [
         "--json-model-override-args {torch_dtype=float16}",
         f"{JSON_ARGS}: (not set) -> (unparsed) {{torch_dtype=float16}}",
     ),
+    ("--hf-overrides compression_config=null", f"{HF}: (not set) -> (unparsed) compression_config=null"),
 ]
 
 
@@ -634,6 +637,13 @@ BF16_IN_EFFECT = '(torch_dtype="bfloat16" in effect)'
             _delta("--dty float16"),
             "--dtype: bfloat16 -> bfloat16 | float16 (float16 in effect)",
         ),
+        # vLLM gives each spelling's merged dotted occurrences in the order the spellings first come: float16 last.
+        (
+            TWO_DTYPES,
+            _delta("--hf-overrides.torch_dtype bfloat16 --hf-over.torch_dtype float16"),
+            f'{HF}: torch_dtype="bfloat16" | torch_dtype="float16" {BF16_IN_EFFECT} -> '
+            'torch_dtype="bfloat16" | torch_dtype="float16" (torch_dtype="float16" in effect)',
+        ),
     ],
 )
 async def test_a_candidate_that_changes_which_value_takes_effect_is_refused(
@@ -662,6 +672,8 @@ async def test_a_candidate_that_changes_which_value_takes_effect_is_refused(
         ),
         (KEYED_LAST, _delta("--max-num-seqs 64")),
         ("--dtype float16 --dty bfloat16", _delta("--max-num-seqs 64")),
+        # The spellings' dotted occurrences come in the other order: bfloat16 last, as the root serves it.
+        (TWO_DTYPES, _delta("--hf-over.torch_dtype float16 --hf-overrides.torch_dtype bfloat16")),
     ],
 )
 async def test_a_candidate_that_keeps_the_value_in_effect_is_accepted(
@@ -741,6 +753,52 @@ def test_a_removal_from_the_resolved_launch_comes_before_the_launch_own_flags() 
         "--dtype: <removed> | bfloat16 | float16 (float16 in effect) -> "
         "<removed> | bfloat16 | float16 (bfloat16 in effect)"
     ]
+
+
+# --- vLLM's dotted flag takes the next word as its value, whatever it is ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "server_args",
+    [
+        # vLLM sets ``foo`` to ``-qfp8`` and serves no quantization: the composed launch keeps no other.
+        "--hf-overrides.foo -qfp8",
+        "--hf-overrides.foo -q=fp8",
+        "--additional-config.foo -qfp8 --max-num-seqs 64",
+        # A one-dash flag with a dot is dotted too (vLLM's ``-cc`` is its ``--compilation-config``).
+        "-cc.custom_ops+ -qfp8",
+    ],
+)
+async def test_a_flag_word_a_dotted_flag_takes_as_its_value_is_not_that_flag(tmp_path: Path, server_args: str) -> None:
+    change = _delta(server_args, remove_args=("--quantization",))
+    await _refused_naming(tmp_path, _repo("--quantization fp8"), change, "--quantization: fp8 -> (not set)")
+
+
+@pytest.mark.parametrize(
+    ("root_args", "change"),
+    [
+        # The dotted flag takes ``bar``; ``-qfp8`` is the root's quantization.
+        ("--quantization fp8", _delta("--hf-overrides.foo bar -qfp8", remove_args=("--quantization",))),
+        # A word after the dotted flag's value is read with the flag before the dotted one, as argparse reads what vLLM
+        # leaves of the launch: ``--revision 3``.
+        ("--revision 3", _delta("--revision --hf-overrides.foo x 3")),
+    ],
+)
+async def test_the_words_after_a_dotted_flag_value_are_read_as_vllm_leaves_them(
+    tmp_path: Path, root_args: str, change: RecipeDelta
+) -> None:
+    assert await _refusal(tmp_path, _repo(root_args), change) is None
+
+
+async def test_a_word_after_a_dotted_flag_value_that_changes_the_flag_before_it_is_refused(tmp_path: Path) -> None:
+    change = _delta("--revision --hf-overrides.foo x 4")
+    await _refused_naming(tmp_path, _repo("--revision 3"), change, "the checkpoint's revision: 3 -> 4")
+
+
+def test_a_dotted_flag_written_with_its_value_takes_no_other_word() -> None:
+    """The composed launch writes ``--flag.key=value`` as two words, so only the comparison sees this form."""
+    assert _changes("--quantization fp8", "--hf-overrides.foo=bar -qfp8") == []
+    assert _changes("--quantization fp8", "--hf-overrides.foo -qfp8") == ["--quantization: fp8 -> (not set)"]
 
 
 # --- options of the frameworks that a spelling only begins, or that only begin one ---------------------------------
