@@ -1040,8 +1040,9 @@ wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for advanced Magpie settings. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
 Native AgentX supports one node and SGLang/vLLM. It rejects `--enable-conc-sweep`,
-`--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--reference-script`,
-`--quantize` and `--quantize-scheme`. Prepare quantized checkpoints before the run.
+`--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--quantize` and
+`--quantize-scheme`. `--reference-script` is its base launch, ahead of the
+recipes; a session no recipe serves and given no script exits 2. Prepare quantized checkpoints before the run.
 Do not pass `ISL`, `OSL`, `RANDOM_RANGE_RATIO`, `MAX_MODEL_LEN`, `EP_SIZE`, or
 `AIPERF_*` / `AGENTX_*` / `AGENTIC_*` controls through `--extra-env`; use `--ep`
 for expert parallelism and Magpie YAML for advanced workload settings.

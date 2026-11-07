@@ -4,9 +4,10 @@
 """Resolve a fresh session's base launch and freeze it as ``base_launch.json``.
 
 The base comes from the operator's ``--reference-script`` when one is given, otherwise from the first recipe source
-that serves the session, otherwise from the default table, which also runs a session when a recipe source cannot be
-read. Resolving reads every source once, here; a resume reads the frozen file instead. Scriptable workloads launch no server and AgentX sessions still take their launch from their
-own recipe path, so neither resolves a base.
+that serves the session, otherwise, for a fixed workload only, from the default table, which also runs a fixed session
+when a recipe source cannot be read. An AgentX session no recipe serves is refused. Resolving reads every source once,
+here; a resume reads the frozen file instead. Scriptable workloads launch no server and the MLPerf AgentX client still
+launches its own, so neither resolves a base.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
+from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.common.model_paths import hf_repo_id
 from hyperloom.common.perf_metric import is_agentx_mode
@@ -76,20 +78,24 @@ def _model_id(args: argparse.Namespace) -> str:
     return hf_repo_id(model) or Path(model).name or model
 
 
-def _query(args: argparse.Namespace, *, framework: str, concurrencies: Sequence[int]) -> LaunchQuery:
+def _query(
+    args: argparse.Namespace, *, framework: str, workload: Workload, concurrencies: Sequence[int]
+) -> LaunchQuery:
+    """The session's query; an AgentX trace replay names no sequence shape."""
     board = (getattr(args, "gpu_type", None) or "").strip()
     if not board:
         _refuse("the base launch is resolved for the target GPU board, and none was detected; pass --gpu-type")
+    fixed = workload is Workload.FIXED
     return LaunchQuery(
         model_id=_model_id(args),
         framework=framework,
         board=board,
-        workload=Workload.FIXED,
+        workload=workload,
         concurrencies=tuple(sorted(set(concurrencies))),
         tp=args.operator_tp,
         ep=args.operator_ep,
-        isl=int(args.isl),
-        osl=int(args.osl),
+        isl=int(args.isl) if fixed else None,
+        osl=int(args.osl) if fixed else None,
     )
 
 
@@ -138,17 +144,19 @@ def resolve_base_launch(
 
     The session then runs at the base's TP and EP, so this runs before anything records them. ``None`` when the
     session resolves no base. Exits 2 when the operator's launch file cannot serve as the base, the query is
-    malformed, or no source and no default serves the session.
+    malformed, or no source and no default serves the session; an AgentX session has no default.
     """
     location = (getattr(args, "reference_script", None) or "").strip()
     if is_scriptable(framework):
         if location:
             _refuse(f"--reference-script is a server launch; a {framework} workload launches no server")
         return None
-    if is_agentx_mode(benchmark_mode):
+    agentx = is_agentx_mode(benchmark_mode)
+    if agentx and is_mlperf_backend():
         return None
     try:
-        query = _query(args, framework=framework, concurrencies=concurrencies)
+        workload = Workload.AGENTX if agentx else Workload.FIXED
+        query = _query(args, framework=framework, workload=workload, concurrencies=concurrencies)
         gpus = _session_gpus(args)
         user_file = _read_user_file(location, framework) if location else None
         found = resolve_base(query, fetch_sources(query, user_file=user_file), gpus=gpus)
