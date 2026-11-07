@@ -160,6 +160,17 @@ _HOST_PYTHON_ENV_KEYS = frozenset({"PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER
 # RUNTIME_ENV_WORKSPACE_DERIVED_KEYS in assets/runtime_env.sh). The kernel-agent.env.sh loaded next carries them.
 _WORKSPACE_DERIVED_ENV_KEYS = frozenset({"HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV", "HYPERLOOM_ROOT"})
 _KERNEL_AGENT_ENV_NAME = "kernel-agent.env.sh"
+# The credentials install_kernel_tools.sh write_env_file keeps in a private checkout's .env and, on a checkout another
+# account can write (_dotenv_not_private), in the kernel-agent env file alone (RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS in
+# assets/runtime_env.sh; test_dotenv_credentials_private.py holds the two equal).
+_DOTENV_CREDENTIAL_KEYS: tuple[str, ...] = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+)
+# The line write_env_file leaves in a .env it kept them out of (see _dotenv_credentials_elsewhere).
+_DOTENV_CREDENTIALS_MARKER = "HYPERLOOM_DOTENV_CREDENTIALS"
 
 
 def _load_missing_env_vars(file_vars: dict[str, str]) -> int:
@@ -205,11 +216,38 @@ def _load_dotenv_fallback() -> dict[str, Any]:
     loaded = _load_missing_env_vars(safe_vars)
     if loaded:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
+    detail: dict[str, Any] = {"vars_loaded": loaded, "source": str(env_file)}
+    moved = _load_moved_dotenv_credentials(env_file)
+    if moved is not None:
+        detail["credentials"] = moved
+        loaded += moved["vars_loaded"]
     return {
         "status": "applied" if loaded else "already_present",
         "skip_reason": None,
-        "detail": {"vars_loaded": loaded, "source": str(env_file)},
+        "detail": detail,
     }
+
+
+def _load_moved_dotenv_credentials(env_file: Path) -> dict[str, Any] | None:
+    """Fill the credentials ``env_file`` no longer carries from the kernel-agent env file; None for a private checkout.
+
+    install_kernel_tools.sh ``write_env_file`` keeps them out of a ``.env`` another account can write
+    (``_dotenv_credentials_elsewhere``) and writes them into this container's kernel-agent env file alone. They are
+    read from there here, with ``.env``, so the provider intent preflight takes from what ``.env`` supplied
+    (``_provider_only_mode``) still counts them, as it did when ``.env`` held them. install.sh's
+    ``preflight_load_dotenv`` does the same in shell (``runtime_env_load_kernel_agent_credentials``).
+    """
+    elsewhere = _dotenv_credentials_elsewhere(env_file)
+    if elsewhere is None:
+        return None
+    env_path, credentials = _kernel_agent_env_credentials()
+    loaded = _load_missing_env_vars(credentials)
+    if loaded:
+        print(
+            f"Preflight: loaded {loaded} missing credential(s) from {env_path} (env wins): {env_file} keeps none, "
+            f"as {elsewhere}"
+        )
+    return {"why": elsewhere, "vars_loaded": loaded, "source": str(env_path) if env_path else None}
 
 
 def _prepend_path(var: str, entry: str) -> None:
@@ -461,7 +499,8 @@ def _kernel_agent_env_problem(entry_stat: os.stat_result, *, is_dir: bool) -> st
     that its group and others cannot write, as a regular file of this account's, not a link, that they cannot write.
     The rule's owner is ``runtime_env_private_kernel_agent_env`` in assets/runtime_env.sh (install.sh, the documented
     ``source`` line, the slurm job); this is its copy for preflight, in the same words, and
-    ``test_install_session_paths.py`` holds every reader to the same refusals.
+    ``test_install_session_paths.py`` holds every reader to the same refusals. ``_dotenv_not_private`` holds the
+    checkout's ``.env`` to the same rule.
     """
     uid = os.geteuid()
     if stat.S_ISLNK(entry_stat.st_mode):
@@ -508,18 +547,78 @@ def _read_kernel_agent_env(env_path: Path) -> str:
         return handle.read().decode("utf-8", errors="replace")
 
 
-def _load_kernel_agent_env_fallback() -> dict[str, Any]:
-    """Auto-source the installer-written kernel-agent env file (see ``_kernel_agent_env_candidate``)."""
-    env_path = _kernel_agent_env_path()
+def _kernel_agent_env_text(env_path: Path) -> str:
+    """``_read_kernel_agent_env``, exiting 2 with why when the file cannot be read."""
     try:
-        text = _read_kernel_agent_env(env_path)
+        return _read_kernel_agent_env(env_path)
     except OSError as exc:
         print(
             f"Preflight: ERROR — failed to read {env_path}: {exc}",
             file=sys.stderr,
         )
         sys.exit(2)
-    parsed_file_vars = _parse_env_assignments(text)
+
+
+def _dotenv_not_private(env_file: Path) -> str | None:
+    """Why another account can write the checkout's ``env_file``, or None when this account alone can.
+
+    The checkout directory and the file, when there is one, are held to ``_kernel_agent_env_problem``'s rule for a
+    directory and for a regular file: a link, another account's, or writable by its group or others. A copy of
+    ``runtime_env_dotenv_not_private`` in assets/runtime_env.sh, which install_kernel_tools.sh ``write_env_file`` asks
+    before it writes credentials to ``.env``, in the same words; test_dotenv_credentials_private.py holds the two to the
+    same answer.
+    """
+    for entry, is_dir in ((env_file.parent, True), (env_file, False)):
+        try:
+            entry_stat = entry.lstat()
+        except FileNotFoundError:
+            if is_dir:
+                return f"{entry} is not a directory"
+            continue
+        except OSError:
+            return f"{entry} cannot be inspected"
+        problem = _kernel_agent_env_problem(entry_stat, is_dir=is_dir)
+        if problem is not None:
+            return f"{entry} {problem}"
+    return None
+
+
+def _dotenv_credentials_elsewhere(env_file: Path) -> str | None:
+    """Why the checkout's credentials are in the kernel-agent env file rather than in ``env_file``; None when it keeps them.
+
+    Another account can write it (``_dotenv_not_private``), or it carries
+    ``HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env``, which ``write_env_file`` leaves in a ``.env`` it kept them out
+    of: its own writes turn a ``.env`` another account could write, in a private directory, into one of this
+    account's. Asked once ``.env`` is loaded. A copy of ``runtime_env_dotenv_credentials_elsewhere`` in
+    assets/runtime_env.sh, in the same words.
+    """
+    not_private = _dotenv_not_private(env_file)
+    if not_private is not None:
+        return f"another account can write it ({not_private})"
+    if os.environ.get(_DOTENV_CREDENTIALS_MARKER) == "kernel-agent-env":
+        return f"it carries {_DOTENV_CREDENTIALS_MARKER}=kernel-agent-env"
+    return None
+
+
+def _kernel_agent_env_credentials() -> tuple[Path | None, dict[str, str]]:
+    """The kernel-agent env file install.sh wrote in this container, and its ``_DOTENV_CREDENTIAL_KEYS`` read as data.
+
+    No file and no credentials when install.sh has not written one: ``_load_kernel_agent_env_fallback``, which runs
+    next, stops the run and says why. A file another account could have written is refused, unread, as that step
+    refuses it (exit 2). A copy of ``runtime_env_load_kernel_agent_credentials`` in assets/runtime_env.sh.
+    """
+    candidate = _kernel_agent_env_candidate()
+    if not candidate or not os.path.lexists(candidate):
+        return None, {}
+    env_path = _kernel_agent_env_path()
+    parsed = _parse_env_assignments(_kernel_agent_env_text(env_path))
+    return env_path, {key: parsed[key] for key in _DOTENV_CREDENTIAL_KEYS if parsed.get(key)}
+
+
+def _load_kernel_agent_env_fallback() -> dict[str, Any]:
+    """Auto-source the installer-written kernel-agent env file (see ``_kernel_agent_env_candidate``)."""
+    env_path = _kernel_agent_env_path()
+    parsed_file_vars = _parse_env_assignments(_kernel_agent_env_text(env_path))
     file_vars, dropped_file_vars = filter_untrusted_env_mapping(
         parsed_file_vars,
         allow_predicate=lambda key: (

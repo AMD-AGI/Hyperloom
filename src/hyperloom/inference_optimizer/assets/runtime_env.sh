@@ -214,6 +214,139 @@ _runtime_env_not_private() {
   fi
 }
 
+# The credentials install_kernel_tools.sh write_env_file keeps in a private checkout's .env. A checkout another account
+# can write (runtime_env_dotenv_not_private), such as one bind-mounted from shared storage, keeps none there: they go to
+# this container's kernel-agent env file alone, write_env_file removes any left in .env
+# (runtime_env_remove_dotenv_credentials), and a reader that took them from .env takes them from that file
+# (runtime_env_dotenv_credentials_elsewhere, runtime_env_load_kernel_agent_credentials, behind install.sh's
+# preflight_load_dotenv). Preflight's copy of this list is _DOTENV_CREDENTIAL_KEYS in cli/preflight_env.py;
+# test_dotenv_credentials_private.py holds the two equal.
+RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS="ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_OAUTH_TOKEN"
+
+# Why another account can write the checkout's .env $1, or nothing when this account alone can: the checkout directory
+# is held to runtime_env_private_kernel_agent_env's rule for a directory and the file, when there is one, to its rule
+# for a regular file (_runtime_env_not_private: a link, another account's, or writable by its group or others).
+# Preflight's copy is _dotenv_not_private in cli/preflight_env.py, with the same words.
+runtime_env_dotenv_not_private() {
+  local dotenv="$1" dir problem
+  dir="$(dirname -- "$dotenv")"
+  problem="$(_runtime_env_not_private "$dir" directory)"
+  if [ -n "$problem" ]; then
+    printf '%s %s' "$dir" "$problem"
+  elif [ -e "$dotenv" ] || [ -L "$dotenv" ]; then
+    problem="$(_runtime_env_not_private "$dotenv" 'regular file')"
+    [ -z "$problem" ] || printf '%s %s' "$dotenv" "$problem"
+  fi
+}
+
+# Why this checkout's credentials are in the kernel-agent env file rather than in its .env $1, or nothing when .env
+# keeps them: another account can write .env (runtime_env_dotenv_not_private), or it carries
+# HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env. write_env_file leaves that line in a .env it kept them out of, because
+# its own writes turn a .env another account could write in a private directory into one of this account's. Ask once
+# load_dotenv_no_clobber has loaded .env. Preflight's copy is _dotenv_credentials_elsewhere in cli/preflight_env.py.
+runtime_env_dotenv_credentials_elsewhere() {
+  local not_private
+  not_private="$(runtime_env_dotenv_not_private "$1")"
+  if [ -n "$not_private" ]; then
+    printf 'another account can write it (%s)' "$not_private"
+  elif [ "${HYPERLOOM_DOTENV_CREDENTIALS:-}" = kernel-agent-env ]; then
+    printf 'it carries HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env'
+  fi
+}
+
+# Remove from the checkout's .env $1 every assignment of RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS and of the keys $2...,
+# with the continuation lines of a quoted value, and keep every other byte. The lines are told apart as
+# load_dotenv_no_clobber reads them. What is kept is written beside the file (mktemp in its directory), given its mode
+# and renamed over it, so a reader sees the old file or the new one, never part of one, and a link there is replaced,
+# never written through. Nothing is written when there is nothing to remove. Status 1 and why on stderr when it cannot
+# be done.
+runtime_env_remove_dotenv_credentials() {
+  local dotenv="$1" keys mode=600 tmp line text key nl quote="" drop=0 removed=0
+  shift
+  keys=" $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $* "
+  [ -f "$dotenv" ] || return 0
+  [ -L "$dotenv" ] || mode="$(stat -c '%a' -- "$dotenv")" || return 1
+  tmp="$(mktemp "$(dirname -- "$dotenv")/.env.XXXXXX")" || return 1
+  while :; do
+    nl=$'\n'
+    if ! IFS= read -r line; then
+      [ -n "$line" ] || break
+      nl=''
+    fi
+    if [ -n "$quote" ]; then
+      ! _runtime_env_quote_ends "$quote" "$line" || quote=""
+    else
+      drop=0
+      text="${line#"${line%%[![:space:]]*}"}"
+      text="${text#export }"
+      if [[ "$text" == *=* && "$text" != \#* ]]; then
+        key="${text%%=*}"
+        [[ "$keys" != *" ${key%"${key##*[![:space:]]}"} "* ]] || drop=1
+        text="${text#*=}"
+        text="${text#"${text%%[![:space:]]*}"}"
+        case "$text" in
+          \"* | \'*) _runtime_env_quote_ends "${text:0:1}" "${text:1}" || quote="${text:0:1}" ;;
+        esac
+      fi
+    fi
+    if [ "$drop" -eq 1 ]; then
+      removed=$((removed + 1))
+    else
+      printf '%s%s' "$line" "$nl"
+    fi
+  done < "$dotenv" > "$tmp"
+  if [ -n "$quote" ]; then
+    printf '[runtime-env ERROR] cannot remove the credentials from %s: a quoted value in it never ends\n' "$dotenv" >&2
+  elif [ "$removed" -eq 0 ] || { chmod -- "$mode" "$tmp" && mv -fT -- "$tmp" "$dotenv"; }; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
+# Status 0 when $2, the rest of a line, ends a value quoted with $1 as _runtime_env_read_quoted_value ends one: its last
+# character other than a blank is that quote, not escaped (for a double quote) by an odd run of backslashes before it.
+# Status 1 while the value runs on to the next line.
+_runtime_env_quote_ends() {
+  local text="${2%"${2##*[![:space:]]}"}" run
+  [ -n "$text" ] && [ "${text: -1}" = "$1" ] || return 1
+  [ "$1" = '"' ] || return 0
+  text="${text%?}"
+  run="${text##*[!\\]}"
+  [ $((${#run} % 2)) -eq 0 ]
+}
+
+# Export, as data and only where the variable is unset or empty, the RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS lines of the
+# kernel-agent env file $1 that install.sh wrote in this container: what a checkout's .env no longer carries once
+# another account can write it. Nothing when there is no such file; status 1, with runtime_env_private_kernel_agent_env's
+# refusal on stderr, for one another account could have written, which is not read. RUNTIME_ENV_CREDENTIALS_LOADED
+# counts what was exported. Preflight's copy is _kernel_agent_env_credentials in cli/preflight_env.py.
+runtime_env_load_kernel_agent_credentials() {
+  local file="$1" line key value REPLY
+  RUNTIME_ENV_CREDENTIALS_LOADED=0
+  [ -e "$file" ] || [ -L "$file" ] || return 0
+  runtime_env_private_kernel_agent_env "$file" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line#export }"
+    key="${line%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ "$line" == *=* && " $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS " == *" $key "* ]] || continue
+    value="${line#*=}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$value" in
+      \"* | \'*)
+        _runtime_env_read_quoted_value "$value" || return 1
+        value="$REPLY" ;;
+      *) value="${value%"${value##*[![:space:]]}"}" ;;
+    esac
+    [ -n "$value" ] && [ -z "${!key:-}" ] || continue
+    export "$key=$value"
+    RUNTIME_ENV_CREDENTIALS_LOADED=$((RUNTIME_ENV_CREDENTIALS_LOADED + 1))
+  done < "$file"
+}
+
 load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT=0
   [ -f "$REPO_ROOT/.env" ] || return 0

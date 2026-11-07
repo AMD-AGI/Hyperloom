@@ -1055,6 +1055,21 @@ write_env_file() {
   mv -f -- "$written" "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
 
+  # A checkout another account can write -- a group- or other-writable checkout or .env, one of another account's, or a
+  # link, as a checkout bind-mounted from shared storage is -- keeps no credentials in .env, where that account could
+  # read or rewrite them: they are in the file above alone, and the ones an earlier install or the operator left in .env
+  # (with the retired spellings purged below) are removed first, before any write below copies .env. Readers that took
+  # them from .env take them from that file instead (install.sh preflight_load_dotenv, preflight's
+  # _load_dotenv_fallback). Asked before the first write below, which replaces .env with a file of this account's.
+  local dotenv_not_private
+  dotenv_not_private="$(runtime_env_dotenv_not_private "$DOTENV")"
+  if [ -n "$dotenv_not_private" ]; then
+    runtime_env_remove_dotenv_credentials "$DOTENV" ANTHROPIC_AUTH_TOKEN DEEPSEEK_API_KEY SAFE_API_KEY \
+      AMD_LLM_API_KEY LLM_GATEWAY_KEY GEAK_API_KEY ||
+      die "the credentials in ${DOTENV} could not be removed, and another account can write it (${dotenv_not_private}); remove them by hand"
+    log "credentials kept out of ${DOTENV}, which another account can write (${dotenv_not_private}): they are in ${env_file} alone"
+  fi
+
   # .env is shared by every session run from this checkout, so it keeps only the
   # workspace root: a later run without USER_DATA_PATH in its shell still finds
   # this workspace, and the paths below derive from that root again. They are not
@@ -1074,22 +1089,31 @@ write_env_file() {
   # Persist each provider's own canonical vars (write when present, clear when
   # absent) so an operator's .env creds survive a re-install. Never cross-write
   # and never persist gateway aliases, so the two providers stay separated.
-  if [ -n "${_anthropic_url}" ]; then
-    upsert_dotenv_var ANTHROPIC_BASE_URL "$_anthropic_url"
+  # Only in a private checkout (see dotenv_not_private above).
+  if [ -z "$dotenv_not_private" ]; then
+    if [ -n "${_anthropic_url}" ]; then
+      upsert_dotenv_var ANTHROPIC_BASE_URL "$_anthropic_url"
+    else
+      remove_dotenv_var ANTHROPIC_BASE_URL
+    fi
+    if [ -n "${_anthropic_key}" ]; then
+      upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
+    else
+      remove_dotenv_var ANTHROPIC_API_KEY
+    fi
+    # The subscription token is a credential form of its own, not another
+    # spelling of the API key, so it is persisted beside the slot above rather
+    # than folded into it. Write-only: an unset token means the operator
+    # authenticates some other way this run, not that a stored one should go.
+    if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+      upsert_dotenv_var CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
+    fi
+    [ -z "${HYPERLOOM_DOTENV_CREDENTIALS:-}" ] || remove_dotenv_var HYPERLOOM_DOTENV_CREDENTIALS
   else
-    remove_dotenv_var ANTHROPIC_BASE_URL
-  fi
-  if [ -n "${_anthropic_key}" ]; then
-    upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
-  else
-    remove_dotenv_var ANTHROPIC_API_KEY
-  fi
-  # The subscription token is a credential form of its own, not another
-  # spelling of the API key, so it is persisted beside the slot above rather
-  # than folded into it. Write-only: an unset token means the operator
-  # authenticates some other way this run, not that a stored one should go.
-  if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    upsert_dotenv_var CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
+    # The writes above leave a .env of this account's even where another account could write the one they replaced,
+    # and a later reader would take it for a private .env that holds the credentials. This line, no secret, says they
+    # are in the kernel-agent env file (runtime_env_dotenv_credentials_elsewhere).
+    upsert_dotenv_var HYPERLOOM_DOTENV_CREDENTIALS kernel-agent-env
   fi
   # Only the Anthropic side is persisted here. The OpenAI-side entries in the
   # shared .env are owned elsewhere and left untouched -- which is also what
