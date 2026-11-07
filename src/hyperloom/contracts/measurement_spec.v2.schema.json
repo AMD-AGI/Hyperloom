@@ -267,13 +267,69 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "staging"
+            "staging",
+            "normalised"
           ],
           "properties": {
             "staging": {
               "type": "string",
               "pattern": "^[0-9a-f]{64}$",
-              "description": "The sha256 of the inference_suite staging manifest the runner stages and runs."
+              "description": "The sha256 of the normalised manifest below: what the fingerprint keeps of the staging."
+            },
+            "normalised": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "schema",
+                "inferencex",
+                "interpreter_version",
+                "interpreter_sha256",
+                "packages"
+              ],
+              "description": "The application's inference_suite staging with every path left out; the runner refuses a test whose own differs.",
+              "properties": {
+                "schema": {
+                  "const": "inference-suite-normalised/1"
+                },
+                "inferencex": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "interpreter_version": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "interpreter_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "packages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "name",
+                      "version",
+                      "wheel_sha256"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "version": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "wheel_sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
         },

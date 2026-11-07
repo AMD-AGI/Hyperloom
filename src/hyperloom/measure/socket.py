@@ -24,7 +24,7 @@ from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
-from inference_suite.contracts import BaseLaunch
+from inference_suite.contracts import BaseLaunch, NormalisedManifest
 
 __all__ = [
     "EnvironmentRef",
@@ -101,13 +101,13 @@ class EnvironmentRef:
 class SessionFacts:
     """Session-level facts the old flow keeps in its state and a runner takes from the instruction sheet.
 
-    ``staging`` is the sha256 of the inference_suite staging manifest the test's rounds run, and ``base_launch`` the
+    ``staging`` is the normalised manifest of the inference_suite staging the test's rounds run, and ``base_launch`` the
     session's frozen base, which the test's own session directory is given so its rounds run on inference_suite.
     """
 
     reference_unset_envs: tuple[str, ...] = ()
     inferencex_path: str | None = None
-    staging: str | None = None
+    staging: NormalisedManifest | None = None
     base_launch: BaseLaunch | None = None
 
 

@@ -8,9 +8,10 @@ sha256 of the exact bytes written (:meth:`MeasurementSpec.sha256`, recorded in t
 *fingerprint* of the measurement content that is stable across sessions (:func:`fingerprint`), so the same measurement
 deduplicates inside a campaign and compares across campaigns.
 
-A v2 sheet carries the session's frozen base launch whole (``procedure.base_launch``) and names the application's
-inference_suite staging by its manifest's sha256 (``tools.inference_suite.staging``); a hosted runner stages the same
-pins itself and its result manifest names its own staging. A v1 sheet, written while tests
+A v2 sheet carries the session's frozen base launch whole (``procedure.base_launch``) and the application's
+inference_suite staging as its normalised manifest (``tools.inference_suite.normalised``) and that manifest's sha256
+(``tools.inference_suite.staging``); a hosted runner refuses a test whose own published staging differs from it and
+its result manifest names its own normalised sha256. A v1 sheet, written while tests
 ran through Magpie, named a Magpie commit and a benchmark backend instead; the journal and the archive keep those, so a
 v1 sheet still loads, but nothing writes one.
 
@@ -30,7 +31,7 @@ from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS
-from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch
+from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, NormalisedError, NormalisedManifest
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
     SHA256_RE,
@@ -53,6 +54,7 @@ _BASE_LAUNCH = "base_launch"
 _BENCHMARK_BACKEND = "benchmark_backend"
 _INFERENCEX = "inferencex"
 _INFERENCE_SUITE = "inference_suite"
+_NORMALISED = "normalised"
 _KIND = "kind"
 _UPSERT = "upsert"
 _RUNTIME = "runtime"
@@ -236,11 +238,11 @@ class Attachment:
 
 @dataclass(frozen=True)
 class ToolCommits:
-    """The tools a sheet names: the InferenceX commit, and the sha256 of the application's inference_suite staging
-    manifest (``staging``). A v1 sheet named a Magpie commit (``magpie``) and no staging."""
+    """The tools a sheet names: the InferenceX commit, and the normalised manifest of the application's inference_suite
+    staging (``staging``). A v1 sheet named a Magpie commit (``magpie``) and no staging."""
 
     inferencex: str
-    staging: str | None = None
+    staging: NormalisedManifest | None = None
     magpie: str | None = None
 
     @classmethod
@@ -260,13 +262,25 @@ class ToolCommits:
     def to_document(self) -> dict[str, Any]:
         if self.magpie is not None:
             return {"magpie": {"commit": self.magpie}, _INFERENCEX: {"commit": self.inferencex}}
-        return {_INFERENCE_SUITE: {"staging": self.staging}, _INFERENCEX: {"commit": self.inferencex}}
+        staging = (
+            None
+            if self.staging is None
+            else {"staging": self.staging.sha256(), _NORMALISED: self.staging.to_document()}
+        )
+        return {_INFERENCE_SUITE: staging, _INFERENCEX: {"commit": self.inferencex}}
 
 
-def _staging_of(value: Any, path: str) -> str:
+def _staging_of(value: Any, path: str) -> NormalisedManifest:
+    """The normalised manifest a sheet carries, refused when it is not the one its ``staging`` sha256 names."""
     r = Reader(value, path)
-    staging = r.text("staging", pattern=SHA256_RE) or ""
+    sha256 = r.text("staging", pattern=SHA256_RE) or ""
+    try:
+        staging = NormalisedManifest.from_document(r.raw(_NORMALISED))
+    except NormalisedError as exc:
+        raise DocumentError(f"{r.at(_NORMALISED)}: {exc}") from None
     r.done()
+    if staging.sha256() != sha256:
+        raise DocumentError(f"{r.at('staging')}: {sha256} is not the sha256 of the normalised manifest it carries")
     return staging
 
 
@@ -802,7 +816,7 @@ def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None 
     """The sheet with everything that is not measurement content removed or replaced.
 
     Removed: ``request_id``, ``meta``, ``procedure.deadline_unix``, ``config.sha256`` (it hashes paths), the session's
-    blob root and runtime snapshot location. Replaced: path-valued YAML fields and session-directory prefixes become
+    blob root and runtime snapshot location, and the staging's normalised manifest, which its sha256 stands for. Replaced: path-valued YAML fields and session-directory prefixes become
     placeholders, and the carried base launch its digest, which leaves out where and when it was resolved. Blobs and
     attachments keep only their hashes.
     """
@@ -812,6 +826,8 @@ def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None 
     del document["procedure"]["deadline_unix"]
     if spec.procedure.base_launch is not None:
         document["procedure"][_BASE_LAUNCH] = spec.procedure.base_launch.digest()
+    if spec.tools.staging is not None:
+        del document["tools"][_INFERENCE_SUITE][_NORMALISED]
     del document["environment"]["blob_root"]
     if document["environment"][_RUNTIME] is not None:
         del document["environment"][_RUNTIME]["snapshot"]

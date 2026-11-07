@@ -18,7 +18,7 @@ from hyperloom.measure.tests.hosted_fixtures import make_call, point_yaml, spec_
 from inference_suite.contracts import Redacted
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
 
-OTHER_STAGING = "d" * 64
+OTHER_STAGING = replace(STAGING, interpreter_version="3.12.16")
 
 
 def _tools(tmp_path, **overrides):
@@ -40,7 +40,7 @@ def test_a_frozen_base_names_the_inferencex_commit_the_inference_suite_staging_r
     assert tools.inferencex == PINNED_TOOLS[INFERENCEX_TOOL]
 
 
-@pytest.mark.parametrize("facts", [None, SessionFacts(), SessionFacts(staging="sha256:" + "d" * 64)])
+@pytest.mark.parametrize("facts", [None, SessionFacts()])
 def test_a_call_whose_facts_name_no_staging_is_refused_not_sent_with_a_guess(tmp_path, facts):
     with pytest.raises(SpecRefused, match="tools_unknown"):
         _tools(tmp_path, session_facts=facts and replace(facts, base_launch=base_launch()))

@@ -67,7 +67,6 @@ MAX_ATTACHMENT_BYTES = 64 * _MIB
 _HASH_CHUNK_BYTES = _MIB
 _POINT_UNREADABLE = "point_unreadable"
 _PLACEHOLDER = re.compile(r"\$\{HL_ATTACH:([A-Za-z0-9][A-Za-z0-9._-]{0,63})\}")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class SpecRefused(ValueError):
@@ -362,13 +361,13 @@ def _hardware_section(ctx: SpecContext, gpus: int) -> dict[str, Any]:
 
 
 def _tools_section(call: TestCall) -> dict[str, Any]:
-    """The staging, and the InferenceX commit the carried base's client is pinned at: the runner stages from a
-    checkout of it, and staging refuses any commit but the one its pins name."""
+    """The application's staging as its normalised manifest and that manifest's sha256, which the runner compares with
+    its own, and the InferenceX commit the carried base's client is pinned at."""
     staging = call.session_facts.staging if call.session_facts else None
-    if not staging or not _SHA256.fullmatch(staging):
-        raise SpecRefused("tools_unknown", f"the inference_suite staging is not a manifest sha256: {staging!r}")
+    if staging is None:
+        raise SpecRefused("tools_unknown", "the test carries no inference_suite staging")
     return {
-        "inference_suite": {"staging": staging},
+        "inference_suite": {"staging": staging.sha256(), "normalised": staging.to_document()},
         "inferencex": {"commit": _frozen_base(call).client.commit},
     }
 
