@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import glob
-import hashlib
 import json
 import logging
 import math
@@ -67,7 +66,6 @@ BASELINE_EVAL_FAILURE_KIND_KEY = "baseline_eval_failure_kind"
 BASELINE_EVAL_OBSERVED_ACCURACY_KEY = "baseline_eval_observed_accuracy"
 BASELINE_EVAL_ACCURACY_FLOOR_KEY = "baseline_eval_accuracy_floor"
 BASELINE_EVAL_EVIDENCE_KEY = "baseline_eval_evidence"
-BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY = "baseline_eval_contract_fingerprint"
 
 # Distinct eval-failure kinds.
 EVAL_KIND_RUNTIME_FAILURE = "eval_runtime_failure"
@@ -146,73 +144,6 @@ def classify_accuracy_failure(score: Any, floor: float) -> str | None:
     if val <= 0.0 or val < floor:
         return EVAL_KIND_ACCURACY_BELOW_FLOOR
     return None
-
-
-def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, str]:
-    """Extract stable eval-contract fields from a materialized Magpie YAML."""
-    if not config_path:
-        return {}
-    try:
-        p = Path(config_path)
-        if not p.is_file():
-            return {}
-        point = read_benchmark_point(p)
-    except (OSError, ValueError, yaml.YAMLError):
-        return {}
-    envs = point.envs
-
-    # Eval-contract keys in benchmark.envs; all others are excluded.
-    _EVAL_CONTRACT_ENV_KEYS = (
-        "RUN_EVAL",
-        "MAGPIE_EVAL_TASKS",
-        "MAGPIE_EVAL_LIMIT",
-        "HYPERLOOM_EVAL_PROBE",
-        "HYPERLOOM_EVAL_PROBE_MIN_SAMPLES",
-        "HYPERLOOM_EVAL_PROBE_LENGTH_RATIO",
-        "HYPERLOOM_EVAL_MAX_TOKENS",
-        "HYPERLOOM_EVAL_DERIVE_STOP",
-        "HYPERLOOM_EVAL_STOP_STRINGS",
-    )
-    # Workload-shape keys that define what is being measured.
-    _WORKLOAD_SHAPE_ENV_KEYS = (
-        "CONC",
-        "ISL",
-        "OSL",
-        "MAX_MODEL_LEN",
-        "TP",
-        "RANDOM_RANGE_RATIO",
-    )
-    contract: dict[str, str] = {
-        "framework": point.framework,
-        "model": point.model,
-        "benchmark_script": point.benchmark_script,
-        "precision": point.precision,
-    }
-    for k in _EVAL_CONTRACT_ENV_KEYS + _WORKLOAD_SHAPE_ENV_KEYS:
-        v = envs.get(k)
-        if v is not None:
-            contract[k] = str(v)
-    return contract
-
-
-def eval_contract_fingerprint(
-    *,
-    config_path: str | Path | None,
-    framework: str | None = None,
-    model: str | None = None,
-) -> str:
-    """Short stable digest of the eval contract (workload + eval definition)."""
-    contract = _extract_eval_contract_fields(config_path)
-    if not contract:
-        # Unreadable or missing config — return invalid sentinel.
-        return ""
-    # Supplement with caller-supplied framework/model when the YAML lacks them.
-    if framework and not contract.get("framework"):
-        contract["framework"] = str(framework)
-    if model and not contract.get("model"):
-        contract["model"] = str(model)
-    payload = json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def resolve_served_context(
@@ -518,9 +449,17 @@ def _eval_definition_digest(results_file: Path) -> str:
     for run_dir in results_file.parents:
         layout = RunLayout(run_dir)
         if layout.eval_dir in results_file.parents and layout.launch.is_file():
-            invocation = Launch.from_document(read_json_strict(layout.launch)).eval
-            return "" if invocation is None else invocation.definition_digest
+            return run_eval_definition_digest(run_dir)
     return ""
+
+
+def run_eval_definition_digest(run_dir: Path) -> str:
+    """The definition digest of the eval the inference_suite round in ``run_dir`` planned, "" when it planned none."""
+    layout = RunLayout(run_dir)
+    if not layout.launch.is_file():
+        return ""
+    invocation = Launch.from_document(read_json_strict(layout.launch)).eval
+    return "" if invocation is None else invocation.definition_digest
 
 
 def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
@@ -727,7 +666,6 @@ __all__ = [
     "ACCURACY_DIR",
     "BASELINE_ACCURACY_STOP_REASON",
     "BASELINE_EVAL_ACCURACY_FLOOR_KEY",
-    "BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY",
     "BASELINE_EVAL_EVIDENCE_KEY",
     "BASELINE_EVAL_FAILED_KEY",
     "BASELINE_EVAL_FAILURE_KIND_KEY",
@@ -746,11 +684,9 @@ __all__ = [
     "EVAL_DEFINITION_DIGEST_KEY",
     "EVAL_KIND_RUNTIME_FAILURE",
     "EVAL_PROBE_FILENAME",
-    "_extract_eval_contract_fields",
     "accuracy_keep_block",
     "classify_accuracy_failure",
     "enablement_correctness",
-    "eval_contract_fingerprint",
     "eval_enablement_allowed",
     "eval_probe_summary",
     "framework_run_eval_envs",
@@ -761,6 +697,7 @@ __all__ = [
     "read_eval_probe",
     "request_baseline_accuracy_stop",
     "resolve_enablement_mode",
+    "run_eval_definition_digest",
     "resolve_served_context",
     "require_kernel_accuracy_default",
     "served_context_hosts_eval",

@@ -148,7 +148,6 @@ def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
     assert result["baseline_eval_failure_kind"] == "eval_runtime_failure"
     assert result["eval_origin"] == "eval"
     assert result["materialized_config"]
-    assert result["baseline_eval_contract_fingerprint"]
 
 
 def test_eval_failure_from_an_unreachable_server_is_not_an_enablement_gap(tmp_path, monkeypatch):
@@ -689,7 +688,6 @@ def test_salvage_prefers_a_measured_round_over_a_warmup(tmp_path):
 from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
-    BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
     BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILED_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
@@ -737,7 +735,6 @@ def test_eval_enablement_missing_accuracy_routes_not_stop(monkeypatch, tmp_path)
     assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] is None
     assert result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] == DEFAULT_ENABLEMENT_ACCURACY_FLOOR
     assert result[BASELINE_EVAL_EVIDENCE_KEY]
-    assert result[BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY]
     assert result["eval_origin"] == "eval"
 
 

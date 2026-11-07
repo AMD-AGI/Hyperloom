@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Both arms must truncate at the same place, and say so in the fingerprint."""
+"""Both arms must truncate at the same place."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _accuracy_gate
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
-    eval_contract_fingerprint,
     materialized_run_eval_disabled,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
@@ -88,43 +87,6 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
         encoding="utf-8",
     )
     return ws
-
-
-# Eval-contract fingerprint: the bounds knobs are part of the contract
-
-
-@pytest.mark.parametrize(
-    ("knob", "changed"),
-    [
-        ("HYPERLOOM_EVAL_MAX_TOKENS", "1024"),
-        ("HYPERLOOM_EVAL_DERIVE_STOP", "0"),
-        ("HYPERLOOM_EVAL_STOP_STRINGS", "<|im_end|>"),
-    ],
-)
-def test_a_bounds_knob_change_changes_the_eval_contract_fingerprint(tmp_path, knob, changed):
-    """Two runs that truncate differently must not claim the same eval contract."""
-    before = _write_config(tmp_path / "before.yaml", **{knob: "4096"})
-    after = _write_config(tmp_path / "after.yaml", **{knob: changed})
-
-    fp_before = eval_contract_fingerprint(config_path=before)
-    fp_after = eval_contract_fingerprint(config_path=after)
-
-    assert fp_before and fp_after
-    assert fp_before != fp_after
-
-
-def test_an_absent_bounds_knob_matches_itself(tmp_path):
-    """Omitting the knobs entirely stays stable: absence is a contract too."""
-    a = _write_config(tmp_path / "a.yaml")
-    b = _write_config(tmp_path / "b.yaml")
-    assert eval_contract_fingerprint(config_path=a) == eval_contract_fingerprint(config_path=b)
-
-
-def test_a_tunable_server_arg_stays_out_of_the_fingerprint(tmp_path):
-    """The digest must survive the very thing the optimizer is allowed to change."""
-    before = _write_config(tmp_path / "before.yaml", EXTRA_SGLANG_ARGS="--chunked-prefill-size 2048")
-    after = _write_config(tmp_path / "after.yaml", EXTRA_SGLANG_ARGS="--chunked-prefill-size 8192")
-    assert eval_contract_fingerprint(config_path=before) == eval_contract_fingerprint(config_path=after)
 
 
 # Grid arm: assert the bounds landed, on the same terms as the baseline arm

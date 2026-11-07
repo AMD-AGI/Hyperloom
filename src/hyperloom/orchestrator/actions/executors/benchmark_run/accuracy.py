@@ -258,7 +258,7 @@ class _BaselineAccuracyMixin:
                         "enablement instead of salvaging (RUN_EVAL stays on)."
                     )
                     self._stamp_eval_failure_contract(
-                        ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
+                        result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
                     )
                     return result
                 result.setdefault("nonfatal_warnings", [])
@@ -357,9 +357,8 @@ class _BaselineAccuracyMixin:
             return False
         return _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {})
 
+    @staticmethod
     def _stamp_eval_failure_contract(
-        self,
-        ctx: RunnerContext,
         result: dict[str, Any],
         *,
         kind: str,
@@ -369,31 +368,24 @@ class _BaselineAccuracyMixin:
         """Mark ``result`` as an eval-rooted baseline failure for enablement."""
         from .._accuracy_gate import (
             BASELINE_EVAL_ACCURACY_FLOOR_KEY,
-            BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
             BASELINE_EVAL_EVIDENCE_KEY,
             BASELINE_EVAL_FAILED_KEY,
             BASELINE_EVAL_FAILURE_KIND_KEY,
             BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
-            eval_contract_fingerprint,
+            run_eval_definition_digest,
         )
         from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 
-        params = ctx.task.params or {}
-        framework = _requested_framework(params)
-        model = params.get("model") or params.get("resolved_model")
         floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
         result[BASELINE_EVAL_FAILED_KEY] = True
         result[BASELINE_EVAL_FAILURE_KIND_KEY] = kind
         result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] = observed_accuracy
         result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] = floor
         result[BASELINE_EVAL_EVIDENCE_KEY] = (evidence or "")[:4000]
-        # Fingerprint derives from the materialized YAML contract fields only — task/metric are result outputs and may
-        # be absent on eval crash, so they must not participate in the stable identity.
-        result[BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY] = eval_contract_fingerprint(
-            config_path=result.get("materialized_config"),
-            framework=framework,
-            model=model,
-        )
+        accuracy_round = result.get(ACCURACY_ROUND_KEY)
+        if accuracy_round and not result.get(ACCURACY_DEFINITION_DIGEST_KEY):
+            # A round that left no score still planned the definition it failed under.
+            result[ACCURACY_DEFINITION_DIGEST_KEY] = run_eval_definition_digest(Path(accuracy_round["run_dir"]))
         result["eval_origin"] = "eval"
         return result
 
@@ -547,7 +539,6 @@ class _BaselineAccuracyMixin:
             kind = EVAL_KIND_GENERATION_PATHOLOGY
             evidence = f"{evidence}; {eval_probe_summary(probe)}"
         self._stamp_eval_failure_contract(
-            ctx,
             result,
             kind=kind or "",
             observed_accuracy=float(acc) if isinstance(acc, (int, float)) else None,
