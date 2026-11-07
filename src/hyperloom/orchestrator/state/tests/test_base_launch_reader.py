@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, ServerBase, session_server_base
 from hyperloom.orchestrator.state.shared_state import SharedState
-from inference_suite.contracts import Redacted
+from inference_suite.contracts import GoldenAcceptance, GoldenCurve, Redacted
 
 from ._session_base import freeze_session_base, session_base
 
@@ -96,6 +96,25 @@ def test_the_server_base_carries_the_argv_and_the_env_a_launch_may_set(session):
 
     assert base.args == '--kv-cache-dtype fp8_e4m3 --speculative-config {"method":"mtp"}'
     assert dict(base.env) == {"SGLANG_USE_AITER": "1"}
+
+
+def test_the_golden_layer_reaches_the_server_base_above_the_base(session):
+    golden = GoldenAcceptance(
+        value=3.48,
+        method="match-expected",
+        token_mode="real-draft-token",
+        spec_method="EAGLE",
+        draft_length=3,
+        curve=GoldenCurve(repo="https://github.com/org/curves", commit="e" * 40, path="al.json", sha256="f" * 64),
+        args=("--speculative-algorithm", "EAGLE"),
+        env={"SGLANG_SIMULATE_ACC_LEN": "3.48"},
+    )
+    freeze_session_base(session, args=("--kv-cache-dtype", "fp8_e4m3"), env={"SGLANG_USE_AITER": "1"}, golden=golden)
+
+    base = session_server_base()
+
+    assert base.args == "--kv-cache-dtype fp8_e4m3 --speculative-algorithm EAGLE"
+    assert dict(base.env) == {"SGLANG_USE_AITER": "1", "SGLANG_SIMULATE_ACC_LEN": "3.48"}
 
 
 @pytest.mark.parametrize(

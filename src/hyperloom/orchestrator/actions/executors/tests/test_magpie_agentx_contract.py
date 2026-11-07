@@ -28,6 +28,8 @@ from hyperloom.orchestrator.actions.executors.benchmark_result import (
     is_valid_measurement,
 )
 from hyperloom.orchestrator.actions.executors.magpie_agentx import bind_source_evidence, enable_profile, load_benchmark
+from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
 
 @pytest.fixture
@@ -144,6 +146,27 @@ def test_grid_ablation_removes_the_option_from_its_owning_layers(source, tmp_pat
     overrides = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert overrides["append_args"] == ["--mem-fraction-static", "0.85"]
     assert overrides["remove_args"] == ([option] if recipe else [])
+
+
+def test_the_session_base_replaces_the_recipe_argv_once_and_candidates_compose_above_it(source, tmp_path, monkeypatch):
+    session = tmp_path / "session"
+    session.mkdir()
+    monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, str(session))
+    freeze_session_base(session, args=("--mem-fraction-static", "0.8"), env={"SGLANG_USE_AITER": "1"})
+
+    accepted = materialize_benchmark_config(
+        source, tmp_path / "accepted", launch=LaunchLayer(extra_server_args="--chunked-prefill-size 4096")
+    )
+    launch = load_benchmark(accepted)["agentx"]["launch_overrides"]
+    assert launch["replace_args"] is True
+    assert launch["append_args"] == ["--mem-fraction-static", "0.8", "--chunked-prefill-size", "4096"]
+    assert launch["env"] == {"SGLANG_USE_AITER": "1"}
+
+    candidate = materialize_benchmark_config(
+        accepted, tmp_path / "candidate", launch=LaunchLayer(extra_server_args="--max-running-requests 64")
+    )
+    argv = load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"]
+    assert argv == ["--mem-fraction-static", "0.8", "--chunked-prefill-size", "4096", "--max-running-requests", "64"]
 
 
 def test_recipe_removal_survives_readding_and_ablating_an_override(source, tmp_path):

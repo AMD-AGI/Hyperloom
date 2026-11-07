@@ -19,6 +19,7 @@ import yaml
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+from hyperloom.orchestrator.state.base_launch import ServerBase
 from inference_suite.argv import removal_option_names, remove_server_args, tokenize_server_args_preserving_json
 
 
@@ -218,6 +219,21 @@ def apply_launch_changes(
         refuse_unpinned_speculative_change(
             accepted_args, accepted_envs, _launch_server_args(recipe, launch), _launch_envs(recipe, benchmark, launch)
         )
+
+
+def seed_session_base(benchmark: dict[str, Any], base: ServerBase, *, recipe: RecipeLaunch) -> None:
+    """Make the session's frozen base the launch Magpie runs, in place of the argv its own recipe resolves.
+
+    Only a workload YAML no layer was composed on yet takes it: ``append_args`` marks one that already carries the
+    base and the launch accepted above it, which seeding again would replace.
+    """
+    agentx = benchmark.get("agentx")
+    composed = isinstance(agentx, dict) and "append_args" in agentx.get("launch_overrides", {})
+    if composed or not (base.args or base.env):
+        return
+    apply_launch_changes(
+        benchmark, LaunchChanges(base.args, dict(base.env), replace_args=True), recipe=recipe, accepted=True
+    )
 
 
 def _refuse_unrunnable_speculative_launch(
