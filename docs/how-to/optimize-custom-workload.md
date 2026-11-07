@@ -69,10 +69,18 @@ order:
 1. `custom_<runner_type>.sh` — with `--gpu-type mi355x`, that is `custom_mi355x.sh`.
 2. Failing that, the **single** `.sh` file in the directory, which is what an
    operator who wrote one script for one machine actually has.
-3. If neither applies, the entrypoint is unresolved and the run reports the miss.
+3. If neither applies, the launch exits 2: there is no script to run.
 
-Your script is invoked with `RESULT_DIR` and `RESULT_FILENAME=inferencex_result`
-injected into its environment. It must write an InferenceX-shaped report to
+The session freezes the script it found, with the sha256 of its content, as its
+base launch. A round whose script has changed since is refused with
+`source_files_changed`; start a new session to measure an edited script.
+
+Your script is invoked with `RESULT_DIR`, `RESULT_FILENAME=inferencex_result`,
+`MODEL`, `TP`, `ROCR_VISIBLE_DEVICES` and, when the session holds a quality
+reference, `QUALITY_REFERENCE` injected into its environment; a profile round
+adds `PROFILE=1` and the trace directory as `VLLM_TORCH_PROFILER_DIR` and
+`SGLANG_TORCH_PROFILER_DIR`. Pins named like an acceptance threshold (`*_MAX`,
+`*_MIN`, `*threshold*`) are refused: Hyperloom judges the result. It must write an InferenceX-shaped report to
 `$RESULT_DIR/inferencex_result.json`:
 
 ```json
@@ -288,8 +296,9 @@ The benchmark output does not go to the launcher log; it lands in the session
 directory:
 
 ```text
-<session>/runs/baseline/<id>/benchmark_custom_<stamp>/scriptable_stdout.log
-<session>/runs/baseline/<id>/benchmark_custom_<stamp>/inferencex_result.json
+<session>/runs/baseline/<id>/.../suite_run_<n>/client/stdout.log
+<session>/runs/baseline/<id>/.../suite_run_<n>/client/inferencex_result.json
+<session>/runs/baseline/<id>/.../suite_run_<n>/report.json
 <session>/reports/optimization_journal.json
 ```
 
