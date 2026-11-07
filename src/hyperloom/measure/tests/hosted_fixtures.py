@@ -21,7 +21,6 @@ from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
 
 FAKE_RUNNER = (sys.executable, "-m", "hyperloom.measure.tests.fake_runner")
-COMMIT = "a" * 40
 HOSTNAME = "node-a"
 
 
@@ -90,7 +89,6 @@ def spec_context(tmp: Path, **overrides: Any) -> SpecContext:
         "image_ref": "registry.invalid/fw@sha256:" + "22" * 32,
         "image_digest": "sha256:" + "22" * 32,
         "gpu_type": "FakeGPU",
-        "inferencex_commit": COMMIT,
         "blobs": LocalBlobStore(tmp / "session" / "hosted" / "blobs"),
         "process_environ": {},
         "platform_env": {},

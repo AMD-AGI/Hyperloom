@@ -714,7 +714,6 @@ def build_backends(config_path: Path) -> Backends:
         image_ref=cfg["image_ref"],
         image_digest=cfg["image_digest"],
         gpu_type=cfg["gpu_type"],
-        inferencex_commit=cfg["inferencex_commit"],
         blobs=LocalBlobStore(blobs_dir),
         power_cap_w=cfg.get("power_cap_w"),
         partition_mode=cfg.get("partition_mode"),

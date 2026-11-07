@@ -662,7 +662,6 @@ def _write_config(tmp: Path, **extra) -> Path:
         "image_ref": "registry.invalid/fw@sha256:" + "22" * 32,
         "image_digest": "sha256:" + "22" * 32,
         "gpu_type": "FakeGPU",
-        "inferencex_commit": "a" * 40,
         "poll_interval_sec": 0.05,
         "local_backend": "hyperloom.measure.tests.test_consistency:FakeLocal",
         **extra,
