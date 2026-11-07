@@ -87,8 +87,8 @@ from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles,
 from .reap_watch import PROCESS_LOG_NAME, ReapWatch, cli_alive
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
-from hyperloom_common.git_safety import app_git_diff, worktree_head
-from .worktrees import PinnedGit
+from hyperloom_common.git_safety import app_git_diff
+from .worktrees import HeldWorktree, PinnedGit
 from ..delivery.deliverable import declared_targets
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
@@ -203,7 +203,18 @@ class SpecialistSubprocessResult:
     intel/tool calls and the per-turn usage. Empty when the log was missing or
     truncated."""
 
+    worktree_refused: str = ""
+    """Why nothing was collected from the worktree, ``error`` saying it too: its path no longer named the directory
+    the specialist was given (:class:`~.worktrees.HeldWorktree`), so no patch, scanned or claimed, is taken from the
+    run. Empty when it did, or there was no worktree."""
+
     error: str = ""
+
+    @property
+    def patch_claims_ignored(self) -> bool:
+        """Whether the patches the specialist's done payload claims are not read: a harvested diff is the whole round,
+        so a claim only restates it, and a refused worktree gives no patch at all."""
+        return bool(self.patch_roots or self.worktree_refused)
 
 
 #: Directories a specialist writes for its own use inside the worktree, never
@@ -213,6 +224,12 @@ _SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", ".hyperloom
 
 # How often to poll a PENDING GPU-specialist Ray actor for its pid.
 _RAY_PENDING_POLL_INTERVAL_SEC: float = 1.0
+
+
+def _add_error(outcome: dict[str, Any], error: str) -> None:
+    """Append ``error`` to the reaped outcome's error, ``; ``-separated."""
+    prior = str(outcome.get("error") or "").strip()
+    outcome["error"] = f"{prior}; {error}" if prior else error
 
 
 def _raise_if_cancelled(scope: CancelScope | None) -> None:
@@ -416,10 +433,10 @@ class SpecialistSubprocessDispatcher:
         _raise_if_cancelled(scope)
         # Drop any extension left over from a prior run of this task id.
         clear_wall_budget_extension(request.task_id)
-        # The pre-image the harvest diffs against, so it must be read before
-        # the specialist can commit anything.
-        admin = request.worktree_admin
-        pinned = PinnedGit(admin, worktree_head(request.worktree, admin=admin)) if admin is not None else None
+        # The worktree's directory and the pre-image the harvest diffs against, both recorded before the specialist
+        # can replace or commit anything.
+        worktree, admin = request.worktree, request.worktree_admin
+        held = HeldWorktree.before_launch(worktree, admin) if worktree is not None else None
         request.workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = request.workspace / "prompt.md"
         # A reused workspace may hold a link the previous run's account planted at this name.
@@ -472,7 +489,7 @@ class SpecialistSubprocessDispatcher:
                 finally:
                     self._release_task(backend, request)
 
-        return self._harvest_result(request, watch, backend, outcome, pinned=pinned)
+        return self._harvest_result(request, watch, backend, outcome, held=held)
 
     async def _ready(
         self, request: SpecialistSpawn, prompt_file: Path, process_log: Path
@@ -598,10 +615,16 @@ class SpecialistSubprocessDispatcher:
         backend: str,
         outcome: dict[str, Any],
         *,
-        pinned: PinnedGit | None,
+        held: HeldWorktree | None,
     ) -> SpecialistSubprocessResult:
-        """Read the reaped specialist's done payload, patches and agent trace into its result."""
+        """Read the reaped specialist's done payload, patches and agent trace into its result.
+
+        ``held`` is the worktree as recorded before the run, and how the app's git reads it. No patch is collected when
+        the worktree's path no longer names the directory it recorded: the agent may have left a link to any directory
+        of the host there. The refusal comes first, as it removes such a link.
+        """
         process_log = watch.workspace / PROCESS_LOG_NAME
+        refused = held.refusal() if held is not None else ""
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
         for cand in watch.done_files:
@@ -623,18 +646,22 @@ class SpecialistSubprocessDispatcher:
 
         # Patches: harvest from the worktree via git diff first, else scan
         # disk. Runs after the done payload, whose targets scope the harvest.
-        patches, collected_patch_roots = self._collect_patches(
-            request.worktree,
-            request.workspace,
-            request.worktree_base,
-            pinned=pinned,
-            targets=declared_targets(done_payload),
-        )
+        patches: list[str] = []
+        collected_patch_roots: dict[str, str] = {}
+        if not refused:
+            patches, collected_patch_roots = self._collect_patches(
+                request.worktree,
+                request.workspace,
+                request.worktree_base,
+                pinned=held.git if held is not None else None,
+                targets=declared_targets(done_payload),
+            )
 
         trace = harvest_agent_trace(backend, request.workspace, process_log)
         if trace.error and (outcome["exit_code"] not in (None, 0) or done_payload is None):
-            prior_error = str(outcome.get("error") or "").strip()
-            outcome["error"] = f"{prior_error}; {trace.error}" if prior_error else trace.error
+            _add_error(outcome, trace.error)
+        if refused:
+            _add_error(outcome, refused)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -646,6 +673,7 @@ class SpecialistSubprocessDispatcher:
             patches=patches,
             patch_roots=collected_patch_roots,
             trace=trace,
+            worktree_refused=refused,
             error=outcome["error"],
         )
 

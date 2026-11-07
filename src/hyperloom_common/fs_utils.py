@@ -92,8 +92,12 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def _open_below(base: Path, parts: Sequence[str], *, create: bool) -> int:
-    """Open ``base`` then each of ``parts`` as a directory, never through a symlink; return the last fd."""
-    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    """Open ``base`` then each of ``parts`` as a directory, never through a symlink; return the last fd.
+
+    ``base`` itself is refused when it is a link (a link above it is followed): a less-privileged process that writes
+    the directory holding it can swap it for a link to anywhere.
+    """
+    fd = os.open(base, _DIR_FLAGS)
     try:
         for name in parts:
             if create:

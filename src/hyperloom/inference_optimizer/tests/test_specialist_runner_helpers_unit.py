@@ -238,12 +238,8 @@ def _finalize(r, tmp_path, payload, params=None):
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
 
 
-def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_not_added(tmp_path, monkeypatch):
-    patches = tmp_path / "patches"
-    patches.mkdir()
-    harvested, copy = patches / "_worktree_diff.patch", patches / "001_x.patch"
-    harvested.write_text("diff\n")
-    copy.write_text("diff\n")
+def _vetted_by_finalize(tmp_path, monkeypatch, sub_result, **prep):
+    """The patch lists ``_finalize`` hands the patch-safety gate for ``sub_result``."""
     vetted: list[list[str]] = []
 
     def _spy_vet(patches, **_kwargs):
@@ -253,8 +249,23 @@ def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_n
     monkeypatch.setattr(sr._patch_safety, "vet_patches", _spy_vet)
     _runner()._finalize(
         ctx=SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={}),
-        prep=sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path),
-        sub_result=sr.SpecialistSubprocessResult(
+        prep=sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path, **prep),
+        sub_result=sub_result,
+    )
+    return vetted
+
+
+def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_not_added(tmp_path, monkeypatch):
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    harvested, copy = patches / "_worktree_diff.patch", patches / "001_x.patch"
+    harvested.write_text("diff\n")
+    copy.write_text("diff\n")
+
+    vetted = _vetted_by_finalize(
+        tmp_path,
+        monkeypatch,
+        sr.SpecialistSubprocessResult(
             done_payload={"proposal_set": [], "summary": "s", "patches_written": [str(copy)]},
             patches=[str(harvested)],
             patch_roots={str(harvested): str(tmp_path)},
@@ -262,6 +273,25 @@ def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_n
     )
 
     assert vetted == [[str(harvested)]]
+
+
+def test_a_refused_worktree_leaves_no_patch_the_specialist_claims(tmp_path, monkeypatch):
+    """A claimed path resolves through the worktree's path, which the agent may have pointed at a host directory."""
+    (tmp_path / "worktree").mkdir()
+    (tmp_path / "patches").mkdir()
+    claimed = tmp_path / "patches" / "001_x.patch"
+    claimed.write_text("diff\n")
+    refused = "worktree_refused: replaced"
+    payload = {"proposal_set": [], "summary": "s", "patches_written": [str(claimed), "creds.txt"]}
+
+    vetted = _vetted_by_finalize(
+        tmp_path,
+        monkeypatch,
+        sr.SpecialistSubprocessResult(done_payload=payload, worktree_refused=refused, error=refused),
+        worktree=tmp_path / "worktree",
+    )
+
+    assert vetted == [[]]
 
 
 def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tmp_path):
