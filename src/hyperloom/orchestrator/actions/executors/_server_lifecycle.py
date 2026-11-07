@@ -328,14 +328,16 @@ class ServerReap(NamedTuple):
 
 
 def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
-    """Stop every server a ``server.pid`` under this session's ``runs/`` still records; return the pids signalled.
+    """Stop every server a pidfile under this session's ``runs/`` still records; return the pids signalled.
 
-    Each directory goes through :func:`inference_suite.stop`: the recorded pid is signalled only while its start time
-    still matches, and once that leader is gone its workers are found by the pidfile's run mark, so a co-located
-    session's server and a recycled pid are never touched. A pidfile whose server outlives SIGKILL is kept.
+    Each ``server.pid`` directory goes through :func:`inference_suite.stop`: the recorded pid is signalled only while
+    its start time still matches, and once that leader is gone its workers are found by the pidfile's run mark, so a
+    co-located session's server and a recycled pid are never touched. A pidfile whose server outlives SIGKILL is kept.
+    The Magpie and bypass ``server_lifecycle`` pidfiles go through :func:`reap_recorded_servers`.
     """
-    reaped: list[int] = []
-    for pid_dir in _suite_pid_dirs(Path(session_dir) / "runs"):
+    runs = Path(session_dir) / "runs"
+    reaped = reap_recorded_servers(runs).reaped
+    for pid_dir in _suite_pid_dirs(runs):
         outcome = stop(pid_dir)
         reaped.extend(outcome.reaped)
         if outcome.survivors:
