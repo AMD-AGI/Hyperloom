@@ -98,6 +98,16 @@ async def test_an_agent_is_fetched_onboarded_configured_installed_and_started(tm
     assert f"checkout, {ready.source_dir}, fetched from {repo}" in onboard.prompts[0]
 
 
+async def test_an_onboarded_agent_is_never_told_why_no_source_change_can_be_kept(tmp_path: Path) -> None:
+    spec = replace(SPEC, source_unkept="the image's sglang names no upstream commit")
+    sandbox, onboard = Sandbox([Process(None)], keep="run/session.json"), Onboarder([_manifest()])
+
+    ready = await make_ready(str(_agent_repo(tmp_path)), spec, tmp_path / "agent", _setup(sandbox, onboard))
+
+    assert spec.source_unkept not in onboard.prompts[0]
+    assert ready.source_unkept == ""
+
+
 def test_the_prompt_has_every_a_b_measured_with_the_gate_s_client_and_the_integration_notes_read() -> None:
     client = "python3 /cache/InferenceX/utils/bench_serving/benchmark_serving.py --backend vllm --ignore-eos"
     spec = replace(SPEC, client=client, baseline=6290.7, knowledge="/b01/agent/mb-integration.md")

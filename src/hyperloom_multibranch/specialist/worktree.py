@@ -13,7 +13,6 @@ against its head, a patch the toolbox applies where it applies every other.
 
 from __future__ import annotations
 
-import functools
 import http.client
 import importlib.metadata
 import logging
@@ -23,7 +22,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -148,17 +146,26 @@ PATCH_TIMEOUT_S = 10.0
 _PATCH_HEAD_BYTES = 128
 
 
-@functools.cache
+#: Each wheel's upstream once resolved, by :func:`_wheel_upstream`'s arguments.
+_RESOLVED: dict[tuple[Path, str | None, str], Upstream] = {}
+
+
 def _wheel_upstream(path: Path, dist_name: str | None, abbreviated: str) -> Upstream | None:
     """The upstream of the wheel installed at ``path``: the GitHub repository its metadata declares, at the full commit
     the active image's reference names when it starts with ``abbreviated``, else the one that repository resolves
-    ``abbreviated`` to. Cached, as the image and the wheel stay the same for the process and the lookup is a network
-    call."""
+    ``abbreviated`` to. Kept once resolved, as the image and the wheel stay the same for the process and the lookup is
+    a network call; one that failed is made again at the next call, as GitHub may answer it then."""
+    key = (path, dist_name, abbreviated)
+    if key in _RESOLVED:
+        return _RESOLVED[key]
     repo = _declared_repo(path, dist_name)
     if repo is None:
         return None
     commit = _image_commit(abbreviated) or _github_commit(repo, abbreviated)
-    return None if commit is None else Upstream(repo, commit)
+    if commit is None:
+        return None
+    _RESOLVED[key] = Upstream(repo, commit)
+    return _RESOLVED[key]
 
 
 def _declared_repo(path: Path, dist_name: str | None) -> str | None:
@@ -190,7 +197,7 @@ def _patch_head(url: str) -> str | None:
     try:
         with urllib.request.urlopen(url, timeout=PATCH_TIMEOUT_S) as reply:
             return reply.readline(_PATCH_HEAD_BYTES).decode("ascii", "replace")
-    except (urllib.error.URLError, http.client.HTTPException, TimeoutError) as error:
+    except (OSError, http.client.HTTPException) as error:
         logger.warning("cannot read %s, so its commit stays unresolved: %s", url, error)
         return None
 

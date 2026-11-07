@@ -44,7 +44,7 @@ from hyperloom_multibranch.toolbox.short_prompts import (
     decide,
     no_patch_files,
 )
-from hyperloom_multibranch.toolbox.weight_precision import weight_precision_changes
+from hyperloom_multibranch.toolbox.weight_precision import ambiguous_words, weight_precision_changes
 
 
 #: PyTorch tunes a GEMM shape the first time a server runs it when TunableOp is switched on (the value ``1``, nothing else
@@ -137,16 +137,38 @@ def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Rec
     The root's precision is the session's: comparing with the parent instead would let a parent that carries a change
     pass it on. Flags the root sets and the candidate keeps pass, and so does every flag the frameworks do not read as
     one of :data:`~.weight_precision.WEIGHT_PRECISION_FLAGS` (the KV cache dtype, the attention backend, fusions, any
-    env var).
+    env var), and every value of a :data:`~.weight_precision.WEIGHT_PRECISION_OVERRIDE_FLAGS` flag that keeps what the
+    root's sets under the weight-precision keys.
+
+    A launch the frameworks read in two ways (:func:`~.weight_precision.ambiguous_words`) is refused before the
+    comparison, whose reading of it would be one of the two: only where the candidate adds or changes such words, since
+    the root's own are the session's launch.
     """
+    ambiguous = ambiguous_words(root, candidate.launch)
+    if ambiguous:
+        raise RequestRejected(
+            f"the candidate's launch is ambiguous between frameworks: {'; '.join(repr(pair) for pair in ambiguous)}: "
+            "a word that begins with '-' and holds a '.' but no '=' (--flag.key, -O3.0, -0.5) followed by a word that "
+            "begins with '-' reads in two ways (vLLM takes a dotted flag's or a number's next word as its value, "
+            "argparse in the others reads that word as a flag), so the weight precision it serves cannot be read; "
+            "write a dotted value with '=' (--flag.key=value), one that begins with '-' inside the flag's JSON value "
+            "(--flag '{\"key\": \"-x\"}'), a level as -O3 or -O=3.0, and no word that begins with '-' right after "
+            "such a word (the composed launch writes --flag=-0.5 as --flag -0.5)",
+            DELTA_NOT_APPLICABLE_CODE,
+        )
     changed = weight_precision_changes(root, candidate.launch)
     if changed:
         raise RequestRejected(
             f"the candidate changes the model's weight precision from the session's root recipe (commit "
             f"{root_commit}): {'; '.join(changed)}; the weight precision of the session cannot change, down or up: "
-            "keep the weights' quantization, dtype and checkpoint flags as the root sets them (the KV cache dtype, "
-            "attention compute precision and activation quantization may change); a flag counts in every form its "
-            "framework reads as that flag (a prefix of it, '_' for '-', '--flag.key value', '-qVALUE')",
+            "keep the weights' quantization, dtype, checkpoint, revision and config-file flags (--config, "
+            "--hf-config-path, --decrypted-config-file), and what --hf-overrides or --json-model-override-args sets "
+            "under torch_dtype, dtype, quantization_config or compression_config at any depth, as the root sets them, "
+            "giving such a flag the root sets under the root's spelling with its keys kept, and the values of a flag "
+            "the root gives more than once in the root's order, since the server keeps one occurrence (the KV cache "
+            "dtype, attention compute precision and activation quantization may change); a flag counts in every form "
+            "its framework reads as that flag (a prefix of it, '_' for '-', '--flag.key value', '-qVALUE'), and the "
+            "word after a '--flag.key' is its value, even one that begins with '-'",
             DELTA_NOT_APPLICABLE_CODE,
         )
 
