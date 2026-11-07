@@ -736,8 +736,6 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(
         preflight.subprocess, "run", lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, b"", b"")
     )
-    monkeypatch.setattr(preflight, "_ensure_client_trust_compat", lambda *_args: True)
-    monkeypatch.setattr(preflight, "_ensure_eval_concurrency_compat", lambda *_args: True)
     monkeypatch.setattr(preflight, "_provider_only_mode", lambda: "")
     monkeypatch.setattr(preflight, "_load_dotenv_fallback", lambda: None)
     monkeypatch.setattr(preflight, "_load_kernel_agent_env_fallback", lambda: None)
@@ -753,7 +751,6 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_check_platform_tuning", lambda: None)
     monkeypatch.setattr(preflight, "_ensure_ray", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_bench_serving_deps", lambda *_args: None)
-    monkeypatch.setattr(preflight, "_ensure_lm_eval_dep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
     monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
@@ -801,11 +798,10 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "check_platform_tuning",
         "ensure_ray",
         "ensure_bench_serving_deps",
-        "ensure_lm_eval",
         "check_serving_framework",
         "ensure_magpie",
         "clone_inferencex",
-        "patch_magpie_eval_concurrency",
+        "check_inferencex_patch_anchors",
         "check_kernel_tuning_clis",
         "check_tracelens_cli",
         "check_tracelens_root",
