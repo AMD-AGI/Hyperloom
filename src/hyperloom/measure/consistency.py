@@ -56,7 +56,8 @@ from typing import Any
 from hyperloom.measure.hosted import HOSTED_DIR_NAME
 from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
 from hyperloom.measure.runner.inventory import FARM_INVENTORY_FILE
-from hyperloom.measure.socket import MeasurementBackend, RoundOutcome, TestCall, TestOutcome
+from hyperloom.measure.socket import MeasurementBackend, TestCall, TestOutcome
+from hyperloom.orchestrator.actions.executors import RoundFolder, is_round_folder
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 
 __all__ = [
@@ -258,16 +259,22 @@ class Summary:
 # -- reading a side -------------------------------------------------------------------------------------------------
 
 
-def _report_of(round_: RoundOutcome) -> tuple[dict[str, Any] | None, Path]:
-    directory = Path(round_.output_dir)
+def _measurement_of(directory: Path) -> dict[str, Any] | None:
+    """The round's measurement: an inference_suite run_dir's from its report, a Magpie round's from the first readable
+    ``benchmark_report.json`` below it; ``None`` when it has none."""
+    if is_round_folder(directory):
+        try:
+            return RoundFolder.read(directory).measurement()
+        except (OSError, ValueError):
+            return None
     for path in sorted(directory.rglob(REPORT_NAME)) if directory.is_dir() else []:
         try:
             document = json.loads(path.read_text(encoding=_UTF8))
         except (OSError, ValueError):
             continue
         if isinstance(document, dict):
-            return document, directory
-    return None, directory
+            return extract_benchmark_measurement(document, workspace=directory)
+    return None
 
 
 def _error_rate(measurement: Mapping[str, Any]) -> float | None:
@@ -295,10 +302,10 @@ def read_side(outcome: TestOutcome, log_dir: Path) -> Side:
         return Side(0, problem="no_measure_round", log_dir=log_dir_text)
     values = []
     for round_ in rounds:
-        report, workspace = _report_of(round_)
-        if report is None:
+        workspace = Path(round_.output_dir)
+        measurement = _measurement_of(workspace)
+        if measurement is None:
             return Side(0, problem=f"no_report: {workspace.name}", log_dir=log_dir_text)
-        measurement = extract_benchmark_measurement(report, workspace=workspace)
         if not measurement.get("valid_measurement") or measurement.get("output_throughput") is None:
             return Side(0, problem=f"invalid_measurement: {workspace.name}", log_dir=log_dir_text)
         if _error_rate(measurement) is None:
