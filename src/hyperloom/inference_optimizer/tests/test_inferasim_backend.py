@@ -17,9 +17,14 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_anchors as ia
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_bridge as ib
+
+
+def _point_spec(bench: dict, **kwargs) -> ib.ServingSpec:
+    return ib.spec_from_point(BenchmarkPoint.from_document({"benchmark": bench}), **kwargs)
 
 
 def test_inferasim_is_not_a_benchmark_backend(monkeypatch):
@@ -29,14 +34,14 @@ def test_inferasim_is_not_a_benchmark_backend(monkeypatch):
     assert bb.resolve_backend_name() == "magpie"
 
 
-def test_spec_from_benchmark_parses_envs():
+def test_spec_from_point_parses_envs():
     bench = {
         "framework": "vllm",
         "model": "/models/Qwen-Qwen3-14B",
         "precision": "fp8",
         "envs": {"TP": 4, "CONC": 128, "ISL": 2048, "OSL": 256},
     }
-    spec = ib.spec_from_benchmark(bench)
+    spec = _point_spec(bench)
     assert spec.framework == "vllm"
     assert spec.tp == 4
     assert spec.conc == 128
@@ -51,7 +56,7 @@ def test_spec_parses_ep_from_server_args():
         "model": "/models/gpt-oss-120b",
         "envs": {"TP": 8, "EXTRA_SGLANG_ARGS": "--ep-size 8 --foo 1"},
     }
-    spec = ib.spec_from_benchmark(bench)
+    spec = _point_spec(bench)
     assert spec.ep == 8
 
 
@@ -72,7 +77,7 @@ def test_spec_parses_kv_cache_dtype_from_server_args(flag, expected):
     lever the model *can* see look like one it cannot, and scored an fp8
     candidate as bf16 -- a candidate whose whole point is halving KV traffic.
     """
-    spec = ib.spec_from_benchmark(
+    spec = _point_spec(
         {
             "framework": "vllm",
             "model": "/models/gpt-oss-120b",
@@ -84,7 +89,7 @@ def test_spec_parses_kv_cache_dtype_from_server_args(flag, expected):
 
 def test_max_num_seqs_caps_the_running_batch(monkeypatch):
     """A scheduler cap below the offered load is the batch the step actually runs."""
-    spec = ib.spec_from_benchmark(
+    spec = _point_spec(
         {
             "framework": "vllm",
             "model": "/models/gpt-oss-120b",
@@ -96,7 +101,7 @@ def test_max_num_seqs_caps_the_running_batch(monkeypatch):
 
 def test_max_num_seqs_above_the_load_changes_nothing(monkeypatch):
     """Raising a cap nobody reaches is a no-op, and must not be reported as a win."""
-    spec = ib.spec_from_benchmark(
+    spec = _point_spec(
         {
             "framework": "vllm",
             "model": "/models/gpt-oss-120b",
@@ -322,7 +327,7 @@ def test_engine_build_keeps_its_name_and_still_reads_server_args(monkeypatch):
         "model": "/models/x",
         "envs": {"EXTRA_SGLANG_ARGS": "--attention-backend aiter", "TP": 4},
     }
-    spec = ib.spec_from_benchmark(bench)
+    spec = _point_spec(bench)
     assert spec.framework == "mori-sglang"
     assert spec.extra_server_args == "--attention-backend aiter"
     assert ib.recipe_from_spec(spec)["attention_backend"] == "aiter"
@@ -410,8 +415,8 @@ def test_ambient_env_is_ignored_when_asked(monkeypatch):
         "model": "/models/gpt-oss-120b",
         "envs": {"TP": 8, "CONC": 128, "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8"},
     }
-    ambient = ib.spec_from_benchmark(bench)
-    alone = ib.spec_from_benchmark(bench, ambient=False)
+    ambient = _point_spec(bench)
+    alone = _point_spec(bench, ambient=False)
     assert (ambient.tp, ambient.conc) == (1, 8)
     assert (alone.tp, alone.conc, alone.kv_cache_dtype) == (8, 128, "fp8")
 
@@ -778,7 +783,7 @@ def test_launches_that_differ_in_an_env_lever_keep_separate_anchors(anchor_store
             "model": "/models/gpt-oss-120b",
             "envs": {"TP": "8", "CONC": "64", "SGLANG_USE_AITER": aiter, "RESULT_DIR": "/out"},
         }
-        return ib.spec_from_benchmark(bench, ambient=False)
+        return _point_spec(bench, ambient=False)
 
     on, off = spec("1"), spec("0")
     assert on.launch and on.launch != off.launch

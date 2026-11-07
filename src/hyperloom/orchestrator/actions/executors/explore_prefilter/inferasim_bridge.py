@@ -61,6 +61,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
 
@@ -384,21 +385,20 @@ def _parse_server_arg_int(server_args: str, *flags: str) -> int:
         return 0
 
 
-def spec_from_benchmark(bench: dict, *, ambient: bool = True) -> ServingSpec:
-    """Extract a :class:`ServingSpec` from a Magpie ``benchmark`` block.
+def spec_from_point(point: BenchmarkPoint, *, ambient: bool = True) -> ServingSpec:
+    """Extract a :class:`ServingSpec` from a benchmark point.
 
-    ``ambient=False`` reads the block alone, without the process env. That is what a caller comparing two
+    ``ambient=False`` reads the point alone, without the process env. That is what a caller comparing two
     materialized configs needs, since an exported ``CONC`` would otherwise
     project every variant at the same concurrency.
     """
-    bench = bench or {}
 
     def override(name: str) -> str:
         return (os.environ.get(name) or "") if ambient else ""
 
-    envs = dict(bench.get("envs") or {})
-    framework = str(bench.get("framework") or _DEFAULT_FRAMEWORK).lower()
-    model_path = str(bench.get("model") or override("MODEL"))
+    envs = dict(point.envs)
+    framework = (point.framework or _DEFAULT_FRAMEWORK).lower()
+    model_path = point.model or override("MODEL")
     # Infera names the engine as a free string, so a build ("mori-sglang") is a
     # regime of its own and reaches us as one. Resolving the args env through the
     # registry rather than an exact table means such a build still has its server
@@ -412,7 +412,7 @@ def spec_from_benchmark(bench: dict, *, ambient: bool = True) -> ServingSpec:
     ep = _parse_server_arg_int(extra_args, "--ep-size", "--expert-parallel-size", "--moe-ep-size") or 1
     pp = _parse_server_arg_int(extra_args, "--pp-size", "--pipeline-parallel-size") or 1
 
-    weight_dtype = _precision_to_weight_dtype(str(bench.get("precision") or DTYPE_BF16))
+    weight_dtype = _precision_to_weight_dtype(point.precision or DTYPE_BF16)
     # KV dtype: the server arg the variant sets, else bf16. Reading the arg matters because an explore grid changes the KV
     # dtype by passing this flag and nothing else -- and the projection prices KV
     # dtype perfectly well, so ignoring the flag made a lever the model *can*

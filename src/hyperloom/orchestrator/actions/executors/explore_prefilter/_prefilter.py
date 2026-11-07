@@ -36,7 +36,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.coerce import to_float, to_str_list
-from hyperloom.common.benchmark_config import BenchmarkPoint
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from hyperloom.inference_optimizer.grading import resolved_grading
 
@@ -339,8 +339,7 @@ def _record_anchor(ctx: RoundContext, gv: GridVariant, result: Any, verdict: Ver
         return
     try:
         cfg = ctx.materialize(gv, verdict.stack, Path(ctx.output_root) / "_anchor_spec" / (gv.name or "variant"))
-        with Path(cfg).open(encoding="utf-8") as fh:
-            spec = bridge.spec_from_benchmark((yaml.safe_load(fh) or {}).get("benchmark") or {}, ambient=False)
+        spec = bridge.spec_from_point(read_benchmark_point(Path(cfg)), ambient=False)
         spec.runtime, spec.gpu = ctx.runtime, ctx.gpu
         source = {"round_id": verdict.round_id, "variant": gv.name, "workspace": getattr(result, "workspace", None)}
         anchors.record_measured_anchor(spec, tpot_mean_ms=result.tpot_mean_ms, source=source)
