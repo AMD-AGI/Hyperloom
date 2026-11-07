@@ -235,24 +235,23 @@ class _GeakDispatchMixin:
         """Name the server-phase script GEAK should launch through Magpie.
 
         GEAK infers its launcher from the recipe's ``benchmark_script``, which on
-        every non-AgentX run IS a server launcher. The AgentX switch replaces
-        that field with the aiperf client -- which boots a server, replays the
-        corpus for ``AGENTX_DURATION``, then tears the server down in its exit
-        trap. Run under ``MAGPIE_RUN_PHASE=server`` it therefore returns no pid,
-        and GEAK's bench aborts before it measures a single repeat.
+        every non-AgentX run IS a server launcher. The MLPerf switch replaces
+        that field with its client, which boots no server under
+        ``MAGPIE_RUN_PHASE=server``, so GEAK's bench would get no pid and abort
+        before it measures a single repeat.
 
-        Naming the builtin the client itself delegates to keeps GEAK on the
-        Magpie launch path -- the reason that launcher exists, since the platform
-        kernel preset, ``--trust-remote-code`` and the gpu-mem-util default are
-        not flags and so cannot be recovered from the accepted-flags handoff --
+        Naming the framework's builtin launcher keeps GEAK on the Magpie launch
+        path -- the reason that launcher exists, since the platform kernel
+        preset, ``--trust-remote-code`` and the gpu-mem-util default are not
+        flags and so cannot be recovered from the accepted-flags handoff --
         while letting its own bench repeats run again.
 
-        Resolution mirrors ``mlperf_agentic_client.sh``: the same ``AGENTX_SERVER_SCRIPT``
-        override, the same ``{framework}_{gpu}.sh`` fallback, the same
-        ``<checkout>/benchmarks/`` directory and deliberately no recursive
-        search, so what we advertise is the path that would have booted the
-        server rather than merely a plausible one. Recipe-recorded values beat
-        the ambient env because the recipe is the record of what actually ran.
+        Resolution takes the ``AGENTX_SERVER_SCRIPT`` override, else the
+        ``{framework}_{gpu}.sh`` fallback, in the ``<checkout>/benchmarks/``
+        directory and deliberately no recursive search, so what we advertise
+        is a launcher on disk rather than merely a plausible one.
+        Recipe-recorded values beat the ambient env because the recipe is the
+        record of what actually ran.
 
         Returns "" for any non-AgentX recipe -- there GEAK's own derivation names
         the script that really launched the baseline, which is strictly better
