@@ -37,6 +37,15 @@ def round_report_path(workspace: Path) -> Path:
     return RunLayout(workspace).report if is_round_folder(workspace) else workspace / MAGPIE_REPORT_FILE
 
 
+def read_round_launch(run_dir: Path) -> Launch | None:
+    """The launch ``run_dir`` records; ``None`` when it holds no ``launch.json``.
+
+    Raises ``OSError``, ``ValueError`` (``LaunchError``) for a launch off contract.
+    """
+    path = RunLayout(run_dir).launch
+    return Launch.from_document(read_json_strict(path)) if path.is_file() else None
+
+
 @dataclass(frozen=True)
 class RoundFolder:
     """One finished run_dir; ``launch`` is ``None`` for a round refused before its launch was composed."""
@@ -50,8 +59,7 @@ class RoundFolder:
         """Raises ``OSError``, ``ValueError`` (``ReportError``, ``LaunchError``) for a report or launch off contract."""
         layout = RunLayout(run_dir)
         report = Report.from_document(read_json_strict(layout.report))
-        launch = Launch.from_document(read_json_strict(layout.launch)) if layout.launch.is_file() else None
-        return cls(layout, report, launch)
+        return cls(layout, report, read_round_launch(run_dir))
 
     def measurement(self) -> dict[str, Any]:
         measurement = round_measurement(self.report, self.launch)
@@ -64,4 +72,4 @@ class RoundFolder:
         return write_gpu_metrics_from_report(round_dir, self.report.to_document(), source=REPORT_FILE)
 
 
-__all__ = ["MAGPIE_REPORT_FILE", "RoundFolder", "is_round_folder", "round_report_path"]
+__all__ = ["MAGPIE_REPORT_FILE", "RoundFolder", "is_round_folder", "read_round_launch", "round_report_path"]

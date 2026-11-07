@@ -25,7 +25,6 @@ from .kernel_round_budget import rebench_round_sec
 from hyperloom_common.env import env_float, env_int
 from hyperloom_common.jsonio import read_json
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
-from hyperloom.common.launch_log_evidence import recipe_server_launch
 from ..actions.executors._recipe_script import resolve_launch_server_script
 from ..actions.executors._workload_envs import geak_metric_axis
 from ..bus.message_bus import Message
@@ -385,24 +384,11 @@ class _GeakDispatchMixin:
             run_with_session_kill, cmd, env=runner_env, watch=RoundWatch(timeout=kill_timeout)
         )
 
-    def _accepted_launch_spec(self, *, agentx: bool) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    def _accepted_launch_spec(self) -> dict[str, Any]:
         try:
-            env_spec = self._coord.writeback.build_env_spec()
+            return self._coord.writeback.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
             raise EnvSpecUnserializable(str(exc)) from exc
-        measurement = self.shared_state.current_best_measurement
-        config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
-        if agentx and not str(config.get("server_launch_flags") or "").strip():
-            evidence = measurement.get("launch_evidence")
-            server_log = str(evidence.get("actual_server_log_path") or "") if isinstance(evidence, Mapping) else ""
-            recipe_launch = recipe_server_launch(server_log)
-            if recipe_launch.flags or recipe_launch.env:
-                env_spec = self._coord.writeback.build_env_spec(
-                    measurement=measurement,
-                    server_launch_flags=recipe_launch.flags,
-                    server_launch_envs=recipe_launch.env,
-                )
-        return env_spec, measurement
 
     @staticmethod
     def _reference_verification_status(evidence: Mapping[str, Any], *, identity_matches: bool, observed: bool) -> str:
@@ -558,7 +544,8 @@ class _GeakDispatchMixin:
 
     def _build_geak_handoff(self, *, agentx: bool) -> dict[str, Any]:
         cb = self.shared_state.current_best
-        env_spec, measurement = self._accepted_launch_spec(agentx=agentx)
+        env_spec = self._accepted_launch_spec()
+        measurement = self.shared_state.current_best_measurement
         spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
         accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
         extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
