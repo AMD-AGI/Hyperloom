@@ -14,7 +14,8 @@ The operator's own launch file enters both as the :class:`UserFile` :func:`parse
 A runner runs one round with :func:`run_round`, and reaps a server a round left running with :func:`stop`. The round
 names the staged tools it runs by :func:`manifest_sha256`, the digest of the tool cache's manifest. A runner that runs
 the round in another process runs ``python -m inference_suite run``, which exits :data:`EXIT_REFUSED` when it refuses
-the config before the round starts.
+the config before the round starts. :func:`inferencex_root` is the staged InferenceX in a tool cache, and
+:data:`CLIENT_FILE` its benchmark client under that root.
 """
 
 from __future__ import annotations
@@ -27,9 +28,10 @@ from inference_suite.recipe.sources import SourceFetchError, fetch_response, fet
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
 from inference_suite.run import RoundResult, run_round
 from inference_suite.runtime.server import stop
-from inference_suite.staging import manifest_sha256
+from inference_suite.staging import CLIENT_FILE, inferencex_root, manifest_sha256
 
 __all__ = [
+    "CLIENT_FILE",
     "EXIT_REFUSED",
     "LaunchQuery",
     "Miss",
@@ -41,6 +43,7 @@ __all__ = [
     "UserFileError",
     "fetch_response",
     "fetch_sources",
+    "inferencex_root",
     "manifest_sha256",
     "parse_user_file",
     "resolve_base",
