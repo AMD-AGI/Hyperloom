@@ -108,6 +108,13 @@ A round holds its server in one of four modes:
 | `reuse` | Runs against the server `pid_dir` records, once it has shown it owns that server (`reuse_not_owned` otherwise). |
 | `external` | Runs the client only, against a server something else starts and stops. Multi-node rounds and rounds given a `BENCHMARK_BASE_URL` use it. |
 
+Before `own` or `boot` starts a server, the round refuses a port something already
+listens on (`port_in_use`) and GPUs that `amd-smi` does not list or that another
+process holds (`gpus_unavailable`, naming each GPU, its amd-smi card and its holder; a
+round's GPU numbers are `HIP_VISIBLE_DEVICES` numbers, matched to amd-smi cards through
+their KFD node). Hyperloom stops
+the session on the first `gpus_unavailable` with `stop_reason=host_gpus_unavailable`.
+
 A server is ready when `/health` answers 200, its process is alive and its log
 shows a ready marker. Every child runs in a session of its own with a run mark in
 its environment; reaping reaches the child's tree and every process carrying that
@@ -189,7 +196,7 @@ A round that did not complete names one `failed_step`:
 
 | Stage | `failed_step` |
 |---|---|
-| Before start | `config_invalid`, `base_digest_mismatch`, `framework_version_too_old`, `framework_version_unknown`, `reuse_not_owned`, `eval_context_too_short`, `staging_missing`, `source_files_changed`, `flag_unknown`, `golden_owned_touched`, `port_in_use` |
+| Before start | `config_invalid`, `base_digest_mismatch`, `framework_version_too_old`, `framework_version_unknown`, `reuse_not_owned`, `eval_context_too_short`, `staging_missing`, `source_files_changed`, `flag_unknown`, `golden_owned_touched`, `port_in_use`, `gpus_unavailable` |
 | Server | `server_exited_before_ready`, `server_silent_before_ready`, `server_boot_timeout`, `server_stalled`, `server_died` |
 | Client | `client_failed`, `client_output_missing` |
 | Eval | `eval_failed` |

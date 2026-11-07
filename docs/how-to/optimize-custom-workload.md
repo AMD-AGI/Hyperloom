@@ -66,7 +66,8 @@ reference.
 Hyperloom looks for your entrypoint inside `--benchmark-scripts-dir` in this
 order:
 
-1. `custom_<runner_type>.sh` — with `--gpu-type mi355x`, that is `custom_mi355x.sh`.
+1. `custom_<gpu-type>.sh`, named after the board itself — with `--gpu-type mi325x`,
+   that is `custom_mi325x.sh`.
 2. Failing that, the **single** `.sh` file in the directory, which is what an
    operator who wrote one script for one machine actually has.
 3. If neither applies, the entrypoint is unresolved and the run reports the miss.
@@ -247,10 +248,9 @@ the bundle rather than the lever.
 ## Other requirements
 
 **GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x`, `mi355x`,
-`r9700` and `radeon8060s` (Strix Halo).
-Note that **`mi308x` and `mi325x` map to `runner_type=mi300x`** with a warning,
-since those GPUs share the MI300X runner family. Without the flag, Hyperloom
-auto-detects through `rocm-smi --showproductname`.
+`r9700` and `radeon8060s` (Strix Halo). The entrypoint name uses the board as
+given: `mi325x` looks for `custom_mi325x.sh`, not `custom_mi300x.sh`. Without the flag, Hyperloom auto-detects through
+`rocm-smi --showproductname`.
 
 **Pin GPUs with `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.** On the known
 ROCm stack the latter can make `torch.cuda.is_available()` return false.
@@ -303,7 +303,7 @@ denominator. For the full artifact schema, see
 | Symptom | Cause |
 |---------|-------|
 | Missing-path error at launch | `--framework-path` or `--benchmark-scripts-dir` not given; `custom` has no shipped entrypoint to fall back on |
-| Entrypoint not resolved | The directory has no `custom_<runner_type>.sh` and does not contain exactly one `.sh` |
+| Entrypoint not resolved | The directory has no `custom_<gpu-type>.sh` and does not contain exactly one `.sh` |
 | Run completes but keeps no optimization | The report carries no `quality_gate`, so accuracy scores 0.0 and every candidate is rejected |
 | Whole budget spent in `PRELUDE` | Credentials not exported from the launching shell; every orchestration turn returns 401 |
 | Specialist patches never land | `--framework-path` not given, so PolicyGate does not recognize the tree |

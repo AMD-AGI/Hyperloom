@@ -168,6 +168,7 @@ def test_failed_step_is_a_closed_list() -> None:
         "flag_unknown",
         "golden_owned_touched",
         "port_in_use",
+        "gpus_unavailable",
         "server_exited_before_ready",
         "server_silent_before_ready",
         "server_boot_timeout",

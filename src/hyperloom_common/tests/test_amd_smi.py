@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import json
 import subprocess
 
 import pytest
@@ -10,6 +11,7 @@ from hyperloom_common.amd_smi import (
     AmdSmiError,
     gfx_clock_limits,
     gpu_rows,
+    gpus_in_rocm_order,
     metric_value,
     read_amd_smi_json,
     run_amd_smi,
@@ -62,3 +64,17 @@ def test_the_clock_limit_is_the_one_the_filled_gfx_slots_agree_on():
     assert single_clock_limit(gfx_clock_limits(clock)) == 2400.0
     assert single_clock_limit({2400.0, 2100.0}) is None
     assert gfx_clock_limits("N/A") == frozenset()
+
+
+def test_rocm_order_follows_the_kfd_nodes_not_the_amd_smi_indices(monkeypatch):
+    # An MI355X board: amd-smi lists cards in PCI order, ROCm numbers them in KFD node order.
+    nodes = {0: 9, 1: 11, 2: 10, 3: 8, 4: 13, 5: 15, 6: 14, 7: 12}
+    listed = {"gpu_data": [{"gpu": gpu, "bdf": "0000:00:00.0", "node_id": node} for gpu, node in nodes.items()]}
+    _answer(monkeypatch, stdout=json.dumps(listed))
+    assert gpus_in_rocm_order() == [3, 0, 2, 1, 7, 4, 6, 5]
+
+
+def test_a_card_without_its_kfd_node_has_no_rocm_number(monkeypatch):
+    _answer(monkeypatch, stdout=json.dumps([{"gpu": 0, "node_id": 2}, {"gpu": 1}]))
+    with pytest.raises(AmdSmiError, match="without its KFD node"):
+        gpus_in_rocm_order()

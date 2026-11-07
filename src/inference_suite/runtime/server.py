@@ -3,7 +3,8 @@
 
 """The round's server: own, boot or reuse it, and :func:`stop` one a round left running.
 
-``own`` starts the server, logs to the run_dir's ``server.log``, keeps ``server.pid`` there while it runs (so a host
+``own`` and ``boot`` first refuse a port something listens on and GPUs that are not visible or not free. ``own``
+starts the server, logs to the run_dir's ``server.log``, keeps ``server.pid`` there while it runs (so a host
 can still stop it if the round's process dies) and tears it down at release. ``boot`` starts it with its live log and
 pidfile in ``pid_dir`` and leaves it running. ``reuse`` runs against the server ``pid_dir`` records, once it has shown
 it owns that server. ``external`` runs against a server something else starts and stops. A boot or reuse round
@@ -28,6 +29,7 @@ from inference_suite.contracts.config import LifecycleMode, ServerConfig, SuiteC
 from inference_suite.contracts.layout import SERVER_LOG, SERVER_PID, ReadyStamp, RunLayout
 from inference_suite.contracts.report import FailedStep, LogRange
 from inference_suite.frameworks import Framework
+from inference_suite.runtime.gpus import unavailable_gpus
 from inference_suite.runtime.phases import Phase, PhaseClock
 from inference_suite.runtime.process import (
     Reaped,
@@ -213,6 +215,9 @@ class ServerLifecycle:
         port = self._config.server.port
         if listening_inodes(port):
             return Stop(FailedStep.PORT_IN_USE, f"something already listens on port {port}")
+        busy = unavailable_gpus(self._config.server.gpus)
+        if busy is not None:
+            return Stop(FailedStep.GPUS_UNAVAILABLE, busy)
         started = time.monotonic()
         self._clock.mark(Phase.SPAWN, started)
         spawned = self._spawned = spawn(self._launch.argv, self._server_env(), self._log)

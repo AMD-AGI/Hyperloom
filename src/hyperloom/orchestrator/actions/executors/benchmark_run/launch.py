@@ -176,7 +176,7 @@ def _attempt_target(params: dict[str, Any], resolved_model: str, override_script
     """The model, GPU type and benchmark script the attempt's config targets."""
     return BenchmarkTarget(
         model_path=resolved_model,
-        # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
+        # gpu_type: task.params > $GPU_TYPE.
         gpu_type=str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower(),
         benchmark_script=override_script,
     )
