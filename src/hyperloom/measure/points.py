@@ -81,7 +81,7 @@ class CanonicalMeasurement:
 
     @property
     def agentx(self) -> bool:
-        """Whether the base configuration is a Magpie AgentX benchmark, the main flow's own test for its workload."""
+        """Whether the base configuration is a native AgentX benchmark, the main flow's own test for its workload."""
 
         return native_config(self.config_path)
 
@@ -185,7 +185,7 @@ def launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str |
 
 def _check_removals(config: Mapping[str, Any], launch: LaunchConfig) -> None:
     """Every option the recipe removes from the launch the framework resolves must be among an AgentX point's
-    removals, or Magpie would launch with it. Any other point carries its whole launch in the recipe's own arguments,
+    removals, or the round would launch with it. Any other point carries its whole launch in the recipe's own arguments,
     so a removal it could not make is refused, not left on."""
 
     if not launch.remove_args:
@@ -193,7 +193,7 @@ def _check_removals(config: Mapping[str, Any], launch: LaunchConfig) -> None:
     names = ", ".join(launch.remove_args)
     point = BenchmarkPoint.from_document(config)
     if not point.agentx:
-        raise PointError(f"only a Magpie AgentX point removes options of the launch it resolves, so {names} would stay")
+        raise PointError(f"only an AgentX point removes options of the launch it resolves, so {names} would stay")
     removed = set(point.agentx_launch.remove_args)
     kept = sorted(name for name in launch.remove_args if name not in removed)
     if kept:
@@ -303,7 +303,7 @@ def generate_profile_point(
     The profile configuration turns the torch profiler on (``PROFILE=1``, ``PROFILE_EXTRA_BODY``, the framework's
     capture flags) and the renderer sizes the capture window from the workload, as the single-lineage profile does.
     The point runs at the primary concurrency without accuracy; apart from the output length the measurement surface
-    must still be the canonical one. An AgentX workload profiles the point it measures: Magpie captures the traces
+    must still be the canonical one. An AgentX workload profiles the point it measures: the round captures the traces
     when the point's ``profiler.torch_profiler`` is enabled, as the single-lineage AgentX profile turns it on.
     """
 

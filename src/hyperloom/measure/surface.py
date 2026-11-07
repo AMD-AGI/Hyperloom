@@ -130,7 +130,7 @@ class MeasurementSurface:
 
 
 def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
-    """The surface fields of a materialized Magpie configuration, with the script and model files hashed.
+    """The surface fields of a materialized point configuration, with the script and model files hashed.
 
     The model files are those of the directory the server loads: an AgentX configuration names it in ``envs.MODEL_PATH``
     and keeps the model's identity in ``benchmark.model``; any other names the directory in ``benchmark.model``.

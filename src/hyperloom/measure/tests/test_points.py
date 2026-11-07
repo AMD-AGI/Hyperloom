@@ -363,7 +363,7 @@ def test_a_point_that_resolves_no_launch_of_its_own_refuses_a_removal_it_cannot_
     delta = RecipeDelta(config=ConfigDelta(remove_args=(RESOLVED_OPTION,)))
     env = environment(blobs, tmp_path, delta=delta)
 
-    with pytest.raises(PointError, match=f"only a Magpie AgentX point .* so {RESOLVED_OPTION} would stay"):
+    with pytest.raises(PointError, match=f"only an AgentX point .* so {RESOLVED_OPTION} would stay"):
         generate_points(env, canonical, tmp_path / "points")
 
 
