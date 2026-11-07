@@ -15,6 +15,7 @@ finder that maps only ``aiter``, as an editable install does).
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -180,6 +181,17 @@ def _mirrors_the_image_meta_without_its_aiter(farm: Farm, image: Image) -> bool:
 
 def test_the_farm_mirrors_the_image_meta_directory_where_aiter_keeps_it_without_its_aiter(tmp_path, image):
     assert _mirrors_the_image_meta_without_its_aiter(_build(tmp_path, image), image)
+
+
+def test_every_link_the_farm_lays_points_into_a_directory_it_names_as_mirrored(tmp_path, image):
+    """The image's directories a sandbox that compiles from the farm binds read-only, so its links resolve there: the
+    package's and the meta directory's (one inside the other in a checkout, apart in a wheel)."""
+    farm = _build(tmp_path, image)
+
+    links = [Path(os.readlink(path)) for path in farm.site.rglob("*") if path.is_symlink()]
+    assert len(farm.mirrored) == 2 and farm.mirrored[1] == image.meta
+    assert links and [link for link in links if not any(link.is_relative_to(root) for root in farm.mirrored)] == []
+    assert {root for root in farm.mirrored if any(link.is_relative_to(root) for link in links)} == set(farm.mirrored)
 
 
 def test_a_patched_aiter_in_the_farm_imports_because_it_is_told_the_mirrored_meta_directory(tmp_path, image):

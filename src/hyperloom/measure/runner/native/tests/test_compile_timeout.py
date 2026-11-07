@@ -1,15 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A compile past its time is given up with every process it started: the compiler's own jobs do not outlive it."""
+"""A compile past its time is given up with every process it started: the compiler's own jobs do not outlive it, and
+under bubblewrap neither does any process of its sandbox, whichever thread started it."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import sys
 import time
+import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -17,8 +21,9 @@ import pytest
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.runner.native import isolated
 from hyperloom.measure.runner.native.builder import plan
-from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation
+from hyperloom.measure.runner.native.isolated import SOURCE_ROOT, IsolatedBuilds, Isolation
 from hyperloom.measure.runner.native.planning import Planned
+from hyperloom.measure.runner.native.tests._bwrap_compile import bwrap_compile_isolation
 from hyperloom.measure.runner.native.tests._native import COMPONENT, KERNEL, Bench
 
 BUDGET_SEC = 2
@@ -117,3 +122,82 @@ def test_a_build_child_past_its_time_is_infra_and_every_process_it_started_is_ki
     assert time.monotonic() - started < BUDGET_SEC + _GIVEN_UP_WITHIN_SEC, "given up when its time ran out"
     assert sleeper.is_file(), "the stand-in child started its sleeper before its time ran out"
     assert _waited_out(int(sleeper.read_text())), "the child's own child is killed with it"
+
+
+#: Under bubblewrap the pids inside are not this process's: the child and its sleeper carry ``argv[2]`` on their command
+#: lines instead, and the child notes in its work directory (``argv[1]``) that the sleeper started.
+_SLEEPS_MARKED = (
+    "import pathlib, subprocess, sys, time\n"
+    "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)', sys.argv[2]])\n"
+    "pathlib.Path(sys.argv[1], 'started').write_text('yes')\n"
+    "time.sleep(300)\n"
+)
+
+
+@dataclass(frozen=True)
+class _SleepsInTheSandbox:
+    """The build child, standing in under bubblewrap: it starts a sleeper and never ends."""
+
+    token: str
+    python: str = sys.executable
+    source: Path = SOURCE_ROOT
+
+    def command(self, work: Path) -> list[str]:
+        return [self.python, "-c", _SLEEPS_MARKED, str(work), self.token]
+
+
+def _carrying(token: str) -> list[int]:
+    """The processes whose command line carries ``token`` (a zombie's is empty)."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit() and int(entry.name) != os.getpid():
+            try:
+                if token.encode() in (entry / "cmdline").read_bytes():
+                    found.append(int(entry.name))
+            except OSError:
+                continue
+    return found
+
+
+def _none_left(token: str) -> bool:
+    deadline = time.monotonic() + _GONE_WITHIN_SEC
+    while _carrying(token) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not _carrying(token)
+
+
+@pytest.mark.agent_isolation
+@pytest.mark.parametrize("worker_thread", [True, False], ids=["worker-thread", "main-thread"])
+async def test_under_bubblewrap_a_build_child_past_its_time_is_killed_with_its_whole_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_thread: bool
+) -> None:
+    sandbox = bwrap_compile_isolation(monkeypatch)
+    monkeypatch.setattr(isolated, "_MARGIN_SEC", 0)
+    bench = Bench(tmp_path, budget_sec=BUDGET_SEC)
+    request = bench.request(bench.patch({KERNEL: "int kernel(void) { return 2; }\n"}))
+    inputs, root = plan(request, bench.blobs)
+    token = f"hl-compile-sleeper-{uuid.uuid4().hex}"
+    runner = IsolatedBuilds(
+        _Planner(Planned(request, root)),  # type: ignore[arg-type]
+        bench.blobs,
+        sandbox,
+        {COMPONENT: "unused:factory"},
+        _SleepsInTheSandbox(token),  # type: ignore[arg-type]
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    try:
+        started = time.monotonic()
+        with pytest.raises(BuildInfraError, match=f"the build runner of {COMPONENT} did not end in time"):
+            if worker_thread:  # as the build service runs it (asyncio.to_thread)
+                await asyncio.to_thread(runner(inputs), scratch)
+            else:
+                runner(inputs)(scratch)
+
+        assert time.monotonic() - started < BUDGET_SEC + _GIVEN_UP_WITHIN_SEC, "given up when its time ran out"
+        assert (scratch / "work" / "started").read_text() == "yes", "the sleeper started before its time ran out"
+        assert _none_left(token), f"left running: {_carrying(token)}"
+    finally:
+        for pid in _carrying(token):  # only what this test started, found by its own token
+            os.kill(pid, signal.SIGKILL)

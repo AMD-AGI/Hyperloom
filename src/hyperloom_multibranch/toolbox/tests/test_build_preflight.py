@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import stat
@@ -16,6 +17,9 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common.bwrap import BwrapProbe
+
+from hyperloom.common.agent_isolation import BwrapIsolation, NoIsolation
 from hyperloom.common.tests._id_map_helpers import HOST_MAP, ONE_ID_MAP, use_id_maps
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.runner.native import isolated
@@ -32,6 +36,8 @@ from hyperloom_multibranch.toolbox.build_preflight import (
     unreachable,
 )
 
+#: Why the compile cannot run as user 65534 on a host that is not root, as the isolation module says it.
+NOT_ROOT = "it runs as uid 1000, not root, and only root can compile as user 65534"
 #: Every directory above a test's own is taken as root's with mode 0755: what this suite controls is below.
 _OPEN_MODE = 0o40755
 _PIN = "614c597bc0c66cabf6a15152037324acc7386090"
@@ -248,6 +254,9 @@ def test_a_tracelens_that_is_not_importable_is_named() -> None:
 # --- the whole preflight --------------------------------------------------------------------------------------------
 
 
+_NO_BWRAP = "bubblewrap: not found on PATH"
+
+
 def _isolation_as(
     monkeypatch: pytest.MonkeyPatch,
     where: Path,
@@ -256,10 +265,11 @@ def _isolation_as(
     setpriv: bool = True,
     maps: tuple[str, str | None] = (HOST_MAP, None),
 ) -> Path:
-    """Have the preflight judge isolation for real (``isolation_problem``) as a process of uid ``euid``, with or without
-    ``setpriv``, in a user namespace of these uid and gid maps (written under ``where``; the gid map is the uid map
-    unless given); returns the maps' directory."""
-    monkeypatch.setattr(preflight, "isolation_problem", isolated.isolation_problem)
+    """Have the preflight judge the account tier for real (``account_problem``) as a process of uid ``euid``, with or
+    without ``setpriv``, in a user namespace of these uid and gid maps (written under ``where``; the gid map is the uid
+    map unless given), on a host with no bubblewrap; returns the maps' directory."""
+    monkeypatch.setattr(preflight, "account_problem", isolated.account_problem)
+    monkeypatch.setattr(preflight, "bwrap_isolation", lambda: NoIsolation((_NO_BWRAP,)))
     monkeypatch.setattr(isolated.os, "geteuid", lambda: euid)
     found = shutil.which
     tool = "/usr/bin/setpriv" if setpriv else None
@@ -289,7 +299,8 @@ def ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PreflightSite:
             Path(directory).chmod(0o755)
     monkeypatch.setattr(preflight, "geteuid", lambda: 0)
     monkeypatch.setattr(preflight, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(preflight, "isolation_problem", lambda: None)
+    monkeypatch.setattr(preflight, "account_problem", lambda: None)
+    monkeypatch.setattr(preflight, "bwrap_isolation", lambda: pytest.fail("the account tier works: no bubblewrap"))
     monkeypatch.setattr(preflight, "tracelens_problem", lambda: None)
     monkeypatch.setattr(preflight, "stat_path", stat_open_above(tmp_path))
     return PreflightSite(
@@ -312,12 +323,17 @@ def test_a_ready_host_passes(ready: PreflightSite) -> None:
     build_preflight(ready)
 
 
+def _no_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(preflight, "account_problem", lambda: NOT_ROOT)
+    monkeypatch.setattr(preflight, "bwrap_isolation", lambda: NoIsolation(("bubblewrap: not found on PATH",)))
+
+
 @pytest.mark.parametrize(
     ("break_it", "says"),
     [
         (
-            lambda m: m.setattr(preflight, "isolation_problem", lambda: "it runs as uid 1000, not root"),
-            "the build service cannot isolate a native build: it runs as uid 1000, not root",
+            _no_isolation,
+            f"it can compile neither as user 65534 ({NOT_ROOT}) nor under bubblewrap (bubblewrap: not found on PATH)",
         ),
         (lambda m: m.setattr(preflight, "tracelens_problem", lambda: "TraceLens at /x is commit 647cbf2"), "647cbf2"),
         (
@@ -325,7 +341,7 @@ def test_a_ready_host_passes(ready: PreflightSite) -> None:
             "the image's upstream commits cannot be read",
         ),
     ],
-    ids=["isolation", "tracelens", "no-image-commit"],
+    ids=["no-isolation", "tracelens", "no-image-commit"],
 )
 def test_each_host_item_that_is_not_ready_is_refused_by_name(
     ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, break_it, says: str
@@ -370,7 +386,8 @@ def test_a_host_that_cannot_isolate_a_build_is_refused_naming_why_as_the_build_w
 
     problem = _refusal(ready)
 
-    assert f"the build service cannot isolate a native build: {says.format(maps=maps)}" in problem, problem
+    assert f"it can compile neither as user 65534 ({says.format(maps=maps)}" in problem, problem
+    assert f"nor under bubblewrap ({_NO_BWRAP})" in problem, problem
 
 
 def test_a_user_namespace_map_that_cannot_be_read_is_refused_naming_the_file(
@@ -382,7 +399,7 @@ def test_a_user_namespace_map_that_cannot_be_read_is_refused_naming_the_file(
     problem = _refusal(ready)
 
     unread = f"cannot read {maps / 'gid_map'}: FileNotFoundError"
-    assert f"the build service cannot isolate a native build: {unread}" in problem, problem
+    assert f"it can compile neither as user 65534 ({unread}" in problem, problem
 
 
 def test_sources_without_the_image_commit_are_refused_naming_what_they_have(
@@ -426,6 +443,56 @@ def test_a_path_65534_cannot_reach_is_refused_naming_the_item_and_the_directory(
     )
     assert f"cannot reach the sgl_kernel checkout {ready.sources / 'sgl_kernel' / present}: " in problem
     assert "(mode 0750" in problem
+
+
+def _bwrap_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only bubblewrap isolates the compile, and the interpreters are looked up on this host's ``PATH``."""
+    monkeypatch.setattr(preflight, "which", shutil.which)
+    monkeypatch.setattr(preflight, "account_problem", lambda: NOT_ROOT)
+    monkeypatch.setattr(
+        preflight, "bwrap_isolation", lambda: BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 9, 0), ()))
+    )
+
+
+def test_a_bubblewrap_that_gave_no_answer_in_time_is_not_a_refusal_at_start(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The probe's own contract: an answer that did not come in time is never a final one."""
+    no_answer = "bubblewrap at /usr/bin/bwrap: no answer in 10 s"
+    monkeypatch.setattr(preflight, "which", shutil.which)
+    monkeypatch.setattr(preflight, "account_problem", lambda: NOT_ROOT)
+    monkeypatch.setattr(preflight, "bwrap_isolation", lambda: NoIsolation((no_answer,), transient=True))
+
+    with caplog.at_level(logging.WARNING, logger=preflight.logger.name):
+        build_preflight(ready)
+
+    (record,) = [r for r in caplog.records if r.name == preflight.logger.name]
+    assert record.levelno == logging.WARNING
+    assert f"({NOT_ROOT}) and bubblewrap gave no answer in time ({no_answer}); each build asks again" in (
+        record.getMessage()
+    )
+
+
+def test_where_only_bubblewrap_isolates_the_compile_user_65534_need_reach_nothing(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bwrap_only(monkeypatch)
+    ready.image_root.chmod(0o700)
+
+    build_preflight(ready)
+
+
+def test_where_only_bubblewrap_isolates_the_compile_what_it_runs_must_still_be_there(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bwrap_only(monkeypatch)
+    ready.image_root.rename(ready.image_root.with_name("gone"))
+
+    problem = _refusal(replace(ready, python="python3.99"))
+
+    assert f"HYPERLOOM_BUILD_IMAGE_ROOT {ready.image_root} does not exist" in problem
+    assert "HYPERLOOM_BUILD_PYTHON 'python3.99' is not found on PATH" in problem
+    assert "user 65534" not in problem and "compile neither" not in problem
 
 
 def test_an_image_interpreter_not_on_path_is_refused(ready: PreflightSite, monkeypatch: pytest.MonkeyPatch) -> None:
