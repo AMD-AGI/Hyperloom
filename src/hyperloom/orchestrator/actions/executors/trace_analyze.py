@@ -22,6 +22,7 @@ from ._kernel_agent_tool import (
     _shape_tool_result,
 )
 from hyperloom_common.coerce import first_text
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
@@ -199,13 +200,12 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     import yaml  # type: ignore[import-untyped]
 
     try:
-        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        point = read_benchmark_point(path)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("failed to read materialized workload config %s: %s", path, exc)
         return {}
-    bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
-    envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-    framework = str(bench.get("framework") or "").strip().lower()
+    envs = point.envs
+    framework = point.framework.strip().lower()
     # Per-framework env-name source of truth (e.g. atom reads ``EXTRA_ATOM_ARGS``).
     from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
@@ -228,8 +228,8 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     runtime_args = {
         "materialized_config": str(path),
         "framework": framework or None,
-        "model": bench.get("model"),
-        "precision": bench.get("precision"),
+        "model": point.model,
+        "precision": point.precision,
         "server_args": server_args,
         "server_args_argv": _split_server_args(server_args),
         "workload": workload,

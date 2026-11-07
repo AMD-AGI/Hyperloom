@@ -1194,9 +1194,9 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = materialize_benchmark_config(src, tmp_path)
-    bench = yaml.safe_load(out.read_text())["benchmark"]
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
 
-    row = _instrumentation_preflight_row(bench)
+    row = _instrumentation_preflight_row(envs)
 
     assert row["check_id"] == CHECK_INSTRUMENTATION_PREFLIGHT
     assert row["status"] == "failed"
@@ -1224,7 +1224,7 @@ def test_instrumentation_preflight_passes_on_a_healthy_patch(tmp_path, monkeypat
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = materialize_benchmark_config(src, tmp_path)
 
-    row = _instrumentation_preflight_row(yaml.safe_load(out.read_text())["benchmark"])
+    row = _instrumentation_preflight_row(yaml.safe_load(out.read_text())["benchmark"]["envs"])
 
     assert row["status"] == "passed"
     assert row["detail"]["degraded_reason"] == ""
@@ -1233,13 +1233,27 @@ def test_instrumentation_preflight_passes_on_a_healthy_patch(tmp_path, monkeypat
     assert row["detail"]["predicts_failure_of"] == []
 
 
-def test_instrumentation_preflight_skips_without_an_envs_block(tmp_path):
-    from hyperloom.orchestrator.actions.executors.profile import _instrumentation_preflight_row
+@pytest.mark.parametrize("in_point", [True, False], ids=["point", "environment"])
+def test_profile_patches_the_checkout_the_point_names_before_the_environments(tmp_path, monkeypatch, in_point):
+    import yaml
 
-    row = _instrumentation_preflight_row({"framework": "sglang"})
+    from hyperloom.orchestrator.actions.executors import profile as profile_mod
 
-    assert row["status"] == "skipped"
-    assert "benchmark.envs" in row["skip_reason"]
+    point_ix, env_ix = tmp_path / "point-ix", tmp_path / "env-ix"
+    bench = {"framework": "sglang", "envs": {}, **({"inferencex_path": str(point_ix)} if in_point else {})}
+    config = tmp_path / "config.yaml"
+    config.write_text(yaml.safe_dump({"benchmark": bench}))
+    monkeypatch.setenv("INFERENCEX_PATH", str(env_ix))
+    for patcher in ("ensure_benchmark_lib_patched", "ensure_benchmark_lib_eval_dest_patched"):
+        monkeypatch.setattr(profile_mod, patcher, lambda _root: True)
+    monkeypatch.setattr(profile_mod, "ensure_benchmark_serving_patched", lambda _root: False)
+    executor = profile_mod.ProfileExecutor()
+    monkeypatch.setattr(executor, "_inject_host_probe", lambda *_args: "")
+
+    result = executor._after_materialize_config(config, tmp_path / "out")
+
+    assert result["error_class"] == "profile_inferencex_patch_failed"
+    assert result["inferencex_path"] == str(point_ix if in_point else env_ix)
 
 
 def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
