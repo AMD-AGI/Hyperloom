@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
 from hyperloom_common.coerce import to_float, to_int
 from inference_suite.contracts import (
     FIXED_METRIC_KEYS,
@@ -34,13 +35,15 @@ _COMPLETED_REQUESTS = "completed_requests"
 _OUTPUT_THROUGHPUT = "output_throughput"
 _REQUEST_THROUGHPUT = "request_throughput"
 _DURATION_SECONDS = "duration_seconds"
+_TOTAL_TOKEN_THROUGHPUT = "total_token_throughput"
+_REQUEST_ERROR_RATE = "request_error_rate"
 
 #: Each AgentX throughput figure, by the measurement key it fills.
 _AGENTX_THROUGHPUT = {
     _REQUEST_THROUGHPUT: _REQUEST_THROUGHPUT,
     _OUTPUT_THROUGHPUT: "output_tokens_per_second",
     "input_throughput": "input_tokens_per_second",
-    "total_token_throughput": "total_tokens_per_second",
+    _TOTAL_TOKEN_THROUGHPUT: "total_tokens_per_second",
     _DURATION_SECONDS: _DURATION_SECONDS,
 }
 
@@ -56,9 +59,44 @@ _SCRIPTABLE_FIELDS = (
 )
 
 
+def _agentx_error_rate_pct(counts: Mapping[str, int]) -> float | None:
+    """The AgentX error rate under ``inferencex-agentx/1``, in percent, or ``None`` when no request was profiled.
+
+    Warmup drops are not errors: (dropped - warmup) / (successful + errors), Magpie's definition, which InferenceX's
+    acceptance threshold was set on.
+    """
+    profiled = counts["successful"] + counts["error_dropped"]
+    if profiled == 0:
+        return None
+    return 100.0 * (counts["dropped_total"] - counts["warmup_dropped"]) / profiled
+
+
+def _agentx_counts_add_up(counts: Mapping[str, int]) -> bool:
+    return (
+        counts["successful"] + counts["dropped_total"] == counts["records_total"]
+        and counts["warmup_dropped"] <= counts["dropped_total"]
+    )
+
+
+def _agentx_valid(result: AgentxResult, measurement: Mapping[str, Any]) -> bool:
+    """A canonical replay the threshold did not stop, whose counts add up and whose error rate is within InferenceX's."""
+    rate = measurement[_REQUEST_ERROR_RATE]
+    return (
+        not result.stopped_by_threshold
+        and not result.fast_mode
+        and _agentx_counts_add_up(result.counts)
+        and _positive(measurement[_COMPLETED_REQUESTS])
+        and rate is not None
+        and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
+        and _positive(measurement[_DURATION_SECONDS])
+        and _positive(measurement[_TOTAL_TOKEN_THROUGHPUT])
+    )
+
+
 def _agentx_metrics(result: AgentxResult) -> dict[str, Any]:
     metrics: dict[str, Any] = {key: result.throughput[raw] for key, raw in _AGENTX_THROUGHPUT.items()}
     metrics[_COMPLETED_REQUESTS] = result.counts["successful"]
+    metrics[_REQUEST_ERROR_RATE] = _agentx_error_rate_pct(result.counts)
     for key, seconds in result.latency_seconds.items():
         metrics[f"{key}_ms"] = None if seconds is None else seconds * _MS_PER_SECOND
     metrics.update({f"e2e_norm_intvty_{stat}": value for stat, value in result.e2e_norm_intvty.items()})
@@ -115,9 +153,14 @@ def _positive(value: object) -> bool:
 
 
 def _load_valid(report: Report, measurement: Mapping[str, Any]) -> bool:
-    """A round whose load ran and served: positive throughput, and a request served unless a script measured it."""
+    """A round whose load ran and served: positive throughput, and a request served unless a script measured it.
+
+    An AgentX round is judged by its counts instead.
+    """
     if report.run_status not in _LOAD_MEASURED or not _positive(measurement[_OUTPUT_THROUGHPUT]):
         return False
+    if report.agentx is not None:
+        return _agentx_valid(report.agentx, measurement)
     return report.scriptable is not None or _positive(measurement[_COMPLETED_REQUESTS])
 
 
