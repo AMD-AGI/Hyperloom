@@ -94,7 +94,7 @@ class BenchmarkPoint:
             inferencex_path=_text(block, "inferencex_path").strip(),
             envs=_mapping(block.get("envs"), source),
             workload_spec=_mapping(block.get("workload_spec"), source),
-            agentx=is_magpie_agentx(block),
+            agentx=is_agentx(block),
             agentx_launch=AgentxLaunch(
                 env=_mapping(launch.get("env"), source),
                 executable=_text(launch, "executable"),
@@ -170,10 +170,14 @@ def configured_benchmark(env: Mapping[str, str] | None = None) -> dict[str, Any]
     return _read_config(path, path.stat().st_mtime_ns).copy()
 
 
-def is_magpie_agentx(benchmark: Mapping[str, Any]) -> bool:
+def is_agentx(benchmark: Mapping[str, Any]) -> bool:
+    """Whether a ``benchmark`` block turns AgentX on: ``agentx`` is true, an enabling word, or a mapping not disabled."""
     value = benchmark.get(_AGENTX)
     if isinstance(value, dict):
         value = value.get("enabled", True)
     if isinstance(value, str):
         return value.strip().lower() in {"true", "enabled", "enable", "yes", "1"}
     return value is True
+
+
+is_magpie_agentx = is_agentx
