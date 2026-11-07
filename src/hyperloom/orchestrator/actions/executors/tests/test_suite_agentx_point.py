@@ -185,7 +185,7 @@ def test_a_discarded_warmup_replay_draws_its_trajectories_with_the_warmup_seed(
 
 
 def test_a_server_phase_point_boots_the_launch_and_replays_nothing() -> None:
-    point = _point(envs={"MAGPIE_RUN_PHASE": "server"})
+    point = _point(envs={"HYPERLOOM_RUN_PHASE": "server"})
     config = suite_config(point, _base(), _settings(LifecycleMode.BOOT))
 
     assert (config.workload, config.agentx, config.profile.enabled) == (WorkloadKind.NONE, None, False)

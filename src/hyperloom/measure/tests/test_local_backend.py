@@ -834,12 +834,12 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
         level = (8, 4)[index]
         envs = _envs_handed_to_magpie(grid, tmp_path, boot)
         assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1"), f"the boot at {level}"
-        assert "MAGPIE_RUN_PHASE" not in envs and envs["CONC"] == level
+        assert "HYPERLOOM_RUN_PHASE" not in envs and envs["CONC"] == level
         assert envs["NUM_WARMUPS"] == min(level, 8), "a variable outside the reuse check is the point's own"
     for level, round_ in zip((4, 2, 4), measured, strict=True):
         envs = _envs_handed_to_magpie(grid, tmp_path, round_)
         assert (envs["NUM_PROMPTS"], envs["NUM_WARMUPS"], envs["CONC"]) == (level * 10, min(level, 8), level)
-        assert "MAGPIE_RUN_PHASE" not in envs
+        assert "HYPERLOOM_RUN_PHASE" not in envs
     assert [_envs_handed_to_magpie(grid, tmp_path, c)["RUN_EVAL"] for c in measured] == ["false", "false", "true"], (
         "no bench evaluates; one evaluation, from the level the server booted on, after the last bench"
     )

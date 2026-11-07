@@ -1204,8 +1204,7 @@ def _pin_client_model_access(bench: dict[str, Any], model_path: str | None, mode
     # same remote code or transformers raises mid-warmup. Mirror it onto every
     # client-trust env. setdefault never overrides an operator opt-out.
     for _trust_key in (
-        "MAGPIE_TRUST_REMOTE_CODE",  # Magpie sglang remote-direct client
-        "BENCH_TRUST_REMOTE_CODE",  # GEAK bench_e2e.sh inferencex client
+        "BENCH_TRUST_REMOTE_CODE",  # the benchmark client
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
         envs.setdefault(_trust_key, "1")

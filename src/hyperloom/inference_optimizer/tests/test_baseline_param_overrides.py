@@ -202,7 +202,7 @@ def test_kimi_materialize_enables_remote_client_trust(tmp_path):
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
     assert envs["SGLANG_ROCM_FUSED_DECODE_MLA"] == "0"
-    assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+    assert envs["BENCH_TRUST_REMOTE_CODE"] == "1"
     assert "--trust-remote-code" in envs["EXTRA_SGLANG_ARGS"]
 
 
@@ -232,7 +232,7 @@ def test_custom_tokenizer_auto_map_enables_client_and_server_trust(tmp_path):
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
-    assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+    assert envs["BENCH_TRUST_REMOTE_CODE"] == "1"
     assert envs["BENCH_TRUST_REMOTE_CODE"] == "1"
     assert envs["HF_HUB_TRUST_REMOTE_CODE"] == "1"
     assert "--trust-remote-code" in envs["EXTRA_SGLANG_ARGS"]
@@ -256,7 +256,7 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
-    assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+    assert envs["BENCH_TRUST_REMOTE_CODE"] == "1"
     assert "--trust-remote-code" in envs["EXTRA_VLLM_ARGS"]
 
 

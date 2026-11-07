@@ -194,7 +194,7 @@ def test_on_magpie_the_boot_and_the_rounds_that_measure_have_one_server_identity
     stored = magpie_server_env(boot["envs"])
     for round_ in measured:
         assert magpie_server_env(round_["envs"]) == stored, f"the round at {round_['name']}"
-    assert "MAGPIE_RUN_PHASE" not in boot["envs"], (
+    assert "HYPERLOOM_RUN_PHASE" not in boot["envs"], (
         "the phase is outside Magpie's reuse check, and Magpie sets it itself"
     )
     assert (boot["envs"]["RUN_EVAL"], boot["envs"]["NUM_PROMPTS"]) == ("false", "1"), "a boot is still small"
@@ -275,9 +275,9 @@ def test_on_bypass_the_boot_round_is_the_same_one_request_round_with_no_evaluati
     LocalMeasurementBackend().run_test(_sweep(tmp_path))
 
     boot, *measured = rounds.rounds
-    assert "MAGPIE_RUN_PHASE" not in boot["envs"]
+    assert "HYPERLOOM_RUN_PHASE" not in boot["envs"]
     assert (boot["envs"]["RUN_EVAL"], boot["envs"]["NUM_PROMPTS"]) == ("false", "1")
-    assert not any("MAGPIE_RUN_PHASE" in r["envs"] for r in measured)
+    assert not any("HYPERLOOM_RUN_PHASE" in r["envs"] for r in measured)
 
 
 def test_the_copy_of_magpies_filter_is_magpies(tmp_path):
@@ -290,7 +290,7 @@ def test_the_copy_of_magpies_filter_is_magpies(tmp_path):
         "RESULT_DIR": "x",
     }
     envs.update(
-        {"HYPERLOOM_EVAL_LIMIT": "5", "ROCR_VISIBLE_DEVICES": "0", "MAGPIE_RUN_PHASE": "server", "PORT": "8123"}
+        {"HYPERLOOM_EVAL_LIMIT": "5", "ROCR_VISIBLE_DEVICES": "0", "HYPERLOOM_RUN_PHASE": "server", "PORT": "8123"}
     )
     config = SimpleNamespace(envs=envs, inferencex_path=str(tmp_path), framework="sglang", model="m", run_mode="local")
 
