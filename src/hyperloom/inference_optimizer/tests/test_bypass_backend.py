@@ -269,6 +269,42 @@ def test_eval_command_without_limit_omits_limit_flag():
     assert "base_url=http://127.0.0.1:8888/v1/completions" in " ".join(cmd)
 
 
+def test_eval_include_path_defaults_to_inferencex_evals(tmp_path):
+    (tmp_path / "utils" / "evals").mkdir(parents=True)
+    expected = str(tmp_path / "utils" / "evals")
+    assert bypass_engine.resolve_eval_include_path(str(tmp_path), "gsm8k") == expected
+    assert bypass_engine.resolve_eval_include_path(str(tmp_path), "gsm8k", "/custom") == "/custom"
+    assert bypass_engine.resolve_eval_include_path(str(tmp_path), "gpqa") is None
+    assert bypass_engine.resolve_eval_include_path(str(tmp_path / "missing"), "gsm8k") is None
+    assert bypass_engine.resolve_eval_include_path(None, "gsm8k") is None
+
+
+def test_eval_command_passes_include_path():
+    run = bypass_engine.EvalRun(
+        python_exe="PY", model="/m", base_url="http://h:1", conc=1, out_dir="/o", include_path="/ix/utils/evals"
+    )
+    cmd = bypass_engine.build_eval_command(run)
+    assert cmd[cmd.index("--include_path") + 1] == "/ix/utils/evals"
+    run_no_include = dataclasses.replace(run, include_path=None)
+    assert "--include_path" not in bypass_engine.build_eval_command(run_no_include)
+
+
+def test_pin_accuracy_eval_envs_sets_include_path(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _workload_envs
+
+    (tmp_path / "utils" / "evals").mkdir(parents=True)
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    monkeypatch.setenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", "true")
+    monkeypatch.delenv("MAGPIE_EVAL_INCLUDE_PATH", raising=False)
+    monkeypatch.delenv("MAGPIE_EVAL_TASKS", raising=False)
+    envs: dict = {}
+    _workload_envs._pin_accuracy_eval_envs(envs)
+    assert envs["MAGPIE_EVAL_INCLUDE_PATH"] == str(tmp_path / "utils" / "evals")
+    explicit = {"MAGPIE_EVAL_INCLUDE_PATH": "/custom"}
+    _workload_envs._pin_accuracy_eval_envs(explicit)
+    assert explicit["MAGPIE_EVAL_INCLUDE_PATH"] == "/custom"
+
+
 def test_resolve_inferencex_root_env_fallbacks(monkeypatch):
     monkeypatch.delenv("MAGPIE_INFERENCEX_PATH", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
