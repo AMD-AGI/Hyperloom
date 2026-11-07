@@ -79,13 +79,28 @@ class ClientPass:
     result: Path | None
 
 
+@dataclass(frozen=True)
+class ClientTarget:
+    """The server a pass measures: its URL, the model path the client reads the tokenizer from, and the name the
+    server answers to."""
+
+    base_url: str
+    model_path: str
+    served_model_name: str
+
+
+def warmup_pass(workload: FixedWorkload) -> ClientPass | None:
+    """The discarded pass before the measured one, on its own seed; ``None`` when the workload runs no warmup."""
+    return ClientPass(workload.warmup_seed, workload.num_warmups, None) if workload.num_warmups else None
+
+
 def client_env(tool: ClientTool) -> dict[str, str]:
     """The env the client gets beyond what the round inherits; ``launch.json`` records it."""
     return {"PYTHONPATH": tool.package_root}
 
 
 def client_argv(
-    tool: ClientTool, base_url: str, server: ServerConfig, workload: FixedWorkload, client_pass: ClientPass
+    tool: ClientTool, target: ClientTarget, workload: FixedWorkload, client_pass: ClientPass
 ) -> tuple[str, ...]:
     """The client argv for one pass: every load knob explicit, the tokenizer read from the served model's path."""
     argv = [
@@ -95,13 +110,13 @@ def client_argv(
         "--backend",
         CLIENT_BACKEND,
         "--base-url",
-        base_url,
+        target.base_url,
         "--endpoint",
         CLIENT_ENDPOINT,
         "--model",
-        server.model_path,
+        target.model_path,
         "--served-model-name",
-        server.served_model_name,
+        target.served_model_name,
         "--tokenizer-mode",
         workload.tokenizer_mode,
         "--dataset-name",
@@ -221,6 +236,10 @@ def _workload(config: SuiteConfig) -> FixedWorkload:
     return config.fixed
 
 
+def _target(server: ServerConfig, base_url: str) -> ClientTarget:
+    return ClientTarget(base_url, server.model_path, server.served_model_name)
+
+
 def measured_invocation(config: SuiteConfig, tool: ClientTool, base_url: str) -> ClientInvocation:
     """The measured pass as ``launch.json`` records it, before the round's server is up."""
     workload = _workload(config)
@@ -228,7 +247,7 @@ def measured_invocation(config: SuiteConfig, tool: ClientTool, base_url: str) ->
     prompts = workload.num_prompts if profiled is None else profiled
     measured = ClientPass(workload.seed, prompts, RunLayout(Path(config.paths.run_dir)).inferencex_result)
     return ClientInvocation(
-        argv=client_argv(tool, base_url, config.server, workload, measured),
+        argv=client_argv(tool, _target(config.server, base_url), workload, measured),
         env=client_env(tool),
         seed=workload.seed,
         warmup_seed=workload.warmup_seed,
@@ -242,10 +261,10 @@ def run_fixed(fixed_round: FixedRound) -> FixedOutcome:
     layout = RunLayout(Path(config.paths.run_dir))
     invocation = measured_invocation(config, fixed_round.tool, fixed_round.server.base_url)
     measured_argv = invocation.argv
-    if workload.num_warmups:
-        warmup = ClientPass(workload.warmup_seed, workload.num_warmups, None)
-        warmup_argv = client_argv(fixed_round.tool, fixed_round.server.base_url, config.server, workload, warmup)
-        returncode, stop = _run_pass(fixed_round, warmup_argv, Phase.WARMUP)
+    warmup = warmup_pass(workload)
+    if warmup is not None:
+        target = _target(config.server, fixed_round.server.base_url)
+        returncode, stop = _run_pass(fixed_round, client_argv(fixed_round.tool, target, workload, warmup), Phase.WARMUP)
         if stop is not None:
             return FixedOutcome(invocation, returncode, None, stop)
     window = fixed_round.window
@@ -271,6 +290,7 @@ __all__ = [
     "CLIENT_RANDOM_NUM_WORKERS",
     "CLIENT_RANDOM_PREFIX_LEN",
     "ClientPass",
+    "ClientTarget",
     "ClientTool",
     "FixedOutcome",
     "FixedRound",
@@ -281,4 +301,5 @@ __all__ = [
     "fixed_metrics",
     "measured_invocation",
     "run_fixed",
+    "warmup_pass",
 ]
