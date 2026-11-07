@@ -282,13 +282,15 @@ def test_a_taken_port_is_refused_before_spawning(tmp_path):
 def test_gpus_that_are_not_free_are_refused_before_spawning(tmp_path, monkeypatch, mode):
     rig = _Rig(tmp_path)
     asked: list[tuple[int, ...]] = []
-    monkeypatch.setattr(server, "unavailable_gpus", lambda gpus: asked.append(gpus) or "GPU 0: held by pid 9 (vllm)")
+    monkeypatch.setattr(
+        server, "unavailable_gpus", lambda gpus: asked.append(gpus) or "GPU 0 (amd-smi card 0): held by pid 9 (vllm)"
+    )
     config = rig.config("r1", mode)
 
     stopped = rig.lifecycle(config).acquire()
 
     assert isinstance(stopped, Stop) and stopped.step is FailedStep.GPUS_UNAVAILABLE
-    assert stopped.detail == "GPU 0: held by pid 9 (vllm)"
+    assert stopped.detail == "GPU 0 (amd-smi card 0): held by pid 9 (vllm)"
     assert asked == [config.server.gpus]
     assert not rig.worker_file.exists() and not (rig.pid_dir / "server.pid").exists()
 
