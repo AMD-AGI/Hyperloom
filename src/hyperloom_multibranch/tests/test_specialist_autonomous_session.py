@@ -407,10 +407,21 @@ def _from_a_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(autonomous_session, "installed_component_upstream", lambda _component: None)
 
 
+def _told(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent made ready as Arbor is: told why no change to its component's source can be kept."""
+    make_ready = autonomous_session.make_ready
+
+    async def told(source: str, spec: AgentSpec, *args):
+        return replace(await make_ready(source, spec, *args), source_unkept=spec.source_unkept)
+
+    monkeypatch.setattr(autonomous_session, "make_ready", told)
+
+
 async def test_an_agent_told_its_source_changes_cannot_land_that_keeps_one_ends_its_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _from_a_wheel(monkeypatch)
+    _told(monkeypatch)
     rig = await _rig(tmp_path, Agent(tail=30.0), start=WITHOUT_VLLM)
     rig.toolbox.refusals = [UNLABELLED]
 
@@ -447,10 +458,34 @@ async def test_an_agent_not_told_its_source_changes_cannot_land_goes_on_past_the
     assert not any("after being told" in note for note in notices)
 
 
+async def test_an_onboarded_agent_never_told_its_source_changes_cannot_land_goes_on_past_their_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    rig = await _rig(tmp_path, start=WITHOUT_VLLM)
+    rig.toolbox.refusals = [UNLABELLED]
+
+    await rig.session.preflight()
+    watch = json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())
+    assert watch["source_unkept"] == "", "a run after a crash holds the agent to what it was told"
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the keep after the refused one")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished) as finished:
+        await asyncio.wait_for(running, 10)
+
+    assert not isinstance(finished.value, SessionRefused)
+    notices = await rig.notices()
+    assert any("only launch and env changes can" in note for note in notices)
+    assert any(note.startswith(f"{NOTICE} keep 1 was refused: the delta does not fit") for note in notices)
+    assert not any("after being told" in note for note in notices)
+
+
 async def test_a_launch_keep_of_an_agent_told_its_source_changes_cannot_land_is_imported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _from_a_wheel(monkeypatch)
+    _told(monkeypatch)
     rig = await _rig(
         tmp_path, Agent(keeps=(128,), args="--max-num-seqs 64", config_source=CONFIG_SOURCE), start=WITHOUT_VLLM
     )
@@ -471,6 +506,7 @@ async def test_an_agent_told_its_source_changes_cannot_land_is_held_to_it_after_
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _from_a_wheel(monkeypatch)
+    _told(monkeypatch)
     rig = await _rig(tmp_path, Agent(exit=3, resume="sleep 30"), start=WITHOUT_VLLM)
 
     await rig.session.preflight()
