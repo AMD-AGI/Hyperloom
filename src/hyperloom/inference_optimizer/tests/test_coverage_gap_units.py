@@ -140,6 +140,12 @@ def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypa
     assert info["eligible"] is False
     assert "could not read" in info["reason"]
 
+    no_block = tmp_path / "no-block.yaml"
+    no_block.write_text(yaml.safe_dump({"other": {}}), encoding="utf-8")
+    info = sl.resolve_lifecycle_params(no_block)
+    assert info["eligible"] is False
+    assert "could not read" in info["reason"]
+
     invalid_port = tmp_path / "invalid-port.yaml"
     invalid_port.write_text(
         yaml.safe_dump({"benchmark": {"framework": "xdit", "envs": {"PORT": "bad"}}}),

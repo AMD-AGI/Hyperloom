@@ -19,6 +19,7 @@ from typing import Any, NamedTuple
 import yaml
 
 from hyperloom.common import rocm_smi
+from hyperloom.common.benchmark_config import PointError, read_benchmark_point
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom_common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
@@ -152,22 +153,19 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         "reason": "",
     }
     try:
-        with Path(materialized_config_path).open(encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError) as exc:
+        point = read_benchmark_point(Path(materialized_config_path))
+    except (OSError, yaml.YAMLError, PointError) as exc:
         info["reason"] = f"could not read materialized config: {exc}"
         return info
-    bench = cfg.get("benchmark") or {}
-    info["framework"] = str(bench.get("framework") or "").lower()
-    envs = bench.get("envs") or {}
+    info["framework"] = point.framework.lower()
     try:
-        info["port"] = int(envs.get("PORT", REUSE_PORT_DEFAULT))
+        info["port"] = int(point.envs.get("PORT", REUSE_PORT_DEFAULT))
     except (TypeError, ValueError):
         info["port"] = REUSE_PORT_DEFAULT
 
     from .benchmark_backend import resolve_backend
 
-    refusal = resolve_backend().lifecycle_refusal(bench, info["framework"])
+    refusal = resolve_backend().lifecycle_refusal(point, info["framework"])
     if refusal is not None:
         info["reason"] = refusal
         return info
@@ -178,8 +176,7 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         info["reason"] = "multi-node (server_lifecycle is local-only)"
         return info
 
-    profiler_on = bool((bench.get("profiler") or {}).get("torch_profiler", {}).get("enabled"))
-    if profiler_on:
+    if point.torch_profiler:
         info["reason"] = "torch_profiler enabled (incompatible with reuse)"
         return info
 

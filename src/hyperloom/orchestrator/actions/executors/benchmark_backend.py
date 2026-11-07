@@ -12,6 +12,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
+
 # Backend selection env var.
 BENCHMARK_BACKEND_ENV = "HYPERLOOM_BENCHMARK_BACKEND"
 DEFAULT_BENCHMARK_BACKEND = "magpie"
@@ -65,15 +67,15 @@ class MagpieBackend:
 
         return _resolve_magpie_python()
 
-    def lifecycle_refusal(self, bench: dict, framework: str) -> str | None:
-        """Why Magpie cannot run ``bench`` under server_lifecycle, or ``None`` when it can."""
+    def lifecycle_refusal(self, point: BenchmarkPoint, framework: str) -> str | None:
+        """Why Magpie cannot run ``point`` under server_lifecycle, or ``None`` when it can."""
         from hyperloom.inference_optimizer import framework_registry
 
         # Server-less (scriptable) frameworks such as xDiT never boot a persistent server.
-        workload_kind = str(bench.get("workload_kind") or "").strip().lower()
+        workload_kind = point.workload_kind.strip().lower()
         if workload_kind == framework_registry.SCRIPTABLE or framework_registry.is_scriptable(framework):
             return "scriptable framework (server-less; no server_lifecycle)"
-        script_name = Path(str(bench.get("benchmark_script") or "")).name
+        script_name = Path(point.benchmark_script).name
         if script_name not in MAGPIE_BUILTIN_SCRIPTS:
             return f"benchmark_script={script_name!r} is not a Magpie built-in ({sorted(MAGPIE_BUILTIN_SCRIPTS)})"
         return None
@@ -115,7 +117,7 @@ class BypassBackend:
 
         return sys.executable or shutil.which("python3") or "python3"
 
-    def lifecycle_refusal(self, bench: dict, framework: str) -> str | None:
+    def lifecycle_refusal(self, point: BenchmarkPoint, framework: str) -> str | None:
         """Why bypass cannot persist ``framework``'s server for reuse, or ``None`` when it can."""
         from .bypass_engine import SERVER_FRAMEWORKS
 
