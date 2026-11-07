@@ -881,7 +881,7 @@ directory elsewhere, point into the workspace, and `TMPDIR` at `/tmp`; `AITER_JI
 are set into the workspace when unset too, since AITER otherwise builds its JIT modules in its installed tree, which
 is read-only there (a GPU specialist so compiles them afresh). With neither `HF_HOME` nor `HF_HUB_CACHE` set, Hugging
 Face's default directory under the app's home (`$XDG_CACHE_HOME/huggingface`, else `~/.cache/huggingface`) becomes the
-child's `HF_HOME`, read-only and with its login files masked, so a model downloaded there stays visible once `HOME` has
+child's `HF_HOME`, read-only and without its login files, so a model downloaded there stays visible once `HOME` has
 moved. They read their toolchain, the git metadata of the worktree's repository (the one whose admin directory the
 repository records for the worktree, never the one the worktree's `.git` file names: the agent can rewrite that file,
 and runs as the app's own uid, so no ownership check tells a directory it made from the app's), the framework source

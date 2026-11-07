@@ -11,7 +11,7 @@ the launch has ended.
 
 In a sandbox (:func:`specialist_confinement`) the specialist writes its workspace and worktree, where its home, CLI
 state and compiler caches are pointed, and its own ``/tmp`` and ``/dev/shm``; it reads its toolchain, its worktree's
-git metadata, its model and references; the credential locations inside what it reads are masked; a GPU task gets
+git metadata, its model and references; the credential locations inside what it reads are hidden; a GPU task gets
 the GPU devices. The claude CLI cannot read its own login file there, so it runs in one only with a login in its
 environment; without one it runs unconfined, said and counted, unless it must be isolated, which refuses it
 (:func:`claude_login_isolation`). codex runs with its own sandbox off (:func:`codex_sandbox_off`), since bubblewrap
@@ -612,7 +612,7 @@ def _at_or_under(path: str, root: str) -> bool:
 def _point_into_sandbox(place: LaunchPlace, env: dict[str, str]) -> None:
     """Point ``env``'s home, CLI state and caches named outside the trees the specialist writes (and the unset
     :data:`SANDBOX_JIT_CACHES`) into its workspace, and its temporary directory at the sandbox's ``/tmp``; name Hugging
-    Face's default directory under the app's home ``HF_HOME`` (read-only, its login masked), kept as the home moves."""
+    Face's default directory under the app's home ``HF_HOME`` (read-only, without its login), kept as the home moves."""
     trees = [str(tree) for tree in place.writable]
 
     def outside(value: str) -> bool:
@@ -668,7 +668,7 @@ def specialist_confinement(place: LaunchPlace, argv0: str, env: Mapping[str, str
     It writes its workspace and worktree. It reads its toolchain (:func:`~hyperloom.common.confinement.toolchain_paths`,
     which names its model and benchmark trees too), the git metadata of its worktree, ``place.readable`` (a local
     model, references), the framework source roots, the programs of the stdio MCP servers it starts, and the AWS files
-    a Bedrock login names. The credential locations those show are masked, and so are the app's state directory and
+    a Bedrock login names. The credential locations those show are hidden, and so are the app's state directory and
     build store; a GPU task gets the GPU devices.
 
     Raises:
