@@ -341,7 +341,7 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
 
 
-# steady-state window follows the TraceLens magpie skill formulas.
+# steady-state window follows the TraceLens skill formulas.
 def _profile_yaml(tmp_path, framework: str, envs: dict) -> Path:
     """Synthesize a minimal profile YAML the materializer recognises as PROFILE=1 + torch_profiler.enabled=True."""
     import yaml as _yaml
@@ -392,7 +392,7 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
     # ``profiler=torch`` belongs in the launched fragment; do not add
-    # ``torch_profiler_dir`` here (Magpie emits ``<workspace>/torch_trace`` before
+    # ``torch_profiler_dir`` here (the round emits its own trace directory before
     # ``EXTRA_VLLM_ARGS`` on the server argv; a duplicate dir in ``EXTRA_VLLM_ARGS``
     # would win last-wins). Argv-preflight probes use dirs in ``baseline.py`` only.
     assert "--profiler-config.profiler torch" in extra, extra
@@ -857,11 +857,11 @@ def test_materialize_profile_max_iters_override_is_quiet_without_agentx(
     assert not any("AgentX capture bound" in r.message for r in caplog.records)
 
 
-def test_materialize_persists_inferencex_path_for_magpie(
+def test_materialize_persists_inferencex_path(
     tmp_path,
     monkeypatch,
 ):
-    """$INFERENCEX_PATH must be written into benchmark.inferencex_path so Magpie uses the patched checkout."""
+    """$INFERENCEX_PATH must be written into benchmark.inferencex_path so the round uses that checkout."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1611,12 +1611,12 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path):
-    """FRAMEWORK=atom falls through to the normal profile path (the atom Magpie wrapper bridges PROFILE=1 to atom's torch profiler)."""
+    """FRAMEWORK=atom falls through to the normal profile path (the round bridges PROFILE=1 to atom's torch profiler)."""
     monkeypatch.setenv("FRAMEWORK", "atom")
     # Anchor session/runs paths under the test tmp dir.
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     pe = ProfileExecutor()
-    # Sentinel-patch the parent __call__ so we can prove the normal path is reached without launching Magpie in this
+    # Sentinel-patch the parent __call__ so we can prove the normal path is reached without launching a round in this
     # unit test.
     called = {"parent": False}
 
@@ -1762,7 +1762,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch, tmp_path
 
 
 def _native_profile_result(trace: Path) -> dict:
-    """What ``ProfileExecutor`` returns for a Magpie-owned profiling round."""
+    """What ``ProfileExecutor`` returns for a profiled AgentX round, read by the archived v1 AgentX report reader."""
     from hyperloom.inference_optimizer.agentx.report import agentx_measurement
 
     measurement = agentx_measurement(
@@ -1795,7 +1795,7 @@ def _native_profile_result(trace: Path) -> dict:
 
 @pytest.mark.asyncio
 async def test_native_agentx_profile_promotes_its_trace(session_dir, tmp_path):
-    """Magpie stamps a profiled replay diagnostic_only, so the profile lane cannot gate on measurement validity."""
+    """A profiled replay is diagnostic_only, so the profile lane cannot gate on measurement validity."""
     trace = tmp_path / "rank0.pt.trace.json.gz"
     trace.write_bytes(b"")
     result = _native_profile_result(trace)
@@ -2597,7 +2597,7 @@ async def test_trace_analyze_handler_backfills_runtime_metadata_from_config(
     tmp_path,
     monkeypatch,
 ):
-    """GEAK candidates must inherit the materialized Magpie workload config."""
+    """GEAK candidates must inherit the materialized workload config."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     config_path = tmp_path / "profile_config.with_envs.yaml"

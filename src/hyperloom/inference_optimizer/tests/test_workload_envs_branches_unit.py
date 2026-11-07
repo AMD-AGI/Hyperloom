@@ -236,7 +236,7 @@ def _arm_sglang_shape_tool(monkeypatch, tmp_path) -> Path:
 
 
 def test_profile_shape_tool_keeps_the_inherited_pythonpath(monkeypatch, tmp_path):
-    # Magpie replaces the launch env's PYTHONPATH with the config's, so a config without one must carry the
+    # The launch takes the config's PYTHONPATH in place of the inherited one, so a config without one must carry the
     # inherited entries, or the profile server loses the operator's and the image's import paths.
     import os
 

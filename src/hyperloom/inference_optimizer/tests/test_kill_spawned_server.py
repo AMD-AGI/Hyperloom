@@ -285,13 +285,13 @@ def test_kill_my_spawned_server_reaps_grandchildren():
                 pass
 
 
-def _make_fake_magpie_command(
+def _make_fake_round_command(
     tmp_path: Path,
     *,
     mode: str,
 ) -> tuple[Path, Path]:
-    """Build a ``python -m Magpie`` stand-in; returns (script_path, sentinel_file)."""
-    script = tmp_path / "fake_magpie.py"
+    """Build a round command stand-in; returns (script_path, sentinel_file)."""
+    script = tmp_path / "fake_round.py"
     sentinel = tmp_path / "leaked_grandchild.pid"
     workspace = tmp_path / "out" / "benchmark_fake_20260101_000000"
 
@@ -331,7 +331,7 @@ time.sleep(120)
 @pytest.mark.asyncio
 async def test_baseline_executor_kills_grandchild_on_timeout(tmp_path, monkeypatch):
     """A leaked grandchild must be dead by the time the executor returns after its timeout fires."""
-    script, sentinel = _make_fake_magpie_command(tmp_path, mode="timeout")
+    script, sentinel = _make_fake_round_command(tmp_path, mode="timeout")
     proc = subprocess.Popen(
         [sys.executable, str(script)],
         stdout=subprocess.DEVNULL,
@@ -621,7 +621,7 @@ def test_death_excerpt_surfaces_config_validation_arch_miss(tmp_path):
     """A config-validation-stage failure (brand-new checkpoint ``model_type``
     unknown to the installed transformers/vLLM) dies BEFORE the engine starts and
     must still be surfaced as a fatal excerpt. Without this the enablement failure
-    classifier only sees Magpie's ``subprocess_nonzero`` stdout tail, classifies
+    classifier only sees the round's ``subprocess_nonzero`` stdout tail, classifies
     ``unknown``, and never seeds the ``pip install -U transformers`` bridge —
     starving every enablement round of the real root cause (DeepSeek-V4 repro)."""
     from hyperloom.common.failure_signature import classify_failure

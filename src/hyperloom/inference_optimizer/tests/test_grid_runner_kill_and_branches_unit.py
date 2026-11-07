@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for the ``run_grid`` per-variant failure branches (yaml build error, magpie timeout, server-dead / overtime sentinels, missing workspace, invalid measurement)."""
+"""Coverage for the ``run_grid`` per-variant failure branches (yaml build error, round timeout, server-dead / overtime sentinels, missing workspace, invalid measurement)."""
 
 from __future__ import annotations
 

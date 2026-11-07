@@ -294,7 +294,7 @@ async def test_profile_failed_does_not_mutate_shared_state(tmp_path):
 
     profile_failed = {
         "status": "failed",
-        "error": "magpie exited 1",
+        "error": "round exited 1",
         "error_class": "subprocess_error",
     }
     p1, p2 = _patch_subs(profile_failed, _trace_analyze_success())
@@ -305,7 +305,7 @@ async def test_profile_failed_does_not_mutate_shared_state(tmp_path):
     assert result["status"] == "failed"
     assert result["error_class"] == "profile_failed"
     assert result["phase"] == "profile"
-    assert "magpie exited 1" in result["error"]
+    assert "round exited 1" in result["error"]
     assert result["sub_result"]["status"] == "failed"
 
     assert state.last_profile_trace == "/old/trace.gz"

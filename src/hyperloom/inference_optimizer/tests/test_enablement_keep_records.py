@@ -598,10 +598,10 @@ def test_an_in_place_enablement_with_no_override_still_observes(tmp_path: Path, 
     assert assertions.get("pytest"), "a named package is asserted at its observed version"
 
 
-def test_the_closure_follows_the_framework_interpreter_not_magpies(tmp_path: Path, monkeypatch):
-    """A split-venv host: Magpie runs from one venv, the server from another.
+def test_the_closure_follows_the_framework_interpreter_not_the_clients(tmp_path: Path, monkeypatch):
+    """A split-venv host: the benchmark client runs from one venv, the server from another.
 
-    Attributing Magpie's distributions to a KEEP whose server ran elsewhere is a
+    Attributing the client's distributions to a KEEP whose server ran elsewhere is a
     confidently wrong closure, which is worse than an absent one. The fallback is
     therefore the serving framework's interpreter, resolved the same way the
     accuracy probes resolve it.

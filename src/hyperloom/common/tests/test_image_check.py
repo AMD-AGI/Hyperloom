@@ -216,8 +216,8 @@ def test_a_source_check_on_a_file_reads_it_under_the_directory_a_variable_names(
     path = PathSpec("INFERENCEX_PATH", (".gitmodules",))
 
     assert _status(_spec(CheckKind.SOURCE_CONTAINS, path=path, text=("utils/aiperf",)), image)[0] is Status.PASS
-    status, detail = _status(_spec(CheckKind.SOURCE_CONTAINS, path=path, text=("utils/magpie",)), image)
-    assert (status, detail) == (Status.FAIL, "/ix/.gitmodules does not hold ['utils/magpie']")
+    status, detail = _status(_spec(CheckKind.SOURCE_CONTAINS, path=path, text=("utils/absent",)), image)
+    assert (status, detail) == (Status.FAIL, "/ix/.gitmodules does not hold ['utils/absent']")
     missing = _spec(CheckKind.SOURCE_CONTAINS, path=PathSpec("INFERENCEX_PATH", ("absent",)), text=("x",))
     assert _status(missing, image) == (Status.FAIL, "there is no such source file")
 

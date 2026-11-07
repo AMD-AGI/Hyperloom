@@ -400,7 +400,6 @@ class TestEntrypointFailFast:
         scripts.mkdir()
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
-        monkeypatch.delenv("MAGPIE_PATH", raising=False)
         monkeypatch.delenv("INFERENCEX_PATH", raising=False)
 
         with pytest.raises(SystemExit) as exc:

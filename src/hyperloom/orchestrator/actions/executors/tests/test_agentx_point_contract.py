@@ -315,7 +315,7 @@ def test_native_power_reaches_baseline_and_keep_budgets(report, tmp_path, watts,
     measurement = extract_benchmark_measurement(report, workspace=workspace, subprocess_started_unix=1000.0)
     state = SimpleNamespace(
         benchmark_mode="agentx",
-        agentx_backend="magpie",
+        agentx_backend="inferencex",
         baseline_perf=graded_axes_of(measurement),
         power_budget_w=900.0,
     )
@@ -330,7 +330,9 @@ def test_public_metrics_and_identity_reach_keep_guards(report):
     measured = extract_benchmark_measurement(report)
     assert measured["e2e_norm_intvty_p50"] == 25
     assert measured["ttft_p50_ms"] == 200
-    state = SimpleNamespace(benchmark_mode="agentx", agentx_backend="magpie", baseline_perf=graded_axes_of(measured))
+    state = SimpleNamespace(
+        benchmark_mode="agentx", agentx_backend="inferencex", baseline_perf=graded_axes_of(measured)
+    )
     assert constraint_veto_reason(measured, state) == ""
     changed = deepcopy(report)
     changed["agentx_metrics"]["recipe"]["conc"] = 16
@@ -380,7 +382,7 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     measured = extract_benchmark_measurement(report)
     assert measured["round_succeeded"] is True
     assert not is_valid_measurement(measured)
-    assert constraint_veto_reason(measured, SimpleNamespace(benchmark_mode="agentx", agentx_backend="magpie")) == (
+    assert constraint_veto_reason(measured, SimpleNamespace(benchmark_mode="agentx", agentx_backend="inferencex")) == (
         "agentx_evidence_invalid"
     )
 
@@ -554,7 +556,7 @@ def test_a_native_variant_drafting_without_a_kernel_is_refused_before_it_is_writ
         )
     assert refused.value.error_class == CAPABILITY_UNSUPPORTED
     assert "16 query heads per rank" in str(refused.value)
-    # The refusal lands before materialization, so the native path leaves no launch for Magpie to pick up.
+    # The refusal lands before materialization, so the native path leaves no launch for a round to pick up.
     assert not list(output_subdir.rglob("config.yaml"))
     # A draft the pinned stack ships a kernel for is composed as any other variant is.
     runnable = _draft_spec_args(tmp_path, heads=64)
@@ -590,7 +592,7 @@ def test_a_native_variant_is_judged_at_the_tensor_parallel_size_its_launch_carri
     assert load_benchmark(one_rank)["agentx"]["launch_overrides"]["env"]["TP"] == "1"
 
 
-def test_vllm_attempt_uses_python_for_magpies_module_entrypoint(source, tmp_path):
+def test_vllm_attempt_launches_its_server_with_the_python_of_its_runtime(source, tmp_path):
     from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime
 
     config = yaml.safe_load(source.read_text())

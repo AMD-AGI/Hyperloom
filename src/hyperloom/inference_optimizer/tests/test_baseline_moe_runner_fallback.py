@@ -96,7 +96,7 @@ def _sglang_args(cmd) -> str:
 
 
 def _run_baseline(tmp_path, model: str, crash_stderr, **params) -> tuple[list[str], dict]:
-    """Run the baseline over a Magpie that fails with ``crash_stderr(sglang_args)`` when it returns text."""
+    """Run the baseline over a round that fails with ``crash_stderr(sglang_args)`` when it returns text."""
     calls: list[str] = []
 
     def fake_run(cmd, *args, **kwargs):

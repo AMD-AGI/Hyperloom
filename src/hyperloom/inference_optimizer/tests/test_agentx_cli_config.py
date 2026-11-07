@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI workloads and explicit YAML converge on one native Magpie contract."""
+"""CLI workloads and explicit YAML converge on one native AgentX point contract."""
 
 from pathlib import Path
 

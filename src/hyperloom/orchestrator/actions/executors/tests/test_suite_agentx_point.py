@@ -3,7 +3,7 @@
 
 """An AgentX point runs the agentx-harness replay on its launch over the session base, golden layer applied.
 
-Every key the Magpie AgentX path read from the point is either carried into the config or refused by name.
+Every key an AgentX point carries is either carried into the config or refused by name.
 """
 
 from __future__ import annotations
@@ -210,7 +210,7 @@ def test_an_agentx_setting_no_round_carries_is_refused(changes: dict, message: s
         suite_config(_point(**changes), _base(), _settings())
 
 
-def test_a_launch_override_magpie_did_not_define_is_refused() -> None:
+def test_a_launch_override_the_point_contract_does_not_define_is_refused() -> None:
     point = _point()
     point["benchmark"]["agentx"]["launch_overrides"]["prepend_args"] = ["--x"]
 

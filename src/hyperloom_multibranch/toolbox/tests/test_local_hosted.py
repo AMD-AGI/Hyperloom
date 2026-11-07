@@ -112,7 +112,7 @@ def test_a_host_tool_repository_that_is_not_set_is_not_in_the_runner_template(
 
 
 def test_only_the_named_tool_repositories_are_taken_from_the_host() -> None:
-    environ = {"INFERENCEX_REPO": "/a", "MAGPIE_REPO": "/b", "GITHUB_TOKEN": "t", "INFERENCEX_REF": "main"}
+    environ = {"INFERENCEX_REPO": "/a", "OTHER_REPO": "/b", "GITHUB_TOKEN": "t", "INFERENCEX_REF": "main"}
     assert host_tool_repos(environ) == {"INFERENCEX_REPO": "/a"}
     assert host_tool_repos({}) == {}
 

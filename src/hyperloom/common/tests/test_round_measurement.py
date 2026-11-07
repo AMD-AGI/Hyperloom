@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``round_measurement``: each kind of round report maps to one measurement under the Magpie measurement's keys."""
+"""``round_measurement``: each kind of round report maps to one measurement under the keys an archived v1 benchmark report's measurement has."""
 
 from __future__ import annotations
 
@@ -51,9 +51,9 @@ def test_a_completed_fixed_round_is_a_valid_measurement_with_every_fixed_key() -
     assert measurement["failed_step"] is None
 
 
-def test_the_measurement_carries_every_key_a_magpie_measurement_carries() -> None:
-    magpie = extract_benchmark_measurement({"success": True, "throughput": {"output_throughput": 1.0}})
-    assert set(magpie) - {"gpu_power_avg_w", "gpu_power_by_gpu_w"} <= set(round_measurement(_fixed(), None))
+def test_the_measurement_carries_every_key_a_v1_benchmark_report_measurement_carries() -> None:
+    v1 = extract_benchmark_measurement({"success": True, "throughput": {"output_throughput": 1.0}})
+    assert set(v1) - {"gpu_power_avg_w", "gpu_power_by_gpu_w"} <= set(round_measurement(_fixed(), None))
 
 
 @pytest.mark.parametrize(

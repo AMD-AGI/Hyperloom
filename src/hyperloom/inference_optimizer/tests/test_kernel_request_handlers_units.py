@@ -2043,7 +2043,7 @@ class TestLoadMaterializedWorkloadMetadata:
         assert ta._load_materialized_workload_metadata(str(cfg)) == {}
 
     def test_parses_sglang_metadata(self, tmp_path):
-        cfg = tmp_path / "magpie.yaml"
+        cfg = tmp_path / "point.yaml"
         cfg.write_text(
             "benchmark:\n"
             "  framework: sglang\n"
@@ -2082,7 +2082,7 @@ class TestLoadMaterializedWorkloadMetadata:
         expected_args,
     ):
         """The handler reads the per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot."""
-        cfg = tmp_path / f"magpie_{framework}.yaml"
+        cfg = tmp_path / f"point_{framework}.yaml"
         cfg.write_text(
             "benchmark:\n"
             f"  framework: {framework}\n"
@@ -2104,7 +2104,7 @@ class TestLoadMaterializedWorkloadMetadata:
 
     def test_atom_server_args_ignore_stray_sglang_env(self, tmp_path):
         """When an atom YAML carries both EXTRA_ATOM_ARGS and a stray EXTRA_SGLANG_ARGS, the atom slot wins."""
-        cfg = tmp_path / "magpie_atom_mixed.yaml"
+        cfg = tmp_path / "point_atom_mixed.yaml"
         cfg.write_text(
             "benchmark:\n"
             "  framework: atom\n"

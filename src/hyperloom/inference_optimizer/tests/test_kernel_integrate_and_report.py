@@ -179,7 +179,6 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
         "tpot_p90_ms": 10.0,
         "completed_requests": 80,
         "valid_measurement": True,
-        "benchmark_backend": "magpie_agentx",
         "diagnostic_only": False,
         "workload_identity": "fixed-workload",
         "accuracy": 0.80,

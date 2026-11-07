@@ -317,7 +317,7 @@ def test_an_agentx_canonical_is_what_the_main_flow_renders_for_the_workload(tmp_
 
 
 @pytest.mark.parametrize("level", [8, 64])
-def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_concurrency(
+def test_an_agentx_point_is_what_the_main_flow_hands_the_round_for_the_recipe_and_concurrency(
     agentx_canonical, blobs, tmp_path, model, level
 ):
     delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
@@ -342,7 +342,7 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1", AITER_LOG_TUNED_CONFIG_ENV: "1"}
 
 
-#: An option of the launch Magpie resolves from the InferenceX recipe, which the recipe's own arguments lack.
+#: An option of the launch resolved from the InferenceX recipe, which the recipe's own arguments lack.
 RESOLVED_OPTION = "--enable-linear-replayssm-spec"
 
 
@@ -452,7 +452,7 @@ def test_acceptance_generates_the_agentx_profile_point_for_a_profile_request(age
     assert load(point)["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
 
 
-def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canonical, blobs, tmp_path, model):
+def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_the_round(canonical, blobs, tmp_path, model):
     delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
     env = environment(blobs, tmp_path, delta=delta)
 

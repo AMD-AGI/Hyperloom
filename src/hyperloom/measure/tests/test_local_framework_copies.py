@@ -52,7 +52,7 @@ from hyperloom.orchestrator.actions.executors import VariantResult
 
 
 @pytest.fixture(autouse=True)
-def magpie_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+def clean_framework_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
         if name.startswith(("AITER_CONFIG_", "HYPERLOOM_FRAMEWORK_")):
             monkeypatch.delenv(name)

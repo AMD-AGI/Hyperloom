@@ -442,11 +442,10 @@ def test_install_fetches_the_pinned_commit_and_warns_when_it_cannot(tmp_path: Pa
     assert "WARN could not fetch InferenceX" in done.stdout and "staging_missing" in done.stdout
 
 
-def test_install_stages_under_the_install_lock_and_installs_no_magpie_or_inferencex_checkout() -> None:
+def test_install_stages_under_the_install_lock_and_installs_no_tool_checkout() -> None:
     text = _INSTALL_SH.read_text(encoding="utf-8")
 
     assert text.index("\nensure_inference_suite_staging\n") > text.index("\nacquire_install_lock\n")
-    assert "magpie" not in text.lower()
     assert "ensure_inferencex" not in text
     assert "INFERENCEX_REF" not in text
 

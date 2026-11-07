@@ -249,7 +249,7 @@ def test_agentx_section_round_trips_with_its_error_rate_definition() -> None:
     document = _document(report)
     assert document["agentx"]["error_rate_definition"] == "inferencex-agentx/1"
     assert Report.from_document(document) == report
-    document["agentx"]["error_rate_definition"] = "magpie/1"
+    document["agentx"]["error_rate_definition"] = "elsewhere/1"
     with pytest.raises(ReportError, match="error rate definition"):
         Report.from_document(document)
 
