@@ -160,6 +160,25 @@ def test_the_runner_plan_names_what_a_runner_reads_and_never_the_session_whole(t
     assert plan.app_only == (session,)
 
 
+def test_a_model_entry_linking_out_of_the_hub_binds_what_it_links_to_and_never_the_directory_it_is_in(
+    tmp_path: Path,
+) -> None:
+    """A link to a file or directory in the home binds that file or directory, never the home with every login in it,
+    and a link to a directory elsewhere never binds that directory's parent."""
+    home, data, model = tmp_path / "home", tmp_path / "data", tmp_path / "model"
+    (home / "tokdir").mkdir(parents=True)
+    (home / "config.json").write_text("{}")
+    (data / "weights").mkdir(parents=True)
+    model.mkdir()
+    (model / "config.json").symlink_to(home / "config.json")
+    (model / "tokenizer").symlink_to(home / "tokdir")
+    (model / "weights").symlink_to(data / "weights")
+    plan = runner_plan(tmp_path / "session", model, {}, "/usr/bin/python3", {"HOME": str(home)})
+
+    linked = set(plan.readable) - {Path("/usr/bin/python3"), model}
+    assert linked == {home / "config.json", home / "tokdir", data / "weights"}, plan.readable
+
+
 @pytest.mark.parametrize(
     ("named", "expected"),
     [
