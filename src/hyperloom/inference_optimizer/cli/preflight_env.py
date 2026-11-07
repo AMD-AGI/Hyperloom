@@ -169,6 +169,17 @@ _DOTENV_CREDENTIAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_CUSTOM_HEADERS",
     "CLAUDE_CODE_OAUTH_TOKEN",
 )
+# Their retired spellings, with the DeepSeek configuration that normalizes into them: a .env that keeps no credentials
+# lends none of these either (_load_dotenv_fallback). RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS in
+# assets/runtime_env.sh, which load_dotenv_no_clobber skips and write_env_file removes.
+_DOTENV_RETIRED_CREDENTIAL_KEYS: tuple[str, ...] = (
+    "ANTHROPIC_AUTH_TOKEN",
+    *LEGACY_DEEPSEEK_ENV_KEYS,
+    "SAFE_API_KEY",
+    "AMD_LLM_API_KEY",
+    "LLM_GATEWAY_KEY",
+    "GEAK_API_KEY",
+)
 # The line write_env_file leaves in a .env it kept them out of (see _dotenv_credentials_elsewhere).
 _DOTENV_CREDENTIALS_MARKER = "HYPERLOOM_DOTENV_CREDENTIALS"
 
@@ -202,6 +213,20 @@ def _load_dotenv_fallback() -> dict[str, Any]:
             "detail": {"vars_loaded": 0, "source": None},
         }
     parsed = _parse_env_assignments(_read_dotenv_text(env_file))
+    # A .env that keeps no credentials lends none: another account may have written them, and a gateway URL or headers
+    # of its own would carry this account's key there. They come from the shell or the kernel-agent env file alone
+    # (_load_moved_dotenv_credentials). The shell's copy of this skip is in load_dotenv_no_clobber.
+    elsewhere = _dotenv_credentials_elsewhere(env_file, parsed)
+    if elsewhere is not None:
+        ignored = [key for key in (*_DOTENV_CREDENTIAL_KEYS, *_DOTENV_RETIRED_CREDENTIAL_KEYS) if key in parsed]
+        for key in ignored:
+            del parsed[key]
+        if ignored:
+            print(
+                f"Preflight: WARNING — ignored {len(ignored)} credential line(s) in {env_file}, which keeps none, "
+                f"as {elsewhere}",
+                file=sys.stderr,
+            )
     for key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT"):
         if key in parsed and _is_placeholder_tracelens_path(parsed[key]):
             del parsed[key]
@@ -217,7 +242,7 @@ def _load_dotenv_fallback() -> dict[str, Any]:
     if loaded:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
     detail: dict[str, Any] = {"vars_loaded": loaded, "source": str(env_file)}
-    moved = _load_moved_dotenv_credentials(env_file)
+    moved = None if elsewhere is None else _load_moved_dotenv_credentials(env_file, elsewhere)
     if moved is not None:
         detail["credentials"] = moved
         loaded += moved["vars_loaded"]
@@ -228,8 +253,8 @@ def _load_dotenv_fallback() -> dict[str, Any]:
     }
 
 
-def _load_moved_dotenv_credentials(env_file: Path) -> dict[str, Any] | None:
-    """Fill the credentials ``env_file`` no longer carries from the kernel-agent env file; None for a private checkout.
+def _load_moved_dotenv_credentials(env_file: Path, elsewhere: str) -> dict[str, Any]:
+    """Fill the credentials ``env_file`` no longer carries, ``elsewhere`` saying why, from the kernel-agent env file.
 
     install_kernel_tools.sh ``write_env_file`` keeps them out of a ``.env`` another account can write
     (``_dotenv_credentials_elsewhere``) and writes them into this container's kernel-agent env file alone. They are
@@ -237,9 +262,6 @@ def _load_moved_dotenv_credentials(env_file: Path) -> dict[str, Any] | None:
     (``_provider_only_mode``) still counts them, as it did when ``.env`` held them. install.sh's
     ``preflight_load_dotenv`` does the same in shell (``runtime_env_load_kernel_agent_credentials``).
     """
-    elsewhere = _dotenv_credentials_elsewhere(env_file)
-    if elsewhere is None:
-        return None
     env_path, credentials = _kernel_agent_env_credentials()
     loaded = _load_missing_env_vars(credentials)
     if loaded:
@@ -583,19 +605,21 @@ def _dotenv_not_private(env_file: Path) -> str | None:
     return None
 
 
-def _dotenv_credentials_elsewhere(env_file: Path) -> str | None:
+def _dotenv_credentials_elsewhere(env_file: Path, parsed: Mapping[str, str] | None = None) -> str | None:
     """Why the checkout's credentials are in the kernel-agent env file rather than in ``env_file``; None when it keeps them.
 
     Another account can write it (``_dotenv_not_private``), or it carries
     ``HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env``, which ``write_env_file`` leaves in a ``.env`` it kept them out
     of: its own writes turn a ``.env`` another account could write, in a private directory, into one of this
-    account's. Asked once ``.env`` is loaded. A copy of ``runtime_env_dotenv_credentials_elsewhere`` in
-    assets/runtime_env.sh, in the same words.
+    account's. The marker is looked for in the environment and in ``parsed``, the file's assignments, when given, so
+    the answer is known before ``.env`` is loaded (load_dotenv_no_clobber looks in both too). A copy of
+    ``runtime_env_dotenv_credentials_elsewhere`` in assets/runtime_env.sh, in the same words.
     """
     not_private = _dotenv_not_private(env_file)
     if not_private is not None:
         return f"another account can write it ({not_private})"
-    if os.environ.get(_DOTENV_CREDENTIALS_MARKER) == "kernel-agent-env":
+    markers = (os.environ.get(_DOTENV_CREDENTIALS_MARKER), (parsed or {}).get(_DOTENV_CREDENTIALS_MARKER))
+    if "kernel-agent-env" in markers:
         return f"it carries {_DOTENV_CREDENTIALS_MARKER}=kernel-agent-env"
     return None
 

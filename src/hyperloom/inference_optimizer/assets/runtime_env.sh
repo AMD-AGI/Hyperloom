@@ -222,6 +222,12 @@ _runtime_env_not_private() {
 # preflight_load_dotenv). Preflight's copy of this list is _DOTENV_CREDENTIAL_KEYS in cli/preflight_env.py;
 # test_dotenv_credentials_private.py holds the two equal.
 RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS="ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_OAUTH_TOKEN"
+# The retired spellings of those credentials (with the DeepSeek configuration that normalizes into them). A .env that
+# keeps no credentials (runtime_env_dotenv_credentials_elsewhere) lends none of these either: load_dotenv_no_clobber
+# skips them there, so a gateway URL, headers or key another account writes into a shared .env never pairs with this
+# account's key, and write_env_file removes them with the keys above. Preflight's copy is
+# _DOTENV_RETIRED_CREDENTIAL_KEYS in cli/preflight_env.py.
+RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS="ANTHROPIC_AUTH_TOKEN DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL SAFE_API_KEY AMD_LLM_API_KEY LLM_GATEWAY_KEY GEAK_API_KEY"
 
 # Why another account can write the checkout's .env $1, or nothing when this account alone can: the checkout directory
 # is held to runtime_env_private_kernel_agent_env's rule for a directory and the file, when there is one, to its rule
@@ -254,17 +260,28 @@ runtime_env_dotenv_credentials_elsewhere() {
   fi
 }
 
-# Remove from the checkout's .env $1 every assignment of RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS and of the keys $2...,
-# with the continuation lines of a quoted value, and keep every other byte. The lines are told apart as
-# load_dotenv_no_clobber reads them. What is kept is written beside the file (mktemp in its directory), given its mode
-# and renamed over it, so a reader sees the old file or the new one, never part of one, and a link there is replaced,
-# never written through. Nothing is written when there is nothing to remove. Status 1 and why on stderr when it cannot
-# be done, a .env this account cannot read included.
+# Remove from the checkout's .env $1 every assignment of RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS,
+# RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS and the keys $2..., with the continuation lines of a quoted value, and
+# keep every other byte. The lines are told apart as load_dotenv_no_clobber reads them. What is kept is written beside
+# the file (mktemp in its directory), given its mode and renamed over it, so a reader sees the old file or the new one,
+# never part of one. A link is always replaced, never written through: by a regular file of what it kept, or, for a
+# link to anything but a regular file, removed, so no later write of .env lands in what it points to. Nothing is
+# written when there is nothing to remove from a regular file. Status 1 and why on stderr when it cannot be done, a
+# .env this account cannot read or one that is not a regular file included.
 runtime_env_remove_dotenv_credentials() {
   local dotenv="$1" keys mode=600 tmp line text key nl quote="" drop=0 removed=0 failed=0
   shift
-  keys=" $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $* "
-  [ -f "$dotenv" ] || return 0
+  keys=" $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS $* "
+  if [ -L "$dotenv" ] && [ ! -f "$dotenv" ]; then
+    rm -f -- "$dotenv" && return 0
+    printf '[runtime-env ERROR] cannot remove the link %s\n' "$dotenv" >&2
+    return 1
+  fi
+  if [ ! -f "$dotenv" ]; then
+    [ -e "$dotenv" ] || return 0
+    printf '[runtime-env ERROR] cannot remove the credentials from %s: it is not a regular file\n' "$dotenv" >&2
+    return 1
+  fi
   [ -L "$dotenv" ] || mode="$(stat -c '%a' -- "$dotenv")" || return 1
   tmp="$(mktemp "$(dirname -- "$dotenv")/.env.XXXXXX")" || return 1
   while :; do
@@ -300,7 +317,7 @@ runtime_env_remove_dotenv_credentials() {
       "$dotenv" >&2
   elif [ -n "$quote" ]; then
     printf '[runtime-env ERROR] cannot remove the credentials from %s: a quoted value in it never ends\n' "$dotenv" >&2
-  elif [ "$removed" -eq 0 ] || { chmod -- "$mode" "$tmp" && mv -fT -- "$tmp" "$dotenv"; }; then
+  elif { [ "$removed" -eq 0 ] && [ ! -L "$dotenv" ]; } || { chmod -- "$mode" "$tmp" && mv -fT -- "$tmp" "$dotenv"; }; then
     rm -f -- "$tmp"
     return 0
   fi
@@ -350,10 +367,20 @@ runtime_env_load_kernel_agent_credentials() {
   done < "$file"
 }
 
+# Export, where unset or empty, the assignments of $REPO_ROOT/.env. A .env that keeps no credentials
+# (runtime_env_dotenv_credentials_elsewhere: another account can write it, or it carries
+# HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env) lends none: its RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS and
+# RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS lines are skipped and counted in DOTENV_SKIPPED_CREDENTIAL_COUNT, and
+# the credentials come from the shell or this container's kernel-agent env file alone. Preflight's copy of that skip
+# is in _load_dotenv_fallback in cli/preflight_env.py.
 load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT=0
+  # shellcheck disable=SC2034 # read by install.sh preflight_load_dotenv
+  DOTENV_SKIPPED_CREDENTIAL_COUNT=0
   [ -f "$REPO_ROOT/.env" ] || return 0
-  local loaded=0 authoritative=0 readonly_root=0 caller_root=0
+  local loaded=0 skipped=0 authoritative=0 readonly_root=0 caller_root=0 skip_credentials=0
+  [ -z "$(runtime_env_dotenv_not_private "$REPO_ROOT/.env")" ] || skip_credentials=1
+  [ "${HYPERLOOM_DOTENV_CREDENTIALS:-}" != kernel-agent-env ] || skip_credentials=1
   setup_dotenv_is_authoritative && authoritative=1
   runtime_env_var_is_readonly USER_DATA_PATH && readonly_root=1
   [ -n "${USER_DATA_PATH:-}" ] && caller_root=1
@@ -382,9 +409,18 @@ load_dotenv_no_clobber() {
         return 1
       fi
       if [ "$pass" = mode ]; then
+        if [ "$key" = HYPERLOOM_DOTENV_CREDENTIALS ]; then
+          [ "$value" != kernel-agent-env ] || skip_credentials=1
+          continue
+        fi
         [ "$key" = HYPERLOOM_RUN_MODE ] || continue
       else
         [ "$key" = HYPERLOOM_RUN_MODE ] && continue
+        if [ "$skip_credentials" -eq 1 ] &&
+           [[ " $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS " == *" $key "* ]]; then
+          skipped=$((skipped + 1))
+          continue
+        fi
         if [ "${HYPERLOOM_RUN_MODE:-}" = docker ]; then
           case "$key" in PYTHON|VIRTUAL_ENV|INFERENCE_OPTIMIZER_FORCE_PYTHON) continue ;; esac
         fi
@@ -407,6 +443,8 @@ load_dotenv_no_clobber() {
     done < "$REPO_ROOT/.env"
   done
   DOTENV_LOADED_COUNT="$loaded"
+  # shellcheck disable=SC2034 # read by install.sh preflight_load_dotenv
+  DOTENV_SKIPPED_CREDENTIAL_COUNT="$skipped"
   return 0
 }
 

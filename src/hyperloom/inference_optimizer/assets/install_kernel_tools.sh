@@ -1058,14 +1058,15 @@ write_env_file() {
   # A checkout another account can write -- a group- or other-writable checkout or .env, one of another account's, or a
   # link, as a checkout bind-mounted from shared storage is -- keeps no credentials in .env, where that account could
   # read or rewrite them: they are in the file above alone, and the ones an earlier install or the operator left in .env
-  # (with the retired spellings purged below) are removed first, before any write below copies .env. Readers that took
-  # them from .env take them from that file instead (install.sh preflight_load_dotenv, preflight's
-  # _load_dotenv_fallback). Asked before the first write below, which replaces .env with a file of this account's.
+  # (with their retired spellings) are removed first, before any write below copies .env; a link there is replaced, or
+  # removed when it points at anything but a regular file. They were never loaded (load_dotenv_no_clobber skips them
+  # in such a .env), so none of them, another account's included, reached the file above. Readers that took them from
+  # .env take them from that file instead (install.sh preflight_load_dotenv, preflight's _load_dotenv_fallback).
+  # Asked before the first write below, which replaces .env with a file of this account's.
   local dotenv_not_private
   dotenv_not_private="$(runtime_env_dotenv_not_private "$DOTENV")"
   if [ -n "$dotenv_not_private" ]; then
-    runtime_env_remove_dotenv_credentials "$DOTENV" ANTHROPIC_AUTH_TOKEN DEEPSEEK_API_KEY SAFE_API_KEY \
-      AMD_LLM_API_KEY LLM_GATEWAY_KEY GEAK_API_KEY ||
+    runtime_env_remove_dotenv_credentials "$DOTENV" ||
       die "the credentials in ${DOTENV} could not be removed, and another account can write it (${dotenv_not_private}); remove them by hand"
     log "credentials kept out of ${DOTENV}, which another account can write (${dotenv_not_private}): they are in ${env_file} alone"
   fi

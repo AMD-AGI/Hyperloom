@@ -536,7 +536,8 @@ acquire_install_lock() {
 # configures both sides on one host.
 #
 # Loader (env wins; never overwrites a key that is already set):
-#   env > $REPO_ROOT/.env > $KERNEL_AGENT_ENV (credentials only, for a checkout another account can write)
+#   env > $REPO_ROOT/.env > $KERNEL_AGENT_ENV (credentials only, for a checkout another account can write,
+#   whose .env lends none)
 #
 # Strict mode by design: --check-only / --dry-run is the only path that
 # downgrades the die to a warn (introspection mode, no install runs).
@@ -550,6 +551,11 @@ preflight_load_dotenv() {
   # kernel-agent env file alone, so a re-install here takes them from there, as preflight does.
   elsewhere="$(runtime_env_dotenv_credentials_elsewhere "$REPO_ROOT/.env")"
   [ -n "$elsewhere" ] || return 0
+  # load_dotenv_no_clobber took none of its credential lines: another account may have written them, and its gateway
+  # URL or headers would carry this account's key to it. Nor are they copied into the kernel-agent env file.
+  if [ "${DOTENV_SKIPPED_CREDENTIAL_COUNT:-0}" -gt 0 ]; then
+    warn "ignored ${DOTENV_SKIPPED_CREDENTIAL_COUNT} credential line(s) in $REPO_ROOT/.env, which keeps none, as ${elsewhere}"
+  fi
   if ! runtime_env_load_kernel_agent_credentials "$KERNEL_AGENT_ENV"; then
     warn "credentials not taken from ${KERNEL_AGENT_ENV}; export them in this shell"
   elif [ "$RUNTIME_ENV_CREDENTIALS_LOADED" -gt 0 ]; then
