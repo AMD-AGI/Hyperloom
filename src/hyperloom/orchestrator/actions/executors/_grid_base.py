@@ -1,14 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared value types and helpers for the ``explore`` executor's grid runs."""
+"""Shared value types and helpers for the ``explore`` executor's grid runs.
+
+A grid round its point routes to inference_suite (:func:`._suite_config.suite_route`) runs through
+:func:`run_grid_suite_round`, which holds the server as the point's ``server_lifecycle`` block says
+(:func:`._suite_config.point_server`) and hands the round back the way the grid reads a finished benchmark process: a
+round the session deadline or a cancel stopped exits with the sentinel the grid reads as the run's own stop, any other
+failed step exits ``1``, and the grid records it under that step's error class (:func:`failed_step_class`).
+"""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from hyperloom_common.coerce import to_str_list
 from hyperloom.common.env_safety import (
@@ -23,6 +33,17 @@ from hyperloom.inference_optimizer.grid_server_args import (
     remove_moe_runner_backend_arg,
 )
 
+from inference_suite import stop
+from inference_suite.contracts import FailedStep
+
+from ._failed_step import failed_step_error_class
+from ._subprocess_kill import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
+    sync_agentx_phase_wait,
+)
+from ._suite_config import SuiteRound, SuiteRoute, deadline_unix, point_server, run_suite_round
+
 log = logging.getLogger(__name__)
 
 
@@ -33,6 +54,89 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 # they are neither a KEEP nor a REVERT.
 TS_FAILED = "FAILED"
 TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"
+
+
+def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
+    """Hold the round of the point at ``config_path`` to the same cap as the enclosing benchmark process."""
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    bench = cfg["benchmark"]
+    bench["timeout_seconds"] = timeout_sec
+    if bench.get("server_lifecycle"):
+        bench["server_lifecycle"]["server_ready_timeout_s"] = timeout_sec
+    envs = bench.setdefault("envs", {})
+    envs["PYTHONUNBUFFERED"] = "1"
+    sync_agentx_phase_wait(envs, timeout_sec)
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+
+@dataclass(frozen=True)
+class GridRound:
+    """One benchmark round of a grid: the config and directories it runs with, and its stop gates.
+
+    ``server_already_ready`` is whether an earlier round left the round's server up. ``magpie_python`` is the
+    interpreter of a round on the Magpie backend; a round inference_suite runs takes its own.
+    """
+
+    magpie_python: str
+    config_path: Path
+    output_dir: Path
+    timeout_sec: int
+    cwd: str
+    result_dir: str | None = None
+    silence_timeout_sec: float | None = None
+    server_already_ready: bool = False
+    session_deadline_sec: float | None = None
+    warmup: bool = False
+
+
+_FAILED_RETURNCODE = 1
+_STOPPED_BY_THE_RUN: Mapping[FailedStep, int] = {
+    FailedStep.DEADLINE_EXHAUSTED: SESSION_TIME_EXHAUSTED_RETURNCODE,
+    FailedStep.CANCELLED: ORCHESTRATOR_CANCELLED_RETURNCODE,
+}
+
+
+@dataclass(frozen=True)
+class SuiteRoundExit:
+    """How a grid round on inference_suite ended: its exit code and, when it failed, the report's failure detail."""
+
+    returncode: int
+    detail: str = ""
+
+
+def run_grid_suite_round(
+    route: SuiteRoute, round_: GridRound, *, env_drop: frozenset[str], on_poll: Callable[[], None]
+) -> SuiteRoundExit:
+    """Run ``round_`` on ``route``; ``env_drop`` names host variables its processes do not inherit.
+
+    Raises:
+        SuiteRoundRefused: When the round is refused before it runs.
+    """
+    sync_benchmark_timeout(round_.config_path, round_.timeout_sec)
+    server = point_server(round_.config_path, finds_server=round_.server_already_ready)
+    request = SuiteRound(
+        config_path=round_.config_path,
+        round_dir=round_.output_dir,
+        lifecycle=server.lifecycle,
+        warmup=round_.warmup,
+        deadline_unix=deadline_unix(round_.session_deadline_sec),
+        env_drop=env_drop,
+    )
+    try:
+        report = run_suite_round(route, request, on_poll=on_poll).report
+    finally:
+        if server.stop_after is not None and (survivors := stop(server.stop_after).survivors):
+            log.error("grid: pids %s outlived SIGKILL; %s keeps their record", survivors, server.stop_after)
+    if report.failed_step is None:
+        return SuiteRoundExit(0)
+    returncode = _STOPPED_BY_THE_RUN.get(report.failed_step, _FAILED_RETURNCODE)
+    return SuiteRoundExit(returncode, report.failure_detail or report.failed_step.value)
+
+
+def failed_step_class(measurement: Mapping[str, Any]) -> str | None:
+    """The error class of the step a run_dir's round failed at, or ``None`` for a round that failed at no step."""
+    step = measurement.get("failed_step")
+    return None if step is None else failed_step_error_class(FailedStep(step))
 
 
 @dataclass
