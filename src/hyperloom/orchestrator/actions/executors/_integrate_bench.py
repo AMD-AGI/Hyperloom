@@ -221,7 +221,6 @@ class BenchStageMixin:
                 output_root=bench_leg.output_root,
                 recipe=GridRecipe(base_yaml_path=config_path, base=base, target=target),
                 launch=GridLaunch(
-                    magpie_python=params.get("magpie_python") or None,
                     result_dir=result_dir,
                     serving_lease=serving_lease,
                 ),
