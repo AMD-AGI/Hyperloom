@@ -152,7 +152,7 @@ def test_a_discarded_warmup_replay_draws_its_trajectories_with_the_warmup_seed(
     freeze_base(session, _base())
     _stage(tmp_path, monkeypatch)
     ran = []
-    monkeypatch.setattr(_suite_config, "_run_config", lambda config, lease, on_poll: ran.append(config))
+    monkeypatch.setattr(_suite_config, "_run_config", lambda config, lease, on_poll, checkpoint=None: ran.append(config))
     point = tmp_path / "slot" / "point.yaml"
     point.parent.mkdir()
     point.write_text(yaml.safe_dump(_point()), encoding="utf-8")
