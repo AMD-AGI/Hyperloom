@@ -42,7 +42,6 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         "benchmark_backend": "magpie_agentx",
         "workload_identity": identity_hash,
         "reported_success": report.get("success"),
-        "benchmark_valid": valid,
         "valid_measurement": valid,
         "publishable": report.get("publishable") is True,
         "diagnostic_only": diagnostic,
