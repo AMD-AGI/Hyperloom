@@ -12,7 +12,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.common.tests.test_round_measurement import _agentx, _agentx_result
 from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
+from inference_suite.contracts import ProfileResult, Report, RunLayout
+from inference_suite.tests.test_compose import _launch
 
 SGLANG_OFF = "server_args=ServerArgs(model_path='m', disable_radix_cache=True, tp_size=8)\n"
 SGLANG_ON = "server_args=ServerArgs(model_path='m', disable_radix_cache=False, tp_size=8)\n"
@@ -122,6 +125,32 @@ def test_the_log_in_the_round_directory_wins_over_a_warmup_launch(tmp_path: Path
     (directory / "warmup_round").mkdir()
     (directory / "warmup_round" / "server.log").write_text(SGLANG_OFF, encoding="utf-8")
     assert baseline_prefix_cache_refusal(point, directory) == ""
+
+
+def _suite_round(tmp_path: Path, report: Report, log: str) -> tuple[Path, Path]:
+    """An AgentX point and the inference_suite run_dir it landed in, with its report, launch and server log."""
+    point, directory = _agentx_round(tmp_path, "sglang", None, log)
+    layout = RunLayout(directory)
+    layout.report.write_text(json.dumps(report.to_document()), encoding="utf-8")
+    layout.launch.write_text(json.dumps(_launch().to_document()), encoding="utf-8")
+    return point, directory
+
+
+@pytest.mark.parametrize(("log", "refused"), [(SGLANG_OFF, True), (SGLANG_ON, False)], ids=["cache_off", "cache_on"])
+def test_a_valid_suite_round_is_read_from_its_server_log(tmp_path: Path, log: str, refused: bool) -> None:
+    assert bool(baseline_prefix_cache_refusal(*_suite_round(tmp_path, _agentx(), log))) is refused
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        _agentx(_agentx_result(stopped_by_threshold=True)),
+        _agentx(profile=ProfileResult(trace_dirs=("profile/torch_trace",), has_step_traces=False)),
+    ],
+    ids=["invalid", "diagnostic"],
+)
+def test_a_suite_round_the_mapper_does_not_accept_is_left_alone(tmp_path: Path, report: Report) -> None:
+    assert baseline_prefix_cache_refusal(*_suite_round(tmp_path, report, SGLANG_OFF)) == ""
 
 
 def test_the_refusal_carries_the_agentx_baseline_error_class_name() -> None:
