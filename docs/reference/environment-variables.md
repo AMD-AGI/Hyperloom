@@ -956,7 +956,7 @@ bubblewrap's own line; the usual causes:
 | `bwrap: setting up uid map: Permission denied` | The kernel created the user namespace without capabilities: with `kernel.apparmor_restrict_unprivileged_userns=1` it does so for a process without `CAP_SYS_ADMIN`. |
 | `bwrap: Creating new namespace failed: ...` | `user.max_user_namespaces` is 0 or used up, or a seccomp or AppArmor profile denies `unshare`. |
 | `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | The container's `/proc` has entries mounted over it (masked paths). |
-| `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`. |
+| `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`: the `unshare` on `PATH` for the `bwrap` on `PATH`, and for a `bwrap` named by path (a hosted run's layer's) only an `unshare` beside it, never one from `PATH`. Without one the probe refuses, and the host must make the root mount private first (`mount --make-rprivate /`), as the layer's `start.sh` does. |
 
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
