@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
 from hyperloom_common.coerce import optional_positive_float
 
 from dataclasses import dataclass
@@ -103,7 +103,7 @@ VERDICT_REVERT = "REVERT"
 
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Return whether CLI workload translation or a bound YAML selects AgentX."""
-    return is_magpie_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
+    return is_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:
