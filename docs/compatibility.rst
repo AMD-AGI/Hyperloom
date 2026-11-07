@@ -106,9 +106,8 @@ The following table lists the validated Hyperloom version and component combinat
 
 .. note::
 
-   MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom keeps the
-   resolved GPU types distinct, but Magpie benchmark rendering reuses the MI300X
-   runner scripts and image family unless a dedicated image is supplied.
+   MI325X shares the gfx942/CDNA3 family with MI300X. Hyperloom keeps the
+   resolved GPU types distinct.
 
 Inference frameworks
 --------------------
@@ -208,7 +207,7 @@ plugins that both engines load by default, so setup refuses to install ATOM
 where either imports (including a ROCm 10 vLLM venv built over that Python),
 and refuses to install SGLang, shared vLLM or ROCm 10 source vLLM where ATOM
 imports. Run ATOM in a separate container instead. Verify a real ``import atom`` and a non-empty ``torch.version.hip``
-with that Python, keep its executable first on ``PATH`` for Magpie's ``python3``
+with that Python, keep its executable first on ``PATH`` for the server's ``python3``
 launch, and use ``PYTHON`` with ``INFERENCE_OPTIMIZER_FORCE_PYTHON=1`` if pinning
 the interpreter. Keep any activated venv consistent; ``/opt/venv`` is not required.
 
