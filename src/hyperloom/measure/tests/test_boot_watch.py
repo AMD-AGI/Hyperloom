@@ -108,11 +108,6 @@ class _ServerGrid:
         ]
 
 
-@pytest.fixture(autouse=True)
-def magpie_backend(monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
-
-
 def _run(monkeypatch, tmp_path: Path, script: str, **point: Any):
     grid = _ServerGrid(script)
     monkeypatch.setattr(local, "run_grid", grid)

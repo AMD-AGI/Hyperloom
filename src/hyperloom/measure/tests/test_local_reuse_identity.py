@@ -75,7 +75,6 @@ def clean_process_env(monkeypatch, tmp_path):
         "MAGPIE_EVAL_TASKS",
         "MAGPIE_EVAL_LIMIT",
         "MAGPIE_EVAL_TOKENIZED_REQUESTS",
-        "HYPERLOOM_BENCHMARK_BACKEND",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SERVER_ARGS", raising=False)
@@ -140,7 +139,7 @@ def rounds(monkeypatch, tmp_path) -> _Rounds:
         "resolve_lifecycle_params",
         lambda path: {"eligible": True, "port": PORT, "framework": "sglang", "reason": ""},
     )
-    monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kw: None)
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot, lifecycle: [])
     return fake
 
 
@@ -192,7 +191,6 @@ def _sweep(
 def test_on_magpie_the_boot_and_the_rounds_that_measure_have_one_server_identity(
     rounds, tmp_path, monkeypatch, accuracy
 ):
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
 
     LocalMeasurementBackend().run_test(_sweep(tmp_path, accuracy=accuracy))
 
@@ -202,14 +200,15 @@ def test_on_magpie_the_boot_and_the_rounds_that_measure_have_one_server_identity
     stored = magpie_server_env(boot["envs"])
     for round_ in measured:
         assert magpie_server_env(round_["envs"]) == stored, f"the round at {round_['name']}"
-    assert "MAGPIE_RUN_PHASE" not in boot["envs"], "Magpie sets the phase itself"
+    assert "MAGPIE_RUN_PHASE" not in boot["envs"], (
+        "the phase is outside Magpie's reuse check, and Magpie sets it itself"
+    )
     assert (boot["envs"]["RUN_EVAL"], boot["envs"]["NUM_PROMPTS"]) == ("false", "1"), "a boot is still small"
 
 
 def test_on_magpie_the_warmup_and_the_measured_round_of_a_graded_test_have_one_server_identity(
     rounds, tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
     (point,) = _points(tmp_path, accuracy=True)[:1]
     call = TestCall(
         points=(point,),
@@ -256,7 +255,6 @@ def test_a_put_kernel_table_has_one_path_in_every_round_of_a_sweep_arm(
     its own that names the same table; a path that counted the points ("2-k-..." at the boot, "1-k-..." next) made
     Magpie's reuse check refuse every level after the boot.
     """
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
     LocalBlobStore(tmp_path / "blobs").put(TABLE)
     table = KernelArtifact(
         KernelKind.GEMM, "fp8", "kernel/t.csv", sha(TABLE), {"load": {"via": "env_file", "env": TABLE_ENV}}
@@ -282,7 +280,6 @@ def test_a_variable_the_launcher_exports_is_kept_or_dropped_alike_in_every_round
     launcher while the boot round's configuration was built, so the boot kept ``SGLANG_USE_AITER`` and every round after
     it dropped it, and Magpie's reuse check refused them.
     """
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
     checkout, launchers = tmp_path / "inferencex", tmp_path / "magpie" / "Magpie" / "scripts" / "benchmark"
     for path in (checkout / "benchmarks", launchers):
         path.mkdir(parents=True)
@@ -301,16 +298,6 @@ def test_a_variable_the_launcher_exports_is_kept_or_dropped_alike_in_every_round
     assert "AITER_LOG_TUNED_CONFIG" in boot["envs"], "a variable the launcher does not export stays"
     for round_ in measured:
         assert magpie_server_env(round_["envs"]) == magpie_server_env(boot["envs"]), f"the round at {round_['name']}"
-
-
-def test_on_bypass_the_boot_round_carries_the_server_phase(rounds, tmp_path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
-
-    LocalMeasurementBackend().run_test(_sweep(tmp_path))
-
-    boot, *measured = rounds.rounds
-    assert boot["envs"]["MAGPIE_RUN_PHASE"] == "server"
-    assert not any("MAGPIE_RUN_PHASE" in r["envs"] for r in measured)
 
 
 def test_the_copy_of_magpies_filter_is_magpies(tmp_path):

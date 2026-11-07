@@ -20,7 +20,6 @@ from hyperloom.measure.tests.test_local_backend import (  # noqa: F401 (fixtures
     _profile_point,
     _run,
     grid,
-    magpie_backend,
 )
 from hyperloom.orchestrator.actions.executors import VariantResult
 

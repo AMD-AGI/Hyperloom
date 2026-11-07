@@ -29,10 +29,11 @@ def main() -> int:
     local.run_grid_warmup_enabled = lambda: True  # type: ignore[assignment]
     local.resolve_lifecycle_params = lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}  # type: ignore[assignment]
 
-    def stop_server(**kwargs: Any) -> None:
+    def stop_server(slot: Path, lifecycle: dict[str, Any]) -> list[int]:
         time.sleep(3.0 * float(os.environ["HL_PHASE_SCALE"]))
+        return []
 
-    local.teardown_lifecycle_server = stop_server  # type: ignore[assignment]
+    local.teardown_variant_server = stop_server  # type: ignore[assignment]
     return runner_flow.run(root / "in", root / "out", scratch=root / "work" / "scratch", spec_wait_sec=60)
 
 

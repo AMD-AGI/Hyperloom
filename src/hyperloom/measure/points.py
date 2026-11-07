@@ -59,7 +59,6 @@ from hyperloom.orchestrator.actions.executors import (
     default_baseline_config,
     materialize_benchmark_config,
 )
-from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend_name
 from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, native_config
 
 _UTF8 = "utf-8"
@@ -168,7 +167,7 @@ def default_canonical(
 def _canonical_surface(config: Mapping[str, Any], point: Path) -> MeasurementSurface:
     """The surface of the canonical ``config`` (rendered at ``point``), its script hashed as the tests will find it.
 
-    Under Magpie the script a test runs is Magpie's own launcher, which Magpie copies into the InferenceX checkout when
+    The script a test runs is Magpie's own launcher, which Magpie copies into the InferenceX checkout when
     its first benchmark starts; a checkout whose pinned commit does not track the launcher has none until then. A surface
     taken before that records no script hash, and every test, which reports the hash of the copy, would differ from it.
     So the launcher is put there first, by the function the runner and the local backend use before they hash a test's
@@ -177,12 +176,10 @@ def _canonical_surface(config: Mapping[str, Any], point: Path) -> MeasurementSur
     launcher, for a test either, and is left to the host check that refuses a tree without the benchmark library.
     """
 
-    under_magpie = resolve_backend_name() == "magpie"
-    if under_magpie:
-        install_launchers([point])
+    install_launchers([point])
     surface = extract_surface(config)
     bench = BenchmarkPoint.from_document(config)
-    if under_magpie and _launcher_missing(bench, surface):
+    if _launcher_missing(bench, surface):
         raise PointError(
             f"the canonical measurement runs {bench.benchmark_script} from the InferenceX checkout "
             f"{bench.inferencex_path}, which has no such file and Magpie has none to put there: a test would report "

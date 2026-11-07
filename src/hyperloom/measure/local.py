@@ -119,10 +119,9 @@ from hyperloom.orchestrator.actions.executors import (
     resolve_lifecycle_params,
     run_grid,
     run_grid_warmup_enabled,
-    teardown_lifecycle_server,
+    teardown_variant_server,
 )
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
-from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend
 from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -167,14 +166,13 @@ _CONTRIBUTING = frozenset({_TEST, _ACCURACY})
 #: The old flow reads the process environment, so two tests in one process would see each other's settings.
 _PROCESS_LOCK = threading.Lock()
 
-#: What a boot round pins in its round's environment, on top of the point and of what the backend says a boot round is
-#: (``boot_phase_envs``). A boot round only brings a server up for the rounds that measure, yet Magpie runs the server
-#: phase and then a full client round whatever ``MAGPIE_RUN_PHASE`` says, so that round has to be made small: no
-#: evaluation (``RUN_EVAL``: 1319 questions on a GSM8K point) and one request, not the point's ``NUM_PROMPTS``. Both are
-#: in Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS``, which a persistent server's reuse check leaves out; a variable outside
-#: those keys would make the check refuse the rounds that measure. ``NUM_WARMUPS`` stays the point's (Magpie takes its
-#: warmups from the concurrency). An AgentX point has no evaluation round and no prompt count; its boot round carries
-#: only what the backend says.
+#: What a boot round pins in its round's environment, on top of the point. A boot round only brings a server up for the
+#: rounds that measure: an inference_suite round told so runs no load, but Magpie runs the server phase and then a full
+#: client round, so that round has to be made small: no evaluation (``RUN_EVAL``: 1319 questions on a GSM8K point) and
+#: one request, not the point's ``NUM_PROMPTS``. Both are in Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS``, which a persistent
+#: server's reuse check leaves out; a variable outside those keys, ``MAGPIE_RUN_PHASE`` included, would make the check
+#: refuse the rounds that measure. ``NUM_WARMUPS`` stays the point's (Magpie takes its warmups from the concurrency). An
+#: AgentX point has no evaluation round and no prompt count; its boot round pins nothing.
 _BOOT_CLIENT_ENVS = {ENV_RUN_EVAL: "false", ENV_NUM_PROMPTS: "1"}
 #: The warmup round of a graded test, the one that evaluates (``_eval_then_measure``).
 _WARMUP = "warmup"
@@ -299,8 +297,7 @@ def _measure(call: TestCall, phases: PhaseRecorder, tracer: ruppell.Tracer | Non
             _patch_profile_client(call)
         with _test_environment(call) as unset_envs:
             call, tracer = _traced(call, tracer, notes)
-            if resolve_backend().name == "magpie":
-                install_launchers(call.points)
+            install_launchers(call.points)
             run = _Run(call, [name for name in unset_envs if name not in private.redirected], phases=phases)
             run.traced = tracer
             with _watch_output(call), _guard_boot(run):
@@ -827,13 +824,16 @@ class _Lifecycle:
         self.framework = str(info.get("framework") or "")
         self.reason = str(info.get("reason") or "")
         self._phases = run.phases
+        self._notes = run.notes
 
     def settings(self, *, cleanup: bool) -> dict[str, Any]:
         return {"cleanup": cleanup, "pid_dir": str(self.pid_dir), "port": self.port}
 
     def teardown(self) -> None:
         self._phases.begin(TEARDOWN)
-        teardown_lifecycle_server(pid_dir=self.pid_dir, framework=self.framework, port=self.port)
+        survivors = teardown_variant_server(self.pid_dir, {"framework": self.framework, "port": self.port})
+        if survivors:
+            self._notes.append(f"server pids {survivors} outlived SIGKILL; {self.pid_dir} keeps their record")
         self._phases.begin(OTHER)
 
 
@@ -860,11 +860,8 @@ async def _sweep(run: _Run) -> None:
 
 
 def _boot_envs(point: Path) -> dict[str, str]:
-    """The environment a boot round of ``point`` is run with: the backend's boot phase, no evaluation, one request."""
-    phase = dict(resolve_backend().boot_phase_envs)
-    if _point(point).agentx:
-        return phase
-    return {**phase, **_BOOT_CLIENT_ENVS}
+    """The environment a boot round of ``point`` is run with: no evaluation and one request, nothing for AgentX."""
+    return {} if _point(point).agentx else dict(_BOOT_CLIENT_ENVS)
 
 
 async def _boot_server(run: _Run, lifecycle: _Lifecycle, point: int, name: str) -> VariantResult:
