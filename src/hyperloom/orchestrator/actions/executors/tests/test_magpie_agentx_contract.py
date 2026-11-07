@@ -53,7 +53,7 @@ def source(tmp_path, monkeypatch):
                     "docker_image": "example/sglang:pinned",
                     "agentx": {"enabled": True, "mode": "canonical"},
                     "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8"},
-                    "profiler": {"torch_profiler": {"enabled": False, "num_steps": 5, "num_profiles": 3}},
+                    "profiler": {"torch_profiler": {"enabled": False, "num_steps": 5, "num_profiles": 1}},
                 }
             }
         )
@@ -326,7 +326,7 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     bench = load_benchmark(rendered)
     torch_profiler = bench["profiler"]["torch_profiler"]
     assert torch_profiler["enabled"] is True
-    assert torch_profiler["num_profiles"] == 3
+    assert torch_profiler["num_profiles"] == 1
     assert torch_profiler["num_steps"] == 5
     assert torch_profiler["start_seconds"] == 300
     assert torch_profiler["interval_seconds"] == 900
@@ -337,7 +337,7 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert load_benchmark(source)["profiler"]["torch_profiler"] == {
         "enabled": False,
         "num_steps": 5,
-        "num_profiles": 3,
+        "num_profiles": 1,
     }
     report["agentx_metrics"]["diagnostic_only"] = True
     measured = extract_benchmark_measurement(report)

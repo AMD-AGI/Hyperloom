@@ -1135,12 +1135,12 @@ refuses (`HYPERLOOM_AGENTX=maybe`) is recorded as failed with error class
 `benchmark_cap_error` and the sweep carries on with the next rung.
 
 Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
-fixed-sequence profiling. Configure capture steps, count, delay and interval through
-`benchmark.profiler.torch_profiler` (`num_steps`, `num_profiles`, `start_seconds`,
-`interval_seconds`). The diagnostic copy preserves those settings and explicit
+fixed-sequence profiling. Configure capture steps and delay through
+`benchmark.profiler.torch_profiler` (`num_steps`, `start_seconds`). A profile round
+captures one window, so a YAML whose `num_profiles` is not 1 is refused when the
+session starts. The diagnostic copy preserves those settings and explicit
 `detailed_annotations`. When profiling is enabled, a missing capture setting becomes
-one capture of 256 steps, starting 300 seconds after measurement, with a 900-second
-interval. A missing `detailed_annotations` becomes true, and false when the TraceLens
+one capture of 256 steps, starting 300 seconds after measurement. A missing `detailed_annotations` becomes true, and false when the TraceLens
 runtime patch was attempted and did not apply: Magpie probes the server whenever the field
 is true and refuses to launch when the server lacks it.
 Hyperloom adds the shape-tool environment through `agentx.launch_overrides` while
