@@ -1,5 +1,5 @@
-"""The tools a test runs: clean checkouts of InferenceX (and, for a v1 sheet, Magpie) at the commits the instruction
-sheet names, and for a v2 sheet the inference_suite staging of this runner's own pins.
+"""The tools a test runs: a clean checkout of InferenceX at the commit the instruction sheet names, and the
+inference_suite staging of this runner's own pins.
 
 The runner never uses the session's checkouts: they are on storage the candidate's author can write. Each commit gets
 its own directory in the runner's cache, fetched by hash and checked out detached, so a directory that exists at the
@@ -33,23 +33,20 @@ __all__ = [
     "ToolError",
     "ensure_inference_suite",
     "ensure_inferencex",
-    "ensure_magpie",
 ]
 
 INFERENCEX_REPO = "https://github.com/SemiAnalysisAI/InferenceX.git"
-MAGPIE_REPO = "https://github.com/AMD-AGI/Magpie.git"
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _FETCH_TIMEOUT_SEC = 900
 #: Where the published stagings live below the runner cache, one directory per staging key.
 INFERENCE_SUITE_DIR = "inference-suite"
-#: What marks an InferenceX tree: the benchmark library a v1 sheet's Magpie runs, at the root or below
-#: ``inferencex-e2e/``, or the client inference_suite stages a v2 sheet's rounds from (the pinned commit has no library).
+#: What marks an InferenceX tree: its benchmark library, at the root or below ``inferencex-e2e/``, or the client
+#: inference_suite stages a sheet's rounds from (the pinned commit has no library).
 _INFERENCEX_MARKERS = (
     Path("benchmarks") / "benchmark_lib.sh",
     Path("inferencex-e2e") / "benchmarks" / "benchmark_lib.sh",
     Path("inferencex-e2e") / CLIENT_FILE,
 )
-_MAGPIE_MARKERS = (Path("Magpie") / "__init__.py",)
 
 
 class ToolError(Exception):
@@ -115,11 +112,6 @@ def ensure_inferencex(commit: str, cache_dir: Path) -> Path:
     return _checkout(
         "InferenceX", os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO, commit, cache_dir, _INFERENCEX_MARKERS
     )
-
-
-def ensure_magpie(commit: str, cache_dir: Path) -> Path:
-    """A clean Magpie checkout at ``commit``; ``MAGPIE_REPO`` overrides where it is fetched from."""
-    return _checkout("Magpie", os.environ.get("MAGPIE_REPO") or MAGPIE_REPO, commit, cache_dir, _MAGPIE_MARKERS)
 
 
 @dataclass(frozen=True)
