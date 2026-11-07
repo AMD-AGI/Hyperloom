@@ -504,6 +504,14 @@ def _run_relative_path(workspace: Path) -> str:
 
 
 @dataclass(frozen=True)
+class PreparationFailure:
+    """A workload dependency that must be fixed before spawning the benchmark, with the returncode its round reports."""
+
+    returncode: int
+    error: str
+
+
+@dataclass(frozen=True)
 class RoundWatch:
     """The stop gates the watchdog enforces on one round and the server log it watches."""
 
@@ -765,6 +773,7 @@ __all__ = [
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "INFERENCEX_CHECKOUT_INVALID_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
+    "PreparationFailure",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",

@@ -70,8 +70,8 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from ._round_folder import RoundFolder, is_round_folder, round_report_path
 from ._suite_config import SuiteRoundRefused, suite_route
-from .benchmark_backend import build_benchmark_command
-from .benchmark_config import apply_benchmark_round_seed, composed_benchmark_timeout_sec, prepare_benchmark_runtime
+from .benchmark_backend import apply_benchmark_round_seed, build_benchmark_command, prepare_inferencex_checkout
+from .benchmark_config import composed_benchmark_timeout_sec, prepare_mlperf_client
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
@@ -452,7 +452,7 @@ def _run_magpie(
     server_log_path = _benchmark_server_log(config_path, output_dir)
     env = _magpie_process_env(unset_envs)
 
-    preparation_failure = prepare_benchmark_runtime(config_path, env)
+    preparation_failure = prepare_inferencex_checkout(config_path, env) or prepare_mlperf_client(config_path, env)
     if preparation_failure is not None:
         return preparation_failure.returncode, "", preparation_failure.error
     apply_benchmark_round_seed(config_path, env, warmup=bench_round.warmup)

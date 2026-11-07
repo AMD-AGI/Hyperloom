@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -44,9 +44,14 @@ from inference_suite.argv import remove_server_args
 from inference_suite.contracts import GpuTelemetry, Lifecycle, LifecycleMode, RunPaths, SuiteConfig
 from inference_suite.frameworks import Framework
 
-from ._accuracy_gate import materialized_run_eval_disabled
 from ._benchmark_interpreter import _resolve_probe_python
-from ._subprocess_kill import BENCHMARK_TIMEOUT_ENV, default_benchmark_timeout_sec, resolve_benchmark_timeouts
+from ._subprocess_kill import (
+    AGENTX_PREFLIGHT_RETURNCODE,
+    BENCHMARK_TIMEOUT_ENV,
+    PreparationFailure,
+    default_benchmark_timeout_sec,
+    resolve_benchmark_timeouts,
+)
 from ._suite_config import RoundSettings, suite_config
 
 
@@ -177,14 +182,6 @@ def prepare_mlperf_round(config_path: Path, env: Mapping[str, str], inferencex_p
     config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding=_UTF8)
 
 
-@dataclass(frozen=True)
-class PreparationFailure:
-    """A workload dependency that must be fixed before spawning the benchmark."""
-
-    returncode: int
-    error: str
-
-
 def composed_benchmark_timeout_sec(config_path: Path) -> float:
     """The hard cap the rounds of one materialized config are granted, sized to the env that config launches with.
 
@@ -217,71 +214,15 @@ def composed_benchmark_timeout_sec(config_path: Path) -> float:
     return default_benchmark_timeout_sec(envs)
 
 
-def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> PreparationFailure | None:
-    """Prepare synthetic or MLPerf dependencies; native AgentX is owned by Magpie."""
-    from hyperloom.inference_optimizer import inferencex_checkout
-
-    from ._magpie_patcher import ensure_lm_eval_install_once
-    from ._subprocess_kill import (
-        AGENTX_PREFLIGHT_RETURNCODE,
-        EVAL_PROBE_UNPATCHABLE_RETURNCODE,
-        INFERENCEX_CHECKOUT_INVALID_RETURNCODE,
+def prepare_mlperf_client(config_path: Path, env: dict[str, str]) -> PreparationFailure | None:
+    """Prepare the MLPerf client a backend round at ``config_path`` runs, against the ``$INFERENCEX_PATH`` checkout."""
+    error = prepare_agentx_runtime(
+        env=env, inferencex_path=os.environ.get("INFERENCEX_PATH", "").strip(), config_path=config_path
     )
-    from ._inferencex_patcher import (
-        ensure_benchmark_lib_eval_start_patched,
-        ensure_benchmark_serving_seed_patched,
-        ensure_eval_probe_patched,
-        ensure_eval_unbound_outputs_patched,
-        eval_probe_targets_exist,
-    )
-
-    log = logging.getLogger(__name__)
-    from .magpie_agentx import native_config
-
-    if native_config(config_path):
+    if not error:
         return None
-    # Pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH`` (its highest-precedence rung) so it loads the patched
-    # checkout, not a stale copy.
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-    if inferencex_path:
-        invalid = inferencex_checkout.unusable_reason(inferencex_path)
-        if invalid:
-            log.error("grid_runner: %s; failing this benchmark", invalid)
-            return PreparationFailure(INFERENCEX_CHECKOUT_INVALID_RETURNCODE, invalid)
-        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-        # Baseline patches its own checkout, but explore / sweep never pass through that hook: re-assert here so a
-        # resumed session or a re-cloned checkout still emits the eval-start marker.
-        ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
-        # Likewise the lm-eval install-once patch the preflight and baseline sweeps lay: without it every explore /
-        # sweep round on a re-cloned checkout reinstalls lm-eval, and a reinstall can break an eval running beside it.
-        ensure_lm_eval_install_once(Path(inferencex_path))
-
-    # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
-    # back to the same env discovery the baseline arm uses ($MAGPIE_PATH/InferenceX).
-    probe_root = Path(inferencex_path) if inferencex_path else None
-    # Best-effort: without it a warmup round pre-fills the measured round's prefix cache, which inflates the number
-    # but never breaks the round.
-    ensure_benchmark_serving_seed_patched(probe_root)
-    # Best-effort, unlike the probe below: a missing guard only costs the reason a failed round reports.
-    ensure_eval_unbound_outputs_patched(probe_root)
-    if not ensure_eval_probe_patched(probe_root) and not materialized_run_eval_disabled(config_path):
-        eval_bounds_msg = (
-            "eval generation bounds + pathology probe are not installed "
-            "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
-            f"{inferencex_path or '<unset>'}, INFERENCEX_PATH="
-            f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}); this "
-            "variant runs eval, so it would be scored against a baseline that "
-            "truncated at a different point"
-        )
-        if eval_probe_targets_exist(probe_root):
-            log.error("grid_runner: %s; failing this benchmark", eval_bounds_msg)
-            return PreparationFailure(EVAL_PROBE_UNPATCHABLE_RETURNCODE, eval_bounds_msg)
-        log.warning("grid_runner: %s", eval_bounds_msg)
-    _agx_err = prepare_agentx_runtime(env=env, inferencex_path=inferencex_path, config_path=config_path)
-    if _agx_err:
-        log.error("%s; failing this benchmark", _agx_err)
-        return PreparationFailure(AGENTX_PREFLIGHT_RETURNCODE, _agx_err)
-    return None
+    logging.getLogger(__name__).error("%s; failing this benchmark", error)
+    return PreparationFailure(AGENTX_PREFLIGHT_RETURNCODE, error)
 
 
 def prepare_agentx_runtime(
@@ -315,19 +256,3 @@ def prepare_agentx_runtime(
     except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError, BaseLaunchMismatch) as exc:
         return f"AgentX runtime preparation failed: {type(exc).__name__}: {exc}"
     return None
-
-
-def apply_benchmark_round_seed(config_path: Path, env: dict[str, str], *, warmup: bool) -> None:
-    """Reseed a discarded warmup round's client so it cannot pre-fill the measured round's prefix cache.
-
-    Native AgentX replays its own workload through Magpie and is left exactly as it was.
-
-    Args:
-        config_path: The round's materialized Magpie YAML.
-        env: The benchmark subprocess env, edited in place.
-        warmup: Whether the round's result is discarded.
-    """
-    from ._inferencex_patcher import apply_round_seed
-    from .magpie_agentx import native_config
-
-    apply_round_seed(env, warmup=warmup and not native_config(config_path))

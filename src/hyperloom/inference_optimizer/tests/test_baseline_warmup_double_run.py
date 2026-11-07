@@ -1742,14 +1742,12 @@ def test_a_grid_launch_marked_as_warmup_moves_its_seed(tmp_path, monkeypatch):
 
 def test_a_native_agentx_warmup_keeps_its_seed(tmp_path, monkeypatch):
     """The native AgentX client is not the patched one, so its rounds are left exactly as they were."""
-    from hyperloom.orchestrator.actions.executors import benchmark_config
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.magpie_agentx.native_config",
-        lambda _path: True,
-    )
+    config = tmp_path / "variant.yaml"
+    config.write_text("benchmark:\n  framework: sglang\n  agentx:\n    enabled: true\n", encoding="utf-8")
     env = {BENCH_SEED_ENV: "7"}
-    benchmark_config.apply_benchmark_round_seed(tmp_path / "variant.yaml", env, warmup=True)
+    benchmark_backend.apply_benchmark_round_seed(config, env, warmup=True)
     assert env == {}
 
 

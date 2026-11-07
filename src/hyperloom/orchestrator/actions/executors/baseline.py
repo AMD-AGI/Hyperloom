@@ -78,11 +78,11 @@ from ._inferencex_patcher import (
 )
 from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
 from ._magpie_patcher import client_tokenizer_hook_installed, ensure_eval_concurrency_compat
-from .benchmark_config import apply_benchmark_round_seed, prepare_agentx_runtime
+from .benchmark_config import prepare_agentx_runtime
 from .benchmark_result import (
     double_run_requested,
 )
-from .benchmark_backend import build_benchmark_command
+from .benchmark_backend import apply_benchmark_round_seed, build_benchmark_command
 from .benchmark_run.accuracy import _EVAL_FAILURE_MARKERS, _BaselineAccuracyMixin
 from .benchmark_run.launch import _BenchmarkLaunchMixin
 from .benchmark_run.records import (
