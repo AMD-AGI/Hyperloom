@@ -289,20 +289,20 @@ def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
     Raises:
         WorktreeError: A directory on the way is a symlink or no directory.
     """
-    fds = [os.open(worktree, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
-    try:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with contextlib.ExitStack() as stack:
+        fd = os.open(worktree, flags)
+        stack.callback(os.close, fd)
         for part in prefix.parts[:-1]:
             with contextlib.suppress(FileExistsError):
-                os.mkdir(part, dir_fd=fds[-1])
+                os.mkdir(part, dir_fd=fd)
             try:
-                fds.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
+                fd = os.open(part, flags, dir_fd=fd)
             except OSError as error:
                 raise WorktreeError(f"{worktree / prefix} cannot be linked: {part} is no directory: {error}") from error
+            stack.callback(os.close, fd)
         with contextlib.suppress(FileExistsError):
-            os.symlink(target, prefix.name, dir_fd=fds[-1])
-    finally:
-        for fd in fds:
-            os.close(fd)
+            os.symlink(target, prefix.name, dir_fd=fd)
 
 
 def _file_sections(patch: str) -> list[tuple[tuple[str, ...], str]]:
