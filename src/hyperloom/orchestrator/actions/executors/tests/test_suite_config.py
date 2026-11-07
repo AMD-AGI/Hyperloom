@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._suite_config import RoundSettings, suite_config
+from hyperloom.orchestrator.actions.executors._suite_config import RoundSettings, backend_reason, suite_config
 from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
 from inference_suite.compose import RoundFacts, compose
@@ -258,3 +258,30 @@ def test_a_point_the_translation_does_not_carry_is_refused(change: dict, message
 
     with pytest.raises(ConfigError, match=message):
         suite_config(point, _base("sglang"), _settings())
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"framework": "xdit"}, "serves nothing"),
+        ({"agentx": {"enabled": True}}, "AgentX point"),
+        ({"profiler": {"torch_profiler": {"enabled": True}}}, "profile point"),
+        ({"envs": {"BENCHMARK_BASE_URL": "http://head:8888"}}, "serves off this node"),
+    ],
+)
+def test_a_point_the_suite_does_not_run_names_why_it_stays_on_the_backend(change: dict, reason: str) -> None:
+    point = _point("sglang")
+    assert backend_reason(point) is None
+    bench = point["benchmark"]
+    for key, value in change.items():
+        bench[key] = {**bench[key], **value} if key == "envs" else value
+
+    assert reason in (backend_reason(point) or "")
+
+
+def test_a_point_naming_an_unknown_framework_is_refused_not_routed() -> None:
+    point = _point("sglang")
+    point["benchmark"]["framework"] = "tgi"
+
+    with pytest.raises(ConfigError, match="not one inference_suite runs"):
+        backend_reason(point)
