@@ -23,11 +23,12 @@ from hyperloom.contracts.measurement import PhaseTiming
 from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.phases import PhaseRecorder
-from hyperloom.measure.socket import MeasurementTimeout, TestCall
+from hyperloom.measure.socket import MeasurementTimeout, RoundPlan, TestCall
 from hyperloom.measure.tests.phase_rounds import READY_ONLY_LOG, FakeClock, Rounds, Run, Script, StagedGrid, result
 from hyperloom.measure.tests.test_local_backend import (
     _call,
     _graded_call,
+    _graded_sweep,
     _sweep_call,
 )
 
@@ -73,13 +74,17 @@ def test_a_graded_test_goes_through_its_phases_in_order_and_they_add_up_to_the_t
         ("server_boot.compile", 10.0, 0),
         ("server_boot.graph_capture", 12.0, 0),
         ("warmup", 60.0, 0),
-        ("accuracy_eval", 50.0, 0),
         ("round_collect", 5.0, 0),
         ("round_setup", 4.0, 0),
         ("measured", 56.0, 0),
-        ("teardown", 40.0, 0),
+        ("round_collect", 40.0, 0),
+        ("round_setup", 3.0, 0),
+        ("accuracy_eval", 52.0, 0),
+        ("teardown", 2.0, 0),
         ("teardown", 3.0, None),
-    ]
+    ], (
+        "the evaluation is a round of its own after the measured bench, its time from the moment it found the server ready"
+    )
     assert sum(p.seconds for p in outcome.phases) == pytest.approx(clock.now - began)
     assert recorder.phases == outcome.phases, "a recorder the runner passed in is the one the backend stamped"
 
@@ -95,7 +100,7 @@ def test_the_time_before_the_first_round_is_the_kernel_tables_the_rebuilt_framew
 
     outcome, _ = _run(monkeypatch, clock, _call(tmp_path), {"test": slow_round})
 
-    assert _stamped(outcome.phases) == [("kernel_tables", 1.5, None), ("round", 2.0, 0)]
+    assert _stamped(outcome.phases) == [("kernel_tables", 1.5, None), ("round", 2.0, 0), ("teardown", 3.0, None)]
 
 
 # -- an AgentX test -----------------------------------------------------------------------------------------------
@@ -111,7 +116,7 @@ def _agentx_point(tmp_path: Path) -> Path:
 def test_an_agentx_test_names_its_warmup_run_and_splits_its_measured_run_at_its_clients_phases(
     monkeypatch, clock, tmp_path
 ) -> None:
-    call = _call(tmp_path, _agentx_point(tmp_path))
+    call = _call(tmp_path, _agentx_point(tmp_path), rounds=RoundPlan(warmup_rounds=1))
 
     outcome, _ = _run(monkeypatch, clock, call, Rounds(clock).agentx())
 
@@ -120,11 +125,13 @@ def test_an_agentx_test_names_its_warmup_run_and_splits_its_measured_run_at_its_
         ("server_boot", 80.0, 0),
         ("warmup", 40.0, 0),
         ("round_collect", 30.0, 0),
+        ("round_setup", 5.0, 0),
         ("client_start", 15.0, 0),
         ("warmup", 30.0, 0),
         ("measured", 200.0, 0),
         ("round_collect", 15.0, 0),
         ("teardown", 30.0, 0),
+        ("teardown", 3.0, None),
     ]
 
 
@@ -135,7 +142,9 @@ def test_a_test_whose_server_never_got_ready_has_the_phases_up_to_the_failure(mo
     outcome, _ = _run(monkeypatch, clock, _call(tmp_path), Rounds(clock).failing_boot())
 
     assert outcome.returncode != 0
-    assert _stamped(outcome.phases) == [("server_boot", 1000.0, 0)], "no boot stamp: the whole round was the boot"
+    assert _stamped(outcome.phases) == [("server_boot", 1000.0, 0), ("teardown", 3.0, None)], (
+        "no boot stamp: the whole round was the boot"
+    )
 
 
 # -- a sweep arm --------------------------------------------------------------------------------------------------
@@ -185,6 +194,28 @@ def test_a_sweep_arm_boots_once_and_every_level_is_a_measured_round_of_its_own_p
     ], "the points are the call's own (c8, c4, c2 are 1, 2, 0) and the server is stopped once, after the last level"
 
 
+def test_a_graded_sweep_arm_benches_every_level_and_its_one_evaluation_is_a_phase_of_its_own_after_the_last(
+    monkeypatch, clock, tmp_path
+) -> None:
+    scripts = {**_sweep_scripts(clock), "eval": Rounds(clock).graded()["eval"]}
+
+    outcome, _ = _run(monkeypatch, clock, _graded_sweep(tmp_path, 2, 8, 4), scripts)
+
+    assert _stamped(outcome.phases)[10:] == [
+        ("round_setup", 1.0, 2),
+        ("measured", 20.0, 2),
+        ("round_collect", 2.0, 2),
+        ("round_setup", 1.0, 0),
+        ("measured", 20.0, 0),
+        ("round_collect", 2.0, 0),
+        ("round_setup", 3.0, 1),
+        ("accuracy_eval", 52.0, 1),
+        ("teardown", 2.0, 1),
+        ("teardown", 3.0, None),
+    ], "the last level leaves the server up for the evaluation, which runs from the level the server booted on"
+    assert [p.name for p in outcome.phases].count("accuracy_eval") == 1
+
+
 # -- a test that timed out ----------------------------------------------------------------------------------------
 
 
@@ -199,7 +230,12 @@ def test_a_test_that_timed_out_says_the_phases_it_went_through(monkeypatch, cloc
     with pytest.raises(MeasurementTimeout) as raised:
         LocalMeasurementBackend().run_test(replace(_call(tmp_path), phases=PhaseRecorder(clock)))
 
-    assert _stamped(raised.value.phases) == [("round_setup", 3.0, 0), ("server_boot", 30.0, 0), ("measured", 1500.0, 0)]
+    assert _stamped(raised.value.phases) == [
+        ("round_setup", 3.0, 0),
+        ("server_boot", 30.0, 0),
+        ("measured", 1500.0, 0),
+        ("teardown", 3.0, None),
+    ]
 
 
 # -- who owns the recorder ----------------------------------------------------------------------------------------

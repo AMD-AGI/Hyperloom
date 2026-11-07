@@ -56,6 +56,7 @@ from hyperloom.common.outside_facts import (
     ENV_EP,
     ENV_ISL,
     ENV_EVAL_LIMIT,
+    ENV_EVAL_ONLY,
     ENV_EVAL_TASKS,
     ENV_MAX_MODEL_LEN,
     ENV_NUM_PROMPTS,
@@ -166,6 +167,7 @@ _CONSUMED_ENV = frozenset(
         ENV_NUM_PROMPTS,
         ENV_NUM_WARMUPS,
         ENV_RUN_EVAL,
+        ENV_EVAL_ONLY,
         ENV_EVAL_TASKS,
         ENV_EVAL_LIMIT,
         _PORT_ENV,
@@ -684,8 +686,8 @@ def _mlperf_config(
 def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings) -> SuiteConfig:
     """The config one round of the point ``document`` runs from, composed on ``base``.
 
-    A point whose ``MAGPIE_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval. A
-    client-only round (``settings.server_url`` or the point's ``BENCHMARK_BASE_URL``) holds its server as ``external``.
+    A point whose ``MAGPIE_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval; one
+    that sets ``EVAL_ONLY`` runs the eval and no load, as InferenceX's ``run_benchmark_serving`` does. A client-only round (``settings.server_url`` or the point's ``BENCHMARK_BASE_URL``) holds its server as ``external``.
 
     Raises:
         ConfigError: When the point is one this translation does not carry (scriptable, or an AgentX, MLPerf or
@@ -704,11 +706,12 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
     if _is_mlperf(bench):
         return _mlperf_config(bench, point, base, settings, boot_only)
     external = None if url is None else _external_address(url)
+    unloaded = boot_only or point.flag(ENV_EVAL_ONLY, default=False)
     return SuiteConfig(
         server=_server(point, base, settings, external, _user_layer(point)),
-        workload=WorkloadKind.NONE if boot_only else WorkloadKind.FIXED,
-        fixed=None if boot_only else _fixed(point),
-        profile=ProfileConfig(enabled=False) if boot_only else _fixed_profile(bench, point),
+        workload=WorkloadKind.NONE if unloaded else WorkloadKind.FIXED,
+        fixed=None if unloaded else _fixed(point),
+        profile=ProfileConfig(enabled=False) if unloaded else _fixed_profile(bench, point),
         eval=_eval(point, enabled=not boot_only and point.flag(ENV_RUN_EVAL, default=False)),
         # An external server's GPUs are not this host's to sample.
         telemetry=settings.telemetry if external is None else replace(settings.telemetry, enabled=False),

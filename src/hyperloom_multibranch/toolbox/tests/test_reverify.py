@@ -90,10 +90,10 @@ async def test_an_edited_accuracy_score_is_named(tmp_path: Path, rig) -> None:
     assert executor.difference(edited) == "accuracy[0].score: recorded 0.99, the bundle has 0.64"
 
 
-async def test_a_graded_result_whose_one_evaluation_ran_in_the_warmup_round_reverifies_from_its_bundle(
+async def test_a_graded_result_whose_one_evaluation_ran_after_its_measured_bench_reverifies_from_its_bundle(
     tmp_path: Path, rig
 ) -> None:
-    executor, result = await _accepted(tmp_path, rig, fake_eval_in_warmup=True)
+    executor, result = await _accepted(tmp_path, rig, fake_eval_round=True)
     record = rig.backend.journal.latest(result.request_id)
     derived = rig.backend.reverify(
         result.request_id,
@@ -101,11 +101,11 @@ async def test_a_graded_result_whose_one_evaluation_ran_in_the_warmup_round_reve
         tmp_path / "again",
     )
 
-    assert [r.phase for r in derived.rounds] == ["warmup", "accuracy", "measure"]
-    assert derived.rounds[1].output_dir == derived.rounds[0].output_dir != derived.rounds[2].output_dir
+    assert [r.phase for r in derived.rounds] == ["warmup", "measure", "accuracy"]
+    assert len({r.output_dir for r in derived.rounds}) == 3, "every round has a directory of its own"
     assert [value.score for value in result.accuracy] == [0.64] and record.extra["verified"] is True
     assert [r.phase for r in result.rounds] == ["warmup", "measure"], "the gate reads the same rounds and score"
-    assert (derived.rounds[1].output_dir / "eval_output" / "results_2000-01-01T10-00-00.json").is_file(), "the evidence"
+    assert (derived.rounds[2].output_dir / "lm_eval" / "results_2000-01-01T10-00-00.json").is_file(), "the evidence"
     assert executor.difference(result) is None
     edited = replace(result, accuracy=(replace(result.accuracy[0], score=0.99),))
     assert executor.difference(edited) == "accuracy[0].score: recorded 0.99, the bundle has 0.64"

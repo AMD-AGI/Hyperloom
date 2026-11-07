@@ -52,6 +52,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     Claim,
     ClaimKey,
     DedupAnswer,
+    FocusBranch,
     Learning,
     MapDirection,
     OpShares,
@@ -93,6 +94,13 @@ UNFINISHED_TITLE = (
     f"Unfinished in this session (finish one: {REPLAY_TOOL} with its request_id makes its change for your head):"
 )
 FOCUS_LINE = "Focus, the bottleneck the scheduler opened this branch on: "
+#: How many earlier branches on the focus a brief lists, newest first; three lines each at most.
+FOCUS_BRANCHES = 5
+FOCUS_HISTORY_TITLE = (
+    "Earlier branches on this focus, newest first: start where they ended. Before your first test, write in your "
+    "branch log what your angle tries that theirs did not, or which reopen_if your head now meets; with neither, "
+    "take another of the session's directions:"
+)
 SETTINGS_TITLE = (
     "Settings this session has not tried (a draw of each family's commit odds x the gain within reach / the cost "
     "of a test):"
@@ -246,6 +254,28 @@ def _tried(item: TriedDirection) -> str:
     return f"{where}: {outcome}{change}"
 
 
+def _focus_branch(item: FocusBranch) -> list[str]:
+    under = " (your start builds on its head)" if item.under_start else ""
+    gains = ", ".join(f"{gain:+.2f}%" for gain in item.gains_pct)
+    commits = f"committed {gains}" if gains else "no commit"
+    found = [
+        f"- {item.branch} from {item.start_commit[:SHORT_COMMIT]} to {item.head_commit[:SHORT_COMMIT]}{under}: "
+        f"{item.tests} tests, {commits}, stopped: {item.stop_reason}"
+    ]
+    if item.exhausted is not None:
+        found += [
+            f"  exhausted {item.exhausted.why.value}: {item.exhausted.detail}",
+            f"  worth again if {item.exhausted.reopen_if}",
+        ]
+    return found
+
+
+def _focus_history(history: Sequence[FocusBranch]) -> list[str]:
+    shown = [line for item in history[:FOCUS_BRANCHES] for line in _focus_branch(item)]
+    earlier = len(history) - FOCUS_BRANCHES
+    return [*shown, f"... {earlier} earlier branches on it, {len(history)} in all"] if earlier > 0 else shown
+
+
 def _ceilings(shares: OpShares | None) -> list[str]:
     largest = shares.largest(CEILING_OPS) if shares is not None else ()
     return [
@@ -308,6 +338,7 @@ def render_brief(brief: StartupBrief) -> str:
         sections.append(f"{FOCUS_LINE}{brief.focus}")
     for title, items in (
         (MAP_TITLE, _agent_map(brief)),
+        (FOCUS_HISTORY_TITLE, _focus_history(brief.focus_history)),
         ("Ceilings (largest ops; claim with target_share_pct):", _ceilings(brief.op_shares)),
         ("Tried:", [_tried(item) for item in brief.tried]),
         (UNFINISHED_TITLE, [_unfinished(item) for item in brief.unfinished]),
@@ -725,6 +756,8 @@ __all__ = [
     "CEILING_OPS",
     "CODE_TITLE",
     "ERROR",
+    "FOCUS_BRANCHES",
+    "FOCUS_HISTORY_TITLE",
     "FOCUS_LINE",
     "LINE_CHARS",
     "MAP_TITLE",
