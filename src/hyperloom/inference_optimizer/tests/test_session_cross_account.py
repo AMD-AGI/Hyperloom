@@ -101,7 +101,7 @@ def test_a_first_leg_makes_every_directory_2775_and_every_file_664_whatever_the_
     assert files == {
         "manifest.json": 0o664,
         "state.json": 0o664,
-        "retest_view.json": 0o640,  # its own group-read rule (#2370): never group-writable, replaced by rename
+        "retest_view.json": 0o640,  # its own group-read rule: never group-writable, replaced by rename
         "runtime/optimizer.lock": 0o664,
         "runtime/pod_history.jsonl": 0o664,
         "runtime/breakdown/parts/metadata__coordinator.json": 0o664,
