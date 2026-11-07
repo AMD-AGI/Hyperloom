@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 
 #: How long a reaped child is given to be collected once nothing of its tree is left running.
 _COLLECT_SEC = 1.0
+#: How long SIGKILL is given to take effect: a server rank frees its device memory and unpins its host cache as it
+#: exits, which took 5-9 s for each rank of a TP4 GLM-5.3 server with HiCache on MI355X.
+_KILL_CONFIRM_SEC = 60.0
 _PROC = Path("/proc")
 #: ``/proc/net`` tables of the TCP sockets a reuse check looks for the server's listener in.
 _TCP_TABLES = ("tcp", "tcp6")
@@ -73,7 +76,7 @@ def reap(roots: Iterable[int], mark: str) -> Reaped:
     tree = collect_tree([*roots, *marked_pids(REAP_MARK_ENV, mark)])
     if not tree.members and not tree.groups:
         return Reaped((), ())
-    kill_tree(tree)
+    kill_tree(tree, confirm_sec=_KILL_CONFIRM_SEC)
     survivors = tuple(sorted({pid for pid, start_time in tree.members if _alive(pid, start_time)}))
     return Reaped(tuple(sorted({pid for pid, _ in tree.members})), survivors)
 
