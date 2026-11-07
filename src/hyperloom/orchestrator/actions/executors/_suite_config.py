@@ -726,16 +726,23 @@ def _mlperf_server_point(point: _Point) -> _Point:
 def _mlperf_config(
     bench: Mapping[str, Any], point: _Point, base: BaseLaunch, settings: RoundSettings, boot_only: bool
 ) -> SuiteConfig:
-    """The MLPerf point's round: the harness against a server of the round's own, unprofiled and without eval."""
+    """The MLPerf point's round: the harness against a server of the round's own, unprofiled and without eval.
+
+    A boot-only round serves the harness's model name too, so the measured round that reuses its server composes the
+    same launch.
+    """
     if _torch_profiler(bench).get("enabled"):
         raise ConfigError("the MLPerf point asks for a torch profile; an MLPerf round is not profiled")
     if point.flag(ENV_RUN_EVAL, default=False):
         raise ConfigError(f"the MLPerf point sets {ENV_RUN_EVAL}; the harness scores its accuracy inline")
     workload = None if boot_only else _mlperf_workload(point)
+    served_model = point.text(_MLPERF_ENV["model"])
+    if served_model is None:
+        raise ConfigError(f"the MLPerf point sets no {_MLPERF_ENV['model']}")
     server_point = _mlperf_server_point(point)
     server = _server(server_point, base, settings, None, _user_layer(server_point))
     return SuiteConfig(
-        server=server if workload is None else replace(server, served_model_name=workload.model),
+        server=replace(server, served_model_name=served_model),
         workload=WorkloadKind.NONE if workload is None else WorkloadKind.MLPERF,
         mlperf=workload,
         eval=_eval(point, enabled=False),
