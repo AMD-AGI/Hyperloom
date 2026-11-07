@@ -9,9 +9,9 @@ exits 0 when the round completed, 1 when it did not. SIGTERM and SIGINT cancel t
 started and writes its report. ``stop --pid-dir <dir>`` prints what it reaped as JSON and exits 1 while a process
 outlives SIGKILL. ``resolve --query <query.json> --gpus <n> --out <base_launch.json>`` reads the sources once and
 writes the base they give, or exits 2 naming why each source holds none. ``stage --tool-cache <dir> [--source
-<InferenceX checkout>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`) and prints the
-manifest's sha256; it stages nothing into a cache that already verifies, and exits 2 with ``staging_missing`` when it
-cannot stage or the cache is damaged. Exit 2 is also a document that breaks its contract.
+<InferenceX checkout>] [--wheels <dir>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`),
+offline from a wheel directory when given one, and prints the manifest's sha256; it stages nothing into a cache that
+already verifies, and exits 2 with ``staging_missing`` when it cannot stage or the cache is damaged. Exit 2 is also a document that breaks its contract.
 """
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ def _resolve(args: argparse.Namespace) -> int:
 
 def _stage(args: argparse.Namespace) -> int:
     try:
-        digest = ensure_staged(args.tool_cache, args.source)
+        digest = ensure_staged(args.tool_cache, args.source, args.wheels)
     except StagingError as exc:
         return _refused(f"{FailedStep.STAGING_MISSING.value}: {exc}")
     print(digest)
@@ -146,6 +146,9 @@ def _parser() -> argparse.ArgumentParser:
     stage_parser.add_argument("--tool-cache", type=Path, required=True, help="the tool cache rounds verify")
     stage_parser.add_argument(
         "--source", type=Path, help="an InferenceX checkout at the pin; fetched at the pin when omitted"
+    )
+    stage_parser.add_argument(
+        "--wheels", type=Path, help="stage offline: install the harness from this wheel directory alone, fetch nothing"
     )
     stage_parser.set_defaults(handler=_stage)
     return parser

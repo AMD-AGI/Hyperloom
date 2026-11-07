@@ -27,8 +27,16 @@ from hyperloom.measure.consistency import (
     summarize,
 )
 from hyperloom.measure.runner.inventory import FARM_INVENTORY_FILE, farm_inventory
-from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
-from hyperloom.measure.tests.hosted_fixtures import FAKE_RUNNER, Rig, make_rig, point_yaml
+from hyperloom.measure.socket import RoundOutcome, SessionFacts, TestCall, TestOutcome
+from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
+from hyperloom.measure.tests.hosted_fixtures import (
+    FAKE_RUNNER,
+    Rig,
+    freeze_session_base,
+    make_rig,
+    point_yaml,
+    staged_tool_cache,
+)
 from hyperloom.contracts.measurement import SandboxFacts
 
 REPORT = "benchmark_local_20000101_000000"
@@ -84,9 +92,15 @@ def _item(tmp: Path, name: str, patched: dict[str, RootExpectation] | None = Non
             cwd=str(tmp),
             magpie_python=sys.executable,
             task_id=task_id,
+            session_facts=SessionFacts(staging=STAGING, base_launch=base_launch()),
         )
 
     return ChecklistItem(name, call, patched or {})
+
+
+@pytest.fixture(autouse=True)
+def _staged_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    staged_tool_cache(tmp_path, monkeypatch)
 
 
 @pytest.fixture
@@ -308,6 +322,7 @@ def _item_per_rep(tmp: Path, name: str, by_rep: dict[int, dict], patched=None, r
             timeout_sec=60,
             cwd=str(tmp),
             magpie_python=sys.executable,
+            session_facts=SessionFacts(staging=STAGING, base_launch=base_launch()),
             task_id=task_id,
         )
 
@@ -635,6 +650,7 @@ def test_the_checklist_file_is_checked_field_by_field(tmp_path) -> None:
 
 
 def _write_config(tmp: Path, **extra) -> Path:
+    freeze_session_base(tmp / "session")
     template = {"role": "measurement", "command": list(FAKE_RUNNER), "gpus": 1, "sealed": True, "signing": True}
     document = {
         "session_dir": str(tmp / "session"),
@@ -646,8 +662,6 @@ def _write_config(tmp: Path, **extra) -> Path:
         "image_ref": "registry.invalid/fw@sha256:" + "22" * 32,
         "image_digest": "sha256:" + "22" * 32,
         "gpu_type": "FakeGPU",
-        "magpie_commit": "a" * 40,
-        "inferencex_commit": "a" * 40,
         "poll_interval_sec": 0.05,
         "local_backend": "hyperloom.measure.tests.test_consistency:FakeLocal",
         **extra,
@@ -686,10 +700,29 @@ def test_the_entry_point_exits_non_zero_when_it_could_not_compare(tmp_path, caps
     assert consistency.main(["--checklist", str(tmp_path / "missing.json"), "--config", str(config)]) == 2
 
 
-@pytest.mark.parametrize(("extra", "expected"), [({}, "magpie"), ({"benchmark_backend": "bypass"}, "bypass")])
-def test_the_config_chooses_the_benchmark_backend_the_sheets_ask_for(tmp_path, extra, expected) -> None:
-    backends = consistency.build_backends(_write_config(tmp_path, **extra))
-    try:
-        assert backends.hosted._config.spec.benchmark_backend == expected
-    finally:
-        backends.close()
+def test_every_test_of_the_checklist_carries_the_sessions_frozen_base_and_the_staging_both_sides_run(
+    tmp_path, monkeypatch
+) -> None:
+    staging = staged_tool_cache(tmp_path, monkeypatch)
+    config = _write_config(tmp_path)
+    point = point_yaml(tmp_path, "p.yaml")
+    args = consistency.build_parser().parse_args(
+        ["--checklist", str(_write_checklist(tmp_path, point)), "--config", str(config)]
+    )
+
+    (item,) = consistency.items_from_arguments(args)
+    facts = item.call(tmp_path / "out", "t").session_facts
+
+    assert (facts.staging, facts.base_launch) == (staging, base_launch())
+
+
+def test_a_session_whose_base_launch_changed_after_it_was_frozen_is_refused_before_any_test(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    config = _write_config(tmp_path)
+    other = dataclasses.replace(base_launch(), args=(*base_launch().args, "--disable-radix-cache"))
+    (tmp_path / "session" / "base_launch.json").write_text(json.dumps(other.to_document()))
+    point = point_yaml(tmp_path, "p.yaml")
+
+    assert consistency.main(["--checklist", str(_write_checklist(tmp_path, point)), "--config", str(config)]) == 2
+    assert "session unusable" in capsys.readouterr().err

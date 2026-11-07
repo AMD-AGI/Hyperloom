@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import json
 from dataclasses import dataclass
@@ -15,6 +16,12 @@ from typing import Any
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
+from hyperloom.measure.runner.tools import INFERENCE_SUITE_DIR
+from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
+from inference_suite.contracts import BaseLaunch, Workload
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
+from inference_suite.recipe.resolve import UnreadSource
+from inference_suite.staging import INFERENCEX_REQUIRED, MANIFEST_FILE, StagedTool, StagingManifest, tool_root
 
 REQUEST_ID = "6c0e0000-0000-5000-8000-000000000001"
 SPEC_FINGERPRINT = "a1b2c3d4e5f60718"
@@ -57,7 +64,7 @@ def manifest_document(files: dict[str, bytes], public_pem: str, **overrides: Any
             "power_cap_w": 1400,
             "partition_mode": "SPX/NPS1",
             "hyperloom_version": "1.1.3+gtest",
-            "magpie_commit": "e" * 40,
+            "inference_suite_staging": "e" * 64,
             "inferencex_commit": "f" * 40,
             "gpu_ids": [0, 1],
             "ecc_delta": {"correctable": 0, "uncorrectable": 0},
@@ -130,7 +137,55 @@ def point_document(yaml_text: str) -> dict[str, Any]:
     return {"yaml": yaml_text, "sha256": hashlib.sha256(yaml_text.encode()).hexdigest()}
 
 
+#: The bytes of each file :func:`stage_into` stages, and the manifest naming them.
+_STAGED_FILE = b"staged\n"
+STAGING_MANIFEST = StagingManifest(
+    {
+        INFERENCEX_TOOL: StagedTool(
+            INFERENCEX_CLIENT_COMMIT, {path: hashlib.sha256(_STAGED_FILE).hexdigest() for path in INFERENCEX_REQUIRED}
+        )
+    }
+).to_bytes()
+#: The sha256 of :data:`STAGING_MANIFEST`, which is how a sheet names the staging.
+STAGING = hashlib.sha256(STAGING_MANIFEST).hexdigest()
+
+
+def stage_into(runner_cache: Path) -> Path:
+    """Lay a staging that verifies, with :data:`STAGING_MANIFEST`, where a runner whose cache is ``runner_cache``
+    stages its inference_suite tools; returns that tool cache."""
+    tools = runner_cache / INFERENCE_SUITE_DIR / INFERENCEX_CLIENT_COMMIT
+    for path in INFERENCEX_REQUIRED:
+        staged = tool_root(tools, INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT) / path
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(_STAGED_FILE)
+    (tools / MANIFEST_FILE).write_bytes(STAGING_MANIFEST)
+    return tools
+
+
+@functools.lru_cache(maxsize=None)
+def base_launch() -> BaseLaunch:
+    """A frozen base resolved offline from the default table, as a session without InferenceX access freezes one."""
+    snapshot = SourceSnapshot(None, 1_793_000_000, unread=UnreadSource("InferenceX", "offline"))
+    query = LaunchQuery(
+        "meta-llama/Llama-3.1-8B-Instruct", "sglang", "mi355x", Workload.FIXED, (64,), isl=1024, osl=1024, tp=1
+    )
+    base = resolve_base(query, snapshot, gpus=8)
+    assert isinstance(base, BaseLaunch), base
+    return base
+
+
 def spec_document() -> dict[str, Any]:
+    """A v2 sheet: the frozen base carried whole and the inference_suite staging named by its manifest's sha256."""
+    document = spec_document_v1()
+    document["schema"] = "hyperloom.measurement-spec/v2"
+    document["tools"] = {"inference_suite": {"staging": STAGING}, "inferencex": {"commit": "b" * 40}}
+    del document["procedure"]["benchmark_backend"]
+    document["procedure"]["base_launch"] = base_launch().to_document()
+    return document
+
+
+def spec_document_v1() -> dict[str, Any]:
+    """A sheet as the application wrote it while tests ran through Magpie."""
     yaml_text = (
         "model: m\nserver:\n  pid_dir: /shared/u1/sess-a/pids\n  port: 8000\ninferencex_path: /shared/u1/sess-a/ix\n"
     )

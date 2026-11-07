@@ -124,6 +124,7 @@ from hyperloom.orchestrator.actions.executors import (
 )
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
+from hyperloom.orchestrator.state.base_launch import freeze_base
 
 __all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
 
@@ -525,11 +526,9 @@ def _builds(environment: CompiledEnvironment) -> SheetBuilds | None:
 
 @contextlib.contextmanager
 def _test_environment(call: TestCall) -> Iterator[list[str]]:
-    """Set the process environment ``run_grid`` reads for this test, and put it back afterwards.
-
-    Yields the variables the test's rounds unset. The session directory is a fresh empty one, so the reference launch
-    the old flow keeps there reads as empty whatever else is on this machine.
-    """
+    """Set the process environment ``run_grid`` reads for this test, and put it back afterwards; yields the variables
+    the test's rounds unset. The session directory is a fresh one holding only the base the call carries, frozen as a
+    session freezes it, so the rounds never read the asking application's session."""
     facts = call.session_facts
     session = Path(tempfile.mkdtemp(prefix="hl-session-"))
     settings = {
@@ -549,13 +548,13 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
         os.environ.pop(key, None)
     os.environ.update(settings)
     try:
+        if facts is not None and facts.base_launch is not None:
+            freeze_base(session, facts.base_launch)
         yield list(dict.fromkeys([*(facts.reference_unset_envs if facts else ()), *call.unset_envs]))
     finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+        os.environ.update({key: value for key, value in saved.items() if value is not None})
+        for key in [key for key, value in saved.items() if value is None]:
+            os.environ.pop(key, None)
         shutil.rmtree(session, ignore_errors=True)
 
 

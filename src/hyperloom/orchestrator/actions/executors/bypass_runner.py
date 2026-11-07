@@ -21,6 +21,7 @@ import yaml
 from hyperloom_common.coerce import to_float, to_int
 from hyperloom_common.env import is_truthy
 from hyperloom.common.benchmark_config import BenchmarkPoint
+from hyperloom.common.outside_facts import ENV_EVAL_LIMIT, ENV_EVAL_TASKS
 from hyperloom.common.env_safety import build_benchmark_env
 
 from . import _server_lifecycle
@@ -294,12 +295,8 @@ class _Round:
                     base_url=self.base_url,
                     conc=self.conc,
                     out_dir=str(self.workspace / "lm_eval"),
-                    tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
-                    or "gsm8k",
-                    limit=(
-                        str(bench_envs.get("MAGPIE_EVAL_LIMIT") or os.environ.get("MAGPIE_EVAL_LIMIT", "")).strip()
-                        or None
-                    ),
+                    tasks=str(bench_envs.get(ENV_EVAL_TASKS) or os.environ.get(ENV_EVAL_TASKS, "")).strip() or "gsm8k",
+                    limit=str(bench_envs.get(ENV_EVAL_LIMIT) or os.environ.get(ENV_EVAL_LIMIT, "")).strip() or None,
                 )
             )
             eval_rc = _run_subprocess(eval_cmd, self.timeout_s, self.workspace, "eval")

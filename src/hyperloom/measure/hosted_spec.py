@@ -31,11 +31,13 @@ from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
     is_secret_shaped_env_name,
+    redact_secret_values,
 )
 from hyperloom.measure.compile import BlobError
 from hyperloom.measure.docs import DocumentError, canonical_json
-from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES, PLATFORM_ENV_NAMES, MeasurementSpec
+from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES, PLATFORM_ENV_NAMES, SPEC_SCHEMA, MeasurementSpec
 from hyperloom.measure.socket import TestCall
+from inference_suite.contracts import BaseLaunch
 
 __all__ = [
     "MAX_ATTACHMENT_BYTES",
@@ -65,7 +67,7 @@ MAX_ATTACHMENT_BYTES = 64 * _MIB
 _HASH_CHUNK_BYTES = _MIB
 _POINT_UNREADABLE = "point_unreadable"
 _PLACEHOLDER = re.compile(r"\$\{HL_ATTACH:([A-Za-z0-9][A-Za-z0-9._-]{0,63})\}")
-_HEX_COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class SpecRefused(ValueError):
@@ -89,13 +91,10 @@ class SpecContext:
     image_ref: str
     image_digest: str
     gpu_type: str
-    magpie_commit: str
-    inferencex_commit: str
     blobs: Any
     power_cap_w: float | None = None
     partition_mode: str | None = None
     model_hashes: Mapping[str, str] = field(default_factory=dict)
-    benchmark_backend: str = "magpie"
     shared_roots: tuple[Path, ...] = ()
     model_dir: Path | None = None
     max_total_bytes: int | None = None
@@ -156,12 +155,6 @@ def _platform_env(ctx: SpecContext) -> dict[str, str]:
 def _unset_envs(call: TestCall) -> tuple[str, ...]:
     facts = call.session_facts
     return tuple(dict.fromkeys([*(facts.reference_unset_envs if facts else ()), *call.unset_envs]))
-
-
-def _commit(value: str | None, what: str) -> str:
-    if not value or not _HEX_COMMIT.fullmatch(value):
-        raise SpecRefused("tools_unknown", f"{what} commit is not a full commit hash: {value!r}")
-    return value
 
 
 def _warmup_rounds(call: TestCall) -> int:
@@ -368,18 +361,58 @@ def _hardware_section(ctx: SpecContext, gpus: int) -> dict[str, Any]:
     }
 
 
-def _tools_section(call: TestCall, ctx: SpecContext) -> dict[str, Any]:
-    facts = call.session_facts
+def _tools_section(call: TestCall) -> dict[str, Any]:
+    """The staging, and the InferenceX commit the carried base's client is pinned at: the runner stages from a
+    checkout of it, and staging refuses any commit but the one its pins name."""
+    staging = call.session_facts.staging if call.session_facts else None
+    if not staging or not _SHA256.fullmatch(staging):
+        raise SpecRefused("tools_unknown", f"the inference_suite staging is not a manifest sha256: {staging!r}")
     return {
-        "magpie": {"commit": _commit((facts.magpie_commit if facts else None) or ctx.magpie_commit, "Magpie")},
-        "inferencex": {"commit": _commit(ctx.inferencex_commit, "InferenceX")},
+        "inference_suite": {"staging": staging},
+        "inferencex": {"commit": _frozen_base(call).client.commit},
     }
 
 
-def _procedure_section(call: TestCall, ctx: SpecContext, deadline_unix: float) -> dict[str, Any]:
+def _unredacted_credentials(base: BaseLaunch) -> list[str]:
+    """Where ``base`` holds a credential in the clear: an env value under a secret-shaped name, or any env value or
+    arg that looks like one. A sheet leaves the application, so only a :class:`Redacted` value may stand for one."""
+    layers = [("env", base.env, base.args), ("client env", base.client.env, base.client.args)]
+    if base.golden_al is not None:
+        layers.append(("golden env", base.golden_al.env, base.golden_al.args))
+    found = []
+    for what, env, args in layers:
+        found += [
+            f"{what} {name}"
+            for name, value in env.items()
+            if isinstance(value, str) and (is_secret_shaped_env_name(name) or redact_secret_values(value) != value)
+        ]
+        found += [
+            f"{what.replace('env', 'arg')} {index}"
+            for index, arg in enumerate(args)
+            if redact_secret_values(arg) != arg
+        ]
+    return found
+
+
+def _frozen_base(call: TestCall) -> BaseLaunch:
+    base = call.session_facts.base_launch if call.session_facts else None
+    if base is None:
+        raise SpecRefused("base_launch_missing", f"a {SPEC_SCHEMA} sheet carries the session's frozen base launch")
+    return base
+
+
+def _base_launch_document(call: TestCall) -> dict[str, Any]:
+    base = _frozen_base(call)
+    found = _unredacted_credentials(base)
+    if found:
+        raise SpecRefused("base_launch_secret", f"the frozen base holds an unredacted credential in {', '.join(found)}")
+    return base.to_document()
+
+
+def _procedure_section(call: TestCall, deadline_unix: float) -> dict[str, Any]:
     section: dict[str, Any] = {
         "prep": call.prep,
-        "benchmark_backend": ctx.benchmark_backend,
+        "base_launch": _base_launch_document(call),
         "rounds": {"warmup": _warmup_rounds(call), "measure": int(call.rounds.measure_rounds)},
         "accuracy": bool(call.accuracy),
         "timeout_sec": float(call.timeout_sec),
@@ -398,8 +431,8 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
 
     Raises:
         SpecRefused: No point, an unreadable point, an environment override that
-            is not allowed, a missing tool commit, a placeholder with no attachment, or a document the sheet schema
-            refuses.
+            is not allowed, a missing staging, no frozen base launch, a placeholder with no
+            attachment, or a document the sheet schema refuses (a base launch over its size cap among them).
     """
     if not call.points:
         raise SpecRefused("no_points", "a test needs at least one measurement point")
@@ -408,7 +441,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
     _refuse_unknown_placeholders(configs, attachments)
     gpus = gpu_count_of(first)
     sheet = {
-        "schema": "hyperloom.measurement-spec/v1",
+        "schema": SPEC_SCHEMA,
         "request_id": request_id,
         "kind": call.kind,
         "meta": _meta_section(call),
@@ -419,10 +452,10 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
         "process_env": _process_env(call, ctx),
         "platform_env": _platform_env(ctx),
         "unset_envs": list(_unset_envs(call)),
-        "tools": _tools_section(call, ctx),
+        "tools": _tools_section(call),
         "environment": _environment_document(call.environment, ctx),
         "model_hashes": dict(ctx.model_hashes),
-        "procedure": _procedure_section(call, ctx, deadline_unix),
+        "procedure": _procedure_section(call, deadline_unix),
         "outputs": {"result_dir": split_result_dir(call)[0], **_max_bytes(ctx)},
     }
     try:

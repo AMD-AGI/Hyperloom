@@ -93,34 +93,34 @@ def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch)
     # PD-disaggregated: force lm_eval string prompts so the sglang_router's /v1/completions (StringOrArray) does not
     # 422 on token-id prompts.
     clear_env(monkeypatch)
-    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="disaggregated"))
     src = tmp_path / "base.yaml"
     write_config(src)
     bench = materialize(src, tmp_path / "out")
-    assert bench["envs"].get("MAGPIE_EVAL_TOKENIZED_REQUESTS") == "false"
+    assert bench["envs"].get("HYPERLOOM_EVAL_TOKENIZED_REQUESTS") == "false"
 
 
 def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
     # Aggregated hits the sglang server directly (accepts token-id prompts), so the env is left unset and the default
     # tokenized path is preserved.
     clear_env(monkeypatch)
-    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="aggregated"))
     src = tmp_path / "base.yaml"
     write_config(src)
     bench = materialize(src, tmp_path / "out")
-    assert "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
+    assert "HYPERLOOM_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
 
 
 def test_materialize_fails_when_the_pd_topology_cannot_be_resolved(tmp_path, monkeypatch):
     # An unresolved topology must not leave a PD run's lm_eval on token-id prompts, which reads accuracy 0.
     clear_env(monkeypatch)
-    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.inference_optimizer.multi_node._internal.topology_file import TopologyHandoffError
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 

@@ -181,7 +181,9 @@ def test_the_translated_launch_differs_from_magpies_only_by_the_listed_items(fra
 
 def test_the_point_knobs_become_the_config_fields() -> None:
     config = suite_config(
-        _point("sglang", HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="64", MAGPIE_EVAL_LIMIT="200"), _base("sglang"), _settings()
+        _point("sglang", HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="64", HYPERLOOM_EVAL_LIMIT="200"),
+        _base("sglang"),
+        _settings(),
     )
 
     assert config.workload is WorkloadKind.FIXED
@@ -254,7 +256,7 @@ def test_an_explicit_context_length_replaces_the_launcher_default() -> None:
         ({"envs": {"BENCHMARK_BASE_URL": "https://head:8888"}}, "is not http://<host>"),
         ({"envs": {"TP": "4"}}, "the point runs TP 4, its base runs 2"),
         ({"envs": {"CONC": None}}, "the point sets no CONC"),
-        ({"envs": {"MAGPIE_EVAL_TASKS": "mmlu"}}, "evaluates 'mmlu'"),
+        ({"envs": {"HYPERLOOM_EVAL_TASKS": "mmlu"}}, "evaluates 'mmlu'"),
         ({"timeout_seconds": 0}, "timeout_seconds must be a positive number"),
     ],
 )
