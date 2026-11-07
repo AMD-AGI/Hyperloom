@@ -361,9 +361,9 @@ batched with it, and a step between two sizes pads up to the next.
 - A constant is often a shape someone validated, not a hardware bound (a row cap, an M threshold, a tile copied \
 from another model or TP size): check it against the shapes the profile shows, and look for an eager fallback that \
 shadows a compiled kernel.
-- The model's weight precision is the session's, never yours to change, down or up: no --quantization, \
---quantization-config or --dtype, no checkpoint of another precision, and no patch that quantizes or de-quantizes \
-weights, lm_head's included. Intermediates may change while the weights stay as they are and accuracy passes: the KV \
+- The model's weight precision is the session's, never yours to change, down or up: no quantization flag \
+(--quantization, --quantization-config, --quantization-param-path, --online-quant-config), no --dtype, no other \
+checkpoint, and no patch that quantizes or de-quantizes weights, lm_head's included; the toolbox refuses those flags. Intermediates may change while the weights stay as they are and accuracy passes: the KV \
 cache dtype, attention's compute precision, a quantized all-reduce, and activation quantization or fusions on \
 weights already FP8 in the checkpoint.
 - A fusion that reorders a floating-point sum changes outputs and must pass the accuracy gate; one that keeps the \

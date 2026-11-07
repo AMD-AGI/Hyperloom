@@ -169,6 +169,7 @@ def test_the_role_keeps_the_weight_precision_and_points_at_the_table_a_shape_rea
     assert "lm_head (the vocabulary projection), is a candidate" not in prompt
     assert "The model's weight precision is the session's, never yours to change, down or up" in prompt
     assert "no patch that quantizes or de-quantizes weights, lm_head's included" in prompt
+    assert "--quantization-param-path, --online-quant-config" in prompt
     assert "Intermediates may change while the weights stay as they are and accuracy passes" in prompt
     assert "the server.log's tuned-config lookups name the table each shape reads" in prompt
     assert "a table for a path the model no longer reaches changes nothing" in prompt
