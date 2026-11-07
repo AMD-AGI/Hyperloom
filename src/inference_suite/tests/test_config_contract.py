@@ -26,6 +26,7 @@ from inference_suite.contracts import (
     LaunchDelta,
     Lifecycle,
     LifecycleMode,
+    MlperfWorkload,
     ProfileConfig,
     RunnerLayer,
     RunPaths,
@@ -58,6 +59,17 @@ _AGENTX = AgentxWorkload(
     warmup_seed=43,
     failed_request_threshold=0.1,
     client_env={"AIPERF_EXPERIMENTAL_FAST": "0"},
+)
+
+_MLPERF = MlperfWorkload(
+    concurrency=16,
+    trajectories=150,
+    flow="smoke_test",
+    model="glm",
+    hardware="mi355x",
+    dataset="/data/agentic_combined_v6.jsonl",
+    tokenizer="/data/tokenizer",
+    endpoints_dir="/opt/mlperf-endpoints",
 )
 
 
@@ -123,6 +135,46 @@ def test_round_trip_fixed_and_scriptable():
     scriptable = _config(workload=WorkloadKind.SCRIPTABLE, agentx=None, scriptable=script, profile=ProfileConfig(False))
     for config in (fixed, scriptable):
         assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config
+
+
+def _mlperf_config(**changes) -> SuiteConfig:
+    return _config(
+        **{
+            "workload": WorkloadKind.MLPERF,
+            "agentx": None,
+            "mlperf": _MLPERF,
+            "profile": ProfileConfig(False),
+            **changes,
+        }
+    )
+
+
+def test_round_trip_mlperf():
+    config = _mlperf_config()
+    document = json.loads(json.dumps(config.to_document()))
+
+    assert document["workload"] == {"kind": "mlperf"}
+    assert document["mlperf"]["endpoints_dir"] == "/opt/mlperf-endpoints"
+    assert SuiteConfig.from_document(document) == config
+    document["mlperf"]["surprise"] = 1
+    with pytest.raises(ConfigError, match="unknown key 'surprise'"):
+        SuiteConfig.from_document(document)
+
+
+def test_the_mlperf_harness_requests_the_model_the_server_serves():
+    with pytest.raises(ConfigError, match="requests 'kimi-k3', the server serves 'glm'"):
+        _mlperf_config(mlperf=replace(_MLPERF, model="kimi-k3"))
+
+
+@pytest.mark.parametrize("name", ["flow", "model", "hardware", "dataset", "tokenizer", "endpoints_dir"])
+def test_every_mlperf_knob_is_explicit(name):
+    with pytest.raises(ConfigError, match=f"the MLPerf {name}"):
+        replace(_MLPERF, **{name: ""})
+
+
+def test_an_mlperf_round_is_not_profiled():
+    with pytest.raises(ConfigError, match="a mlperf profile needs a fixed or AgentX workload"):
+        _mlperf_config(profile=ProfileConfig(enabled=True, agentx_open_after_sec=0, agentx_duration_sec=30))
 
 
 @pytest.mark.parametrize(

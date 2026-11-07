@@ -369,6 +369,40 @@ class ScriptableResult:
         return cls(fields["result_file"], dict(_FIELDS.mapping(fields["result"], _SCRIPTABLE_RESULT)))
 
 
+_MLPERF_RESULT = "the MLPerf result"
+
+
+@dataclass(frozen=True)
+class MlperfResult:
+    """The MLPerf harness's run: the files it wrote, run_dir-relative, and their mapping into the InferenceX result
+    schema, which ``result_file`` holds. ``scores_file`` is ``None`` when the harness scored nothing inline."""
+
+    summary_file: str
+    scores_file: str | None
+    result_file: str
+    result: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        _FIELDS.text(self.summary_file, "the MLPerf summary file")
+        _FIELDS.optional_text(self.scores_file, "the MLPerf scores file")
+        _FIELDS.text(self.result_file, "the MLPerf result file")
+        _FIELDS.mapping(self.result, _MLPERF_RESULT)
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "summary_file": self.summary_file,
+            "scores_file": self.scores_file,
+            "result_file": self.result_file,
+            "result": dict(self.result),
+        }
+
+    @classmethod
+    def from_document(cls, document: object) -> MlperfResult:
+        fields = _complete(document, field_names(cls), _MLPERF_RESULT)
+        result = dict(_FIELDS.mapping(fields["result"], _MLPERF_RESULT))
+        return cls(fields["summary_file"], fields["scores_file"], fields["result_file"], result)
+
+
 @dataclass(frozen=True)
 class EvalDefinition:
     """Everything an eval score depends on; two scores compare only under the same definition."""
@@ -625,6 +659,7 @@ REPORT_KEYS = (
     "fixed",
     "agentx",
     "scriptable",
+    "mlperf",
     "eval",
     "profile",
 )
@@ -632,11 +667,13 @@ _WORKLOAD_SECTIONS = {
     WorkloadKind.FIXED: "fixed",
     WorkloadKind.AGENTX: "agentx",
     WorkloadKind.SCRIPTABLE: "scriptable",
+    WorkloadKind.MLPERF: "mlperf",
 }
 _SECTION_TYPES: dict[str, type] = {
     "fixed": FixedMetrics,
     "agentx": AgentxResult,
     "scriptable": ScriptableResult,
+    "mlperf": MlperfResult,
     "eval": EvalResult,
     "profile": ProfileResult,
 }
@@ -662,6 +699,7 @@ class Report:
     fixed: FixedMetrics | None = None
     agentx: AgentxResult | None = None
     scriptable: ScriptableResult | None = None
+    mlperf: MlperfResult | None = None
     eval: EvalResult | None = None
     profile: ProfileResult | None = None
 
@@ -779,6 +817,7 @@ __all__ = [
     "GpuMonitorBlock",
     "LogRange",
     "MetricStats",
+    "MlperfResult",
     "ProbeOutcome",
     "ProfileResult",
     "Report",

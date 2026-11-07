@@ -50,6 +50,8 @@ class WorkloadKind(str, Enum):
     FIXED = "fixed"
     AGENTX = "agentx"
     SCRIPTABLE = "scriptable"
+    #: The MLPerf agentic harness (``utility/run_agentic.sh``) against the round's server.
+    MLPERF = "mlperf"
     #: A boot-only round, or an accuracy round that runs eval and no load.
     NONE = "none"
 
@@ -430,6 +432,41 @@ class ScriptableWorkload:
         return cls(fields.get("script"), fields.get("params", {}), fields.get("quality_reference"))
 
 
+@dataclass(frozen=True)
+class MlperfWorkload:
+    """One ``run_agentic.sh`` perf run from the ``endpoints_dir`` checkout.
+
+    ``model`` is the name the harness requests, so the round's server serves under it; ``dataset`` is the trajectory
+    corpus and ``tokenizer`` the directory the harness counts tokens with.
+    """
+
+    concurrency: int
+    trajectories: int
+    flow: str
+    model: str
+    hardware: str
+    dataset: str
+    tokenizer: str
+    endpoints_dir: str
+
+    def __post_init__(self) -> None:
+        _FIELDS.integer(self.concurrency, "the MLPerf concurrency", minimum=1)
+        _FIELDS.integer(self.trajectories, "the MLPerf trajectories", minimum=1)
+        for name in _MLPERF_KEYS[2:]:
+            _FIELDS.text(getattr(self, name), f"the MLPerf {name}")
+
+    def to_document(self) -> dict[str, object]:
+        return {key: getattr(self, key) for key in _MLPERF_KEYS}
+
+    @classmethod
+    def from_document(cls, document: object) -> MlperfWorkload:
+        fields = _FIELDS.known(document, _MLPERF_KEYS, "the MLPerf workload")
+        return cls(**{key: fields.get(key) for key in _MLPERF_KEYS})
+
+
+_MLPERF_KEYS = field_names(MlperfWorkload)
+
+
 #: The window fields each workload's capture needs; the caller computes them (``_profile_setup``).
 _PROFILE_WINDOW = {
     WorkloadKind.FIXED: ("num_prompts", "delay_iters", "max_iters"),
@@ -654,7 +691,7 @@ class RunPaths:
 
 
 #: The workload kinds with a config section; each section is the field named by its kind's value.
-_SECTIONED_WORKLOADS = (WorkloadKind.FIXED, WorkloadKind.AGENTX, WorkloadKind.SCRIPTABLE)
+_SECTIONED_WORKLOADS = (WorkloadKind.FIXED, WorkloadKind.AGENTX, WorkloadKind.SCRIPTABLE, WorkloadKind.MLPERF)
 _BASE_WORKLOAD = {WorkloadKind.FIXED: Workload.FIXED, WorkloadKind.AGENTX: Workload.AGENTX}
 
 
@@ -673,6 +710,7 @@ class SuiteConfig:
     fixed: FixedWorkload | None = None
     agentx: AgentxWorkload | None = None
     scriptable: ScriptableWorkload | None = None
+    mlperf: MlperfWorkload | None = None
 
     def __post_init__(self) -> None:
         kind = _FIELDS.enum(WorkloadKind, self.workload, "the workload kind")
@@ -685,6 +723,10 @@ class SuiteConfig:
             raise ConfigError("a round with no workload boots a server or runs eval")
         if self.server.golden is GoldenUse.EXCLUDE and not (kind is WorkloadKind.NONE and self.eval.enabled):
             raise ConfigError("golden exclude is the accuracy round: no workload, eval enabled")
+        if self.mlperf is not None and self.mlperf.model != self.server.served_model_name:
+            raise ConfigError(
+                f"the MLPerf harness requests {self.mlperf.model!r}, the server serves {self.server.served_model_name!r}"
+            )
         if self.profile.enabled:
             if self.lifecycle.mode is not LifecycleMode.OWN:
                 raise ConfigError(f"a profile round owns its server, got lifecycle {self.lifecycle.mode.value}")
@@ -737,6 +779,7 @@ class SuiteConfig:
             scriptable=(
                 None if fields.get("scriptable") is None else ScriptableWorkload.from_document(fields.get("scriptable"))
             ),
+            mlperf=None if fields.get("mlperf") is None else MlperfWorkload.from_document(fields.get("mlperf")),
             profile=ProfileConfig(enabled=False) if profile is None else ProfileConfig.from_document(profile),
             eval=EvalConfig.from_document(fields.get("eval")),
             telemetry=GpuTelemetry.from_document(fields.get("telemetry")),
@@ -765,6 +808,7 @@ __all__ = [
     "LaunchDelta",
     "Lifecycle",
     "LifecycleMode",
+    "MlperfWorkload",
     "ProfileConfig",
     "RunPaths",
     "RunnerLayer",
