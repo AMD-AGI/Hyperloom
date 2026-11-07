@@ -41,13 +41,6 @@ def stub_install_steps(monkeypatch, tmp_path):
     # Stub the kernel-agent env fallback (it hard-fails when missing).
     monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", lambda: None)
 
-    # InferenceX setup is orthogonal to the auth block under test.
-    inferencex_dir = tmp_path / "InferenceX"
-    (inferencex_dir / "benchmarks").mkdir(parents=True)
-    (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text("# stub", encoding="utf-8")
-    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
-    monkeypatch.setattr(cli_preflight.inferencex_checkout, "clone", lambda dest: str(inferencex_dir))
-
     def _fake_which(name: str, **_kwargs):
         return f"/usr/bin/{name}"
 
