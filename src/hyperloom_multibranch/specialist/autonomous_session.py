@@ -323,7 +323,7 @@ class AutonomousSession:
         # Every snapshot of the agent's session is one of this branch's keeps, the first among them possibly written
         # while the preflight waited for the agent to start.
         mark = None if ready.manifest.snapshots is not None else self._mark(ready.manifest)
-        KeepWatch(root, mark=mark, source_unkept=unkept).save(self._place.workspace / WATCH_FILE)
+        KeepWatch(root, mark=mark, source_unkept=ready.source_unkept).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
         if unkept:
             component = self._setup.component
