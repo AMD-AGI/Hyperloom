@@ -3,7 +3,8 @@
 
 """Contract of a round: one round per call into an empty run_dir, which does not change once the call returns, GPU
 samples from the measured window alone, KV samples tagged by phase, a fixed profile round's window around its
-measured pass, an AgentX profile round's window on the replay's phase clock, the checks that refuse a round before its
+measured pass, an AgentX profile round's window on the replay's phase clock, an MLPerf round's harness against the
+round's server, the checks that refuse a round before its
 server starts, a reuse round on the server a boot round left, and the CLI's ``run`` and ``stop`` round trips."""
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase
 from inference_suite.staging import AGENTX_PYTHON, GSM8K_TASK, StagingReport
 from inference_suite.tests.test_base_launch_contract import _base
-from inference_suite.tests.test_config_contract import _AGENTX, _SHA, _config, _eval
+from inference_suite.tests.test_config_contract import _AGENTX, _MLPERF, _SHA, _config, _eval
 
 pytestmark = pytest.mark.skipif(not Path("/proc/net/tcp").exists(), reason="needs Linux procfs")
 
@@ -485,6 +486,69 @@ def test_an_agentx_workload_the_harness_cannot_honour_is_refused_before_the_serv
     result = run.run_round(config)
 
     assert result.report.failed_step is FailedStep.CONFIG_INVALID and match in result.report.failure_detail
+    assert not result.layout.launch.exists() and not rig.calls.exists()
+
+
+_RUN_AGENTIC = """#!/usr/bin/env bash
+printf '%s\\n' "$PWD $* $PORT $AGENTIC_CONCURRENCY $AGENTIC_NUM_TRAJECTORIES" >> "$FAKE_CLIENT_CALLS"
+for _ in 1 2 3 4; do echo "trajectory done"; sleep 0.2; done
+mkdir -p "$RESULTS_DIR/run"
+cp "$FAKE_MLPERF_OUTPUT"/* "$RESULTS_DIR/run/"
+exit "${FAKE_MLPERF_EXIT:-0}"
+"""
+
+
+def _mlperf_config(rig, run_id: str, monkeypatch) -> SuiteConfig:
+    endpoints = rig.tmp / "endpoints"
+    script = endpoints / "utility" / "run_agentic.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(_RUN_AGENTIC)
+    (rig.tmp / "tokenizer").mkdir(exist_ok=True)
+    (rig.tmp / "agentic_combined_v6.jsonl").write_text("")
+    monkeypatch.setenv("FAKE_MLPERF_OUTPUT", str(Path(__file__).parent / "fixtures" / "mlperf_agentic_smoke"))
+    workload = replace(
+        _MLPERF,
+        endpoints_dir=str(endpoints),
+        tokenizer=str(rig.tmp / "tokenizer"),
+        dataset=str(rig.tmp / "agentic_combined_v6.jsonl"),
+    )
+    config = rig.config(run_id, workload=WorkloadKind.MLPERF, fixed=None, mlperf=workload)
+    inherit = (*config.server.env_inherit, "FAKE_MLPERF_OUTPUT", "FAKE_MLPERF_EXIT")
+    return replace(config, server=replace(config.server, env_inherit=inherit))
+
+
+def test_an_mlperf_round_runs_the_harness_against_its_own_server_and_maps_its_result(rig, monkeypatch):
+    result = run.run_round(_mlperf_config(rig, "r1", monkeypatch))
+
+    report, layout = result.report, result.layout
+    assert report.run_status is RunStatus.COMPLETED, report.failure_detail
+    (call,) = rig.calls.read_text().splitlines()
+    assert call == f"{rig.tmp / 'endpoints'} smoke_test glm mi355x perf {rig.port} 16 150"
+    assert report.mlperf is not None and report.codes.client == 0 and report.concurrency == 16
+    assert report.mlperf.result["completed"] == 172
+    assert json.loads(layout.inferencex_result.read_text())["accuracy_score"] == pytest.approx(0.7178)
+    marks = _marks(layout)
+    assert marks[Phase.MEASURED.value] < marks[Phase.FINISHED.value]
+    assert not layout.server_pid.exists(), "the round owns its server and takes it down"
+
+
+def test_a_failing_mlperf_harness_fails_the_round_as_its_client(rig, monkeypatch):
+    monkeypatch.setenv("FAKE_MLPERF_EXIT", "2")
+
+    report = run.run_round(_mlperf_config(rig, "r1", monkeypatch)).report
+
+    assert report.failed_step is FailedStep.CLIENT_FAILED and report.codes.client == 2
+    assert report.mlperf is None and report.run_status is RunStatus.FAILED
+
+
+def test_an_mlperf_harness_that_is_not_there_is_refused_before_the_server_starts(rig, monkeypatch):
+    config = _mlperf_config(rig, "r1", monkeypatch)
+    config = replace(config, mlperf=replace(config.mlperf, endpoints_dir=str(rig.tmp / "nowhere")))
+
+    result = run.run_round(config)
+
+    assert result.report.failed_step is FailedStep.CONFIG_INVALID
+    assert "run_agentic.sh" in result.report.failure_detail
     assert not result.layout.launch.exists() and not rig.calls.exists()
 
 
