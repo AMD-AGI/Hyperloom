@@ -267,8 +267,12 @@ def _document(campaign, config_path, arbor_root, session_dir, files) -> str:
     lines += [f"- {c}" for c in (pack.constraints or [])] or ["- (no constraints)"]
     if cfg.get("directives"):
         lines += ["", "**Directives (config):**"] + [f"- {d}" for d in cfg["directives"]]
-    skills = agent_skills(pack)
+    from arbor import conflicts, lifecycle
+    skills = lifecycle.loaded(campaign) if getattr(pack, "lifecycle", None) is not None else agent_skills(pack)
     lines += ["", f"**Skills:** {', '.join(skills) if skills else '(none)'}"]
+    clash = conflicts.summary_lines(session_dir)
+    if clash:
+        lines += ["", *clash]
     policy = {**(pack.policy or {}), **(cfg.get("policy") or {})}
     lines.append(f"**Policy overrides:** `{json.dumps(policy)}`" if policy else
                  "**Policy overrides:** none (the defaults in arbor/state.py)")

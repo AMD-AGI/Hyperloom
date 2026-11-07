@@ -56,8 +56,8 @@ their output, and serves it.
 
 ## Ported from an earlier dashboard
 
-The source is an earlier campaign dashboard, which served earlier
-campaigns. Kept: the page and its panels, the snapshot's keys (`arbor.collect`'s realtime
+The source is an earlier per-cluster campaign dashboard, which served two
+campaigns before this one. Kept: the page and its panels, the snapshot's keys (`arbor.collect`'s realtime
 collector writes the same ones), the server's caching, and its rules:
 
 - **The collector never raises.** Every section records its own failure in
@@ -77,19 +77,19 @@ Changed:
   can change, never decides what the page shows. It writes nothing, so a
   dashboard polling beside a running realtime collector never replaces that
   collector's `status.json`.
-- **Liveness from the Slurm job** (`--slurm-job`), as the Cluster A page's last
+- **Liveness from the Slurm job** (`--slurm-job`), as the earlier page's last
   fix did for chained campaigns: a driver inside a job on a GPU node is
-  invisible to a process check on the login node, which shows a running
-  campaign as "not running". Only a queued successor is "between
+  invisible to a process check on the login node, and the first port showed
+  running campaigns as "not running". Only a queued successor is "between
   chunks"; a `squeue` that fails is "unknown".
 - **No node panel by default.** The realtime collector never samples GPU nodes:
   a probe during a measured replay perturbs it. The panel shows only when a
   snapshot carries node data.
 - No hard-coded model, operating point or target. The KPIs show the
   campaign's own metric and unit; the progress bar shows only when the
-  campaign config states a target (the Cluster A page fell back to a B200 number).
+  campaign config states a target (the earlier page fell back to a fixed number).
 - The events panel shows only when the collector is given `--events`;
-  `event_recorder.sh`, which watched one Cluster A campaign's paths, is not ported.
+  `event_recorder.sh`, which watched one campaign's paths, is not ported.
 - Global mode, the knowledge panel, and the share's index are new.
 
 ## Troubleshooting

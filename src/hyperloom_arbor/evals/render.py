@@ -65,7 +65,7 @@ def _fold(summary: str, body: str, lang: str = "") -> str:
 def build_agent_index(steps: list[dict[str, Any]]) -> dict[str, int]:
     """Map each Agent dispatch's tool_use_id to a small stable ordinal.
 
-    With many dispatches and many subagent steps in a run, "this line came
+    With many dispatches and over a thousand subagent steps in one run, "this line came
     from a subagent" is not enough to read by — you need to know *which*.
     """
     index: dict[str, int] = {}
@@ -81,8 +81,8 @@ def _actor_tag(step: dict[str, Any], agent_index: dict[str, int]) -> str:
     Deliberately at the front of the line and fixed-shape. The previous form
     put a `subagent` badge in the middle, after a variable-length tool name and
     before an optional duration — invisible when skimming and impossible to
-    grep reliably, which is how a run's subagent lines read as if they were
-    the orchestrator's.
+    grep reliably, which is how 1,101 subagent lines read as if they were the
+    orchestrator's.
     """
     if step.get("actor") != "subagent":
         return "MAIN "

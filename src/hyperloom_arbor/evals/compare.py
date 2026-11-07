@@ -1,8 +1,8 @@
 """compare.py — rank many sessions side by side.
 
-The campaign table in docs/archive/configs-mi355x-README.md compares several models on
-one number each. This produces the same table with the process columns attached,
-so two runs that reached the same gain can be told apart by what they spent and
+The campaign table in docs/archive/configs-mi355x-README.md compares four models on one
+number each. This produces the same table with the process columns attached,
+so runs that reached the same gain can be told apart by what they spent and
 whether they followed the protocol to get there.
 
 Grouping is by whatever you ask for — ``--group-by model`` for the campaign

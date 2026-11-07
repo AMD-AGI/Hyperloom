@@ -1,9 +1,9 @@
 """What a KEEP's served tree needs from outside it, and how that is rebuilt.
 
-One campaign's landed.patch was almost all symlinks: its agent pointed
-AITER_JIT_DIR at arbor/aiter_jit/ and linked every AITER JIT module there into AITER's install
-directory, so the modules were saved nowhere and a fresh container need not have them. The
-operator's choice: rebuild them, do not store them.
+One campaign's landed.patch was almost all symlinks: its agent pointed AITER_JIT_DIR at
+arbor/aiter_jit/ and linked every AITER JIT module there into AITER's install directory, so
+the modules were saved nowhere and a fresh container need not have them. The choice: rebuild
+them, do not store them.
 
 On every KEEP the driver records each link in the served tree that leaves the tree -- its path,
 its target, whether the target is there, and the sha256 and size of what it serves -- in

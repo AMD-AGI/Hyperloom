@@ -20,12 +20,17 @@ Four record types:
 
 A record is superseded by a later record with the same ``id``. Nothing is ever
 deleted — the file is the audit trail; ``current()`` is the view.
+
+A ``FACT`` or ``DEAD_END`` that shows an earlier KEEP's change invalid names that
+KEEP's iteration in ``retracts``; the harness then takes the change back
+(arbor/retraction.py). A record without one is written without the key.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -38,8 +43,8 @@ PROBEABLE_TYPES = ("ASSUMPTION", "UNKNOWN")
 
 LEDGER_FILENAME = "ledger.jsonl"
 
-# Used when a record declares no cost estimate. A server run takes tens of minutes
-# and an eval run minutes, so this sits between them: an unestimated probe is assumed
+# Used when a record declares no cost estimate. A server run is ~30 min and an
+# eval run ~2 min, so this sits between them: an unestimated probe is assumed
 # non-trivial but not a server booking.
 DEFAULT_COST_MIN = 15.0
 
@@ -66,10 +71,24 @@ class Finding:
     # The image and operating point it was measured at (arbor/measure/scope.py),
     # stamped by the harness on DEAD_END and FACT records.
     scope: dict | None = None
+    # The iteration of an earlier KEEP this FACT or DEAD_END shows invalid, which the
+    # harness then reverts (arbor/retraction.py); None for every other record.
+    retracts: int | None = None
 
     def __post_init__(self) -> None:
-        self.type = (self.type or "").upper()
-        self.status = (self.status or "open").lower()
+        self.type = str(self.type or "").upper()
+        self.status = str(self.status or "open").lower()
+        # The agent writes records by hand, and a field of the wrong type must not reach the arithmetic that ranks
+        # them: an `amdahl_share` written as a sentence made every later iteration fail in probe_value
+        # A number that does not parse is unknown, as if it were left out.
+        self.cost_est_min = _number(self.cost_est_min)
+        self.amdahl_share = _number(self.amdahl_share)
+        self.gates = _strings(self.gates)
+        self.config_keys = _strings(self.config_keys)
+        try:
+            self.iteration = int(self.iteration or 0)
+        except (TypeError, ValueError):
+            self.iteration = 0
 
     @property
     def valid(self) -> bool:
@@ -88,6 +107,33 @@ class Finding:
         if expected is None:
             return False
         return expected != self.config_fingerprint
+
+
+def _number(value: Any) -> float | None:
+    """``value`` as a float: a number, or a string holding only one ("0.93", or "93%" as 0.93); else None."""
+    if isinstance(value, bool) or value is None:
+        return None
+    number = None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        text, scale = value.strip(), 1.0
+        if text.endswith("%"):
+            text, scale = text[:-1].strip(), 0.01
+        try:
+            number = float(text) * scale
+        except ValueError:
+            return None
+    return number if number is not None and math.isfinite(number) else None
+
+
+def _strings(value: Any) -> list[str]:
+    """``value`` as a list of strings: one string is a list of one; anything else that is not a list is empty."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if v is not None]
+    return []
 
 
 def fingerprint(config: dict[str, Any], keys: list[str]) -> str:
@@ -140,8 +186,11 @@ def load(path: str | Path) -> list[Finding]:
 def append(path: str | Path, finding: Finding) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    doc = asdict(finding)
+    if doc.get("retracts") is None:
+        doc.pop("retracts", None)      # every record but a retraction reads as before
     with p.open("a") as fh:
-        fh.write(json.dumps(asdict(finding), default=str) + "\n")
+        fh.write(json.dumps(doc, default=str) + "\n")
 
 
 def current(findings: list[Finding]) -> list[Finding]:

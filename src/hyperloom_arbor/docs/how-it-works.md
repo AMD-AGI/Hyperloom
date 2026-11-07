@@ -139,7 +139,7 @@ booked as a REVERT of the change, not as NOT_MEASURED.
 
 ## Planning: the dossier, the map and rounds
 
-With the `dossier` skill enabled (and a serving workload), a campaign plans before it measures
+With the `dossier-v1` skill enabled (and a serving workload), a campaign plans before it measures
 (using the skills, and giving a campaign its directions: [dossier-and-profiler.md](dossier-and-profiler.md)):
 
 1. **The dossier:** the agent finds this model's dossier in `docs/dossier/` or writes one (the
@@ -167,8 +167,21 @@ tree: confirmed, the A/B becomes the bar and baseline, the next target is 1.40×
 next round starts; not confirmed, the campaign stops with `ROUND_STOP.md`. Without a hook,
 reaching the target ends the run.
 
+**The A/B for any pack:** `python3 -m arbor.ab` (`arbor/ab.py`) is a hook every campaign can use:
+`"round_ab": {"command": "python3 -m arbor.ab --config <config> --out {out} --deadline {deadline}"}`.
+- **The arms:** commits of the workspace, each served with its own `arbor/config.json`. The base is
+  the first commit, the current tree HEAD.
+- **The rounds:** a warm-up round, with the full GSM8K on the current arm, then pairs that alternate
+  which arm goes first.
+- **Confirmed:** ahead in every pair, a mean gain above the floor (the pack's band, or either arm's
+  spread), and GSM8K passed.
+- **The tree is put back** however it ends.
+- **Named trees:** `--base` and `--current` compare any two commits, as an integration does.
+
+A launcher may set a hook of its own instead, with its own packages and operating points.
+
 **The rebased bar:** when a campaign moves to another node, the launcher can rebase its bar to
-that node (`scripts/model-m-campaign/rebase_bar.py`), but only for a campaign with a dossier and a map
+that node with a script of its own, but only for a campaign with a dossier and a map
 (`arbor/rebaseline.py`).
 
 ## What a campaign leaves behind
@@ -198,8 +211,8 @@ In the session directory ([reference.md](reference.md) has the full layout):
   node; see [operations.md](operations.md).
 - **Component mode:** Arbor runs inside a host (Hyperloom's multibranch today) that owns the cards,
   the deadline and the merge. See [hosts.md](hosts.md).
-- **Rolling chunks** (`ARBOR_ROLL=1`, Cluster A): a campaign longer than one job's wall moves from node
-  to node. See [operations.md](operations.md).
+- **Rolling chunks** (`ARBOR_ROLL=1`, on a cluster with a job time limit): a campaign longer than
+  one job's wall moves from node to node. See [operations.md](operations.md).
 - **Parallel mode** (`python3 -m arbor.parallel`): rounds of map, lanes on separate nodes, and an
   A/B per lane at integration. Built and tested on fakes, never run on GPUs. See
   [operations.md](operations.md).

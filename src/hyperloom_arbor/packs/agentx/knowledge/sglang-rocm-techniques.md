@@ -1,6 +1,6 @@
 # SGLang ROCm Optimization Techniques — Distilled from Production PRs
 
-These are the core patterns learned from optimizing GLM-5.2-MXFP4 on MI355X with SGLang.
+These are the core patterns learned from optimizing an MXFP4 DSA/MLA model on MI355X with SGLang.
 Each section describes the **general idea** — look for similar opportunities in new models.
 
 ---
@@ -86,7 +86,7 @@ Each section describes the **general idea** — look for similar opportunities i
 - Softmax at topk=1 (can't change argmax — always skip)
 
 **Production examples found:**
-- Per-forward weight dequantization in absorb BMMs was a no-op for bf16 GLM-5.2 → removing it saved a visible share of per-layer time
+- Per-forward weight dequantization in absorb BMMs was a no-op for a bf16 checkpoint → removing it saved a visible share of per-layer time
 - Softmax at topk=1 removed (argmax is invariant to monotone transforms)
 
 **How to find:** Read the kernel entry points in `dsa_backend.py` and `mla.py`. Check if scale factors are actually != 1.0 for your model. Profile with rocprofv3 to find kernels with <5% arithmetic utilization.
@@ -95,7 +95,7 @@ Each section describes the **general idea** — look for similar opportunities i
 
 ## Pattern 6: Sampling kernel bottlenecks at small batch
 
-**Core idea:** Sampling kernels (top-p, renorm) are often written as one-block-per-row. At small batch (CONC=1, 6 rows with EAGLE), this leaves 99% of SMs idle. Restructure to radix-sort or split-row parallelism.
+**Core idea:** Sampling kernels (top-p, renorm) are often written as one-block-per-row. At small batch (CONC=1, 6 rows with EAGLE), this leaves almost every CU idle. Restructure to radix-sort or split-row parallelism.
 
 **What to look for:**
 - `top_p_renorm`, `_top_p_renorm_kernel` in SGLang source
@@ -114,7 +114,7 @@ Each section describes the **general idea** — look for similar opportunities i
 
 **Core idea:** EAGLE speculative decoding has a verify pass (target model checks draft tokens). On HIP, this path has more opportunities for dtype mismatches and metadata sizing bugs than on CUDA because HIP testing lags.
 
-**Specific bugs found in GLM-5.2 that also apply to any DSA model with EAGLE:**
+**Specific bugs found in one DSA model that also apply to any DSA model with EAGLE:**
 - `_forward_aiter` initialized metadata with `q_dtype=bfloat16` at model load, but runtime Q is fp8 → persistent kernel aborts in EAGLE draft steps
 - `page_table_1` is `repeat_interleave`d by `speculative_num_draft_tokens` during target_verify → `num_rows != bs` → kv_indptr out of bounds
 - Output tensor inherits Q dtype (fp8) but AITER reduce kernel requires bf16 output
@@ -127,13 +127,12 @@ Each section describes the **general idea** — look for similar opportunities i
 4. Disable persistent mode — metadata sized at init with wrong q_dtype
 
 **These 4 fixes are required for any DSA model using --dsa-decode-backend aiter + EAGLE on ROCm.**
-The patch is at `Arbor-v2/patches/apply_all_aiter_eagle_fixes.py`.
 
 ---
 
 ## Where to look in a new model
 
-When starting a campaign on a new DSA/MLA model (DSV4, Kimi-K2.5, etc.):
+When starting a campaign on a new DSA/MLA model:
 
 1. **Check Pattern 1 first** — run grep for silently-disabled features. Little reading, potentially a large gain.
 2. **Run SIKL decode profile** — identify the top-3 ops. Don't guess.
@@ -144,7 +143,7 @@ When starting a campaign on a new DSA/MLA model (DSV4, Kimi-K2.5, etc.):
 
 ## DSA indexer
 
-The DSA indexer (`attn.indexer`, a visible share of GLM-5.2 decode) runs on 21 of 78 layers.
+The DSA indexer (`attn.indexer`, a visible share of decode) runs on a subset of the layers.
 The 4-kernel fused version is several times faster. Check if it's enabled on your model:
 ```bash
 docker exec $CONTAINER grep -r "fused.*indexer\|four.kernel\|dsa_fused" /sgl-workspace/ --include="*.py" | head

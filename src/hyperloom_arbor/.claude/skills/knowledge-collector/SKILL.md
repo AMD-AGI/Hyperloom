@@ -14,7 +14,8 @@ and the project, user and campaign names, are set up as in the
 ## What it collects
 
 One directory per type, staged in `<session>/collector/knowledge/<type>/` and
-pushed to `/path/to/arbor-share/projects/<project>/<user>/<campaign>/knowledge/<type>/`:
+pushed to `<share root>/projects/<project>/<user>/<campaign>/knowledge/<type>/` (`ARBOR_SHARE_ROOT`, the
+`realtime-collector` skill's settings):
 
 | Type | Files | From |
 | --- | --- | --- |
@@ -61,7 +62,7 @@ python3 -m arbor.collect knowledge --session <session> --config <config> \
   skill writes a campaign's profile report as `PROFILE.md`, with the small
   files beside it. Pass a profile kept elsewhere with `--profiles <dir>`.
 - **The dossier** the campaign worked from (`docs/dossier/<model>-<workload>-<gpu>/`,
-  found by the `dossier` skill) goes with `--dossier`. Once shared, the dossier
+  found by the `dossier-v1` skill) goes with `--dossier`. Once shared, the dossier
   skill's lookup finds it on the share too, so the next campaign on the same
   model, workload and GPU type starts from it instead of writing one.
 
@@ -71,8 +72,8 @@ Before a campaign, or when asked what is known about a model:
 
 1. **Find the campaigns**: the dashboard's global mode, filtered by project
    (the `dashboard` skill); or
-   `ssh arbor-share 'ls /path/to/arbor-share/projects/<project>/*/*/knowledge/summary/SUMMARY.md'`;
-   on a Cluster B node, the same path directly.
+   `ssh arbor-share 'ls <share root>/projects/<project>/*/*/knowledge/summary/SUMMARY.md'`;
+   on a node that mounts the share, the same path directly.
 2. **Read** `SUMMARY.md`, then `OUTCOMES.md` (what was tried and why it was
    kept or reverted) and `FINDINGS.md` (dead ends, with when to revisit each).
 3. **Use it as leads, with their labels.** A result holds for its pins, node,

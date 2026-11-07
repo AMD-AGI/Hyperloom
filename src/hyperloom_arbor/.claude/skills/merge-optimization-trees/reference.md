@@ -1,7 +1,9 @@
 # Reference: measurement discipline for knob comparisons
 
-Detail behind steps 5–8 of [SKILL.md](SKILL.md). This file covers only what makes two knob states comparable; where GPUs
-are, the storage policy and container permissions are the cluster's own rules.
+Detail behind steps 5–8 of [SKILL.md](SKILL.md). The cluster-level rules
+(where GPUs are, storage policy, container permissions) belong to the project
+that runs the campaign; this file covers only what makes two knob states
+comparable.
 
 ## Both operating points, always
 
@@ -14,12 +16,12 @@ a deliverable, and the two are not the same code path:
   ROCm sparse-attention gates branch on exactly that number. A knob can be
   admitted at one point and silently rejected at the other.
 - Launch-width and tiling work tuned at high concurrency can invert at low
-  concurrency. A prefill-gather knee in programs per CU gave large
-  speedups at depth, collapsed on a small input, and **inverted to a
-  slowdown** past the knee.
+  concurrency. A prefill-gather change with a knee at about 8 programs per CU
+  won large at depth, much less on a small input, and **was slower** past the
+  knee.
 - Components can be entirely absent at one point. At C8, all-reduce,
-  shared-expert MoE, sparse prefill and the sparse attention indexer measure
-  **zero time with zero calls**. A feature in those components has no C8 time to
+  shared-expert MoE, sparse prefill and the sparse attention indexer made
+  **zero calls**. A feature in those components has no C8 time to
   remove, so its gain cannot transfer — the Amdahl denominator is different,
   not merely smaller.
 
@@ -29,9 +31,9 @@ own output directory so their aggregate files cannot overwrite each other.
 ## Warm up before every measured run
 
 The first replay against a fresh server pays cold JIT compilation, tuned-config
-resolution, and an empty prefix cache. On back-to-back replays on one server
-instance, the cold first replay is a **low outlier**: including it widens the
-run-to-run spread considerably.
+resolution, and an empty prefix cache. On three back-to-back C32 replays on one
+server instance, the cold first replay was a **clear low outlier**: including
+it more than doubled the run-to-run spread.
 
 This matters more in a knob sweep than anywhere else, because each knob state
 usually gets a fresh server — so **every measurement is a cold first replay**
@@ -47,8 +49,9 @@ Derive the acceptance threshold from the baseline's own spread, not from a
 round number. A gate set below the noise floor books noise as wins.
 
 Compute the baseline's relative spread over at least 3 replays and use it as
-the minimum credible gain. Secondary metrics are much noisier than the primary
-— a p90 interactivity "win" inside its own spread is not a result.
+the minimum credible gain. Secondary metrics are much noisier — p90
+interactivity has shown spreads several times wider than throughput's, so a p90
+"win" inside its own spread is not a result.
 
 Re-derive the threshold on the integration branch. It is a property of the
 tree and node, not a constant.
@@ -95,9 +98,9 @@ match offline before the campaign starts. It is a two-line test and it has
 repeatedly been the difference between a campaign and a wasted one.
 
 - A harness matching `SwiGLU` collected nothing for a knob whose marker reads
-  `SiluAndMulWithClamp dispatch`. Checking every anchor found several that could
-  never match — enough to discard a large share of the knobs while every run
-  still reported success and every number still looked fine.
+  `SiluAndMulWithClamp dispatch`. Checking all 15 anchors found 8 that could
+  never match — enough to discard 7 of 14 knobs while every run still reported
+  success and every number still looked fine.
 - Substring patterns fail on hyphenation and on wording drift between a knob's
   name and its log line: `hidden quant` does not match
   `hidden-state MXFP8 producer`.
@@ -113,13 +116,13 @@ repeatedly been the difference between a campaign and a wasted one.
 This is the single most misleading instrument in the set. A marker reading
 
 ```
-DSv4.1 sparse MLA decode: knob=1 batch=<large> -> Triton decode (base path)
+sparse MLA decode: knob=1 batch=1024 -> Triton decode (base path)
 ```
 
 was read as "this feature declines at C32, so it is inert there". It was not
 inert: later decode steps ran smaller batches that fell inside the kernel's
-row band, it dispatched, and it killed the server. The wrong reading survived
-into the documentation.
+33-72 row band, it dispatched, and it killed the server. The wrong reading
+survived two rounds of documentation.
 
 For any knob gated on batch size, sequence length or context length, the first
 log line is the *least* informative one. Count dispatches, or log once per
@@ -132,23 +135,22 @@ When a set of knobs fails as a set, halving the ON set finds the culprit in
 
 - **Re-run the control in the environment's CURRENT state.** Not the state it
   had before the failures. A container degraded over one session from passing
-  every control run to failing most of them, and was fixed by recreating it;
-  without a control re-check after the failures, every knob would have been
-  blamed for the container.
+  every check to failing most of them, and was fixed by recreating it; without a control re-check
+  after the failures, every knob would have been blamed for the container.
 - **Confirm each step's environment actually took effect.** Read the marker and
   check the knob you turned off reads `knob=0` and its feature marker is
   absent. A bisect step that silently did not apply points at the wrong half.
 - **One failure is not evidence.** This class of fault also occurs
   intermittently on unmodified baselines. Require a repeated, arm-specific
-  pattern — a death in every attempt with the culprit on against none in
-  several attempts without is a pattern; one death is an anecdote.
+  pattern — 3 deaths in 3 attempts with the culprit on against 0 in 6 without
+  is a pattern; one death is an anecdote.
 - **Preserve every failed attempt.** Move its directory aside rather than
   letting the next run overwrite it; a server log is the only record of why a
   run died, and it is gone as soon as the next server starts.
 
-Expect the first hypothesis to be wrong. The most-suspected knob can be cleared
-early in the bisect, and the culprit can be one that had been dismissed as
-"inert at this operating point".
+Expect the first hypothesis to be wrong. In the run that produced these notes,
+the most-suspected knob was cleared by the second bisect step, and the culprit
+was one that had been dismissed as "inert at this operating point".
 
 ## Prove "one tree, environment only"
 
@@ -165,9 +167,10 @@ usually far larger than the effect being chased.
 
 Related: attribute the gain to the right thing. A treatment arm beating an
 *older* baseline tells you about the whole tree. Only the paired control —
-same tree, knob off — isolates the knob. A lean tree measuring well above a
-stock baseline looked like a knob win; its own paired control measured the
-same, so the knobs were flat and the merged tree had earned all of it.
+same tree, knob off — isolates the knob. A lean tree that beat the stock
+baseline by a wide margin looked like a knob win; its own paired control
+measured the same, so the knobs were flat and the merged tree had earned all
+of it.
 
 ## Interaction edges from profiles
 
@@ -181,8 +184,8 @@ one profile, not one run per pair, and it is how a combination can be declined
 with arithmetic before it is ever measured.
 
 Price each feature as a percentage of the serving window from that census. A
-feature worth 0.1% of the window does not need a 600-second replay to rank,
-and should not be allowed to consume one.
+feature worth a sliver of the window does not need a full replay to rank, and
+should not be allowed to consume one.
 
 ## The record each merge leaves
 

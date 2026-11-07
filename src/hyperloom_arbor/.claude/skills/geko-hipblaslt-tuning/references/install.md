@@ -50,7 +50,7 @@ Run on the **host**. Assumes `geko_build` mounts a host directory to `/work` —
 
 ```bash
 # WORKDIR: host path shared with geko_build via -v mount (its /work)
-WORKDIR=<your-host-workdir>   # e.g. /home/user/mywork/agentx
+WORKDIR=<your-host-workdir>   # e.g. $HOME/mywork/agentx
 
 docker exec geko_build bash -c "
 mkdir -p /work/tmp_debs

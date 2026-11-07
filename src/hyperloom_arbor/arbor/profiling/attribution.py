@@ -3,8 +3,8 @@
 This is the one idea worth taking from SIKL. SIKL's per-op bench hooks module
 objects, so its rows are named for the source (``attn.indexer``,
 ``mlp.experts``) and its unmatched time lands in an explicit ``<rest>`` row you
-can read. On DSv4 that row was a sizable share of prefill — a number that was *visible*,
-and therefore a known coverage hole rather than a silent understatement.
+can read. On DSv4 that row was a sizable share of prefill — a number that was
+*visible*, and therefore a known coverage hole rather than a silent understatement.
 
 A torch trace gives mangled device symbols instead. Matching those with
 substrings is workable but fails in a specific, dangerous way: a pattern that

@@ -1,4 +1,4 @@
-# The serving template: the `balanced` pack's method (the v2 line) for any
+# The serving template: one method for any
 # model served by vLLM or SGLang, with nothing model-specific in it. The model, the framework, the
 # operating point and the correctness floor come from the config; the model's facts and the map of
 # directions come from its dossier. Used as is by a host (Hyperloom's Arbor adapter) or copied and
@@ -10,10 +10,10 @@ description: >
   campaign config, on the GPUs the config (or the host) gives, gated on output tok/s per GPU at
   the operating point the bench runs (concurrency, input and output length).
 
-  THE METHOD (from the `balanced` pack, the v2 line): local increments balanced against the big
+  THE METHOD: local increments balanced against the big
   directions and kernel plans that one-change iterations rarely reach. Two skills by default:
-  `dossier` (the map of where the work is, looked up first and written if missing, section 3) and
-  `profiler` (TraceLens on PyTorch-profiler traces, the host's profile first). The `hardware`,
+  `dossier-v1` (the map of where the work is, looked up first and written if missing, section 3) and
+  `profiler` (every profile uses the skill's tracer, not the PyTorch profiler). The `hardware`,
   `serving-playbook` and `kernels` skills may be added by a pack derived from this one. Four
   harness rules (section 12): a documented bundle is one claim; every dead end carries its image
   and operating point; each arm's configuration is proven; a change to a numerics knob is gated
@@ -66,7 +66,7 @@ workload:
 # The main agent gets exactly these skills (arbor/pack/loader.py). The dossier and the profiler
 # are the default; add hardware, serving-playbook and kernels in a derived pack.
 skills:
-  - dossier
+  - dossier-v1
   - profiler
 
 # Writing the dossier is a run of LEARN iterations (no server run when the served tree is
@@ -96,13 +96,13 @@ constraints:
   # ======================================================================
   # 3. THE DOSSIER IS THE MAP
   # ======================================================================
-  - "LOOK THE DOSSIER UP BEFORE ANYTHING ELSE. Use the `dossier` skill: its first step runs find-dossier.sh, which searches docs/dossier/ in this Arbor checkout. If one exists for this model, workload and GPU, read it and work from its part 11 (directions). If it is missing, writing it is the campaign's first work. knowledge/dossier-and-profile.md gives the order and what each part draws on."
+  - "LOOK THE DOSSIER UP BEFORE ANYTHING ELSE. Use the `dossier-v1` skill: its first step runs find-dossier.sh, which searches docs/dossier/ in this Arbor checkout. If one exists for this model, workload and GPU, read it and work from its part 11 (directions). If it is missing, writing it is the campaign's first work. knowledge/dossier-and-profile.md gives the order and what each part draws on."
   - "IF THE CAMPAIGN WAS GIVEN ITS DIRECTIONS (a host's plan, or an operator's map), WORK THOSE: the map is already set, and the dossier serves them rather than replacing them."
   - "A DOSSIER ITERATION IS A LEARN: `INTENT: LEARN`, no change to the served tree, and at least one LEDGER record (a FACT per part written, naming the file and the part). Without a ledger record the harness reads 'no changes' and counts a null. Up to 6 LEARNs may run in a row (policy above)."
   - "THE DOSSIER'S DIRECTIONS ARE THE MAP. Give each direction in part 11 a map ID (`m-<component>`, e.g. `m-moe-experts`, `m-attn`), cite it in DONE lines and ledger records, and refresh parts 7 and 8 after every KEEP: the bottleneck moves."
   - "A REWRITE IS NOT A SINGLE ITERATION: write its kernel plan (the dossier skill's kernel-plan.md) and build it in stages, each with its own gate."
-  - "PROFILE WITH THE `profiler` SKILL: the host's profile first (component.profile, in component mode), then TraceLens on a PyTorch-profiler trace of the served program; an eager trace only for op attribution, labelled eager. A KEEP never carries the profiler settings. Reports go to <session>/profiles/<name>/PROFILE.md. Profile the measured phase, not the bench's warmup, and record how many requests were running in the window. Stop any traced server before DONE."
-  - "LOOK FOR THE CUDA COUNTERPART. If the model code has an NVIDIA or common path beside its ROCm one, diff them per component: it feeds the dossier's part 8. The CUDA path is the specification for what should exist."
+  - "PROFILE WITH THE `profiler` SKILL, NEVER THE PYTORCH PROFILER. The skill's tracer is vendored with it; a launcher builds it in the container. A model the tracer has not traced before is a new target: follow its new-target.md, run the facts job and its checks first, and label every number unvalidated until they pass. Reports go to <session>/profiles/<name>/PROFILE.md. Profile the measured phase, not the bench's warmup, and record how many requests were running in the window. Stop any traced server before DONE."
+  - "LOOK FOR THE CUDA COUNTERPART. If the model code has a CUDA or common path beside its ROCm one, diff them per component: it feeds the dossier's part 8. The CUDA path is the specification for what should exist."
 
   # ======================================================================
   # 4. HOW TO CLOSE AN ITERATION

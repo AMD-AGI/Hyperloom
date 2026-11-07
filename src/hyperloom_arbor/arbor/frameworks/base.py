@@ -50,6 +50,8 @@ class FrameworkAdapter:
 
     # The value of a config's "framework" that names it, lower-case.
     name = ""
+    # The server's command before its arguments, unless the host gives its own (`entrypoint`).
+    default_entrypoint = ""
     # The server process, for `pgrep -af`. A bracket in it keeps pgrep's own
     # command line from matching.
     server_pattern = ""
@@ -70,6 +72,16 @@ class FrameworkAdapter:
     # The framework's compiled extension: a tree that has the package but cannot import
     # this does not serve (a source-only worktree; component mode refuses it at start).
     native_module = ""
+
+    def entrypoint(self, config: dict) -> str:
+        """The server's command before its arguments: the host's ``component.entrypoint`` when it
+        gives one (the entrypoint of its base launch, arbor/base_launch.py), else the framework's
+        own. Component mode stops its server by PID, so another entrypoint needs no stop pattern."""
+        block = (config or {}).get("component")
+        given = block.get("entrypoint") if isinstance(block, dict) else None
+        if isinstance(given, list) and given:
+            return shlex.join(str(t) for t in given)
+        return self.default_entrypoint
 
     def serve_cmd(self, config: dict, server_flags: str) -> str:
         """The server's own command line, in the foreground, flags last."""
@@ -117,13 +129,17 @@ class FrameworkAdapter:
         """``env`` with the server confined to ``gpu_ids`` ("4,5,6,7"); ``env`` as it
         is when none are given.
 
-        ROCR_VISIBLE_DEVICES alone. Do NOT also set HIP_VISIBLE_DEVICES: HIP
-        indexes into the list ROCR has already filtered, so setting both
-        double-filters. With gpu_ids="0,1,2,3" that happens to be the identity,
-        but with any other selection the server silently gets the wrong devices.
+        ROCR_VISIBLE_DEVICES selects the cards. HIP indexes into the list ROCR has
+        already filtered, so a HIP_VISIBLE_DEVICES copied from gpu_ids double-filters:
+        with "0,1,2,3" that is the identity, with any other selection the server
+        silently gets the wrong devices. So HIP_VISIBLE_DEVICES is set to the identity
+        on ROCR's list, "0,..,n-1", and a configured one is replaced. It must be set:
+        Ray, which vLLM 0.27 imports at start, refuses ROCR_VISIBLE_DEVICES without it
+        ("Please use HIP_VISIBLE_DEVICES instead of ROCR_VISIBLE_DEVICES"), and every
+        server the harness itself started failed so (every A/B of one run).
         """
         if not gpu_ids:
             return env
-        env = {**env, "ROCR_VISIBLE_DEVICES": gpu_ids}
-        env.pop("HIP_VISIBLE_DEVICES", None)
-        return env
+        ids = [g.strip() for g in str(gpu_ids).split(",") if g.strip()]
+        return {**env, "ROCR_VISIBLE_DEVICES": ",".join(ids),
+                "HIP_VISIBLE_DEVICES": ",".join(str(k) for k in range(len(ids)))}

@@ -10,23 +10,23 @@ description: >-
 allowed-tools: Bash(docker *), Bash(sbatch *), Bash(squeue *), Bash(scancel *)
 ---
 
-# geko hipBLASLt tuning for DSV4.1-Flash serving (gfx950)
+# geko hipBLASLt tuning for LLM serving (gfx950)
 
-Tune the critical decode hipBLASLt GEMMs for DeepSeek-V4.1-Flash on vLLM/AgentX, deploy them, and **prove the
+Tune the critical decode hipBLASLt GEMMs of a model served on vLLM (AgentX), deploy them, and **prove the
 tuned kernels are actually used** — apple-to-apple against the stock library.
 
 ## When to use
-- Installing geko into a fresh ROCm vLLM container and running `geko --tune`.
+- Installing geko into a fresh vLLM ROCm container and running `geko --tune`.
 - Hitting `geko --tune` end-to-end errors (msgpack / scale_type — see the 3 patches below).
 - A tune produced big GEMM-level uplift but **no e2e change** → verify the kernels fire + check the budget.
 - Deciding whether hipBLASLt tuning is worth it for this workload (short answer below).
 
 ## Decision first: is hipBLASLt tuning even the lever?
-In the GPU-kernel-time budget for DSV4.1-Flash AgentX serving, **hipBLASLt `Cijk_*` is a small share**. Most
-of the cost is the **aiter** umbrella (MoE experts `mfma_moe*_afp8_wfp4`, dense `_mxfp8_linear`) plus TP
-all-reduce. So geko hipBLASLt tuning is **flat end-to-end at every concurrency even with tuned kernels
-verified firing (and faster at GEMM level)**. If the goal is e2e throughput, tune **aiter** (its native autotuner),
-not hipBLASLt. Still proceed below if you specifically want the hipBLASLt tune + a rigorous usage proof.
+Measure the GPU-kernel-time budget first. On one MoE model's AgentX serving, **hipBLASLt `Cijk_*` was a small
+share**; most of the time was the **aiter** umbrella (MoE experts `mfma_moe*_afp8_wfp4`, dense `_mxfp8_linear`)
+plus TP all-reduce. There geko hipBLASLt tuning was **flat end-to-end at every concurrency even with tuned
+kernels verified firing and faster at the GEMM level**. If aiter dominates and the goal is e2e throughput, tune
+**aiter** (its native autotuner), not hipBLASLt. Still proceed below if you specifically want the hipBLASLt tune + a rigorous usage proof.
 
 ## The 3 critical `geko --tune` patches (hipBLASLt 1.5.0)
 `geko --tune` fails e2e without these. Idempotent; resolve `$TENSILE` (tensilelite `Tensile/` dir) and
@@ -40,7 +40,7 @@ Full copy-paste block + why-each: **[references/install.md](references/install.m
 
 ## Workflow (one change per step; validate each)
 1. **Install** geko in the container — `[references/install.md](references/install.md)` (and run `scripts/geko_install.sh` inside the container; needs `apt install llvm-14-dev libomp5-14` for the client build).
-2. **Profile the decode shapes** at your TARGET concurrency: launch with `--enforce-eager` + `HIPBLASLT_LOG_MASK=32`, drive the load, take the dominant M among K=5120 GEMMs. **Copy the exact types verbatim** — DSV4.1 decode is bf16-in / **f32-out** (`c_type=d_type=f32_r`); a bf16-out workload silently never fires (PITFALL #0).
+2. **Profile the decode shapes** at your TARGET concurrency: launch with `--enforce-eager` + `HIPBLASLT_LOG_MASK=32`, drive the load, take the dominant M among K=5120 GEMMs. **Copy the exact types verbatim** — MoE decode GEMMs are often bf16-in / **f32-out** (`c_type=d_type=f32_r`); a bf16-out workload silently never fires (PITFALL #0).
 3. **Tune**: `geko --tune --workload-log <shapes.yaml>` → `full_libs`. Merge into the full stock gfx950 logic and rebuild via `TensileCreateLibrary` → a complete `merged_devlib` (deploying `full_libs` alone is a sparse library that regresses). See `[references/tune-run.md](references/tune-run.md)`.
 4. **Deploy + serve**: `HIPBLASLT_TENSILE_LIBPATH=<merged_devlib>/library/gfx950` on BOTH baseline(stock) and tuned so only the library differs.
 5. **Verify + record** — below.
@@ -50,7 +50,7 @@ Two independent checks — the deterministic one is complete, the trace one is a
 - **Deterministic selection (window-independent):** `OUTDIR=<run> scripts/verify_selection.sh` benches each kept shape merged-vs-stock with the exact serving types. Healthy = `tuned-selected = N of N`.
 - **Serving-trace firing:** `python3 scripts/verify_kernels_in_trace.py` — the exact `kernel_tuned` names appear as `Cijk_*` events in the tuned trace, 0 in baseline. A partial count is fine (short window). **Do NOT** use the bare `_UserArgs_` tag — stock kernels carry it too.
 
-Worked result (f32 workload): every kept shape tuned-selected (`N of N`), a partial count in the trace → PASS; e2e flat. With the wrong (bf16-out) workload: none selected — the canonical signature-mismatch failure.
+With the right workload, selection and the trace both show the tuned kernels firing. With the wrong (bf16-out) workload, none fire: the canonical signature-mismatch failure.
 
 ## Pitfalls & scale gotchas (read before a long run)
 - **Signature-exact match** (PITFALL #0): geko kernels are `Equality` — they fire only on an exact

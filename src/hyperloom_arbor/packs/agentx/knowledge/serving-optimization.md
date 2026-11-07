@@ -6,10 +6,10 @@
 
 ```bash
 # SIKL requires MODEL_PATH and TP — always set them explicitly:
-docker exec -e MODEL_PATH=/models/GLM-5.2-MXFP4 -e TP=4 \
+docker exec -e MODEL_PATH=/models/<model> -e TP=4 \
   $CONTAINER bash /workspace/Arbor/packs/agentx/validator/sikl_profile_decode.sh
 # Reads: /tmp/sikl_decode_result.json
-# Shows: per-op GPU time breakdown for GLM-5.2 decode step
+# Shows: per-op GPU time breakdown for the model's decode step
 # Note: SIKL starts its own server instance, so run it BEFORE the bench server is up
 ```
 
@@ -24,17 +24,17 @@ Run it again after a KEEP to see if the bottleneck shifted. The agent should mai
 1. **Config** — env vars, server flags, AITER switches. Exhaust in 2-3 iterations. These are warmup.
 2. **Framework** — patches to vLLM/SGLang Python source: fused ops, scheduling, dispatch, batching, attention backends, KV cache policies.
 3. **Kernel** — new or rewritten HIP/Triton/FlyDSL/CK kernels: MoE routing, attention, KV cache, GEMM, prefill/decode overlap.
-4. **Feature** — port a whole NVIDIA feature: persistent kernels, flash-decode, chunked prefill improvements, speculative paths, fused GEMM+activation, EP overlap.
+4. **Feature** — port a whole feature another backend already has: persistent kernels, flash-decode, chunked prefill improvements, speculative paths, fused GEMM+activation, EP overlap.
 
 Config changes are one-time warmup. The session's value comes from code changes at framework/kernel/feature tier.
 
 ## Research protocol
 
 Before proposing any code change in framework/kernel/feature tier:
-1. Search for whether NVIDIA already solved it in TRT-LLM, CUTLASS, or the vLLM CUDA path
+1. Search for whether another backend already solved it: the framework's other GPU paths, or public kernel libraries
 2. Check unmerged PRs in the relevant framework (SGLang, vLLM, AITER, CK)
 3. Read the actual diffs, not summaries
-4. Prioritize: proven speedup on NVIDIA + low AMD porting complexity = highest priority
+4. Prioritize: a speedup proven elsewhere + low porting complexity on AMD = highest priority
 
 ## Depth expectations
 

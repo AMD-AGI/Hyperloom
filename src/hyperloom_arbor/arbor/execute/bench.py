@@ -64,7 +64,7 @@ def _live_flags(config: dict) -> str:
     server_flags changed nothing — silently, with the file on disk showing the
     edit it believed had landed.
 
-    Found by a campaign that booked a class-A KEEP for landing
+    Found by one campaign, which booked a class-A KEEP for landing
     ``--profiler-config`` and only discovered iterations later that
     /proc/<pid>/cmdline contained no such flag and POST /start_profile returned
     404, while the workspace config held the correct string and shell-quoting
@@ -73,8 +73,8 @@ def _live_flags(config: dict) -> str:
     The consequence is larger than one KEEP: every flag-valued lever was
     unreachable. That includes ``--max-cudagraph-capture-size``, which is the
     named fix for graph eviction at the capture ceiling, a measured gain on
-    p90_interactivity. A campaign cannot land a flag fix through a
-    path that discards flags.
+    p90_interactivity. A campaign cannot land a flag fix through a path that
+    discards flags.
     """
     from arbor.execute.workspace import read_workspace_config
     static = str(config.get("server_flags", "") or "")

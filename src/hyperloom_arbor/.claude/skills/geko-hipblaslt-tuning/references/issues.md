@@ -55,3 +55,13 @@ Must be re-applied each day if the container is restarted after midnight.
 hipblaslt source tree. The deb package does not include these yaml files (only `.co`/`.dat.zlib`).  
 **Fix:** Copy `library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx950/`
 from `geko_build` (compresses to ~18 MB).
+
+---
+
+## Reference Run (decode shapes, a vLLM container)
+
+| Metric | Value |
+|---|---|
+| Shapes | 24 decode (3 layers × M=1…8) |
+| Valid / Kept (≥3%) | 24 / 22 |
+| Regressed (excluded) | 2 — M=1,8 for N=5120,K=288 |

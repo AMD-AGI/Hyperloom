@@ -34,7 +34,7 @@ from __future__ import annotations
 # Import budget is load-bearing, not style. `hook` runs twice per tool call, in a
 # fresh interpreter each time, so every module imported here is latency the user
 # feels on every action the agent takes. `hashlib`, `subprocess`, and `typing`
-# each cost ~11 ms to import and none is needed on the hook path, so they are
+# each cost milliseconds to import and none is needed on the hook path, so they are
 # imported inside the functions that actually use them. `Any` survives in
 # annotations only because `from __future__ import annotations` leaves them
 # unevaluated strings.
@@ -526,8 +526,8 @@ def _migrate_fallback_events(trace_dir: Path) -> int:
     Hooks start firing at ``SessionStart``, which is necessarily before the
     agent can run ``mark session-start``. Those early rows land under
     ``~/.arbor/trajectories/<session_id>/`` and used to stay there: on a real
-    run that stranded the early events, costing those orchestrator steps their
-    timing and permission mode. Moving them at open time closes the window.
+    run that stranded 29 events, costing 15 orchestrator steps their timing and
+    permission mode. Moving them at open time closes the window.
     """
     moved = 0
     try:
@@ -638,7 +638,7 @@ def _mark_session_start(args) -> None:
 def _run_hook_fast() -> int:
     """The hook path, with no argparse.
 
-    Called before ``main`` builds a parser, because argparse costs ~2 ms to
+    Called before ``main`` builds a parser, because argparse costs milliseconds to
     import and the hook runs twice per tool call for the entire session.
     """
     try:

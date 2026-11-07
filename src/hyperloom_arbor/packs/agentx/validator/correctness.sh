@@ -63,7 +63,7 @@ content = msg.get("content", "").strip()
 reasoning = msg.get("reasoning_content", "").strip()
 
 # Accept reasoning models: content OR reasoning_content must be non-empty.
-# GLM-5.2 is a thinking model — reasoning_content carries the response when
+# A thinking model's reasoning_content carries the response when
 # max_tokens is hit before the final answer token.
 if not content and not reasoning:
     write({"passed": False, "score": 0.0, "error": "response had no content or reasoning"})

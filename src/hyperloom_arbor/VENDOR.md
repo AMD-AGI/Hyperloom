@@ -7,9 +7,9 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 | | |
 | --- | --- |
 | Source | `AMD-AGI/Arbor` (internal) |
-| Tag | `v0.9.2` |
-| Commit | `cfbb7b9` |
-| Files | 330 |
+| Tag | `v0.9.3` |
+| Commit | `e3a4bd1` |
+| Files | 349 |
 | Licence | Apache-2.0, [`LICENSE`](LICENSE) (`REUSE.toml` at the repository root says so per file) |
 
 ## What it holds
@@ -17,10 +17,12 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 The engine and what its agents read:
 
 - `arbor/`, the harness: the loop, the gates, component mode, the dossier and stage machinery;
-- `.claude/skills/`, the skills its agents use (the dossier, the profiler, kernels, hardware, the serving playbook's
-  rules and knob catalog, and the rest). The profiler skill is this copy's own: it profiles with TraceLens (below);
-- `plugins/`, the skill families a pack can place in a session's chapters (`docs/skill-integration.md`): `dossier`
-  (the dossier split into six skills), `benchmark` (the benchmark studied once) and `pack` (drafting a pack);
+- `.claude/skills/`, the skills its agents use (the flat dossier as `dossier-v1`, the profiler, kernels, hardware,
+  the serving playbook's rules and knob catalog, and the rest). The profiler skill is this copy's own: it profiles with
+  TraceLens (below);
+- the skill families a pack loads (`lifecycle.load`, `docs/skill-integration.md`), each in `.claude/skills/<family>/`
+  with its `family.json`: `dossier` (the dossier split into six skills), `benchmark` (the benchmark studied once)
+  and `pack` (drafting a pack). Up to `v0.9.2` they were under `plugins/`;
 - `packs/serving` (the template MB names by default), `packs/agentx`, `packs/_shared`, `packs/parallel-dossier` and
   the `evolve-asm` packs;
 - `docs/`, the operator and host documentation; `evals/`, the session tracer the skills' hooks call; `scripts/pack/`;
@@ -31,10 +33,17 @@ The engine and what its agents read:
 - **Left out:** Arbor's tests (they run upstream at the tag), its campaign results, its workload-specific packs,
   configs and dossiers, and its cluster launchers. Code or documents that name one of them keep the name; the file is
   not here.
-  - **Skills for developing Arbor** (`plugins/arbor-dev`, the `develop` mode) are left out: a campaign never loads
-    them, and this copy is not edited here. The two skill docs say so where they would describe them.
-  - **Records of internal campaigns** are left out: the barren/learn design notes, the config index, and two
-    one-shot campaign scripts under `scripts/pack/`.
+  - **Skills for developing Arbor** (`.claude/skills/arbor-dev`, the `develop` mode) are left out: a campaign never
+    loads them, and this copy is not edited here. The two skill docs say so where they would describe them.
+  - **Knowledge search** (`arbor/knowledge/` and its `knowledge` skill family) is left out: its registry names a source
+    of another vendor's kernels, and its evaluation set names internal workloads. The code that would use it imports it
+    only when a pack loads `knowledge:search`, which no pack here does.
+  - **Architecture research** (the `architecture` family, `architecture:performance`, and its guide) is left out: it
+    studies how other vendors' frameworks implement a model, on their GPUs. A pack loads it only by naming it, which
+    no pack here does.
+  - **Records of internal campaigns** are left out: the barren/learn design notes, the config index, a campaign
+    archive skill, two notes about one model's profile and MoE, and two one-shot campaign scripts under
+    `scripts/pack/`.
   - **The serving playbook keeps its rules and its knob catalog only.**
     - **Left out:** the InferenceX study's evidence corpus, and the five reference pages generated from it (big
       directions, regime tables, AMD knobs, numerics knobs, the image manifest). They carry other vendors' recipes
@@ -66,10 +75,8 @@ The engine and what its agents read:
   - **Also dropped:** internal plans, branches, sessions and decision records, roadmap ids, and study record ids.
   - **The private repository:** this copy carries no access or clone instructions for it. The README, getting started
     and the skills guide point to this copy instead.
-- **No results of internal campaigns:** the `benchmark` family's `contract.md` is this copy's own. It keeps every rule
-  and what it guards against, without the campaigns' names, costs and figures.
-  - **Elsewhere:** the study skill's findings, and the campaign names and figures in code comments and skills, are
-    generalized.
+- **No results of internal campaigns:** from `v0.9.3`, Arbor's own tree has none in its code, skills and docs, and
+  the `benchmark` family's `contract.md` is Arbor's own text. The vendoring tool still refuses a copy that has one.
 - **`CONTRIBUTING.md`** is this copy's own: it says where a change to Arbor is made.
 - **Profiling on TraceLens:** upstream, Arbor's profiler skill traces with a tracer of its own, which is not released
   here. In this copy the skill (`.claude/skills/profiler/SKILL.md`) profiles with TraceLens instead, as this repository
@@ -93,6 +100,15 @@ in `src/kernelforge`, except two kernels, each annotated as `src/kernelforge`'s 
 - a FlyDSL reference kernel (Apache-2.0, FlyDSL Project Contributors);
 - an SGLang Triton kernel (Apache-2.0, SGLang Team and contributors).
 
+From `v0.9.3`, every fact in the hardware cards cites a public AMD source (an ISA guide, a white paper, a data sheet,
+the ROCm documentation), and what had none was cut.
+
+**This repository's weight-precision check,** in `arbor/measure/weight_precision.py`: a copy of
+`src/hyperloom_multibranch/toolbox/weight_precision.py`, unedited but for its two imports, which point at
+`arbor/measure/_hyperloom_shim.py` (`REMOVED`, a two-field `LaunchConfig`, and the server-argument tokenizer copied from
+`src/hyperloom/inference_optimizer/grid_server_args.py`). Arbor refuses a weight-precision change before its server
+starts, as the toolbox's acceptance does, with the same reading of the flags. MIT, as this repository.
+
 ## How it is used
 
 Arbor runs from its own root: `python -m arbor run --config <config>` with this directory as the working directory
@@ -109,11 +125,11 @@ Never edit it here: a change is made in Arbor and the copy is taken again, whole
 maintainers' vendoring tool, with the same omissions, placeholders, profiler skill and examples. The tool refuses a
 copy that still names any of the replaced terms, or cites an internal board or ticket.
 
-This copy also carries a text-only scrub on top of the tag: internal board, job and plan references, operator decision
-logs, measured performance figures and the history of internal runs are removed. The vendoring tool applies it, as a
-patch over its own output, and refuses a tag the patch no longer fits, so a re-vendor keeps it. The tool also refuses a
-copy that still has a job id, a dated operator log, an internal plan or a measured step time, or, in Arbor's own text, a
-date (bar timestamp examples), a run, round, generation or iteration id, or a run's counts, times or figures.
+Up to `v0.9.2`, this copy carried a text-only scrub on top of the tag, applied by the vendoring tool as a patch: internal
+board, job and plan references, operator decision logs, measured performance figures and the history of internal runs
+removed. From `v0.9.3`, Arbor's own tree carries that cleanup, so no patch is applied. The tool still refuses a copy
+that has a job id, a dated operator log, an internal plan or a measured step time, or, in Arbor's own text, a date (bar
+timestamp examples), a run, round, generation or iteration id, or a run's counts, times or figures.
 
 Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,
 `[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). Secret

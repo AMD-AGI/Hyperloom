@@ -77,8 +77,8 @@ sig_mfma: <n>
 
 ## Integration — aiter CSV deployment
 
-Winning tile configs are written to:
-`/workspace/knowledge_base/aiter/configs/model_configs/dsv41flash_fp8fp4_tuned_fmoe.csv`
+Winning tile configs are written to the CSV the bench driver's `--deploy-csv` names (its default is
+in `validator/bench_moe_fp8fp4.py`).
 
 Use `--deploy --config-name <config> --tile-config <tile>` with the bench driver.
 The CSV is bind-mounted to the host git repo — changes are git-tracked automatically.

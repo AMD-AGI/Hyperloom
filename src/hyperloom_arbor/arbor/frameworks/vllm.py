@@ -9,13 +9,14 @@ from arbor.frameworks.base import STACK_ENV_PREFIXES, FrameworkAdapter
 
 class VLLM(FrameworkAdapter):
     name = "vllm"
+    default_entrypoint = "vllm serve"
     server_pattern = "[v]llm serve"
     native_module = "vllm._C"
     # `vllm serve` is the API server, which takes its engine down on SIGTERM; an
     # EngineCore or worker it leaves behind renames itself `VLLM::...`, so those
-    # get SIGTERM too once the grace period has passed. One campaign
-    # kept a server and its EngineCore holding most of each GPU's memory
-    # through every "stop" when only SGLang was signalled.
+    # get SIGTERM too once the grace period has passed. One campaign kept a
+    # server and its EngineCore holding most of each GPU's memory through
+    # every "stop" when only SGLang was signalled.
     stop_patterns = ("vllm serve",)
     post_grace_patterns = ("VLLM::",)
     env_prefixes = ("VLLM_",) + STACK_ENV_PREFIXES
@@ -39,7 +40,7 @@ class VLLM(FrameworkAdapter):
         # the served name; a server registering only one 404s the other.
         names = model_name if model_path in ("", model_name) else f"{model_name} {model_path}"
         return (
-            f"vllm serve {model_path} "
+            f"{self.entrypoint(config)} {model_path} "
             f"--served-model-name {names} "
             f"--host 0.0.0.0 --port {config.get('port', 8888)} "
             f"--tensor-parallel-size {tp} "

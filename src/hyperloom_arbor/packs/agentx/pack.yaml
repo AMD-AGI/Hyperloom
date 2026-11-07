@@ -32,4 +32,4 @@ constraints:
   - "Every code change must address a real hardware bottleneck confirmed by SIKL or rocprofv3."
   - "Do not modify InferenceX, AIPerf, or the validator scripts — they are outside the workspace."
   - "One change at a time. Gate it before touching anything else."
-  - "Before proposing any code change, search for whether NVIDIA already solved it (TRT-LLM, CUTLASS, vLLM CUDA path). Port proven techniques first."
+  - "Before proposing any code change, search for whether another backend already solved it (the framework's other GPU paths, public kernel libraries). Port proven techniques first."
