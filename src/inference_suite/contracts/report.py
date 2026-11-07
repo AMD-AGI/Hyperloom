@@ -68,7 +68,7 @@ class FailedStep(str, Enum):
     #: ``speculative_decoding_pinned``.
     GOLDEN_OWNED_TOUCHED = "golden_owned_touched"
     PORT_IN_USE = "port_in_use"
-    #: Magpie's ``gpu_selection.auto`` refusal.
+    #: A requested GPU is not visible or another process holds it; refused before boot.
     GPUS_UNAVAILABLE = "gpus_unavailable"
     SERVER_EXITED_BEFORE_READY = "server_exited_before_ready"
     #: ``hung_before_ready``.
