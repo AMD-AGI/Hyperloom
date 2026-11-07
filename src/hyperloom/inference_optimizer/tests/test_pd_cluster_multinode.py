@@ -267,7 +267,7 @@ def test_tracelens_patch_failure_reports_the_pod_error(monkeypatch: pytest.Monke
         _read_bundled_pod_python_script=lambda *_args: "print()",
         _poll_timeout_from_args=lambda _args: 30,
         _extract_pod_json=real_cli._extract_pod_json,
-        _infera_ssh_run_script=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+        _infera_ssh_bash_with_env=lambda *_args, **_kwargs: subprocess.CompletedProcess(
             ["ssh"], 1, stdout=stdout, stderr="bash: warning: setlocale: LC_ALL: cannot change locale\n"
         ),
     )
@@ -279,6 +279,44 @@ def test_tracelens_patch_failure_reports_the_pod_error(monkeypatch: pytest.Monke
     out = capsys.readouterr().out
     report = json.loads(out[out.index("{") :])
     assert [failure["error"] for failure in report["failures"]] == [pod_error, pod_error]
+
+
+def test_tracelens_patch_runs_under_the_container_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import argparse
+
+    from hyperloom.inference_optimizer.multi_node import cli as real_cli
+
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").write_text('#!/bin/sh\necho "venv-python $*"\n', encoding="utf-8")
+    (venv_bin / "python3").chmod(0o755)
+    environ = tmp_path / "environ"
+    environ.write_bytes(f"PATH={venv_bin}:/usr/bin:/bin\0HOME=/root\0".encode())
+    scripts: list[str] = []
+    fake = _FakeCli({})
+    fake.EXIT_CONFIG_ERROR = real_cli.EXIT_CONFIG_ERROR
+    fake._SHAPE_GATE_DEPS = ()
+    fake._read_bundled_pod_python_script = lambda *_args: "print('patched')"
+    fake._poll_timeout_from_args = lambda _args: 30
+    fake._extract_pod_json = real_cli._extract_pod_json
+
+    def _bash_with_env(state, ip, script, *, timeout, port=None):
+        scripts.append(script)
+        return subprocess.CompletedProcess(["ssh"], 0, stdout='{"status": "applied", "per_pod": [{}]}', stderr="")
+
+    fake._infera_ssh_bash_with_env = _bash_with_env
+    monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
+    monkeypatch.setattr(pd_cmds, "_require_state", lambda: dict(_PD_STATE))
+    monkeypatch.setattr(pd_cmds, "CONTAINER_ENVIRON_PATH", str(environ))
+
+    ns = argparse.Namespace(tracelens_root="/tl", sglang_version_pin=None, patch_set="roofline")
+    assert pd_cmds.apply_tracelens_patch(ns) == 0
+    assert len(scripts) == 2
+    ran = subprocess.run(
+        ["bash", "-c", scripts[0]], env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=True
+    )
+    assert ran.stdout.startswith("venv-python ")
+    assert "--local --tracelens-root /tl --patch-set roofline" in ran.stdout
 
 
 def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:

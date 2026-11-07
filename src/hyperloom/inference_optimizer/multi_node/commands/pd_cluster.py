@@ -11,6 +11,7 @@ Prefill and decode receive ``SGLANG_TORCH_PROFILER_DIR``; the router does not.
 from __future__ import annotations
 
 import argparse
+import base64
 import dataclasses
 import json
 import os
@@ -253,12 +254,34 @@ def _engine_pods(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [pod for pod in pods if isinstance(pod, dict) and pod.get("podIP")]
 
 
-def _flag_probe_script(environ_path: str = "/proc/1/environ") -> str:
-    """Bash that lists ``sglang.launch_server --help`` options under the container environment in ``environ_path``."""
+CONTAINER_ENVIRON_PATH = "/proc/1/environ"
+
+
+def _container_env_line(environ_path: str) -> str:
+    """Bash that exports the container's interpreter search paths read from ``environ_path``."""
     return (
         "while IFS= read -r -d '' kv; do case \"$kv\" in PATH=*|PYTHONPATH=*|VIRTUAL_ENV=*|LD_LIBRARY_PATH=*) "
         f'export "$kv";; esac; done < {shlex.quote(environ_path)}\n'
-        "python3 -m sglang.launch_server --help 2>/dev/null | grep -oE -- '--[a-z][a-z0-9-]*' | sort -u"
+    )
+
+
+def _flag_probe_script(environ_path: str = CONTAINER_ENVIRON_PATH) -> str:
+    """Bash that lists ``sglang.launch_server --help`` options under the container environment in ``environ_path``."""
+    return (
+        _container_env_line(environ_path)
+        + "python3 -m sglang.launch_server --help 2>/dev/null | grep -oE -- '--[a-z][a-z0-9-]*' | sort -u"
+    )
+
+
+def _pod_python_script(text: str, interpreter: str, args: str) -> str:
+    """Bash that writes the Python ``text`` to a temp file and runs it with ``args`` under the container environment."""
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return (
+        _container_env_line(CONTAINER_ENVIRON_PATH)
+        + 'script="$(mktemp)"\n'
+        + f'echo {encoded} | base64 -d > "$script"\n'
+        + f'{interpreter} "$script" {args}\n'
+        + 'rc=$?\nrm -f "$script"\nexit $rc'
     )
 
 
@@ -414,7 +437,7 @@ def apply_tracelens_patch(args: argparse.Namespace) -> int:
         op_args += f" --patch-set {shlex.quote(str(patch_set))}"
     timeout = cli._poll_timeout_from_args(args)
     pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "python3")
-    from .._internal.ssh_client import RemoteScript
+    pod_script = _pod_python_script(script, pod_python, op_args)
 
     per_pod: list[dict] = []
     failures: list[dict] = []
@@ -423,13 +446,7 @@ def apply_tracelens_patch(args: argparse.Namespace) -> int:
         port = int(target.get("sshPort") or state.get("ssh_port") or 0)
         info(f"apply-tracelens-patch ({state.get('backend')}): ssh -> {ip}:{port}")
         try:
-            completed = cli._infera_ssh_run_script(
-                state,
-                ip,
-                RemoteScript(script, pod_python, op_args),
-                timeout=timeout,
-                port=port,
-            )
+            completed = cli._infera_ssh_bash_with_env(state, ip, pod_script, timeout=timeout, port=port)
         except subprocess.TimeoutExpired:
             failures.append({"host": ip, "sshPort": port, "error": f"timeout after {timeout}s"})
             continue
