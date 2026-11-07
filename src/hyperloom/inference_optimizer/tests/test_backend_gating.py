@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 3-gate tests: Magpie install in preflight and install.sh is gated by benchmark backend."""
+"""Stage 3-gate tests: Magpie install in preflight is gated by benchmark backend."""
 
 from __future__ import annotations
 
@@ -41,35 +41,6 @@ def test_preflight_skips_magpie_install_under_bypass(monkeypatch):
         ("ensure_magpie", "skipped", "benchmark_backend_not_magpie"),
     ]
     assert "MAGPIE_PATH" not in preflight_mod.os.environ
-
-
-def test_install_sh_gates_magpie_calls():
-    install_sh = Path(preflight_mod.__file__).resolve().parent.parent / "assets" / "install.sh"
-    text = install_sh.read_text(encoding="utf-8")
-    # Backend-based gate present.
-    assert "HYPERLOOM_BENCHMARK_BACKEND" in text
-    assert 'if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then' in text
-    # Normalization must strip ONLY leading/trailing whitespace (mirrors Python's .strip().lower()) so "
-    # bypass"/"bypass " skip Magpie at install time too, while an internal-space value like "by pass" stays !=
-    # "bypass" (matching runtime, which resolves unknown values back to magpie).
-    assert "sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'" in text
-    assert "tr -d '[:space:]'" not in text
-    # ensure_magpie runs only for non-bypass (inside the first else…fi block).
-    gate_idx = text.index("HYPERLOOM_BENCHMARK_BACKEND_LC=")
-    else_idx = text.index("else", gate_idx)
-    fi_idx = text.index("\nfi\n", gate_idx)
-    magpie_idx = text.index("ensure_magpie\n", gate_idx)
-    assert else_idx < magpie_idx < fi_idx
-    # InferenceX stays unconditional (after the fi).
-    inferencex_idx = text.index("ensure_inferencex\n", fi_idx)
-    assert inferencex_idx > fi_idx
-    # The atomic-scripts patch also scrubs the redundant --concurrent-requests eval flag from the InferenceX benchmark
-    # copies, so it must run AFTER ensure_inferencex (which exports $INFERENCEX_PATH) and is gated on non-bypass by
-    # its own guard rather than the first else branch.
-    patch_guard_idx = text.index('if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then', gate_idx)
-    patch_idx = text.index("ensure_magpie_compat_patches\n", gate_idx)
-    patch_fi_idx = text.index("\nfi\n", patch_guard_idx)
-    assert inferencex_idx < patch_guard_idx < patch_idx < patch_fi_idx
 
 
 def test_kernel_install_validates_ray_cli_and_serving_slot():

@@ -16,7 +16,6 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 DEFAULT_REPO = "https://github.com/SemiAnalysisAI/InferenceX.git"
-# MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
 DEFAULT_REF = "3d5581562f643f9bdeb8410cd924e2c70906c966"
 
 
@@ -78,7 +77,7 @@ def unusable_reason(path: Path | str) -> str:
 
 
 def destination_name(ref: str) -> str:
-    """Per-revision checkout dir name, matching install.sh's ``InferenceX@<sha>``."""
+    """Per-revision checkout dir name, ``InferenceX@<sha>``."""
     slug = ref if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref or "") else re.sub(r"[^A-Za-z0-9._-]", "-", ref or "head")
     return f"InferenceX@{slug}"
 
@@ -122,8 +121,8 @@ def clone(dest: Path) -> str | None:
 def detect() -> str:
     """A writable InferenceX checkout at the pinned revision, or "" when there is none.
 
-    Detection order: the Magpie submodule (canonical post-install.sh), then the
-    installer's per-revision cache checkout (resolved via ``resolve_dep_dir`` so
+    Detection order: the Magpie submodule, then the
+    per-revision cache checkout (resolved via ``resolve_dep_dir`` so
     a process that did not inherit INFERENCEX_PATH still finds it), then the
     bare dir. A complete checkout at the wrong revision is refused rather than
     accepted silently.

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import subprocess
 import os
-import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -225,21 +224,10 @@ def test_clone_destination_is_per_revision():
     assert "/" not in inferencex_checkout.destination_name("feature/x y")
 
 
-def _installer_pin() -> str:
-    installer = Path(cli_preflight.__file__).resolve().parents[1] / "assets" / "install.sh"
-    match = re.search(r'^INFERENCEX_REF="\$\{INFERENCEX_REF:-([0-9a-f]{40})\}"$', installer.read_text(), re.M)
-    assert match, "installer must declare its reproducible default revision"
-    return match[1]
-
-
-def test_default_inferencex_pin_is_consistent():
-    assert _installer_pin() == inferencex_checkout.DEFAULT_REF
-
-
 @pytest.mark.parametrize("explicit_ref", [None, "a" * 40])
 def test_ensure_inferencex_reuses_installed_pin_without_network(tmp_path, monkeypatch, explicit_ref):
-    """An installer checkout survives CLI preflight, including an operator's matching pin override."""
-    installed_ref = explicit_ref or _installer_pin()
+    """A checkout at the pin survives CLI preflight, including an operator's matching pin override."""
+    installed_ref = explicit_ref or inferencex_checkout.DEFAULT_REF
     checkout = _checkout(tmp_path, f"InferenceX@{installed_ref}")
     monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
     if explicit_ref:
