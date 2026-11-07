@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from inference_suite.contracts import FailedStep
+from inference_suite.contracts import FailedStep, RunLayout
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
 from hyperloom_common.env import is_truthy
@@ -44,7 +44,6 @@ from hyperloom.common.outside_facts import (
     ENV_NUM_PROMPTS,
     ENV_RUN_EVAL,
     ENV_TP,
-    MAGPIE_AGENTX_CLIENT_LOG,
     ROCR_VISIBLE_DEVICES_ENV,
 )
 from hyperloom.contracts.measurement import PhaseTiming, SandboxFacts
@@ -128,7 +127,7 @@ from hyperloom.orchestrator.state.base_launch import freeze_base
 __all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
 
 #: ``VariantResult.error_class`` of a round the per-round cap reaped.
-_TIMEOUT_CLASSES = frozenset({FailedStep.ROUND_TIMEOUT.value, "magpie_timeout", "warmup_magpie_timeout"})
+_TIMEOUT_CLASSES = frozenset({FailedStep.ROUND_TIMEOUT.value})
 #: Return codes of rounds the run itself stopped, keyed by the class the result carries.
 _STOP_RETURNCODES = {
     SESSION_TIME_EXHAUSTED_CLASS: SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -1170,14 +1169,12 @@ def _failure_logs(failing: list[VariantResult]) -> list[str]:
 
 
 def _client_logs(failing: list[VariantResult]) -> list[str]:
-    """The tails of the AgentX replay client's own log beside the server log of every result with a failed round.
+    """The tails of the AgentX replay client's own log in the run_dir of every result with a failed round.
 
-    Magpie records only the client's exit code as the round's error; what the client was refused is in this log alone.
+    The round's report names only the client's exit code; what the client was refused is in this log alone.
     """
     return [
-        _read_tail(str(Path(result.server_log_path).parent / MAGPIE_AGENTX_CLIENT_LOG))
-        for result in failing
-        if result.server_log_path
+        _read_tail(str(RunLayout(Path(result.workspace)).agentx_client_log)) for result in failing if result.workspace
     ]
 
 

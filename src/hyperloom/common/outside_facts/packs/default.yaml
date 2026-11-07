@@ -720,19 +720,6 @@ facts:
                     path = inferencex-e2e/utils/srt-slurm
                     url = https://github.com/NVIDIA/srt-slurm.git
 
-  magpie_agentx_client_log:
-    kind: names
-    project: Magpie (native AgentX runtime at the commit Hyperloom pins)
-    reason: >-
-      A native AgentX round boots its server and then runs the InferenceX replay client with its output written to this
-      file in the round's workspace, beside server.log (agentx_runtime.py, _execute_local). The client's own failures (a
-      Hugging Face download refused, say) are only in this file: Magpie records the client's exit code as the round's
-      error and keeps the client's words out of benchmark_stderr.log.
-    names:
-      file: agentx_client.log
-    examples:
-      - "hyperloom.measure.local: a failed round's client log is read from this file beside its server.log, for the infrastructure causes the client states"
-
   hub_rate_limited:
     kind: log_regex
     project: huggingface_hub (the Hub client InferenceX's replay client and its hf CLI download with)
