@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import optional_positive_float, to_float
 from hyperloom_common.env import is_truthy
+from hyperloom.common.benchmark_config import PointError, read_benchmark_point
 from hyperloom.common.gain_math import accuracy_meets_floor
 from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
@@ -74,20 +76,16 @@ _WORKLOAD_ARG_COUNTS: dict[str, str] = {
 def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     """Extract KB workload-tag fields from a baseline-materialized Magpie YAML."""
     try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
+        point = read_benchmark_point(Path(yaml_path))
+    except (OSError, PointError, yaml.YAMLError):
         return {}
-    out: dict[str, Any] = {}
-    bm = cfg.get("benchmark") if isinstance(cfg, dict) else None
-    if not isinstance(bm, dict):
-        return out
-    for key in ("workload_mode", "quant_scheme"):
-        value = bm.get(key)
-        if value not in (None, "", 0):
-            out[key] = value
-    envs = bm.get("envs") if isinstance(bm.get("envs"), dict) else {}
-    declared = envs.get(server_args_env_name(bm.get("framework")))
+    out: dict[str, Any] = {
+        key: value
+        for key, value in (("workload_mode", point.workload_mode), ("quant_scheme", point.quant_scheme))
+        if value
+    }
+    envs = point.envs
+    declared = envs.get(server_args_env_name(point.framework))
     tokens = declared.split() if isinstance(declared, str) else []
     for index, token in enumerate(tokens):
         out.update(_WORKLOAD_ARG_FLAGS.get(token, {}))
