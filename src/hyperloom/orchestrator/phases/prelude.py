@@ -38,7 +38,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
 
 from . import machine_state as _phase_state
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args, merge_cumulative_extra_server_args
-from hyperloom.inference_optimizer.inferencex_checkout import pick_tree
 from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_OTHER,
@@ -1491,7 +1490,6 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             )
         if promoted_checkout:
             outcome["active_framework_root"] = promoted_checkout
-            state.active_inferencex_path = pick_tree(promotion["target_repos"], state.active_inferencex_path)
         outcome["status"] = "reproduced"
         outcome.pop("replayed_patch_refs", None)
         if replayed_patch_refs:
