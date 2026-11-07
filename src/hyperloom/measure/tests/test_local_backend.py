@@ -35,6 +35,7 @@ from hyperloom.orchestrator.actions.executors import (
     VariantResult,
 )
 from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
+from inference_suite.contracts import RunLayout
 
 
 def _point(directory: Path, name: str, *, conc: int = 4, run_eval: object = "false", **counts: object) -> Path:
@@ -639,10 +640,9 @@ def test_the_session_is_a_fresh_empty_directory_and_the_environment_is_put_back(
     assert not Path(seen["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] or "x").exists()
 
 
-@pytest.mark.parametrize("timeout_class", ["round_timeout", "magpie_timeout"])
-def test_the_environment_is_put_back_when_the_test_raises(grid, tmp_path, monkeypatch, timeout_class):
+def test_the_environment_is_put_back_when_the_test_raises(grid, tmp_path, monkeypatch):
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
-    grid.answers["test"] = grid.result("test", status="failed", error_class=timeout_class)
+    grid.answers["test"] = grid.result("test", status="failed", error_class="round_timeout")
 
     with pytest.raises(subprocess.TimeoutExpired):
         _run(_call(tmp_path, env_overrides={"HL_TEST_FLAG": "on"}))
@@ -1758,10 +1758,11 @@ def test_a_failed_round_is_classified_from_the_flag_error_in_its_server_log(grid
 
 
 def test_a_round_whose_replay_client_the_hub_refused_is_an_infrastructure_failure(grid, tmp_path):
-    """Magpie records only the client's exit code; the Hub's 429 is in agentx_client.log beside server.log."""
+    """The round's report names only the client's exit code; the Hub's 429 is in the run_dir's AgentX client log."""
     refusal = "429 Too Many Requests: you have reached your 'api' rate limit."
     result = _failed_round_with_logs(grid, tmp_path, server_log="INFO waiting for the server to be ready\n")
-    client_log = Path(result.server_log_path).parent / "agentx_client.log"
+    client_log = RunLayout(Path(result.workspace)).agentx_client_log
+    client_log.parent.mkdir(parents=True, exist_ok=True)
     client_log.write_text(f"Fetching 9 files\nhuggingface_hub.errors.HfHubHTTPError: \n\n{refusal}\n", encoding="utf-8")
     grid.answers["test"] = result
 

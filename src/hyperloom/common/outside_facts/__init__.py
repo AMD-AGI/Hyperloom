@@ -88,7 +88,6 @@ __all__ = [
     "KFD_RENDER_MINOR_KEY",
     "KFD_ROOT",
     "KFD_VRAM_PREFIX",
-    "MAGPIE_AGENTX_CLIENT_LOG",
     "PID_NAMESPACE_LINK",
     "PY_IMPORT_ERROR",
     "PY_MODULE_NOT_FOUND_ERROR",
@@ -286,7 +285,6 @@ AIPERF_SUBMODULE = _aiperf_source["submodule"]
 AIPERF_PARSER_FILE = _aiperf_source["parser_file"]
 AIPERF_OUTPUT_LENGTH_FILE = _aiperf_source["output_length_file"]
 
-MAGPIE_AGENTX_CLIENT_LOG = _PACK.names("magpie_agentx_client_log", "file")["file"]
 HUB_RATE_LIMITED = _PACK.pattern("hub_rate_limited")
 
 
