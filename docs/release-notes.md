@@ -20,6 +20,15 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A `custom` workload's entrypoint is named after the board itself.**
+  `--benchmark-scripts-dir` is searched for `custom_<gpu-type>.sh` with the
+  board as given, so `mi308x`, `mi325x` and `mi350x` now look for
+  `custom_mi308x.sh`, `custom_mi325x.sh` and `custom_mi350x.sh`; they were
+  folded into `custom_mi300x.sh` and `custom_mi355x.sh` before. **Upgrade
+  note:** on those boards, rename the script, or keep it the only `.sh` in
+  the directory; an unresolved entrypoint exits 2 at launch. See
+  [Optimize a custom workload](how-to/optimize-custom-workload.md#the-entrypoint).
+
 - **A fixed-workload session resolves its base launch once and freezes it
   as `base_launch.json`.** The base comes from `--reference-script`, else
   InferenceX `main`, else the framework's cookbook `main`, else a default
