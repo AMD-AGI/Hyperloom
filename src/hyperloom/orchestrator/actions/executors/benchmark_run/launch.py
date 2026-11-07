@@ -38,7 +38,7 @@ from ..benchmark_result import (
     snapshot_workspaces,
 )
 from .._failed_step import failed_step_error_class
-from .._round_folder import RoundFolder
+from .._round_folder import MAGPIE_REPORT_FILE, RoundFolder, round_report_path
 from .._suite_config import (
     SuiteRound,
     SuiteRoundRefused,
@@ -58,7 +58,6 @@ from .records import (
     _should_establish_quality_ref,
     _stopped_round_result,
 )
-from .rounds import _BENCHMARK_REPORT_NAME, _round_report_path
 
 if TYPE_CHECKING:
     from ....loop.sub_agent_runner import RunnerContext
@@ -206,7 +205,7 @@ def _suite_round_failure(
         error_class, error = failed_step_error_class(FailedStep(step)), measurement.get("failure_detail") or step
     else:
         error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
-    report_path = _round_report_path(finished.workspace)
+    report_path = round_report_path(finished.workspace)
     return {
         "status": "failed",
         "error_class": error_class,
@@ -567,7 +566,7 @@ class _BenchmarkLaunchMixin:
             )
         if workspace is None:
             return self._no_workspace_failure(round_, finished, boot, harvested)
-        report_path = workspace / _BENCHMARK_REPORT_NAME
+        report_path = workspace / MAGPIE_REPORT_FILE
         report = read_json(report_path, None, require_dict=True)
         measurement = extract_benchmark_measurement(
             report,
@@ -592,7 +591,7 @@ class _BenchmarkLaunchMixin:
         warnings: list[str],
     ) -> dict[str, Any]:
         """The result of a round that measured, with the launch evidence of the server it measured attached."""
-        report_path = _round_report_path(finished.workspace)
+        report_path = round_report_path(finished.workspace)
         result = {
             "status": "succeeded",
             **measurement,

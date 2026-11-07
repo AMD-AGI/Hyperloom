@@ -167,14 +167,21 @@ def _resolve_leak_roots(leak_root: Path | None = None) -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def _run_workspaces(root: Path) -> list[Path]:
+    """The workspaces rounds left in ``root``: Magpie's ``benchmark_*`` directories and inference_suite run_dirs."""
+    if not root.is_dir():
+        return []
+    return [p for p in root.iterdir() if p.is_dir() and (p.name.startswith("benchmark_") or is_round_folder(p))]
+
+
 def snapshot_workspaces(root: Path) -> frozenset[Path]:
-    """Return the ``benchmark_*`` workspaces present in ``root`` right now."""
-    return frozenset(p.resolve() for p in root.glob("benchmark_*") if p.is_dir())
+    """Return the round workspaces present in ``root`` right now."""
+    return frozenset(p.resolve() for p in _run_workspaces(root))
 
 
 def select_run_workspace(root: Path, *, known_before: frozenset[Path]) -> Path | None:
-    """Return the ``benchmark_*`` workspace this run created in ``root``."""
-    fresh = [p for p in root.glob("benchmark_*") if p.is_dir() and p.resolve() not in known_before]
+    """Return the round workspace this run created in ``root``."""
+    fresh = [p for p in _run_workspaces(root) if p.resolve() not in known_before]
     return max(fresh, default=None)
 
 

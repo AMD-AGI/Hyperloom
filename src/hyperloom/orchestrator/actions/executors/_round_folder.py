@@ -23,9 +23,18 @@ from inference_suite.contracts.layout import REPORT_FILE
 from ._gpu_metrics import write_gpu_metrics_from_report
 
 
+#: The file Magpie writes its own measurement to, inside the workspace it creates.
+MAGPIE_REPORT_FILE = "benchmark_report.json"
+
+
 def is_round_folder(path: Path) -> bool:
     """Whether ``path`` is an inference_suite run_dir, which every round that ran leaves with its report."""
     return RunLayout(path).report.is_file()
+
+
+def round_report_path(workspace: Path) -> Path:
+    """The report a round left in ``workspace``: an inference_suite run_dir's, else Magpie's."""
+    return RunLayout(workspace).report if is_round_folder(workspace) else workspace / MAGPIE_REPORT_FILE
 
 
 @dataclass(frozen=True)
@@ -55,4 +64,4 @@ class RoundFolder:
         return write_gpu_metrics_from_report(round_dir, self.report.to_document(), source=REPORT_FILE)
 
 
-__all__ = ["RoundFolder", "is_round_folder"]
+__all__ = ["MAGPIE_REPORT_FILE", "RoundFolder", "is_round_folder", "round_report_path"]
