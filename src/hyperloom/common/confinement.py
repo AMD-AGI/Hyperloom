@@ -14,7 +14,8 @@ configuration, never from a list of tool names in code (:func:`credential_paths`
 directories, every environment variable that names a credential location, Hugging Face's login files, and the files
 the app registers in :data:`PRIVATE_PATHS` as it creates them. So nothing broad under a credential location is bound
 because a program lives there: :func:`toolchain_paths` binds a program's own directory, and its parent only away from
-those locations.
+those locations; a search-path entry (or any other path it derives) that is one is not bound, and one that holds one
+is bound entry by entry around it.
 
 Nothing is resolved through what an agent writes. A name in a tree the agent writes may be a symlink it left there, to
 any host path, or become one before the next launch; so a path reached through such a tree (looked up in a directory
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import pwd
 import shutil
@@ -92,6 +94,10 @@ _ETC = Path("/etc")
 _ROOT = Path("/")
 #: How many symlinks resolving one path may follow, as the kernel allows (``ELOOP`` past it, so nothing is bound).
 _MAX_LINKS = 40
+
+log = logging.getLogger(__name__)
+_SAID: set[Path] = set()
+_SAID_LOCK = threading.Lock()
 
 
 def _real(path: str | os.PathLike[str]) -> Path:
@@ -684,6 +690,51 @@ def _resolver() -> Iterator[Path]:
             yield target
 
 
+def _say_once(path: Path, message: str) -> None:
+    with _SAID_LOCK:
+        if path in _SAID:
+            return
+        _SAID.add(path)
+    log.warning(message)
+
+
+def _entries_around(path: Path, roots: tuple[Path, ...], depth: int) -> Iterator[Path]:
+    """The entries of the directory ``path`` (which holds a credential location of ``roots``, resolved) that neither
+    are nor hold one, and those that hold one opened up the same way ``depth`` levels down; an entry is judged by
+    where it resolves, so a link to a credential location is left out too. What lies deeper, or cannot be listed, is
+    left out: nothing of it is bound."""
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return
+    for name in names:
+        entry = path / name
+        real = _real(entry)
+        if not any(_at_or_under(root, real) for root in roots):
+            yield entry
+        elif real not in roots and depth > 1 and real.is_dir():
+            yield from _entries_around(entry, roots, depth - 1)
+
+
+def _around_logins(paths: Iterable[Path], roots: tuple[Path, ...]) -> Iterator[Path]:
+    """``paths`` without the credential locations ``roots`` (resolved): one that is one (a ``PATH`` entry that is the
+    home) is not bound, and said once, since bound whole it would show every login in it, and a mask is only ever
+    below a bound path; one that holds one is bound entry by entry around it (:func:`_entries_around`), so no login
+    in it is shown, nor one made there after the launch."""
+    for path in paths:
+        real = _real(path)
+        if real in roots:
+            _say_once(
+                real,
+                f"confinement: {path} is not shown to the agent: it is a credential location (a home, or a tool's "
+                "login), and bound whole it would show every login in it; programs there are not found inside",
+            )
+        elif any(real in root.parents for root in roots):
+            yield from _entries_around(path, roots, HOME_DEPTH)
+        else:
+            yield path
+
+
 def toolchain_paths(environ: Mapping[str, str], argv0: str, *, writable: Iterable[Path]) -> tuple[Path, ...]:
     """What a child needs to read to run ``argv0`` under ``environ``: the system roots, this interpreter's prefixes,
     the child's interpreter's import path (:func:`interpreter_search_path`), every entry of its search-path variables,
@@ -692,13 +743,16 @@ def toolchain_paths(environ: Mapping[str, str], argv0: str, *, writable: Iterabl
     sandbox mounts its own), ``/sys`` (:attr:`Confinement.sys_paths`), nor what lies in the trees the child writes
     (``writable``; its scratch too, when that is on the host) or is reached through them: those show it already, a
     read-only bind there would take the child's own files from it, and where a link there points is the agent's
-    choice."""
+    choice. Nor, beyond the system roots, a credential location of the child's or this process's (a ``PATH`` entry
+    that is the home), and what holds one only entry by entry around it (:func:`_around_logins`)."""
     agent = _trees(writable)
-    found: list[Path] = [Path(root) for root in SYSTEM_ROOTS]
-    found.extend(Path(root) for root in interpreter_roots())
-    found.extend(interpreter_search_path(environ, writable=agent))
+    derived: list[Path] = [Path(root) for root in interpreter_roots()]
+    derived.extend(interpreter_search_path(environ, writable=agent))
     for name in (*SEARCH_PATH_VARIABLES, *CA_VARIABLES, *DATA_VARIABLES):
-        found.extend(_absolute_entries(environ.get(name, "")))
-    found.extend(_program_dirs(argv0, environ, agent))
-    found.extend(_resolver())
+        derived.extend(_absolute_entries(environ.get(name, "")))
+    derived.extend(_program_dirs(argv0, environ, agent))
+    derived.extend(_resolver())
+    kept = [path for path in derived if path != _ROOT and not _agents(path, agent)]
+    found = [Path(root) for root in SYSTEM_ROOTS]
+    found.extend(_around_logins(dict.fromkeys(kept), _credential_roots(environ)))
     return tuple(dict.fromkeys(path for path in found if path != _ROOT and not _agents(path, agent)))
