@@ -104,7 +104,7 @@ _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 # The ``XDIT_`` pair predates ``--framework custom`` and is still both read and
 # written because operator bench scripts live outside this repo and cannot be
 # renamed in lockstep; drop it once those scripts have moved over.
-_QUALITY_REF_ENVS = ("HYPERLOOM_QUALITY_REF", "XDIT_QUALITY_REF")
+QUALITY_REF_ENVS = ("HYPERLOOM_QUALITY_REF", "XDIT_QUALITY_REF")
 _QUALITY_REF_WRITE_ENVS = ("HYPERLOOM_QUALITY_REF_WRITE", "XDIT_QUALITY_REF_WRITE")
 
 
@@ -1095,7 +1095,7 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
     # ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``) so baseline + variants
     # resolve the same file.
     if not window.serves_requests:
-        _qref = _first_env(_QUALITY_REF_ENVS)
+        _qref = _first_env(QUALITY_REF_ENVS)
         if not _qref:
             from hyperloom.inference_optimizer.session.paths import session_dir
 
@@ -1106,7 +1106,7 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
             _ref_compare, _ref_write = "", (_first_env(_QUALITY_REF_WRITE_ENVS) or _qref)
         else:
             _ref_compare, _ref_write = _qref, ""
-        for _name in _QUALITY_REF_ENVS:
+        for _name in QUALITY_REF_ENVS:
             envs[_name] = _ref_compare
         for _name in _QUALITY_REF_WRITE_ENVS:
             envs[_name] = _ref_write
