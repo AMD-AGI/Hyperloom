@@ -18,7 +18,8 @@ from pathlib import Path
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.contracts.measurement import AccuracyValue
-from inference_suite.contracts import EvalResult, Report, RunLayout
+from hyperloom.orchestrator.actions.executors import RoundFolder, is_round_folder
+from inference_suite.contracts import EvalResult
 
 __all__ = ["DISCARDED_DIRS", "RESULT_METRICS", "read_accuracy"]
 
@@ -86,10 +87,10 @@ def _report_values(result: EvalResult) -> tuple[AccuracyValue, ...]:
     )
 
 
-def _run_dir_accuracy(layout: RunLayout) -> tuple[AccuracyValue, ...]:
+def _run_dir_accuracy(directory: Path) -> tuple[AccuracyValue, ...]:
     """The scores the round's report holds; none for a round whose report is unreadable or that did not evaluate."""
     try:
-        report = Report.from_document(json.loads(layout.report.read_text(encoding="utf-8")))
+        report = RoundFolder.read(directory).report
     except (OSError, ValueError):
         return ()
     return () if report.eval is None else _report_values(report.eval)
@@ -102,9 +103,8 @@ def read_accuracy(directory: Path) -> tuple[AccuracyValue, ...]:
     newest; a file that cannot be read or holds no recognised metric falls back to the one before it. An inference_suite
     run_dir is read through its report alone.
     """
-    layout = RunLayout(Path(directory))
-    if layout.report.is_file():
-        return _run_dir_accuracy(layout)
+    if is_round_folder(Path(directory)):
+        return _run_dir_accuracy(Path(directory))
     for path in reversed(_result_files(directory)):
         try:
             values = _values(json.loads(path.read_text(encoding="utf-8")))
