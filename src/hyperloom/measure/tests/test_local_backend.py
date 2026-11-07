@@ -28,6 +28,7 @@ from hyperloom.measure.runner.rounds import rounds_document
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.tests import eval_refusal_logs, test_log_causes
 from hyperloom.measure.tests._inferencex import CLIENT, CLIENT_PATH, LIBRARY, LIBRARY_PATH, stock_checkout
+from hyperloom.measure.tests.run_dirs import write_run_dir
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -206,7 +207,7 @@ def test_a_point_that_run_grid_did_not_warn_about_carries_none(grid, tmp_path):
 
 def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(grid, unheld, tmp_path):
     result = grid.result("test", returncode=0)
-    (Path(result.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+    write_run_dir(Path(result.workspace), eval_code=3)
     grid.answers["test"] = result
     point = _point(tmp_path, "acc", run_eval="true")
 
@@ -216,46 +217,45 @@ def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(gri
     assert outcome.returncode == 3
 
 
-def _lm_eval_results(directory: Path, score: float) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    document = {"results": {"gsm8k": {"exact_match,flexible-extract": score}}}
-    (directory / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+#: The version every run_dir report of these tests states for its evaluation.
+LM_EVAL_VERSION = "lm_eval=0.4.9;gsm8k=3"
+
+
+def _evaluated(run_dir: Path, score: float) -> None:
+    """The round in ``run_dir`` evaluated ``score``, as its report says."""
+    write_run_dir(run_dir, scores={"exact_match,flexible-extract": score}, eval_code=0)
 
 
 def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(grid, unheld, tmp_path):
     result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
     workspace = Path(result.workspace)
-    _lm_eval_results(workspace / "eval_output", 0.64)
-    _lm_eval_results(workspace.parent / "warmup_round" / "bench" / "eval_output", 0.10)
+    _evaluated(workspace, 0.64)
+    _evaluated(workspace.parent / "warmup_round", 0.10)
     grid.answers["test"] = result
     point = _point(tmp_path, "acc", run_eval="true")
 
     outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
 
     by_phase = {r.phase: r.accuracy for r in outcome.rounds}
-    assert by_phase["accuracy"] == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),)
+    assert by_phase["accuracy"] == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64, LM_EVAL_VERSION),)
     assert by_phase["warmup"] == by_phase["measure"] == ()
 
 
 def test_the_accuracy_round_carries_the_version_lm_eval_reported(grid, unheld, tmp_path):
     result = grid.result("test")
-    workspace = Path(result.workspace)
-    workspace.joinpath("eval_output").mkdir(parents=True, exist_ok=True)
-    document = {"results": {"gsm8k": {"exact_match,flexible-extract": 0.64}}, "versions": {"gsm8k": 3.0}}
-    document["lm_eval_version"] = "0.4.13"
-    (workspace / "eval_output" / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+    _evaluated(Path(result.workspace), 0.64)
     grid.answers["test"] = result
     point = _point(tmp_path, "acc", run_eval="true")
 
     outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
 
     (value,) = [r.accuracy for r in outcome.rounds if r.phase == "accuracy"][0]
-    assert value.version == "lm_eval=0.4.13;gsm8k=3"
+    assert value.version == "lm_eval=0.4.9;gsm8k=3"
 
 
 def test_an_accuracy_round_with_only_a_warmup_evaluation_carries_no_score(grid, tmp_path):
     result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
-    _lm_eval_results(Path(result.workspace).parent / "warmup_round" / "eval_output", 0.10)
+    _evaluated(Path(result.workspace).parent / "warmup_round", 0.10)
     grid.answers["test"] = result
     point = _point(tmp_path, "acc", run_eval="true")
 
@@ -311,9 +311,9 @@ def _graded_answers(grid: _Grid, score: float = 0.64) -> VariantResult:
         grid.result("test", output_throughput=2222.0),
         grid.result("eval", note="evaluation_only"),
     )
-    _lm_eval_results(Path(warmup.workspace) / "eval_output", 0.10)
-    _lm_eval_results(Path(measured.workspace) / "eval_output", 0.20)
-    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", score)
+    _evaluated(Path(warmup.workspace), 0.10)
+    _evaluated(Path(measured.workspace), 0.20)
+    _evaluated(Path(evaluation.workspace), score)
     grid.answers.update(warmup=warmup, test=measured, eval=evaluation)
     return evaluation
 
@@ -390,7 +390,7 @@ def test_the_accuracy_of_a_graded_test_is_read_from_its_evaluation_round(grid, s
         Path(grid.answers["warmup"].workspace),
         Path(grid.answers["test"].workspace),
     )
-    assert accuracy.accuracy == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),)
+    assert accuracy.accuracy == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64, LM_EVAL_VERSION),)
     assert warmed.accuracy == measured.accuracy == ()
     assert outcome.returncode == 0
 
@@ -409,7 +409,7 @@ def test_the_rounds_file_of_a_graded_test_lists_its_rounds_in_the_order_they_ran
     assert [entry.get("accuracy") for entry in document] == [
         None,
         None,
-        [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": 0.64}],
+        [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": 0.64, "version": LM_EVAL_VERSION}],
     ]
 
 
@@ -430,7 +430,7 @@ def test_the_warmup_round_of_a_held_test_says_what_run_grid_says_of_a_discarded_
 
 def test_the_eval_exit_code_of_a_graded_test_is_the_one_its_evaluation_round_recorded(grid, server, tmp_path):
     evaluation = _graded_answers(grid)
-    (Path(evaluation.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+    write_run_dir(Path(evaluation.workspace), scores={"exact_match,flexible-extract": 0.64}, eval_code=3)
 
     outcome = _run(_graded_call(tmp_path))
 
@@ -441,6 +441,7 @@ def test_the_eval_exit_code_of_a_graded_test_is_the_one_its_evaluation_round_rec
 def test_a_server_that_dies_in_the_evaluation_fails_the_accuracy_and_keeps_the_measured_reading(grid, server, tmp_path):
     _graded_answers(grid)
     workspace = Path(grid.answers["eval"].workspace)
+    write_run_dir(workspace)  # the evaluation never finished, so the report holds no score and no exit code of it
     (workspace / "server.log").write_text(test_log_causes.ILLEGAL_ADDRESS_LOG, encoding="utf-8")
     grid.answers["eval"] = grid.result(
         "eval",
@@ -509,6 +510,7 @@ def test_a_graded_test_the_run_stops_in_a_round_reports_the_stop_and_runs_no_rou
     grid.answers[round_name] = grid.result(
         round_name, status="failed", returncode=None, error_class="session_time_exhausted", error="out of time"
     )
+    write_run_dir(Path(grid.answers[round_name].workspace))  # the stopped round evaluated nothing
 
     outcome = _run(_graded_call(tmp_path))
 
@@ -541,7 +543,7 @@ def test_a_graded_test_without_a_warmup_boots_in_its_measured_round_and_evaluate
 def test_a_graded_test_on_a_framework_that_cannot_hold_a_server_evaluates_in_its_one_round(monkeypatch, grid, tmp_path):
     _Server(monkeypatch, eligible=False)
     result = grid.result("test")
-    _lm_eval_results(Path(result.workspace) / "eval_output", 0.64)
+    _evaluated(Path(result.workspace), 0.64)
     grid.answers["test"] = result
 
     outcome = _run(_graded_call(tmp_path))
@@ -853,9 +855,9 @@ def _graded_sweep_answers(grid: _Grid, *levels: int, score: float = 0.64) -> Var
     evaluation's score sits in the evaluation round's directory."""
     for level in levels:
         bench = grid.answers[f"c{level}"] = grid.result(f"c{level}", output_throughput=100.0 * level)
-        _lm_eval_results(Path(bench.workspace) / "eval_output", level / 100.0)
+        _evaluated(Path(bench.workspace), level / 100.0)
     evaluation = grid.answers["eval"] = grid.result("eval", note="evaluation_only")
-    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", score)
+    _evaluated(Path(evaluation.workspace), score)
     return evaluation
 
 
@@ -889,7 +891,7 @@ def test_a_graded_sweep_benches_every_level_and_then_evaluates_once_on_the_serve
         (),
         (),
         (),
-        (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),),
+        (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64, LM_EVAL_VERSION),),
     ]
     assert outcome.rounds[-1].output_dir == Path(evaluation.workspace)
     assert outcome.returncode == 0
@@ -933,6 +935,7 @@ def test_a_graded_sweep_whose_bench_fails_or_is_stopped_runs_no_evaluation(grid,
 def test_a_graded_sweep_whose_evaluation_fails_keeps_every_bench_and_fails_its_accuracy(grid, server, tmp_path):
     _graded_sweep_answers(grid, 8, 4)
     grid.answers["eval"] = grid.result("eval", status="failed", returncode=1, error="server died", error_class="x")
+    write_run_dir(Path(grid.answers["eval"].workspace))  # the evaluation never finished
 
     outcome = _run(_graded_sweep(tmp_path, 8, 4))
 
@@ -1323,7 +1326,7 @@ def _profile_point(directory: Path, *, profile: object = "1", enabled: bool = Tr
 
 def _with_trace(grid: _Grid, name: str = "test", where: str = "torch_trace") -> VariantResult:
     result = grid.result(name)
-    trace = Path(result.workspace) / where / "rank0.pt.trace.json.gz"
+    trace = RunLayout(Path(result.workspace)).profile_dir / where / "rank0.pt.trace.json.gz"
     trace.parent.mkdir(parents=True, exist_ok=True)
     trace.write_bytes(b"trace")
     grid.answers[name] = result
@@ -1439,7 +1442,7 @@ def test_a_test_that_does_not_profile_leaves_the_checkout_as_upstream_ships_it(g
 
 def test_the_traces_of_a_profile_test_move_into_the_output_profile_directory(grid, tmp_path):
     result = _with_trace(grid)
-    sidecar = Path(result.workspace).parent / "capture_traces" / "graph.json"
+    sidecar = RunLayout(Path(result.workspace)).profile_dir / "capture_traces" / "graph.json"
     sidecar.parent.mkdir(parents=True)
     sidecar.write_text("{}")
 
@@ -1448,7 +1451,7 @@ def test_the_traces_of_a_profile_test_move_into_the_output_profile_directory(gri
     profile = tmp_path / "out" / "profile"
     assert (profile / "torch_trace" / "rank0.pt.trace.json.gz").read_bytes() == b"trace"
     assert (profile / "capture_traces" / "graph.json").is_file(), "the capture sidecars keep their directory name"
-    assert not (Path(result.workspace) / "torch_trace").exists(), "the bundle must carry each trace once"
+    assert not RunLayout(Path(result.workspace)).profile_torch_trace.exists(), "the bundle must carry each trace once"
 
 
 def test_a_profile_test_that_left_no_trace_does_not_end_as_a_success(grid, tmp_path):
@@ -1465,7 +1468,7 @@ def test_a_failed_profile_round_moves_no_trace(grid, tmp_path):
     outcome = _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
 
     assert outcome.returncode == 1 and "profile_no_trace" not in outcome.stderr
-    assert (Path(result.workspace) / "torch_trace").exists()
+    assert RunLayout(Path(result.workspace)).profile_torch_trace.exists()
 
 
 @pytest.mark.parametrize(
@@ -1552,9 +1555,9 @@ class _Machine:
         launched = _build_variant_yaml(kwargs["recipe"], variant, output_subdir=slot)
         self.launches.append(benchmark := yaml.safe_load(launched.read_text())["benchmark"])
         self.ports.append(port := int((benchmark.get("envs") or {}).get("PORT", REUSE_PORT_DEFAULT)))
-        workspace = slot / "benchmark_stub"
-        (workspace / "torch_trace").mkdir(parents=True)
-        (workspace / "torch_trace" / "rank0.pt.trace.json.gz").write_bytes(b"trace")
+        workspace = slot / "suite_run_0"
+        RunLayout(workspace).profile_torch_trace.mkdir(parents=True)
+        (RunLayout(workspace).profile_torch_trace / "rank0.pt.trace.json.gz").write_bytes(b"trace")
         listener = socket.socket()
         try:
             listener.bind(("127.0.0.1", port))
@@ -1877,7 +1880,6 @@ def _failed_evaluation(grid: _Grid, tmp_path: Path, server_log: str, stderr: str
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "server.log").write_text(server_log, encoding="utf-8")
     (workspace / "benchmark_stderr.log").write_text(stderr, encoding="utf-8")
-    (workspace / "eval_returncode").write_text("1", encoding="utf-8")
     return grid.result(
         "eval",
         status="failed",
@@ -1970,7 +1972,7 @@ def test_a_warmup_that_failed_for_a_cause_no_log_names_keeps_the_measured_round_
 def test_a_warmup_whose_server_log_is_healthy_goes_on_to_the_measured_round(grid, server, tmp_path):
     _warmup_with_logs(grid, tmp_path, test_log_causes.SERVER_LOG_WITH_BAD_REQUEST, returncode=0)
     evaluation = grid.result("eval")
-    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", 0.64)
+    _evaluated(Path(evaluation.workspace), 0.64)
     grid.answers["eval"] = evaluation
 
     outcome = _run(_graded_call(tmp_path))

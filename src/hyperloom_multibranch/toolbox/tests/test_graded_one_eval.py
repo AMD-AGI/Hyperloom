@@ -11,7 +11,6 @@ then turns the outcome into the rounds and accuracy of its result.
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,13 +28,14 @@ from hyperloom.measure.socket import RoundPlan, TestCall
 from hyperloom.orchestrator.actions.executors import VariantResult
 from hyperloom_multibranch.toolbox.hosted_executor import _measured_values
 from hyperloom_multibranch.toolbox.tests.helpers import req
+from hyperloom.measure.tests.run_dirs import write_run_dir
 
 FLEXIBLE = "exact_match,flexible-extract"
 _BOOT_ONLY = "server_lifecycle_boot_only"
 
 
 class _Grid:
-    """``run_grid``: every call is one round, with a report in its directory when it benches and lm-eval's files when it
+    """``run_grid``: every call is one round, whose run_dir report holds its bench when it benches and its scores when it
     evaluates."""
 
     def __init__(self, root: Path, score: float, throughputs: dict[str, float]) -> None:
@@ -50,22 +50,18 @@ class _Grid:
         self.reseeded[name] = kwargs["launch"].warmup_round
         config = yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text())
         envs = {**config["benchmark"]["envs"], **(kwargs["recipe"].base.extra_envs or {})}
-        workspace = self.root / f"variant_00_{name}" / f"benchmark_fake_{len(self.called)}"
+        workspace = self.root / f"variant_00_{name}" / f"suite_run_{len(self.called)}"
         workspace.mkdir(parents=True)
         if kwargs["launch"].lifecycle_boot_only:  # a sweep's boot: run_grid says no round was measured
             return [VariantResult(name, "", {}, "succeeded", returncode=0, workspace=str(workspace), note=_BOOT_ONLY)]
+        fixed = {}
         if not is_truthy(envs.get("EVAL_ONLY"), default=False):
-            report = {
-                "success": True,
-                "throughput": {"output_throughput": self.throughputs[name], "completed_requests": 8, "num_prompts": 8},
-            }
-            (workspace / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")
+            fixed = {"output_throughput": self.throughputs[name], "completed_requests": 8, "requested_requests": 8}
+        scores = None
         if is_truthy(envs["RUN_EVAL"], default=True):
             self.evaluated.append(name)
-            results = workspace / "eval_output"
-            results.mkdir()
-            document = {"results": {"gsm8k": {FLEXIBLE: self.score}}}
-            (results / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+            scores = {FLEXIBLE: self.score}
+        write_run_dir(workspace, fixed, scores, eval_code=None if scores is None else 0)
         return [VariantResult(name, "", {}, "succeeded", returncode=0, workspace=str(workspace))]
 
 
@@ -104,7 +100,7 @@ def test_a_graded_test_with_a_warmup_runs_one_evaluation_and_its_score_is_the_re
     outcome, (rounds, accuracy) = _result_of(call, point)
 
     assert grid.evaluated == ["eval"], "one evaluation, after the measured bench, none before it"
-    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
+    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64, "lm_eval=0.4.9;gsm8k=3"),)
     assert [(r.phase, r.metrics["output_throughput"]) for r in rounds] == [("warmup", 1111.0), ("measure", 2222.0)]
     assert [r.phase for r in outcome.rounds] == ["warmup", "measure", "accuracy"]
 
@@ -126,7 +122,7 @@ def test_a_graded_test_without_a_warmup_still_evaluates_after_its_measured_bench
     _, (rounds, accuracy) = _result_of(call, point)
 
     assert grid.evaluated == ["eval"]
-    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
+    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64, "lm_eval=0.4.9;gsm8k=3"),)
     assert [(r.phase, r.metrics["output_throughput"]) for r in rounds] == [("measure", 3333.0)]
 
 
@@ -152,7 +148,7 @@ def test_a_graded_sweep_benches_every_level_and_its_one_evaluation_after_the_las
 
     assert grid.called == ["c16", "c16", "c8", "c4", "eval"], "a boot round, a bench at every level, an evaluation"
     assert grid.evaluated == ["eval"], "one evaluation, after the last bench, none between two of them"
-    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
+    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64, "lm_eval=0.4.9;gsm8k=3"),)
     assert [(r.phase, r.concurrency, r.metrics["output_throughput"]) for r in rounds] == [
         ("measure", 16, 1600.0),
         ("measure", 8, 800.0),

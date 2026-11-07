@@ -30,6 +30,7 @@ from hyperloom.measure.short_prompts.tests.support import (
     staged_plan,
 )
 from hyperloom.measure.tests.test_local_backend import _agentx_point, _call, _Grid, _point
+from hyperloom.measure.tests.run_dirs import write_run_dir
 
 
 SKIPPED = "short_prompt_check skipped: test failed"
@@ -209,7 +210,7 @@ def test_a_test_whose_evaluation_failed_runs_no_check(monkeypatch, tmp_path, cac
     """The evaluation's return code is what says the test failed, and a test that failed spends no time on the check."""
     grid = _grid(monkeypatch, tmp_path)
     result = grid.result("eval", returncode=0)
-    (Path(result.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+    write_run_dir(Path(result.workspace), eval_code=3)
     grid.answers["eval"] = result
     call = _call(
         tmp_path,

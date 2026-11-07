@@ -71,6 +71,7 @@ from hyperloom.measure.socket import (
     TestMeta,
     TestOutcome,
 )
+from hyperloom.orchestrator.actions.executors import is_round_folder
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
 from hyperloom_multibranch.contracts.gate import ResultUnverified
@@ -106,7 +107,8 @@ DEFAULT_TEST_TIMEOUT_SEC = 3600
 TEST_SILENCE_TIMEOUT_SEC = 600.0
 #: Where a test's landed files go, below the session directory: ``tests/<request_id>/attempt-<n>``.
 OUTPUTS_DIR = "tests"
-_REPORT = "benchmark_report.json"
+#: The report an archived v1 bundle's round left; a v2 round is an inference_suite run_dir.
+_V1_REPORT = "benchmark_report.json"
 _MANIFEST = "manifest.json"
 _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
 _SWEEP = "conc_sweep"
@@ -662,8 +664,8 @@ def _concurrency_in(text: str) -> int | None:
     return value if value >= 1 else None
 
 
-def _report_of(directory: Path) -> dict[str, Any] | None:
-    for path in sorted(Path(directory).rglob(_REPORT)) if Path(directory).is_dir() else []:
+def _v1_report_of(directory: Path) -> dict[str, Any] | None:
+    for path in sorted(Path(directory).rglob(_V1_REPORT)) if Path(directory).is_dir() else []:
         try:
             document = json.loads(path.read_text(encoding=_UTF8))
         except (OSError, ValueError):
@@ -741,13 +743,22 @@ def _round_values_at(rounds: tuple[RoundOutcome, ...], concurrencies: tuple[int 
     return tuple(values)
 
 
+def _round_measurement(round_dir: Path) -> dict[str, Any] | None:
+    """A run_dir's measurement from its report, an archived v1 round's from its ``benchmark_report.json``; ``None``
+    when the round left no readable report."""
+    if is_round_folder(round_dir):
+        try:
+            return extract_benchmark_measurement(None, workspace=round_dir)
+        except (OSError, ValueError):
+            return None
+    report = _v1_report_of(round_dir)
+    return None if report is None else extract_benchmark_measurement(report, workspace=round_dir)
+
+
 def _round_value(phase: str, round_dir: Path, concurrency: int | None) -> RoundValue | None:
     """The value of the round that landed in ``round_dir``; ``None`` when its report is missing or invalid."""
-    report = _report_of(round_dir)
-    if report is None:
-        return None
-    measurement = extract_benchmark_measurement(report, workspace=round_dir)
-    if not measurement.get("valid_measurement"):
+    measurement = _round_measurement(round_dir)
+    if measurement is None or not measurement.get("valid_measurement"):
         return None
     completed = measurement.get("completed_requests")
     requested = measurement.get("requested_requests")

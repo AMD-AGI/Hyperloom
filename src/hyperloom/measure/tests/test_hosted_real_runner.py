@@ -160,7 +160,7 @@ def test_the_shipped_runner_flow_produces_a_result_the_backend_accepts(real, tmp
     assert inferencex.endswith("InferenceX-" + _head(tmp_path / "inferencex"))
     assert inferencex.startswith(str(tmp_path / "sandboxes")), "the runner's scratch is the sandbox's own directory"
     assert [x.phase for x in outcome.rounds] == ["measure"]
-    assert outcome.rounds[0].output_dir == call.output_dir / "benchmark_stub_20000101_000000"
+    assert outcome.rounds[0].output_dir == call.output_dir / "suite_run_0"
     assert (outcome.sandbox.gpu_ids, outcome.sandbox.node_name) == ((0,), "node-a")
 
 
