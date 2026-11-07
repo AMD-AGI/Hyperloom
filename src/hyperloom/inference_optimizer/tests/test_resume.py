@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -485,6 +486,15 @@ class TestN23ResumePerSession:
         assert exc.value.code == 2
 
 
+def _installed_env_file(tmp_path, monkeypatch) -> Path:
+    """Where install.sh writes the kernel-agent env file for the workspace ``tmp_path``, its directory made."""
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+    env_file = Path(cli_preflight_env._kernel_agent_env_candidate())
+    env_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return env_file
+
+
 # _load_kernel_agent_env_fallback hard-fails on bad state
 
 
@@ -508,14 +518,13 @@ class TestN24KernelAgentEnvHardFail:
         assert "install.sh" in err
 
     def test_aborts_when_env_file_missing(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        env_file = _installed_env_file(tmp_path, monkeypatch)
         with pytest.raises(SystemExit) as excinfo:
             cli_preflight_env._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
-        assert "kernel-agent.env.sh" in err
         assert "install.sh" in err
-        assert str(tmp_path) in err
+        assert str(env_file) in err
 
     @pytest.mark.parametrize(
         "contents",
@@ -529,10 +538,7 @@ class TestN24KernelAgentEnvHardFail:
         capsys,
         contents,
     ):
-        runtime = tmp_path / "runtime"
-        runtime.mkdir()
-        (runtime / "kernel-agent.env.sh").write_text(contents, encoding="utf-8")
-        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        _installed_env_file(tmp_path, monkeypatch).write_text(contents, encoding="utf-8")
         with pytest.raises(SystemExit) as excinfo:
             cli_preflight_env._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
@@ -541,13 +547,10 @@ class TestN24KernelAgentEnvHardFail:
         assert "install.sh" in err
 
     def test_sources_vars_on_success(self, tmp_path, monkeypatch, capsys):
-        runtime = tmp_path / "runtime"
-        runtime.mkdir()
-        (runtime / "kernel-agent.env.sh").write_text(
+        _installed_env_file(tmp_path, monkeypatch).write_text(
             "# valid env file\nexport KERNEL_AGENT_LOG_LEVEL=INFO\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         cli_preflight_env._load_kernel_agent_env_fallback()
         import os as _os
 
@@ -557,13 +560,10 @@ class TestN24KernelAgentEnvHardFail:
         assert "kernel-agent" in out
 
     def test_env_wins_over_file(self, tmp_path, monkeypatch, capsys):
-        runtime = tmp_path / "runtime"
-        runtime.mkdir()
-        (runtime / "kernel-agent.env.sh").write_text(
+        _installed_env_file(tmp_path, monkeypatch).write_text(
             "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("KERNEL_AGENT_LOG_LEVEL", "DEBUG")
         cli_preflight_env._load_kernel_agent_env_fallback()
         import os as _os
@@ -577,9 +577,7 @@ class TestN24KernelAgentEnvHardFail:
         capsys,
     ):
         """The installer emits credentials as a conditional block (#1169)."""
-        runtime = tmp_path / "runtime"
-        runtime.mkdir()
-        (runtime / "kernel-agent.env.sh").write_text(
+        _installed_env_file(tmp_path, monkeypatch).write_text(
             'if [ -n "${ANTHROPIC_API_KEY:-}" ]; then\n'
             "  [ \"${ANTHROPIC_API_KEY}\" = 'ak-install-time' ] || \\\n"
             "    echo '[kernel-agent] ANTHROPIC_API_KEY differs' >&2\n"
@@ -588,7 +586,6 @@ class TestN24KernelAgentEnvHardFail:
             "fi\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         import os as _os
 
@@ -641,10 +638,8 @@ class TestTracelensRootEnvCorrection:
             os.environ.clear()
             os.environ.update(snapshot)
 
-    def _write_env_file(self, tmp_path, tracelens_dir):
-        runtime = tmp_path / "runtime"
-        runtime.mkdir(exist_ok=True)
-        (runtime / "kernel-agent.env.sh").write_text(
+    def _write_env_file(self, tmp_path, monkeypatch, tracelens_dir):
+        _installed_env_file(tmp_path, monkeypatch).write_text(
             f"export TRACELENS_ROOT='{tracelens_dir}'\n",
             encoding="utf-8",
         )
@@ -653,8 +648,7 @@ class TestTracelensRootEnvCorrection:
         """An inherited TRACELENS_ROOT that points nowhere is corrected from the file."""
         good = tmp_path / "deps" / "TraceLens"
         good.mkdir(parents=True)
-        self._write_env_file(tmp_path, good)
-        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        self._write_env_file(tmp_path, monkeypatch, good)
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost" / "TraceLens"))
 
         outcome = cli_preflight_env._load_kernel_agent_env_fallback()
@@ -671,8 +665,7 @@ class TestTracelensRootEnvCorrection:
         file_dir.mkdir(parents=True)
         inherited = tmp_path / "inherited" / "TraceLens"
         inherited.mkdir(parents=True)
-        self._write_env_file(tmp_path, file_dir)
-        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        self._write_env_file(tmp_path, monkeypatch, file_dir)
         monkeypatch.setenv("TRACELENS_ROOT", str(inherited))
 
         outcome = cli_preflight_env._load_kernel_agent_env_fallback()
@@ -685,8 +678,6 @@ class TestTracelensRootEnvCorrection:
     @pytest.mark.parametrize("override_kind", ["missing", "non-checkout", "empty"])
     def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch, override_kind):
         """TraceLens correction must not replace an explicit Magpie value, even an invalid one."""
-        runtime = tmp_path / "runtime"
-        runtime.mkdir()
         magpie_dir = tmp_path / "installed-magpie"
         (magpie_dir / "Magpie").mkdir(parents=True)
         (magpie_dir / "Magpie" / "__init__.py").write_text("", encoding="utf-8")
@@ -694,11 +685,10 @@ class TestTracelensRootEnvCorrection:
         if override_kind == "non-checkout":
             override.mkdir()
         selected = "" if override_kind == "empty" else str(override)
-        (runtime / "kernel-agent.env.sh").write_text(
+        _installed_env_file(tmp_path, monkeypatch).write_text(
             f"export MAGPIE_PATH='{magpie_dir}'\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("MAGPIE_PATH", selected)
 
         outcome = cli_preflight_env._load_kernel_agent_env_fallback()
@@ -714,16 +704,13 @@ class TestTracelensRootEnvCorrection:
         import subprocess
         import sys
 
-        runtime = tmp_path / "runtime"
-        runtime.mkdir()
         magpie_dir = tmp_path / "runtime Magpie"
         (magpie_dir / "Magpie").mkdir(parents=True)
         (magpie_dir / "Magpie" / "__init__.py").write_text("RUNTIME_MARKER = 'installer-checkout'\n", encoding="utf-8")
-        (runtime / "kernel-agent.env.sh").write_text(
+        _installed_env_file(tmp_path, monkeypatch).write_text(
             f"export MAGPIE_PATH='{magpie_dir}'\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("PYTHONPATH", "")
 
         outcome = cli_preflight_env._load_kernel_agent_env_fallback()
