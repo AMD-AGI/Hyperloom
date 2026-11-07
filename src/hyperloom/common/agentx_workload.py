@@ -24,6 +24,13 @@ from hyperloom.common.outside_facts import ENV_CONC
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
 AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
 
+# The MLPerf client boots its server from the inference_suite config the first names, records its pid in the pid_dir
+# the second names, and runs inference_suite under the interpreter the third names; all three are unset when the
+# server is off this node.
+MLPERF_SERVER_CONFIG_ENV = "MLPERF_SERVER_CONFIG"
+MLPERF_SERVER_PID_DIR_ENV = "MLPERF_SERVER_PID_DIR"
+MLPERF_SUITE_PYTHON_ENV = "MLPERF_SUITE_PYTHON"
+
 # Both client scripts write the pid of the server they boot here, under their RESULT_DIR. The server is setsid'd and
 # re-parented away from the client, so reaping the round's process tree never reaches it.
 AGENTX_SERVER_PIDFILE = "agentx_server.pid"
@@ -91,6 +98,13 @@ def agentic_backend(env: Mapping[str, str] | None = None) -> str:
 
 def is_mlperf_backend(env: Mapping[str, str] | None = None) -> bool:
     return agentic_backend(env) == "mlperf"
+
+
+def is_agentx_client_key(key: str, env: Mapping[str, str]) -> bool:
+    """True for a knob the AgentX client reads, which the server never needs."""
+    if key.startswith("AGENTX_"):
+        return True
+    return is_mlperf_backend(env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV)
 
 
 def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:

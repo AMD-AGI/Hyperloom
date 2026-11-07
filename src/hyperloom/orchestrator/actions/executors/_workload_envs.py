@@ -30,7 +30,7 @@ from typing import Any, Mapping, NamedTuple
 
 import yaml
 
-from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
+from hyperloom.common.agentx_workload import is_agentx_client_key, pin_mlperf_round_concurrency
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -71,7 +71,7 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from inference_suite.argv import compact_json_server_args, remove_server_args
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from hyperloom.orchestrator.state.base_launch import session_server_base
+from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, session_server_base
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -147,15 +147,6 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     if conc and conc > 0:
         env["CONC"] = str(conc)
     return env
-
-
-def _is_agentx_client_key(key: str, env: "Mapping[str, str]") -> bool:
-    """True for a knob :func:`apply_agentx_switch` forwards to the AgentX client."""
-    from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
-
-    if key.startswith("AGENTX_"):
-        return True
-    return is_mlperf_backend(env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV)
 
 
 # GEAK's own names for the axes Hyperloom hands it: ``E2E_METRIC`` selects one
@@ -368,7 +359,7 @@ def apply_agentx_switch(
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
     for key, value in _agentx_env.items():
-        if _is_agentx_client_key(key, _agentx_env):
+        if is_agentx_client_key(key, _agentx_env):
             envs[key] = value
     envs[BACKEND_ENV] = "mlperf"
     # The harness dials a fixed port and model name. Pinning both here is the
@@ -401,7 +392,7 @@ def prepare_agentx_runtime(
     config_path: Path | str | None = None,
     active: bool | None = None,
 ) -> str | None:
-    """Deploy and preflight AgentX assets for baseline/profile runs."""
+    """Deploy and preflight the MLPerf client, and write the config its server boots from."""
     from hyperloom.common.agentx_workload import is_mlperf_backend
 
     runtime_env = env or os.environ
@@ -426,16 +417,12 @@ def prepare_agentx_runtime(
         return None
     try:
         from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
-        from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
+        from ._mlperf_server import prepare_mlperf_round
 
-        maybe_prepare_agentx(
-            env=runtime_env,
-            inferencex_path=str(inferencex_path or ""),
-            config_path=Path(config_path) if config_path else "",
-        )
+        prepare_mlperf_round(Path(config_path or ""), runtime_env, str(inferencex_path or ""))
     except AgentXPreflightError as exc:
         return f"AgentX preflight failed: {exc}"
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError, BaseLaunchMismatch) as exc:
         return f"AgentX runtime preparation failed: {type(exc).__name__}: {exc}"
     return None
 
@@ -1119,7 +1106,7 @@ def _merge_caller_overrides(
         # The AgentX switch already settled these from the same pins; the raw
         # pin would undo its CONC scaling of the warmup grace.
         agentx_env = agentx_env_for_conc()
-        combined_extra = {k: v for k, v in combined_extra.items() if not _is_agentx_client_key(k, agentx_env)}
+        combined_extra = {k: v for k, v in combined_extra.items() if not is_agentx_client_key(k, agentx_env)}
     if extra_envs:
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(

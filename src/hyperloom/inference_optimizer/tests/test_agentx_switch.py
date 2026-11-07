@@ -148,7 +148,7 @@ _PROBE_CONTRAST = """
 import sys
 
 assert not any(m.startswith("hyperloom.inference_optimizer.agentx") for m in sys.modules)
-from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx  # noqa: F401
+from hyperloom.inference_optimizer.agentx.preflight import check_mlperf_harness  # noqa: F401
 
 assert any(m.startswith("hyperloom.inference_optimizer.agentx") for m in sys.modules)
 print("CONTRAST_OK")
