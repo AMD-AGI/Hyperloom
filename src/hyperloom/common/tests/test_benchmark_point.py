@@ -34,6 +34,7 @@ def test_reads_every_field_of_a_fixed_point(tmp_path: Path) -> None:
                     "precision": "bf16",
                     "runner_type": "mi355x",
                     "benchmark_script": "vllm_mi300x.sh",
+                    "workload_kind": "server",
                     "inferencex_path": "/ix ",
                     "envs": {"TP": 8, "EXTRA_VLLM_ARGS": "--x"},
                     "profiler": {"torch_profiler": {"enabled": True}},
@@ -49,6 +50,7 @@ def test_reads_every_field_of_a_fixed_point(tmp_path: Path) -> None:
         precision="bf16",
         runner_type="mi355x",
         benchmark_script="vllm_mi300x.sh",
+        workload_kind="server",
         inferencex_path="/ix",
         envs={"TP": 8, "EXTRA_VLLM_ARGS": "--x"},
         agentx=False,
@@ -63,7 +65,15 @@ def test_reads_every_field_of_a_fixed_point(tmp_path: Path) -> None:
 def test_absent_fields_read_empty() -> None:
     point = BenchmarkPoint.from_document({"benchmark": {}})
 
-    assert (point.framework, point.model, point.benchmark_script, point.inferencex_path, dict(point.envs)) == (
+    assert (
+        point.framework,
+        point.model,
+        point.benchmark_script,
+        point.workload_kind,
+        point.inferencex_path,
+        dict(point.envs),
+    ) == (
+        "",
         "",
         "",
         "",
@@ -152,6 +162,8 @@ def test_the_point_is_a_copy_the_reader_cannot_change() -> None:
         {"benchmark": {"agentx": {"launch_overrides": {"source_files": ["/src.py"]}}}},
         {"benchmark": {"profiler": {"torch_profiler": True}}},
         {"benchmark": {"server_lifecycle": "on"}},
+        {"benchmark": {"profiler": "x"}},
+        {"benchmark": {"profiler": {"torch_profiler": "x"}}},
     ],
 )
 def test_a_misshapen_point_is_refused(document: object) -> None:
