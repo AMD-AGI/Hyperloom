@@ -4706,3 +4706,16 @@ async def test_a_kernel_overlay_variant_is_not_skipped_by_a_plain_one(sub_agent_
     )
     assert len(calls) == 2
     assert out["skipped_dup"] == []
+
+
+@pytest.mark.parametrize("text", ["other: {}\n", "benchmark:\n  envs: x\n", "benchmark: [\n"])
+def test_explore_refuses_a_round_whose_materialized_config_is_not_a_point(tmp_path, text):
+    from hyperloom.orchestrator.actions.executors import explore
+
+    cfg = tmp_path / "explore_base.with_envs.yaml"
+    cfg.write_text(text, encoding="utf-8")
+
+    with pytest.raises(explore._RoundRefused) as refused:
+        explore._round_point(cfg)
+    assert refused.value.result["error_class"] == "unreadable_config"
+    assert str(cfg) in refused.value.result["error"]

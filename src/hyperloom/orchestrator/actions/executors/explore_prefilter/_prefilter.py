@@ -27,7 +27,6 @@ the measurement as an InferaSim anchor.
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
 import os
 from dataclasses import dataclass, field
@@ -37,6 +36,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.coerce import to_float, to_str_list
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from hyperloom.inference_optimizer.grading import resolved_grading
 
@@ -114,6 +114,7 @@ class RoundContext:
     """
 
     config_path: Path
+    point: BenchmarkPoint
     output_root: Path
     state: Any
     target: BenchmarkTarget
@@ -127,6 +128,7 @@ class RoundContext:
         """The context of an ``explore._ExploreRound`` once its schedule is open."""
         return cls(
             config_path=explore_round.config_path,
+            point=explore_round.point,
             output_root=explore_round.output_root,
             state=explore_round.ss,
             target=explore_round.target,
@@ -136,18 +138,9 @@ class RoundContext:
             session_dir=session_dir,
         )
 
-    @functools.cached_property
-    def base_bench(self) -> dict[str, Any]:
-        """The ``benchmark`` block of the round's config."""
-        try:
-            with Path(self.config_path).open(encoding="utf-8") as fh:
-                return dict((yaml.safe_load(fh) or {}).get("benchmark") or {})
-        except (OSError, yaml.YAMLError):
-            return {}
-
     @property
     def framework(self) -> str:
-        return str(self.base_bench.get("framework") or "").lower()
+        return self.point.framework.lower()
 
     @property
     def grade_on_intvty(self) -> bool:
@@ -179,7 +172,7 @@ class RoundContext:
             "workload_signature": workload_signature(),
             "runtime": dict(sorted(self.runtime.items())),
             "benchmark": reuse.benchmark_identity(
-                self.base_bench, volatile_roots=[str(self.output_root), str(self.session_dir or "")]
+                self.point, volatile_roots=[str(self.output_root), str(self.session_dir or "")]
             ),
             "inherited_args": self.inherited_args,
             "decision_protocol": self.decision_protocol,
@@ -193,7 +186,7 @@ class RoundContext:
             return None
         launch = launch_of(gv, stack)
         pythonpath = [str(getattr(gv, "overlay_pythonpath", "") or "")]
-        for envs in (launch.extra_envs, stack.extra_envs, self.base_bench.get("envs") or {}):
+        for envs in (launch.extra_envs, stack.extra_envs, self.point.envs):
             pythonpath += str(envs.get("PYTHONPATH") or "").split(":")
         stack_id = {
             "extra_server_args": stack.extra_args,
