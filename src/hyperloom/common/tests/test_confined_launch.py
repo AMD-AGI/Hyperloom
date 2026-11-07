@@ -331,3 +331,39 @@ def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(outsid
     seen = json.loads(out)
     assert seen == {"kube": "ENOENT", "token": "ENOENT", "model": "ok:weights", "visible": "ok:shown", "write": "EROFS"}
     assert not (hf / "new").exists()
+
+
+@pytest.mark.parametrize("entry", ["home", "ancestor", "root"])
+def test_a_path_entry_that_is_or_holds_the_home_shows_none_of_its_logins(outside_tmp, monkeypatch, entry):
+    """``PATH=$HOME:...``, an ancestor of the home, or ``/``: the app's home holds its logins (an SSH key, a netrc,
+    the GitHub CLI's, Claude's, git's), and none is readable inside, while the program on ``PATH`` still runs; the
+    home and the ancestor are never bound whole."""
+    isolation = BwrapIsolation(usable_bwrap())
+    home, work = outside_tmp / "users" / "u", outside_tmp / "work"
+    work.mkdir()
+    paths = {
+        "ssh": _write(home / ".ssh/id_rsa", "SECRET-SSH"),
+        "netrc": _write(home / ".netrc", "SECRET-NETRC"),
+        "gh": _write(home / ".config/gh/hosts.yml", "SECRET-GH"),
+        "claude": _write(home / ".claude/.credentials.json", "SECRET-CLAUDE"),
+        "claude_json": _write(home / ".claude.json", "SECRET-CLAUDE"),
+        "git": _write(home / ".git-credentials", "SECRET-GIT"),
+    }
+    tool = _write(home / "bin/tool", "#!/bin/sh\necho tool ran\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    shown = {"home": home, "ancestor": outside_tmp / "users", "root": Path("/")}[entry]
+    env = {"HOME": str(home), "PATH": f"{shown}:{home / 'bin'}:/usr/bin:/bin"}
+    readable = toolchain_paths(env, "tool", writable=(work,))
+    masked = credential_paths(env, allowed=(*readable, work), writable=(work,))
+    confinement = Confinement(writable=(work,), readable=readable, masked=masked)
+    assert not {str(home), str(outside_tmp / "users")} & set(confinement.policy().read_only)
+
+    seen = _run(isolation, confinement, env, paths, work)
+
+    assert seen == {
+        **dict.fromkeys(paths, "ENOENT"),
+        "tool": "tool ran",
+        "write": "ok:written",
+        "mark": "mark-1",
+    }
