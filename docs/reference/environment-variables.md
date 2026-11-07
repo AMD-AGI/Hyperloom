@@ -180,7 +180,7 @@ throughput-only measurement.
 |----------|---------|-------------|
 | `HYPERLOOM_QUALITY_REF`<br>`HYPERLOOM_QUALITY_REF_WRITE` | Derived under the session dir | The scriptable quality gate's reference artifact: `_WRITE` establishes it on the baseline, the other compares against it on every later candidate. What the artifact holds is the workload's own business — xDiT stores an image, an operator-supplied `custom` workload stores whatever its script compares. Also emitted as `XDIT_QUALITY_REF` / `XDIT_QUALITY_REF_WRITE` for bench scripts written before the rename; either name is read, both are written. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
-| `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
+| `HYPERLOOM_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
 
 The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
 `src/hyperloom/common/gain_math.py` is a fixed
@@ -190,7 +190,7 @@ baseline accuracy.
 Note that the score is measured once per candidate, not averaged over repeats.
 On a full GSM8K run (1319 problems) the 5-point tolerance sits several standard
 errors away from the baseline, so single-run noise does not trip it. Capping the
-eval with a small `MAGPIE_EVAL_LIMIT` shrinks that margin sharply and can make
+eval with a small `HYPERLOOM_EVAL_LIMIT` shrinks that margin sharply and can make
 the gate noise-sensitive — prefer the full task set whenever a gate decision
 depends on the result.
 
