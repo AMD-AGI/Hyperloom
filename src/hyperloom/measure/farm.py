@@ -43,7 +43,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.aiter_layout import image_aiter_meta
-from hyperloom.common.benchmark_config import BenchmarkPoint, is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint, is_agentx
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.jit.key import AITER_PACKAGE
@@ -441,7 +441,7 @@ def launch_environment(config: dict[str, Any]) -> dict[str, Any]:
     """The mapping the server of ``config`` takes its variables from, created when it has none: what :func:`server_environment`
     reads, for a caller that writes."""
     bench = config.setdefault("benchmark", {})
-    if is_magpie_agentx(bench):
+    if is_agentx(bench):
         return bench["agentx"].setdefault("launch_overrides", {}).setdefault("env", {})
     return bench.setdefault("envs", {})
 
