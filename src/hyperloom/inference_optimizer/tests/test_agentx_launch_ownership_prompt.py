@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+from inference_suite import golden
+
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -36,8 +38,11 @@ def test_no_specialist_prompt_names_a_magpie_launch_module(domain):
     assert _MAGPIE_MODULE not in "\n".join(build_specialist_prompts(inp))
 
 
-def test_the_speculative_decoding_reference_defers_to_magpie_on_native_runs():
+def test_the_speculative_decoding_reference_points_at_the_golden_layer_inference_suite_enforces():
     doc = (asset_prompt_references_dir() / "speculative_decoding.md").read_text(encoding="utf-8")
-    assert "## Native Magpie AgentX runs" in doc
-    assert "_validate_golden_launch" in doc
-    assert "Hyperloom-managed launch" in doc
+    assert "## A base with a golden layer owns acceptance" in doc
+    assert "inference_suite.golden" in doc
+    for name in golden.__all__:
+        if name.startswith("GOLDEN_OWNED_"):
+            assert f"`{name}`" in doc
+    assert "Magpie" not in doc
