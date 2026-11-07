@@ -468,6 +468,15 @@ def test_a_point_that_leaves_run_eval_unset_is_refused_because_unset_means_on(gr
     assert grid.calls == []
 
 
+def test_a_point_not_shaped_as_one_is_refused_like_any_call_the_backend_cannot_run(grid, tmp_path):
+    point = tmp_path / "shapeless.yaml"
+    point.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": "RUN_EVAL=false"}}), encoding="utf-8")
+
+    with pytest.raises(TestCallRefused, match=str(point)):
+        _run(_call(tmp_path, point))
+    assert grid.calls == []
+
+
 @pytest.mark.parametrize(("yaml_value", "accuracy"), [("true", False), ("false", True), (True, False), ("0", True)])
 def test_a_point_whose_run_eval_contradicts_the_call_is_refused(grid, tmp_path, yaml_value, accuracy):
     point = _point(tmp_path, "mismatch", run_eval=yaml_value)

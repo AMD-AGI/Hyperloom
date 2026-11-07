@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPoint, PointError, read_benchmark_point
 from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
@@ -326,7 +326,10 @@ def _point_config(point: Path) -> dict[str, Any]:
 
 
 def _point(point: Path) -> BenchmarkPoint:
-    return read_benchmark_point(Path(point))
+    try:
+        return read_benchmark_point(Path(point))
+    except PointError as exc:
+        raise TestCallRefused(str(exc)) from exc
 
 
 def _validate(call: TestCall) -> None:
@@ -425,8 +428,7 @@ def _patch_profile_client(call: TestCall) -> None:
     Magpie's, or a framework with no InferenceX script) has none to patch.
     """
     point = _point(call.points[0])
-    facts = call.session_facts
-    root = point.inferencex_path or (facts.inferencex_path if facts is not None else None)
+    root = point.inferencex_path or (call.session_facts.inferencex_path if call.session_facts is not None else None)
     if not root or point.agentx or framework_registry.is_scriptable(point.framework):
         return
     try:
