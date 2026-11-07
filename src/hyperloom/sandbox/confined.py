@@ -201,7 +201,7 @@ def _credential_locations(paths: Sequence[Path], env: Mapping[str, str], trees: 
     path itself, so its bind would show every credential in it."""
     locations = set(credential_paths(env, writable=trees))
     return tuple(
-        f"{path} is a credential location of the app's, which its bind would show unmasked"
+        f"{path} is a credential location, which its bind would show unmasked"
         for path in paths
         if Path(os.path.realpath(path)) in locations
     )

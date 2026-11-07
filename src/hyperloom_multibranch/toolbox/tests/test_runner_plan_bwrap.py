@@ -21,7 +21,7 @@ import pytest
 
 from hyperloom.common import agent_isolation
 from hyperloom.sandbox import confined
-from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate, ProcessUsers
+from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate, ProcessUsers, RunnerPlan
 from hyperloom.sandbox.socket import SandboxDenied
 from hyperloom_common.tests._bwrap_host import unavailable, usable_bwrap
 from hyperloom_multibranch.toolbox.local_hosted import runner_plan
@@ -90,6 +90,49 @@ def _home_and_model(area: Path) -> tuple[Path, Path]:
     return home, model
 
 
+def _read_in_sandbox(plan: RunnerPlan, session: Path, reads: dict[str, str]) -> tuple[bool, dict[str, str]]:
+    """Whether a sealed test sandbox of ``plan`` ran confined, and what its process got reading each of ``reads``."""
+    template = LocalTemplate(
+        "runner",
+        "measurement",
+        command=(sys.executable, "-I", "-S", "-c", READER, json.dumps(reads)),
+        sealed=True,
+        signing=True,
+    )
+    provider = LocalSandboxProvider([template], base_dir=session / "sandboxes", users=ProcessUsers(plan=plan))
+    try:
+        sandbox = provider.create("runner", role="measurement", timeout_sec=120, metadata={})
+        until = time.monotonic() + 60
+        while True:
+            try:
+                return sandbox.confined, json.loads(sandbox.read_file("/out/seen.json"))
+            except FileNotFoundError:
+                assert time.monotonic() < until, "the test never wrote what it read"
+                time.sleep(0.05)
+    finally:
+        provider.close()
+
+
+def _refused_twice(
+    plan: RunnerPlan, session: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, bwrap: str
+) -> tuple[bool, str]:
+    """Whether a test sandbox of ``plan`` ran confined, said at WARNING, and why a hosted run refused one."""
+    template = LocalTemplate(
+        "runner", "measurement", command=(sys.executable, "-c", "import time; time.sleep(600)"), sealed=True
+    )
+    provider = LocalSandboxProvider([template], base_dir=session / "sandboxes", users=ProcessUsers(plan=plan))
+    try:
+        with caplog.at_level(logging.WARNING):
+            sandbox = provider.create("runner", role="measurement", timeout_sec=120, metadata={})
+        sandbox.kill()
+        monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=True, layer_bwrap=bwrap))
+        with pytest.raises(SandboxDenied, match="must run confined") as refused:
+            provider.create("runner", role="measurement", timeout_sec=120, metadata={})
+    finally:
+        provider.close()
+    return sandbox.confined, str(refused.value)
+
+
 def test_a_model_linking_into_the_home_shows_its_test_what_the_links_name_and_none_of_the_home_s_logins(
     area: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -113,29 +156,10 @@ def test_a_model_linking_into_the_home_shows_its_test_what_the_links_name_and_no
         "through_link": str(model / "tokenizer" / ".." / ".netrc"),
         "beside_weights": str(data / "other.txt"),
     }
-    template = LocalTemplate(
-        "runner",
-        "measurement",
-        command=(sys.executable, "-I", "-S", "-c", READER, json.dumps(reads)),
-        sealed=True,
-        signing=True,
-    )
-    provider = LocalSandboxProvider([template], base_dir=session / "sandboxes", users=ProcessUsers(plan=plan))
-    try:
-        sandbox = provider.create("runner", role="measurement", timeout_sec=120, metadata={})
-        until = time.monotonic() + 60
-        while True:
-            try:
-                seen = json.loads(sandbox.read_file("/out/seen.json"))
-                break
-            except FileNotFoundError:
-                assert time.monotonic() < until, "the test never wrote what it read"
-                time.sleep(0.05)
-    finally:
-        provider.close()
+    confined_, seen = _read_in_sandbox(plan, session, reads)
 
     assert plan.refused == ()
-    assert sandbox.confined
+    assert confined_
     assert seen == {
         "config": "ok:model-config",
         "tokenizer": "ok:tokenizer",
@@ -167,22 +191,47 @@ def test_a_model_linking_to_a_login_in_the_home_never_runs_its_test_confined_wit
     monkeypatch.setenv("HOME", str(home))
     session = area / "session"
     plan = runner_plan(session, model, {}, sys.executable, {"HOME": str(home)})
-    template = LocalTemplate(
-        "runner", "measurement", command=(sys.executable, "-c", "import time; time.sleep(600)"), sealed=True
-    )
-    provider = LocalSandboxProvider([template], base_dir=session / "sandboxes", users=ProcessUsers(plan=plan))
-    try:
-        with caplog.at_level(logging.WARNING):
-            sandbox = provider.create("runner", role="measurement", timeout_sec=120, metadata={})
-        sandbox.kill()
-        monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=True, layer_bwrap=probe.path))
-        with pytest.raises(SandboxDenied, match="must run confined") as refused:
-            provider.create("runner", role="measurement", timeout_sec=120, metadata={})
-    finally:
-        provider.close()
+    confined_, refused = _refused_twice(plan, session, monkeypatch, caplog, probe.path)
 
     why = f"{model / name} links to {home / login}, in {home / login}, a hidden entry of a home"
-    assert not sandbox.confined
+    assert not confined_
     assert "runs unconfined, as before" in caplog.text and why in caplog.text
-    assert why in str(refused.value)
+    assert why in refused
     assert home / login not in plan.readable and home / "tokdir" in plan.readable
+
+
+def test_a_hub_cache_above_the_home_masks_the_home_s_logins_and_a_model_link_to_one_never_runs_confined(
+    area: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The plan reads the hub cache whole, here the home's parent, and masks the home's logins in it; a model entry
+    linking to the home's ``.ssh`` would open that mask up around it. Without that link the test runs confined and
+    reads the tokenizer the model links to, and no login; with it the plan refuses the link, so its test runs as
+    before, said at WARNING, and a hosted run refuses it."""
+    probe = usable_bwrap()
+    hub = area / "hp"
+    home, model, session = hub / "home", area / "model", area / "session"
+    for path, text in ((home / ".ssh" / "id_rsa", "SECRET-SSH"), (home / "tokdir" / "tok.json", "tokenizer")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    model.mkdir()
+    (model / "tokenizer").symlink_to(home / "tokdir")
+    monkeypatch.setenv("HOME", str(home))
+    environ = {"HOME": str(home), "HF_HUB_CACHE": str(hub)}
+    plan = runner_plan(session, model, {}, sys.executable, environ)
+    reads = {"tokenizer": str(model / "tokenizer" / "tok.json"), "ssh": str(home / ".ssh" / "id_rsa")}
+    confined_, seen = _read_in_sandbox(plan, session, reads)
+
+    assert plan.refused == () and hub in plan.readable
+    assert confined_
+    assert seen == {"tokenizer": "ok:tokenizer", "ssh": "EACCES"}
+
+    (model / "keys").symlink_to(home / ".ssh")
+    plan = runner_plan(session, model, {}, sys.executable, environ)
+    confined_, refused = _refused_twice(plan, area / "session-2", monkeypatch, caplog, probe.path)
+
+    why = f"{model / 'keys'} links to {home / '.ssh'}, in {home / '.ssh'}, a hidden entry of a home"
+    assert plan.refused == (f"{why} where tools keep their logins, which its bind would show unmasked",)
+    assert not confined_
+    assert "runs unconfined, as before" in caplog.text and why in caplog.text
+    assert why in refused
+    assert home / ".ssh" not in plan.readable
