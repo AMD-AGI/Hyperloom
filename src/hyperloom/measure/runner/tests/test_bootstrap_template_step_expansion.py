@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import time
 from collections.abc import Mapping
@@ -211,6 +212,31 @@ def test_the_step_starts_the_runner_under_every_expansion(tmp_path: Path, expans
     assert started.read_text().splitlines() == ["--x", "a b", "--spec-wait-sec", "1800"]
     time.sleep(0.5)
     assert not (tmp_path / "out" / "status.json").exists()
+
+
+@pytest.mark.parametrize("bootstrap", ["exec sleep 60\n", "sleep 60\nexit 3\n"])
+def test_the_step_returns_at_once_when_its_output_is_a_pipe(tmp_path: Path, bootstrap: str) -> None:
+    """A platform that reads the step's output to its end must not wait for the runner, nor for its start failure."""
+    env, paths = _pod(tmp_path)
+    _entry(tmp_path, env, f'touch "$HYPERLOOM_OUT_DIR/started"\n{bootstrap}')
+    step = subprocess.Popen(
+        ["/bin/sh", "-c", runner_template_step(**paths)],  # type: ignore[arg-type]
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    began = time.monotonic()
+    try:
+        step.communicate(timeout=10)
+        assert step.returncode == 0 and time.monotonic() - began < 5.0
+        assert _wait_for(tmp_path / "out" / "started"), (tmp_path / "work" / "runner-boot.log").read_text()
+    finally:
+        try:
+            os.killpg(step.pid, signal.SIGKILL)  # the runner the step left behind, and its sleep
+        except ProcessLookupError:
+            pass
+        step.communicate()
 
 
 def test_a_missing_cache_entry_ends_the_test_with_a_start_failure(tmp_path: Path) -> None:
