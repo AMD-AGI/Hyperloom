@@ -24,7 +24,7 @@ from inference_suite import (
     ClientTarget,
     ClientTool,
     client_argv,
-    client_env,
+    fixed_client_env,
     inferencex_root,
     warmup_pass,
 )
@@ -63,7 +63,7 @@ class GateClient:
         tool = ClientTool(PYTHON, self.package_root)
         target = ClientTarget(f"http://0.0.0.0:{port}", self.model, self.model)
         measured = ClientPass(self.workload.seed, self.workload.num_prompts, result_dir / RESULT_FILE)
-        env = [f"{name}={value}" for name, value in client_env(tool).items()]
+        env = [f"{name}={value}" for name, value in fixed_client_env(tool).items()]
         passes = [client_pass for client_pass in (warmup_pass(self.workload), measured) if client_pass is not None]
         return " && ".join(shlex.join([*env, *client_argv(tool, target, self.workload, p)]) for p in passes)
 

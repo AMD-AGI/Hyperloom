@@ -94,7 +94,7 @@ def warmup_pass(workload: FixedWorkload) -> ClientPass | None:
     return ClientPass(workload.warmup_seed, workload.num_warmups, None) if workload.num_warmups else None
 
 
-def client_env(tool: ClientTool) -> dict[str, str]:
+def fixed_client_env(tool: ClientTool) -> dict[str, str]:
     """The env the client gets beyond what the round inherits; ``launch.json`` records it."""
     return {"PYTHONPATH": tool.package_root}
 
@@ -222,7 +222,7 @@ class FixedRound:
 def _run_pass(fixed_round: FixedRound, argv: tuple[str, ...], phase: Phase) -> tuple[int | None, Stop | None]:
     config = fixed_round.config
     layout = RunLayout(Path(config.paths.run_dir))
-    env = {**inherited_env(config.server), **client_env(fixed_round.tool)}
+    env = {**inherited_env(config.server), **fixed_client_env(fixed_round.tool)}
     fixed_round.clock.mark(phase)
     child = spawn(argv, env, layout.client_stdout, layout.client_stderr)
     ended = wait_child(child, fixed_round.gate, OutputActivity(fixed_round.server, layout.client_stdout).check)
@@ -248,7 +248,7 @@ def measured_invocation(config: SuiteConfig, tool: ClientTool, base_url: str) ->
     measured = ClientPass(workload.seed, prompts, RunLayout(Path(config.paths.run_dir)).inferencex_result)
     return ClientInvocation(
         argv=client_argv(tool, _target(config.server, base_url), workload, measured),
-        env=client_env(tool),
+        env=fixed_client_env(tool),
         seed=workload.seed,
         warmup_seed=workload.warmup_seed,
     )
@@ -297,7 +297,7 @@ __all__ = [
     "MeasuredWindow",
     "OutputActivity",
     "client_argv",
-    "client_env",
+    "fixed_client_env",
     "fixed_metrics",
     "measured_invocation",
     "run_fixed",
