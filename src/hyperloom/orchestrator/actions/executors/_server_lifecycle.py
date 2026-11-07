@@ -19,10 +19,11 @@ from typing import Any, NamedTuple
 import yaml
 
 from hyperloom.common import rocm_smi
-from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom_common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
+from inference_suite import stop
+from inference_suite.contracts.layout import SERVER_PID
 
 
 log = logging.getLogger(__name__)
@@ -345,11 +346,12 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
 
 
 def stop_agentx_servers(root: Path | str) -> list[int]:
-    """Stop any server an AgentX client under ``root`` booted and left running; return the pids alive after SIGKILL.
+    """Stop any server an MLPerf AgentX round under ``root`` left running; return the pids alive after SIGKILL.
 
-    Its :data:`AGENTX_SERVER_PIDFILE` is the only handle on that server once the round's process tree is gone.
+    inference_suite booted it and records it in its pid_dir's ``server.pid``, the only handle on it once the client's
+    tree is gone.
     """
-    return reap_recorded_servers(root, AGENTX_SERVER_PIDFILE).survivors
+    return [pid for pidfile in sorted(Path(root).rglob(SERVER_PID)) for pid in stop(pidfile.parent).survivors]
 
 
 def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> ServerReap:

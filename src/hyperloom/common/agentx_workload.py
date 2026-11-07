@@ -31,10 +31,6 @@ MLPERF_SERVER_CONFIG_ENV = "MLPERF_SERVER_CONFIG"
 MLPERF_SERVER_PID_DIR_ENV = "MLPERF_SERVER_PID_DIR"
 MLPERF_SUITE_PYTHON_ENV = "MLPERF_SUITE_PYTHON"
 
-# Both client scripts write the pid of the server they boot here, under their RESULT_DIR. The server is setsid'd and
-# re-parented away from the client, so reaping the round's process tree never reaches it.
-AGENTX_SERVER_PIDFILE = "agentx_server.pid"
-
 BACKEND_ENV = "HYPERLOOM_AGENTIC_BACKEND"
 
 # The MLPerf agentic v6 corpus and the two flows ``run_agentic.sh`` accepts.
