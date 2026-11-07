@@ -110,7 +110,8 @@ class SourceSnapshot:
     """Everything resolving reads, recorded once when the session starts.
 
     ``inferencex`` is read for every query a recipe may serve, and keys the golden curves; it is ``None`` when the
-    operator's ``user_file`` is the base or InferenceX could not be read. A cookbook is carried for the query's framework only. ``golden_lengths`` are InferenceX's ``golden_length`` answers
+    operator's ``user_file`` is the base of a fixed query or a frozen base, or InferenceX could not be read; a
+    shell ``user_file`` of an AgentX query carries it for the corpus the replay runs. A cookbook is carried for the query's framework only. ``golden_lengths`` are InferenceX's ``golden_length`` answers
     for the cookbook's AgentX launches (see :func:`~inference_suite.recipe.golden_curve.golden_requests`) and
     ``base_model`` the model's HF ``cardData.base_model``. ``latest_releases`` maps a framework to its latest release
     tag, which stands for a recipe image that names no version. ``user_file``, when the operator gave one, is the
@@ -393,7 +394,7 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
         topology=spelling.read(shell.args),
         args=shell.args,
         env=_without_runner_env(shell.env),
-        client=_client({}),
+        client=_client(_client_env(query, snapshot, {})),
         resolved_unix=snapshot.fetched_unix,
         runner_owned=_runner_owned(query.framework),
         stripped=(*shell.stripped, *_runner_env(shell.env)),
@@ -453,11 +454,11 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
     snapshot could not read a source, and for a fixed one the default table has no row for either.
     """
     _FIELDS.integer(gpus, "the visible GPU count", minimum=1)
+    if snapshot.unread is not None and query.workload is Workload.AGENTX:
+        return Miss((), snapshot.unread)
     if snapshot.user_file is not None:
         return _user_file_base(query, snapshot, snapshot.user_file)
     if snapshot.unread is not None:
-        if query.workload is Workload.AGENTX:
-            return Miss((), snapshot.unread)
         return _default_base(query, snapshot, ())
     misses: list[SourceMiss] = []
     for read in _readers(query.framework):

@@ -314,6 +314,32 @@ def test_a_cookbook_agentx_base_names_the_corpus_of_its_base_models_family():
     assert base.client.env["WEKA_LOADER_OVERRIDE"] == "semianalysis_cc_traces_weka_062126"
 
 
+_SHELL = b"python3 -m sglang.launch_server --tp-size 8\n"
+
+
+@pytest.mark.parametrize(
+    ("model", "corpus"),
+    [("amd/Qwen3.8-Flash-Next-Quark-MXFP4-AttnFP8-PLEFP8", "_256k"), (_GLM53_MXFP4, "")],
+)
+def test_a_shell_user_file_agentx_base_names_the_corpus_inferencex_replays_for_its_model_family(model, corpus):
+    user_file = parse_user_file("launch.sh", _SHELL, framework="sglang")
+    snapshot = SourceSnapshot(_inferencex("a1e8f975"), _FETCHED, user_file=user_file)
+
+    base = _base(_agentx(model), snapshot)
+
+    assert base.source.kind is SourceKind.USER_FILE
+    assert base.client.env == {"WEKA_LOADER_OVERRIDE": f"semianalysis_cc_traces_weka_062126{corpus}"}
+
+
+def test_a_shell_user_file_agentx_query_whose_inferencex_could_not_be_read_is_a_miss_naming_it():
+    user_file = parse_user_file("launch.sh", _SHELL, framework="sglang")
+    snapshot = dataclasses.replace(_no_inferencex_snapshot(), user_file=user_file)
+
+    miss = _miss(_agentx(_GLM53_MXFP4), snapshot)
+
+    assert miss.reasons() == ("InferenceX could not be read: git clone exited 128: could not resolve host",)
+
+
 def test_a_fixed_base_names_no_corpus():
     assert "WEKA_LOADER_OVERRIDE" not in _base(_fixed()).client.env
 
