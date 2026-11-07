@@ -26,13 +26,25 @@ from pathlib import Path
 
 import pytest
 
-from inference_suite.contracts import LaunchQuery, Workload
+from inference_suite.contracts import (
+    BaseLaunch,
+    ClientLaunch,
+    ImageFacts,
+    LaunchModel,
+    LaunchPoint,
+    LaunchQuery,
+    LaunchSource,
+    SourceKind,
+    Topology,
+    VersionBasis,
+    Workload,
+)
 from inference_suite.recipe import sources
 from inference_suite.recipe.golden_curve import GoldenLength, GoldenRequest
 from inference_suite.recipe.inferencex import INFERENCEX_REPO, PROJECT, InferencexPoint, Scenario, inferencex_points
 from inference_suite.recipe.model import InferencexSelection, InferencexSnapshot
 from inference_suite.recipe.resolve import UnreadSource
-from inference_suite.recipe.user_file import parse_user_file
+from inference_suite.recipe.user_file import UserFile, parse_user_file
 from inference_suite.recipe.sources import (
     MAIN,
     SRT_SLURM,
@@ -156,6 +168,7 @@ def test_an_unreachable_site_is_refused() -> None:
 
 
 _QUERY = LaunchQuery("deepseek-ai/DeepSeek-R1-0528", "sglang", "mi355x", Workload.FIXED, (64,), isl=8192, osl=1024)
+_AGENTX_QUERY = LaunchQuery("deepseek-ai/DeepSeek-R1-0528", "sglang", "mi355x", Workload.AGENTX, (8,))
 
 
 @pytest.fixture
@@ -185,14 +198,60 @@ def test_a_source_that_cannot_be_read_is_named_and_stops_the_reading(read_infere
     assert snapshot.sglang_cookbook is None
 
 
-def test_a_user_file_reads_no_source(monkeypatch) -> None:
+def _frozen_agentx_file() -> UserFile:
+    query = LaunchQuery("moonshotai/Kimi-K3", "sglang", "mi355x", Workload.AGENTX, (32,))
+    base = BaseLaunch(
+        query=query,
+        source=LaunchSource(kind=SourceKind.USER_FILE, path="kimi.sh", files={"kimi.sh": "c" * 64}),
+        point=LaunchPoint(conc=32, exact=True),
+        image=ImageFacts(run=None, recipe=None, framework_version=None, version_basis=VersionBasis.NOT_APPLICABLE),
+        framework="sglang",
+        entrypoint=("sglang", "serve"),
+        model=LaunchModel("moonshotai/Kimi-K3"),
+        topology=Topology(tp=8),
+        args=("--tp", "8"),
+        env={},
+        client=ClientLaunch(tool="aiperf", commit="d" * 40, env={"WEKA_LOADER_OVERRIDE": "corpus"}),
+        resolved_unix=1_700_000_000,
+    )
+    return parse_user_file("base_launch.json", json.dumps(base.to_document()).encode(), framework="sglang")
+
+
+@pytest.mark.parametrize("agentx", [False, True], ids=["fixed-shell", "agentx-frozen-base"])
+def test_a_user_file_reads_no_source(monkeypatch, agentx) -> None:
     monkeypatch.setattr(sources, "_inferencex", _never)
+    monkeypatch.setattr(sources, "_recipe_reads", _never)
+    if agentx:
+        query, user_file = _AGENTX_QUERY, _frozen_agentx_file()
+    else:
+        query = _QUERY
+        user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
+
+    snapshot = fetch_sources(query, user_file=user_file)
+
+    assert (snapshot.user_file, snapshot.inferencex, snapshot.unread) == (user_file, None, None)
+
+
+def test_an_agentx_shell_user_file_reads_inferencex_alone_for_the_corpus(read_inferencex, monkeypatch) -> None:
     monkeypatch.setattr(sources, "_recipe_reads", _never)
     user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
 
-    snapshot = fetch_sources(_QUERY, user_file=user_file)
+    snapshot = fetch_sources(_AGENTX_QUERY, user_file=user_file)
 
-    assert (snapshot.user_file, snapshot.inferencex, snapshot.unread) == (user_file, None, None)
+    assert (snapshot.user_file, snapshot.inferencex, snapshot.unread) == (user_file, _main_fixture(), None)
+
+
+def test_an_agentx_shell_user_file_names_an_unreadable_inferencex(monkeypatch) -> None:
+    def unreachable(into):
+        raise SourceFetchError("git clone exited 128: could not resolve host")
+
+    monkeypatch.setattr(sources, "_inferencex", unreachable)
+    user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
+
+    snapshot = fetch_sources(_AGENTX_QUERY, user_file=user_file)
+
+    assert snapshot.user_file == user_file
+    assert snapshot.unread == UnreadSource("InferenceX", "git clone exited 128: could not resolve host")
 
 
 def test_an_unreadable_inferencex_is_named_and_stops_the_reading(monkeypatch) -> None:
