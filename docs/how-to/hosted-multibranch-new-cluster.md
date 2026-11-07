@@ -49,7 +49,7 @@ template's values to the paths inside the sandbox.
 
 | Variable | Required | What it points at |
 | --- | --- | --- |
-| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner stages its inference_suite tools into `inference-suite/<InferenceX pin>/` itself, offline, installing the AgentX harness only from the sandbox's checked wheels, so that directory must be writable and the cache's wheels must hold the harness's; the rest of the cache can be read-only. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
+| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner uses the inference_suite staging `cache_build` published in `inference-suite/<staging key>/` (see [The inference_suite staging](#the-inference_suite-staging)) offline and builds none, so the whole cache can be read-only. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the hosted multi-branch entry | The hosted multi-branch entry passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. |
@@ -128,11 +128,42 @@ Give `--wheel-target` explicitly. The command does not read `HYPERLOOM_RUNNER_WH
 the environment, to `HYPERLOOM_RUNNER_CACHE`), and without it the wheels are built for the builder's own interpreter. Run
 it with `umask 022` so the sandbox's account can read the entry, on a file system that supports `flock` (NFSv4 does).
 
-It prints the entry's `manifest_sha256`, the value a template pins with `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256`.
+It prints the entry's `manifest_sha256`, the value a template pins with `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256`,
+and the directory of the inference_suite staging it published.
 A finished entry is never modified: a build of the same commit into the same directory from a checkout whose
 `bootstrap.sh` differs (it embeds that checkout's `bootstrap.py` and `cache_layout.py`) is refused with `CacheConflict`,
 naming both `bootstrap.sh` hashes, and so is one for another wheel target, because a campaign may have pinned that
 entry's manifest. Build by hand from another checkout into a `HYPERLOOM_RUNNER_CACHE` directory of its own.
+
+### The inference_suite staging
+
+After the entry, `cache_build` publishes the commit's inference_suite staging, the AgentX client and InferenceX subset
+a v2 test's rounds run, with the commit's own `inference_suite` (`python -m inference_suite publish`). It downloads the
+pinned python-build-standalone CPython 3.12 build and the wheels of `src/inference_suite/agentx-client.lock`, each
+checked against its pinned sha256, fetches InferenceX at its pin, and installs the client with `--no-deps` from those
+files alone. The builder needs egress to GitHub and PyPI; the sandbox needs none.
+
+```text
+<HYPERLOOM_RUNNER_CACHE>/inference-suite/                  2775, group of the cache (setgid)
+    <staging key>/                                         published: never written again
+        staging_manifest.json
+        inferencex/<InferenceX pin>/infx/...               the InferenceX subset
+        inferencex/<InferenceX pin>/agentx-python/         the CPython build with the client installed
+    .staging-<staging key>-<uuid>/                         a build in progress; no reader looks inside
+```
+
+The staging key is the sha256 of the InferenceX pin, the interpreter build and the client lock, so a change to any of
+them publishes a new directory beside the old one. Builders share the directory without a lock: each builds in its own
+`.staging-*` directory, syncs it and renames it to the key. A builder that loses the rename removes its own directory
+and uses the winner once the winner's normalised manifest (each package's name, version and wheel sha256, the
+interpreter and the InferenceX pin) is the one it built; one that differs is refused, naming the packages. A
+`.staging-*` directory left by a builder that died can be removed once no build is running.
+
+Every account that runs `cache_build` must be in the cache's group, and the cache root must be setgid in it
+(`chgrp <group> <cache> && chmod 2775 <cache>`); `inference-suite/` is then created `2775` in that group, so builders
+of different accounts can each rename into it. Run the build with `umask 022` so the sandbox's account can read the
+staging. A test whose application staging differs from the runner's published one fails with `preflight_mismatch`,
+naming each package that differs.
 
 A new cluster also needs two more things staged into the runner cache, each with its own command, run where the cache
 is written (the prompt set on a host that has the model's tokenizer files). Without the prompt set, a test that asks for
