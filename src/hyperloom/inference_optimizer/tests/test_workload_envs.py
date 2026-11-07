@@ -172,18 +172,17 @@ def test_visible_gpu_count_rocm_smi_error(monkeypatch):
     assert we._visible_gpu_count() == 0
 
 
-def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
+def test_precision_pins_and_the_board_keeps_the_point_script(monkeypatch, tmp_path):
     clear_env(monkeypatch)
     monkeypatch.setenv("PRECISION", "fp8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = tmp_path / "cfg.yaml"
-    # framework empty -> gpu_type branch pops benchmark_script
     src.write_text(
         yaml.safe_dump({"benchmark": {"model": "/m", "envs": {}, "benchmark_script": "old.sh"}}), encoding="utf-8"
     )
     bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x"))
     assert bench["precision"] == "fp8"
-    assert "benchmark_script" not in bench
+    assert bench["benchmark_script"] == "old.sh"
 
 
 def test_bypass_scriptable_prefers_absolute_benchmark_script(tmp_path):

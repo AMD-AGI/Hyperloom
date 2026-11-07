@@ -55,7 +55,6 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
 )
-from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS, GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
@@ -558,11 +557,9 @@ def apply_scriptable_runtime_defaults(
 ) -> None:
     """Re-pin an operator's scriptable entrypoint and its runtime paths.
 
-    Every config path that re-derives ``benchmark_script`` from ``gpu_type``
-    must call this, otherwise the bare ``{framework}_{gpu_type}.sh`` it writes
-    replaces the resolved absolute path. Only the ``custom`` framework has such
-    an entrypoint: its repo and script arrive at launch, so this only wires what
-    was given and leaves anything missing to fail where it is diagnosable.
+    Only the ``custom`` framework has such an entrypoint: its repo and script
+    arrive at launch, so this only wires what was given and leaves anything
+    missing to fail where it is diagnosable.
 
     ``--extra-env`` is the only channel an operator has for the knobs their own
     script reads, so those pins are written into ``benchmark.envs`` rather than
@@ -849,13 +846,6 @@ def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> Non
     precision = os.environ.get("PRECISION", "").strip()
     if precision:
         bench["precision"] = precision
-    if target.gpu_type:
-        bench["runner_type"] = gpu_runner_type(target.gpu_type)
-        framework = str(bench.get("framework") or "").lower()
-        if framework:
-            bench["benchmark_script"] = f"{framework}_{bench['runner_type']}.sh"
-        else:
-            bench.pop("benchmark_script", None)
     if target.benchmark_script:
         bench["benchmark_script"] = str(target.benchmark_script)
     effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
@@ -1304,7 +1294,7 @@ def _pin_runtime_build_envs(
     if (
         "sglang" in str(bench.get("framework") or "").lower()
         and str(bench.get("precision") or "").strip().lower() == "fp8"
-        and _resolve_amd_gpu_type(gpu_type or bench.get("runner_type")) in _GFX942_GPU_TYPES
+        and _resolve_amd_gpu_type(gpu_type) in _GFX942_GPU_TYPES
         and _fp8_is_per_channel_per_token(str(model_path or os.environ.get("MODEL_PATH", "")))
     ):
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")

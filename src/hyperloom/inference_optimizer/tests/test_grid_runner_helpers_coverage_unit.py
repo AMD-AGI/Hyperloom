@@ -289,7 +289,7 @@ def test_runtime_overrides_model_precision_and_gpu_no_framework_agent(monkeypatc
     monkeypatch.setenv("PRECISION", "fp8")
     for k in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
         monkeypatch.delenv(k, raising=False)
-    bench: dict = {}  # no framework -> benchmark_script popped
+    bench: dict = {}
     apply_runtime_benchmark_overrides(
         bench,
         model_path="/models/x",
@@ -297,16 +297,8 @@ def test_runtime_overrides_model_precision_and_gpu_no_framework_agent(monkeypatc
     )
     assert bench["model"] == "/models/x"
     assert bench["precision"] == "fp8"
-    assert bench["runner_type"] == "mi355x"
+    assert "runner_type" not in bench
     assert "benchmark_script" not in bench
-
-
-def test_runtime_overrides_framework_pins_generic_script(monkeypatch) -> None:
-    for k in ("PRECISION", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
-        monkeypatch.delenv(k, raising=False)
-    bench = {"framework": "sglang"}
-    apply_runtime_benchmark_overrides(bench, gpu_type="mi300x")
-    assert bench["benchmark_script"] == "sglang_mi300x.sh"
 
 
 def test_runtime_overrides_env_ints_and_rocr_autofill(monkeypatch) -> None:

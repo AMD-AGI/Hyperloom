@@ -570,12 +570,12 @@ def test_run_conc_sweep_happy_path_writes_reports(
     assert not final_json_path.exists()
 
 
-def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
+def test_run_conc_sweep_targets_the_session_board(
     session_dir: Path,
     baseline_yaml: Path,
     monkeypatch,
 ):
-    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like every other executor — not state.gpu_type's real type."""
+    """The sweep materializes for the board the session runs on, not a runner label exported beside it."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.gpu_type = "mi325x"
     monkeypatch.setenv("GPU_TYPE", "mi300x")
@@ -604,8 +604,8 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
     ):
         asyncio.run(run_conc_sweep(state, session_dir, concs=[1], total_budget_sec=9000))
 
-    assert seen["materialize_gpu"] == "mi300x"
-    assert seen["run_grid_gpu"] == "mi300x"
+    assert seen["materialize_gpu"] == "mi325x"
+    assert seen["run_grid_gpu"] == "mi325x"
 
 
 def test_conc_sweep_preserves_baseline_script_through_variant_materialization(session_dir, baseline_yaml, monkeypatch):
@@ -653,7 +653,7 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     assert [call[0]["grid"][0].name for call in calls] == ["baseline_conc64", "optimized_conc64"]
     for kwargs, bench in calls:
         assert bench["benchmark_script"] == "sglang_custom.sh"
-        assert bench["runner_type"] == "mi355x"
+        assert "runner_type" not in bench
         # ISL + OSL of 9216 sends three requests per unit of concurrency, as the session's own rounds do.
         assert int(bench["envs"]["NUM_PROMPTS"]) == 192
         assert bench["envs"]["RUN_EVAL"] == "false"

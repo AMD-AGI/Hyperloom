@@ -221,7 +221,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch,
     assert measure_lc["cleanup"] is True
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(tmp_path / "ws")
     assert captured[0]["benchmark"]["envs"]["PORT"] == (captured[1]["benchmark"]["envs"]["PORT"])
-    assert captured[0]["benchmark"]["benchmark_script"] == f"{framework}_mi300x.sh"
+    assert "benchmark_script" not in captured[0]["benchmark"]
 
 
 def test_a_ray_head_that_never_answers_a_driver_leaves_the_rounds_on_the_local_path(
@@ -2264,7 +2264,7 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path, monkeypatch):
     assert result["status"] == "succeeded"
     assert state["calls"] == 2
     assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
-    assert captured[0]["benchmark"]["benchmark_script"] == "atom_mi300x.sh"
+    assert "benchmark_script" not in captured[0]["benchmark"]
     assert captured[0]["benchmark"]["server_lifecycle"]["enabled"] is True
 
 
