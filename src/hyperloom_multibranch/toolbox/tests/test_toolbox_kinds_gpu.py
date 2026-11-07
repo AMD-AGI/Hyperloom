@@ -37,7 +37,6 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.inference_optimizer.session import paths as session_paths
-from hyperloom.measure.pins import pinned_tool_commits
 from hyperloom.measure.points import default_canonical
 from hyperloom.measure.profile_traces import PROFILE_DIR
 from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES
@@ -129,12 +128,9 @@ def _toolbox(
         image_ref="local",
         image_digest=IMAGE,
         gpu_type="MI355X",
-        magpie_commit=pinned_tool_commits().magpie if BACKEND == "magpie" else "a" * 40,
-        inferencex_commit=commit,
         blobs=blobs,
         process_environ={},
         platform_env={},
-        benchmark_backend=BACKEND,
         blob_root=str(blobs.root),
     )
     toolbox = build_local_toolbox(

@@ -9,7 +9,7 @@ import asyncio
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hyperloom.contracts.measurement import (
@@ -24,6 +24,9 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.measure.surface import SurfaceViolation
+from hyperloom.measure.runner.cache_layout import CACHE_ENV
+from hyperloom.measure.tests.bundle_factory import base_launch, stage_into
+from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -265,3 +268,16 @@ def lineage_blackboard(
     with ThreadPoolExecutor(1) as seeding:
         seeding.submit(asyncio.run, seed()).result()
     return LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=clock)
+
+
+def freeze_base_at(session: Path, commit: str) -> None:
+    """Freeze the fixture base as ``session``'s with its client pinned at ``commit``, the commit of the stand-in
+    InferenceX repository a real runner checks out for the sheet."""
+    base = base_launch()
+    freeze_base(session, replace(base, client=replace(base.client, commit=commit)))
+
+
+def staged_runner_cache(tmp: Path) -> dict[str, str]:
+    """The runner variable naming a runner cache that already holds a staging that verifies: the stand-in InferenceX
+    repository is not at the commit the staging pins, so a runner that staged from it would refuse the staging."""
+    return {CACHE_ENV: str(stage_into(tmp / "runner-cache").parents[1])}
