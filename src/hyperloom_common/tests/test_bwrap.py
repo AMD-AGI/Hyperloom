@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -35,6 +36,7 @@ from hyperloom_common.bwrap import (
     main,
     probe_bwrap,
 )
+from hyperloom_common.tests._bwrap_host import as_owner
 
 #: What the canary printed on this pod's bubblewrap 0.6.1 to 0.13.1 (``python3 -I bwrap.py probe``).
 CANARY_OK = {
@@ -53,7 +55,13 @@ UID_MAP_DENIED = "bwrap: setting up uid map: Permission denied"
 UNBINDABLE = (
     "bwrap: Can't bind mount /oldroot/usr on /newroot/usr: Unable to mount source on destination: Invalid argument"
 )
-DEV_NULL_MASK = ["--ro-bind", "/dev/null"]
+
+
+def directories(monkeypatch: pytest.MonkeyPatch, *paths: str) -> None:
+    """Make ``paths`` read as directories, the only thing a mask below a bound tree may be: the policies here name
+    paths no host has."""
+    real = bwrap._is_directory
+    monkeypatch.setattr(bwrap, "_is_directory", lambda path: path in paths or real(path))
 
 
 @pytest.fixture(autouse=True)
@@ -132,13 +140,12 @@ def probed(path: str = "bwrap", version: tuple[int, int, int] = (0, 13, 1)) -> B
 def test_argv_mounts_by_depth_with_the_masks_last(tmp_path: Path) -> None:
     models = tmp_path / "models"
     (models / "stored_tokens").mkdir(parents=True)
-    (models / "token").write_text("hf_secret")
     work = tmp_path / "work"
     work.mkdir()
     policy = BwrapPolicy(
         read_only=("/usr", str(models)),
         writable=(str(work),),
-        masked=(str(models / "stored_tokens"), str(models / "token"), str(models / "absent")),
+        masked=(str(models / "stored_tokens"),),
         devices=("/dev/kfd",),
         tmp="/var/tmp/hl-agent-a",
         shm="/dev/shm/hl-agent-b",
@@ -163,12 +170,43 @@ def test_argv_mounts_by_depth_with_the_masks_last(tmp_path: Path) -> None:
         *("--bind", "/dev/shm/hl-agent-b", "/dev/shm"),
         *("--ro-bind-try", str(models), str(models), "--bind", str(work), str(work)),
         *("--perms", "0000", "--tmpfs", stored, "--remount-ro", stored),
-        *DEV_NULL_MASK,
-        str(models / "token"),
+        *("--remount-ro", "/"),
         *("--chdir", str(work), "--setenv", "HYPERLOOM_REAP_MARK", "m1", "--json-status-fd", "9"),
         *("--", "claude", "--print"),
     ]
-    assert "--dev" not in argv and "--ro-bind" not in argv[: argv.index("--perms")]
+    assert "--dev" not in argv and "--ro-bind" not in argv
+
+
+def test_below_a_bound_tree_only_a_directory_is_masked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A mount over a file goes with the file's first rename on the host, and an absent path has none to cover what the
+    # app makes there later: the agent would read a credential the app refreshed or logged into during the task.
+    home = tmp_path / "home"
+    tool = home / ".config" / "tool"
+    tool.mkdir(parents=True)
+    (tool / "credentials.json").write_text("{}")
+    (home / "link").symlink_to(tool)
+    outside = tmp_path / "outside"
+    outside.write_text("x")
+    file, absent, link = str(tool / "credentials.json"), str(tool / "token"), str(home / "link")
+    policy = BwrapPolicy(read_only=(str(home),), masked=(str(tool), file, absent, link, str(outside)))
+    # Outside every bound tree (a fresh tmpfs /tmp here) nothing shows, so a file or absent path there is left out.
+    elsewhere = BwrapPolicy(read_only=(str(home),), masked=(str(tool), str(outside), str(tmp_path / "absent")))
+    shared = BwrapPolicy(read_only=(), masked=("/tmp/hl-key",), tmp="/var/tmp/hl-agent-a")
+
+    assert policy.problems((0, 13, 1)) == [bwrap._not_a_directory(path) for path in (file, absent, link)]
+    assert shared.problems((0, 13, 1)) == [bwrap._not_a_directory("/tmp/hl-key")]
+    assert "is masked below a bound tree but is not a directory" in bwrap._not_a_directory(file)
+    with pytest.raises(BwrapPolicyError) as refused:
+        policy.argv(probed(), ["true"])
+    assert refused.value.problems == tuple(policy.problems((0, 13, 1)))
+    assert elsewhere.problems((0, 13, 1)) == []
+    masks = [arg for arg in elsewhere.argv(probed(), ["true"]) if arg in (str(outside), str(tmp_path / "absent"))]
+    assert masks == [] and "--ro-bind" not in elsewhere.argv(probed(), ["true"])
+
+    # Checked again as each mount is made, after the policy's problems were read.
+    monkeypatch.setattr(BwrapPolicy, "_mask_problems", lambda self: [])
+    with pytest.raises(BwrapPolicyError, match="credentials.json is masked below a bound tree"):
+        policy.argv(probed(), ["true"])
 
 
 def test_a_bind_below_tmp_comes_after_the_tmp_mount() -> None:
@@ -251,7 +289,8 @@ def test_nothing_may_be_bound_at_or_above_an_app_only_path(tmp_path: Path) -> No
     assert BwrapPolicy(read_only=(str(tmp_path / "app2"),), app_only=(app,)).problems((0, 13, 1)) == []
 
 
-def test_a_read_only_bind_or_mask_below_a_writable_bind_needs_0_12() -> None:
+def test_a_read_only_bind_or_mask_below_a_writable_bind_needs_0_12(monkeypatch: pytest.MonkeyPatch) -> None:
+    directories(monkeypatch, "/ws/.home/token")
     policy = BwrapPolicy(read_only=("/ws/.git",), writable=("/ws", "/ws/.home"), masked=("/ws/.home/token",))
 
     assert policy.problems((0, 11, 1)) == [
@@ -262,8 +301,11 @@ def test_a_read_only_bind_or_mask_below_a_writable_bind_needs_0_12() -> None:
 
 
 @pytest.mark.parametrize("join", [None, (7, 8)])
-def test_below_a_bound_scratch_anything_needs_0_12(join: tuple[int, int] | None) -> None:
+def test_below_a_bound_scratch_anything_needs_0_12(
+    join: tuple[int, int] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # A Scratch an earlier launch or command used may hold a link it left, whether or not this launch joins a holder.
+    directories(monkeypatch, "/tmp/hl-key")
     policy = BwrapPolicy(
         read_only=("/tmp/hyperloom-host/ca-bundle.pem",),
         writable=("/tmp/pytest-of-ci/ws",),
@@ -336,6 +378,127 @@ def test_scratch_dirs_are_private_and_removable() -> None:
         second.remove()
 
     assert not any(os.path.exists(path) for path in (first.tmp, first.shm, second.tmp, second.shm))
+
+
+def test_scratch_an_agent_locked_is_removed_by_its_owner() -> None:
+    # The sandbox maps to the owning uid, so an agent can chmod 000 its /tmp and /dev/shm themselves and a directory
+    # in them; root here is made to honour the modes, as the plain user CI and a deployment run as does.
+    made = Scratch.create()
+    for root in (made.tmp, made.shm):
+        locked = Path(root) / "locked"
+        (locked / "inner").mkdir(parents=True)
+        (locked / "inner" / "file").write_text("x")
+        (locked / "inner").chmod(0)
+        locked.chmod(0)
+        os.chmod(root, 0)
+
+    done = as_owner(
+        "import sys; from hyperloom_common.bwrap import Scratch; Scratch(*sys.argv[1:]).remove()", made.tmp, made.shm
+    )
+
+    left = [path for path in (made.tmp, made.shm) if os.path.lexists(path)]
+    for path in left:
+        subprocess.run(["chmod", "-R", "u+rwx", path], check=False)
+        shutil.rmtree(path)
+    assert done.returncode == 0 and left == [], done.stderr
+
+
+def test_scratch_removes_dev_shm_when_tmp_fails_and_names_each_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    made = Scratch.create()
+    remove = bwrap._remove_tree
+    refused = {made.tmp}
+
+    def failing(path: str) -> None:
+        if path in refused:
+            raise PermissionError(13, "Permission denied", path)
+        remove(path)
+
+    monkeypatch.setattr(bwrap, "_remove_tree", failing)
+    again = Scratch(made.tmp, tempfile.mkdtemp(prefix="hl-agent-"))
+    try:
+        with pytest.raises(PermissionError) as one:
+            made.remove()
+        shm_left = os.path.lexists(made.shm)
+        refused.add(again.shm)
+        with pytest.raises(OSError, match=f"scratch not removed: .*{made.tmp}.*; .*{again.shm}"):
+            again.remove()
+    finally:
+        for path in (made.tmp, made.shm, again.shm):
+            if os.path.lexists(path):
+                remove(path)
+
+    assert one.value.filename == made.tmp and not shm_left
+
+
+def _descend(root: str, name: str, levels: int) -> None:
+    """Make ``levels`` nested directories ``name`` under ``root``, each relative to the last: no path is spelled out."""
+    current = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for _ in range(levels):
+            os.mkdir(name, dir_fd=current)
+            below = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=current)
+            os.close(current)
+            current = below
+        os.close(os.open("f", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=current))
+        os.mkfifo("pipe", dir_fd=current)
+        os.symlink("/", "up", dir_fd=current)
+        os.mkdir("locked", 0, dir_fd=current)
+    finally:
+        os.close(current)
+
+
+@pytest.mark.parametrize(
+    ("name", "levels"), [("d", 1500), ("y" * 200, 30)], ids=["deeper-than-recursion", "longer-than-path-max"]
+)
+def test_scratch_removes_a_tree_too_deep_or_too_long_for_a_path(name: str, levels: int) -> None:
+    made = Scratch.create()
+    _descend(made.tmp, name, levels)
+    os.mkdir(os.path.join(made.shm, "keep"))
+
+    try:
+        made.remove()
+    finally:
+        left = [path for path in (made.tmp, made.shm) if os.path.lexists(path)]
+        for path in left:
+            subprocess.run(["rm", "-rf", "--one-file-system", path], check=False)
+
+    assert left == []
+
+
+def test_scratch_removes_dev_shm_whatever_stops_tmp(monkeypatch: pytest.MonkeyPatch) -> None:
+    made = Scratch.create()
+    remove = bwrap._remove_tree
+
+    def failing(path: str) -> None:
+        if path == made.tmp:
+            raise RecursionError("maximum recursion depth exceeded")
+        remove(path)
+
+    monkeypatch.setattr(bwrap, "_remove_tree", failing)
+    try:
+        with pytest.raises(RecursionError):
+            made.remove()
+        shm_left = os.path.lexists(made.shm)
+    finally:
+        for path in (made.tmp, made.shm):
+            if os.path.lexists(path):
+                remove(path)
+
+    assert not shm_left
+
+
+def test_remove_tree_refuses_what_is_not_a_directory(tmp_path: Path) -> None:
+    (tmp_path / "file").write_text("x")
+    (tmp_path / "link").symlink_to(tmp_path / "kept")
+    (tmp_path / "kept").mkdir()
+
+    for name in ("file", "link"):
+        with pytest.raises(NotADirectoryError):
+            bwrap._remove_tree(str(tmp_path / name))
+    with pytest.raises(FileNotFoundError):
+        bwrap._remove_tree(str(tmp_path / "absent"))
+
+    assert (tmp_path / "file").exists() and (tmp_path / "kept").is_dir()
 
 
 def test_status_tells_a_command_that_ran_from_a_setup_that_failed() -> None:
@@ -483,6 +646,53 @@ def test_an_unbindable_root_that_unshare_does_not_fix_is_refused(
     assert probe_bwrap().problems == (UNBINDABLE, "unshare (util-linux) is not on PATH to give a launch its own mounts")
 
 
+def test_a_bubblewrap_given_by_path_retries_only_with_the_unshare_beside_it(
+    fake: FakeBwrap, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A hosted run names its layer's bubblewrap; an unshare from PATH is the image's, which the layer does not vouch
+    # for. The fake on PATH has an unshare beside it.
+    layer = FakeBwrap(tmp_path / "layer")
+    layer.configure(unbindable=UNBINDABLE)
+    bare = FakeBwrap(tmp_path / "bare", unshare=False)
+    bare.configure(unbindable=UNBINDABLE)
+
+    beside = probe_bwrap(str(layer.path))
+    refused = bwrap_probe(str(bare.path))
+
+    assert beside.ok and beside.prefix == (str(layer.directory / "unshare"), "--mount", "--")
+    assert layer.runs == ["plain", "1"]
+    assert refused.problems == (
+        UNBINDABLE,
+        f"no unshare beside {bare.path} to give a launch its own mounts, and none is taken from PATH for a bubblewrap "
+        "named by path: the host must make the root mount private first (mount --make-rprivate /)",
+    )
+    assert bare.runs == ["plain"] and fake.runs == []
+    assert main(["probe", "--bwrap", str(bare.path)]) == 1
+    assert "no unshare beside" in capsys.readouterr().out
+
+    # The same binary looked up on PATH may use the unshare there.
+    (fake.directory / "bwrap").unlink()
+    (fake.directory / "bwrap").symlink_to(bare.path)
+    assert bwrap_probe().ok and bwrap_probe().prefix == (str(fake.directory / "unshare"), "--mount", "--")
+
+
+def test_the_probe_of_a_bubblewrap_named_by_path_is_not_the_one_found_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same binary: found on PATH it may use the unshare there, named by path only one beside it.
+    bare = FakeBwrap(tmp_path / "bare", unshare=False)
+    bare.configure(unbindable=UNBINDABLE)
+    other = FakeBwrap(tmp_path / "other")
+    monkeypatch.setenv("PATH", f"{bare.directory}{os.pathsep}{other.directory}")
+
+    found = bwrap_probe()
+    named = bwrap_probe(str(bare.path))
+
+    assert found.ok and found.prefix == (str(other.directory / "unshare"), "--mount", "--")
+    assert not named.ok and "no unshare beside" in named.problems[1]
+    assert bwrap_probe() is found
+
+
 def test_the_probe_runs_once_per_key(fake: FakeBwrap, monkeypatch: pytest.MonkeyPatch) -> None:
     fake.configure(sleep=0.3)
     found = []
@@ -502,7 +712,7 @@ def test_the_probe_runs_once_per_key(fake: FakeBwrap, monkeypatch: pytest.Monkey
 
     transient = BwrapProbe(str(fake.path), (0, 13, 1), ("no answer",), transient=True)
     calls = []
-    monkeypatch.setattr(bwrap, "probe_bwrap", lambda path: calls.append(path) or transient)
+    monkeypatch.setattr(bwrap, "_probe", lambda path, unshare: calls.append(path) or transient)
     bwrap._PROBES.clear()
     assert bwrap_probe() is transient and bwrap_probe() is transient and len(calls) == 2
 

@@ -856,9 +856,12 @@ deployments.
    and the process holds `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL`. Never on the Ray GPU actor path, and never for an
    agent sandbox's commands (`choose_sandbox_isolation()`), which run as the app's own account.
 2. **bubblewrap**: the agent runs in a sandbox that starts from an empty root (`hyperloom_common/bwrap.py`): only the
-   paths its confinement binds exist inside, read-only unless they are its work trees; the credential locations inside
-   a bound tree are masked (the app's home and XDG directories, every path an environment variable with a
-   credential-shaped name points at, Hugging Face's login files, and the files the app registers); it has its own
+   paths its confinement binds exist inside, read-only unless they are its work trees, and the root takes no new name;
+   the credential locations inside a bound tree are hidden (the app's home and XDG directories, every path an
+   environment variable with a credential-shaped name points at, Hugging Face's login files, made yet or not, and the
+   files the app registers): a directory is masked, and a read-only tree that holds a file is bound entry by entry
+   without it, so a login the app replaces or makes there after the launch is not shown either. A credential file in a
+   work tree refuses the launch, naming it. It has its own
    user, pid and IPC namespaces, its own `/proc`, no capability and `no_new_privs`, and shares the app's network
    (loopback MCP). A program's own directory is bound, and its parent only away from those credential locations, so
    a native install under `~/.local/bin` does not make the rest of `~/.local` readable. Nothing is bound, run or
