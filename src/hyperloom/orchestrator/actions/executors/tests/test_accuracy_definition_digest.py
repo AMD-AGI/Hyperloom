@@ -206,3 +206,23 @@ def test_the_enablement_trigger_keeps_the_digest_its_eval_failure_ran_under():
     _adopt_eval_trigger(state, {ag.ACCURACY_DEFINITION_DIGEST_KEY: BASELINE_DIGEST})
     assert state.enablement.eval_definition_digest == BASELINE_DIGEST
     assert SharedState.from_dict(state.to_dict()).enablement.eval_definition_digest == BASELINE_DIGEST
+
+
+@pytest.mark.parametrize(
+    ("accuracy_pass", "expected"),
+    [(True, pytest.approx(-100 * (0.945 - 0.94) / 0.945)), (None, None)],
+    ids=["same_definition", "other_definition"],
+)
+def test_a_patch_records_an_accuracy_delta_only_for_a_score_its_gate_compared(accuracy_pass, expected):
+    from hyperloom.common.perf_metric import GradedComparison
+    from hyperloom.orchestrator.actions.executors import _integrate_perf_gate as gate
+
+    attempt = SimpleNamespace(shared_state=SharedState(), specialist_task_id="t", done_payload={})
+    throughput = gate._ThroughputGrade(
+        gate._GateBasis(100.0, 2.0), GradedComparison("output", 110.0, 100.0, "KEEP"), 10.0
+    )
+    evidence = {"accuracy_pass": accuracy_pass, "accuracy": 0.94}
+    verdict = gate._weigh_gate(
+        attempt, {"accuracy_baseline": 0.945}, {"output_throughput": 110.0}, evidence, throughput
+    )
+    assert verdict.measured.acc_delta_pct == expected

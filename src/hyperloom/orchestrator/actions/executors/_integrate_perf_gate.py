@@ -556,7 +556,12 @@ def _weigh_gate(
 
     accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
     acc_block, acc_reason = _accuracy_block(params, accuracy_pass, attempt.specialist_task_id)
-    acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
+    # Only a score taken under the baseline's eval definition draws a verdict, and only it compares with the baseline.
+    acc_delta_pct = (
+        None
+        if accuracy_pass is None
+        else _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
+    )
 
     gate_pass = throughput.cleared and not acc_block
     fix_finding = first_text(_done_field(attempt.done_payload, "resolves_finding"))
