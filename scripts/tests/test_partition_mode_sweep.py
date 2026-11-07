@@ -665,6 +665,13 @@ class TestReadSuiteConfig:
         assert pms.main(["--suite-config", str(tmp_path / "missing.yaml")]) == 2
         assert "cannot read the suite config" in capsys.readouterr().err
 
+    def test_an_occupied_output_dir_is_refused_before_inspecting_the_card(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(pms, "_inspect_card", lambda args: pytest.fail("the card was inspected"))
+        (tmp_path / "spx" / "partition0" / "round").mkdir(parents=True)
+        argv = ["--benchmark-command", "true", "--output-dir", str(tmp_path)]
+        assert pms.main(argv) == 2
+        assert "is not empty" in capsys.readouterr().err
+
     def test_neither_source_is_refused(self, capsys):
         assert pms.main([]) == 2
         assert "--suite-config" in capsys.readouterr().err
