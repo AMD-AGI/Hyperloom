@@ -238,3 +238,12 @@ def test_a_patch_records_an_accuracy_delta_only_for_a_score_its_gate_compared(ac
         attempt, {"accuracy_baseline": 0.945}, {"output_throughput": 110.0}, evidence, throughput
     )
     assert verdict.measured.acc_delta_pct == expected
+
+
+def test_a_session_without_a_measured_baseline_grades_against_the_proposed_score_with_no_digest():
+    state = SharedState(baseline_accuracy=0.0)
+    assert ag.AccuracyReference.of_session(state, {"accuracy_baseline": 0.9}) == ag.AccuracyReference(0.9, "")
+    measured = SharedState(baseline_accuracy=0.945, baseline_accuracy_definition_digest=BASELINE_DIGEST)
+    assert ag.AccuracyReference.of_session(measured, {"accuracy_baseline": 0.9}) == ag.AccuracyReference(
+        0.945, BASELINE_DIGEST
+    )

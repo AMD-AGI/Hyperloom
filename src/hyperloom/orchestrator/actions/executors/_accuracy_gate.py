@@ -528,6 +528,15 @@ class AccuracyReference:
             str(getattr(state, "baseline_accuracy_definition_digest", "") or ""),
         )
 
+    @classmethod
+    def of_session(cls, state: Any, params: Mapping[str, Any]) -> AccuracyReference:
+        """The baseline the session measured, else the one a proposal's ``params`` carry, which no suite round took."""
+        measured = cls.of_baseline(state)
+        if measured.score > 0:
+            return measured
+        proposed = to_float(params.get("accuracy_baseline"), 0.0) or to_float(params.get("baseline_accuracy"), 0.0)
+        return cls(proposed or 0.0, "")
+
     def comparable(self, eval_results: Mapping[str, Any]) -> float | None:
         """The score ``eval_results`` holds when taken under this reference's definition; ``None`` otherwise.
 
