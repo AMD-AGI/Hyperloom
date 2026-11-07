@@ -516,6 +516,44 @@ async def test_applied_source_is_measured_and_transactionally_kept_or_reverted(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rounds_left,launches,status", [(1.5, 1, "succeeded"), (0.5, 0, "skipped")], ids=["one-round", "under-one-round"]
+)
+async def test_a_native_variant_is_admitted_on_the_single_round_it_runs(
+    source, report, tmp_path, monkeypatch, rounds_left, launches, status
+):
+    """The grid warmup is on outside tests, but a native variant never gets one, so only its measured round is due."""
+    import subprocess
+    import time
+
+    from hyperloom.orchestrator.actions.executors import _grid_runner
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    launched = []
+
+    def run(cmd, **kwargs):
+        workspace = Path(cmd[cmd.index("--output-dir") + 1]) / "benchmark_sglang_candidate"
+        workspace.mkdir(parents=True)
+        (workspace / "benchmark_report.json").write_text(json.dumps(report))
+        launched.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "complete", "")
+
+    monkeypatch.setattr(_grid_runner, "run_with_session_kill", run)
+    round_sec = 600.0
+    results = await _grid_runner.run_grid(
+        grid=[GridVariant("candidate")],
+        output_root=tmp_path / "grid",
+        recipe=GridRecipe(base_yaml_path=materialize_benchmark_config(source, tmp_path / "base")),
+        stop=_grid_runner.GridStop(
+            session_deadline_sec=time.monotonic() + rounds_left * round_sec, variant_expected_sec=round_sec
+        ),
+    )
+
+    assert [result.status for result in results] == [status]
+    assert len(launched) == launches
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("capture_status", ["complete", "failed", "missing"])
 async def test_profile_executor_keeps_capture_windows_separate(source, report, tmp_path, monkeypatch, capture_status):
     import gzip
