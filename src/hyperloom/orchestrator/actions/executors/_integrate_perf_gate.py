@@ -20,6 +20,7 @@ from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORR
 from ...state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import accuracy_keep_block, eval_probe_summary
+from .benchmark_run.accuracy import accuracy_round_due
 from ._enablement_config import DEFAULT_SWITCH_OFF_PARITY_BAND_PCT
 from ._git import _git_head_sha
 from ._integrate_attempt import IntegrateAttempt
@@ -78,7 +79,10 @@ class PerfGateMixin:
                 "workspace": str(attempt.output_root),
             }
 
-        verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, _GateBasis(base_tput, keep_threshold_pct))
+        throughput = _grade_throughput(shared_state, bench_result, _GateBasis(base_tput, keep_threshold_pct))
+        if throughput.cleared and accuracy_round_due(shared_state):
+            await self._run_patch_accuracy_round(attempt, params, bench_result, gate_evidence)
+        verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, throughput)
         measured = verdict.measured
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)
@@ -501,6 +505,30 @@ class _GateBasis:
 
 
 @dataclass(frozen=True)
+class _ThroughputGrade:
+    """How the bench's throughput graded against the base, before its accuracy is weighed."""
+
+    basis: _GateBasis
+    graded: GradedComparison
+    delta_pct: float | None
+
+    @property
+    def cleared(self) -> bool:
+        """Whether the throughput cleared the KEEP threshold, unvetoed."""
+        return (
+            self.graded.comparable
+            and self.delta_pct is not None
+            and self.delta_pct >= self.basis.keep_threshold_pct
+            and not self.graded.veto_reason
+        )
+
+
+def _grade_throughput(shared_state: SharedState, bench_result: dict[str, Any], basis: _GateBasis) -> _ThroughputGrade:
+    graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=basis.keep_threshold_pct)
+    return _ThroughputGrade(basis, graded, _graded_delta_pct(graded, bench_result, basis.base_tput))
+
+
+@dataclass(frozen=True)
 class _GateVerdict:
     """The measurement the KEEP gate weighed, its verdict, and the accuracy and correctness-fix findings behind it."""
 
@@ -519,25 +547,18 @@ def _weigh_gate(
     params: dict[str, Any],
     bench_result: dict[str, Any],
     gate_evidence: dict[str, Any],
-    basis: _GateBasis,
+    throughput: _ThroughputGrade,
 ) -> _GateVerdict:
-    """Grade the bench against the base and weigh the accuracy gate and any correctness-fix claim."""
+    """Weigh the graded throughput, the accuracy gate and any correctness-fix claim."""
     shared_state = attempt.shared_state
-    base_tput, keep_threshold_pct = basis.base_tput, basis.keep_threshold_pct
-    graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
-    delta_pct = _graded_delta_pct(graded, bench_result, base_tput)
+    base_tput, keep_threshold_pct = throughput.basis.base_tput, throughput.basis.keep_threshold_pct
+    graded, delta_pct = throughput.graded, throughput.delta_pct
 
     accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
     acc_block, acc_reason = _accuracy_block(params, accuracy_pass, attempt.specialist_task_id)
     acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
 
-    gate_pass = (
-        graded.comparable
-        and delta_pct is not None
-        and delta_pct >= keep_threshold_pct
-        and not graded.veto_reason
-        and not acc_block
-    )
+    gate_pass = throughput.cleared and not acc_block
     fix_finding = first_text(_done_field(attempt.done_payload, "resolves_finding"))
     fix_refusals: list[str] = []
     correctness_fix = False

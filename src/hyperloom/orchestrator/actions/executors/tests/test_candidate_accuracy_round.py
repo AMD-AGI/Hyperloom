@@ -113,3 +113,58 @@ def test_a_grid_rounds_point_is_the_variant_config_beside_its_workspace(tmp_path
     workspace = tmp_path / "variant_00_x" / "suite_run_0"
 
     assert variant_config_of(str(workspace)) == tmp_path / "variant_00_x" / VARIANT_CONFIG_FILE
+
+
+async def _integrate_gate(tmp_path, monkeypatch, *, tput: float, regraded_pass: bool | None = True):
+    """Weigh an integrate bench at ``tput`` against a base of 1000 tok/s, the round regrading accuracy to
+    ``regraded_pass``."""
+    from hyperloom.orchestrator.actions.executors import _integrate_bench, _integrate_perf_gate
+    from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+
+    calls = []
+
+    async def run_round(slot, launch, state, *, session):
+        calls.append((slot, launch, session))
+        return AccuracyRoundOutcome(slot / ACCURACY_DIR, "")
+
+    def regrade(bench, bench_leg, result_dir, gate_evidence):
+        gate_evidence["accuracy_pass"] = regraded_pass
+
+    monkeypatch.setattr(_integrate_perf_gate, "accuracy_round_due", lambda state: True)
+    monkeypatch.setattr(_integrate_bench, "run_candidate_accuracy_round", run_round)
+    monkeypatch.setattr(_integrate_bench, "_grade_bench_accuracy", regrade)
+    attempt = IntegrateAttempt(
+        task_id="t-int",
+        specialist_task_id="t-spec",
+        shared_state=SharedState(baseline_tput=1000.0, current_best={"tput": 1000.0}),
+        done_payload={},
+        output_root=tmp_path / "run",
+    )
+    workspace = tmp_path / "run" / "variant_00_patch" / "benchmark_x"
+    out = await IntegratePatchExecutor(session_dir=tmp_path / "session")._gate_perf(
+        attempt=attempt,
+        params={"base_tput": 1000.0, "keep_threshold_pct": 1.0, "require_accuracy_for_keep": True},
+        bench_result={"status": "succeeded", "output_throughput": tput, "workspace": str(workspace)},
+        gate_evidence={"accuracy_pass": True},
+    )
+    return out, calls, workspace.parent
+
+
+@pytest.mark.asyncio
+async def test_an_integrate_bench_that_cleared_the_threshold_is_weighed_on_the_grade_after_its_round(
+    tmp_path, monkeypatch
+):
+    out, calls, slot = await _integrate_gate(tmp_path, monkeypatch, tput=1100.0, regraded_pass=False)
+
+    assert calls == [(slot, slot / VARIANT_CONFIG_FILE, tmp_path / "session")]
+    assert out["status"] != "kept" and out["accuracy_pass"] is False
+    assert out["bench_result"][ACCURACY_ROUND_KEY] == {"run_dir": str(slot / ACCURACY_DIR), "error_class": ""}
+
+
+@pytest.mark.asyncio
+async def test_an_integrate_bench_below_the_threshold_runs_no_accuracy_round(tmp_path, monkeypatch) -> None:
+    out, calls, _ = await _integrate_gate(tmp_path, monkeypatch, tput=1005.0)
+
+    assert calls == []
+    assert out["status"] == "reverted"

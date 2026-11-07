@@ -2543,6 +2543,7 @@ async def test_executor_grades_real_patch_bench(
         enablement=EnablementRound(),
         framework="vllm",
         benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
+        agentx_accuracy=False,
         current_best={
             "tput": 100.0,
             "total_throughput": 20000.0,
