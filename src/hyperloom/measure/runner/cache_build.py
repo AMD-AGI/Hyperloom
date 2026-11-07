@@ -135,7 +135,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import _parent_is_shared, current_umask, make_shared_dirs, ownership
+from hyperloom_common.shared_storage import current_umask, make_shared_dirs, ownership, parent_is_shared
 from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
 from hyperloom.measure.runner.cache_layout import (
     BOOTSTRAP_NAME,
@@ -1012,7 +1012,7 @@ def _open_lock(path: Path) -> int:
     Raises:
         CacheBuildError: When it cannot be opened so, naming it: a lock another account made without group write.
     """
-    shared = _parent_is_shared(path)
+    shared = parent_is_shared(path)
     mode = _ALL_FILE_BITS & ~(_shared_umask() if shared else current_umask())
     try:
         try:
