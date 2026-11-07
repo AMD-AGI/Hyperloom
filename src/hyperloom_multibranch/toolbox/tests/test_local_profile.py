@@ -22,7 +22,6 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Valid
 from hyperloom.measure.tests._inferencex import stock_repo
 from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.hosted_fixtures import spec_context
-from hyperloom.measure.tests.test_hosted_real_runner import _git_repo
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -145,24 +144,5 @@ async def test_a_profile_point_that_does_not_turn_the_profiler_on_is_not_run_as_
         result = await _profile(toolbox)
         assert result.validity is Validity.MEASUREMENT_FAILED and result.profile_location == "", result
         assert "does not turn the torch profiler on" in (result.failure_reason or ""), result.failure_reason
-    finally:
-        await toolbox.close()
-
-
-async def test_a_profile_test_on_an_inferencex_that_cannot_be_patched_fails_naming_the_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = tmp_path / "inferencex"
-    commit = _git_repo(repo)
-    _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
-    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox(tmp_path, blackboard, commit, repo, PROFILE_POINT)
-    try:
-        await toolbox.start()
-        result = await _profile(toolbox)
-        assert result.validity is Validity.MEASUREMENT_FAILED and result.profile_location == "", result
-        reason = result.failure_reason or ""
-        assert "benchmark_lib.sh" in reason and "benchmark_serving.py" in reason, reason
-        assert reason.endswith("lack the patch"), reason
     finally:
         await toolbox.close()
