@@ -130,7 +130,7 @@ def _session_point(framework: Framework, tmp_path: Path) -> tuple[dict, BaseLaun
 
 
 @pytest.mark.parametrize("framework", list(Framework))
-def test_a_point_of_every_framework_runs_on_its_frozen_base_and_none_reaches_the_bypass_runner(framework, tmp_path):
+def test_a_point_of_every_framework_runs_on_its_frozen_base(framework, tmp_path):
     point, base = _session_point(framework, tmp_path)
 
     config = suite_config(point, base, replace(_settings(), lifecycle=Lifecycle(LifecycleMode.OWN)))

@@ -185,22 +185,6 @@ def test_precision_pins_and_the_board_keeps_the_point_script(monkeypatch, tmp_pa
     assert bench["benchmark_script"] == "old.sh"
 
 
-def test_bypass_scriptable_prefers_absolute_benchmark_script(tmp_path):
-    from hyperloom.orchestrator.actions.executors import bypass_scriptable
-
-    script = tmp_path / "custom_mi355x.sh"
-    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-
-    resolved = bypass_scriptable.resolve_scriptable_script(
-        "custom",
-        "mi355x",
-        "",
-        {"benchmark_script": str(script)},
-    )
-
-    assert resolved == script
-
-
 def test_rocr_derives_tp(monkeypatch, tmp_path):
     clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
