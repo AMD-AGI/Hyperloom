@@ -5,12 +5,16 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
+import pathlib
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -177,6 +181,101 @@ def test_hugging_faces_default_directory_stays_visible_read_only_once_the_home_m
     named = _env(HOME=str(home), HF_HUB_CACHE=str(tmp_path / "hub"))
     prepare_launch(_bwrap(), place, ["claude"], named).release()
     assert "HF_HOME" not in named
+
+
+def _cannot_search(monkeypatch: pytest.MonkeyPatch, locked: Path) -> None:
+    """Fail every look below ``locked`` as it fails for a uid that cannot search it (``EACCES``), where the suite runs
+    as root, which can."""
+    accessor = getattr(pathlib, "_NormalAccessor", None)  # Python 3.10's Path calls the os functions through it
+    for name in ("stat", "lstat"):
+        real = getattr(os, name)
+
+        def look(path: Any, *args: Any, _real: Any = real, **kwargs: Any) -> Any:
+            if not isinstance(path, int) and os.fsdecode(path).startswith(f"{locked}{os.sep}"):
+                raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+            return _real(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, name, look)
+        if hasattr(accessor, name):
+            monkeypatch.setattr(accessor, name, staticmethod(look))
+
+
+@pytest.mark.parametrize("whose", ["the child's", "the app's too"])
+def test_a_home_the_app_cannot_search_has_no_hugging_face_cache_to_show_and_the_launch_goes_on(
+    tmp_path, monkeypatch, whose
+):
+    """CI's runner is not root, and its HOME may name ``/root``: the cache, the model and the logins below a home the
+    app cannot search read as absent (nothing of the app's shows them either), never as a ``PermissionError``."""
+    locked = tmp_path / "locked-home"
+    (locked / ".cache" / "huggingface").mkdir(parents=True)
+    (locked / "model").mkdir()
+    _cannot_search(monkeypatch, locked)
+    if whose == "the app's too":
+        monkeypatch.setenv("HOME", str(locked))
+    place = _place(tmp_path, readable=(locked / "model",))
+    env = _env(HOME=str(locked), CLAUDE_CODE_OAUTH_TOKEN="token-value")
+
+    prepared = prepare_launch(_bwrap(), place, ["claude", "--print"], env)
+    prepared.release()
+
+    assert "HF_HOME" not in env and env["HOME"] == str(place.workspace / ".home")
+    assert prepared.policy is not None and not any(path.startswith(str(locked)) for path in prepared.policy.read_only)
+
+
+_LAUNCH_AS_IT_IS = """
+import json, sys
+from pathlib import Path
+from hyperloom_common.bwrap import BwrapProbe
+from hyperloom.common.agent_isolation import BwrapIsolation
+from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, prepare_launch
+home, ws = sys.argv[1], Path(sys.argv[2])
+env = {"PATH": "/usr/bin:/bin", "HOME": home, "CLAUDE_CODE_OAUTH_TOKEN": "token-value"}
+place = LaunchPlace(ws, ws / "worktree", readable=(Path(home, "model"),))
+prepared = prepare_launch(BwrapIsolation(BwrapProbe("/opt/fake/bwrap", (0, 13, 1), ())), place, ["claude"], env)
+prepared.release()
+print(json.dumps({"home": env["HOME"], "hf": "HF_HOME" in env, "read_only": prepared.policy.read_only}))
+"""
+
+
+def test_a_launch_by_a_uid_that_cannot_search_its_home_goes_on_without_what_lies_there():
+    """The same, with no stand-in: the app runs as a uid that cannot search the home it and the child are given
+    (as root here: user 65534 through ``setpriv``, against a root-owned 0700 home; else the suite's own uid against
+    a 0000 one)."""
+    src = Path(launch_env.__file__).resolve().parents[3]
+    as_root = os.geteuid() == 0
+    drop = ["setpriv", "--reuid", "65534", "--regid", "65534", "--clear-groups"] if as_root else []
+    if as_root and shutil.which("setpriv") is None:
+        pytest.skip("needs setpriv to run as another uid")
+    base = Path(tempfile.mkdtemp(prefix="hl-unsearchable-"))
+    home, ws = base / "home", base / "ws"
+    try:
+        base.chmod(0o755)
+        (home / ".cache" / "huggingface").mkdir(parents=True)
+        (home / "model").mkdir()
+        (ws / "worktree").mkdir(parents=True)
+        if as_root:
+            os.chown(ws, 65534, 65534)
+            os.chown(ws / "worktree", 65534, 65534)
+        env = {"PATH": os.defpath, "HOME": str(home), "PYTHONPATH": str(src)}
+        reached = subprocess.run([*drop, sys.executable, "-c", "import hyperloom"], env=env, capture_output=True)
+        if reached.returncode != 0:
+            pytest.skip(f"this interpreter or tree cannot be run as the other uid: {reached.stderr[-300:]!r}")
+        home.chmod(0o700 if as_root else 0)
+        done = subprocess.run(
+            [*drop, sys.executable, "-c", _LAUNCH_AS_IT_IS, str(home), str(ws)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    finally:
+        home.chmod(0o700)
+        shutil.rmtree(base)
+
+    assert done.returncode == 0, done.stderr
+    seen = json.loads(done.stdout)
+    assert seen["home"] == str(ws / ".home") and not seen["hf"]
+    assert not any(path.startswith(str(home)) for path in seen["read_only"])
 
 
 def test_the_apps_state_directory_is_masked_where_a_bind_would_show_it(tmp_path, monkeypatch):

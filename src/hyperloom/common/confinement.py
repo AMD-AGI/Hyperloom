@@ -385,9 +385,10 @@ def _opened_up(directory: Path, visible: tuple[Path, ...], depth: int) -> list[P
 
 
 def _masks_for(path: Path, visible: tuple[Path, ...]) -> list[Path]:
-    """``path`` itself when nothing of ``visible`` is at or below it; else its entries, opened up around them."""
+    """``path`` itself when nothing of ``visible`` is at or below it; else its entries, opened up around them. None for
+    a path this process cannot look at (below a directory it cannot search): no bind of its shows it either."""
     real = _real(path)
-    if not real.exists() or real == _ROOT:
+    if not os.path.exists(real) or real == _ROOT:
         return []
     if not any(_at_or_under(shown, real) for shown in visible):
         return [real]
