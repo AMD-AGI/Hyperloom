@@ -123,6 +123,22 @@ def test_the_leased_round_is_reaped_only_past_its_own_session_deadline(session, 
     assert leased.session_remaining_sec == pytest.approx(600 + _suite_config._LEASED_BACKSTOP_SLACK_SEC, abs=5)
 
 
+def test_a_leased_round_sizes_its_server_by_tp_not_by_the_gpu_mask_the_point_carries(
+    session, tmp_path, monkeypatch
+) -> None:
+    lease = _Lease(_rounds())
+    point = _write_point(tmp_path / "slot" / "point.yaml", ROCR_VISIBLE_DEVICES="0,1,2,3,4,5,6,7")
+
+    run_suite_round(suite_route(session, point), _request(point, lease), on_poll=lambda: None)
+
+    (leased,) = lease.leased
+    assert _gpus(leased) == (0, 1)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "6,7")
+    monkeypatch.setattr(SessionKillRound, "run", lambda self: (0, "", ""))
+    assert leased.run() == (0, "", "")
+    assert _gpus(leased) == (6, 7)
+
+
 def _leased(tmp_path: Path, gpus: tuple[int, ...]) -> SuiteLeasedRound:
     config = _config()
     config = replace(config, server=replace(config.server, gpus=gpus))

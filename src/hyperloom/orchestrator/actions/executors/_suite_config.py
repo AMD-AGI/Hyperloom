@@ -92,7 +92,7 @@ from ._failed_step import failed_step_error_class
 from ._gpu_power import round_gpu_telemetry
 from ._multi_node_env import client_only_server_url
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
-from ._ray_backend import SuiteLeasedRound
+from ._ray_backend import SuiteLeasedRound, strip_visible_devices_from_config
 from ._ray_serving import ServingLease
 from ._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -583,6 +583,11 @@ def _read_point(config_path: Path) -> Mapping[str, object]:
     return yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
 
 
+def _round_point(config_path: Path, lease: ServingLease | None) -> Mapping[str, object]:
+    # Ray places a leased round on GPUs of its choosing, so the host's GPU masks the point carries must not size it.
+    return _read_point(config_path if lease is None else strip_visible_devices_from_config(config_path))
+
+
 def _server_phase_point(document: Mapping[str, object]) -> Mapping[str, object]:
     bench = _bench(document)
     return {**document, "benchmark": {**bench, "envs": {**_envs(bench), _RUN_PHASE_ENV: _SERVER_ONLY_PHASE}}}
@@ -696,7 +701,7 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
     run_dir = _next_run_dir(request.round_dir)
     settings = _settings(route, run_dir, request.lifecycle, request.deadline_unix, request.env_drop)
     try:
-        point = _read_point(request.config_path)
+        point = _round_point(request.config_path, request.serving_lease)
         if request.boot_only:
             point = _server_phase_point(point)
         config = suite_config(point, route.base, settings)
@@ -735,7 +740,9 @@ def run_accuracy_suite_round(route: SuiteRoute, request: AccuracyRound, *, on_po
         shutil.rmtree(run_dir)
     settings = _settings(route, run_dir, Lifecycle(LifecycleMode.OWN), request.deadline_unix)
     try:
-        config = accuracy_config(_read_point(request.config_path), route.base, settings, request.timeout_sec)
+        config = accuracy_config(
+            _round_point(request.config_path, request.serving_lease), route.base, settings, request.timeout_sec
+        )
     except ConfigError as exc:
         raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     return _run_config(config, request.serving_lease, on_poll)
