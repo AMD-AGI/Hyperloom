@@ -22,7 +22,7 @@ from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation, verify_bundle
 from hyperloom.measure.compile import LocalBlobStore, PackageBase, compile_environment
 from hyperloom.measure.hosted_spec import dir_manifest_sha256
-from hyperloom.measure.manifest import ResultManifest
+from hyperloom.measure.manifest import RESULT_SCHEMA_V1, ResultManifest
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.points import default_canonical, generate_points
 from hyperloom.measure.runner import run as runner
@@ -279,6 +279,7 @@ def test_a_successful_test_leaves_a_signed_manifest_and_status_last(tmp_path, en
             spec_fingerprint=ResultManifest.from_bytes(raw).spec_fingerprint,
             spec_sha256=None,
             sandbox_id="sbx-1",
+            result_schema=RESULT_SCHEMA_V1,
         ),
     )
     assert signing.verify(raw, (out / "manifest.sig").read_text(), signing.public_key_pem(key))

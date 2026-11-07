@@ -62,7 +62,7 @@ from hyperloom.measure.hosted_log import (
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.jit.publish import publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
-from hyperloom.measure.manifest import ResultManifest
+from hyperloom.measure.manifest import ResultManifest, result_schema_for
 from hyperloom.measure.phases import ACQUIRED, LANDED, RUNNER_DONE, HostTimeline
 from hyperloom.measure.boot_watch import HUNG_BEFORE_READY, PRE_READY_SILENCE_SEC, PreReadySilence
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR
@@ -731,6 +731,7 @@ class HostedMeasurementBackend:
                 spec_fingerprint=self._expected_fingerprint(attempt.spec, listed.runner.hyperloom_version),
                 spec_sha256=spec_sha256(attempt.spec_raw),
                 sandbox_id=runner.sandbox_id,
+                result_schema=result_schema_for(attempt.spec.schema),
                 rule_pack_digest=self._config.rule_pack_digest,
             ),
             max_total_bytes=attempt.spec.outputs.max_total_bytes,
@@ -864,7 +865,8 @@ class HostedMeasurementBackend:
         if not isinstance(fingerprint, str) or not fingerprint or not record.sandbox_id:
             raise ResultRejected(RejectReason.RECORD_MISMATCH, "the acceptance kept no sheet fingerprint or sandbox")
         sheet = self.journal.load_spec(record.request_id, record.attempt)
-        return BundleExpectation(key, record.request_id, fingerprint, spec_sha256(sheet), record.sandbox_id)
+        schema = result_schema_for(MeasurementSpec.from_bytes(sheet).schema)
+        return BundleExpectation(key, record.request_id, fingerprint, spec_sha256(sheet), record.sandbox_id, schema)
 
     def _drop_pre_switch(self, previous: Record, schema: str) -> None:
         """End an attempt journalled with a sheet of an older version: its sandbox measures what the session no longer
