@@ -307,6 +307,54 @@ def test_where_bubblewrap_cannot_sandbox_a_test_tests_run_as_before_and_that_is_
     assert not sandbox.confined, "the sandbox runs as before: its runner sees the app's processes"
 
 
+def test_a_probe_that_gave_no_answer_in_time_leaves_only_that_launch_unconfined(
+    area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = FakeBwrap(area)
+    late = BwrapProbe(str(fake.path), None, (f"bubblewrap at {fake.path}: no answer in 10 s",), transient=True)
+    answers = [late, late, fake.isolation().probe]
+    asked: list[BwrapProbe] = []
+
+    def answer(_path: str | None) -> BwrapProbe:
+        asked.append(answers.pop(0))
+        return asked[-1]
+
+    real = agent_isolation.choose_test_isolation
+    monkeypatch.setattr(confined, "choose_test_isolation", lambda probe=None: real(probe=probe or answer))
+    with caplog.at_level(logging.WARNING):
+        provider = LocalSandboxProvider(
+            [_runner(gpus=0)], base_dir=area / "sandboxes", users=ProcessUsers(plan=RunnerPlan())
+        )
+        providers.append(provider)
+        made = [provider.create("runner", role="measurement", timeout_sec=60, metadata={}) for _ in range(3)]
+
+    assert [sandbox.confined for sandbox in made] == [False, True, True], "a later launch is chosen for again"
+    assert len(asked) == 3, "an answer that came is kept"
+    said = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert said == [f"{UNCONFINED_TESTS} (running them as an account: {TEST_ACCOUNT}; {late.problems[0]})"]
+
+
+def test_a_probe_that_answered_no_is_not_asked_again(
+    area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = BwrapProbe(None, None, ("bubblewrap: not found on PATH",))
+    asked: list[str | None] = []
+
+    def answer(path: str | None) -> BwrapProbe:
+        asked.append(path)
+        return missing
+
+    real = agent_isolation.choose_test_isolation
+    monkeypatch.setattr(confined, "choose_test_isolation", lambda probe=None: real(probe=probe or answer))
+    provider = LocalSandboxProvider(
+        [_runner(gpus=0)], base_dir=area / "sandboxes", users=ProcessUsers(plan=RunnerPlan())
+    )
+    providers.append(provider)
+    made = [provider.create("runner", role="measurement", timeout_sec=60, metadata={}) for _ in range(2)]
+
+    assert [sandbox.confined for sandbox in made] == [False, False] and asked == [None]
+
+
 @pytest.mark.parametrize("layer", [None, "/nonexistent/hyperloom-host/bin/bwrap"])
 def test_a_hosted_run_where_bubblewrap_cannot_sandbox_a_test_refuses_the_provider(
     monkeypatch: pytest.MonkeyPatch, layer: str | None

@@ -29,6 +29,9 @@ plan's path that is itself one of the app's credential locations (a home, a logi
 what lies below a bind, never the bound path itself. A sealed sandbox, whose one launch finds its scratch as it was
 made, falls back to a fresh ``/tmp`` of its own where a bubblewrap older than
 :data:`~hyperloom_common.bwrap.NESTED_SAFE` refuses binds below a bound one.
+
+Tests unconfined only because bubblewrap's probe gave no answer in time are so for that launch alone: the next
+sandbox is chosen for again, until a choice is final.
 """
 
 from __future__ import annotations
@@ -210,6 +213,21 @@ class SandboxConfiner:
         self.plan = plan
         self.base = base
         self.python = python
+        self._lock = threading.Lock()
+
+    def _chosen(self) -> BwrapIsolation | NoIsolation:
+        """The isolation of the sandbox made now: chosen again while the last choice was unconfined only because
+        bubblewrap's probe gave no answer in time (which the probe does not keep), as the first was otherwise.
+
+        Raises:
+            IsolationRefused: In a hosted run, where bubblewrap cannot sandbox a test.
+        """
+        with self._lock:
+            if isinstance(self.isolation, NoIsolation) and self.isolation.transient:
+                self.isolation = choose_test_isolation()
+                if isinstance(self.isolation, NoIsolation):
+                    _warn_once(f"{UNCONFINED_TESTS} ({self.isolation.why})")
+            return self.isolation
 
     def confine(self, sandbox: SandboxShape) -> SandboxConfinement | None:
         """The confinement of ``sandbox``, whose processes run its command and commands under :data:`SHELL`. ``None``
@@ -218,8 +236,9 @@ class SandboxConfiner:
 
         Raises:
             SandboxDenied: In a hosted run, where the sandbox's paths cannot be bound safely.
+            IsolationRefused: In a hosted run, where bubblewrap cannot sandbox a test.
         """
-        isolation = self.isolation
+        isolation = self._chosen()
         if not isinstance(isolation, BwrapIsolation):
             return None
         scratch = Scratch.create()
