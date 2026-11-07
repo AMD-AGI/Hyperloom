@@ -38,7 +38,6 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
-from hyperloom_common.fs_utils import read_text_nofollow
 from hyperloom_common.git_safety import app_git, trusted_admin_dir
 from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, SHARED_DIR_MODE, make_shared_dirs, share_new_directory
 from hyperloom_multibranch.repo.isolated_git import (
@@ -377,30 +376,25 @@ class SourceBase:
             _link(path, PurePosixPath(prefix), target)
         found = self._worktrees.get(path)
         if found is None:
-            made = BranchWorktree(path, self._native, self._linked(), self._admin(path), common=common)
+            made = BranchWorktree(path, self._native, self._linked(), self._admin(path, common), common=common)
             found = self._worktrees.setdefault(path, made)
         return found
 
-    def _admin(self, worktree: Path) -> Path | None:
-        """The admin directory of ``worktree`` in this base's repository: the one entry of its ``worktrees`` whose
-        ``gitdir`` names the worktree's ``.git``, read from the base, never from the worktree, whose ``.git`` file
-        whoever writes the worktree decides; ``None``, said, when not exactly one does."""
-        gitfile = os.path.realpath(worktree / _GIT_DIR)
-        entries = self.path / _GIT_DIR / "worktrees"
+    def _admin(self, worktree: Path, common: Path) -> Path | None:
+        """The admin directory of ``worktree`` in this base's repository, whose git directory is ``common``: the one
+        :func:`~hyperloom_common.git_safety.trusted_admin_dir` proves the app's and ``common``'s, the same decision
+        every git run in the worktree is made under; ``None``, said, when it proves none."""
         try:
-            listed = sorted(entry for entry in entries.iterdir() if entry.is_dir() and not entry.is_symlink())
-        except OSError:
-            listed = []
-        found = [entry for entry in listed if _names_gitfile(entry, gitfile)]
-        if len(found) == 1:
-            return found[0]
-        logger.warning(
-            "%d admin directories of %s name the worktree %s: a sandbox shows its specialist no git metadata there",
-            len(found),
-            self.path,
-            worktree,
-        )
-        return None
+            return trusted_admin_dir(worktree, common)
+        except OSError as error:
+            logger.warning(
+                "no admin directory of %s is proven the worktree %s's (%s): a sandbox shows its specialist no git "
+                "metadata there",
+                self.path,
+                worktree,
+                error,
+            )
+            return None
 
     def _linked(self) -> tuple[Path, ...]:
         """What every worktree's links point at, read from this base's own record, never from a worktree, whose
@@ -486,15 +480,6 @@ def _file_sections(patch: str) -> list[tuple[tuple[str, ...], str]]:
 
 def _within(path: str, trees: Sequence[str]) -> bool:
     return any(path == tree or path.startswith(f"{tree}/") for tree in trees)
-
-
-def _names_gitfile(entry: Path, gitfile: str) -> bool:
-    """Whether the admin directory ``entry`` belongs to the worktree whose resolved ``.git`` is ``gitfile``."""
-    try:
-        named = read_text_nofollow(entry / "gitdir").strip()
-    except (OSError, UnicodeDecodeError):
-        return False
-    return os.path.realpath(os.path.join(entry, named)) == gitfile
 
 
 def linked_paths(common: Path) -> list[tuple[str, str]]:

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import logging
 import os
 import shutil
 import stat
@@ -959,6 +960,34 @@ def test_a_gitfile_naming_a_directory_of_the_source_base_that_is_no_worktree_s_r
 
     with pytest.raises(worktree_module.WorktreeError, match="not an admin dir of a linked worktree"):
         worktree.diff("vllm")
+
+
+def test_a_worktree_s_admin_directory_is_the_one_its_git_runs_against(tmp_path, base):
+    """The admin directory a sandbox shows is decided where every git run in the worktree is: by
+    ``trusted_admin_dir`` against the source base's git directory."""
+    worktree = base.worktree("s1", tmp_path / "s1")
+
+    assert worktree.admin == Path(os.path.realpath(base.path / ".git" / "worktrees" / "s1"))
+    assert worktree.admin == trusted_admin_dir(worktree.path, base.path / ".git")
+
+
+@_PLANTED_WHERE
+def test_a_worktree_whose_gitfile_names_a_planted_admin_directory_shows_none(
+    tmp_path, base, in_worktree, refusal, caplog
+):
+    """The run's next leg finds the worktree as the agent left it: a gitfile pointed at an admin directory of the
+    agent's own is not believed, and the sandbox is shown no git metadata."""
+    first = base.worktree("s1", tmp_path / "s1")
+    first.sync("c0", [])
+    where = first.path if in_worktree else tmp_path / "agent-home"
+    where.mkdir(exist_ok=True)
+    _plant_admin_dir(first.path, where, tmp_path / "ran")
+
+    with caplog.at_level(logging.WARNING, logger=worktree_module.logger.name):
+        again = SourceBase(base.path).worktree("s1", first.path)
+
+    assert again.admin is None
+    assert refusal in caplog.text
 
 
 def test_an_untracked_repository_the_agent_nested_in_the_worktree_does_not_outlive_a_sync(tmp_path, base):
