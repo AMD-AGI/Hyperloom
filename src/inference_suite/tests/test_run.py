@@ -37,6 +37,7 @@ from inference_suite.contracts import (
     LifecycleMode,
     ProfileConfig,
     Redacted,
+    RunDirError,
     RunLayout,
     RunPaths,
     RunStatus,
@@ -502,7 +503,7 @@ def test_a_round_writes_only_into_an_empty_run_dir(rig):
     rig.staging = StagingReport(_SHA, {}, ("inferencex at its pin (not staged)",))
     run.run_round(config)
 
-    with pytest.raises(run.RunDirError):
+    with pytest.raises(RunDirError):
         run.run_round(config)
 
 

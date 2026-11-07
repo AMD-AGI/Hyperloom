@@ -17,10 +17,11 @@ A runner runs one round with :func:`run_round`, and reaps a server a round left 
 from __future__ import annotations
 
 from inference_suite.contracts.base_launch import LaunchQuery
+from inference_suite.contracts.layout import RunDirError
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import SourceFetchError, fetch_response, fetch_sources
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
-from inference_suite.run import RoundResult, RunDirError, run_round
+from inference_suite.run import RoundResult, run_round
 from inference_suite.runtime.server import stop
 
 __all__ = [
