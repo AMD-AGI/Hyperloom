@@ -743,8 +743,12 @@ def test_the_layers_bubblewrap_is_probed_by_path_before_anything_runs_and_marks_
 
 @pytest.mark.parametrize(
     ("layer", "said"),
-    [(None, NO_LAYER_BWRAP), ("layer", "bubblewrap at layer/bin/bwrap is not an absolute path")],
-    ids=["unset", "relative"],
+    [
+        (None, NO_LAYER_BWRAP),
+        (" \t\n", NO_LAYER_BWRAP),
+        ("layer", "bubblewrap at layer/bin/bwrap is not an absolute path"),
+    ],
+    ids=["unset", "blank", "relative"],
 )
 def test_a_run_whose_layer_names_no_bubblewrap_ends_finally_without_probing_one(
     run, monkeypatch, isolation, layer, said
@@ -760,6 +764,13 @@ def test_a_run_whose_layer_names_no_bubblewrap_ends_finally_without_probing_one(
     assert (written["final"], written["returncode"]) == (True, entry.RETURNCODE_REFUSED)
     assert written["error"].startswith("agents cannot be isolated on this host: ") and said in written["error"]
     assert isolation.asked == [] and fake.calls == []
+
+
+def test_a_layer_named_with_whitespace_around_it_is_probed_at_the_path_inside_it(run, monkeypatch, isolation):
+    monkeypatch.setenv(entry.HOST_LAYER_ENV, f"  {run.layer}\t\n")
+    fake = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 0 and len(fake.calls) == 1
+    assert isolation.asked == [str(run.layer / "bin" / "bwrap")]
 
 
 @pytest.mark.parametrize(
