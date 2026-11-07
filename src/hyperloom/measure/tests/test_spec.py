@@ -413,11 +413,19 @@ def test_a_conc_sweep_arm_carries_one_point_per_level_that_differ_only_in_the_le
     [
         (lambda: _sweep(point_yaml(conc=4), point_yaml(conc=8, port=8001)), "more than the concurrency level", False),
         (lambda: _sweep(point_yaml(conc=4), point_yaml(conc=4)), "appears twice", False),
+        (lambda: _sweep("model: a\n", "model: b\n"), "must contain a benchmark mapping", False),
         (_sweep, "at least one", True),
         (lambda: _edit(lambda d: d["config"].append(point_document(point_yaml(conc=8)))), "exactly one", True),
         (lambda: _edit(lambda d: d.update(config=[])), "exactly one", True),
     ],
-    ids=["server args differ", "duplicate point", "no point", "grid with two points", "grid with none"],
+    ids=[
+        "server args differ",
+        "duplicate point",
+        "no benchmark block",
+        "no point",
+        "grid with two points",
+        "grid with none",
+    ],
 )
 def test_the_points_of_a_sheet_are_held_to_the_prep(document, message: str, schema_rejects: bool) -> None:
     doc = document()

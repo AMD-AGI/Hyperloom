@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint, PointError, read_benchmark_point
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import AttachmentRef, FailureClass
@@ -184,10 +184,15 @@ def _parse(raw: bytes) -> MeasurementSpec:
 
 
 def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
-    model = ((yaml.safe_load(yaml_text) or {}).get("benchmark") or {}).get("model")
+    try:
+        model = BenchmarkPoint.from_document(yaml.safe_load(yaml_text), source="the sheet's point").model
+    except PointError as exc:
+        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
+    if hashes and not model:
+        raise RunnerFailure(_SPEC_REJECTED, "the sheet hashes model files but its point names no model")
     for relative, wanted in hashes.items():
         try:
-            actual = hashlib.sha256((Path(str(model)) / relative).read_bytes()).hexdigest()
+            actual = hashlib.sha256((Path(model) / relative).read_bytes()).hexdigest()
         except OSError as exc:
             raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} unreadable: {exc}") from exc
         if actual != wanted:
@@ -329,7 +334,7 @@ def _patch_replay_client(ctx: _Context, points: list[Path], inferencex: Path) ->
     The patch only adds a field to the export line of a failed request, so a test it cannot be made for runs without it
     and says so: its no-content failures are then counted but not told empty from short.
     """
-    if not is_magpie_agentx((yaml.safe_load(points[0].read_text()) or {}).get("benchmark") or {}):
+    if not read_benchmark_point(points[0]).agentx:
         return
     try:
         patch_replay_client(inferencex)
@@ -348,8 +353,7 @@ def _install_eval_deps(ctx: _Context, spec: MeasurementSpec, points: list[Path],
     """
     if not spec.procedure.accuracy or spec.procedure.benchmark_backend != _MAGPIE:
         return
-    benchmark = (yaml.safe_load(points[0].read_text()) or {}).get("benchmark") or {}
-    if is_magpie_agentx(benchmark):
+    if read_benchmark_point(points[0]).agentx:
         return
     ctx.phases.begin(EVAL_DEPS)
     try:

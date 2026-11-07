@@ -19,6 +19,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.benchmark_config import BenchmarkPoint, PointError
 from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
@@ -499,16 +500,14 @@ def _check_points(points: tuple[Config, ...], prep: str) -> None:
             raise DocumentError("spec.config: the points of one arm differ in more than the concurrency level")
 
 
-def _without_point_values(config: Any) -> Any:
+def _without_point_values(config: Any) -> dict[str, Any]:
     """The configuration with the values the concurrency level decides removed, as the points are compared."""
-    if not isinstance(config, Mapping):
-        return config
-    result = dict(config)
-    benchmark = result.get("benchmark")
-    if isinstance(benchmark, Mapping) and isinstance(benchmark.get("envs"), Mapping):
-        envs = {k: v for k, v in benchmark["envs"].items() if k not in POINT_VALUE_KEYS}
-        result["benchmark"] = {**benchmark, "envs": envs}
-    return result
+    try:
+        envs = BenchmarkPoint.from_document(config, source="spec.config.yaml").envs
+    except PointError as exc:
+        raise DocumentError(str(exc)) from None
+    benchmark = {**config["benchmark"], "envs": {k: v for k, v in envs.items() if k not in POINT_VALUE_KEYS}}
+    return {**config, "benchmark": benchmark}
 
 
 def _model_hashes(value: Any, path: str) -> dict[str, str]:

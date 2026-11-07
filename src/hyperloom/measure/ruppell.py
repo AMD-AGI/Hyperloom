@@ -53,7 +53,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.outside_facts import HIP_GRAPH_PACKET_CAPTURE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV, DEFAULT_CACHE_DIR
 
@@ -240,10 +240,9 @@ class Tracer:
         site = self._plugin_site()
         traced = []
         for index, point in enumerate(points):
-            config = yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {}
-            benchmark = config.setdefault("benchmark", {})
-            envs = benchmark.get("envs") or {}
-            benchmark["envs"] = {**envs, **self._server_envs(envs, environ, site)}
+            config = yaml.safe_load(Path(point).read_text(encoding=_UTF8))
+            envs = BenchmarkPoint.from_document(config, source=str(point)).envs
+            config["benchmark"]["envs"] = {**envs, **self._server_envs(envs, environ, site)}
             target = self.work / f"point_{index}.yaml"
             target.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
             traced.append(target)
@@ -359,11 +358,11 @@ def prepare(points: Sequence[Path], environ: Mapping[str, str]) -> Tracer | str:
     No step needs a GPU: the point must be an SGLang server that is not an AgentX launch, the image's ROCm one ruppell
     supports, the pinned tree staged in the runner cache, and the build must succeed in this image.
     """
-    benchmark = (yaml.safe_load(Path(points[0]).read_text(encoding=_UTF8)) or {}).get("benchmark") or {}
-    framework = str(benchmark.get("framework") or "").lower()
+    point = read_benchmark_point(Path(points[0]))
+    framework = point.framework.lower()
     if "sglang" not in framework:
         return f"ruppell: skipped (the framework is {framework or 'unnamed'}, not SGLang)"
-    if is_magpie_agentx(benchmark):
+    if point.agentx:
         return "ruppell: skipped (an AgentX launch takes its environment elsewhere)"
     rocm = Path(environ.get("ROCM_PATH") or "/opt/rocm")
     version = rocm_version(rocm)

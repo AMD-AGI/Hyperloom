@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.benchmark_config import PointError
 from hyperloom.measure.surface import (
     POINT_ENV_KEYS,
     REQUEST_ENV_KEYS,
@@ -142,3 +143,17 @@ def test_point_is_held_to_concurrency_run_eval_and_canonical_counts(config):
         check_point(config, concurrency=64, accuracy=False, reference=reference)
     with pytest.raises(SurfaceViolation, match=r"NUM_PROMPTS: expected '320', point has '8'"):
         check_point(changed(config, NUM_PROMPTS=8), concurrency=64, accuracy=True, reference=reference)
+
+
+def test_a_field_the_point_leaves_out_is_none_in_the_surface(config: dict) -> None:
+    del config["benchmark"]["benchmark_script"]
+
+    fields = extract_surface(config).fields
+    assert fields["benchmark.benchmark_script"] is None
+    assert fields["benchmark_script_sha256"] is None
+
+
+def test_a_configuration_with_no_benchmark_block_is_refused() -> None:
+    for read in (extract_surface, point_values, lambda c: check_point(c, concurrency=1, accuracy=False, reference={})):
+        with pytest.raises(PointError, match="benchmark mapping"):
+            read({"model": "m"})
