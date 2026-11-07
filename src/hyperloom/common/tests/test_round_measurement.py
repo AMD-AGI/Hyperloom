@@ -9,13 +9,17 @@ import pytest
 
 from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
 from hyperloom.common.round_measurement import LATENCY_SOURCE, round_measurement
-from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+from hyperloom.orchestrator.actions.executors.benchmark_result import (
+    extract_benchmark_measurement,
+    is_valid_measurement,
+)
 from inference_suite.contracts import (
     FIXED_METRIC_KEYS,
     AgentxResult,
     FailedStep,
     FixedMetrics,
     LaunchDelta,
+    MlperfResult,
     ProfileResult,
     RunStatus,
     ScriptableResult,
@@ -221,3 +225,67 @@ def test_a_round_without_a_load_measures_nothing_and_succeeds_when_it_completes(
     assert measurement["round_succeeded"] is True
     failed = _fixed(workload_kind=WorkloadKind.NONE, fixed=None, run_status=RunStatus.FAILED, failed_step="eval_failed")
     assert round_measurement(failed, None)["round_succeeded"] is False
+
+
+_MLPERF_RESULT = {
+    "completed": 172,
+    "request_error_rate": 0.0,
+    "submission_valid": True,
+    "submission_invalid_reasons": [],
+    "corpus_loader": "agentic_combined_v6",
+    "duration": 666.45,
+    "request_throughput": 0.258,
+    "output_throughput": 78.98,
+    "mean_ttft_ms": 9000.0,
+    "median_ttft_ms": 3325.7,
+    "p90_ttft_ms": 8220.4,
+    "p99_ttft_ms": 42970.9,
+    "median_tpot_ms": 76.7,
+    "mean_e2el_ms": 43923.4,
+    "p99_e2el_ms": 277600.9,
+    "total_output_tokens": 52640,
+    "accuracy_score": 0.7178,
+    "accuracy_missing_turns": 0,
+}
+
+
+def _mlperf(**result: object):
+    section = MlperfResult(
+        "client/mlperf_artifacts/run/result_summary.json",
+        None,
+        "client/inferencex_result.json",
+        {**_MLPERF_RESULT, **result},
+    )
+    return _report(workload_kind=WorkloadKind.MLPERF, fixed=None, profile=None, eval=None, mlperf=section)
+
+
+def test_an_mlperf_round_maps_the_harness_result_under_the_measurement_keys() -> None:
+    measurement = round_measurement(_mlperf(), None)
+
+    assert measurement["valid_measurement"] is True and measurement["round_succeeded"] is True
+    assert (measurement["output_throughput"], measurement["completed_requests"]) == (78.98, 172)
+    assert (measurement["duration_seconds"], measurement["request_error_rate"]) == (666.45, 0.0)
+    assert (measurement["ttft_p50_ms"], measurement["ttft_p99_ms"], measurement["tpot_p50_ms"]) == (
+        3325.7,
+        42970.9,
+        76.7,
+    )
+    assert (measurement["e2el_mean_ms"], measurement["total_output_tokens"]) == (43923.4, 52640)
+    assert measurement["tpot_mean_ms"] is None, "a figure the harness did not report stays null"
+
+
+@pytest.mark.parametrize(
+    ("result", "valid"),
+    [
+        ({}, True),
+        ({"submission_valid": False, "submission_invalid_reasons": ["interrupted"]}, False),
+        ({"completed": 0}, False),
+        ({"output_throughput": 0.0}, False),
+    ],
+)
+def test_the_harness_submission_verdict_reaches_the_measurement_gate(result: dict, valid: bool) -> None:
+    measurement = round_measurement(_mlperf(**result), None)
+
+    assert measurement["valid_measurement"] is valid
+    assert is_valid_measurement(measurement) is valid
+    assert measurement["submission_invalid_reasons"] == result.get("submission_invalid_reasons", [])

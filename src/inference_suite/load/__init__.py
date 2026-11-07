@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The round's load: the fixed-shape InferenceX client against the server, and the server-less scriptable workload.
+"""The round's load: the fixed-shape InferenceX client, the AgentX replay and the MLPerf agentic harness against the
+server, and the server-less scriptable workload.
 
-Both run as a child of the round under its gates, write their output below the run_dir's ``client/``, and end in
+Each runs as a child of the round under its gates, writes its output below the run_dir's ``client/``, and ends in
 one of three ways: a stop gate tripped, the child exited non-zero, or it wrote the result document the round reads.
 """
 

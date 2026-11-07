@@ -248,7 +248,7 @@ def test_an_explicit_context_length_replaces_the_launcher_default() -> None:
     [
         ({"framework": "vllm"}, "the point runs vllm, its base runs sglang"),
         ({"framework": "xdit"}, "serves nothing"),
-        ({"benchmark_script": "mlperf_agentic_client.sh"}, "MLPerf agentic client"),
+        ({"benchmark_script": "mlperf_agentic_client.sh"}, "the harness scores its accuracy inline"),
         ({"profiler": {"torch_profiler": {"enabled": True}}}, "bounds no capture window"),
         ({"envs": {"PROFILE": "1"}}, "PROFILE without profiler.torch_profiler.enabled"),
         ({"envs": {"BENCHMARK_BASE_URL": "https://head:8888"}}, "is not http://<host>"),
@@ -272,12 +272,12 @@ def test_a_point_the_translation_does_not_carry_is_refused(change: dict, message
     ("change", "reason"),
     [
         ({"framework": "xdit"}, "serves nothing"),
-        ({"benchmark_script": "mlperf_agentic_client.sh"}, "MLPerf agentic client"),
+        ({"benchmark_script": "mlperf_agentic_client.sh"}, None),
         ({"agentx": {"enabled": True}}, None),
         ({"profiler": {"torch_profiler": {"enabled": True}}}, None),
     ],
 )
-def test_only_a_point_serving_nothing_or_driving_its_own_server_stays_on_the_backend(change: dict, reason) -> None:
+def test_only_a_point_serving_nothing_stays_on_the_backend(change: dict, reason) -> None:
     point = _point("sglang")
     assert backend_reason(point) is None
     point["benchmark"].update(change)
@@ -377,3 +377,98 @@ def test_a_round_without_an_external_server_keeps_its_own_lifecycle_and_telemetr
 
     assert config.lifecycle == _settings(LifecycleMode.BOOT).lifecycle
     assert (config.server.host, config.telemetry.enabled) == ("127.0.0.1", True)
+
+
+#: What the AgentX switch writes into an MLPerf point (``_workload_envs.apply_agentx_switch``).
+_MLPERF_ENVS = {
+    "HYPERLOOM_AGENTIC_BACKEND": "mlperf",
+    "MLPERF_AGENTIC_MODEL": "kimi-k3",
+    "MLPERF_AGENTIC_FLOW": "smoke_test",
+    "MLPERF_AGENTIC_HARDWARE": "mi355x",
+    "MLPERF_ENDPOINTS_DIR": "/opt/mlperf-endpoints",
+    "MLPERF_TOKENIZER_DIR": "/data/tokenizer",
+    "AGENTIC_DATASET_PATH": "/data/agentic_combined_v6.jsonl",
+    "AGENTIC_NUM_TRAJECTORIES": "150",
+    "AGENTIC_CONCURRENCY": "16",
+    "AGENTX_FAILED_REQUEST_THRESHOLD": "0.1",
+    "MODEL": _MODEL,
+    "FRAMEWORK": "sglang",
+    "CONC": "16",
+    "PORT": "30000",
+    "RUN_EVAL": "false",
+    "EXTRA_SGLANG_ARGS": "--context-length 8192 --served-model-name kimi-k3",
+}
+
+
+def _mlperf_point(**envs: str | None) -> dict:
+    point = _point("sglang", **_MLPERF_ENVS)
+    point["benchmark"]["benchmark_script"] = "mlperf_agentic_client.sh"
+    for name, value in envs.items():
+        if value is None:
+            point["benchmark"]["envs"].pop(name)
+        else:
+            point["benchmark"]["envs"][name] = value
+    return point
+
+
+def test_an_mlperf_point_runs_the_harness_against_a_server_serving_the_name_it_requests() -> None:
+    base = _base("sglang")
+    config = suite_config(_mlperf_point(), base, _settings())
+
+    assert config.workload is WorkloadKind.MLPERF and config.mlperf is not None
+    mlperf = config.mlperf
+    assert (mlperf.concurrency, mlperf.trajectories, mlperf.flow, mlperf.hardware) == (16, 150, "smoke_test", "mi355x")
+    assert (mlperf.dataset, mlperf.tokenizer) == ("/data/agentic_combined_v6.jsonl", "/data/tokenizer")
+    assert mlperf.endpoints_dir == "/opt/mlperf-endpoints"
+    assert config.server.served_model_name == mlperf.model == "kimi-k3"
+    assert (config.server.port, config.lifecycle.mode, config.eval.enabled) == (30000, LifecycleMode.OWN, False)
+    env = config.server.user.env_set
+    assert not [name for name in env if name.startswith(("MLPERF_", "AGENTIC_", "AGENTX_"))]
+    assert not {"HYPERLOOM_AGENTIC_BACKEND", "MODEL", "FRAMEWORK"} & set(env)
+    assert env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "900"
+    assert "--served-model-name" not in config.server.user.args_add
+    launch = _launch(config, base)
+    assert launch.argv[launch.argv.index("--served-model-name") + 1] == "kimi-k3"
+
+
+def test_an_operator_keep_alive_is_kept() -> None:
+    config = suite_config(_mlperf_point(SGLANG_TIMEOUT_KEEP_ALIVE="60"), _base("sglang"), _settings())
+
+    assert config.server.user.env_set["SGLANG_TIMEOUT_KEEP_ALIVE"] == "60"
+
+
+def test_an_mlperf_server_phase_point_boots_the_server_and_runs_no_harness() -> None:
+    config = suite_config(_mlperf_point(MAGPIE_RUN_PHASE="server"), _base("sglang"), _settings(LifecycleMode.BOOT))
+
+    assert (config.workload, config.mlperf) == (WorkloadKind.NONE, None)
+
+
+def test_an_mlperf_server_phase_point_boots_the_server_its_measured_round_reuses() -> None:
+    base = _base("sglang")
+    boot = suite_config(_mlperf_point(MAGPIE_RUN_PHASE="server"), base, _settings(LifecycleMode.BOOT))
+    reuse = suite_config(_mlperf_point(), base, _settings(LifecycleMode.REUSE))
+
+    assert boot.server.served_model_name == reuse.server.served_model_name == "kimi-k3"
+    assert _launch(boot, base).argv == _launch(reuse, base).argv
+
+
+@pytest.mark.parametrize(
+    ("envs", "bench", "message"),
+    [
+        (
+            {"AGENTIC_DATASET_PATH": None, "MLPERF_TOKENIZER_DIR": None},
+            {},
+            "sets no AGENTIC_DATASET_PATH, MLPERF_TOKENIZER_DIR",
+        ),
+        ({"AGENTIC_CONCURRENCY": "8"}, {}, "AGENTIC_CONCURRENCY is not its CONC 16"),
+        ({"RUN_EVAL": "true"}, {}, "scores its accuracy inline"),
+        ({"BENCHMARK_BASE_URL": "http://head:30000"}, {}, "not the external server"),
+        ({}, {"profiler": {"torch_profiler": {"enabled": True}}}, "an MLPerf round is not profiled"),
+    ],
+)
+def test_an_mlperf_point_a_round_cannot_run_is_refused(envs: dict, bench: dict, message: str) -> None:
+    point = _mlperf_point(**envs)
+    point["benchmark"].update(bench)
+
+    with pytest.raises(ConfigError, match=message):
+        suite_config(point, _base("sglang"), _settings())

@@ -1068,11 +1068,16 @@ scriptable frameworks (xDiT, custom) keep output-throughput grading.
 
 ### MLPerf agentic backend
 
-`HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) keeps the
-InferenceSuite server lifecycle and swaps the AgentX client for the MLCommons
-`inference-endpoint` harness (`utility/run_agentic.sh`), replaying
-`agentic_combined_v6` trajectories instead of aiperf Weka traces. The backend is
-recorded at seed; resuming a session under the other backend is refused.
+`HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) swaps the
+AgentX client for the MLCommons `inference-endpoint` harness
+(`utility/run_agentic.sh`), replaying `agentic_combined_v6` trajectories instead
+of aiperf Weka traces. Each round runs on inference_suite: it serves the
+session's frozen base launch (golden layer included) and runs the harness from
+`MLPERF_ENDPOINTS_DIR` as the round's load, then maps the harness's
+`result_summary.json` and `scores.json` into the run directory's
+`client/inferencex_result.json`. A session that froze no base launch is refused
+at preflight. The backend is recorded at seed; resuming a session under the
+other backend is refused.
 
 The harness publishes no per-request OSL/E2EL series, so MLPerf sessions grade
 on **output throughput** (`HYPERLOOM_PERF_METRIC` is not honoured here) and gate
@@ -1089,9 +1094,8 @@ submission is not run by Hyperloom: run `run_agentic.sh full` and upstream
 The AgentX switch pins `PORT=30000`, `MLPERF_AGENTIC_MODEL=kimi-k3` and
 `--served-model-name kimi-k3`, and settles `MLPERF_AGENTIC_FLOW`,
 `AGENTIC_NUM_TRAJECTORIES` and `AGENTIC_CONCURRENCY` (from the round's `CONC`)
-into the recipe. The client refuses to start if port 30000 is already
-answering, checks that the listener belongs to the server it booted, and checks
-`/v1/models` lists `kimi-k3`.
+into the recipe. The round's server serves under `kimi-k3`, the name the
+harness requests, on the round's `PORT`, which the harness is given.
 
 | Variable | Default | Description |
 |---|---|---|

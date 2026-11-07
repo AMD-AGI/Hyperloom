@@ -49,8 +49,8 @@ def has_graded_axes(perf: Any) -> bool:
 
     That is only the interactivity family: every other row in the table is filled for an ordinary measurement as
     well (duration, latency percentiles and error rate from the raw result, ``output_tput_per_gpu`` stamped on
-    promotion, total and input throughput on every report), while the interactivity axes' only producer is
-    ``agentx/mapping.py``. A synthetic round carries them as nulls, so the block stays hidden: rendering it would claim
+    promotion, total and input throughput on every report), while only an AgentX replay produces the interactivity
+    axes. A synthetic round carries them as nulls, so the block stays hidden: rendering it would claim
     the session was graded on axes it never had.
     """
     axes = to_mapping(perf)
