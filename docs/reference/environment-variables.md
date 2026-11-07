@@ -879,9 +879,10 @@ in time leaves only that launch's test unconfined: the next sandbox is chosen fo
 cannot swap a link to the app's files in between a check and the open.
 
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
-framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` names `bin/bwrap` in
-the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it ignored), which the layer's `start.sh` sets to its
-own; with the variable unset, blank or relative, no launch of the run uses bubblewrap. It checks before its installer or `optimize` runs: where neither tier
+framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` and
+`hyperloom-multibranch hosted run` name `bin/bwrap` in the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it
+ignored), which the layer's `start.sh` sets to its own; with the variable unset, blank or relative, no launch of the run
+uses bubblewrap. `hyperloom hosted run` checks before its installer or `optimize` runs: where neither tier
 works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
 answer in time ends the leg without one, so the host starts it again. Where the account is chosen, it probes the layer's
 bubblewrap too: the Ray GPU actor path never starts a specialist as an account, so where that bubblewrap cannot confine
@@ -913,6 +914,18 @@ bound tree holds them (that tree is bound entry by entry without them); its envi
 entry is `uid+netns`, `uid` or `bwrap+netns`. Where neither tier works, the toolbox refuses at start
 (`build_preflight`) and each build fails as the machine's, naming both reasons; a bubblewrap whose probe gives no
 answer in time is not refused but logged, and each build asks again.
+
+A multi-branch session records in its manifest and `MB-report.json` (`agent_isolation`) how the paths that launch its
+agents and tests start them (`hyperloom_multibranch.scheduling.launch_isolation`): its specialists as the agent runner's
+chooser gives them now (`account`, `bwrap`, else `none` with the reasons, or `refused` where they must be isolated and
+no tier can); its agent and dev sandboxes and its tests on this host as their choosers give them now (`bwrap`, else
+`none` with the reasons, or `refused` in a hosted run whose layer bubblewrap cannot sandbox them), or `hosted` when the
+grant's sandboxes run them. A sandbox whose own paths bubblewrap cannot bind safely runs as before even where the record
+says `bwrap`, which its own WARNING says. `MB-report.md` has the same as one line (`agent isolation: specialists <...>,
+sandboxes <...>, tests <...>: <reasons>`), and the session logs one WARNING at its start naming what runs unconfined. A
+multi-branch `hosted run` starts only when nothing it launches in the app container would run unconfined or be refused:
+with the layer's bubblewrap its specialists, and with `placement.measurement: local` its sandboxes and tests too, run
+under it; a spec measured there ends before anything starts while one of them would not.
 
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
@@ -1252,7 +1265,10 @@ values), so a bad input stops the run before it starts. Which variables are requ
 and input variables are always required except for a session started by hand on a grant handed to it
 (`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
 `HYPERLOOM_GRANT_LIMITS`, `HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
-required.
+required. A multi-branch `hosted run` whose spec says `placement.measurement: local` measures on the app container's own cards:
+it needs no sandbox variable, key or source pair, and `HYPERLOOM_GRANT_LIMITS` is optional (its `max_runtime_sec`, when given,
+bounds the session together with the spec's `budget.max_hours`; see
+[Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md)).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
