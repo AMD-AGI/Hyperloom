@@ -231,26 +231,7 @@ def _load_dotenv_fallback() -> dict[str, Any]:
     for key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT"):
         if key in parsed and _is_placeholder_tracelens_path(parsed[key]):
             del parsed[key]
-    # A .env another account can write lends a narrower set: nothing that routes this account's traffic or picks what
-    # it executes (is_allowed_not_private_dotenv_key). The shell's copy is load_dotenv_no_clobber.
-    not_private = _dotenv_not_private(env_file)
-    safe_vars, dropped_vars = filter_untrusted_env_mapping(
-        parsed,
-        allow_predicate=(
-            is_allowed_not_private_dotenv_key
-            if not_private is not None
-            else lambda key: key == "PYTHON" or is_allowed_dotenv_key(key)
-        ),
-    )
-    for key in dropped_vars:
-        if not_private is not None:
-            print(
-                f"Preflight: WARNING — ignoring .env key {key} from {env_file}, which another account can write "
-                f"({not_private})",
-                file=sys.stderr,
-            )
-        else:
-            print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
+    safe_vars = _allowed_dotenv_vars(env_file, parsed)
     if os.environ.get("USER_DATA_PATH", "").strip():
         safe_vars = {key: value for key, value in safe_vars.items() if key not in _WORKSPACE_DERIVED_ENV_KEYS}
     loaded = _load_missing_env_vars(safe_vars)
@@ -266,6 +247,31 @@ def _load_dotenv_fallback() -> dict[str, Any]:
         "skip_reason": None,
         "detail": detail,
     }
+
+
+def _allowed_dotenv_vars(env_file: Path, parsed: Mapping[str, str]) -> dict[str, str]:
+    """The assignments of ``env_file`` it may lend, each other one named in a warning, never its value.
+
+    A ``.env`` another account can write (``_dotenv_not_private``) lends a narrower set: nothing that routes this
+    account's traffic or picks what it executes (``is_allowed_not_private_dotenv_key``). The shell's copy is
+    load_dotenv_no_clobber in assets/runtime_env.sh.
+    """
+    not_private = _dotenv_not_private(env_file)
+    if not_private is None:
+        safe_vars, dropped_vars = filter_untrusted_env_mapping(
+            parsed, allow_predicate=lambda key: key == "PYTHON" or is_allowed_dotenv_key(key)
+        )
+        for key in dropped_vars:
+            print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
+        return safe_vars
+    safe_vars, dropped_vars = filter_untrusted_env_mapping(parsed, allow_predicate=is_allowed_not_private_dotenv_key)
+    for key in dropped_vars:
+        print(
+            f"Preflight: WARNING — ignoring .env key {key} from {env_file}, which another account can write "
+            f"({not_private})",
+            file=sys.stderr,
+        )
+    return safe_vars
 
 
 def _load_moved_dotenv_credentials(env_file: Path, elsewhere: str) -> dict[str, Any]:

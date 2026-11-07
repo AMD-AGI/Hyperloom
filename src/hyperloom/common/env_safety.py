@@ -166,6 +166,12 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
+# Route this account's traffic: allowed from a private .env, never from an untrusted source or a shared .env.
+_PROXY_ENV_NAMES: tuple[str, ...] = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+# Where this account's runtime dir and kernel-agent env file are: read from a private .env and the kernel-agent env
+# file, never from a shared .env.
+_RUNTIME_PATH_ENV_NAMES: tuple[str, ...] = ("HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV")
+
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -192,24 +198,19 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HF_HUB_CACHE",
         "HF_HUB_OFFLINE",
         "HF_TOKEN",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
         "HYPERLOOM_BENCHMARK_BACKEND",
         "HYPERLOOM_DOCKER_TARGET_HOST",
         "HYPERLOOM_FRAMEWORK_ENV",
         "HYPERLOOM_LLM_MODE",
         "HYPERLOOM_RUN_MODE",
-        "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SKILL_PATH",
         "HYPERLOOM_WHEEL_REPO",
         "HYPERLOOM_WHEEL_TAG",
         "INFERENCE_OPTIMIZER_FORCE_PYTHON",
-        "KERNEL_AGENT_ENV",
         "KERNEL_OPT_BACKEND_ORDER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_CUSTOM_HEADERS",
-        "NO_PROXY",
         "ROCM_PATH",
         "SGLANG_ROCM_EXTRA",
         "SGLANG_ROCM_INDEX_URL",
@@ -218,6 +219,8 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "VIRTUAL_ENV",
         "VLLM_PYTHON",
         "VLLM_VENV_ROOT",
+        *_PROXY_ENV_NAMES,
+        *_RUNTIME_PATH_ENV_NAMES,
     }
 )
 
@@ -251,19 +254,16 @@ DOTENV_NOT_PRIVATE_REFUSED_NAMES: frozenset[str] = frozenset(
         "GEAK_ROOT",
         "HF_ENDPOINT",
         "HIP_PATH",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
         "HYPERLOOM_WHEEL_REPO",
-        "HYPERLOOM_RUNTIME_DIR",
         "INFERENCE_OPTIMIZER_FORCE_PYTHON",
-        "KERNEL_AGENT_ENV",
-        "NO_PROXY",
         "PYTHON",
         "ROCM_PATH",
         "SGLANG_ROCM_INDEX_URL",
         "VIRTUAL_ENV",
         "VLLM_PYTHON",
         "VLLM_VENV_ROOT",
+        *_PROXY_ENV_NAMES,
+        *_RUNTIME_PATH_ENV_NAMES,
     }
 )
 
@@ -285,11 +285,9 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "GEAK_SCORE_TARGET",
         "GEAK_SKIP_PROFILE",
         "HYPERLOOM_ROOT",
-        "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV",
         "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
         "INFERENCEX_PATH",
-        "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_LOG_LEVEL",
         # KernelForge's writable-state root.
         "KERNELFORGE_PROJECT_ROOT",
@@ -304,6 +302,7 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "TRACELENS_INTERNAL_ROOT",
         "TRACELENS_ROOT",
         "USER_DATA_PATH",
+        *_RUNTIME_PATH_ENV_NAMES,
     }
 )
 
@@ -337,9 +336,7 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             # Reroute traffic, model downloads or TLS trust.
             "CURL_CA_BUNDLE",
             "HF_ENDPOINT",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "NO_PROXY",
+            *_PROXY_ENV_NAMES,
             "REQUESTS_CA_BUNDLE",
             "SSL_CERT_DIR",
             "SSL_CERT_FILE",
