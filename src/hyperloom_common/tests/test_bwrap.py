@@ -142,12 +142,10 @@ def test_argv_mounts_by_depth_with_the_masks_last(tmp_path: Path) -> None:
     (models / "stored_tokens").mkdir(parents=True)
     work = tmp_path / "work"
     work.mkdir()
-    outside = tmp_path / "outside-every-bind"
-    outside.write_text("nothing inside shows it")
     policy = BwrapPolicy(
         read_only=("/usr", str(models)),
         writable=(str(work),),
-        masked=(str(models / "stored_tokens"), str(outside), str(tmp_path / "absent")),
+        masked=(str(models / "stored_tokens"),),
         devices=("/dev/kfd",),
         tmp="/var/tmp/hl-agent-a",
         shm="/dev/shm/hl-agent-b",
@@ -190,6 +188,8 @@ def test_below_a_bound_tree_only_a_directory_is_masked(tmp_path: Path, monkeypat
     outside.write_text("x")
     file, absent, link = str(tool / "credentials.json"), str(tool / "token"), str(home / "link")
     policy = BwrapPolicy(read_only=(str(home),), masked=(str(tool), file, absent, link, str(outside)))
+    # Outside every bound tree (a fresh tmpfs /tmp here) nothing shows, so a file or absent path there is left out.
+    elsewhere = BwrapPolicy(read_only=(str(home),), masked=(str(tool), str(outside), str(tmp_path / "absent")))
     shared = BwrapPolicy(read_only=(), masked=("/tmp/hl-key",), tmp="/var/tmp/hl-agent-a")
 
     assert policy.problems((0, 13, 1)) == [bwrap._not_a_directory(path) for path in (file, absent, link)]
@@ -198,7 +198,9 @@ def test_below_a_bound_tree_only_a_directory_is_masked(tmp_path: Path, monkeypat
     with pytest.raises(BwrapPolicyError) as refused:
         policy.argv(probed(), ["true"])
     assert refused.value.problems == tuple(policy.problems((0, 13, 1)))
-    assert BwrapPolicy(read_only=(str(home),), masked=(str(tool), str(outside))).problems((0, 13, 1)) == []
+    assert elsewhere.problems((0, 13, 1)) == []
+    masks = [arg for arg in elsewhere.argv(probed(), ["true"]) if arg in (str(outside), str(tmp_path / "absent"))]
+    assert masks == [] and "--ro-bind" not in elsewhere.argv(probed(), ["true"])
 
     # Checked again as each mount is made, after the policy's problems were read.
     monkeypatch.setattr(BwrapPolicy, "_mask_problems", lambda self: [])
