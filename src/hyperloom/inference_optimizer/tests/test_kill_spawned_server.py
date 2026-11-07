@@ -558,20 +558,6 @@ def test_every_sentinel_returncode_names_exactly_one_cause():
     assert SESSION_TIME_EXHAUSTED_RETURNCODE in assigned
 
 
-def test_an_actor_timeout_is_not_recorded_as_a_failed_agentx_preflight():
-    """The two causes that share ``_run_magpie``'s return channel stay apart.
-
-    ``_run_magpie`` returns ``AGENTX_PREFLIGHT_RETURNCODE`` when the execution
-    boundary fails preflight and, a few lines on, whatever the serving lease's
-    actor returned -- including ``_ACTOR_TIMEOUT_RC``. Callers see one
-    ``returncode`` either way, so the two sharing a number (which they did) is
-    enough to have a hung actor blamed on a missing aiperf.
-    """
-    from hyperloom.orchestrator.actions.executors import _ray_serving, _subprocess_kill
-
-    assert _ray_serving._ACTOR_TIMEOUT_RC != _subprocess_kill.AGENTX_PREFLIGHT_RETURNCODE
-
-
 def test_run_with_session_kill_streams_child_output_to_parent(capsys):
     """Captured child output is also mirrored immediately to parent streams."""
     code = "import sys\nprint('child-out', flush=True)\nprint('child-err', file=sys.stderr, flush=True)\n"

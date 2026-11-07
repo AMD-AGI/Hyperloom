@@ -546,7 +546,7 @@ def test_ray_exec_enabled_pytest_default_off(monkeypatch: pytest.MonkeyPatch):
     assert rb.ray_exec_enabled() is False
 
 
-# ── _run_magpie routing (P1/T1) ──────────────────────────────────────────────
+# ── serving-lease routing ────────────────────────────────────────────────────
 def test_num_gpus_for_config_reads_tp(tmp_path: Path):
     from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
@@ -994,9 +994,6 @@ def test_maybe_serving_lease_multi_node_none(monkeypatch: pytest.MonkeyPatch, tm
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
     assert maybe_serving_lease(num_gpus=2) is None
-
-
-# ── _run_magpie routing (P1/T1 + T2) ─────────────────────────────────────────
 
 
 # ── the session budget across the Ray process boundary ───────────────────────
