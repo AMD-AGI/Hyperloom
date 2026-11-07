@@ -24,11 +24,7 @@ benchmark:
     XDIT_USE_TORCH_COMPILE: 1
     XDIT_USE_FP4_GEMMS: 0
     XDIT_USE_FP8_GEMMS: 0
-    # xDiT tolerance semantics (see baseline_xdit.yaml for rationale).
     XDIT_QUALITY_REF: ""
-    XDIT_QUALITY_LPIPS_MAX: 0.15
-    XDIT_QUALITY_SSIM_MIN: 0.85
-    XDIT_QUALITY_MSE_MAX: 0.006
     PROFILE: 1
     # The xdit script runs bare `python3` and `xdit`, and AITER's runtime JIT needs `hipcc`; see baseline_xdit.yaml.
     PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

@@ -3,8 +3,8 @@
 #
 # xDiT is a scriptable framework: there is no OpenAI server, no serving client
 # and no server lifecycle. The shipped xdit script (inference_suite/load/scripts/xdit.sh)
-# runs the xDiT CLI once per variant, measures E2E latency, runs the image-quality
-# gate (LPIPS/SSIM/MSE vs a fixed BF16 reference) and writes its result directly.
+# runs the xDiT CLI once per variant, measures E2E latency, scores the image
+# (LPIPS/SSIM/MSE vs a fixed BF16 reference) and writes its result directly.
 # Throughput is img/s.
 #
 # PRECISION IS LOCKED to BF16 for an xDiT session: a precision change (FP4/FP8)
@@ -32,14 +32,9 @@ benchmark:
     XDIT_USE_TORCH_COMPILE: 0
     XDIT_USE_FP4_GEMMS: 0          # LOCKED (precision = BF16)
     XDIT_USE_FP8_GEMMS: 0          # LOCKED (precision = BF16)
-    # Image-quality gate — xDiT tolerance semantics. xDiT validates optimizations
-    # against a numeric tolerance (~1e-2 rtol/atol, ~0.15 abs allowed) rather than
-    # a tight per-pixel match; these thresholds mirror that so equal-quality /
-    # precision-track optims (e.g. compile, fp8 GEMM) pass while gross divergence
-    # is still caught. NOTE: feature-level, step-skipping optims (fbcache/teacache)
-    # diverge per-image and can only be validated distributionally (FID), which is
-    # not yet wired up here. The script writes quality_gate.{passed,lpips,ssim,mse}
-    # and _accuracy_gate maps passed->1.0.
+    # Image-quality gate: the script writes quality_gate.{lpips,ssim,mse} raw
+    # against a fixed BF16 reference, and _accuracy_gate judges them against
+    # SCRIPTABLE_QUALITY_LIMITS (D2: no threshold reaches the script).
     # Reference image path — informational only: the materializer reads
     # $XDIT_QUALITY_REF from the process env, not this key, and overwrites
     # both REF and REF_WRITE. Empty auto-derives
@@ -47,9 +42,6 @@ benchmark:
     # every other variant COMPARES against it. The gate is skipped only on
     # profile / roofline runs.
     XDIT_QUALITY_REF: ""
-    XDIT_QUALITY_LPIPS_MAX: 0.15
-    XDIT_QUALITY_SSIM_MIN: 0.85
-    XDIT_QUALITY_MSE_MAX: 0.006
     # The xdit script runs bare `python3` and `xdit`; put the venv ahead of the
     # system so the xDiT/torch(ROCm) install is picked up rather than /usr/bin/python3.
     # /opt/rocm/bin is REQUIRED so AITER's runtime JIT (module_fmha_v3_fwd) can
