@@ -19,7 +19,8 @@ handlers and integrating external components.
 |---|---|
 | Optimization loop, phase chain, orchestration model | [`docs/conceptual/optimization-loop.md`](docs/conceptual/optimization-loop.md) |
 | Profiling → TraceLens → kernel value chain | [`docs/reference/kernel-execution-path.md`](docs/reference/kernel-execution-path.md) |
-| External components (Magpie, TraceLens, GEAK, IntelliKit, AgentKernelArena) | [`docs/components/`](docs/components/) |
+| External components (TraceLens, GEAK, IntelliKit, AgentKernelArena) | [`docs/components/`](docs/components/) |
+| Benchmark rounds: base launch resolution, server lifecycle, run directory, `report.json` | [`docs/reference/inference-suite.md`](docs/reference/inference-suite.md) |
 | Agent instructions / runtime behavior | [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md) |
 | Workflow & PR process | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Style, module layout, tests, shell/YAML, commit hygiene, REUSE, local setup | [`docs/contributing/style-guide.md`](docs/contributing/style-guide.md) |
@@ -28,9 +29,9 @@ handlers and integrating external components.
 | Before building an optimization: whether it already exists in an open or merged upstream PR, and in your tree | [`.claude/skills/check-prior-art/`](.claude/skills/check-prior-art/) |
 | Before taking up an upstream PR: whether an AMD deployment runs the code it changes, whether your tree has it, and what to do with it | [`.claude/skills/analyze-upstream-pr/`](.claude/skills/analyze-upstream-pr/) |
 
-Ships two packages: `src/hyperloom/` (the optimizer) and `src/kernelforge/` (the Forge
-kernel backend), over the `src/hyperloom_common/` library they both build on. All three are
-exercised in CI.
+Ships three packages: `src/hyperloom/` (the optimizer), `src/kernelforge/` (the Forge
+kernel backend) and `src/inference_suite/` (the benchmark rounds the optimizer measures),
+over the `src/hyperloom_common/` library they all build on. All four are exercised in CI.
 
 ## Common commands
 
@@ -102,7 +103,7 @@ doc is the authority on where that boundary lives.
   and what the old behaviour cost them. Refactors with nothing observable, and test- or
   docs-only changes, are exempt — say which in the PR description rather than leaving
   the omission to be guessed at.
-- **Fix upstream, not around it.** When the root cause is inside a component (GEAK, Magpie,
+- **Fix upstream, not around it.** When the root cause is inside a component (GEAK,
   TraceLens, IntelliKit) or a framework, fix it there and pin the fix — don't paper over it
   with a local workaround.
 - **New framework or platform?** Work bring-up through the owning components before
