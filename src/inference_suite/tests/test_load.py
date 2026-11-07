@@ -39,7 +39,15 @@ from inference_suite.contracts import (
     WorkloadKind,
 )
 from inference_suite.contracts.launch import ClientInvocation
-from inference_suite.load.fixed import ClientPass, ClientTool, FixedRound, client_argv, fixed_metrics, run_fixed
+from inference_suite.load.fixed import (
+    ClientPass,
+    ClientTarget,
+    ClientTool,
+    FixedRound,
+    client_argv,
+    fixed_metrics,
+    run_fixed,
+)
 from inference_suite.load.scriptable import (
     ShippedScript,
     run_scriptable,
@@ -123,9 +131,8 @@ def _flag(argv: list[str] | tuple[str, ...], flag: str) -> str:
 def test_client_argv_passes_every_load_knob_explicitly(tmp_path: Path):
     tool = ClientTool(python="/py", package_root="/ix")
     server = _config().server
-    argv = client_argv(
-        tool, "http://127.0.0.1:30000", server, _FIXED, ClientPass(seed=7, num_prompts=640, result=tmp_path / "r.json")
-    )
+    target = ClientTarget("http://127.0.0.1:30000", server.model_path, server.served_model_name)
+    argv = client_argv(tool, target, _FIXED, ClientPass(seed=7, num_prompts=640, result=tmp_path / "r.json"))
     assert argv[:3] == ("/py", "-m", "infx.bench_serving.benchmark_serving")
     expected = {
         "--seed": "7",
@@ -150,9 +157,7 @@ def test_client_argv_passes_every_load_knob_explicitly(tmp_path: Path):
     assert {flag: _flag(argv, flag) for flag in expected} == expected
     assert "--trust-remote-code" in argv and "--save-result" in argv and "--ignore-eos" in argv
     assert "--use-chat-template" not in argv
-    quiet = client_argv(
-        tool, "http://127.0.0.1:30000", server, replace(_FIXED, trust_remote_code=False), ClientPass(0, 1, None)
-    )
+    quiet = client_argv(tool, target, replace(_FIXED, trust_remote_code=False), ClientPass(0, 1, None))
     assert "--trust-remote-code" not in quiet and "--save-result" not in quiet
 
 

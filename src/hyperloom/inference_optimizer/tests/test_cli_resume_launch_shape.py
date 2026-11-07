@@ -429,7 +429,7 @@ def test_pre_existing_state_without_the_fields_loads_defaults():
 
 
 def test_state_archived_with_the_retired_backend_field_still_loads():
-    """A state.json written while HYPERLOOM_BENCHMARK_BACKEND existed loads; the field is dropped, not restored."""
+    """A state.json that recorded the retired benchmark_backend field loads; the field is dropped, not restored."""
     restored = SharedState.from_dict({"session_id": "old", "benchmark_backend": "bypass", "framework_repo_path": "/fw"})
 
     assert restored.framework_repo_path == "/fw"
@@ -441,7 +441,6 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
 
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     monkeypatch.setenv("SGLANG_REPO_PATH", "")
     monkeypatch.setenv("SGLANG_DIR", "")
     state = SharedState(
@@ -454,7 +453,6 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
     assert os.environ["FRAMEWORK_REPO_PATH"] == "/archived/fw"
     assert os.environ["SGLANG_REPO_PATH"] == "/archived/fw"
     assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == "/archived/scripts"
-    assert "HYPERLOOM_BENCHMARK_BACKEND" not in os.environ
 
 
 def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):

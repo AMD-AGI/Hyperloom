@@ -325,24 +325,6 @@ class TestLaunchValidation:
         assert os.environ["FRAMEWORK_REPO_PATH"] == str(repo.resolve())
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(scripts.resolve())
 
-    def test_custom_launches_without_the_retired_backend_switch(self, monkeypatch, tmp_path):
-        """HYPERLOOM_BENCHMARK_BACKEND is gone: custom needs only its two paths."""
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
-
-        repo, scripts = tmp_path / "fw", tmp_path / "sc"
-        repo.mkdir()
-        scripts.mkdir()
-        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-        monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
-        args = self._args()
-        args.framework_path = str(repo)
-        args.benchmark_scripts_dir = str(scripts)
-
-        _apply_operator_supplied_paths(args, "custom")
-        assert os.environ["FRAMEWORK_REPO_PATH"] == str(repo.resolve())
-        assert "HYPERLOOM_BENCHMARK_BACKEND" not in os.environ
-
     def test_a_shipped_framework_keeps_its_backend_freedom(self, monkeypatch):
         """The gate is scoped to custom; xdit/sglang launches are untouched."""
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
@@ -548,6 +530,31 @@ class TestResumeReappliesOperatorPaths:
 class TestCustomAdapterMeasurement:
     """Handoff probe: custom/native adapter emits nonzero throughput, no harness error."""
 
+    @pytest.mark.parametrize("framework", ["custom", "xdit"])
+    def test_a_scriptable_point_runs_on_the_bypass_runner_under_hyperloom_s_interpreter(self, tmp_path, framework):
+        """The operator's own benchmark and eval scripts run on the bypass runner, never on Magpie."""
+        import sys
+
+        from hyperloom.orchestrator.actions.executors.benchmark_backend import build_benchmark_command
+
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(yaml.safe_dump({"benchmark": {"framework": framework}}), encoding="utf-8")
+
+        argv = build_benchmark_command(python_exe="/magpie/venv/python", config_path=cfg_path, output_dir=tmp_path)
+
+        assert argv == [
+            sys.executable,
+            "-m",
+            "hyperloom.orchestrator.actions.executors.bypass_runner",
+            "benchmark",
+            "--benchmark-config",
+            str(cfg_path),
+            "--output-dir",
+            str(tmp_path),
+            "--run-mode",
+            "local",
+        ]
+
     def test_custom_scriptable_run_emits_nonzero_throughput(self, tmp_path, monkeypatch):
         import yaml
         from hyperloom.orchestrator.actions.executors import bypass_runner
@@ -564,7 +571,6 @@ class TestCustomAdapterMeasurement:
             encoding="utf-8",
         )
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
 
         cfg = {
             "benchmark": {

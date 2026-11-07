@@ -731,7 +731,6 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     inferencex.mkdir()
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
     monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "Magpie"))
-    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda *_args, **_kwargs: "python")
     monkeypatch.setattr(
         preflight.subprocess, "run", lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, b"", b"")
