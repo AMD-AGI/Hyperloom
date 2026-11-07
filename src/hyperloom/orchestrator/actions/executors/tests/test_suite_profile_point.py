@@ -31,7 +31,7 @@ def _agentx_point(path: Path) -> Path:
 
 @pytest.fixture
 def unpatched(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_profile_setup, "patch_for_profile", lambda envs, framework: ProfilePatch(True, False, None))
+    monkeypatch.setattr(_profile_setup, "patch_for_profile", lambda envs, framework: ProfilePatch(True, False, None, True))
 
 
 def test_an_agentx_profile_point_turns_its_profiler_on_before_it_is_routed(tmp_path, unpatched) -> None:
