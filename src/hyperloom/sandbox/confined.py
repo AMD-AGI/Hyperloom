@@ -24,9 +24,11 @@ them by it as before. A sealed sandbox runs one command, in a pid namespace of i
 one holder's (:class:`~hyperloom_common.bwrap.Holder`), so a later command sees and stops what an earlier one started,
 as it would on the host.
 
-A sandbox whose paths bubblewrap cannot bind safely runs as before, said at WARNING, and a hosted run refuses it. A
-sealed sandbox, whose one launch finds its scratch as it was made, falls back to a fresh ``/tmp`` of its own where a
-bubblewrap older than :data:`~hyperloom_common.bwrap.NESTED_SAFE` refuses binds below a bound one.
+A sandbox whose paths bubblewrap cannot bind safely runs as before, said at WARNING, and a hosted run refuses it: a
+plan's path that is itself one of the app's credential locations (a home, a login file) is one, since a mask hides
+what lies below a bind, never the bound path itself. A sealed sandbox, whose one launch finds its scratch as it was
+made, falls back to a fresh ``/tmp`` of its own where a bubblewrap older than
+:data:`~hyperloom_common.bwrap.NESTED_SAFE` refuses binds below a bound one.
 """
 
 from __future__ import annotations
@@ -185,6 +187,19 @@ def _within(path: Path, trees: Sequence[Path]) -> bool:
     return any(given == tree or tree in given.parents for tree in (Path(os.path.normpath(t)) for t in trees))
 
 
+def _credential_locations(paths: Sequence[Path], env: Mapping[str, str], trees: Sequence[Path]) -> tuple[str, ...]:
+    """Why each of ``paths`` that is, resolved, one of the credential locations of the app or of the sandbox's
+    environment ``env`` (a home, a login file or directory; :func:`~hyperloom.common.confinement.credential_paths`
+    with nothing allowed names each, whole) must not be bound: a mask hides what lies below a bound path, never the
+    path itself, so its bind would show every credential in it."""
+    locations = set(credential_paths(env, writable=trees))
+    return tuple(
+        f"{path} is a credential location of the app's, which its bind would show unmasked"
+        for path in paths
+        if Path(os.path.realpath(path)) in locations
+    )
+
+
 class SandboxConfiner:
     """How a provider confines the sandboxes it names no account for: with ``isolation`` (bubblewrap, or unconfined
     as before), by ``plan``; ``base`` is the provider's directory of sandboxes, ``python`` its launcher's
@@ -230,9 +245,9 @@ class SandboxConfiner:
     ) -> BwrapPolicy | tuple[str, ...]:
         """The policy of every launch of the sandbox, or why bubblewrap must not launch it: ``fs/`` writable, and a
         sealed sandbox's ``private/``; the toolchain and the plan's trees read-only, but none in a tree it writes,
-        which shows it already; the credential locations they show masked; the devices; the app's state and the
-        provider's directory never bound. No launch dies with the thread that started it: the sandbox's kill and
-        timeout end it, with their grace."""
+        which shows it already, and none of the plan's that is a credential location; the credential locations they
+        show masked; the devices; the app's state and the provider's directory never bound. No launch dies with the
+        thread that started it: the sandbox's kill and timeout end it, with their grace."""
         directory, env = sandbox.directory, sandbox.env
         writable = (directory / "fs", *((directory / "private",) if sandbox.sealed else ()))
         trees = (*writable, Path(scratch.tmp), Path(scratch.shm))
@@ -242,6 +257,9 @@ class SandboxConfiner:
             toolchain.extend(toolchain_paths(env, program, writable=trees))
         named = (*toolchain, *self.plan.readable)
         readable = tuple(path for path in dict.fromkeys(named) if not _within(path, writable))
+        exposed = _credential_locations(self.plan.readable, env, trees)
+        if exposed:
+            return exposed
         masked = credential_paths(env, allowed=(*readable, *writable), writable=trees)
         state = os.environ.get(STATE_DIR_ENV, "")
         confinement = Confinement(
