@@ -49,7 +49,7 @@ def apply_runtime_benchmark_overrides(
     benchmark_script: str | None = None,
     conc: Any = None,
 ) -> dict[str, Any]:
-    """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
+    """Apply runtime env/CLI overrides to a point YAML."""
     agentx_mode = True if is_agentx_client_script(str(bench.get("benchmark_script") or "")) else None
 
     if model_path:

@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A point YAML translated into a suite config serves what Magpie's launcher served for it, but for listed items.
+"""A point YAML translated into a suite config: the server it launches, the workload it sends and what it refuses.
 
-``_MAGPIE`` is what Magpie's generic launchers at 06b7cf6 exec for ``_point``: the server argv and the variables they
-export on top of the point's, recorded by running each script with stub ``python3``/``vllm``/``setsid`` and a MEC
-firmware recent enough that ``HSA_NO_SCRATCH_RECLAIM`` stays unset. The base is the default table's, which was read
-from the same launchers.
+The launch the translation must produce is spelled out per framework: the base's defaults with the point's
+``EXTRA_<FW>_ARGS`` on top, its knobs as config fields rather than server environment, and the GPUs masked by
+``HIP_VISIBLE_DEVICES``.
 """
 
 from __future__ import annotations
@@ -51,55 +50,31 @@ _EXTRA = {
 }
 _SGLANG_ENTRY = ("python3", "-m", "sglang.launch_server")
 _ATOM_ENTRY = ("python3", "-m", "atom.entrypoints.openai_server")
+_SERVED = ("--model", _MODEL, "--host", "127.0.0.1", "--port", "8888", "--served-model-name", _MODEL)
 _SGLANG_ARGV = (
-    *("--model-path=/models/Qwen3-8B", "--host=0.0.0.0", "--port=8888", "--trust-remote-code"),
-    *("--tensor-parallel-size=2", "--mem-fraction-static=0.8", "--disable-radix-cache"),
-    *("--context-length", "8192", "--cuda-graph-max-bs", "64"),
+    *("--trust-remote-code", "--mem-fraction-static", "0.8", "--disable-radix-cache", "--tensor-parallel-size", "2"),
+    *("--context-length", "8192", "--cuda-graph-max-bs", "64", "--model-path", _MODEL, "--host", "127.0.0.1"),
+    *("--port", "8888", "--served-model-name", _MODEL, "--enable-metrics"),
 )
 _VLLM_ARGV = (
-    *("--port", "8888", "--tensor-parallel-size=2", "--gpu-memory-utilization", "0.95", "--max-model-len", "8192"),
-    *("--trust-remote-code", "--max-num-seqs", "64", "--gpu-memory-utilization", "0.9"),
+    *("--trust-remote-code", "--tensor-parallel-size", "2", "--max-model-len", "8192", "--max-num-seqs", "64"),
+    *("--gpu-memory-utilization", "0.9", *_SERVED),
 )
-_ATOM_ARGV = ("--model", _MODEL, "-tp", "2", "--server-port", "8888", "--max-model-len", "8192", "--trust-remote-code")
-_LOGICAL_MASK = {"HIP_VISIBLE_DEVICES": "0,1"}
-#: (entrypoint, argv after it, variables the launcher exports) per framework and board.
-_MAGPIE = {
+_ATOM_ARGV = (
+    *("-tp", "2", "--max-model-len", "8192", "--trust-remote-code", "--model", _MODEL, "--host", "127.0.0.1"),
+    *("--server-port", "8888"),
+)
+#: The server environment every framework gets from ``_point``: its non-knob variables and the round's GPU mask.
+_POINT_ENV = {"PATH": "/opt/venv/bin:/usr/bin", "AITER_LOG_TUNED_CONFIG": "1", "HIP_VISIBLE_DEVICES": "4,5"}
+#: (entrypoint, argv after it, server environment) per framework and board.
+_LAUNCH = {
     ("sglang", "mi300x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1"}),
     ("sglang", "mi355x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1"}),
-    ("vllm", "mi300x"): (("vllm", "serve", _MODEL), _VLLM_ARGV, {**_LOGICAL_MASK, "VLLM_ROCM_USE_AITER": "1"}),
-    ("vllm", "mi355x"): (("vllm", "serve", _MODEL), _VLLM_ARGV, {**_LOGICAL_MASK, "VLLM_ROCM_USE_AITER": "1"}),
-    ("atom", "mi300x"): (_ATOM_ENTRY, _ATOM_ARGV, _LOGICAL_MASK),
-    ("atom", "mi355x"): (_ATOM_ENTRY, _ATOM_ARGV, _LOGICAL_MASK),
+    ("vllm", "mi300x"): (("vllm", "serve"), _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
+    ("vllm", "mi355x"): (("vllm", "serve"), _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
+    ("atom", "mi300x"): (_ATOM_ENTRY, _ATOM_ARGV, {}),
+    ("atom", "mi355x"): (_ATOM_ENTRY, _ATOM_ARGV, {}),
 }
-
-#: The knobs the config carries as fields instead of server environment.
-_KNOBS = {"TP", "CONC", "ISL", "OSL", "RANDOM_RANGE_RATIO", "MAX_MODEL_LEN", "NUM_PROMPTS", "NUM_WARMUPS", "RUN_EVAL"}
-_KNOBS |= {"PORT", "MAGPIE_TRUST_REMOTE_CODE"}
-
-
-def _listed_args(framework: str) -> tuple[set, set]:
-    """The flags only Magpie's launch has, and those only the suite's: the round's address and served name, and
-    sglang's metrics switch for the KV telemetry."""
-    magpie = {("host", ("0.0.0.0",))} if framework == "sglang" else set()
-    suite = {("host", ("127.0.0.1",))}
-    if framework == "sglang":
-        suite.add(("enable-metrics", ()))
-    if framework != "atom":
-        suite.add(("served-model-name", (_MODEL,)))
-    if framework == "vllm":
-        # vLLM's launcher passes the model positionally after ``serve``.
-        suite.add(("model", (_MODEL,)))
-    return magpie, suite
-
-
-def _listed_env(framework: str) -> tuple[set, set]:
-    """Magpie's server sees the point's knobs and masks the GPUs by ROCR plus HIP renumbering; the suite's by HIP."""
-    extra_name, extra = _EXTRA[framework]
-    magpie = {(name, _point_envs(framework)[name]) for name in _KNOBS | {"ROCR_VISIBLE_DEVICES"}}
-    magpie.add((extra_name, extra))
-    if framework != "sglang":
-        magpie.add(("HIP_VISIBLE_DEVICES", "0,1"))
-    return magpie, {("HIP_VISIBLE_DEVICES", "4,5")}
 
 
 def _point_envs(framework: str) -> dict[str, str]:
@@ -107,7 +82,7 @@ def _point_envs(framework: str) -> dict[str, str]:
     return {
         "TP": "2", "CONC": "64", "ISL": "1024", "OSL": "1024", "RANDOM_RANGE_RATIO": "1", "MAX_MODEL_LEN": "8192",
         "NUM_PROMPTS": "640", "NUM_WARMUPS": "8", "RUN_EVAL": "true", "ROCR_VISIBLE_DEVICES": "4,5",
-        "PORT": "8888", "MAGPIE_TRUST_REMOTE_CODE": "1", "PATH": "/opt/venv/bin:/usr/bin",
+        "PORT": "8888", "BENCH_TRUST_REMOTE_CODE": "1", "PATH": "/opt/venv/bin:/usr/bin",
         "AITER_LOG_TUNED_CONFIG": "1", extra_name: extra,
     }  # fmt: skip
 
@@ -160,27 +135,15 @@ def _flags(argv: tuple[str, ...]) -> set[tuple[str, tuple[str, ...]]]:
     return set(flags.items())
 
 
-@pytest.mark.parametrize(("framework", "board"), sorted(_MAGPIE))
-def test_the_translated_launch_differs_from_magpies_only_by_the_listed_items(framework: str, board: str) -> None:
+@pytest.mark.parametrize(("framework", "board"), sorted(_LAUNCH))
+def test_the_translated_launch_is_the_base_under_the_points_server_layer(framework: str, board: str) -> None:
     base = _base(framework, board)
     launch = _launch(suite_config(_point(framework), base, _settings()), base)
-    entry, magpie_argv, exported = _MAGPIE[(framework, board)]
+    entry, argv, env = _LAUNCH[(framework, board)]
 
-    assert launch.argv[: len(base.entrypoint)] == entry[: len(base.entrypoint)]
-    suite_flags = _flags(launch.argv[len(base.entrypoint) :])
-    magpie_flags = _flags(magpie_argv)
-    if framework == "atom":
-        # ATOM's ``-tp`` and ``--tensor-parallel-size`` are one destination.
-        magpie_flags = {
-            ("tensor-parallel-size", values) if flag == "tp" else (flag, values) for flag, values in magpie_flags
-        }
-        suite_flags = {
-            ("tensor-parallel-size", values) if flag == "tp" else (flag, values) for flag, values in suite_flags
-        }
-    assert (magpie_flags - suite_flags, suite_flags - magpie_flags) == _listed_args(framework)
-    magpie_env = set({**_point_envs(framework), **exported}.items())
-    suite_env = set(launch.env.items())
-    assert (magpie_env - suite_env, suite_env - magpie_env) == _listed_env(framework)
+    assert launch.argv[: len(base.entrypoint)] == entry
+    assert _flags(launch.argv[len(base.entrypoint) :]) == _flags(argv)
+    assert dict(launch.env) == {**env, **_POINT_ENV}
 
 
 def test_the_point_knobs_become_the_config_fields() -> None:
@@ -223,10 +186,10 @@ def test_the_fixed_workload_of_a_point_is_the_one_its_round_sends() -> None:
 
 
 def test_a_server_phase_point_boots_the_server_and_runs_no_load_or_eval() -> None:
-    config = suite_config(_point("vllm", MAGPIE_RUN_PHASE="server"), _base("vllm"), _settings(LifecycleMode.BOOT))
+    config = suite_config(_point("vllm", HYPERLOOM_RUN_PHASE="server"), _base("vllm"), _settings(LifecycleMode.BOOT))
 
     assert (config.workload, config.fixed, config.eval.enabled) == (WorkloadKind.NONE, None, False)
-    assert "MAGPIE_RUN_PHASE" not in config.server.user.env_set
+    assert "HYPERLOOM_RUN_PHASE" not in config.server.user.env_set
 
 
 def test_an_eval_only_point_runs_the_eval_and_no_load_on_the_held_server() -> None:
@@ -441,14 +404,14 @@ def test_an_operator_keep_alive_is_kept() -> None:
 
 
 def test_an_mlperf_server_phase_point_boots_the_server_and_runs_no_harness() -> None:
-    config = suite_config(_mlperf_point(MAGPIE_RUN_PHASE="server"), _base("sglang"), _settings(LifecycleMode.BOOT))
+    config = suite_config(_mlperf_point(HYPERLOOM_RUN_PHASE="server"), _base("sglang"), _settings(LifecycleMode.BOOT))
 
     assert (config.workload, config.mlperf) == (WorkloadKind.NONE, None)
 
 
 def test_an_mlperf_server_phase_point_boots_the_server_its_measured_round_reuses() -> None:
     base = _base("sglang")
-    boot = suite_config(_mlperf_point(MAGPIE_RUN_PHASE="server"), base, _settings(LifecycleMode.BOOT))
+    boot = suite_config(_mlperf_point(HYPERLOOM_RUN_PHASE="server"), base, _settings(LifecycleMode.BOOT))
     reuse = suite_config(_mlperf_point(), base, _settings(LifecycleMode.REUSE))
 
     assert boot.server.served_model_name == reuse.server.served_model_name == "kimi-k3"

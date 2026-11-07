@@ -98,7 +98,7 @@ def strip_benchmark_harness_flags(server_args: str | None) -> str:
 def normalize_server_args(server_args: str | None) -> str:
     """Compact JSON values and drop one layer of shell wrappers, removing nothing.
 
-    Magpie expands ``EXTRA_*_ARGS`` unquoted, so a ``--quantization 'fp8'`` wrapper would reach argv literally.
+    ``EXTRA_*_ARGS`` travel as one unquoted string, so a ``--quantization 'fp8'`` wrapper would reach argv literally.
     """
     args = _argv.reserialize_json_blobs(str(server_args or "").strip())
     if not args:

@@ -4,8 +4,8 @@
 """A baseline whose session froze a base runs its rounds on inference_suite, played here by ``ScriptedRounds``.
 
 The contract: each round writes its own run_dir with ``launch.json`` below the round's directory, the cold-start pair
-boots one server the measured round reuses and the attempt reaps it with ``stop`` on its slot, a failed step maps to
-its error class, and the Magpie launch is never reached.
+boots one server the measured round reuses and the attempt reaps it with ``stop`` on its slot, and a failed step maps
+to its error class.
 """
 
 from __future__ import annotations
@@ -66,10 +66,6 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: sys.executable)
     monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
 
-    def no_magpie(*args, **kwargs):
-        raise AssertionError("a suite round launched the Magpie backend")
-
-    monkeypatch.setattr(baseline, "run_with_session_kill", no_magpie)
     stopped: list[Path] = []
     monkeypatch.setattr(baseline, "stop", lambda pid_dir: stopped.append(Path(pid_dir)) or Reaped((), ()))
     return SimpleNamespace(session=session, point=_point(tmp_path / "point.yaml"), ws=tmp_path / "ws", stopped=stopped)
@@ -85,7 +81,6 @@ def _play(monkeypatch, suite: SimpleNamespace, *attempts: LaunchAttempt, **param
     rounds = ScriptedRounds(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock(), launch=_launch())
     monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
     executor = _ThroughputOnly(
-        magpie_python=sys.executable,
         default_config_path=suite.point,
         session_dir=suite.session,
         shared_state=SimpleNamespace(session_budget_usable_sec=lambda: None),

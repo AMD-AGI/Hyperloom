@@ -185,8 +185,8 @@ def _digest(document: Mapping[str, object]) -> str:
 @dataclass(frozen=True)
 class LaunchConfig:
     """Server arguments in the shell form the launcher takes, the extra environment variables, and ``remove_args``:
-    the long options, by name, removed from the launch the framework resolves before these arguments are added (a
-    Magpie AgentX recipe's, from InferenceX), so a change that turns off an option of that launch stays off. Its
+    the long options, by name, removed from the launch the framework resolves before these arguments are added (an
+    AgentX recipe's, from InferenceX), so a change that turns off an option of that launch stays off. Its
     document carries ``remove_args`` only when there are any, so a launch without them keeps its digest."""
 
     server_args: str = ""
@@ -587,7 +587,7 @@ def _apply_config(launch: LaunchConfig, delta: ConfigDelta) -> LaunchConfig:
     """``launch`` changed by ``delta``. A removal of an option the launch's own arguments lack is one of the resolved
     launch's, kept in ``remove_args``, unless the delta gives ``launch_remove_args`` whole; an option the new arguments
     set again leaves it. Such a removal is kept by name: one scoped to a value (``--x=v``) removes ``--x`` whatever
-    the resolved launch sets it to, as Magpie removes by name only."""
+    the resolved launch sets it to, as the launch removes by name only."""
 
     args = dedupe_extra_server_args(
         compose_server_args(

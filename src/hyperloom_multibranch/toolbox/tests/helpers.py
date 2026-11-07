@@ -75,12 +75,18 @@ def req(
 
 
 class FakeRepo:
+    """Holds ``recipe`` at ``PARENT``, which is also the root commit until a test names another (``root_commit``)."""
+
     def __init__(self, recipe: Recipe | None = None) -> None:
         self.recipes = {PARENT: recipe or Recipe(base_image_digest=IMAGE)}
         self.heads: dict[str, str] = {}
+        self.root_commit = PARENT
 
     async def head(self, branch: str) -> str:
         return self.heads.get(branch, PARENT)
+
+    async def root(self) -> str:
+        return self.root_commit
 
     async def read_recipe(self, commit: str) -> Recipe:
         return self.recipes[commit]

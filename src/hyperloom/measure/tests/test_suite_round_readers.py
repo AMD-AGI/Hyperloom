@@ -4,8 +4,8 @@
 """The measure readers of a round read an inference_suite run_dir through its ``report.json``.
 
 The contract: accuracy, the accuracy pass's exit code, the consistency check's measurement and a landed bundle's
-rounds come from the run_dir's report, never from the lm-eval file or Magpie's ``benchmark_report.json``; a Magpie
-round's files keep being read as before.
+rounds come from the run_dir's report, never from the lm-eval file beside it. A landed bundle's rounds are found by
+either report, so an archived v1 bundle keeps its rounds.
 """
 
 from __future__ import annotations
@@ -61,17 +61,10 @@ def test_a_run_dir_that_did_not_evaluate_has_no_accuracy_even_beside_an_lm_eval_
     assert read_accuracy(run_dir) == ()
 
 
-def test_a_magpie_rounds_accuracy_is_still_its_lm_eval_file(tmp_path):
-    _lm_eval_file(tmp_path, 0.5)
-
-    assert [v.score for v in read_accuracy(tmp_path)] == [0.5]
-
-
 @pytest.mark.parametrize(("eval_code", "expected"), [(3, 3), (None, 7)])
 def test_the_accuracy_pass_exit_code_of_a_run_dir_is_its_reports(tmp_path, eval_code, expected):
     codes = ExitCodes(client=0, eval=eval_code)
     run_dir = _run_dir(tmp_path / "suite_run_0", _report(profile=None, codes=codes))
-    (run_dir / "eval_returncode").write_text("9", encoding="utf-8")
 
     assert local._eval_returncode(_variant(run_dir, 7)) == expected
 

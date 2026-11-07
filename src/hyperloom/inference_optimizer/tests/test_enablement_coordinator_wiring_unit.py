@@ -68,7 +68,7 @@ def test_extract_launch_log_empty_on_none_or_blank():
         ({"error": "bad --flag"}, "fast_exit_arg_error"),
         ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
         ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
-        ({"error": "gpu_selection.auto: needed 8 idle GPU(s) but only found 7"}, HOST_GPUS_UNAVAILABLE),
+        ({"error": "GPU 0: held by pid 4242 (python3)"}, HOST_GPUS_UNAVAILABLE),
         ({"error": "budget reached"}, SESSION_TIME_EXHAUSTED_CLASS),
     ],
 )

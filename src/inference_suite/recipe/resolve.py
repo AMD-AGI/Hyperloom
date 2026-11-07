@@ -418,7 +418,7 @@ def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[So
         )
     return BaseLaunch(
         query=query,
-        source=LaunchSource(kind=SourceKind.DEFAULT_TABLE, path=TABLE_PATH, locator=row.origin),
+        source=LaunchSource(kind=SourceKind.DEFAULT_TABLE, path=TABLE_PATH),
         point=LaunchPoint(max(query.concurrencies), exact=True),
         image=NO_RECIPE_IMAGE,
         framework=query.framework,

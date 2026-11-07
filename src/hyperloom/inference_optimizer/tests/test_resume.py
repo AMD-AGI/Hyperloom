@@ -629,7 +629,7 @@ class TestTracelensRootEnvCorrection:
             "KERNEL_AGENT_ENV",
             "USER_DATA_PATH",
             "TRACELENS_ROOT",
-            "MAGPIE_PATH",
+            "INFERENCEX_PATH",
         ):
             monkeypatch.delenv(var, raising=False)
         try:
@@ -676,57 +676,26 @@ class TestTracelensRootEnvCorrection:
         assert outcome["detail"]["corrected_keys"] == []
 
     @pytest.mark.parametrize("override_kind", ["missing", "non-checkout", "empty"])
-    def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch, override_kind):
-        """TraceLens correction must not replace an explicit Magpie value, even an invalid one."""
-        magpie_dir = tmp_path / "installed-magpie"
-        (magpie_dir / "Magpie").mkdir(parents=True)
-        (magpie_dir / "Magpie" / "__init__.py").write_text("", encoding="utf-8")
-        override = tmp_path / "not-a-magpie-checkout"
+    def test_another_explicit_path_is_not_corrected(self, tmp_path, monkeypatch, override_kind):
+        """TraceLens correction must not replace another explicit path value, even an invalid one."""
+        installed_dir = tmp_path / "installed-inferencex"
+        installed_dir.mkdir()
+        override = tmp_path / "not-an-inferencex-checkout"
         if override_kind == "non-checkout":
             override.mkdir()
         selected = "" if override_kind == "empty" else str(override)
         _installed_env_file(tmp_path, monkeypatch).write_text(
-            f"export MAGPIE_PATH='{magpie_dir}'\n",
+            f"export INFERENCEX_PATH='{installed_dir}'\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("MAGPIE_PATH", selected)
+        monkeypatch.setenv("INFERENCEX_PATH", selected)
 
         outcome = cli_preflight_env._load_kernel_agent_env_fallback()
 
         import os as _os
 
-        assert _os.environ["MAGPIE_PATH"] == selected
-        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
-
-    def test_runtime_magpie_gapfill_reaches_child_imports(self, tmp_path, monkeypatch):
-        """The runtime file's Magpie import root reaches child processes."""
-        import os
-        import subprocess
-        import sys
-
-        magpie_dir = tmp_path / "runtime Magpie"
-        (magpie_dir / "Magpie").mkdir(parents=True)
-        (magpie_dir / "Magpie" / "__init__.py").write_text("RUNTIME_MARKER = 'installer-checkout'\n", encoding="utf-8")
-        _installed_env_file(tmp_path, monkeypatch).write_text(
-            f"export MAGPIE_PATH='{magpie_dir}'\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("PYTHONPATH", "")
-
-        outcome = cli_preflight_env._load_kernel_agent_env_fallback()
-        cli_preflight_env._derive_runtime_paths()
-
-        assert os.environ["MAGPIE_PATH"] == str(magpie_dir)
-        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
-        child = subprocess.run(
-            [sys.executable, "-c", "import Magpie; print(Magpie.RUNTIME_MARKER)"],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        assert child.returncode == 0, child.stderr
-        assert child.stdout.strip() == "installer-checkout"
+        assert _os.environ["INFERENCEX_PATH"] == selected
+        assert "INFERENCEX_PATH" not in outcome["detail"]["corrected_keys"]
 
     def test_placeholder_path_to_your_is_unset(self):
         assert cli_preflight_env._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True

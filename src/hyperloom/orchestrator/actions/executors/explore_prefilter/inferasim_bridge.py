@@ -4,7 +4,7 @@
 """InferaSim projection bridge.
 
 Maps a Hyperloom benchmark spec (the ``benchmark`` block of a materialized
-Magpie YAML: framework/model/precision + TP/CONC/ISL/OSL envs) onto Infera's
+point YAML: framework/model/precision + TP/CONC/ISL/OSL envs) onto Infera's
 ``inferasim`` serving projection and returns projected throughput/latency.
 
 The only consumer is EXPLORE's projection router (:mod:`_projection`),
@@ -12,7 +12,7 @@ which compares a variant's projection with the stack's projection to decide
 which variants are worth a real benchmark. A projected number is never
 compared with a measured one and never decides a KEEP. In particular
 ``ProjMetrics.output_throughput`` is the projected aggregate decode rate, not
-Magpie's ``output_throughput``.
+a measured round's ``output_throughput``.
 
 Design notes
 ------------
@@ -240,7 +240,7 @@ def extrapolation_notes(spec: "ServingSpec", replica_gpus: int, calibrated: bool
 class ProjMetrics:
     """Projected serving metrics, mapped onto benchmark measurement fields."""
 
-    output_throughput: float  # aggregate output tok/s (Magpie headline)
+    output_throughput: float  # aggregate output tok/s (the headline metric)
     request_throughput: float
     total_token_throughput: float
     ttft_ms: float
@@ -263,7 +263,7 @@ def _as_int(value: Any, default: int) -> int:
 
 
 def _first_env_or(bench_envs: dict, key: str, default: Any, *, ambient: bool = True) -> Any:
-    """Ambient env wins over YAML envs (Magpie/bypass convention), then default."""
+    """Ambient env wins over YAML envs, then default."""
     val = os.environ.get(key) if ambient else None
     if val is None or str(val).strip() == "":
         val = bench_envs.get(key)

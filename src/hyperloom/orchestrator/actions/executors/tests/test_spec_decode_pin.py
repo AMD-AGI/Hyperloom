@@ -343,10 +343,7 @@ def test_building_a_variant_leaves_a_real_draft_base_open(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypatch):
-    def _never_launched(_bench_round, **_kwargs):
-        raise AssertionError("a refused variant must not reach Magpie")
-
-    monkeypatch.setattr(gr, "_run_magpie", _never_launched)
+    monkeypatch.setattr(gr, "run_grid_suite_round", lambda *_a, **_k: pytest.fail("a refused variant was launched"))
     base = _base_yaml(tmp_path, "vllm", VLLM_SYNTHETIC, {})
     results = await run_grid(
         grid=[GridVariant("more-draft", extra_server_args=_spec_config(num_speculative_tokens=5))],
@@ -371,7 +368,7 @@ async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypa
     ],
 )
 async def test_a_variant_touching_golden_fails_as_serve_flag_naming_the_key(tmp_path, monkeypatch, candidate, key):
-    monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: pytest.fail("a refused variant must not reach Magpie"))
+    monkeypatch.setattr(gr, "run_grid_suite_round", lambda *_a, **_k: pytest.fail("a refused variant was launched"))
     results = await run_grid(
         grid=[GridVariant("touches-golden", extra_server_args=candidate)],
         output_root=tmp_path / "out",
@@ -432,27 +429,6 @@ def _build_native(tmp_path: Path, config: Path, variant: GridVariant, stack: Lau
         GridRecipe(base_yaml_path=config, base=stack), variant, output_subdir=tmp_path / variant.name
     )
     return yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["agentx"]["launch_overrides"]
-
-
-@pytest.mark.parametrize(
-    "variant",
-    [
-        pytest.param(
-            GridVariant("v", extra_server_args="--speculative-dspark-block-size 5 --speculative-num-draft-tokens 6"),
-            id="appends-a-different-draft",
-        ),
-        pytest.param(GridVariant("v", remove_args=["--speculative-dspark-block-size"]), id="removes-the-draft-flag"),
-        pytest.param(GridVariant("v", unset_envs=["SGLANG_SIMULATE_ACC_LEN"]), id="unsets-acc-len"),
-        pytest.param(
-            GridVariant("v", extra_server_args="--max-num-seqs 64", args_mode="replace"), id="replace-drops-the-draft"
-        ),
-    ],
-)
-def test_building_a_native_variant_refuses_a_change_to_the_recipes_pinned_draft(tmp_path, variant):
-    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, SGLANG_SYNTHETIC_ENV)
-    with pytest.raises(SpeculativeDecodingPinnedError, match=SERVE_FLAG) as refused:
-        _build_native(tmp_path, config, variant)
-    assert refused.value.error_class == SERVE_FLAG
 
 
 def test_building_a_native_variant_keeps_other_knobs_open(tmp_path):

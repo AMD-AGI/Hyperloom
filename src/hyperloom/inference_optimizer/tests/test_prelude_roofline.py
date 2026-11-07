@@ -99,7 +99,7 @@ def test_prelude_initial_roofline_task_contract(coord: Coordinator):
         "unset_envs": ["OLD_BACKEND"],
         "args_mode": "replace",
     }
-    coord.shared_state.baseline_benchmark_script = "magpie_serving_bench.sh"
+    coord.shared_state.baseline_benchmark_script = "serving_bench.sh"
 
     task = asyncio.run(
         coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial"),
@@ -110,7 +110,7 @@ def test_prelude_initial_roofline_task_contract(coord: Coordinator):
     assert task.params["reason"] == "prelude_initial"
     assert task.params["source"] == "coordinator_internal"
     assert "base_extra_args" not in task.params
-    assert task.params["benchmark_script"] == "magpie_serving_bench.sh"
+    assert task.params["benchmark_script"] == "serving_bench.sh"
 
 
 def test_prelude_initial_roofline_uses_baseline_server_args(

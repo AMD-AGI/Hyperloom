@@ -2725,7 +2725,7 @@ def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
 
 
 def test_194_3_splitter_receives_R_from_random_range_ratio_env(tmp_path):
-    """Without --split-r, the wrapper falls back to RANDOM_RANGE_RATIO env — the same variable Hyperloom propagates from the YAML config into every Magpie subprocess."""
+    """Without --split-r, the wrapper falls back to RANDOM_RANGE_RATIO env — the same variable Hyperloom propagates from the YAML config into every round."""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=["--split-conc", "32", "--split-osl", "1024"],

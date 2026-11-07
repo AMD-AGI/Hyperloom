@@ -5,16 +5,12 @@
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 
 import pytest
 import yaml
 
 from hyperloom.inference_optimizer import framework_registry as fr
-from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 
 
 class TestRegistryEntry:
@@ -396,7 +392,7 @@ class TestEntrypointFailFast:
         monkeypatch.setenv("CUSTOM_DIR", "")
 
     def test_an_empty_scripts_dir_exits_listing_candidates(self, monkeypatch, tmp_path, capsys):
-        """Failing here beats looping magpie_nonzero_invalid_measurement for hours."""
+        """Failing here beats looping round_nonzero_invalid_measurement for hours."""
         from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"
@@ -404,7 +400,6 @@ class TestEntrypointFailFast:
         scripts.mkdir()
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
-        monkeypatch.delenv("MAGPIE_PATH", raising=False)
         monkeypatch.delenv("INFERENCEX_PATH", raising=False)
 
         with pytest.raises(SystemExit) as exc:
@@ -525,156 +520,3 @@ class TestResumeReappliesOperatorPaths:
         _apply_operator_supplied_paths(args, "custom")
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(new_scripts.resolve())
         assert os.environ["FRAMEWORK_REPO_PATH"] == str(new_repo.resolve())
-
-
-class TestCustomAdapterMeasurement:
-    """Handoff probe: custom/native adapter emits nonzero throughput, no harness error."""
-
-    @pytest.mark.parametrize("framework", ["custom", "xdit"])
-    def test_a_scriptable_point_runs_on_the_bypass_runner_under_hyperloom_s_interpreter(self, tmp_path, framework):
-        """The operator's own benchmark and eval scripts run on the bypass runner, never on Magpie."""
-        import sys
-
-        from hyperloom.orchestrator.actions.executors.benchmark_backend import build_benchmark_command
-
-        cfg_path = tmp_path / "config.yaml"
-        cfg_path.write_text(yaml.safe_dump({"benchmark": {"framework": framework}}), encoding="utf-8")
-
-        argv = build_benchmark_command(python_exe="/magpie/venv/python", config_path=cfg_path, output_dir=tmp_path)
-
-        assert argv == [
-            sys.executable,
-            "-m",
-            "hyperloom.orchestrator.actions.executors.bypass_runner",
-            "benchmark",
-            "--benchmark-config",
-            str(cfg_path),
-            "--output-dir",
-            str(tmp_path),
-            "--run-mode",
-            "local",
-        ]
-
-    def test_custom_scriptable_run_emits_nonzero_throughput(self, tmp_path, monkeypatch):
-        import yaml
-        from hyperloom.orchestrator.actions.executors import bypass_runner
-
-        scripts = tmp_path / "scripts"
-        scripts.mkdir()
-        (scripts / "custom_mi355x.sh").write_text(
-            "#!/bin/bash\n"
-            'cat > "$RESULT_DIR/$RESULT_FILENAME.json" <<JSON\n'
-            '{"framework": "custom", "workload_kind": "scriptable", '
-            '"throughput_unit": "fps", "output_throughput": 1.29, '
-            '"quality_gate": {"passed": true}}\n'
-            "JSON\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
-
-        cfg = {
-            "benchmark": {
-                "framework": "custom",
-                "model": "/models/custom",
-                "runner_type": "mi355x",
-                "run_mode": "local",
-                "timeout_seconds": 60,
-                "workload_kind": "scriptable",
-                "envs": {"TP": 8},
-            }
-        }
-        cfg_path = tmp_path / "config.yaml"
-        cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-
-        rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
-        assert rc == 0
-        ws = sorted((tmp_path / "out").glob("benchmark_custom_*"))[-1]
-        rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
-        assert rep["success"] is True
-        assert float(rep["throughput"]["output_throughput"]) == pytest.approx(1.29)
-
-    @pytest.mark.parametrize(
-        ("timeout_override", "expected_timeout"), [(None, 7800.0), ("10", 10.0)], ids=["default", "override"]
-    )
-    def test_an_inert_env_variant_measures_without_a_harness_error(
-        self, tmp_path, monkeypatch, timeout_override, expected_timeout
-    ):
-        """An inert env variant measures under the shared scriptable benchmark caps."""
-        import asyncio
-        import subprocess
-        import sys
-        from unittest.mock import patch
-
-        from hyperloom.orchestrator.actions.executors._grid_runner import (
-            GridVariant,
-            run_grid,
-        )
-
-        base = tmp_path / "base.yaml"
-        base.write_text(
-            yaml.safe_dump(
-                {
-                    "benchmark": {
-                        "framework": "custom",
-                        "model": "/models/custom",
-                        "workload_kind": "scriptable",
-                        "run_mode": "local",
-                        "envs": {"TP": 8, "HYWORLD_HOIST": "0"},
-                        "timeout_seconds": 60,
-                    }
-                }
-            )
-        )
-
-        def _ok(cmd, *a, **k):
-            assert k["watch"].timeout == expected_timeout
-            assert k["watch"].silence_timeout_sec == 600
-            assert k["watch"].server_log_path is None
-            assert k["watch"].session_deadline_sec is None
-            slot = Path(cmd[cmd.index("--output-dir") + 1])
-            ws = slot / "benchmark_custom_20260101_000000"
-            ws.mkdir(parents=True, exist_ok=True)
-            (ws / "benchmark_report.json").write_text(
-                json.dumps(
-                    {
-                        "success": True,
-                        "framework": "custom",
-                        "throughput": {
-                            "output_throughput": 1.29,
-                            "completed_requests": 1,
-                            "duration_seconds": 10.0,
-                        },
-                    }
-                )
-            )
-            return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
-        if timeout_override is None:
-            monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
-        else:
-            monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", timeout_override)
-        with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-            side_effect=_ok,
-        ) as launch:
-            results = asyncio.run(
-                run_grid(
-                    grid=[
-                        GridVariant(name="baseline"),
-                        GridVariant(
-                            name="inert-off",
-                            extra_envs={"HYWORLD_HOIST": "0"},
-                        ),
-                    ],
-                    output_root=tmp_path / "out",
-                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi355x")),
-                    launch=GridLaunch(magpie_python=sys.executable),
-                )
-            )
-        assert launch.call_count == 2
-        assert [r.status for r in results] == ["succeeded", "succeeded"]
-        assert [r.output_throughput for r in results] == pytest.approx([1.29, 1.29])
-        assert all(not r.error_class for r in results)
-        assert not list((tmp_path / "out").glob("variant_*/abort_reason.json"))

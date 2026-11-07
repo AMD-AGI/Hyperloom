@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The phases of a round, read off the marks its Magpie runs leave beside their server logs.
+"""The phases of a round, read off the marks its runs leave in their run_dirs beside their server logs.
 
-The marks are written the way the launcher writes them (``server_ready_at``, ``kv_metrics.json``); the cases are the
+The marks are written the way an inference_suite round writes them (``server_ready_at``, ``kv_metrics.json``); the cases are the
 rounds a test is made of: a graded test's warmup round and its measured round, a round with a warmup run in front of its
 measured one, an AgentX round, a round whose server never got ready.
 """
@@ -30,7 +30,6 @@ from hyperloom.measure.round_marks import (
     boot_parts,
     read_runs,
     round_boundaries,
-    server_log_of,
 )
 
 T0 = 1_000.0
@@ -52,7 +51,7 @@ def _write_run(
     ended: float | None = None,
     log: str | None = None,
 ) -> None:
-    """What a Magpie run leaves: the ready stamp, the watchdog's phase marks and, when it ended, the file's time."""
+    """What a run leaves: the ready stamp, its phase marks and, when it ended, the file's time."""
     (directory / "server_ready_at").write_text(f"{ready:.3f} {boot:.3f}\n", encoding="utf-8")
     if marks is not None or ended is not None:
         phase_marks = [{"phase": phase, "mono": 1.0, "ts": at} for phase, at in (marks or {}).items()]
@@ -410,15 +409,6 @@ The server is fired up and ready to roll!
 """
 
 
-def _magpie_run(root: Path, *, log: str, launch: str = "benchmark_sglang_20000101_000800") -> Path:
-    """A run as Magpie leaves it: the ready stamp in the run's directory, the server log one directory deeper."""
-    directory = _run_dir(root, "variant_00_test", warmup=True)
-    _write_run(directory, T0 + 90.0, 80.0)
-    (directory / launch).mkdir()
-    (directory / launch / "server.log").write_text(log, encoding="utf-8")
-    return directory
-
-
 def test_the_graph_capture_of_the_newer_sglang_wording_is_read_and_the_older_wording_still_is(tmp_path: Path) -> None:
     newer = tmp_path / "newer.log"
     newer.write_text(SGLANG_NEW_LOG, encoding="utf-8")
@@ -440,8 +430,11 @@ def test_a_capture_that_only_began_or_failed_is_not_a_graph_capture_time(tmp_pat
     assert boot_parts(log) == BootParts()
 
 
-def test_a_server_log_one_directory_below_the_runs_is_found_and_splits_the_boot(tmp_path: Path) -> None:
-    _magpie_run(tmp_path, log=SGLANG_NEW_LOG)
+def test_the_server_log_in_the_run_dir_splits_the_boot_and_one_below_it_is_not_read(tmp_path: Path) -> None:
+    directory = _run_dir(tmp_path, "variant_00_test", warmup=True)
+    _write_run(directory, T0 + 90.0, 80.0, log=SGLANG_NEW_LOG)
+    (directory / "nested").mkdir()
+    (directory / "nested" / "server.log").write_text(VLLM_LOG, encoding="utf-8")
     (run,) = read_runs(tmp_path, WINDOW)
 
     phases = _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))
@@ -453,17 +446,3 @@ def test_a_server_log_one_directory_below_the_runs_is_found_and_splits_the_boot(
         "server_boot.graph_capture",
     ]
     assert [seconds for _, seconds in phases[2:4]] == [2.0, 11.5]
-
-
-def test_of_several_launches_below_a_run_the_last_by_name_is_read_and_a_log_in_the_directory_itself_comes_first(
-    tmp_path: Path,
-) -> None:
-    directory = _magpie_run(tmp_path, log=SGLANG_LOG, launch="benchmark_sglang_20000101_000000")
-    later = directory / "benchmark_sglang_20000101_000800"
-    later.mkdir()
-    (later / "server.log").write_text(SGLANG_NEW_LOG, encoding="utf-8")
-
-    assert boot_parts(server_log_of(directory)).graph_capture == 11.5
-    (directory / "server.log").write_text(VLLM_LOG, encoding="utf-8")
-    assert server_log_of(directory) == directory / "server.log"
-    assert server_log_of(tmp_path / "no_such_run") == tmp_path / "no_such_run" / "server.log"

@@ -179,7 +179,6 @@ def test_the_actor_pins_the_round_to_the_gpus_ray_placed_it_on(tmp_path, monkeyp
     assert _gpus(leased) == (4, 5)
     (process,) = ran
     assert (process.cmd, process.timeout) == (leased.cmd, leased.timeout)
-    assert process.server_log_path is None and process.silence_timeout_sec is None
 
 
 def test_an_actor_ray_narrowed_nothing_for_runs_the_config_as_written(tmp_path, monkeypatch) -> None:
@@ -251,7 +250,7 @@ def test_a_grid_with_a_serving_lease_runs_its_rounds_in_the_lease(monkeypatch, g
 
 
 def test_the_actor_stops_a_leased_round_that_trails_its_checkpoint(tmp_path, monkeypatch) -> None:
-    """The leased round has no server log for the watchdog to read; its checkpoint still rules, and stops it."""
+    """The leased round's checkpoint rules from the round's start, and stops it."""
     monkeypatch.setattr(_agentx_checkpoint, "AGENTX_CHECKPOINT_SEC", 0.0)
     monkeypatch.setattr(_agentx_checkpoint, "workspace_checkpoint_p50", lambda root: 90.0)
     slot = tmp_path / "slot"
@@ -259,9 +258,7 @@ def test_the_actor_stops_a_leased_round_that_trails_its_checkpoint(tmp_path, mon
     checkpoint = SuiteRoundCheckpoint(AgentxCheckpoint(100.0, enforce=True), slot=slot, run_dir=slot / "run-1")
     started = time.monotonic()
 
-    returncode, _out, _err = SessionKillRound(
-        ["sleep", "60"], env={}, timeout=120, server_already_ready=True, checkpoint=checkpoint
-    ).run()
+    returncode, _out, _err = SessionKillRound(["sleep", "60"], env={}, timeout=120, checkpoint=checkpoint).run()
 
     assert returncode == AGENTX_EARLY_STOP_RETURNCODE
     assert time.monotonic() - started < 30

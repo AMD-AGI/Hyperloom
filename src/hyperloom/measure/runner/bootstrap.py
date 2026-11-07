@@ -106,10 +106,18 @@ in the foreground never ends, so the agent never starts, the sandbox never turns
 checked line in the background (``nohup ... &``) with its output in ``runner-boot.log`` next to the scratch directory,
 and returns at once. The runner then waits for the spec for ``--spec-wait-sec`` seconds, :data:`TEMPLATE_SPEC_WAIT_SEC`
 unless the step's arguments name another.
+
+A template step must also reach ``sh`` as written. A platform may expand variables in a step's text before any shell
+parses it, whatever quotes surround them (Kubernetes turns ``$$`` into ``$`` and ``$(NAME)`` into a value in a
+container's command; a shell that renders the step into a script expands ``$d`` to nothing), and the checked line is
+full of ``$``. The step is therefore ``echo <base64> | base64 -d | sh``, which no such expansion changes, and the line it
+decodes (:func:`runner_template_payload`) also leaves a ``runner_start_failed`` status, with the boot log's tail, when
+the start ends before anything wrote one, so the application does not wait for a status that will never come.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shlex
@@ -123,6 +131,7 @@ __all__ = [
     "TEMPLATE_SPEC_WAIT_SEC",
     "runner_start_command",
     "runner_start_shell_line",
+    "runner_template_payload",
     "runner_template_step",
 ]
 
@@ -298,22 +307,68 @@ def _with_spec_wait(runner_args: tuple[str, ...]) -> tuple[str, ...]:
     return runner_args if named else (*runner_args, _SPEC_WAIT_ARG, str(TEMPLATE_SPEC_WAIT_SEC))
 
 
+#: The directories a template step makes by default: its ``HYPERLOOM_IN_DIR``, ``HYPERLOOM_OUT_DIR`` and
+#: ``HYPERLOOM_SCRATCH_DIR``, whose defaults the script's are; and where it writes the runner's output.
+_TEMPLATE_DIRS = ("/in", "/out", "/scratch")
+_BOOT_LOG = "/runner-boot.log"
+
+#: What the template step's payload runs when the start fails before anything wrote ``status.json``: the line or the
+#: template's preparation ended with code ``$1`` and nothing reported why. It writes the start failure the application
+#: reads, with the boot log's tail as the reason, into ``HYPERLOOM_OUT_DIR`` or, when that is empty, the template's out
+#: directory, so the application ends the test at once instead of waiting for a status that never comes.
+_START_FAILED = (
+    "hl_start_failed() { o=${HYPERLOOM_OUT_DIR:-@OUT@}; "
+    'if [ ! -e "$o/status.json" ]; then '
+    "t=$(tail -c 600 @BOOT@ 2>/dev/null | LC_ALL=C tr '\\n\\t' '  ' | LC_ALL=C tr -cd ' -~' | tr -d '\"\\\\'); "
+    'mkdir -p "$o"; '
+    'printf \'{"error_class": "runner_start_failed", "message": "runner start, exit %s before status.json was '
+    'written: %s", "state": "failed"}\\n\' "$1" "$t" >"$o/.status.json.tmp" '
+    '&& mv "$o/.status.json.tmp" "$o/status.json"; fi; return "$1"; }'
+)
+
+
 def runner_template_step(
     *runner_args: str,
     pre: str = "",
     env: Mapping[str, str] | None = None,
-    dirs: Sequence[str] = ("/in", "/out", "/scratch"),
-    boot_log: str = "/runner-boot.log",
+    dirs: Sequence[str] = _TEMPLATE_DIRS,
+    boot_log: str = _BOOT_LOG,
 ) -> str:
     """The one-line start step of a measurement template; it starts the runner in the background and returns at once.
+
+    The step is ``echo <base64> | base64 -d | sh``, with no ``$``, quote or backslash in it: a platform that expands
+    variables in a step's text before ``sh`` runs it (Kubernetes' ``$(NAME)`` and ``$$`` in a container's command, or a
+    shell that renders the step into a script) leaves it as it is. :func:`runner_template_payload` is the ``sh`` it runs.
+
+    Raises:
+        ValueError: ``pre`` spans lines, or a name in ``env`` is not a shell variable name.
+    """
+    payload = runner_template_payload(*runner_args, pre=pre, env=env, dirs=dirs, boot_log=boot_log)
+    return f"echo {base64.b64encode(payload.encode()).decode('ascii')} | base64 -d | sh"
+
+
+def runner_template_payload(
+    *runner_args: str,
+    pre: str = "",
+    env: Mapping[str, str] | None = None,
+    dirs: Sequence[str] = _TEMPLATE_DIRS,
+    boot_log: str = _BOOT_LOG,
+) -> str:
+    """The one line of ``sh`` the start step of :func:`runner_template_step` runs.
 
     The line makes ``dirs`` (the template's ``HYPERLOOM_IN_DIR``, ``HYPERLOOM_OUT_DIR`` and ``HYPERLOOM_SCRATCH_DIR``,
     whose defaults the script's are), runs ``pre`` (the template's own preparation, one line of ``sh``, run in the
     foreground and only when the directories were made), then starts :func:`runner_start_shell_line` with
     ``runner_args`` under ``nohup`` in the background, with ``env`` set for it alone and its output in ``boot_log``
     (``runner-boot.log`` next to the scratch directory, never inside the runner's own). A step that never returned
-    would keep the sandbox from ever turning ready (see the module's documentation). ``runner_args`` get
+    would keep the sandbox from ever turning ready (see the module's documentation), and so would a background part
+    that held the step's stdin, stdout or stderr: a platform reading the step's output to its end would wait for the
+    runner, so the background part has its own. ``runner_args`` get
     ``--spec-wait-sec`` :data:`TEMPLATE_SPEC_WAIT_SEC` unless they name it.
+
+    A start that fails before anything wrote ``status.json`` (the directories, ``pre``, or the started line ending
+    non-zero without one) leaves a ``runner_start_failed`` status with the boot log's tail in ``HYPERLOOM_OUT_DIR``,
+    or in the second of ``dirs`` (``/out`` when there is none) when that is empty.
 
     Raises:
         ValueError: ``pre`` spans lines, or a name in ``env`` is not a shell variable name.
@@ -325,6 +380,11 @@ def runner_template_step(
         raise ValueError(f"not shell variable names: {', '.join(map(repr, bad))}")
     assignments = "".join(f"{name}={shlex.quote(value)} " for name, value in (env or {}).items())
     start = shlex.quote(runner_start_shell_line(*_with_spec_wait(runner_args)))
-    background = f"({assignments}nohup sh -c {start} >{shlex.quote(boot_log)} 2>&1 &)"
+    failed = _START_FAILED.replace("@OUT@", shlex.quote(dirs[1] if len(dirs) > 1 else _TEMPLATE_DIRS[1])).replace(
+        "@BOOT@", shlex.quote(boot_log)
+    )
+    background = f'( ({assignments}nohup sh -c {start} >{shlex.quote(boot_log)} 2>&1 || hl_start_failed "$?") </dev/null >/dev/null 2>&1 &)'
     made = "mkdir -p " + " ".join(shlex.quote(directory) for directory in dirs)
-    return " && ".join(part for part in (made, pre, background) if part)
+    return (
+        f"{failed}; {{ " + " && ".join(part for part in (made, pre, background) if part) + '; } || hl_start_failed "$?"'
+    )

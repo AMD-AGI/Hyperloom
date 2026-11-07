@@ -112,7 +112,7 @@ def _coord(
     coord.shared_state = SharedState(
         baseline_config_path=str(recipe),
         benchmark_mode="agentx" if agentx else "synthetic",
-        agentx_backend="magpie" if agentx else "",
+        agentx_backend="inferencex" if agentx else "",
         framework=framework,
         model_path="/models/accepted",
         gpu_type="mi355x",

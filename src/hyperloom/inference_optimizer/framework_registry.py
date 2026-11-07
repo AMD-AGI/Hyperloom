@@ -129,12 +129,12 @@ def shipped_config_name(kind: str, framework: str) -> str:
 
 
 def extra_args_env(framework: str | None) -> str:
-    """Return the Magpie env var used to append backend args."""
+    """Return the point env var used to append backend args."""
     return _spec_or_default(framework).extra_args_env
 
 
 def server_args_env_name(framework: str | None) -> str:
-    """Return the Magpie env var used to append backend server args."""
+    """Return the point env var used to append backend server args."""
     name = str(framework or "").strip().lower()
     if is_supported(name):
         return extra_args_env(name)

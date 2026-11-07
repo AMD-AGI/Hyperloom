@@ -833,8 +833,7 @@ class _ArmServer:
         return _ArmRound(GridLaunch(serving_lease=self.lease), label="server_restart")
 
     def teardown(self) -> None:
-        lifecycle = {"framework": self.framework, "port": self.port}
-        if survivors := teardown_variant_server(self.pid_dir, lifecycle):
+        if survivors := teardown_variant_server(self.pid_dir):
             log.error(
                 "conc_sweep: arm=%s pids %s outlived SIGKILL; %s keeps their record",
                 self.arm_name,

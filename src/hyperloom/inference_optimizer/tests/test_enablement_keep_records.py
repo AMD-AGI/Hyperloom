@@ -598,10 +598,10 @@ def test_an_in_place_enablement_with_no_override_still_observes(tmp_path: Path, 
     assert assertions.get("pytest"), "a named package is asserted at its observed version"
 
 
-def test_the_closure_follows_the_framework_interpreter_not_magpies(tmp_path: Path, monkeypatch):
-    """A split-venv host: Magpie runs from one venv, the server from another.
+def test_the_closure_follows_the_framework_interpreter_not_the_clients(tmp_path: Path, monkeypatch):
+    """A split-venv host: the benchmark client runs from one venv, the server from another.
 
-    Attributing Magpie's distributions to a KEEP whose server ran elsewhere is a
+    Attributing the client's distributions to a KEEP whose server ran elsewhere is a
     confidently wrong closure, which is worse than an absent one. The fallback is
     therefore the serving framework's interpreter, resolved the same way the
     accuracy probes resolve it.
@@ -643,10 +643,6 @@ def test_an_override_rewriting_path_selects_that_pythons_closure(tmp_path: Path,
 
     monkeypatch.setenv("PATH", str(ambient_bin))
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
-    monkeypatch.delenv("MAGPIE_PYTHON", raising=False)
-    # Force the branch that consults PATH: pin Magpie's own answer to the
-    # single-venv sentinel so resolution falls through to `which("vllm")`.
-    monkeypatch.setattr(_benchmark_interpreter, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
 
     seen: dict[str, str] = {}
     real_probe = _benchmark_interpreter._resolve_probe_python
@@ -691,8 +687,6 @@ def test_the_materialized_configs_envs_decide_the_probed_interpreter(tmp_path: P
     monkeypatch.setenv("PATH", str(ambient_bin))
     monkeypatch.setenv("FRAMEWORK", "sglang")  # outranked by the config's own framework
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
-    monkeypatch.delenv("MAGPIE_PYTHON", raising=False)
-    monkeypatch.setattr(_benchmark_interpreter, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
 
     seen: dict[str, Any] = {}
     real_probe = _benchmark_interpreter._resolve_probe_python

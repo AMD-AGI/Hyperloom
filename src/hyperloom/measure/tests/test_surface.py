@@ -10,7 +10,6 @@ import pytest
 
 from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.measure.surface import (
-    MeasurementSurface,
     POINT_ENV_KEYS,
     REQUEST_ENV_KEYS,
     SURFACE_ENV_KEYS,
@@ -85,23 +84,6 @@ def test_every_workload_and_eval_field_changes_the_hash(config, name):
     value = "7" if name != "HYPERLOOM_EVAL_TASKS" else "easy_task"
 
     assert extract_surface(changed(config, **{name: value})).sha256 != baseline.sha256
-
-
-def test_a_point_still_spelling_the_pre_switch_eval_names_has_another_surface_and_its_names_no_reader(config):
-    """The eval names were ``MAGPIE_EVAL_*`` before the switch: a surface recorded then hashes another way, so whatever is
-    keyed by it misses, and nothing reads the old names, so a point that still carries them evaluates the default."""
-    envs = config["benchmark"]["envs"]
-    old = copy.deepcopy(config)
-    old["benchmark"]["envs"] = {**envs, "MAGPIE_EVAL_LIMIT": envs["HYPERLOOM_EVAL_LIMIT"]}
-    del old["benchmark"]["envs"]["HYPERLOOM_EVAL_LIMIT"]
-    pre_switch = MeasurementSurface({**extract_surface(old).fields, "envs.MAGPIE_EVAL_LIMIT": "250"})
-
-    assert extract_surface(old).fields["envs.HYPERLOOM_EVAL_LIMIT"] is None
-    assert pre_switch.sha256 != extract_surface(config).sha256
-    assert set(pre_switch.differences(extract_surface(config))) == {
-        "envs.MAGPIE_EVAL_LIMIT",
-        "envs.HYPERLOOM_EVAL_LIMIT",
-    }
 
 
 def test_check_surface_names_the_field_that_differs(config):

@@ -4,10 +4,10 @@
 """Turn a materialized point YAML into the inference_suite round it runs as, and run that round.
 
 The point YAML stays Hyperloom's internal format; this module is the one place it becomes a suite config, and
-inference_suite never reads it. The translation reproduces what Magpie's generic launcher would serve for the same
-point: its knobs (``TP``, ``CONC`` ...) become config fields instead of server environment, ``EXTRA_<FW>_ARGS`` and
-every other variable become the user layer on the frozen base, and the launcher's own server rules (vLLM's and
-ATOM's ``--max-model-len`` default, sglang's radix-cache conflict) are applied to that layer. What the YAML does
+inference_suite never reads it. The point's knobs (``TP``, ``CONC`` ...) become config fields instead of server
+environment, ``EXTRA_<FW>_ARGS`` and every other variable become the user layer on the frozen base, and the server
+rules a launch needs (vLLM's and ATOM's ``--max-model-len`` default, sglang's radix-cache conflict) are applied to
+that layer. What the YAML does
 not hold -- where the round writes, its interpreter, lifecycle and telemetry -- comes in :class:`RoundSettings`.
 
 An AgentX point runs the agentx-harness replay on the launch its ``agentx.launch_overrides`` composed on the session
@@ -15,9 +15,9 @@ base, above the base's golden layer; a profile point turns the torch profiler on
 point (``benchmark_script`` names the MLPerf agentic client) runs the MLPerf harness against the round's own server,
 which serves under the model name the harness requests.
 
-A scriptable point (xDiT, or an operator's own script) runs its session base's script once, with the point's
-environment as the scriptable runner handed it before (:func:`scriptable_workload`); the quality gate the script
-writes is its eval, so it runs no GSM8K.
+A scriptable point (xDiT, or a custom session's own benchmark and eval scripts) runs its session base's script once
+with the point's environment (:func:`scriptable_workload`); the quality gate the script writes is its eval, so it
+runs no GSM8K.
 
 Every point of a session that froze a base launch runs on inference_suite (:func:`suite_route`). A client-only round --
 multi-node, or one whose session or point names a ``BENCHMARK_BASE_URL`` -- holds its server as ``external``: it
@@ -133,7 +133,6 @@ from ._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
 from ._subprocess_kill import (
     AGENTX_EARLY_STOP_ERROR_CLASS,
     AGENTX_EARLY_STOP_RETURNCODE,
-    _KV_METRICS_ENV,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     AgentxCheckpointMissed,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -141,7 +140,10 @@ from ._subprocess_kill import (
     session_deadline_to_remaining_sec,
 )
 
-#: The host the round's server binds and its client reaches; Magpie bound every interface.
+#: Escape hatch for a round that must not pay even the cost of one HTTP GET every couple of seconds.
+_KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
+
+#: The host the round's server binds and its client reaches.
 SERVER_HOST = "127.0.0.1"
 #: Measured and warmup prompts are drawn with different seeds so the warmup does not prime the measured prompts.
 MEASURED_SEED = 0
@@ -149,9 +151,9 @@ WARMUP_SEED = 1
 
 _PORT_ENV = "PORT"
 _GPU_MASK_ENV = "ROCR_VISIBLE_DEVICES"
-_RUN_PHASE_ENV = "MAGPIE_RUN_PHASE"
+_RUN_PHASE_ENV = "HYPERLOOM_RUN_PHASE"
 _SERVER_ONLY_PHASE = "server"
-_CLIENT_TRUST_ENV = "MAGPIE_TRUST_REMOTE_CODE"
+_CLIENT_TRUST_ENV = "BENCH_TRUST_REMOTE_CODE"
 _TOKENIZER_MODE_ENV = "HYPERLOOM_CLIENT_TOKENIZER_MODE"
 _REMOTE_SERVER_ENV = "BENCHMARK_BASE_URL"
 _PROBE_ENV = "HYPERLOOM_EVAL_PROBE"
@@ -193,7 +195,7 @@ _CONSUMED_ENV = frozenset(
     }
 )
 
-# Magpie's launcher defaults (scripts/benchmark/*_mi3*.sh at 06b7cf6), and the eval probe's in _inferencex_patcher.
+# The generic launcher's defaults (``inference_suite/recipe/defaults/table.yaml``) and the eval probe's.
 _LAUNCHER_PORT = 8888
 _HTTP_PORT = 80
 _UTF8 = "utf-8"
@@ -204,7 +206,7 @@ _PROBE_LENGTH_RATIO = 0.75
 #: The few-shot count of InferenceX's ``infx/evals/gsm8k.yaml``.
 _GSM8K_FEWSHOT = 5
 
-#: The frameworks whose Magpie launcher always passes ``--max-model-len`` (sglang's leaves the context to the host).
+#: The frameworks whose generic launcher always passes ``--max-model-len`` (sglang's leaves the context to the host).
 _LAUNCHER_CONTEXT_LENGTH = frozenset({Framework.VLLM, Framework.ATOM})
 #: A flag the launcher drops from its defaults when the point's args carry the flag it cannot run beside:
 #: sglang's HiCache is built on the radix cache.
@@ -460,9 +462,9 @@ def _fixed_profile(bench: Mapping[str, Any], point: _Point) -> ProfileConfig:
     )
 
 
-#: The ``agentx`` keys a point may set: Magpie's recipe selection (``recipe``, ``selector`` ...) gives way to the base.
+#: The ``agentx`` keys a point may set; a recipe selection (``recipe``, ``selector`` ...) gives way to the base.
 _AGENTX_BLOCK_KEYS = frozenset({"enabled", "mode", "concurrency", "failed_request_threshold", "launch_overrides"})
-#: Every ``launch_overrides`` key Magpie read; ``remove_args`` edits the recipe argv a base-seeded launch replaces.
+#: Every ``launch_overrides`` key a point may set; ``remove_args`` edits the recipe argv a base-seeded launch replaces.
 _AGENTX_LAUNCH_KEYS = frozenset(
     {"version", "append_args", "remove_args", "replace_args", "env", "unset_env", "executable"}
     | {"source_files", "absent_source_files"}
@@ -475,8 +477,8 @@ _EP_SIZE_ENV = "EP_SIZE"
 _WARMUP_PER_LANE_ENV = "AIPERF_WARMUP_REQUESTS_PER_LANE"
 #: The AgentX point's environment the config carries as fields, beside a fixed point's and the client's ``AIPERF_*``.
 _AGENTX_CONSUMED_ENV = _CONSUMED_ENV | {_MODEL_PATH_ENV, _EP_SIZE_ENV, _TRACE_ENV, _DURATION_ENV}
-#: The client knobs of Magpie's replay and the MLPerf client, which the agentx-harness replay does not read.
-_MAGPIE_CLIENT_PREFIXES = ("AGENTX_", "AGENTIC_")
+#: The client knobs of the retired AgentX replay and the MLPerf client, which the agentx-harness replay does not read.
+_FOREIGN_CLIENT_PREFIXES = ("AGENTX_", "AGENTIC_")
 
 
 def _agentx_block(bench: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -500,7 +502,7 @@ def _check_agentx_block(block: Mapping[str, Any], point: _Point) -> None:
 
 
 def _check_agentx_envs(point: _Point, base: BaseLaunch) -> None:
-    refused = sorted(name for name in point.envs if name.startswith(_MAGPIE_CLIENT_PREFIXES))
+    refused = sorted(name for name in point.envs if name.startswith(_FOREIGN_CLIENT_PREFIXES))
     if refused:
         raise ConfigError(f"the AgentX point sets {', '.join(refused)}; the agentx-harness replay has its own knobs")
     if point.flag(ENV_RUN_EVAL, default=False):
@@ -546,7 +548,7 @@ def _agentx_workload(point: _Point, base: BaseLaunch) -> AgentxWorkload:
 
 
 def _agentx_server_env(point: _Point) -> dict[str, str]:
-    """The point's environment as Magpie layered it under the launch's: less what the config carries as fields."""
+    """The point's environment, layered under the launch's: less what the config carries as fields."""
     return {
         name: value
         for name, value in point.envs.items()
@@ -721,7 +723,7 @@ def _scriptable_config(
 def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings) -> SuiteConfig:
     """The config one round of the point ``document`` runs from, composed on ``base``.
 
-    A point whose ``MAGPIE_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval; one
+    A point whose ``HYPERLOOM_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval; one
     that sets ``EVAL_ONLY`` runs the eval and no load, as InferenceX's ``run_benchmark_serving`` does. A client-only round (``settings.server_url`` or the point's ``BENCHMARK_BASE_URL``) holds its server as ``external``.
 
     Raises:
@@ -905,7 +907,7 @@ class SuiteRound:
 
     ``warmup`` marks a discarded round, which draws its prompts with the warmup seed so it cannot prime the measured
     round's prefix cache. ``boot_only`` marks a round that only brings the server up, running the point as a
-    ``MAGPIE_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
+    ``HYPERLOOM_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
     ``serving_lease`` is the Ray lease whose actor runs the round on the GPUs it holds, ``None`` to run it here.
     ``checkpoint`` stops an AgentX round that trails its reference; its ruling lands in ``round_dir``.
     """
@@ -948,9 +950,16 @@ def staged_tool_cache() -> Path:
     return resolve_dep_dir(TOOL_CACHE_DIR, TOOL_CACHE_ENV)
 
 
-def suite_route(session_dir: Path | None) -> SuiteRoute | None:
-    """The route every round of the session at ``session_dir`` runs on inference_suite, ``None`` with no session."""
-    return None if session_dir is None else session_route(Path(session_dir))
+def suite_route(session_dir: Path | None) -> SuiteRoute:
+    """What every round of the session at ``session_dir`` runs on inference_suite with.
+
+    Raises:
+        SuiteRoundRefused: ``config_invalid`` when there is no session, or it froze no base launch to run on.
+    """
+    route = None if session_dir is None else session_route(Path(session_dir))
+    if route is None:
+        raise _refused_at(FailedStep.CONFIG_INVALID, f"the session {session_dir} froze no base launch to run on")
+    return route
 
 
 def session_route(session_dir: Path) -> SuiteRoute | None:
@@ -997,7 +1006,7 @@ def deadline_unix(session_deadline_sec: float | None) -> int | None:
 
 
 def inherited_env_names(environ: Mapping[str, str]) -> tuple[str, ...]:
-    """The host environment a round's server and client see: what a Magpie round saw, less the GPU masks."""
+    """The host environment a round's server and client see: the scrubbed process environment, less the GPU masks."""
     scrubbed = scrub_benchmark_process_env(dict(environ))
     return tuple(sorted(name for name in scrubbed if _ENV_NAME.fullmatch(name) and name not in _GPU_MASK_ENVS))
 
@@ -1179,9 +1188,9 @@ __all__ = [
     "round_lifecycle",
     "run_accuracy_suite_round",
     "run_suite_round",
-    "session_route",
     "staged_tool_cache",
     "suite_config",
     "scriptable_workload",
+    "session_route",
     "suite_route",
 ]

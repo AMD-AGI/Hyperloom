@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The shipped baseline and profile points: read as inference_suite runs them, with nothing only Magpie read."""
+"""The shipped baseline and profile points: read as inference_suite runs them, with nothing only the retired runner read."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ _FRAMEWORKS = ("atom", "sglang", "vllm", "xdit")
 _SERVING = tuple(framework for framework in _FRAMEWORKS if not is_scriptable(framework))
 _KINDS = ("baseline", "profile")
 
-#: Keys of the benchmark block only Magpie's runner read; ``profiler`` and ``server_lifecycle`` are pinned below.
-_MAGPIE_KEYS = ("run_mode", "gpu_selection", "runner_type", "benchmark_script")
+#: Keys of the benchmark block only the retired runner read; ``profiler`` and ``server_lifecycle`` are pinned below.
+_RETIRED_KEYS = ("run_mode", "gpu_selection", "runner_type", "benchmark_script")
 #: The HIP runtime switches that make the profiler record every graph replay (outside_facts hip_graph_packet_capture).
 _GRAPH_REPLAY_ENV = {
     "DEBUG_CLR_GRAPH_PACKET_CAPTURE": "0",
@@ -77,11 +77,10 @@ def test_a_serving_profile_records_every_graph_replay(framework):
 
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("framework", _FRAMEWORKS)
-def test_the_point_carries_nothing_only_magpie_read(kind, framework):
+def test_the_point_carries_nothing_only_the_retired_runner_read(kind, framework):
     block = _block(kind, framework)
 
-    assert not set(_MAGPIE_KEYS) & set(block)
+    assert not set(_RETIRED_KEYS) & set(block)
     assert set(block.get("profiler", {})) == {"torch_profiler"}
     assert "enabled" not in block.get("server_lifecycle", {})
     assert "XDIT_SUPPORTS_PROFILER" not in block["envs"]
-    assert "magpie" not in _text(kind, framework).lower()

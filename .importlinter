@@ -98,7 +98,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
@@ -371,9 +370,6 @@ ignore_imports =
     hyperloom.**.tests.** -> **
     hyperloom_multibranch.tests.** -> **
     hyperloom_multibranch.**.tests.** -> **
-    # The round gate's KV recorder until run_round owns telemetry and unit 5.05a deletes _build_kv_recorder.
-    hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_poll
-    hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_record
     # The AgentX checkpoint reads aiperf's per-request export with the parser the suite's timeline owns.
     hyperloom.orchestrator.actions.executors._agentx_checkpoint -> inference_suite.telemetry.agentx_timeline
 unmatched_ignore_imports_alerting = none
@@ -462,7 +458,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers

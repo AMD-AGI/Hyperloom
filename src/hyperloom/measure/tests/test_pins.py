@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inference_optimizer import inferencex_checkout
-from hyperloom.inference_optimizer.session.paths import MAGPIE_DEFAULT_REF
 
 # Every name multibranch-dev's scheduling.local_peers imports from this module.
 from hyperloom.measure.pins import (
@@ -62,10 +60,14 @@ def test_image_from_pod_status_refusals() -> None:
         image_from_pod_status(_pod("r@sha256:" + "0" * 64), "main")
 
 
-def test_the_tool_commits_are_the_magpie_preflight_installs_and_the_inferencex_the_checkout_is_held_to() -> None:
+_LAST_MAGPIE_REF = "06b7cf6e185fdd49483a512e350cb3964ba3bf68"
+_LAST_INFERENCEX_REF = "3d5581562f643f9bdeb8410cd924e2c70906c966"
+
+
+def test_the_tool_commits_are_the_last_ones_pinned_for_magpie_and_its_inferencex_checkout() -> None:
     commits = pinned_tool_commits({})
 
-    assert commits == ToolCommits(magpie=MAGPIE_DEFAULT_REF, inferencex=inferencex_checkout.DEFAULT_REF)
+    assert commits == ToolCommits(magpie=_LAST_MAGPIE_REF, inferencex=_LAST_INFERENCEX_REF)
     assert isinstance(
         active_image({"HYPERLOOM_ACTIVE_IMAGE_REF": "r", "HYPERLOOM_ACTIVE_IMAGE_DIGEST": DIGEST}), ActiveImage
     )
@@ -75,7 +77,7 @@ def test_a_non_empty_override_wins_and_an_empty_one_is_ignored() -> None:
     magpie, inferencex = "a" * 40, "c" * 40
 
     assert pinned_tool_commits({"MAGPIE_REF": magpie, "INFERENCEX_REF": inferencex}) == ToolCommits(magpie, inferencex)
-    assert pinned_tool_commits({"MAGPIE_REF": ""}).magpie == MAGPIE_DEFAULT_REF
+    assert pinned_tool_commits({"MAGPIE_REF": ""}).magpie == _LAST_MAGPIE_REF
 
 
 @pytest.mark.parametrize("var", ["MAGPIE_REF", "INFERENCEX_REF"])

@@ -429,7 +429,7 @@ def test_an_unexpressed_entry_of_no_known_kind_or_out_of_order_is_refused(
         _recipe(unexpressed=entries)
 
 
-#: An option of the launch the framework resolves (a Magpie AgentX recipe's), which a recipe's own arguments lack.
+#: An option of the launch the framework resolves (an AgentX recipe's), which a recipe's own arguments lack.
 RESOLVED_OPTION = "--enable-linear-replayssm-spec"
 
 
@@ -558,7 +558,7 @@ def test_a_recipe_base_round_trips_and_a_document_without_one_keeps_its_digest()
     ("document", "message"),
     [
         ({"digest": "1" * 64, "source": "inferencex"}, "the base launch digest"),
-        ({"digest": "sha256:" + "1" * 64, "source": "magpie"}, "the base launch source"),
+        ({"digest": "sha256:" + "1" * 64, "source": "elsewhere"}, "the base launch source"),
         ({"digest": "sha256:" + "1" * 64, "source": "inferencex", "path": "base_launch.json"}, "path"),
     ],
     ids=["unprefixed_digest", "unknown_source", "unknown_key"],

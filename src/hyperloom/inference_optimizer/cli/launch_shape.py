@@ -53,7 +53,7 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
         # Model not on disk yet (uncached HF id).
         print(
             "NOTE: Model context is unavailable locally; using a planning estimate. "
-            "Magpie resolves the AgentX serving context from its workload configuration.",
+            "The AgentX serving context is resolved from its workload configuration.",
             file=sys.stderr,
         )
     return (
@@ -184,7 +184,7 @@ def _export_workload_envs_for_optimize(
     tp_resolved: int,
     ep_resolved: int,
 ) -> None:
-    """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs."""
+    """Project resolved workload knobs (TP/CONC/EP) into env for downstream point YAMLs."""
     os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
     os.environ["CONC"] = str(max(1, int(getattr(args, "conc", DEFAULT_CONC) or DEFAULT_CONC)))
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))

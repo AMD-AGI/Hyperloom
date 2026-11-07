@@ -5,7 +5,7 @@
 
 ``python -m hyperloom.measure.consistency --checklist FILE --config FILE`` runs every test of the checklist twice, one
 after the other: with the local backend on this machine, then with the hosted backend in a fresh sandbox. Both sides are
-read with ``extract_benchmark_measurement``; the check compares output throughput, completed requests and error rate,
+read from their rounds' inference_suite run_dirs; the check compares output throughput, completed requests and error rate,
 and, for a test with a patched recipe, the hashes of the files the runner rebuilt against the locally compiled ones.
 Every test is one line of ``consistency.jsonl``; the last line is the summary against the pass criteria.
 
@@ -58,7 +58,6 @@ from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
 from hyperloom.measure.runner.inventory import FARM_INVENTORY_FILE
 from hyperloom.measure.socket import MeasurementBackend, SessionFacts, TestCall, TestOutcome
 from hyperloom.orchestrator.actions.executors import RoundFolder, is_round_folder, staged_tool_cache
-from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_base
 from inference_suite import StagingError, normalised_manifest
 
@@ -88,7 +87,6 @@ log = logging.getLogger(__name__)
 
 #: The schema of the file the runner lists in its result bundle (``FARM_INVENTORY_FILE``) with what it rebuilt.
 FARM_INVENTORY_SCHEMA = "hyperloom.farm-inventory/v1"
-REPORT_NAME = "benchmark_report.json"
 REPORT_FILE = "consistency.jsonl"
 DEFAULT_REPORT_DIR = Path("reports/hosted")
 PASS, FAIL, NO_DATA = "PASS", "FAIL", "NO_DATA"
@@ -264,21 +262,13 @@ class Summary:
 
 
 def _measurement_of(directory: Path) -> dict[str, Any] | None:
-    """The round's measurement: an inference_suite run_dir's from its report, a Magpie round's from the first readable
-    ``benchmark_report.json`` below it; ``None`` when it has none."""
-    if is_round_folder(directory):
-        try:
-            return RoundFolder.read(directory).measurement()
-        except (OSError, ValueError):
-            return None
-    for path in sorted(directory.rglob(REPORT_NAME)) if directory.is_dir() else []:
-        try:
-            document = json.loads(path.read_text(encoding=_UTF8))
-        except (OSError, ValueError):
-            continue
-        if isinstance(document, dict):
-            return extract_benchmark_measurement(document, workspace=directory)
-    return None
+    """The round's measurement, from its inference_suite run_dir's report; ``None`` when it has none."""
+    if not is_round_folder(directory):
+        return None
+    try:
+        return RoundFolder.read(directory).measurement()
+    except (OSError, ValueError):
+        return None
 
 
 def _error_rate(measurement: Mapping[str, Any]) -> float | None:
@@ -675,7 +665,6 @@ def _item_of(entry: Any, index: int, default_repeats: int = 1) -> ChecklistItem:
             output_dir=output_dir,
             timeout_sec=int(entry.get("timeout_sec", 3600)),
             cwd=str(output_dir),
-            magpie_python=sys.executable,
             task_id=task_id,
             kind=entry.get("kind", "test"),
             prep=entry.get("prep", "grid"),

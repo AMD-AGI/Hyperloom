@@ -23,6 +23,7 @@ from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.measure.runner import run as runner_flow
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.tests.bundle_factory import lm_eval_at_its_pin
+from hyperloom.measure.tests.run_dirs import write_run_dir
 
 PROBE = "import os, sys, yaml; print(os.path.exists(os.path.join(os.path.dirname(yaml.__file__), '_hl_marker.py')))"
 
@@ -31,10 +32,9 @@ class StubBackend:
     """Stands in for the local measurement backend: no server, one report, and a record of the point it was given."""
 
     def run_test(self, call: TestCall) -> TestOutcome:
-        workspace = Path(call.output_dir) / "benchmark_stub_20000101_000000"
-        workspace.mkdir(parents=True)
-        report = {"success": True, "throughput": {"output_throughput": 1234.5, "completed_requests": 8}}
-        (workspace / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")
+        workspace = write_run_dir(
+            Path(call.output_dir) / "suite_run_0", {"output_throughput": 1234.5, "completed_requests": 8}
+        )
         point = yaml.safe_load(Path(call.points[0]).read_text(encoding="utf-8"))
         (Path(call.output_dir) / "point_seen.json").write_text(json.dumps(point), encoding="utf-8")
         envs = (point.get("benchmark") or {}).get("envs") or {}

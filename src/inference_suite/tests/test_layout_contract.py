@@ -35,10 +35,8 @@ def test_a_text_that_is_not_a_whole_stamp_reads_as_none(text: str) -> None:
     assert parse_ready_stamp(text) is None
 
 
-def test_the_stamp_reads_what_the_current_launcher_writes(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import stamp_server_ready
-
-    stamp_server_ready(str(tmp_path / "server.log"), 42.0)
+def test_the_stamp_reads_what_the_round_writes(tmp_path: Path) -> None:
+    RunLayout(tmp_path).write_ready_stamp(ReadyStamp(1_700_000_000.0, 42.0))
     stamp = RunLayout(tmp_path).read_ready_stamp()
     assert stamp is not None and stamp.boot_sec == 42.0
 

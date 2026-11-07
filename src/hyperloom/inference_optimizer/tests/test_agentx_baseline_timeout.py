@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import sys
 
 import pytest
 
@@ -31,7 +30,7 @@ def test_baseline_cap_does_not_expand_with_workload(monkeypatch, tmp_path, agent
     monkeypatch.setenv("HYPERLOOM_AGENTX", agentx)
     monkeypatch.setenv("AGENTX_DURATION", "50000")
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "20000")
-    executor = BaselineExecutor(magpie_python=sys.executable, session_dir=tmp_path)
+    executor = BaselineExecutor(session_dir=tmp_path)
     assert executor._resolve_timeout({"timeout_sec": 99}) == 7800
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "123.5")
     assert executor._resolve_timeout({}) == 123.5
@@ -39,7 +38,7 @@ def test_baseline_cap_does_not_expand_with_workload(monkeypatch, tmp_path, agent
 
 def test_profile_retains_nonbenchmark_budget(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "99")
-    executor = ProfileExecutor(magpie_python=sys.executable, session_dir=tmp_path)
+    executor = ProfileExecutor(session_dir=tmp_path)
     assert executor.benchmark_watchdog is False
     assert executor._resolve_timeout({}) == 14400
     assert executor._resolve_timeout({"timeout_sec": 15000}) == 15000

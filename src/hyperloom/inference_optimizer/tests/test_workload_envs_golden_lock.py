@@ -63,7 +63,6 @@ benchmark:
     NUM_WARMUPS: 8
     EXTRA_SGLANG_ARGS: --variant 4 --watchdog-timeout 1800
     AITER_LOG_TUNED_CONFIG: '1'
-    MAGPIE_TRUST_REMOTE_CODE: '1'
     BENCH_TRUST_REMOTE_CODE: '1'
     HF_HUB_TRUST_REMOTE_CODE: '1'
     RUN_EVAL: 'true'
@@ -80,7 +79,6 @@ benchmark:
     NUM_WARMUPS: 8
     EXTRA_VLLM_ARGS: --max-num-seqs 256
     AITER_LOG_TUNED_CONFIG: '1'
-    MAGPIE_TRUST_REMOTE_CODE: '1'
     BENCH_TRUST_REMOTE_CODE: '1'
     HF_HUB_TRUST_REMOTE_CODE: '1'
     RUN_EVAL: 'true'
@@ -104,7 +102,6 @@ benchmark:
     NUM_WARMUPS: 8
     AITER_LOG_TUNED_CONFIG: '1'
     EXTRA_SGLANG_ARGS: --watchdog-timeout 1800
-    MAGPIE_TRUST_REMOTE_CODE: '1'
     BENCH_TRUST_REMOTE_CODE: '1'
     HF_HUB_TRUST_REMOTE_CODE: '1'
     RUN_EVAL: 'true'

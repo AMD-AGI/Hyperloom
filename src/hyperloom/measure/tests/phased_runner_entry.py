@@ -15,7 +15,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 from hyperloom.measure import local
 from hyperloom.measure.runner import run as runner_flow
@@ -29,7 +28,7 @@ def main() -> int:
     local.run_grid_warmup_enabled = lambda: True  # type: ignore[assignment]
     local.resolve_lifecycle_params = lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}  # type: ignore[assignment]
 
-    def stop_server(slot: Path, lifecycle: dict[str, Any]) -> list[int]:
+    def stop_server(slot: Path) -> list[int]:
         time.sleep(3.0 * float(os.environ["HL_PHASE_SCALE"]))
         return []
 

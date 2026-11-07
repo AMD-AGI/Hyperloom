@@ -12,8 +12,6 @@ import re
 from dataclasses import dataclass
 from typing import Mapping
 
-from hyperloom.inference_optimizer.inferencex_checkout import DEFAULT_REF as INFERENCEX_DEFAULT_REF
-from hyperloom.inference_optimizer.session.paths import MAGPIE_DEFAULT_REF
 from hyperloom.measure.docs import PREFIXED_SHA256_RE
 
 __all__ = [
@@ -39,8 +37,12 @@ class ImagePinError(ValueError):
 
 
 # ToolPinError, ToolCommits and pinned_tool_commits are a compatibility layer for main's toolbox GPU tests and
-# multibranch-dev's scheduling.local_peers, which this branch does not migrate; removed with 5.12 once they are gone.
-_TOOL_REFS = (("MAGPIE_REF", MAGPIE_DEFAULT_REF), ("INFERENCEX_REF", INFERENCEX_DEFAULT_REF))
+# multibranch-dev's scheduling.local_peers, which this branch does not migrate; removed once they are gone. The two
+# commits are the last ones Hyperloom pinned for Magpie and its InferenceX checkout, kept here for those callers alone.
+_TOOL_REFS = (
+    ("MAGPIE_REF", "06b7cf6e185fdd49483a512e350cb3964ba3bf68"),
+    ("INFERENCEX_REF", "3d5581562f643f9bdeb8410cd924e2c70906c966"),
+)
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -50,7 +52,7 @@ class ToolPinError(ValueError):
 
 @dataclass(frozen=True)
 class ToolCommits:
-    """The Magpie commit preflight installs and the InferenceX commit the checkout Hyperloom detects is held to."""
+    """The last Magpie and InferenceX commits Hyperloom pinned, as the compatibility callers above still read them."""
 
     magpie: str
     inferencex: str

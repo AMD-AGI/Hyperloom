@@ -40,7 +40,7 @@ def test_the_client_sends_the_warmup_then_the_measured_pass_of_the_gate_s_round(
     tmp_path: Path, tool_cache: Path
 ) -> None:
     envs = {"ISL": "1024", "OSL": "1024", "CONC": "8", "RANDOM_RANGE_RATIO": "0.8", "NUM_PROMPTS": "80"}
-    canonical = _canonical(tmp_path, **envs, NUM_WARMUPS="16", MAGPIE_TRUST_REMOTE_CODE="1")
+    canonical = _canonical(tmp_path, **envs, NUM_WARMUPS="16", BENCH_TRUST_REMOTE_CODE="1")
     client = GateClient.read(canonical)
     assert client is not None
     assert client.workload == fixed_workload(yaml.safe_load(canonical.read_text(encoding="utf-8")))
