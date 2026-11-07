@@ -145,7 +145,7 @@ class BenchStageMixin:
         unset_envs: "list[str] | None" = None,
         variant_suffix: str = "",
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run a 1-variant Magpie bench under the patched server + accuracy gate.
+        """Run a 1-variant bench under the patched server + accuracy gate.
 
         Args:
             bench_leg: The task params (config / model / bench knobs), the
