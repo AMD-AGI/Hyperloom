@@ -699,7 +699,7 @@ def test_a_link_to_shared_storage_is_not_taken_for_it(tmp_path):
 
 def test_parent_is_shared_judges_the_nearest_existing_directory_as_the_walk_reaches_it(tmp_path, monkeypatch):
     shared = _setgid_parent(tmp_path / "shared")
-    (shared / "dangling").symlink_to(tmp_path / "nowhere")
+    (shared / "dangling").symlink_to(shared / "nowhere")  # its target would be shared storage, were it there
     (tmp_path / "link").symlink_to(shared)
     (shared / "planted").symlink_to(shared)
     theirs(shared / "planted", monkeypatch)
