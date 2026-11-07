@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import urllib.parse
@@ -709,12 +710,16 @@ class AccuracyRound:
 def run_accuracy_suite_round(route: SuiteRoute, request: AccuracyRound, *, on_poll: Callable[[], None]) -> RoundResult:
     """Run the accuracy round ``request`` names into ``<slot>/accuracy``, as :func:`run_suite_round` runs a round.
 
+    Readers find the round at that fixed path, so a slot run again replaces the round an earlier attempt left there.
+
     Raises:
         SuiteRoundRefused: When the point has no accuracy round (:func:`accuracy_config`), the tool cache holds no
             staging manifest, or the lease's actor ran no round.
-        RunDirError: The slot already holds an accuracy round.
     """
-    settings = _settings(route, request.slot / ACCURACY_DIR, Lifecycle(LifecycleMode.OWN), request.deadline_unix)
+    run_dir = request.slot / ACCURACY_DIR
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    settings = _settings(route, run_dir, Lifecycle(LifecycleMode.OWN), request.deadline_unix)
     try:
         config = accuracy_config(_read_point(request.config_path), route.base, settings, request.timeout_sec)
     except ConfigError as exc:
