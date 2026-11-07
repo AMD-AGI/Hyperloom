@@ -97,8 +97,8 @@ run in the app container, so the run needs no measurement or `dev` template, no 
   `max_runtime_sec`, the earlier of the two does. Its other totals are not read.
 - `HYPERLOOM_RUNNER_CACHE` is still required: the session stages its prompt sets there.
 - The agent and dev sandboxes and the tests run in this container, beside the run's credentials, so the run starts only
-  where they run isolated, as the specialists must. Where they would run as the app's own account, which they do in
-  this version, it ends before anything starts, naming them (exit code 1).
+  where they run isolated, as the specialists must: under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`). Where it
+  cannot sandbox them, the run ends before anything starts, naming them and why (exit code 1).
 - Without a visible-device mask, the cards are as many as `rocm-smi` shows, and a container that holds fewer render
   nodes (`/dev/dri/renderD*`) than that is refused, naming both counts: set `ROCR_VISIBLE_DEVICES` to the cards it was
   given.

@@ -25,7 +25,6 @@ from hyperloom.common import agent_isolation
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, read_host_info
-from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.hosted_run import (
@@ -44,7 +43,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     run_argv,
     write_final_exit,
 )
-from hyperloom_multibranch.scheduling.launch_isolation import LOCAL_SANDBOX, LOCAL_TEST, NO_ACCOUNT, LaunchIsolation
+from hyperloom_multibranch.scheduling.launch_isolation import NO_ACCOUNT, LaunchIsolation, launch_isolation
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 
 CREATED = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
@@ -257,17 +256,18 @@ def test_a_hosted_run_measured_in_the_grants_sandboxes_needs_only_its_specialist
 
 
 @pytest.mark.usefixtures("account")
-def test_a_hosted_run_measured_here_is_refused_while_its_sandboxes_and_tests_run_unconfined_here(
+def test_a_hosted_run_measured_here_is_refused_while_its_layers_bubblewrap_cannot_sandbox_its_sandboxes_and_tests(
     probes: Callable[..., Probes],
 ) -> None:
-    probes({LAYER_BWRAP: ()})
+    probes({LAYER_BWRAP: (DENIED,)})
 
     with pytest.raises(PeersUnavailable) as refused:
         require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
 
     assert str(refused.value) == (
         "a hosted run launches nothing unconfined beside its credentials, and here agent and dev sandboxes and tests"
-        f" run unconfined on this host ({LOCAL_SANDBOX}; {LOCAL_TEST})"
+        f" will be refused (running them as an account: {agent_isolation.SANDBOX_ACCOUNT};"
+        f" bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}; running them as an account: {agent_isolation.TEST_ACCOUNT})"
     )
 
 
@@ -280,29 +280,22 @@ def test_a_hosted_run_whose_runner_would_start_its_specialists_unconfined_is_ref
     with pytest.raises(PeersUnavailable) as refused:
         require_hosted_isolation(_spec(measurement), {HOST_LAYER_ENV: str(LAYER)})
 
-    assert str(refused.value).startswith("a hosted run launches nothing unconfined beside its credentials, and here ")
-    assert f"specialists{' and agent and dev sandboxes and tests' * (measurement == 'local')} run unconfined" in str(
-        refused.value
-    )
-    assert NO_ACCOUNT in str(refused.value)
+    assert str(refused.value) == (
+        f"a hosted run launches nothing unconfined beside its credentials, and here specialists run unconfined on this"
+        f" host ({NO_ACCOUNT})"
+    ), "the layer's bubblewrap confines the sandboxes and tests it runs here"
 
 
 @pytest.mark.usefixtures("account")
-def test_a_hosted_run_measured_here_starts_once_every_launch_here_is_isolated(
-    probes: Callable[..., Probes], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    probes({LAYER_BWRAP: ()})
-    asked: list[bool] = []
-
-    def isolated(*, local: bool) -> LaunchIsolation:
-        asked.append(local)
-        return LaunchIsolation(agent_isolation.ACCOUNT, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ())
-
-    monkeypatch.setattr(hosted_run_module, "launch_isolation", isolated)
+def test_a_hosted_run_measured_here_starts_once_every_launch_here_is_isolated(probes: Callable[..., Probes]) -> None:
+    probed = probes({LAYER_BWRAP: ()})
 
     require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
 
-    assert asked == [True]
+    assert launch_isolation(local=True) == LaunchIsolation(
+        agent_isolation.ACCOUNT, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()
+    )
+    assert set(probed.asked) == {LAYER_BWRAP}, "the sandboxes and tests here use the layer's bubblewrap"
 
 
 @pytest.mark.parametrize("measurement", ["local", "hosted"])

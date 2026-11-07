@@ -19,17 +19,17 @@ from typing import Any
 import pytest
 
 from hyperloom.common import agent_isolation
-from hyperloom.common.agent_isolation import ACCOUNT, NONE, REFUSED
+from hyperloom.common.agent_isolation import ACCOUNT, BWRAP, NONE, REFUSED, BwrapIsolation, NoIsolation
+from hyperloom_common.bwrap import BwrapProbe
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs, RunAsError
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.orchestrator.specialists import agent_runner
-from hyperloom.sandbox.local import LocalSandboxProvider
+from hyperloom.sandbox.confined import RunnerPlan
+from hyperloom.sandbox.local import LocalSandboxProvider, ProcessUsers
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
 from hyperloom_multibranch.scheduling.launch_isolation import (
     HOSTED,
-    LOCAL_SANDBOX,
-    LOCAL_TEST,
     NO_ACCOUNT,
     LaunchIsolation,
     announce_launch_isolation,
@@ -42,6 +42,10 @@ from hyperloom_multibranch.specialist.agent_sandbox import FrameworkProtection
 ACCOUNT_RUN_AS = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="/home/hl", drop_tool="setpriv")
 #: A shell line that prints whether it can read this test process's environment, as an unconfined command can.
 REACHES = "if cat /proc/{pid}/environ >/dev/null 2>&1; then echo reached; else echo fenced; fi"
+#: Why a sandbox on this host runs unconfined, as the choosers say it.
+SANDBOX_WHY = ("running them as an account: an agent sandbox runs its commands as the app's own account", "no bwrap")
+#: Why a test on this host runs unconfined, as the choosers say it.
+TEST_WHY = ("running them as an account: a test sandbox runs as the app's own account", "no bwrap")
 
 
 @pytest.fixture(autouse=True)
@@ -100,17 +104,55 @@ def test_a_specialist_the_runner_would_refuse_is_recorded_refused_with_the_runne
     )
 
 
-def test_sandboxes_and_tests_on_this_hosts_cards_are_recorded_unconfined_naming_why(
+def _choosers_give(monkeypatch: pytest.MonkeyPatch, *, confined: bool) -> None:
+    """The sandbox and test choosers give bubblewrap (``confined``), else unconfined with their reasons."""
+
+    def sandbox() -> BwrapIsolation | NoIsolation:
+        return BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ())) if confined else NoIsolation(SANDBOX_WHY)
+
+    monkeypatch.setattr(launch_isolation_module, "choose_sandbox_isolation", sandbox)
+    monkeypatch.setattr(
+        launch_isolation_module, "local_test_isolation", lambda: (BWRAP, ()) if confined else (NONE, TEST_WHY)
+    )
+
+
+def test_sandboxes_and_tests_on_this_hosts_cards_are_recorded_under_bubblewrap_where_their_choosers_give_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _runner_gives(monkeypatch, ACCOUNT_RUN_AS)
+    _choosers_give(monkeypatch, confined=True)
 
     isolation = launch_isolation(local=True)
 
-    assert isolation == LaunchIsolation(ACCOUNT, NONE, NONE, False, (LOCAL_SANDBOX, LOCAL_TEST))
+    assert isolation == LaunchIsolation(ACCOUNT, BWRAP, BWRAP, False, ())
+    assert isolation.problems() == ""
+
+
+def test_sandboxes_and_tests_on_this_hosts_cards_are_recorded_unconfined_naming_why_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _runner_gives(monkeypatch, ACCOUNT_RUN_AS)
+    _choosers_give(monkeypatch, confined=False)
+
+    isolation = launch_isolation(local=True)
+
+    assert isolation == LaunchIsolation(ACCOUNT, NONE, NONE, False, (*SANDBOX_WHY, TEST_WHY[0]))
     assert isolation.problems() == (
-        f"agent and dev sandboxes and tests run unconfined on this host ({LOCAL_SANDBOX}; {LOCAL_TEST})"
+        f"agent and dev sandboxes and tests run unconfined on this host ({SANDBOX_WHY[0]}; no bwrap; {TEST_WHY[0]})"
     )
+
+
+def test_sandboxes_and_tests_a_hosted_run_cannot_confine_here_are_recorded_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _runner_gives(monkeypatch, ACCOUNT_RUN_AS)
+    monkeypatch.setattr(agent_isolation._STATE, "hosted", True)
+
+    isolation = launch_isolation(local=True)
+
+    assert (isolation.sandboxes, isolation.tests) == (REFUSED, REFUSED)
+    assert agent_isolation.NO_LAYER_BWRAP in isolation.reasons
+    assert isolation.problems().startswith("agent and dev sandboxes and tests will be refused (")
 
 
 def test_sandboxes_and_tests_measured_in_a_grants_sandboxes_are_recorded_there_not_unconfined_here(
@@ -132,16 +174,16 @@ def test_a_hosted_runs_mark_makes_its_launches_required(monkeypatch: pytest.Monk
 
 
 def test_the_record_reads_back_as_the_report_writes_it() -> None:
-    isolation = LaunchIsolation(ACCOUNT, NONE, HOSTED, True, (LOCAL_SANDBOX,))
+    isolation = LaunchIsolation(ACCOUNT, NONE, BWRAP, True, ("no bwrap",))
 
     assert isolation.to_dict() == {
         "specialists": ACCOUNT,
         "sandboxes": NONE,
-        "tests": HOSTED,
+        "tests": BWRAP,
         "required": True,
-        "reasons": [LOCAL_SANDBOX],
+        "reasons": ["no bwrap"],
     }
-    assert isolation.line() == f"agent isolation: specialists account, sandboxes none, tests hosted: {LOCAL_SANDBOX}"
+    assert isolation.line() == "agent isolation: specialists account, sandboxes none, tests bwrap: no bwrap"
     assert LaunchIsolation(ACCOUNT, HOSTED, HOSTED, True, ()).line() == (
         "agent isolation: specialists account, sandboxes hosted, tests hosted"
     )
@@ -153,13 +195,13 @@ def _said(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
 
 def test_a_session_that_launches_some_unconfined_says_so_once_at_warning(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO, logger=launch_isolation_module.__name__):
-        announce_launch_isolation(LaunchIsolation(NONE, NONE, NONE, False, (NO_ACCOUNT, LOCAL_SANDBOX, LOCAL_TEST)))
+        announce_launch_isolation(LaunchIsolation(NONE, NONE, NONE, False, (NO_ACCOUNT, "no bwrap")))
 
     [said] = _said(caplog)
     assert said.levelno == logging.WARNING
     assert said.getMessage() == (
-        f"specialists and agent and dev sandboxes and tests run unconfined on this host ({NO_ACCOUNT}; {LOCAL_SANDBOX};"
-        f" {LOCAL_TEST}): they can read this account's files and credentials, as before"
+        f"specialists and agent and dev sandboxes and tests run unconfined on this host ({NO_ACCOUNT}; no bwrap):"
+        " they can read this account's files and credentials, as before"
     )
 
 
@@ -190,8 +232,10 @@ async def test_the_record_of_the_sandboxes_is_what_a_dev_command_on_this_host_re
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The dev sandbox the local backend builds runs one command: unconfined, it reads this process's environment,
-    and the record must say so; confined, it cannot, and the record must not. The watch the sandbox starts for this
-    process is ended with the test: left running, it is a child every later test of this process counts."""
+    and the record must say so; confined, it cannot, and the record must not, unless that one sandbox's own paths
+    could not be bound (on bubblewrap before 0.12.0 a path below the agent-writable /tmp, as ``tmp_path`` is), which it
+    says itself. The watch the sandbox starts for this process is ended with the test: left running, it is a child
+    every later test of this process counts."""
 
     watches: dict[int, tuple[subprocess.Popen[bytes], Path]] = {}
     monkeypatch.setattr(agent_watch, "_watches", watches)
@@ -214,7 +258,10 @@ async def test_the_record_of_the_sandboxes_is_what_a_dev_command_on_this_host_re
 
     assert ran.returncode == 0, ran.output
     reached = ran.output.split()[-1] == "reached"
-    assert reached == (launch_isolation(local=True).sandboxes == NONE), ran.output
+    recorded, own = launch_isolation(local=True).sandboxes, getattr(sandbox, "isolation", None)
+    own_paths_refused = recorded == BWRAP and isinstance(own, NoIsolation)
+    assert reached == (recorded == NONE or own_paths_refused), ran.output
+    assert not own_paths_refused or "below the agent-writable /tmp" in own.why, own
 
 
 def test_the_record_of_the_tests_is_what_a_test_sandbox_on_this_host_reaches(tmp_path: Path) -> None:
@@ -224,7 +271,7 @@ def test_the_record_of_the_tests_is_what_a_test_sandbox_on_this_host_reaches(tmp
     line = REACHES.format(pid=os.getpid())
     probe = ("/bin/sh", "-c", f'({line}) > "$HYPERLOOM_SANDBOX_ROOT/out/reached"')
     template = replace(local_runner_template("runner-1", gpus=0), command=probe)
-    provider = LocalSandboxProvider([template], base_dir=tmp_path / "sandboxes")
+    provider = LocalSandboxProvider([template], base_dir=tmp_path / "sandboxes", users=ProcessUsers(plan=RunnerPlan()))
     sandbox = provider.create(template.name, role="measurement", timeout_sec=60, metadata={})
     try:
         process, status = sandbox._startup  # type: ignore[attr-defined]

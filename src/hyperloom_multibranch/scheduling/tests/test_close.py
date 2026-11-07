@@ -78,7 +78,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     MergeReport,
     _decision,
 )
-from hyperloom_multibranch.scheduling.launch_isolation import LOCAL_SANDBOX, LaunchIsolation
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.manifest import CodeVersion, SessionManifest
 from hyperloom_multibranch.scheduling.roster import RosterCaps
@@ -92,7 +92,9 @@ __all__ = ["final"]
 NOW = 1_800_000_000.0
 CLOCK = Clock(now=lambda: NOW)
 #: How the session's agents were isolated, as its manifest recorded.
-ISOLATION = LaunchIsolation("account", "none", "hosted", True, (LOCAL_SANDBOX,))
+#: Why the agent sandboxes ran unconfined, as the record says it.
+UNCONFINED = "bubblewrap: not found"
+ISOLATION = LaunchIsolation("account", "none", "bwrap", True, (UNCONFINED,))
 HARD_STOP = NOW + 60.0
 #: Real seconds the clock in these tests lets the exports run before the hard stop passes.
 SHORT_GRACE = 0.3
@@ -314,15 +316,14 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert written["agent_isolation"] == {
         "specialists": "account",
         "sandboxes": "none",
-        "tests": "hosted",
+        "tests": "bwrap",
         "required": True,
-        "reasons": [LOCAL_SANDBOX],
+        "reasons": [UNCONFINED],
     }
     assert all(check["regression_cases"] == 0 for check in breakdown["close"]["selection"]["checks"])
     markdown = layout.report_markdown.read_text()
     assert (
-        markdown.splitlines()[4]
-        == f"Agent isolation: specialists account, sandboxes none, tests hosted: {LOCAL_SANDBOX}"
+        markdown.splitlines()[4] == f"Agent isolation: specialists account, sandboxes none, tests bwrap: {UNCONFINED}"
     )
     assert "Chosen: integration `i1`" in markdown
     assert "| candidate | commit | eligible | regression cases | degraded concs | error |" in markdown
