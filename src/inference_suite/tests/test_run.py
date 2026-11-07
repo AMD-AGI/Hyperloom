@@ -43,15 +43,17 @@ from inference_suite.contracts import (
     RunPaths,
     RunStatus,
     SuiteConfig,
+    Telemetry,
     WorkloadKind,
 )
-from inference_suite.contracts.base_launch import Workload
+from inference_suite.contracts.base_launch import LaunchSource, SourceKind, Workload
 from inference_suite.contracts.launch import Launch, LayerSource, VersionCheck
 from inference_suite.contracts.report import Report
 from inference_suite.eval.definition import EvalPlan
 from inference_suite.framework_probe import FrameworkInstall, FrameworkProbeError
 from inference_suite.parser_check import FlagRefusal, RefusedFlag
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
+from inference_suite.recipe.image_version import NO_RECIPE_IMAGE
 from inference_suite.runtime import server as runtime_server
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase
@@ -283,7 +285,7 @@ class _Rig:
             fixed=_FIXED,
             profile=ProfileConfig(enabled=False),
             eval=_eval(enabled=False),
-            telemetry=GpuTelemetry(enabled=True, interval_sec=0.05),
+            telemetry=Telemetry(GpuTelemetry(enabled=True, interval_sec=0.05), kv=True),
             deadlines=Deadlines(boot_sec=60, round_sec=120, eval_sec=60, silence_sec=60),
             paths=RunPaths(str(self.tmp / run_dir), str(self.tools), _SHA),
         )
@@ -368,6 +370,27 @@ def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
     phases = {row["phase"] for row in kv["samples"]}
     assert {Phase.WARMUP.value, Phase.MEASURED.value, Phase.FINISHED.value, Phase.EVAL.value} <= phases
     assert all(row["capacity_tokens"] == 4096 for row in kv["samples"])
+
+
+def _user_file_base(rig) -> None:
+    rig.base = replace(
+        rig.base,
+        source=LaunchSource(kind=SourceKind.USER_FILE, path="launch.sh", files={"launch.sh": _SHA}),
+        image=NO_RECIPE_IMAGE,
+    )
+    rig.base_path.write_text(json.dumps(rig.base.to_document()))
+
+
+@pytest.mark.parametrize("kv", [True, False])
+def test_a_user_file_sglang_base_serves_metrics_exactly_when_the_round_scrapes_them(rig, kv):
+    _user_file_base(rig)
+    config = rig.config("r1", telemetry=replace(rig.config("r1").telemetry, kv=kv))
+    result = run.run_round(config)
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    argv = Launch.from_document(json.loads(result.layout.launch.read_text())).argv
+    assert ("--enable-metrics" in argv) is kv
+    assert result.layout.kv_metrics.exists() is kv
 
 
 _FIXED_WINDOW = ProfileConfig(
@@ -563,7 +586,7 @@ def test_the_refusal_says_whether_the_host_holds_a_redacted_value(rig, monkeypat
 
 
 def test_a_round_writes_only_into_an_empty_run_dir(rig):
-    config = rig.config("r1", telemetry=GpuTelemetry(enabled=False, interval_sec=1))
+    config = rig.config("r1", telemetry=Telemetry(GpuTelemetry(enabled=False, interval_sec=1), kv=True))
     rig.staging = StagingReport(_SHA, {}, ("inferencex at its pin (not staged)",))
     run.run_round(config)
 
@@ -657,7 +680,7 @@ def test_a_reuse_round_runs_on_the_server_a_boot_round_left_and_the_cli_stops_it
 
 
 def test_cli_run_round_trips_the_config_and_exits_by_the_round_status(rig, tmp_path, capsys):
-    config = rig.config("ignored", telemetry=GpuTelemetry(enabled=False, interval_sec=1))
+    config = rig.config("ignored", telemetry=Telemetry(GpuTelemetry(enabled=False, interval_sec=1), kv=True))
     rig.staging = StagingReport(_SHA, {}, ("inferencex at its pin (not staged)",))
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.safe_dump(config.to_document()))

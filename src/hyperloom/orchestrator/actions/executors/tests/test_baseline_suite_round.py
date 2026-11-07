@@ -139,6 +139,16 @@ def test_a_lone_round_owns_its_server(monkeypatch, suite):
     assert result["workspace"] == str(suite.ws / f"{RUN_DIR_PREFIX}0")
 
 
+@pytest.mark.parametrize(("flag", "kv"), [(None, True), ("0", False)])
+def test_a_suite_round_samples_kv_metrics_unless_the_operator_turns_them_off(monkeypatch, suite, flag, kv):
+    if flag is not None:
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_KV_METRICS", flag)
+    _, rounds = _play(monkeypatch, suite, LaunchAttempt(outcome=READY, metrics=_HOT), baseline_double_run=False)
+
+    (config,) = (call.config for call in rounds.calls)
+    assert config.telemetry.kv is kv
+
+
 @pytest.mark.parametrize(
     ("stage", "error_class"), [("argv_parse", ARGV_INVALID), ("weights_loading", SERVER_INIT_DEAD)]
 )
@@ -195,4 +205,4 @@ def test_a_multi_node_round_restarts_the_cluster_and_measures_it_externally_afte
     assert (warm.server.host, warm.server.port) == ("10.0.0.2", 30000)
     assert (warm.fixed.seed, measured.fixed.seed) == (WARMUP_SEED, MEASURED_SEED)
     assert Path(warm.paths.run_dir).parent == suite.ws / "mn_warmup"
-    assert not measured.telemetry.enabled
+    assert not measured.telemetry.gpu.enabled

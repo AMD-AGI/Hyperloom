@@ -437,9 +437,7 @@ def _server_command(engine: str, role: Mapping[str, Any]) -> _ServerCommand:
     stripped = tuple(f"--{key}" for key in sorted(config) if key.replace("_", "-") in owned)
     config = {key: value for key, value in config.items() if key.replace("_", "-") not in owned}
     prefix: tuple[str, ...] = ()
-    if engine == Framework.SGLANG and not {"enable-metrics", "enable_metrics"} & config.keys():
-        prefix = ("--enable-metrics",)
-    elif engine == Framework.VLLM:
+    if engine == Framework.VLLM:
         config = {key: _kv_transfer_text(key, value) for key, value in config.items()}
     elif engine == Framework.ATOM:
         prefix = ("-tp", str(_atom_tensor_parallel_size(role["gpus"], config)))

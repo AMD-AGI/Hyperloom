@@ -122,7 +122,7 @@ def test_dsr1_fixed_launch_is_the_selected_variant_without_runner_owned_flags():
         *("--kv-cache-dtype", "fp8_e4m3", "--max-prefill-tokens", "196608", "--mem-fraction-static", "0.8"),
         *("--num-continuous-decode-steps", "8", "--tensor-parallel-size", "8", "--trust-remote-code"),
     )
-    assert tp8.stripped == ("--served-model-name",)
+    assert tp8.stripped == ("--enable-metrics", "--served-model-name")
     assert tp8.env == {"RCCL_MSCCL_ENABLE": "0", "ROCM_QUICK_REDUCE_QUANTIZATION": "INT4", "SGLANG_USE_AITER": "1"}
     assert tp8.golden is None
     assert tp8.warnings == ()

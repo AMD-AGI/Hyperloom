@@ -173,7 +173,7 @@ def test_agentx_kimi_applies_the_point_patch_and_reads_a_placeholder_image_as_no
     occurrences = dict(argv_flag_occurrences(launch.args))
     assert occurrences["max-running-requests"] == occurrences["cuda-graph-max-bs-decode"] == "32"
     assert occurrences["speculative-algorithm"] == "DFLASH"
-    assert launch.stripped == ("--model-path", "--served-model-name", "--host", "--port")
+    assert launch.stripped == ("--model-path", "--served-model-name", "--host", "--port", "--enable-metrics")
     assert launch.image is None
     assert any("placeholder image <K31_MI35X_IMAGE>" in warning for warning in launch.warnings)
     assert launch.env["SGLANG_HICACHE_MAMBA_HOST_RATIO"] == "12"

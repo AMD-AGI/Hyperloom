@@ -75,7 +75,9 @@ that set each flag and environment variable and what it overrode:
 3. the candidate's layer: removals, then additions;
 4. the golden layer, when the round applies it;
 5. the guard: the model path, address and GPU mask of the round;
-6. the runner's layer: the environment and floors a host needs;
+6. the runner's layer: the environment and floors a host needs, and the
+   framework's metrics switch (`--enable-metrics` for SGLang; vLLM needs none)
+   when the round samples KV telemetry;
 7. the profiler layer of a profile round.
 
 Neither the operator's nor the candidate's layer may set what the guard or the

@@ -684,7 +684,7 @@ class TestPartitionConfig:
         assert config.server.gpus == (10,)
         assert config.server.port == _suite_config().server.port + 3
         assert config.paths.run_dir == "/o/cpx/partition3/round"
-        assert config.telemetry.enabled is False
+        assert config.telemetry.gpu.enabled is False
         assert config.workload == _suite_config().workload
 
 

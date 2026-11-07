@@ -629,7 +629,7 @@ def partition_config(config: SuiteConfig, run: PartitionRun) -> SuiteConfig:
     return replace(
         config,
         server=server,
-        telemetry=replace(config.telemetry, enabled=False),
+        telemetry=replace(config.telemetry, gpu=replace(config.telemetry.gpu, enabled=False)),
         paths=replace(config.paths, run_dir=str(run.run_dir)),
     )
 

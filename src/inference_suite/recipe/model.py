@@ -25,6 +25,7 @@ from hyperloom_common.contract_fields import ContractFields
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.contracts.base_launch import GoldenCurve, LaunchSource, SourceApi, SourceKind, Topology
+from inference_suite.frameworks import Framework, framework_facts
 
 
 class RecipeSourceError(ValueError):
@@ -82,9 +83,11 @@ _HOST = "host"
 _TENSOR_PARALLEL_SIZE = "--tensor-parallel-size"
 
 SGLANG_ENTRYPOINT = ("python3", "-m", "sglang.launch_server")
-#: The sglang server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
+#: The sglang server flags the runner sets or allocates for every round (canonical names): what srtctl owns, and the
+#: metrics switch the runner turns on when the round scrapes ``/metrics``.
 SGLANG_RUNNER_OWNED = frozenset(
     {"model-path", "served-model-name", _HOST, "port", "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port"}
+    | {canonical_flag_name(flag) for flag in (framework_facts(Framework.SGLANG).metrics_flag,) if flag}
 )
 SGLANG_TOPOLOGY = TopologySpelling(
     tp=(_TENSOR_PARALLEL_SIZE, "--tp-size", "--tp"), ep=("--ep-size", "--expert-parallel-size", "--ep")
