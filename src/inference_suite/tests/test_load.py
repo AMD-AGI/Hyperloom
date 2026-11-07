@@ -75,13 +75,12 @@ def _round_config(tmp_path: Path, workload: WorkloadKind, **sections) -> SuiteCo
     return replace(
         _config(),
         workload=workload,
-        agentx=None,
         eval=EvalConfig(enabled=False, num_fewshot=0, concurrency=1, probe=probe),
         profile=ProfileConfig(enabled=False),
         lifecycle=Lifecycle(mode=LifecycleMode.OWN),
         deadlines=_DEADLINES,
         paths=RunPaths(run_dir=str(tmp_path / "run"), tool_cache=str(tmp_path / "tools"), tool_manifest_sha256=_SHA),
-        **sections,
+        **{"agentx": None, **sections},
     )
 
 
