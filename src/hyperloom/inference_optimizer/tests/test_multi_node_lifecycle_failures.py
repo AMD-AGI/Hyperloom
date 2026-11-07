@@ -321,6 +321,34 @@ def test_pd_engine_profile_uses_engine_urls_without_pods(monkeypatch: pytest.Mon
     asyncio.run(life.trigger_pd_engine_profile("start", {"output_dir": str(tmp_path)}))
 
     assert seen == [
-        ("http://p-svc:8010/start_profile", {"output_dir": str(tmp_path / "prefill")}),
-        ("http://d-svc:8020/start_profile", {"output_dir": str(tmp_path / "decode")}),
+        ("http://p-svc:8010/start_profile", {"output_dir": str(tmp_path / "prefill"), "with_stack": False}),
+        ("http://d-svc:8020/start_profile", {"output_dir": str(tmp_path / "decode"), "with_stack": False}),
     ]
+
+
+@pytest.mark.parametrize(("env_value", "expected"), [(None, False), ("1", True), ("true", True), ("0", False)])
+def test_pd_engine_profile_with_stack_follows_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, env_value: str | None, expected: bool
+) -> None:
+    seen: list[tuple[str, dict]] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, json.loads(request.content or b"{}")))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(life, "is_multi_node", lambda: True)
+    monkeypatch.setattr(life, "_read_state", lambda: _PD_WORKERS)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    if env_value is None:
+        monkeypatch.delenv("HYPERLOOM_MN_PROFILE_WITH_STACK", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_MN_PROFILE_WITH_STACK", env_value)
+
+    asyncio.run(life.trigger_pd_engine_profile("start", {"output_dir": str(tmp_path)}))
+    asyncio.run(life.trigger_pd_engine_profile("stop"))
+
+    starts = [body for path, body in seen if path == "/start_profile"]
+    stops = [body for path, body in seen if path == "/stop_profile"]
+    assert len(starts) == 2 and all(body["with_stack"] is expected for body in starts)
+    assert stops == [{}, {}]

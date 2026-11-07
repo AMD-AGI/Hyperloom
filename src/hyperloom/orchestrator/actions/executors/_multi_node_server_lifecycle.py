@@ -661,8 +661,9 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
 
     The router does not write GPU traces. Each engine listens on its pod's
     ``enginePort``, else the worker port. A role with no pods in state is reached through
-    ``HYPERLOOM_MN_EXT_<ROLE>_URL``. Only ``output_dir`` is sent; step-window
-    fields crash disaggregated SGLang.
+    ``HYPERLOOM_MN_EXT_<ROLE>_URL``. A start sends ``output_dir`` and ``with_stack``
+    (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window fields crash
+    disaggregated SGLang.
     """
     if not is_multi_node():
         return
@@ -687,6 +688,7 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
         return
     route = "start_profile" if action == "start" else "stop_profile"
     output_dir = str((body or {}).get("output_dir") or "").strip() if action == "start" else ""
+    with_stack = os.environ.get("HYPERLOOM_MN_PROFILE_WITH_STACK", "").strip().lower() in ("1", "true", "yes", "on")
     if action == "start":
         client_timeout = 30.0
     else:
@@ -704,6 +706,8 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
             except OSError as exc:
                 log.debug("pd-cluster profile: cannot mkdir %s: %s", role_dir, exc)
             payload["output_dir"] = role_dir
+        if action == "start":
+            payload["with_stack"] = with_stack
         try:
             resp = await client.post(url, json=payload)
             log.info("pd-cluster profile %s %s -> %s HTTP %d", role, route, url, resp.status_code)
