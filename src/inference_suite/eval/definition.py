@@ -22,7 +22,7 @@ from inference_suite.contracts.config import SuiteConfig
 from inference_suite.contracts.launch import EvalInvocation, Launch
 from inference_suite.contracts.layout import RunLayout
 from inference_suite.contracts.report import EvalDefinition, FailedStep
-from inference_suite.eval.run import EVAL_MODULE, EvalRequest
+from inference_suite.eval.run import EVAL_ENTRY, EvalRequest
 from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.runtime.server import server_url
 
@@ -33,6 +33,8 @@ _NATIVE_CONTEXT_KEYS = ("max_position_embeddings", "max_sequence_length", "seq_l
 #: Where a model ships its chat template, newest convention first.
 _CHAT_TEMPLATE_FILES = ("chat_template.jinja", "chat_template.json")
 _MODEL_CLASS_FILE = Path(__file__).with_name("model.py")
+#: The directory holding the ``inference_suite`` package this module was imported from.
+_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 _UTF8 = "utf-8"
 
 
@@ -65,7 +67,7 @@ class EvalPlan:
 
     def invocation(self, python: str, request_file: Path) -> EvalInvocation:
         """The eval process run by ``python`` on the request written to ``request_file``."""
-        return EvalInvocation((python, "-I", "-m", EVAL_MODULE, str(request_file)), self.digest)
+        return EvalInvocation((python, "-I", "-c", EVAL_ENTRY, str(_SOURCE_ROOT), str(request_file)), self.digest)
 
     def write(self, layout: RunLayout, request_file: Path) -> None:
         """Write the definition into the run_dir's eval directory and the request to ``request_file``."""

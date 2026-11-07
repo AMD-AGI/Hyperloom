@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,7 +24,8 @@ from inference_suite.eval.definition import (
     definition_digest,
     plan_eval,
 )
-from inference_suite.eval.run import EVAL_MODULE, EvalRequest
+from inference_suite.eval import run as eval_run
+from inference_suite.eval.run import EvalRequest
 from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.tests.test_base_launch_contract import _base
 from inference_suite.tests.test_config_contract import _accuracy_round, _config, _eval
@@ -158,7 +161,8 @@ def test_the_plan_writes_its_definition_and_request_and_names_its_process(staged
     written = EvalDefinition.from_document(json.loads(layout.eval_definition.read_text(encoding="utf-8")))
     assert definition_digest(written) == plan.digest == invocation.definition_digest
     assert EvalRequest.from_document(json.loads(request_file.read_text(encoding="utf-8"))) == plan.request
-    assert invocation.argv == ("/staged/lm-eval/bin/python", "-I", "-m", EVAL_MODULE, str(request_file))
+    assert invocation.argv[:3] == ("/staged/lm-eval/bin/python", "-I", "-c")
+    assert invocation.argv[-1] == str(request_file)
     assert (plan.request.output_dir, plan.request.probe_file) == (str(layout.eval_dir), str(layout.eval_probe))
 
 
@@ -168,3 +172,17 @@ def test_the_plan_writes_its_definition_and_request_and_names_its_process(staged
 )
 def test_each_serving_framework_names_its_context_flag(framework, flag):
     assert framework_facts(framework).server_flags.context_length == flag
+
+
+def test_the_eval_process_runs_the_tree_the_definition_was_read_from(staged, tmp_path):
+    plan = _accepted(_accuracy_round(), staged, tmp_path)
+    request_file = tmp_path / "request.json"
+    request_file.write_text("{}", encoding="utf-8")
+
+    done = subprocess.run(
+        plan.invocation(sys.executable, request_file).argv, capture_output=True, text=True, check=False, cwd=tmp_path
+    )
+
+    # The isolated child ignores PYTHONPATH, so only its argv can point it at the tree whose model class was hashed.
+    assert "EvalRequestError" in done.stderr, done.stderr
+    assert str(Path(eval_run.__file__).resolve()) in done.stderr
