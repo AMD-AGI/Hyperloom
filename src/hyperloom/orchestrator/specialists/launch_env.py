@@ -12,8 +12,9 @@ the launch has ended.
 In a sandbox (:func:`specialist_confinement`) the specialist writes its workspace and worktree, where its home, CLI
 state and compiler caches are pointed, and its own ``/tmp`` and ``/dev/shm``; it reads its toolchain, its worktree's
 git metadata, its model and references; the credential locations inside what it reads are masked; a GPU task gets
-the GPU devices. The claude CLI cannot read its own login there, so it needs one in its environment
-(:func:`require_claude_login`); codex runs with its own sandbox off (:func:`codex_sandbox_off`), since bubblewrap
+the GPU devices. The claude CLI cannot read its own login file there, so it runs in one only with a login in its
+environment; without one it runs unconfined, said and counted, unless it must be isolated, which refuses it
+(:func:`claude_login_isolation`). codex runs with its own sandbox off (:func:`codex_sandbox_off`), since bubblewrap
 already confines it and codex's own, a nested bubblewrap, could not map a user namespace inside.
 
 bubblewrap ends its sandbox at once on a SIGTERM of its own, without passing it on, and exits before the agent ran
@@ -47,6 +48,7 @@ from hyperloom.common.agent_isolation import (
     IsolationRefused,
     NoIsolation,
     choose_agent_isolation,
+    isolation_required,
     unconfined_launch,
 )
 from hyperloom.common.confinement import Confinement, credential_paths, toolchain_paths
@@ -108,11 +110,23 @@ _BEDROCK_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
 #: The files a Bedrock-backed claude CLI may take its AWS credentials from; bound read-only, never masked.
 BEDROCK_FILE_VARIABLES = ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE")
 _TRUE = frozenset({"1", "true", "yes", "on"})
+_CLAUDE_LOGIN_FILE = (
+    "the agent's bubblewrap sandbox cannot show it its login file without showing that file to the agent"
+)
+_CLAUDE_LOGIN_GIVEN = (
+    "give it ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token` prints one), or "
+    "CLAUDE_CODE_USE_BEDROCK=1 with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or with AWS_SHARED_CREDENTIALS_FILE or "
+    "AWS_CONFIG_FILE naming a file, which the sandbox then reads"
+)
+#: Why a claude CLI with no login in its environment runs unconfined where its launch need not be isolated.
+CLAUDE_LOGIN_UNCONFINED = (
+    f"a claude CLI with no login in its environment runs unconfined: {_CLAUDE_LOGIN_FILE}; {_CLAUDE_LOGIN_GIVEN}, "
+    "to run it confined"
+)
+#: Why a claude CLI with no login in its environment is refused where its launch must be isolated.
 CLAUDE_LOGIN_REFUSAL = (
-    "the claude CLI cannot read its own login inside the agent's bubblewrap sandbox: give it ANTHROPIC_API_KEY, "
-    "ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token` prints one), or CLAUDE_CODE_USE_BEDROCK=1 "
-    "with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or with AWS_SHARED_CREDENTIALS_FILE or AWS_CONFIG_FILE naming "
-    "a file, which the sandbox then reads"
+    f"a claude CLI with no login in its environment cannot run here, where it must be isolated: {_CLAUDE_LOGIN_FILE}; "
+    f"{_CLAUDE_LOGIN_GIVEN}"
 )
 CODEX_SANDBOX_OFF = (
     "codex runs with its own sandbox off in the agent's bubblewrap sandbox: bubblewrap confines it, and codex's own "
@@ -740,19 +754,25 @@ def bedrock_files(env: Mapping[str, str]) -> tuple[Path, ...]:
     return tuple(Path(value) for value in named if os.path.isabs(value) and os.path.isfile(value))
 
 
-def require_claude_login(isolation: AgentIsolation, env: Mapping[str, str]) -> None:
-    """Refuse a claude CLI in a bubblewrap sandbox that has no login it can read there: its own (under the app's
-    home or ``CLAUDE_CONFIG_DIR``) is not bound. A token in ``env`` logs it in, and so does Bedrock with its keys
-    in ``env`` or a credentials file ``env`` names (:func:`bedrock_files`).
+def claude_login_isolation(isolation: AgentIsolation, env: Mapping[str, str]) -> AgentIsolation:
+    """How to isolate a claude CLI launched with ``env`` where ``isolation`` was chosen: as chosen, unless that is a
+    bubblewrap sandbox and the CLI has no login it can read there. Its own login file (under the app's home or
+    ``CLAUDE_CONFIG_DIR``) is not bound, and binding it would show it to the agent; a token in ``env`` logs it in, and
+    so does Bedrock with its keys in ``env`` or a credentials file ``env`` names (:func:`bedrock_files`). Without one,
+    a launch that must be isolated (a hosted run, or ``HYPERLOOM_SPECIALIST_USER`` set) is refused, and any other
+    runs unconfined, as on a host without bubblewrap (:data:`CLAUDE_LOGIN_UNCONFINED`), which :func:`prepare_launch`
+    says and counts for the session report.
 
     Raises:
         SpecialistAgentUnavailableError: :data:`CLAUDE_LOGIN_REFUSAL`.
     """
     if not isinstance(isolation, BwrapIsolation) or any(env.get(name) for name in CLAUDE_TOKEN_VARIABLES):
-        return
+        return isolation
     if _truthy(env.get(_BEDROCK)) and (all(env.get(name) for name in _BEDROCK_KEYS) or bedrock_files(env)):
-        return
-    raise SpecialistAgentUnavailableError(CLAUDE_LOGIN_REFUSAL)
+        return isolation
+    if isolation_required():
+        raise SpecialistAgentUnavailableError(CLAUDE_LOGIN_REFUSAL)
+    return NoIsolation((CLAUDE_LOGIN_UNCONFINED,))
 
 
 def codex_sandbox_off(isolation: AgentIsolation) -> bool:

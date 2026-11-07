@@ -22,7 +22,14 @@ from hyperloom.common import agent_isolation
 from hyperloom.common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists.agent_runner import AgentConfigError
-from hyperloom.orchestrator.specialists.launch_env import CODEX_BYPASS_FLAG, LaunchPlace, LaunchStatus, SandboxedProcess
+from hyperloom.orchestrator.specialists.launch_env import (
+    CLAUDE_LOGIN_REFUSAL,
+    CLAUDE_LOGIN_UNCONFINED,
+    CODEX_BYPASS_FLAG,
+    LaunchPlace,
+    LaunchStatus,
+    SandboxedProcess,
+)
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec, wait_finished
 
 _USER_ENV = "HYPERLOOM_SPECIALIST_USER"
@@ -188,17 +195,32 @@ async def test_a_sandboxed_sessions_liveness_looks_below_the_agents_own_process(
     assert asked == [4242]
 
 
-async def test_a_sandboxed_claude_without_a_login_it_can_read_is_refused_before_anything_starts(
+async def test_a_claude_without_a_login_a_sandbox_can_show_starts_unconfined_where_it_need_not_be_isolated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(agent_runner, "_launch_isolation", lambda: _tier("bwrap"))
+
+    _workspace, calls = await _launch(tmp_path)
+
+    [(argv, kwargs)] = calls
+    assert _FAKE_BWRAP not in argv and "pass_fds" not in kwargs  # the CLI itself, not a sandbox
+    assert agent_isolation.session_isolation_lines() == (
+        f"agent isolation: 1 agent launch ran unconfined: {CLAUDE_LOGIN_UNCONFINED}",
+    )
+
+
+async def test_a_claude_without_a_login_a_sandbox_can_show_is_refused_before_anything_starts_where_it_must_be_isolated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_runner, "_launch_isolation", lambda: _tier("bwrap"))
+    monkeypatch.setattr(agent_isolation._STATE, "hosted", True)
     calls: list[tuple[list[str], dict[str, Any]]] = []
     runner = make_runner(tmp_path / "session", popen=_recording_popen(calls))
 
-    with pytest.raises(AgentConfigError, match="claude setup-token"):
+    with pytest.raises(AgentConfigError) as refused:
         await runner.launch(make_spec(tmp_path / "w"))
 
-    assert calls == []
+    assert str(refused.value) == CLAUDE_LOGIN_REFUSAL and calls == []
 
 
 async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
