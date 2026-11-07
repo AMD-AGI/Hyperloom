@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 
 import pytest
@@ -522,45 +521,3 @@ class TestResumeReappliesOperatorPaths:
         _apply_operator_supplied_paths(args, "custom")
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(new_scripts.resolve())
         assert os.environ["FRAMEWORK_REPO_PATH"] == str(new_repo.resolve())
-
-
-class TestCustomAdapterMeasurement:
-    """Handoff probe: custom/native adapter emits nonzero throughput, no harness error."""
-
-    def test_custom_scriptable_run_emits_nonzero_throughput(self, tmp_path, monkeypatch):
-        import yaml
-        from hyperloom.orchestrator.actions.executors import bypass_runner
-
-        scripts = tmp_path / "scripts"
-        scripts.mkdir()
-        (scripts / "custom_mi355x.sh").write_text(
-            "#!/bin/bash\n"
-            'cat > "$RESULT_DIR/$RESULT_FILENAME.json" <<JSON\n'
-            '{"framework": "custom", "workload_kind": "scriptable", '
-            '"throughput_unit": "fps", "output_throughput": 1.29, '
-            '"quality_gate": {"passed": true}}\n'
-            "JSON\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
-
-        cfg = {
-            "benchmark": {
-                "framework": "custom",
-                "model": "/models/custom",
-                "runner_type": "mi355x",
-                "run_mode": "local",
-                "timeout_seconds": 60,
-                "workload_kind": "scriptable",
-                "envs": {"TP": 8},
-            }
-        }
-        cfg_path = tmp_path / "config.yaml"
-        cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-
-        rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
-        assert rc == 0
-        ws = sorted((tmp_path / "out").glob("benchmark_custom_*"))[-1]
-        rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
-        assert rep["success"] is True
-        assert float(rep["throughput"]["output_throughput"]) == pytest.approx(1.29)

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import os
 import re
 import sys
@@ -194,10 +193,11 @@ def test_a_round_whose_server_never_stamps_a_ready_banner_has_no_limit(framework
 
 
 def test_the_literals_the_guard_copies_equal_their_definitions() -> None:
-    engine = importlib.import_module("hyperloom.orchestrator.actions.executors.bypass_engine")
+    from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
+    serving = {item.value for item in Framework if framework_facts(item).kind is FrameworkKind.SERVING}
     assert boot_watch._READY_STAMP == READY_STAMP
-    assert set(boot_watch._SERVER_FRAMEWORKS) == set(engine.SERVER_FRAMEWORKS)
+    assert set(boot_watch._SERVER_FRAMEWORKS) == serving
 
 
 def _stamp(directory: Path, text: str) -> None:

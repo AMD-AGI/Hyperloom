@@ -757,7 +757,6 @@ ignorelist = ["aiter"]
 "src/kernelforge/workflows/forge_loop/campaign/experiment.py" = ["DTZ005"]
 "src/kernelforge/workflows/forge_loop/campaign/schema.py" = ["DTZ005"]
 "src/kernelforge/agent_backends/usage_ledger.py" = ["DTZ005"]
-"src/hyperloom/orchestrator/actions/executors/bypass_report.py" = ["DTZ005"]
 "src/hyperloom/orchestrator/actions/executors/benchmark_run/bringup.py" = ["DTZ001"]
 "src/hyperloom/orchestrator/rehearsal/scenario.py" = ["DTZ001"]
 # These call the root logger directly; a root-level call configures logging on
