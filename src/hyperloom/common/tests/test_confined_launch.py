@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -289,12 +291,20 @@ print(json.dumps(seen))
 """
 
 
-def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(tmp_path):
+@pytest.fixture
+def outside_tmp() -> Iterator[Path]:
+    """A directory below no ``/tmp`` of the host's: there a directory bound entry by entry is in the sandbox's root,
+    not in its own ``/tmp``, which it writes."""
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as base:
+        yield Path(base)
+
+
+def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(outside_tmp):
     """A tool replaces its login file by a rename (``~/.git-credentials`` through its lock file) and Hugging Face
     writes its token at the first login: neither, done on the host while the sandbox runs, shows inside, while the
     model beside them still reads; and the directory bound entry by entry stays read-only."""
     isolation = BwrapIsolation(usable_bwrap())
-    hf, tools, work = tmp_path / "hf", tmp_path / "tools", tmp_path / "work"
+    hf, tools, work = outside_tmp / "hf", outside_tmp / "tools", outside_tmp / "work"
     work.mkdir()
     model, kube = _write(hf / "hub/model.txt", "weights"), _write(tools / "kube/config", "SECRET-OLD")
     visible = _write(tools / "kube/visible", "shown")
