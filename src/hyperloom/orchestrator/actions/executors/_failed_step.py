@@ -9,13 +9,11 @@ from inference_suite.contracts import FailedStep
 
 from ...state.failure_evidence import FAILED_STEP_ERROR_CLASSES
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
-from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED
 
 # The failed steps whose class an action module owns; every other step is mapped in ``failure_evidence``. A round
 # inference_suite stopped on its deadline or on cancel was stopped by this run, so it is recorded as the run's own
 # stop rather than as a failure.
 _ACTION_OWNED_STEP_CLASSES: dict[FailedStep, str] = {
-    FailedStep.GOLDEN_OWNED_TOUCHED: SPECULATIVE_DECODING_PINNED,
     FailedStep.DEADLINE_EXHAUSTED: SESSION_TIME_EXHAUSTED_CLASS,
     FailedStep.CANCELLED: ORCHESTRATOR_CANCELLED_CLASS,
 }

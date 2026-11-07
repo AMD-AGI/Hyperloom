@@ -227,11 +227,11 @@ class TestFailedStepClasses:
 
         from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
         from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
-        from hyperloom.orchestrator.actions.executors._spec_decode_pin import SPECULATIVE_DECODING_PINNED
+        from hyperloom.common.failure_signature import SERVE_FLAG
         from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
 
         assert failed_step_error_class(FailedStep.FLAG_UNKNOWN) == ARGV_INVALID
-        assert failed_step_error_class(FailedStep.GOLDEN_OWNED_TOUCHED) == SPECULATIVE_DECODING_PINNED
+        assert failed_step_error_class(FailedStep.GOLDEN_OWNED_TOUCHED) == SERVE_FLAG
         assert failed_step_error_class(FailedStep.SERVER_EXITED_BEFORE_READY) == "server_init_dead"
         assert failed_step_error_class(FailedStep.SERVER_STALLED) == "detokenizer_stall"
         assert failed_step_error_class(FailedStep.CLIENT_FAILED) == "magpie_nonzero_invalid_measurement"
@@ -269,3 +269,11 @@ class TestFailedStepClasses:
             assert (
                 classify_failure_attribution(error_class=failed_step_error_class(step)) == FAILURE_ATTRIBUTION_HARNESS
             )
+
+    def test_a_golden_owned_touch_is_a_candidate_failure(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        error_class = failed_step_error_class(FailedStep.GOLDEN_OWNED_TOUCHED)
+        assert classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_CANDIDATE
