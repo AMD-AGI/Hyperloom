@@ -194,6 +194,21 @@ def test_the_round_writes_its_run_dir_into_the_slots_accuracy_dir(session, tmp_p
     assert config.server.golden is GoldenUse.EXCLUDE
 
 
+def test_a_slot_run_again_replaces_the_accuracy_round_an_earlier_attempt_left(session, tmp_path, monkeypatch) -> None:
+    slot = tmp_path / "slot"
+    point = _write(slot / "point.yaml", _agentx_point(_agentx_base()))
+    (slot / ACCURACY_DIR / "leftover").mkdir(parents=True)
+    claimed = []
+    monkeypatch.setattr(_suite_config, "run_round", lambda config, cancel: claimed.append(Path(config.paths.run_dir)))
+    route = session_route(session)
+    assert route is not None
+
+    run_accuracy_suite_round(route, AccuracyRound(point, slot, 900.0), on_poll=lambda: None)
+
+    assert claimed == [slot / ACCURACY_DIR]
+    assert not (slot / ACCURACY_DIR / "leftover").exists()
+
+
 def test_a_fixed_point_refuses_the_accuracy_round_as_config_invalid(session, tmp_path) -> None:
     slot = tmp_path / "slot"
     point = _write(slot / "point.yaml", _fixed(_agentx_point(_agentx_base())))
