@@ -10,6 +10,7 @@ import importlib.util
 import json
 import logging
 import os
+import shutil
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -230,6 +231,32 @@ def test_the_live_output_is_read_from_the_sandbox_of_the_unfinished_attempt(tmp_
     assert 0.0 <= output[0] <= read - written + 1e-6, "its age is the time since it was written, as of the reading"
     journal.append(Record("r1", 1, STATE_FINISHED, "lsb-1", "tests/r1/attempt-1", "r1", {}))
     assert toolbox._live_log("r1") is None
+
+
+@pytest.mark.parametrize("linked", ["out", "out/files", "out/files/v"])
+def test_the_live_output_is_never_read_through_a_link_the_sandbox_made_out_of_its_root(
+    tmp_path: Path, linked: str
+) -> None:
+    """The sandbox's processes write ``/out``: a link there, at any depth, to a directory of the app's never shows the
+    app a log in it; a log the sandbox wrote in its own tree still shows."""
+    toolbox = LocalHostedToolbox.__new__(LocalHostedToolbox)
+    journal = MeasurementJournal(tmp_path / "hosted")
+    toolbox.backend, toolbox.sandboxes = SimpleNamespace(journal=journal), tmp_path / "sandboxes"  # type: ignore[assignment]
+    journal.append(Record("r1", 1, STATE_SENT, "lsb-1", "tests/r1/attempt-1", "r1", {}))
+    fs, app = tmp_path / "sandboxes" / "lsb-1" / "fs", tmp_path / "app"
+    written = time.time()
+    _write(fs / "out" / "files" / "own" / "server.log", "the sandbox's own line\n", written - 100)
+    for below in ("files/v", "v", ""):
+        _write(app / below / "server.log", "SECRET line of the app's\n", written)
+    target = {"out": app, "out/files": app / "files", "out/files/v": app / "v"}[linked]
+    if (fs / linked).is_dir():
+        shutil.rmtree(fs / linked)
+    (fs / linked).symlink_to(target)
+
+    output = toolbox._live_log("r1")
+    assert output is None or "SECRET" not in output[1], output
+    if linked == "out/files/v":
+        assert output is not None and output[1] == "the sandbox's own line"
 
 
 def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
