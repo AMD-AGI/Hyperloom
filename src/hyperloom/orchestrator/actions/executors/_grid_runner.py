@@ -75,7 +75,7 @@ from hyperloom.inference_optimizer import speculative_capability
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override, prepend_launch_path
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import seal_server_argv
-from .magpie_agentx import ServerArgvInvalidError, materialize_grid_variant
+from .agentx_point import ServerArgvInvalidError, materialize_grid_variant
 from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._grid_base import (

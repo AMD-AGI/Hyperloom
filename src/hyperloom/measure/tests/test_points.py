@@ -41,7 +41,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     materialize_config_with_envs,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
 

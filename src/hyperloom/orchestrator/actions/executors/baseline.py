@@ -468,7 +468,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
     ) -> dict[str, Any]:
         """Run one benchmark round and parse its result; ``warmup_round`` marks a discarded round."""
         from ._multi_node_env import is_multi_node, log_mn_banner, mn_bench_warmup_enabled
-        from .magpie_agentx import bind_source_evidence
+        from .agentx_point import bind_source_evidence
 
         await asyncio.to_thread(bind_source_evidence, config_path, attempt.params.get("patches") or [])
         result_dir = _resolve_result_dir(output_dir, attempt.override_result_dir)
