@@ -47,6 +47,7 @@ from hyperloom.common.model_paths import resolve_serving_model_path
 
 from .. import inferencex_checkout
 from .bootstrap import parse_operator_extra_env
+from .codex_sandbox import _check_codex_sandbox
 from .device_init import _rocm_smi_visible_gpus
 from .framework_probe import (
     SKIP_FRAMEWORK_CHECK_ENV,
@@ -862,11 +863,12 @@ def _check_kernel_tuning_clis() -> dict[str, Any]:
 
 
 def _check_agent_cli() -> None:
-    """WARN when the CLI this deployment's specialists run cannot be resolved; launching them will fail."""
+    """Check the agent CLI: warn when it cannot be resolved, and stop when Codex cannot create its sandbox."""
     backend = preferred_agent_backend()
     resolve = resolve_codex_executable if backend == AGENT_BACKEND_CODEX else resolve_claude_executable
     if not resolve():
         print(f"Preflight: WARNING — no {backend} CLI; specialists cannot start without it (assets/install.sh).")
+    _check_codex_sandbox()
 
 
 def _emit_preflight_diagnostics(
@@ -1553,12 +1555,7 @@ def _check_host_runtime(install_event: dict[str, Any]) -> None:
         category="check",
         action=_check_gpu_visibility,
     )
-    _run_install_step(
-        install_event,
-        step_id="check_shm_disk",
-        category="check",
-        action=_check_shm_disk,
-    )
+    _run_install_step(install_event, step_id="check_shm_disk", category="check", action=_check_shm_disk)
     _run_install_step(
         install_event,
         step_id="check_platform_tuning",
