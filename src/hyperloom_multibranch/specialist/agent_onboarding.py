@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -40,6 +41,8 @@ from time import monotonic
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
+from hyperloom_common.git_safety import NO_PROGRAMS
+from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
 from hyperloom_multibranch.specialist.agent_spec import ROOT_PROFILE_SOURCE, AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import (
@@ -358,12 +361,14 @@ async def fetch_source(source: str, checkout: Path) -> str:
         if done.returncode != 0:
             raise AttemptFailed(f"fetching {url}: {tail(done.output)}")
         if ref:
-            checked = await _git([GIT, "checkout", QUIET, ref], checkout)
+            checked = await _checkout_git([GIT, "checkout", QUIET, ref], checkout)
             if checked.returncode != 0:
                 # Left in place, the clone would pass the next attempt on its default branch.
                 shutil.rmtree(checkout)
                 raise AttemptFailed(f"checking out {ref}: {tail(checked.output)}")
-    head = await _git([GIT, REV_PARSE, "HEAD"], checkout)
+    head = await _checkout_git([GIT, REV_PARSE, "HEAD"], checkout)
+    if head.returncode != 0:
+        raise AttemptFailed(f"reading the commit of {checkout}: {tail(head.output)}")
     return head.output.strip()
 
 
@@ -392,17 +397,38 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
         [GIT, "add", "--all"],
         [*commit, "commit", QUIET, "--no-verify", "--message", f"Copy of {tree}{at}"],
     ):
-        done = await _git(argv, checkout)
+        done = await _checkout_git(argv, checkout)
         if done.returncode != 0:
             # Left in place, the partial repository would pass the next attempt as fetched.
             shutil.rmtree(checkout)
             raise AttemptFailed(f"committing a copy of {tree}: {tail(done.output)}")
 
 
+async def _checkout_git(argv: list[str], checkout: Path) -> CommandResult:
+    """:func:`_git` in the agent's checkout, used whoever owns it: an earlier attempt may have been another account."""
+
+    return await _git([argv[0], *trusting(checkout), *argv[1:]], checkout)
+
+
 async def _git(argv: list[str], cwd: Path) -> CommandResult:
+    """``argv`` (``git <args>``) in ``cwd``; no program the config of the repository there names runs, its driver
+    programs included (:mod:`~hyperloom_multibranch.repo.isolated_git`), as the agent writes that config."""
+
     cwd.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, **NO_LAZY_FETCH}
+    try:
+        blanked = await asyncio.to_thread(blank_driver_programs, cwd, env, *leading_options(argv[1:]))
+    except (OSError, subprocess.SubprocessError) as error:
+        return CommandResult(1, f"git config in {cwd} cannot be read to blank its driver programs: {error}")
     process = await asyncio.create_subprocess_exec(
-        *argv, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        argv[0],
+        *NO_PROGRAMS,
+        *blanked,
+        *argv[1:],
+        cwd=cwd,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     output, _ = await process.communicate()
     return CommandResult(process.returncode or 0, output.decode(errors="replace"))
