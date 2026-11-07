@@ -43,6 +43,21 @@ class ServerArgs:
 """
 
 
+_RAISING_SERVER_ARGS = """
+import argparse
+
+class _Expand(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        raise RuntimeError("config expansion failed")
+
+class ServerArgs:
+    @staticmethod
+    def add_cli_args(parser):
+        parser.add_argument("--config", action=_Expand)
+        return parser
+"""
+
+
 @pytest.fixture
 def env(tmp_path: Path) -> dict[str, str]:
     srt = tmp_path / "sglang" / "srt"
@@ -98,6 +113,15 @@ def test_a_rejected_value_is_refused_and_names_the_layer_that_set_it(env):
 def test_an_interpreter_without_the_framework_is_a_probe_error(tmp_path):
     with pytest.raises(FrameworkProbeError, match="no answer"):
         check(_launch(), sys.executable, {"PYTHONPATH": str(tmp_path)})
+
+
+def test_a_parser_that_raises_is_a_probe_error_carrying_where_it_raised(env):
+    server_args = Path(env["PYTHONPATH"]) / "sglang" / "srt" / "server_args.py"
+    server_args.write_text(_RAISING_SERVER_ARGS)
+
+    with pytest.raises(FrameworkProbeError, match="RuntimeError: config expansion failed") as raised:
+        check(_launch(candidate=LaunchDelta(args_add=("--config", "x.yaml"))), sys.executable, env)
+    assert f'File "{server_args}", line 6, in __call__' in str(raised.value)
 
 
 def test_a_framework_with_no_server_parser_has_no_probe():
