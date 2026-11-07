@@ -16,6 +16,9 @@ its server as ``external``: it measures the server at that URL, which something 
 local GPU. A round with a Ray serving lease runs in the lease's actor on the GPUs Ray placed it on. The points
 :func:`backend_reason` names stay on the benchmark backend. :func:`run_suite_round` writes each round into a fresh
 run_dir below its round directory, so an attempt retried in the same directory never meets the run_dir before it.
+
+An AgentX point is not translated into a measured round, but :func:`run_accuracy_suite_round` serves the launch it ran
+for the D9 accuracy round: on a server of its own, without the base's golden layer, eval only, into ``<slot>/accuracy``.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.env import is_truthy
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import AgentxLaunch, BenchmarkPoint, is_magpie_agentx
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
@@ -55,7 +58,7 @@ from hyperloom.inference_optimizer.framework_registry import extra_args_env
 from hyperloom.inference_optimizer.session.paths import resolve_dep_dir
 from hyperloom.orchestrator.state.base_launch import frozen_base
 from inference_suite import EXIT_REFUSED, RoundResult, manifest_sha256, run_round
-from inference_suite.argv import argv_flag_occurrences, canonical_flag_name
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
 from inference_suite.contracts import (
     DEFAULT_MAX_TOKENS_CAP,
     BaseLaunch,
@@ -66,6 +69,7 @@ from inference_suite.contracts import (
     EvalProbe,
     EvalTask,
     FixedWorkload,
+    GoldenUse,
     GpuTelemetry,
     FailedStep,
     LaunchDelta,
@@ -112,6 +116,7 @@ _PROBE_ENV = "HYPERLOOM_EVAL_PROBE"
 _PROBE_MIN_SAMPLES_ENV = "HYPERLOOM_EVAL_PROBE_MIN_SAMPLES"
 _PROBE_LENGTH_RATIO_ENV = "HYPERLOOM_EVAL_PROBE_LENGTH_RATIO"
 _EVAL_MAX_TOKENS_ENV = "HYPERLOOM_EVAL_MAX_TOKENS"
+_MODEL_PATH_ENV = "MODEL_PATH"
 
 #: The point knobs the config carries as fields; none of them reaches the server's environment.
 _CONSUMED_ENV = frozenset(
@@ -252,21 +257,25 @@ def backend_reason(document: Mapping[str, object]) -> str | None:
     return None
 
 
+def _point_of(bench: Mapping[str, Any], timeout: float, boot: float) -> _Point:
+    return _Point(_framework(bench), str(bench.get("model") or "").strip(), _envs(bench), float(timeout), float(boot))
+
+
 def _point(document: Mapping[str, object]) -> _Point:
     reason = backend_reason(document)
     if reason is not None:
         raise ConfigError(f"{reason}; it stays on the benchmark backend")
     bench = _bench(document)
-    framework = _framework(bench)
-    envs = _envs(bench)
     timeout = bench.get("timeout_seconds")
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         raise ConfigError(f"the point's timeout_seconds must be a positive number, got {timeout!r}")
     boot = (bench.get("server_lifecycle") or {}).get("server_ready_timeout_s") or timeout
-    return _Point(framework, str(bench.get("model") or "").strip(), envs, float(timeout), float(boot))
+    return _point_of(bench, timeout, boot)
 
 
-def _check_topology(point: _Point, base: BaseLaunch) -> None:
+def _check_base(point: _Point, base: BaseLaunch) -> None:
+    if point.framework.value != base.framework:
+        raise ConfigError(f"the point runs {point.framework.value}, its base runs {base.framework}")
     for name, value in ((ENV_TP, base.topology.tp), (ENV_EP, base.topology.ep)):
         if point.text(name) is not None and point.integer(name) != value:
             raise ConfigError(f"the point runs {name} {point.integer(name)}, its base runs {value}")
@@ -314,10 +323,16 @@ def _external_address(url: str) -> _Address:
     return _Address(parts.hostname, port)
 
 
-def _server(point: _Point, base: BaseLaunch, settings: RoundSettings, external: _Address | None) -> ServerConfig:
+def _user_layer(point: _Point) -> LaunchDelta:
     args_add, args_remove = _user_args(point)
     env = {name: value for name, value in point.envs.items() if name not in _CONSUMED_ENV}
     env.pop(extra_args_env(point.framework.value), None)
+    return LaunchDelta(args_add=args_add, args_remove=args_remove, env_set=env)
+
+
+def _server(
+    point: _Point, base: BaseLaunch, settings: RoundSettings, external: _Address | None, user: LaunchDelta
+) -> ServerConfig:
     if not point.model:
         raise ConfigError("the point names no model")
     return ServerConfig(
@@ -328,7 +343,7 @@ def _server(point: _Point, base: BaseLaunch, settings: RoundSettings, external: 
         port=point.integer(_PORT_ENV, _LAUNCHER_PORT) if external is None else external.port,
         gpus=_gpus(point, base.topology.tp),
         framework_python=settings.framework_python,
-        user=LaunchDelta(args_add=args_add, args_remove=args_remove, env_set=env),
+        user=user,
         env_inherit=settings.env_inherit,
     )
 
@@ -379,27 +394,102 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
             that is not plain HTTP.
     """
     point = _point(document)
-    if point.framework.value != base.framework:
-        raise ConfigError(f"the point runs {point.framework.value}, its base runs {base.framework}")
-    _check_topology(point, base)
+    _check_base(point, base)
     boot_only = (point.text(_RUN_PHASE_ENV) or "").lower() == _SERVER_ONLY_PHASE
     url = point.text(_REMOTE_SERVER_ENV) or settings.server_url
     external = None if url is None else _external_address(url)
     return SuiteConfig(
-        server=_server(point, base, settings, external),
+        server=_server(point, base, settings, external, _user_layer(point)),
         workload=WorkloadKind.NONE if boot_only else WorkloadKind.FIXED,
         fixed=None if boot_only else _fixed(point),
         eval=_eval(point, enabled=not boot_only and point.flag(ENV_RUN_EVAL, default=False)),
         # An external server's GPUs are not this host's to sample.
         telemetry=settings.telemetry if external is None else replace(settings.telemetry, enabled=False),
         lifecycle=settings.lifecycle if external is None else Lifecycle(LifecycleMode.EXTERNAL),
-        deadlines=Deadlines(
-            boot_sec=point.boot_timeout_sec,
-            round_sec=point.timeout_sec,
-            eval_sec=point.timeout_sec,
-            silence_sec=settings.silence_sec,
-            deadline_unix=settings.deadline_unix,
-        ),
+        deadlines=_deadlines(point, settings),
+        paths=settings.paths,
+    )
+
+
+def _deadlines(point: _Point, settings: RoundSettings) -> Deadlines:
+    return Deadlines(
+        boot_sec=point.boot_timeout_sec,
+        round_sec=point.timeout_sec,
+        eval_sec=point.timeout_sec,
+        silence_sec=settings.silence_sec,
+        deadline_unix=settings.deadline_unix,
+    )
+
+
+def _flag_groups(argv: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+    """Each flag of a normalized ``argv`` by canonical name, with the values after it; a repeated flag keeps its last."""
+    groups: dict[str, tuple[str, ...]] = {}
+    name = ""
+    for token in argv:
+        if argv_flag_occurrences([token]):
+            name = canonical_flag_name(token)
+            groups[name] = (token,)
+        elif name:
+            groups[name] = (*groups[name], token)
+    return groups
+
+
+def _layer_over_base(launch: AgentxLaunch, base: BaseLaunch) -> LaunchDelta:
+    """The layer the AgentX ``launch`` runs above ``base`` and its golden layer.
+
+    A launch composed on the session base replaces the recipe's argv with the base's, golden's and its own layers'
+    flags, and sets their environment; what differs from base plus golden is its own layer. A flag the base sets and
+    the launch dropped is removed.
+    """
+    if not launch.replace_args:
+        raise ConfigError("the AgentX point does not run the session base; its launch extends the recipe's argv")
+    golden = base.golden_al
+    golden_args, golden_env = (golden.args, golden.env) if golden is not None else ((), {})
+    below = _flag_groups(normalize_argv((*base.args, *golden_args)))
+    ran = _flag_groups(normalize_argv(launch.append_args))
+    below_env = {**base.env, **golden_env}
+    unset = tuple(sorted(set(launch.unset_env) & set(base.env)))
+    return LaunchDelta(
+        args_add=tuple(token for name, group in ran.items() if below.get(name) != group for token in group),
+        args_remove=tuple(f"--{name}" for name in _flag_groups(base.args) if name not in ran),
+        env_set={
+            name: str(value)
+            for name, value in launch.env.items()
+            if name not in unset and below_env.get(name) != str(value)
+        },
+        env_unset=unset,
+    )
+
+
+def accuracy_config(
+    document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings, timeout_sec: float
+) -> SuiteConfig:
+    """The D9 accuracy round of the AgentX point ``document``: its launch on ``base`` less the golden layer, eval only.
+
+    The round owns its server, so a client-only session, whose server is someone else's, has no accuracy round.
+    ``timeout_sec`` bounds the server's boot and the eval each.
+
+    Raises:
+        ConfigError: When the point is not AgentX, does not run the session base, names another framework or topology
+            than ``base``, or the session's rounds measure an external server.
+    """
+    bench = _bench(document)
+    if not is_magpie_agentx(bench):
+        raise ConfigError("an accuracy round serves an AgentX point")
+    if settings.server_url is not None:
+        raise ConfigError("an accuracy round owns its server, and a client-only session's server is external")
+    point = _point_of(bench, timeout_sec, timeout_sec)
+    point = replace(point, model=point.text(_MODEL_PATH_ENV) or point.model)
+    _check_base(point, base)
+    layer = _layer_over_base(BenchmarkPoint.from_block(bench).agentx_launch, base)
+    server = _server(point, base, settings, None, layer)
+    return SuiteConfig(
+        server=replace(server, golden=GoldenUse.APPLY if base.golden_al is None else GoldenUse.EXCLUDE),
+        workload=WorkloadKind.NONE,
+        eval=_eval(point, enabled=True),
+        telemetry=settings.telemetry,
+        lifecycle=Lifecycle(LifecycleMode.OWN),
+        deadlines=_deadlines(point, settings),
         paths=settings.paths,
     )
 
@@ -408,6 +498,8 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
 TOOL_CACHE_DIR = "inference-suite-tools"
 TOOL_CACHE_ENV = "INFERENCE_SUITE_TOOL_CACHE"
 RUN_DIR_PREFIX = "suite_run_"
+#: Where in its slot an accuracy round writes its run_dir; the accuracy gate reads ``<slot>/accuracy/eval``.
+ACCURACY_DIR = "accuracy"
 #: The config a leased round runs from, beside its run_dir: the run_dir must be empty when the round starts.
 LEASED_CONFIG_SUFFIX = ".config.yaml"
 #: A leased round Ray never ran: its actor could not be placed, answered no more, or outlived its wait.
@@ -501,8 +593,14 @@ def suite_route(session_dir: Path | None, config_path: Path) -> SuiteRoute | Non
     """The route the point at ``config_path`` runs on inference_suite, or ``None`` while it stays on the backend."""
     if session_dir is None:
         return None
-    frozen = frozen_base(Path(session_dir))
-    if frozen is None or _declined(config_path):
+    route = session_route(Path(session_dir))
+    return None if route is None or _declined(config_path) else route
+
+
+def session_route(session_dir: Path) -> SuiteRoute | None:
+    """What a round of the session at ``session_dir`` runs on inference_suite with, ``None`` when it froze no base."""
+    frozen = frozen_base(session_dir)
+    if frozen is None:
         return None
     tool_cache = resolve_dep_dir(TOOL_CACHE_DIR, TOOL_CACHE_ENV)
     return SuiteRoute(
@@ -555,16 +653,20 @@ def _next_run_dir(round_dir: Path) -> Path:
     return round_dir / f"{RUN_DIR_PREFIX}{index}"
 
 
-def _settings(route: SuiteRoute, request: SuiteRound, manifest: str) -> RoundSettings:
+def _settings(
+    route: SuiteRoute, run_dir: Path, lifecycle: Lifecycle, deadline: int | None, env_drop: frozenset[str] = frozenset()
+) -> RoundSettings:
+    if route.manifest_sha256 is None:
+        raise _refused_at(FailedStep.STAGING_MISSING, f"{route.tool_cache} holds no staging manifest")
     return RoundSettings(
         base_path=str(route.base_path),
-        paths=RunPaths(str(_next_run_dir(request.round_dir)), str(route.tool_cache), manifest),
+        paths=RunPaths(str(run_dir), str(route.tool_cache), route.manifest_sha256),
         framework_python=route.framework_python,
-        lifecycle=request.lifecycle,
+        lifecycle=lifecycle,
         telemetry=round_gpu_telemetry(),
         silence_sec=resolve_benchmark_timeouts()[0],
-        env_inherit=inherited_env_names({k: v for k, v in os.environ.items() if k not in request.env_drop}),
-        deadline_unix=request.deadline_unix,
+        env_inherit=inherited_env_names({k: v for k, v in os.environ.items() if k not in env_drop}),
+        deadline_unix=deadline,
         server_url=route.server_url,
     )
 
@@ -579,18 +681,50 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
         SuiteRoundRefused: When the point does not translate, the tool cache holds no staging manifest, or the lease's
             actor ran no round.
     """
-    if route.manifest_sha256 is None:
-        raise _refused_at(FailedStep.STAGING_MISSING, f"{route.tool_cache} holds no staging manifest")
+    run_dir = _next_run_dir(request.round_dir)
+    settings = _settings(route, run_dir, request.lifecycle, request.deadline_unix, request.env_drop)
     try:
-        config = suite_config(
-            _read_point(request.config_path), route.base, _settings(route, request, route.manifest_sha256)
-        )
+        config = suite_config(_read_point(request.config_path), route.base, settings)
     except ConfigError as exc:
         raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     if request.warmup and config.fixed is not None:
         config = replace(config, fixed=replace(config.fixed, seed=WARMUP_SEED))
-    if request.serving_lease is not None:
-        return _run_leased(config, request.serving_lease)
+    return _run_config(config, request.serving_lease, on_poll)
+
+
+@dataclass(frozen=True)
+class AccuracyRound:
+    """The D9 accuracy round of one slot: the AgentX point the slot ran, and the slot it writes ``accuracy/`` into.
+
+    ``timeout_sec`` bounds the round's boot and its eval each; ``serving_lease`` is the Ray lease whose actor runs it.
+    """
+
+    config_path: Path
+    slot: Path
+    timeout_sec: float
+    deadline_unix: int | None = None
+    serving_lease: ServingLease | None = None
+
+
+def run_accuracy_suite_round(route: SuiteRoute, request: AccuracyRound, *, on_poll: Callable[[], None]) -> RoundResult:
+    """Run the accuracy round ``request`` names into ``<slot>/accuracy``, as :func:`run_suite_round` runs a round.
+
+    Raises:
+        SuiteRoundRefused: When the point has no accuracy round (:func:`accuracy_config`), the tool cache holds no
+            staging manifest, or the lease's actor ran no round.
+        RunDirError: The slot already holds an accuracy round.
+    """
+    settings = _settings(route, request.slot / ACCURACY_DIR, Lifecycle(LifecycleMode.OWN), request.deadline_unix)
+    try:
+        config = accuracy_config(_read_point(request.config_path), route.base, settings, request.timeout_sec)
+    except ConfigError as exc:
+        raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
+    return _run_config(config, request.serving_lease, on_poll)
+
+
+def _run_config(config: SuiteConfig, lease: ServingLease | None, on_poll: Callable[[], None]) -> RoundResult:
+    if lease is not None:
+        return _run_leased(config, lease)
     with cancel_scope_listener() as scope:
 
         def cancel() -> str:
@@ -636,6 +770,7 @@ def _run_leased(config: SuiteConfig, lease: ServingLease) -> RoundResult:
 
 
 __all__ = [
+    "ACCURACY_DIR",
     "LEASED_CONFIG_SUFFIX",
     "MEASURED_SEED",
     "RAY_ROUND_UNPLACED_CLASS",
@@ -644,6 +779,8 @@ __all__ = [
     "TOOL_CACHE_DIR",
     "TOOL_CACHE_ENV",
     "WARMUP_SEED",
+    "accuracy_config",
+    "AccuracyRound",
     "PointServer",
     "RoundSettings",
     "SuiteRound",
@@ -654,7 +791,9 @@ __all__ = [
     "inherited_env_names",
     "point_server",
     "round_lifecycle",
+    "run_accuracy_suite_round",
     "run_suite_round",
+    "session_route",
     "suite_config",
     "suite_route",
 ]

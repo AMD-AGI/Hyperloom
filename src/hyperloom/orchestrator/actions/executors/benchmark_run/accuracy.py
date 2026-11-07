@@ -1,17 +1,33 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Eval-failure routing and the accuracy stop of ``BenchmarkRunExecutor``."""
+"""Eval-failure routing, the accuracy stop and the AgentX accuracy round of ``BenchmarkRunExecutor``.
+
+:func:`run_accuracy_round` is the one entry to the D9 accuracy round of a slot, which the baseline runs here once its
+throughput round succeeded. Its score is not read yet: the gates still take AgentX accuracy from
+``parse_eval_results``.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.agentx_workload import is_mlperf_backend
+from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import RUN_AFTER_MOE_RUNNER_FAILURE, RUN_INITIAL
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
+from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
+from .._failed_step import failed_step_error_class
+from .._grid_runner import _num_gpus_for_config, session_grid_bounds
+from .._ray_serving import maybe_serving_lease
+from .._suite_config import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
 from .records import (
+    _BENCHMARK_MODE_ATTR,
     _DOUBLE_RUN_ROUND_DIRS,
     _is_double_run_accuracy_handoff,
     _iter_log_tails,
@@ -41,6 +57,47 @@ _EVAL_SERVER_UNREACHABLE_MARKERS = (
 )
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _LOG_SCAN_MAX_BYTES = 262_144
+#: The result key a slot's accuracy round is recorded under.
+ACCURACY_ROUND_KEY = "agentx_accuracy_round"
+_ACCURACY_ROUND_FAILED = "agentx_accuracy_round_failed"
+
+
+@dataclass(frozen=True)
+class AccuracyRoundOutcome:
+    """What a slot's accuracy round left: where it ran, and the error class it ended on, ``""`` when it completed."""
+
+    run_dir: Path
+    error_class: str
+
+    def to_record(self) -> dict[str, str]:
+        return {"run_dir": str(self.run_dir), "error_class": self.error_class}
+
+
+async def run_accuracy_round(
+    slot: Path, launch: Path, *, session: Path, timeout_sec: float, deadline: int | None
+) -> AccuracyRoundOutcome:
+    """Run the D9 accuracy round of ``slot``, whose AgentX point is ``launch``, into ``<slot>/accuracy``.
+
+    The round serves the slot's launch on a server of its own with the base's golden layer left out, and runs only the
+    eval; ``timeout_sec`` bounds its boot and its eval each, and ``deadline`` is the session's, in unix seconds.
+    """
+    route = session_route(session)
+    if route is None:
+        log.error("accuracy_round: %s froze no base launch to serve the accuracy round on", session)
+        return AccuracyRoundOutcome(slot, failed_step_error_class(FailedStep.CONFIG_INVALID))
+    lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(launch))
+    request = AccuracyRound(launch, slot, timeout_sec, deadline, lease)
+    try:
+        async with heartbeat_while_output_flows(unit="accuracy_round", label="eval") as activity:
+            ran = await asyncio.to_thread(run_accuracy_suite_round, route, request, on_poll=activity.note)
+    except SuiteRoundRefused as exc:
+        log.error("accuracy_round: refused before it ran: %s", exc)
+        return AccuracyRoundOutcome(slot, exc.error_class)
+    finally:
+        if lease is not None:
+            lease.close()
+    step = ran.report.failed_step
+    return AccuracyRoundOutcome(ran.layout.root, "" if step is None else failed_step_error_class(step))
 
 
 class _BaselineAccuracyMixin:
@@ -201,8 +258,41 @@ class _BaselineAccuracyMixin:
             )
             retry.setdefault("nonfatal_warnings", []).append("moe_runner_backend_fallback_dropped_flag")
             result = retry
+        await self._run_baseline_accuracy_round(ctx, result)
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
+
+    async def _run_baseline_accuracy_round(self, ctx: RunnerContext, result: dict[str, Any]) -> None:
+        """Run the accuracy round of a genuine native AgentX baseline that succeeded, unless the session opted out.
+
+        It runs after the attempt released its server, so the round's own server has the GPUs to itself.
+        """
+        params = ctx.task.params or {}
+        if result.get("status") != "succeeded" or not _should_establish_quality_ref(
+            getattr(ctx.task, "kind", ""), params
+        ):
+            return
+        state = self._resolve_shared_state(ctx.extra.get("shared_state"))
+        if not (
+            agentx_active(benchmark_mode=getattr(state, _BENCHMARK_MODE_ATTR, ""))
+            and not is_mlperf_backend()
+            and state.agentx_accuracy
+        ):
+            return
+        slot = Path(result["output_dir"])
+        if slot.name in _DOUBLE_RUN_ROUND_DIRS:
+            slot = slot.parent
+        outcome = await run_accuracy_round(
+            slot,
+            Path(result["materialized_config"]),
+            session=self.session_dir,
+            timeout_sec=self._resolve_timeout(params),
+            deadline=deadline_unix(session_grid_bounds(state)[0]),
+        )
+        result[ACCURACY_ROUND_KEY] = outcome.to_record()
+        if outcome.error_class:
+            log.warning("baseline_executor: the AgentX accuracy round ended %s in %s", outcome.error_class, slot)
+            result.setdefault("nonfatal_warnings", []).append(_ACCURACY_ROUND_FAILED)
 
     @staticmethod
     def _accuracy_stop_death_evidence(result: dict[str, Any]) -> str:
