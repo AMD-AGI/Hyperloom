@@ -236,6 +236,37 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "VLLM_",
 )
 
+# Names of DOTENV_EXACT_ALLOWLIST and DOTENV_PREFIX_ALLOWLIST a checkout's ``.env`` lends only when no other account can
+# write it: each routes this account's traffic (the proxies, the model hub's endpoint) or picks the interpreter, the
+# libraries or the packages an install or a run executes. From a ``.env`` another account can write (a checkout on
+# shared storage) that account would choose them, and so run code as this account or read what it sends; such a
+# ``.env`` lends only what is_allowed_not_private_dotenv_key allows. The shell loader's copy of every list this
+# predicate reads is in assets/runtime_env.sh (RUNTIME_ENV_DOTENV_*); test_dotenv_allow_list.py holds them equal.
+DOTENV_NOT_PRIVATE_REFUSED_NAMES: frozenset[str] = frozenset(
+    {
+        "GEAK_CLAUDE_BIN",
+        "GEAK_CODEX_BIN",
+        "GEAK_E2E_RUNNER",
+        "GEAK_NODE_BIN",
+        "GEAK_ROOT",
+        "HF_ENDPOINT",
+        "HIP_PATH",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "HYPERLOOM_WHEEL_REPO",
+        "HYPERLOOM_RUNTIME_DIR",
+        "INFERENCE_OPTIMIZER_FORCE_PYTHON",
+        "KERNEL_AGENT_ENV",
+        "NO_PROXY",
+        "PYTHON",
+        "ROCM_PATH",
+        "SGLANG_ROCM_INDEX_URL",
+        "VIRTUAL_ENV",
+        "VLLM_PYTHON",
+        "VLLM_VENV_ROOT",
+    }
+)
+
 KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -457,6 +488,12 @@ def is_allowed_dotenv_key(key: object) -> bool:
     if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
         return False
     return upper in DOTENV_EXACT_ALLOWLIST or any(upper.startswith(prefix) for prefix in DOTENV_PREFIX_ALLOWLIST)
+
+
+def is_allowed_not_private_dotenv_key(key: object) -> bool:
+    """True when a ``.env`` another account can write may lend ``key``: is_allowed_dotenv_key, less
+    DOTENV_NOT_PRIVATE_REFUSED_NAMES."""
+    return is_allowed_dotenv_key(key) and str(key or "").strip().upper() not in DOTENV_NOT_PRIVATE_REFUSED_NAMES
 
 
 def is_allowed_kernel_agent_env_key(key: object) -> bool:

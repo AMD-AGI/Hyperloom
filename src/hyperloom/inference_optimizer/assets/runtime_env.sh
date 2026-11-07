@@ -367,19 +367,120 @@ runtime_env_load_kernel_agent_credentials() {
   done < "$file"
 }
 
+# Print the lines that export the credential $1 with the value $2 from a sourced kernel-agent env file as a fallback,
+# not an override: a value already in the environment is kept, and a different one is announced, never printed. The
+# same lines as install_kernel_tools.sh write_env_file's _emit_credential_fallback; test_dotenv_allow_list.py holds
+# the two equal.
+runtime_env_emit_credential_fallback() {
+  echo "if [ -n \"\${${1}:-}\" ]; then"
+  echo "  [ \"\${${1}}\" = '${2}' ] || \\"
+  echo "    echo '[kernel-agent] ${1} differs from the install-time snapshot in this file; keeping the value already in the environment (re-run install.sh to refresh it)' >&2"
+  echo "else"
+  echo "  export ${1}='${2}'"
+  echo "fi"
+}
+
+# Put the credentials KEY=VALUE... into this container's kernel-agent env file $1, for a checkout whose .env keeps
+# none (install_baremetal.sh, which runs before install.sh writes the file whole). Each KEY given loses what the file
+# held for it, and is written (runtime_env_emit_credential_fallback) when its VALUE is not empty; every other line of a
+# file that passes runtime_env_private_kernel_agent_env stays, and one that does not is not read. The file is written
+# beside itself and renamed into place, as write_env_file writes it. Status 1 and why on stderr when it cannot be.
+runtime_env_write_kernel_agent_credentials() {
+  local file="$1" dir written line pair keys="" skip="" key
+  shift
+  for pair in "$@"; do keys+=" ${pair%%=*}"; done
+  keys+=" "
+  runtime_env_private_kernel_agent_env "$file" write || return 1
+  dir="$(dirname -- "$file")"
+  written="$(mktemp "${dir}/.kernel-agent.env.XXXXXX")" || return 1
+  {
+    if { [ -e "$file" ] || [ -L "$file" ]; } && runtime_env_private_kernel_agent_env "$file" 2>/dev/null; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        if [ -n "$skip" ]; then
+          [ "$line" != 'fi' ] || skip=""
+          continue
+        fi
+        key="${line#"${line%%[![:space:]]*}"}"
+        # shellcheck disable=SC2016 # the literal first line runtime_env_emit_credential_fallback writes
+        if [[ "$key" == 'if [ -n "${'*':-}" ]; then' ]]; then
+          # shellcheck disable=SC2016 # the same literal
+          key="${key#'if [ -n "${'}"
+          key="${key%%:-*}"
+          [[ "$keys" != *" $key "* ]] || { skip=1; continue; }
+        elif [[ "$key" == export\ *=* ]]; then
+          key="${key#export }"
+          key="${key%%=*}"
+          [[ "$keys" != *" $key "* ]] || continue
+        fi
+        printf '%s\n' "$line"
+      done < "$file"
+    else
+      echo '#!/bin/sh'
+      echo '# kernel-agent runtime env (credentials from install_baremetal.sh; install.sh regenerates the rest)'
+    fi
+    for pair in "$@"; do
+      [ -z "${pair#*=}" ] || runtime_env_emit_credential_fallback "${pair%%=*}" "${pair#*=}"
+    done
+  } > "$written" || { rm -f -- "$written"; return 1; }
+  mv -f -- "$written" "$file" || { rm -f -- "$written"; return 1; }
+}
+
+# What a .env another account can write (runtime_env_dotenv_not_private) lends, by name: the keys
+# is_allowed_not_private_dotenv_key in hyperloom/common/env_safety.py allows, read from copies of the lists it reads.
+# RUNTIME_ENV_DOTENV_ALLOWED_KEYS is DOTENV_EXACT_ALLOWLIST, RUNTIME_ENV_DOTENV_ALLOWED_PREFIXES DOTENV_PREFIX_ALLOWLIST,
+# RUNTIME_ENV_DOTENV_BLOCKED_KEYS BLOCKED_UNTRUSTED_ENV_NAMES (the loader and interpreter variables: LD_PRELOAD,
+# NODE_OPTIONS, PYTHONPATH, BASH_ENV, ...), and RUNTIME_ENV_DOTENV_NOT_PRIVATE_REFUSED_KEYS
+# DOTENV_NOT_PRIVATE_REFUSED_NAMES (what routes this account's traffic or picks what it executes).
+# test_dotenv_allow_list.py holds each copy equal to its list and runtime_env_dotenv_key_lent to the predicate.
+RUNTIME_ENV_DOTENV_ALLOWED_KEYS="ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_OAUTH_TOKEN \
+CLAUDE_MODEL CODEX_MODEL DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL DSH_MODEL FRAMEWORK GEAK_CLAUDE_MODEL \
+HF_DATASETS_OFFLINE HF_HOME HF_HUB_CACHE HF_HUB_OFFLINE HF_TOKEN HIP_PATH HTTPS_PROXY HTTP_PROXY \
+HYPERLOOM_BENCHMARK_BACKEND HYPERLOOM_DOCKER_TARGET_HOST HYPERLOOM_FRAMEWORK_ENV HYPERLOOM_LLM_MODE \
+HYPERLOOM_RUNTIME_DIR HYPERLOOM_RUN_MODE HYPERLOOM_SKILL_PATH HYPERLOOM_WHEEL_REPO HYPERLOOM_WHEEL_TAG \
+INFERENCE_OPTIMIZER_FORCE_PYTHON KERNEL_AGENT_ENV KERNEL_OPT_BACKEND_ORDER NO_PROXY OPENAI_API_KEY OPENAI_BASE_URL \
+OPENAI_CUSTOM_HEADERS ROCM_PATH SGLANG_ROCM_EXTRA SGLANG_ROCM_INDEX_URL SGLANG_ROCM_PYPI_VERSION USER_DATA_PATH \
+VIRTUAL_ENV VLLM_PYTHON VLLM_VENV_ROOT"
+RUNTIME_ENV_DOTENV_ALLOWED_PREFIXES="AITER_ FORGE_ GEAK_ KERNELFORGE_ HF_ HYPERLOOM_ INFERENCE_OPTIMIZER_ KERNEL_OPT_ \
+SGLANG_ VLLM_"
+RUNTIME_ENV_DOTENV_BLOCKED_KEYS="AGENTX_KEEP_ALIVE_ENV BASH_ENV CDPATH ENV GCONV_PATH GIT_SSH_COMMAND IFS LD_AUDIT \
+LD_LIBRARY_PATH LD_PRELOAD NODE_OPTIONS PATH PERL5OPT PYTHONHOME PYTHONINSPECT PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE \
+SHELLOPTS"
+RUNTIME_ENV_DOTENV_NOT_PRIVATE_REFUSED_KEYS="GEAK_CLAUDE_BIN GEAK_CODEX_BIN GEAK_E2E_RUNNER GEAK_NODE_BIN GEAK_ROOT \
+HF_ENDPOINT HIP_PATH HTTPS_PROXY HTTP_PROXY HYPERLOOM_RUNTIME_DIR HYPERLOOM_WHEEL_REPO INFERENCE_OPTIMIZER_FORCE_PYTHON \
+KERNEL_AGENT_ENV NO_PROXY PYTHON ROCM_PATH SGLANG_ROCM_INDEX_URL VIRTUAL_ENV VLLM_PYTHON VLLM_VENV_ROOT"
+
+# Status 0 when a .env another account can write lends the variable named $1 (any case, as preflight compares it).
+runtime_env_dotenv_key_lent() {
+  local upper="${1^^}" prefix
+  [[ "$upper" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
+  [[ " $RUNTIME_ENV_DOTENV_BLOCKED_KEYS $RUNTIME_ENV_DOTENV_NOT_PRIVATE_REFUSED_KEYS " != *" $upper "* ]] || return 1
+  [[ " $RUNTIME_ENV_DOTENV_ALLOWED_KEYS " != *" $upper "* ]] || return 0
+  for prefix in $RUNTIME_ENV_DOTENV_ALLOWED_PREFIXES; do
+    [[ "$upper" != "$prefix"* ]] || return 0
+  done
+  return 1
+}
+
 # Export, where unset or empty, the assignments of $REPO_ROOT/.env. A .env that keeps no credentials
 # (runtime_env_dotenv_credentials_elsewhere: another account can write it, or it carries
 # HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env) lends none: its RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS and
 # RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS lines are skipped and counted in DOTENV_SKIPPED_CREDENTIAL_COUNT, and
-# the credentials come from the shell or this container's kernel-agent env file alone. Preflight's copy of that skip
-# is in _load_dotenv_fallback in cli/preflight_env.py.
+# the credentials come from the shell or this container's kernel-agent env file alone. A .env another account can write
+# lends, besides, only what runtime_env_dotenv_key_lent allows: every other line is skipped, its name (never its value)
+# in DOTENV_REFUSED_KEYS and in one warning on stderr, so another account's LD_PRELOAD, NODE_OPTIONS, PYTHONPATH or
+# HTTPS_PROXY never reaches this account's shell. A private .env is read as before: install_kernel_tools.sh and
+# install_baremetal.sh themselves keep names there (PYTHONPATH, MAGPIE_PYTHON, TRACELENS_INTERNAL_ROOT, TL_EXTENSION)
+# that preflight's list does not carry and the documented shell flows read back. Preflight's copy of both skips is in
+# _load_dotenv_fallback in cli/preflight_env.py.
 load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT=0
   # shellcheck disable=SC2034 # read by install.sh preflight_load_dotenv
   DOTENV_SKIPPED_CREDENTIAL_COUNT=0
+  DOTENV_REFUSED_KEYS=""
   [ -f "$REPO_ROOT/.env" ] || return 0
-  local loaded=0 skipped=0 authoritative=0 readonly_root=0 caller_root=0 skip_credentials=0
-  [ -z "$(runtime_env_dotenv_not_private "$REPO_ROOT/.env")" ] || skip_credentials=1
+  local loaded=0 skipped=0 authoritative=0 readonly_root=0 caller_root=0 skip_credentials=0 not_private refused=""
+  not_private="$(runtime_env_dotenv_not_private "$REPO_ROOT/.env")"
+  [ -z "$not_private" ] || skip_credentials=1
   [ "${HYPERLOOM_DOTENV_CREDENTIALS:-}" != kernel-agent-env ] || skip_credentials=1
   setup_dotenv_is_authoritative && authoritative=1
   runtime_env_var_is_readonly USER_DATA_PATH && readonly_root=1
@@ -421,6 +522,10 @@ load_dotenv_no_clobber() {
           skipped=$((skipped + 1))
           continue
         fi
+        if [ -n "$not_private" ] && ! runtime_env_dotenv_key_lent "$key"; then
+          [[ " $refused " == *" $key "* ]] || refused+="${refused:+ }$key"
+          continue
+        fi
         if [ "${HYPERLOOM_RUN_MODE:-}" = docker ]; then
           case "$key" in PYTHON|VIRTUAL_ENV|INFERENCE_OPTIMIZER_FORCE_PYTHON) continue ;; esac
         fi
@@ -445,6 +550,14 @@ load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT="$loaded"
   # shellcheck disable=SC2034 # read by install.sh preflight_load_dotenv
   DOTENV_SKIPPED_CREDENTIAL_COUNT="$skipped"
+  # shellcheck disable=SC2034 # for the caller; the warning below names them too
+  DOTENV_REFUSED_KEYS="$refused"
+  # Said once per .env and set of names, though install.sh loads .env twice.
+  if [ -n "$refused" ] && [ "${_RUNTIME_ENV_DOTENV_REFUSED_SAID:-}" != "$REPO_ROOT/.env:$refused" ]; then
+    _RUNTIME_ENV_DOTENV_REFUSED_SAID="$REPO_ROOT/.env:$refused"
+    printf '[runtime-env WARN] not loaded from %s, which another account can write (%s): %s; export any of them you need in this shell\n' \
+      "$REPO_ROOT/.env" "$not_private" "$refused" >&2
+  fi
   return 0
 }
 

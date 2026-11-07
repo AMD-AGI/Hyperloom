@@ -109,6 +109,22 @@ line and the Slurm job load that file anyway. A new container has no such file,
 so export the credentials in the shell that runs `install.sh` there; to rotate a
 key, export the new one and re-run `install.sh`.
 
+Nor does such a `.env` lend anything that would let that account run code as you
+or see your traffic. `install.sh` and the CLI preflight take from it only the
+keys the preflight allow list names, less those that route traffic or pick what
+runs: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PYTHONPATH`, `NODE_OPTIONS`,
+`NODE_EXTRA_CA_CERTS`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, the `GIT_*` program
+hooks and any other name outside the list are skipped, and so are `HTTP_PROXY`,
+`HTTPS_PROXY`, `NO_PROXY`, `HF_ENDPOINT`, `PYTHON`, `VIRTUAL_ENV`,
+`INFERENCE_OPTIMIZER_FORCE_PYTHON`, `VLLM_PYTHON`, `VLLM_VENV_ROOT`, `ROCM_PATH`,
+`HIP_PATH`, `SGLANG_ROCM_INDEX_URL`, `HYPERLOOM_WHEEL_REPO`,
+`HYPERLOOM_RUNTIME_DIR`, `KERNEL_AGENT_ENV` and the `GEAK_*` program paths. Each
+skipped key is named in a warning, never its value; export any you need in the
+shell. A `.env` only you can write is read as before. `install_baremetal.sh`
+follows the same rules: on such a checkout it reads none of those keys, and
+none of the credentials, from `.env`, and writes the Anthropic-side credentials
+to `kernel-agent.env.sh` alone; an OpenAI key it does not write anywhere.
+
 `install.sh` leaves `HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env` in such a
 `.env`, which is no secret. Its own writes replace a `.env` another account could
 write, in a directory that is yours, with one of yours, and the line tells the

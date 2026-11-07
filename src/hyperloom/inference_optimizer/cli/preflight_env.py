@@ -21,6 +21,7 @@ from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
     is_allowed_kernel_agent_env_key,
+    is_allowed_not_private_dotenv_key,
     is_python_package_root,
 )
 from hyperloom_common.llm.llm_config import (
@@ -230,12 +231,26 @@ def _load_dotenv_fallback() -> dict[str, Any]:
     for key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT"):
         if key in parsed and _is_placeholder_tracelens_path(parsed[key]):
             del parsed[key]
+    # A .env another account can write lends a narrower set: nothing that routes this account's traffic or picks what
+    # it executes (is_allowed_not_private_dotenv_key). The shell's copy is load_dotenv_no_clobber.
+    not_private = _dotenv_not_private(env_file)
     safe_vars, dropped_vars = filter_untrusted_env_mapping(
         parsed,
-        allow_predicate=lambda key: key == "PYTHON" or is_allowed_dotenv_key(key),
+        allow_predicate=(
+            is_allowed_not_private_dotenv_key
+            if not_private is not None
+            else lambda key: key == "PYTHON" or is_allowed_dotenv_key(key)
+        ),
     )
     for key in dropped_vars:
-        print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
+        if not_private is not None:
+            print(
+                f"Preflight: WARNING — ignoring .env key {key} from {env_file}, which another account can write "
+                f"({not_private})",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
     if os.environ.get("USER_DATA_PATH", "").strip():
         safe_vars = {key: value for key, value in safe_vars.items() if key not in _WORKSPACE_DERIVED_ENV_KEYS}
     loaded = _load_missing_env_vars(safe_vars)
