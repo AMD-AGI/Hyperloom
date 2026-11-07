@@ -1117,7 +1117,7 @@ image identity, required for custom models.
 Canonical replay warms up 11 requests per lane plus one probe before it opens its
 fixed profiling window, so its round grows with the concurrency being measured
 while the window does not. That shape is Magpie's, at the ref native AgentX pins
-it to (see [Magpie](../components/magpie.md)); Hyperloom composes only `CONC`, and
+it to (`MAGPIE_REF` in `install.sh`); Hyperloom composes only `CONC`, and
 the numbers below have to be re-measured when the pin moves. With
 `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset and a `CONC` pinned, the cap
 defaults to `(11 × CONC + 1) × 20 s + 3640 s + 300 s + 1800 s` (20 s per warmup
