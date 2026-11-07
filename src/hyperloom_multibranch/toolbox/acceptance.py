@@ -147,9 +147,10 @@ def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Rec
             f"{root_commit}): {'; '.join(changed)}; the weight precision of the session cannot change, down or up: "
             "keep the weights' quantization, dtype, checkpoint, revision and config-file flags, and what "
             "--hf-overrides or --json-model-override-args sets under torch_dtype, dtype or quantization_config at any "
-            "depth, as the root sets them (the KV cache dtype, attention compute precision and activation "
-            "quantization may change); a flag counts in every form its framework reads as that flag (a prefix of "
-            "it, '_' for '-', '--flag.key value', '-qVALUE')",
+            "depth, as the root sets them, giving such a flag the root sets under the root's spelling with its keys "
+            "kept, since the server keeps one occurrence (the KV cache dtype, attention compute precision and "
+            "activation quantization may change); a flag counts in every form its framework reads as that flag (a "
+            "prefix of it, '_' for '-', '--flag.key value', '-qVALUE')",
             DELTA_NOT_APPLICABLE_CODE,
         )
 

@@ -15,7 +15,7 @@ patch that casts weights at load is not, nor what a config file holds.
 
 A launch word is first read as the frameworks' argument parsers read it (:func:`_flag`): ``--flag=value`` is ``--flag
 value``; a long flag's name reads ``_`` as ``-`` and ends at its first ``.``, and ``--flag.key value`` is a value of
-``--flag`` that keeps its key (vLLM merges it into ``--flag``'s JSON); ``-qVALUE`` is ``-q VALUE``; and a long flag that
+``--flag`` that keeps its key (vLLM gives it as a JSON value of ``--flag``); ``-qVALUE`` is ``-q VALUE``; and a long flag that
 is no spelling of a setting but begins one or more (``--dty``) is each setting it begins, as argparse takes a prefix of
 an option for the option, unless the word is an option of the frameworks' servers itself (:data:`_OWN_OPTIONS`).
 
@@ -23,9 +23,11 @@ The comparison is then Arbor's (``arbor/measure/precision.py``): a flag's values
 a word before any flag is a positional, not compared; a word that reads as a number (``-1``) is a value, not a flag; a
 JSON object or array compares in canonical form (sorted keys, no spaces) and any other value as its text; a flag given
 without a value reads as on; a flag added, removed or given another value is a change. The spellings of one setting are
-one flag, and a value it is given twice counts once, under one spelling or two. An override flag's value is what it
-sets under the keys (:func:`_weight_keys`), and a value that sets none of them is not one. A flag the launch removes
-from the resolved launch (``LaunchConfig.remove_args``) has the value :data:`~hyperloom.contracts.recipe.REMOVED`.
+one flag, and a value it is given twice counts once, under one spelling or two. An override flag's values are what its
+occurrences set under the keys (:func:`_override_values`): a launch none of whose occurrences sets a key does not make
+the setting, and in one where some occurrence does, an occurrence that sets none is a value too, since the parser keeps
+one occurrence. A flag the launch removes from the resolved launch (``LaunchConfig.remove_args``) has the value
+:data:`~hyperloom.contracts.recipe.REMOVED`.
 """
 
 from __future__ import annotations
@@ -84,6 +86,8 @@ _OWN_OPTIONS = frozenset({"--mode"})
 _NOT_SET = "(not set)"
 _ON = "(on)"
 _EMPTY = "''"
+#: The value of an override flag's occurrence that sets none of :data:`WEIGHT_PRECISION_KEYS`.
+_NO_KEY = ("(no key)",)
 
 
 def weight_precision_changes(before: LaunchConfig, after: LaunchConfig) -> list[str]:
@@ -98,17 +102,22 @@ def weight_precision_changes(before: LaunchConfig, after: LaunchConfig) -> list[
 
 
 def _settings(launch: LaunchConfig) -> dict[str, frozenset[tuple[str, ...]]]:
-    """The weight-precision settings ``launch`` makes, by name: every value its flags give the setting; an override
-    flag's value as what it sets under the keys, and none when it sets none of them."""
+    """The weight-precision settings ``launch`` makes, by name: every value its flags give the setting, an override
+    flag's as :func:`_override_values` reads its occurrences."""
     found: dict[str, set[tuple[str, ...]]] = {}
+    overrides: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
     removed = [(_flag(flag)[0], (REMOVED,)) for flag in launch.remove_args]
     for flag, values in [*_flags(launch.server_args), *removed]:
         for name in _names(flag):
-            if name not in _OVERRIDE_SETTINGS:
+            if name in _OVERRIDE_SETTINGS:
+                overrides.setdefault(name, []).append((flag, values))
+            else:
                 found.setdefault(name, set()).add(values)
-            elif keys := _weight_keys(values):
-                found.setdefault(name, set()).add(keys)
-    return {name: frozenset(values) for name, values in found.items()}
+    settings = {name: frozenset(values) for name, values in found.items()}
+    for name, occurrences in overrides.items():
+        if override := _override_values(occurrences):
+            settings[name] = override
+    return settings
 
 
 def _flags(server_args: str) -> list[tuple[str, tuple[str, ...]]]:
@@ -128,9 +137,9 @@ def _flag(word: str) -> tuple[str, list[str]]:
     """The option a flag word names, as the frameworks' parsers read it, with the values the word carries itself.
 
     argparse reads a value attached to a one-letter option as its value (``-qfp8`` and ``-q=fp8`` are ``-q fp8``).
-    vLLM reads a long flag's name with ``_`` as ``-`` up to its first ``.``, and merges ``--flag.key value`` into
-    ``--flag``'s JSON value: that is a value of ``--flag`` here, led by its key (``.key``), so a key added, removed or
-    given another value changes ``--flag``.
+    vLLM reads a long flag's name with ``_`` as ``-`` up to its first ``.``, and gives ``--flag.key value`` to
+    ``--flag`` as the JSON value ``{"key": value}``, merged with the flag's other dotted occurrences: that is a value of
+    ``--flag`` here, led by its key (``.key``), so a key added, removed or given another value changes ``--flag``.
     """
     if word[:2] in _SHORT_SPELLINGS and len(word) > 2:
         return word[:2], [word[2:].removeprefix("=")]
@@ -163,40 +172,81 @@ def _names(flag: str) -> set[str]:
     return {name for spelling, name in _SETTING_OF_SPELLING.items() if spelling.startswith(flag)}
 
 
-def _weight_keys(values: tuple[str, ...]) -> tuple[str, ...]:
-    """What an override flag's ``values`` set under :data:`WEIGHT_PRECISION_KEYS`: ``"path=value"`` for each place in
-    the value, at any depth, whose key is one of them (the value under it in canonical JSON, as a whole), sorted; ``()``
-    when it sets none of them. Two launches set the same thing under the keys when they hold the same values at the
-    same paths, whatever else their values set.
+def _override_values(occurrences: list[tuple[str, tuple[str, ...]]]) -> frozenset[tuple[str, ...]]:
+    """The values of an override flag that ``occurrences``, its (flag, values) pairs in one launch, give it: what each
+    occurrence sets under :data:`WEIGHT_PRECISION_KEYS`, vLLM's dotted ones of one spelling as the one JSON value it
+    merges them into; none when no occurrence sets a key.
 
-    ``--flag.a.b value`` is the value vLLM merges it into, ``{"a": {"b": value}}`` (``value`` read as JSON, else as its
-    text; a key ending in ``+`` appends the value's comma-separated items), so a dotted path that ends at a key or
-    passes through one sets it. A value that is not JSON counts, by its text, when the text names a key: what it sets
-    cannot be read. A removal (:data:`~hyperloom.contracts.recipe.REMOVED`) is a value of its own.
+    argparse keeps the last occurrence's value, and vLLM gives its merged dotted ones after all the others, so an
+    occurrence that sets no key can drop what another sets: ``--hf-overrides '{"torch_dtype": "bfloat16"}'
+    --hf_overrides '{"max_position_embeddings": 4096}'`` serves no dtype override. Which occurrence a framework keeps is
+    not read here: when some occurrence sets a key, one that sets none is a value too (:data:`_NO_KEY`). A removal
+    (:data:`~hyperloom.contracts.recipe.REMOVED`) is a value of its own.
     """
-    if values == (REMOVED,):
-        return values
-    path: list[str] = []
-    words = values
-    if values and values[0].startswith("."):
-        path, words = values[0][1:].split("."), values[1:]
+    values: set[tuple[str, ...]] = set()
+    dotted: dict[str, dict[str, object]] = {}
+    for flag, words in occurrences:
+        if words == (REMOVED,):
+            values.add(words)
+        elif words and words[0].startswith("."):
+            _merge(dotted.setdefault(flag, {}), _dotted_value(words))
+        else:
+            values.add(_plain_value(words))
+    values.update(_set_under_keys(value) for value in dotted.values())
+    return frozenset(values) if values - {_NO_KEY} else frozenset()
+
+
+def _plain_value(words: tuple[str, ...]) -> tuple[str, ...]:
+    """What ``--flag value`` sets under the keys; a value that is not JSON counts by its text when the text names a key,
+    since what it sets cannot be read."""
     text = " ".join(words)
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return (f"(unparsed) {text}",) if any(key in text for key in WEIGHT_PRECISION_KEYS) else _NO_KEY
+    return _set_under_keys(value)
+
+
+def _dotted_value(words: tuple[str, ...]) -> dict[str, object]:
+    """The JSON value vLLM makes of ``--flag.a.b value``, ``words`` being ``(".a.b", "value")``: ``{"a": {"b": value}}``,
+    with ``value`` read as JSON, else as its text, and a last key ending in ``+`` taking its comma-separated items as a
+    list. A dotted path that ends at a key or passes through one sets it."""
+    *path, last = words[0][1:].split(".")
+    text = " ".join(words[1:])
     value: object
-    if path and path[-1].endswith("+"):
-        path[-1] = path[-1].removesuffix("+")
-        value, parsed = text.split(","), True
+    if last.endswith("+"):
+        last, value = last.removesuffix("+"), text.split(",")
     else:
         try:
-            value, parsed = json.loads(text), True
+            value = json.loads(text)
         except ValueError:
-            value, parsed = text, False
+            value = text
+    nested: dict[str, object] = {last: value}
     for key in reversed(path):
-        value = {key: value}
+        nested = {key: nested}
+    return nested
+
+
+def _merge(into: dict[str, object], value: dict[str, object]) -> None:
+    """Merge ``value`` into ``into`` as vLLM merges dotted occurrences: an object key by key, a list appended to a list,
+    anything else replacing what was there."""
+    for key, item in value.items():
+        current = into.get(key)
+        if isinstance(item, dict) and isinstance(current, dict):
+            _merge(current, item)
+        elif isinstance(item, list) and isinstance(current, list):
+            into[key] = [*current, *item]
+        else:
+            into[key] = item
+
+
+def _set_under_keys(value: object) -> tuple[str, ...]:
+    """``"path=value"`` for each place in ``value``, at any depth, whose key is one of :data:`WEIGHT_PRECISION_KEYS`
+    (the value under it in canonical JSON, as a whole), sorted; :data:`_NO_KEY` when there is none. Two values set the
+    same thing under the keys when they hold the same values at the same paths, whatever else they set."""
     found: list[str] = []
     _find_keys(value, "", found)
-    if not parsed and any(key in text for key in WEIGHT_PRECISION_KEYS):
-        found.append(f"(unparsed) {' '.join(values)}")
-    return tuple(sorted(found))
+    return tuple(sorted(found)) or _NO_KEY
 
 
 def _find_keys(node: object, path: str, found: list[str]) -> None:

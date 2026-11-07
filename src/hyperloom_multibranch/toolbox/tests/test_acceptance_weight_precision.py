@@ -381,10 +381,6 @@ OVERRIDES_ADDED = [
         "--json-model-override-args {torch_dtype=float16}",
         f"{JSON_ARGS}: (not set) -> (unparsed) {{torch_dtype=float16}}",
     ),
-    (
-        "--hf-overrides.text_config torch_dtype=float16",
-        f"{HF}: (not set) -> (unparsed) .text_config torch_dtype=float16",
-    ),
 ]
 
 
@@ -448,6 +444,9 @@ async def test_an_override_flag_removed_from_the_resolved_launch_is_refused(tmp_
         # A JSON key that only contains a key's name is not that key; only a value that is not JSON counts by its text.
         ("", '--hf-overrides \'{"kv_cache_dtype": "fp8"}\''),
         ("", "--hf-overrides max_position_embeddings=65536"),
+        # vLLM reads a dotted value that is not JSON as its text, so these set a string under a key that is none of them.
+        ("", "--hf-overrides.text_config torch_dtype=float16"),
+        ("", "--hf-overrides.max_position_embeddings dtype"),
         (
             '--hf-overrides \'{"torch_dtype": "bfloat16", "max_position_embeddings": 32768}\'',
             '--hf-overrides \'{"max_position_embeddings": 65536, "torch_dtype": "bfloat16"}\'',
@@ -464,6 +463,77 @@ async def test_an_override_that_keeps_what_the_root_sets_under_the_keys_is_accep
 async def test_removing_an_override_that_sets_no_key_is_accepted(tmp_path: Path) -> None:
     repo = _repo("--hf-overrides '{\"max_position_embeddings\": 32768}'")
     assert await _refusal(tmp_path, repo, _delta("--max-num-seqs 64", remove_args=("--hf-overrides",))) is None
+
+
+# --- an override flag given more than once ---------------------------------------------------------------------------
+
+ROOT_DTYPE = '--hf-overrides \'{"torch_dtype": "bfloat16"}\''
+DROPPED = 'torch_dtype="bfloat16" -> (no key) | torch_dtype="bfloat16"'
+
+
+@pytest.mark.parametrize(
+    ("root_args", "server_args", "change"),
+    [
+        # argparse keeps the last value given, and the composed launch keeps both spellings: each of these serves
+        # without the root's dtype override.
+        (ROOT_DTYPE, "--hf_overrides '{\"max_position_embeddings\": 4096}'", f"{HF}: {DROPPED}"),
+        (ROOT_DTYPE, "--hf-over '{\"max_position_embeddings\": 4096}'", f"{HF}: {DROPPED}"),
+        (
+            '--json-model-override-args \'{"torch_dtype": "bfloat16"}\'',
+            "--json-model '{\"max_position_embeddings\": 4096}'",
+            f"{JSON_ARGS}: {DROPPED}",
+        ),
+        # vLLM gives its merged dotted occurrences after all the others.
+        (ROOT_DTYPE, "--hf-overrides.max_position_embeddings 4096", f"{HF}: {DROPPED}"),
+        # It merges the dotted occurrences of each spelling apart, and gives them in turn.
+        ("--hf-overrides.torch_dtype bfloat16", "--hf-over.max_position_embeddings 4096", f"{HF}: {DROPPED}"),
+        # Which occurrence a framework keeps is not read: vLLM would keep the dotted one here.
+        (
+            "--hf-overrides.torch_dtype bfloat16",
+            "--hf_overrides '{\"max_position_embeddings\": 4096}'",
+            f"{HF}: {DROPPED}",
+        ),
+        # Merged, the dotted occurrences set another quantization config.
+        (
+            "--hf-overrides.quantization_config.quant_method fp8",
+            "--hf-overrides.quantization_config.activation_scheme dynamic",
+            f'{HF}: quantization_config={{"quant_method":"fp8"}} -> '
+            'quantization_config={"activation_scheme":"dynamic","quant_method":"fp8"}',
+        ),
+    ],
+)
+async def test_an_occurrence_that_can_drop_what_the_root_sets_under_a_key_is_refused(
+    tmp_path: Path, root_args: str, server_args: str, change: str
+) -> None:
+    await _refused_naming(tmp_path, _repo(root_args), _delta(server_args), change)
+
+
+@pytest.mark.parametrize(
+    ("root_args", "server_args"),
+    [
+        # vLLM merges the dotted occurrences of one spelling, ``_`` read as ``-``, into one value.
+        ("--hf-overrides.torch_dtype bfloat16", "--hf-overrides.max_position_embeddings 4096"),
+        ("--hf-overrides.torch_dtype bfloat16", "--hf_overrides.max_position_embeddings 4096"),
+        # No occurrence sets a key.
+        ("--hf-overrides '{\"max_position_embeddings\": 32768}'", "--hf_overrides '{\"rope_theta\": 1000000}'"),
+        ("--hf-overrides '{\"max_position_embeddings\": 32768}'", "--hf-overrides.rope_theta 1000000"),
+        # Every occurrence sets the root's value under the keys.
+        (ROOT_DTYPE, '--hf_overrides \'{"torch_dtype": "bfloat16", "max_position_embeddings": 4096}\''),
+    ],
+)
+async def test_occurrences_that_keep_what_the_root_sets_under_the_keys_are_accepted(
+    tmp_path: Path, root_args: str, server_args: str
+) -> None:
+    assert await _refusal(tmp_path, _repo(root_args), _delta(server_args)) is None
+
+
+def test_dotted_occurrences_merge_as_vllm_merges_them() -> None:
+    assert _changes("--hf-overrides.a.dtype+ x", "--hf-overrides.a.dtype+ x --hf-overrides.a.dtype+=y") == [
+        f'{HF}: a.dtype=["x"] -> a.dtype=["x","y"]'
+    ]
+    nested = '--hf-overrides \'{"text_config": {"torch_dtype": "bfloat16"}}\''
+    assert _changes(nested, "--hf-overrides.text_config.torch_dtype bfloat16") == []
+    assert _changes(nested, "--hf-overrides.text_config.torch_dtype bfloat16 --hf-overrides.text_config.x 1") == []
 
 
 # --- options of the frameworks that a spelling only begins, or that only begin one ---------------------------------
