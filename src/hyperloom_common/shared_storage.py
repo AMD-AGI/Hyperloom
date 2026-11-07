@@ -7,7 +7,7 @@ On shared storage each container of a run may be another host account. The accou
 directories are made setgid in it once (``2775``), so what is created below them takes that group.
 
 Permissions are widened only where the storage is set up to be shared: when the nearest existing directory above what
-is created is setgid, group-writable and not writable by others (:func:`_parent_is_shared`). There what this module
+is created is setgid, group-writable and not writable by others (:func:`parent_is_shared`). There what this module
 creates has an explicit mode, set by ``fchmod`` after the create: directories ``2775`` (each one of a chain it makes)
 and files ``664``, whatever the umask. Anywhere else (a ``0755`` home, a ``1777`` ``/tmp``, a setgid directory the group
 cannot write) the umask alone decides, exactly as for a plain ``mkdir`` or ``open``, so what is made there stays as
@@ -43,7 +43,7 @@ _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _PROBE_PREFIX = ".hl-writable-"
 
 
-def _parent_is_shared(path: Path) -> bool:
+def parent_is_shared(path: Path) -> bool:
     """Whether what is created at ``path`` lands in storage set up to be shared: the nearest existing directory above
     ``path`` is setgid, group-writable and not writable by others.
 
@@ -75,7 +75,7 @@ def _private_mode(mode: int) -> int:
 def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
     """Create each missing directory of ``path`` with ``mode`` (default ``2775``) and return ``path``.
 
-    Below shared storage (:func:`_parent_is_shared`, judged once, at the nearest directory that exists) the mode is set
+    Below shared storage (:func:`parent_is_shared`, judged once, at the nearest directory that exists) the mode is set
     by ``fchmod`` on each new directory, opened without following a link, so the umask never decides it; the group
     comes from a setgid parent. Anywhere else ``mode`` is only asked of ``mkdir``, which masks it with the umask. An
     existing directory is left as it is. A new shared directory that did not keep the setgid bit (this account is not in
@@ -87,7 +87,7 @@ def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
     while not probe.is_dir():
         missing.append(probe)
         probe = probe.parent
-    shared = bool(missing) and _parent_is_shared(missing[-1])
+    shared = bool(missing) and parent_is_shared(missing[-1])
     for directory in reversed(missing):
         try:
             os.mkdir(directory, mode)
@@ -101,10 +101,10 @@ def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
 
 def share_new_directory(directory: Path, *, mode: int = SHARED_DIR_MODE) -> None:
     """Give a directory this process has just made (``mkdir``, ``mkdtemp``) its shared ``mode``, by ``fchmod`` on the
-    directory opened without following a link, when it is made below shared storage (:func:`_parent_is_shared`); logged
+    directory opened without following a link, when it is made below shared storage (:func:`parent_is_shared`); logged
     as in :func:`make_shared_dirs` when it does not keep setgid. Anywhere else it is left as it was made; a link there
     is refused either way."""
-    _widen_new_directory(directory, mode, shared=_parent_is_shared(directory))
+    _widen_new_directory(directory, mode, shared=parent_is_shared(directory))
 
 
 def _widen_new_directory(directory: Path, mode: int, *, shared: bool) -> None:
@@ -124,9 +124,9 @@ def _widen_new_directory(directory: Path, mode: int, *, shared: bool) -> None:
 
 
 def create_shared_file(path: Path) -> None:
-    """Create ``path`` empty with mode ``664`` below shared storage (:func:`_parent_is_shared`), else as the umask leaves
+    """Create ``path`` empty with mode ``664`` below shared storage (:func:`parent_is_shared`), else as the umask leaves
     ``664``; an existing file is replaced by rename, never truncated or chmodded."""
-    if not _parent_is_shared(path):
+    if not parent_is_shared(path):
         try:
             os.close(os.open(path, _NEW_FILE, SHARED_FILE_MODE))  # the umask masks it, as for any create
         except FileExistsError:
@@ -145,9 +145,9 @@ def create_shared_file(path: Path) -> None:
 
 def write_shared_bytes(path: Path, data: bytes, *, mode: int = SHARED_FILE_MODE) -> None:
     """Write ``data`` to a new file beside ``path`` with ``mode`` and rename it over ``path``: the file is then this
-    account's, whoever owned the one it replaced. Below shared storage (:func:`_parent_is_shared`) the file has ``mode``
+    account's, whoever owned the one it replaced. Below shared storage (:func:`parent_is_shared`) the file has ``mode``
     whatever the umask; anywhere else ``mode`` masked by the umask."""
-    final_mode = mode if _parent_is_shared(path) else _private_mode(mode)
+    final_mode = mode if parent_is_shared(path) else _private_mode(mode)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as handle:
@@ -235,6 +235,7 @@ __all__ = [
     "current_umask",
     "make_shared_dirs",
     "ownership",
+    "parent_is_shared",
     "share_new_directory",
     "setgid_warnings",
     "writable_problems",

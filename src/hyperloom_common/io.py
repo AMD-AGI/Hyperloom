@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import SHARED_FILE_MODE, _parent_is_shared, make_shared_dirs
+from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, parent_is_shared
 
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 
@@ -156,7 +156,7 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
         make_shared_dirs(path.parent)
     elif options.make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
-    shared = options.shared and _parent_is_shared(path)
+    shared = options.shared and parent_is_shared(path)
     fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     tmp = Path(tmp_str)
     try:
