@@ -151,7 +151,9 @@ def test_the_shell_lends_exactly_what_preflight_lends_from_a_shared_dotenv():
     expected = [f"{n}={v}" for n, v in pairs if env_safety.is_lent_not_private_dotenv_assignment(n, v)]
     assert lent == expected
     assert {"FRAMEWORK=vllm", "HYPERLOOM_RUN_MODE=docker", "HF_HUB_OFFLINE=1"} <= set(lent)
-    assert not [line for line in lent if line.split("=", 1)[0].upper() in _FETCH_AND_ENDPOINT_VALUES.keys() - {"FRAMEWORK"}]
+    assert not [
+        line for line in lent if line.split("=", 1)[0].upper() in _FETCH_AND_ENDPOINT_VALUES.keys() - {"FRAMEWORK"}
+    ]
 
 
 def test_the_shell_emits_the_credential_lines_write_env_file_emits():
@@ -511,7 +513,7 @@ def test_install_baremetal_reads_from_a_shared_dotenv_only_what_the_loader_lends
         )
         tail = (
             'DOTENV_NOT_PRIVATE="$(runtime_env_dotenv_not_private "$DOTENV")"\n'
-            'for k in VLLM_VENV_ROOT USER_DATA_PATH KERNEL_OPT_BACKEND_ORDER HYPERLOOM_RUN_MODE HYPERLOOM_FRAMEWORK_ENV; do '
+            "for k in VLLM_VENV_ROOT USER_DATA_PATH KERNEL_OPT_BACKEND_ORDER HYPERLOOM_RUN_MODE HYPERLOOM_FRAMEWORK_ENV; do "
             'printf "%s=%s\\n" "$k" '
             '"$(read_dotenv_var "$k")"; done\n'
         )
