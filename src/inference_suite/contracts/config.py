@@ -389,7 +389,11 @@ _AGENTX_KEYS = field_names(AgentxWorkload)
 
 
 class ScriptableRunEnv(str, Enum):
-    """The env names the round sets for a scriptable script; a param naming one is refused."""
+    """The env names the round sets for a scriptable script; a param naming one is refused.
+
+    A profile round sets ``PROFILE=1`` and names its torch trace directory under both framework spellings, the
+    contract scriptable scripts were written against.
+    """
 
     RESULT_DIR = "RESULT_DIR"
     RESULT_FILENAME = "RESULT_FILENAME"
@@ -397,6 +401,9 @@ class ScriptableRunEnv(str, Enum):
     TP = "TP"
     ROCR_VISIBLE_DEVICES = "ROCR_VISIBLE_DEVICES"
     QUALITY_REFERENCE = "QUALITY_REFERENCE"
+    PROFILE = "PROFILE"
+    VLLM_TORCH_PROFILER_DIR = "VLLM_TORCH_PROFILER_DIR"
+    SGLANG_TORCH_PROFILER_DIR = "SGLANG_TORCH_PROFILER_DIR"
 
 
 _SCRIPTABLE_RUN_ENV = frozenset(item.value for item in ScriptableRunEnv)
@@ -404,14 +411,12 @@ _SCRIPTABLE_RUN_ENV = frozenset(item.value for item in ScriptableRunEnv)
 
 @dataclass(frozen=True)
 class ScriptableWorkload:
-    """A server-less script (xDiT); its ``params`` are its env, so they carry no acceptance threshold (D2)."""
+    """A run of the scriptable base's script; ``params`` are its env, so they carry no acceptance threshold (D2)."""
 
-    script: str
     params: Mapping[str, object] = field(default_factory=dict)
     quality_reference: str | None = None
 
     def __post_init__(self) -> None:
-        _FIELDS.text(self.script, "the scriptable script")
         params = dict(_FIELDS.mapping(self.params, "the scriptable params"))
         for name, value in params.items():
             _FIELDS.matching(_ENV_NAME, name, "a scriptable param name (an environment variable name)")
@@ -424,12 +429,12 @@ class ScriptableWorkload:
         _FIELDS.optional_text(self.quality_reference, "the scriptable quality reference")
 
     def to_document(self) -> dict[str, object]:
-        return {"script": self.script, "params": _sorted(self.params), "quality_reference": self.quality_reference}
+        return {"params": _sorted(self.params), "quality_reference": self.quality_reference}
 
     @classmethod
     def from_document(cls, document: object) -> ScriptableWorkload:
         fields = _FIELDS.known(document, field_names(cls), "the scriptable workload")
-        return cls(fields.get("script"), fields.get("params", {}), fields.get("quality_reference"))
+        return cls(fields.get("params", {}), fields.get("quality_reference"))
 
 
 @dataclass(frozen=True)
@@ -471,6 +476,8 @@ _MLPERF_KEYS = field_names(MlperfWorkload)
 _PROFILE_WINDOW = {
     WorkloadKind.FIXED: ("num_prompts", "delay_iters", "max_iters"),
     WorkloadKind.AGENTX: ("agentx_open_after_sec", "agentx_duration_sec"),
+    #: The script's whole run is the window.
+    WorkloadKind.SCRIPTABLE: (),
 }
 
 
@@ -503,7 +510,9 @@ class ProfileConfig:
     def check_window(self, kind: WorkloadKind) -> None:
         missing = [key for key in _PROFILE_WINDOW.get(kind, ()) if getattr(self, key) is None]
         if kind not in _PROFILE_WINDOW or missing:
-            raise ConfigError(f"a {kind.value} profile needs {', '.join(missing) or 'a fixed or AgentX workload'}")
+            raise ConfigError(
+                f"a {kind.value} profile needs {', '.join(missing) or 'a fixed, AgentX or scriptable workload'}"
+            )
 
     def to_document(self) -> dict[str, object]:
         return {key: getattr(self, key) for key in _PROFILE_KEYS}
@@ -692,7 +701,11 @@ class RunPaths:
 
 #: The workload kinds with a config section; each section is the field named by its kind's value.
 _SECTIONED_WORKLOADS = (WorkloadKind.FIXED, WorkloadKind.AGENTX, WorkloadKind.SCRIPTABLE, WorkloadKind.MLPERF)
-_BASE_WORKLOAD = {WorkloadKind.FIXED: Workload.FIXED, WorkloadKind.AGENTX: Workload.AGENTX}
+_BASE_WORKLOAD = {
+    WorkloadKind.FIXED: Workload.FIXED,
+    WorkloadKind.AGENTX: Workload.AGENTX,
+    WorkloadKind.SCRIPTABLE: Workload.SCRIPTABLE,
+}
 
 
 @dataclass(frozen=True)

@@ -190,7 +190,7 @@ def test_an_external_round_cannot_play_a_boot_wall(tmp_path):
 
 
 def test_a_scriptable_round_keeps_its_script_result_and_records_no_server_or_launch(tmp_path):
-    workload = ScriptableWorkload(script="xdit", params={"XDIT_NUM_STEPS": 28})
+    workload = ScriptableWorkload(params={"XDIT_NUM_STEPS": 28})
     config = _fixed_config(tmp_path / "run", workload=WorkloadKind.SCRIPTABLE, fixed=None, scriptable=workload)
     result = _rounds(LaunchAttempt(outcome=READY, metrics={"latency_s": 3.5}), launch=_launch()).run_round(config)
 
