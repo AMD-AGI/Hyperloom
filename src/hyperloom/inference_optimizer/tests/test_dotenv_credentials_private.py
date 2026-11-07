@@ -144,12 +144,12 @@ def _no_credentials() -> dict[str, str]:
     return {"ANTHROPIC_BASE_URL": ""}
 
 
-def _launch_env(checkout: Path, workspace: Path) -> dict[str, str]:
+def _launch_env(checkout: Path, workspace: Path, **exported: str) -> dict[str, str]:
     """This process's environment without any credential, workspace or provider variable, plus a launch shell's."""
     dropped = ("ANTHROPIC_", "OPENAI_", "CLAUDE_", "DEEPSEEK_", "GEAK_", "HYPERLOOM_", "KERNEL_AGENT_", "LLM_")
     env = {key: value for key, value in os.environ.items() if not key.startswith(dropped)}
     env.pop("USER_DATA_PATH", None)
-    return {**env, "REPO_ROOT": str(checkout), "USER_DATA_PATH": str(workspace)}
+    return {**env, "REPO_ROOT": str(checkout), "USER_DATA_PATH": str(workspace), **exported}
 
 
 def _assignments(path: Path) -> dict[str, str]:
@@ -161,15 +161,15 @@ def _credentials_in(path: Path) -> dict[str, str | None]:
     return {key: assignments.get(key) for key in _CREDENTIAL_KEYS}
 
 
-def _preflight_credentials(checkout: Path, workspace: Path) -> dict[str, str | None]:
-    """The credentials preflight leaves for ``hyperloom optimize`` launched from a shell that exports none.
+def _preflight_credentials(checkout: Path, workspace: Path, **exported: str) -> dict[str, str | None]:
+    """The credentials preflight leaves for ``hyperloom optimize`` launched from a shell that exports ``exported``.
 
     It runs preflight's whole env normalisation, so the single-provider rule that strips the side ``.env`` did not
     supply is applied too: with the operator's OpenAI side in ``.env``, a credential not counted as ``.env``'s would be
     stripped here.
     """
     with (
-        mock.patch.dict(os.environ, _launch_env(checkout, workspace), clear=True),
+        mock.patch.dict(os.environ, _launch_env(checkout, workspace, **exported), clear=True),
         mock.patch.object(cli_preflight, "_validate_explicit_server_limits", lambda args: None),
     ):
         cli_preflight._normalize_preflight_env(argparse.Namespace(), {"ext": {"steps": []}})
@@ -328,6 +328,12 @@ def test_a_reinstall_in_the_same_container_takes_the_credentials_from_its_file(t
     assert f"loaded 4 missing credential(s) from {env_file} (env wins)" in again.stdout
     assert _credentials_in(env_file) == _CREDENTIALS
     _assert_no_credentials_and_the_rest_kept(checkout / ".env")
+    # A key exported for a rotation wins over the file's, in install.sh and in preflight alike.
+    rotated = {"ANTHROPIC_API_KEY": "sk-test-rotated-key"}
+    _install(installer, checkout, workspace, {**_no_credentials(), **rotated})
+    assert _credentials_in(env_file) == {**_CREDENTIALS, **rotated}
+    _install(installer, checkout, workspace, _CREDENTIALS)
+    assert _preflight_credentials(checkout, workspace, **rotated) == {**_CREDENTIALS, **rotated}
 
 
 def test_a_dotenv_the_install_made_this_accounts_takes_them_from_the_next_install(tmp_path, container):
