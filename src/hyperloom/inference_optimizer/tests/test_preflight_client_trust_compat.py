@@ -1,4 +1,4 @@
-"""Run-time assertion of the SGLang custom-tokenizer trust patch."""
+"""The SGLang custom-tokenizer trust patch on a Magpie tree."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.preflight import _ensure_client_trust_compat
 from hyperloom.orchestrator.actions.executors._magpie_patcher import (
     _LOCAL_TRUST_SENTINEL,
     ensure_client_trust_compat,
@@ -138,57 +137,3 @@ def test_one_drifted_script_does_not_starve_its_sibling(tmp_path: Path):
     assert ensure_client_trust_compat(tmp_path) is False
     mi355x = (tmp_path / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(encoding="utf-8")
     assert "magpie_run_benchmark_serving_remote_direct trust" in mi355x
-
-
-# --- preflight wrapper: multi-node gate + warn-only contract ----------------
-
-
-def test_single_node_leaves_the_tree_untouched(upstream_magpie: Path, monkeypatch):
-    """Single-node keeps whatever install.sh left; the fix is multi-node scoped."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
-    before = {
-        p.name: p.read_text(encoding="utf-8")
-        for p in (upstream_magpie / "Magpie" / "scripts" / "benchmark").glob("*.sh")
-    }
-
-    assert _ensure_client_trust_compat(str(upstream_magpie)) is True
-
-    after = {
-        p.name: p.read_text(encoding="utf-8")
-        for p in (upstream_magpie / "Magpie" / "scripts" / "benchmark").glob("*.sh")
-    }
-    assert after == before
-    assert "MAGPIE_TRUST_REMOTE_CODE" not in after["sglang_mi300x.sh"]
-
-
-def test_multi_node_patches_through_the_wrapper(upstream_magpie: Path, monkeypatch):
-    """The multi-node path is the one that actually gets the gate."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    assert _ensure_client_trust_compat(str(upstream_magpie)) is True
-    text = (upstream_magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh").read_text(encoding="utf-8")
-    assert "magpie_run_benchmark_serving_remote_direct trust" in text
-
-
-def test_drift_warns_but_never_raises(tmp_path: Path, monkeypatch, capsys):
-    """Preflight must degrade, not abort: most models need no remote code."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    _write_scripts(tmp_path, mi300x="#!/usr/bin/env bash\necho hand-edited\n")
-
-    assert _ensure_client_trust_compat(str(tmp_path)) is False
-
-    out = capsys.readouterr().out
-    assert "custom-tokenizer trust patch" in out
-    assert "MAGPIE_TRUST_REMOTE_CODE=1" in out
-
-
-def test_patcher_explosion_propagates(monkeypatch, capsys):
-    def boom(*_args):
-        raise RuntimeError("patcher exploded")
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._magpie_patcher.ensure_client_trust_compat", boom)
-
-    with pytest.raises(RuntimeError):
-        _ensure_client_trust_compat("/m")
-
-    assert capsys.readouterr().out == ""

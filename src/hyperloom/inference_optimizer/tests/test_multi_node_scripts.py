@@ -1256,7 +1256,7 @@ def test_infera_ssh_env_empty_without_pods_or_key(tmp_path, monkeypatch):
 
 
 def test_magpie_remote_env_pins_eval_interpreter(tmp_path, monkeypatch):
-    """The eval must run in the interpreter preflight installed lm_eval into."""
+    """The eval must run in the benchmark interpreter."""
     _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 2, "service_url": "http://h:8888"})
     monkeypatch.setattr(mne, "external_service_url", lambda: "")
     monkeypatch.setattr(

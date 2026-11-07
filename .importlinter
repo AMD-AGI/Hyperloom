@@ -99,7 +99,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend
@@ -461,7 +460,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend

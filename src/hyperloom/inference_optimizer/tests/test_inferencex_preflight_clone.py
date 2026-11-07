@@ -284,10 +284,10 @@ def test_native_preflight_leaves_checkout_and_patches_to_magpie(tmp_path, monkey
         pytest.fail("native AgentX must not clone or patch the synthetic InferenceX runtime")
 
     monkeypatch.setattr(cli_preflight, "_ensure_inferencex", unexpected)
-    monkeypatch.setattr(cli_preflight, "_patch_magpie_compat", unexpected)
+    monkeypatch.setattr(cli_preflight, "_check_inferencex_patch_anchors", unexpected)
     event = {"ext": {"steps": []}}
 
-    assert cli_preflight._prepare_inferencex(event, magpie_active=True) == ""
+    assert cli_preflight._prepare_inferencex(event) == ""
     assert os.environ["INFERENCEX_PATH"] == inherited_checkout
     assert os.environ["MAGPIE_INFERENCEX_PATH"] == native_checkout
     assert event["ext"]["steps"][-1]["skip_reason"] == "magpie_manages_native_agentx"
@@ -301,11 +301,21 @@ def test_synthetic_and_mlperf_preflight_keep_checkout_preparation(tmp_path, monk
     checkout = str(tmp_path / "InferenceX")
     monkeypatch.setattr(cli_preflight, "_ensure_inferencex", lambda _event: checkout)
     patches = []
-    monkeypatch.setattr(
-        cli_preflight,
-        "_patch_magpie_compat",
-        lambda _event, path, *, magpie_active: patches.append((path, magpie_active)),
-    )
+    monkeypatch.setattr(cli_preflight, "_check_inferencex_patch_anchors", lambda _event, path: patches.append(path))
 
-    assert cli_preflight._prepare_inferencex({"ext": {"steps": []}}, magpie_active=backend != "bypass") == checkout
-    assert patches == [(checkout, backend != "bypass")]
+    assert cli_preflight._prepare_inferencex({"ext": {"steps": []}}) == checkout
+    assert patches == [checkout]
+
+
+@pytest.mark.parametrize(("anchors_ok", "status"), [(True, "applied"), (False, "warned")])
+def test_patch_anchor_check_records_drift_as_a_warning(monkeypatch, anchors_ok, status):
+    """A drifted checkout warns in the install event; preflight goes on without patching Magpie."""
+    seen = []
+    monkeypatch.setattr(cli_preflight, "_report_inferencex_patch_anchors", lambda path: seen.append(path) or anchors_ok)
+    event = {"ext": {"steps": []}}
+
+    cli_preflight._check_inferencex_patch_anchors(event, "/ix")
+
+    assert seen == ["/ix"]
+    step = event["ext"]["steps"][-1]
+    assert (step["step_id"], step["category"], step["status"]) == ("check_inferencex_patch_anchors", "check", status)

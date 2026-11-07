@@ -114,9 +114,10 @@ hosted = [
 # runner installs ``requirements/runner.lock``, this list compiled with hashes, and never resolves this list itself.
 # The framework stack (torch, triton, sglang, aiter) is the framework image's and must not be listed here.
 #
-# ``lm_eval[api]`` is the accuracy pass's client: 0.4.13, the release that the ref ``inference_optimizer/cli/preflight.py``
-# pins (``_LM_EVAL_PINNED_REF``). It comes from PyPI, not as that ref's GitHub archive, because GitHub does not keep an
-# archive's checksum stable and a hash lock must not depend on one. ``tenacity`` is what its ``api`` models import.
+# ``lm_eval[api]`` is the accuracy pass's client: 0.4.13 (``ddd6722``), the first release whose API model reports a
+# refused connection instead of masking it with ``UnboundLocalError`` (EleutherAI/lm-evaluation-harness#3293). It comes
+# from PyPI because GitHub does not keep an archive's checksum stable and a hash lock must not depend on one.
+# ``tenacity`` is what its ``api`` models import.
 runner = [
     "PyYAML>=6.0",
     "cryptography>=42",
