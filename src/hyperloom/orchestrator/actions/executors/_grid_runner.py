@@ -1257,6 +1257,7 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
                 server_already_ready=(run.launch.server_already_ready or rounds.auto_warmup or is_multi_node()),
                 session_deadline_sec=run.stop.session_deadline_sec,
                 warmup=run.launch.warmup_round,
+                boot_only=run.launch.lifecycle_boot_only,
             ),
         )
     except subprocess.TimeoutExpired as exc:
