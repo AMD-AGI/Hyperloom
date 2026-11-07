@@ -20,7 +20,6 @@ import yaml
 
 from hyperloom.common import rocm_smi
 from hyperloom.common.benchmark_config import PointError, read_benchmark_point
-from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom_common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
@@ -54,9 +53,6 @@ _KILL_CONFIRM_SECONDS = 30.0
 
 #: How often a hand-off re-reads VRAM while it waits for the GPUs to drain.
 _GPU_FREE_POLL_SECONDS = 5.0
-
-#: How many still-running serving process groups a busy hand-off names.
-_HOLDERS_REPORTED = 8
 
 
 # Magpie built-in benchmark scripts that support the server_lifecycle reuse protocol.
@@ -332,15 +328,19 @@ class ServerReap(NamedTuple):
 
 
 def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
-    """Reap serving processes orphaned by a prior monitor-process death, or by a run that simply ended with a server up.
+    """Stop every server a ``server.pid`` under this session's ``runs/`` still records; return the pids signalled.
 
-    Scans only the current session's ``runs/`` pidfiles and reaps each pid whose cmdline still matches a serving
-    process (SIGTERM -> grace -> SIGKILL on the group), so a co-located session's server and a recycled pid are never
-    touched. A server inference_suite booted is reaped through its own ``stop``.
+    Each directory goes through :func:`inference_suite.stop`: the recorded pid is signalled only while its start time
+    still matches, and once that leader is gone its workers are found by the pidfile's run mark, so a co-located
+    session's server and a recycled pid are never touched. A pidfile whose server outlives SIGKILL is kept.
     """
-    runs = Path(session_dir) / "runs"
-    reaped = reap_recorded_servers(runs).reaped
-    return reaped + [pid for pid_dir in _suite_pid_dirs(runs) for pid in stop(pid_dir).reaped]
+    reaped: list[int] = []
+    for pid_dir in _suite_pid_dirs(Path(session_dir) / "runs"):
+        outcome = stop(pid_dir)
+        reaped.extend(outcome.reaped)
+        if outcome.survivors:
+            log.error("orphan-reaper: pids %s from %s outlived SIGKILL", list(outcome.survivors), pid_dir)
+    return reaped
 
 
 def stop_agentx_servers(root: Path | str) -> list[int]:
@@ -354,7 +354,7 @@ def stop_agentx_servers(root: Path | str) -> list[int]:
 
 def _suite_pid_dirs(root: Path) -> list[Path]:
     """Every pid_dir under ``root`` holding an inference_suite ``server.pid``."""
-    return [pidfile.parent for pidfile in sorted(root.rglob(SERVER_PID))]
+    return [pidfile.parent for pidfile in sorted(root.rglob(SERVER_PID))] if root.is_dir() else []
 
 
 def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> ServerReap:
@@ -481,7 +481,7 @@ class GpuHandoff(NamedTuple):
     reaped: list[int]
     #: ``(card, used_mib, total_mib)`` for every named card still holding VRAM at the deadline.
     busy: list[tuple[int, float, float]]
-    #: The serving process groups still up when ``busy`` is non-empty, one line each, to say who holds the cards.
+    #: The directories whose ``server.pid`` outlived the reap, when ``busy`` is non-empty.
     holders: list[str]
     #: Why the cards could not be checked at all; empty when they were.
     unverified: str
@@ -531,36 +531,7 @@ def free_gpus_for_handoff(
         if not busy:
             return GpuHandoff(reaped, [], [], "")
         if time.monotonic() >= deadline:
-            return GpuHandoff(reaped, busy, _serving_process_groups(), "")
+            return GpuHandoff(
+                reaped, busy, [str(pid_dir) for pid_dir in _suite_pid_dirs(Path(session_dir) / "runs")], ""
+            )
         time.sleep(poll_sec)
-
-
-def _serving_process_groups() -> list[str]:
-    """Name up to :data:`_HOLDERS_REPORTED` live process groups that look like serving processes, one line each.
-
-    A line names the program, not the flags it was started with: those can carry a credential.
-    """
-    try:
-        pids = sorted(int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdigit())
-    except OSError:
-        return []
-    groups: dict[int, str] = {}
-    for pid in pids:
-        if not _looks_like_server_process(pid):
-            continue
-        try:
-            pgid = os.getpgid(pid)
-        except OSError:
-            continue
-        if pgid not in groups:
-            groups[pgid] = redact_secret_values(f"pgid={pgid} {_program_of(pid)[:160]}")
-        if len(groups) >= _HOLDERS_REPORTED:
-            break
-    return list(groups.values())
-
-
-def _program_of(pid: int) -> str:
-    """``pid``'s command line up to its first ``--`` flag, e.g. ``python3 -m sglang.launch_server``."""
-    words = _pid_cmdline(pid).split()
-    first_flag = next((i for i, word in enumerate(words) if i and word.startswith("--")), len(words))
-    return " ".join(words[:first_flag])

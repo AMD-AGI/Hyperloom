@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the session-scoped orphaned serving-process reaper."""
+"""Tests for the cmdline-gated reaper of the old-format pidfiles (``reap_recorded_servers``, ``stop_agentx_servers``)."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from inference_suite.runtime.process import ServerPidfile
 
 from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 from hyperloom.orchestrator.actions.executors._server_lifecycle import (
-    reap_orphaned_servers,
     reap_recorded_servers,
     stop_agentx_servers,
 )
@@ -174,7 +173,7 @@ def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path, marker, tag):
     proc = _spawn_marker_process(marker)
     pidfile = _write_pidfile(tmp_path, tag, proc.pid)
     try:
-        reaped = reap_orphaned_servers(tmp_path)
+        reaped = reap_recorded_servers(tmp_path / "runs").reaped
 
         # Reap the zombie so the liveness probe reflects true termination (the reaper is not this process's
         # parent-waiter).
@@ -201,7 +200,7 @@ def test_reap_spares_pid_whose_cmdline_does_not_match(tmp_path):
     proc = _spawn_marker_process("totally-unrelated-process")
     pidfile = _write_pidfile(tmp_path, "sglang_8888", proc.pid)
     try:
-        reaped = reap_orphaned_servers(tmp_path)
+        reaped = reap_recorded_servers(tmp_path / "runs").reaped
 
         assert proc.pid not in reaped
         assert _pid_alive(proc.pid), "unrelated pid must not be killed"
@@ -218,7 +217,7 @@ def test_reap_spares_pid_whose_cmdline_does_not_match(tmp_path):
 def test_reap_no_pidfiles_is_noop(tmp_path):
     """Fresh session (no pidfiles) reaps nothing and never raises."""
     (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
-    assert reap_orphaned_servers(tmp_path) == []
+    assert reap_recorded_servers(tmp_path / "runs").reaped == []
 
 
 def test_reap_dead_pid_clears_stale_pidfile(tmp_path):
@@ -228,7 +227,7 @@ def test_reap_dead_pid_clears_stale_pidfile(tmp_path):
     proc.wait(timeout=5)
     pidfile = _write_pidfile(tmp_path, "sglang_8888", proc.pid)
 
-    reaped = reap_orphaned_servers(tmp_path)
+    reaped = reap_recorded_servers(tmp_path / "runs").reaped
 
     assert proc.pid not in reaped
     assert not pidfile.exists()
@@ -239,7 +238,7 @@ def test_reap_kills_group_when_recorded_leader_exited_but_child_survives(tmp_pat
     leader_pid, child_pid = _spawn_dead_leader_with_live_child(tmp_path, "sglang.launch_server")
     pidfile = _write_pidfile(tmp_path, "sglang_8888", leader_pid)
     try:
-        reaped = reap_orphaned_servers(tmp_path)
+        reaped = reap_recorded_servers(tmp_path / "runs").reaped
 
         deadline = time.time() + 5.0
         while time.time() < deadline and _pid_alive(child_pid):
@@ -260,7 +259,7 @@ def test_reap_spares_group_when_recorded_leader_exited_but_child_is_unrelated(tm
     leader_pid, child_pid = _spawn_dead_leader_with_live_child(tmp_path, "totally-unrelated-process")
     pidfile = _write_pidfile(tmp_path, "sglang_8888", leader_pid)
     try:
-        reaped = reap_orphaned_servers(tmp_path)
+        reaped = reap_recorded_servers(tmp_path / "runs").reaped
 
         assert leader_pid not in reaped
         assert _pid_alive(child_pid), "unrelated process group must not be killed"
@@ -277,7 +276,7 @@ def test_reap_kills_sglang_ranks_whose_leader_is_an_unreaped_zombie(tmp_path):
     leader, child_pid = _spawn_zombie_leader(tmp_path, "sglang::scheduler_TP0")
     pidfile = _write_pidfile(tmp_path, "agentx_server", leader.pid)
     try:
-        reaped = reap_orphaned_servers(tmp_path)
+        reaped = reap_recorded_servers(tmp_path / "runs").reaped
 
         assert reaped == [leader.pid]
         assert _gone(child_pid)
@@ -296,7 +295,7 @@ def test_reap_treats_a_lone_zombie_leader_as_stale(tmp_path):
     leader, _ = _spawn_zombie_leader(tmp_path, None)
     pidfile = _write_pidfile(tmp_path, "agentx_server", leader.pid)
     try:
-        assert reap_orphaned_servers(tmp_path) == []
+        assert reap_recorded_servers(tmp_path / "runs").reaped == []
         assert not pidfile.exists()
     finally:
         leader.wait(timeout=5)
@@ -341,21 +340,6 @@ def test_stop_agentx_servers_stops_the_suite_server_and_leaves_other_pidfiles_al
             proc.wait(timeout=5)
 
 
-def test_reap_orphaned_servers_stops_a_suite_server_through_its_own_pidfile(tmp_path):
-    """The session reaper must not discard an inference_suite server.pid as malformed and leave its server up."""
-    server = _spawn_marker_process("sglang.launch_server")
-    pidfile = _write_suite_pidfile(tmp_path, server.pid)
-    try:
-        assert server.pid in reap_orphaned_servers(tmp_path)
-
-        server.wait(timeout=5)
-        assert not pidfile.exists()
-    finally:
-        if server.poll() is None:
-            server.kill()
-            server.wait(timeout=5)
-
-
 def test_reap_never_signals_its_own_process_group(tmp_path, monkeypatch):
     """A pidfile naming a member of the reaper's own group would otherwise take the orchestrator down with it."""
     in_our_group = subprocess.Popen(
@@ -368,7 +352,7 @@ def test_reap_never_signals_its_own_process_group(tmp_path, monkeypatch):
     signalled: list[int] = []
     monkeypatch.setattr(sl, "_terminate_group", lambda pgid: signalled.append(pgid) or True)
     try:
-        assert reap_orphaned_servers(tmp_path) == []
+        assert reap_recorded_servers(tmp_path / "runs").reaped == []
         assert signalled == []
         assert pidfile.exists()
     finally:
