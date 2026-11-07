@@ -45,7 +45,8 @@ def layer(tmp_path) -> Path:
     _tool(
         root,
         "app_bootstrap.sh",
-        'echo "PATH=$PATH" >"$CALLS.boot"; env | grep -E "^(SSL_CERT_FILE|NODE_EXTRA_CA_CERTS)=" >>"$CALLS.boot" || true',
+        'echo bootstrap >>"$CALLS"; echo "PATH=$PATH" >"$CALLS.boot"; '
+        'env | grep -E "^(SSL_CERT_FILE|NODE_EXTRA_CA_CERTS)=" >>"$CALLS.boot" || true',
     )
     _tool(root / "bin", "claude", "echo 1.0.0")
     return root
@@ -53,16 +54,29 @@ def layer(tmp_path) -> Path:
 
 @pytest.fixture
 def image(tmp_path) -> Path:
-    """The tools of an image as stubs: root, git, setpriv, bash and the account tools, each recording its call."""
+    """The tools of an image as stubs: root, git, setpriv, bash, mount and the account tools, each recording its call.
+    The real mount must never run in a test: it would change the propagation of the host's root mount."""
     tools = tmp_path / "tools"
     for name in ("git", "setpriv"):
         _tool(tools, name)
+    _tool(tools, "mount", 'echo "mount $*" >>"$CALLS"')
     _tool(tools, "bash", 'exec /bin/bash "$@"')
     _tool(tools, "id", "echo 0")
     _tool(tools, "getent", 'echo "getent $*" >>"$CALLS"; exit 2')
     for name in ("groupadd", "useradd"):
         _tool(tools, name, f'echo "{name} $*" >>"$CALLS"')
     return tools
+
+
+def _bare_path(tmp_path, image, *names) -> str:
+    """A PATH of the image's stubs and the named real tools only, so a tool the image lacks cannot be found."""
+    essentials = tmp_path / "essentials"
+    essentials.mkdir(exist_ok=True)
+    for name in names:
+        found = shutil.which(name)
+        if found and not (essentials / name).exists():
+            (essentials / name).symlink_to(found)
+    return f"{image}:{essentials}"
 
 
 def _run(tmp_path, layer, image, *sh_options, **env):
@@ -88,13 +102,9 @@ def _run(tmp_path, layer, image, *sh_options, **env):
 def test_an_image_without_git_or_setpriv_is_refused_by_name(tmp_path, layer, image, missing):
     (image / missing).unlink()
     # Keep the real tool out of reach: only the stub dir and a dir with the bare essentials are searched.
-    essentials = tmp_path / "essentials"
-    essentials.mkdir()
-    for name in ("cat", "cut", "dirname", "mv", "chmod", "ls"):
-        found = shutil.which(name)
-        if found:
-            (essentials / name).symlink_to(found)
-    done, _ = _run(tmp_path, layer, image, PATH=f"{image}:{essentials}")
+    done, _ = _run(
+        tmp_path, layer, image, PATH=_bare_path(tmp_path, image, "cat", "cut", "dirname", "mv", "chmod", "ls")
+    )
     assert done.returncode == 1 and f"has no {missing}" in done.stderr, done.stderr
 
 
@@ -315,8 +325,9 @@ def test_the_script_checks_its_own_kernel_maps_before_it_looks_up_the_account(tm
 @needs_2000_mapped
 def test_a_layer_without_the_cli_is_refused(tmp_path, layer, image):
     (layer / "bin" / "claude").unlink()
-    done, _ = _run(tmp_path, layer, image)
+    done, calls = _run(tmp_path, layer, image)
     assert done.returncode == 1 and "no claude CLI" in done.stderr
+    assert not [c for c in calls if c.startswith("mount ")], "the root mount is touched only after every check"
 
 
 @needs_2000_mapped
@@ -367,6 +378,46 @@ def test_an_existing_account_is_left_alone_and_no_ca_means_no_bundle(tmp_path, l
     assert done.returncode == 0, done.stderr
     assert not [c for c in calls if c.startswith(("useradd", "groupadd"))]
     assert not (tmp_path / "local-tmp" / "hyperloom-host").exists()
+
+
+_ROOT_STAYS = "so the root mount stays as it is; wrap each bwrap call in 'unshare --mount'"
+
+
+@needs_2000_mapped
+def test_the_root_mount_is_made_private_once_right_before_the_bootstrap(tmp_path, layer, image):
+    done, calls = _run(tmp_path, layer, image)
+    assert done.returncode == 0 and done.stderr == "", done.stderr
+    assert [c for c in calls if c.startswith("mount ")] == ["mount --make-rprivate /"]
+    assert calls[-2:] == ["mount --make-rprivate /", "bootstrap"]
+
+
+@needs_2000_mapped
+@pytest.mark.parametrize(
+    ("stub", "said"),
+    [
+        ('echo "mount: /: permission denied." >&2; exit 32', "mount: /: permission denied."),
+        ("exit 1", "no message"),
+    ],
+    ids=["with-a-message", "silent"],
+)
+def test_a_root_mount_that_cannot_be_made_private_is_logged_and_the_bootstrap_still_runs(
+    tmp_path, layer, image, stub, said
+):
+    _tool(image, "mount", f'echo "mount $*" >>"$CALLS"; {stub}')
+    done, calls = _run(tmp_path, layer, image)
+    assert done.returncode == 0, done.stderr
+    assert done.stderr.splitlines() == [f"hosted layer: mount --make-rprivate / failed ({said}), {_ROOT_STAYS}"]
+    assert calls[-2:] == ["mount --make-rprivate /", "bootstrap"]
+
+
+@needs_2000_mapped
+def test_an_image_without_mount_is_logged_and_the_bootstrap_still_runs(tmp_path, layer, image):
+    (image / "mount").unlink()
+    bare = _bare_path(tmp_path, image, "cat", "cut", "dirname", "env", "grep", "mkdir", "mv", "chmod")
+    done, calls = _run(tmp_path, layer, image, PATH=bare)
+    assert done.returncode == 0, done.stderr
+    assert done.stderr.splitlines() == [f"hosted layer: the image has no mount (util-linux), {_ROOT_STAYS}"]
+    assert calls[-1] == "bootstrap"
 
 
 def test_a_layer_built_under_a_private_umask_is_readable_and_runnable_by_every_account(tmp_path):
