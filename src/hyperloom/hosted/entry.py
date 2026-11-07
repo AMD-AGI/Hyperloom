@@ -22,6 +22,19 @@ started fresh, after the stray files of a session that never finished its first 
 after the same installer run; its environment is the entry's own, with the running interpreter's directory first on ``PATH`` (as for ``optimize``) so the
 command resolves to, and runs with, the interpreter the installer installed into.  The installer itself never sees a host-only input
 other than ``HYPERLOOM_STATE_DIR``, which it needs to install the hosted extra.
+
+A hosted run's specialists, which every launch path starts through the isolation chooser
+(:mod:`hyperloom.common.agent_isolation`), must be isolated: unconfined, they could read the application's credentials.
+Before the installer or ``optimize`` runs, the entry marks the process so
+(:func:`~hyperloom.common.agent_isolation.require_agent_isolation`), with the hosting layer's bubblewrap, ``bin/bwrap``
+in the directory ``HYPERLOOM_HOST_LAYER`` names (the layer's ``start.sh`` names its own; :func:`layer_bwrap`), and no
+other; a host where neither an account nor that bubblewrap can isolate a specialist ends the run finally, naming why,
+and every later launch through the chooser is isolated or refused. A probe that gave no answer in time ends the leg
+without ``exit.json``, so the host starts it again. The entry also registers the state directory, whose variable it
+removes from the environment, among the paths no agent sandbox shows
+(:data:`~hyperloom.common.confinement.PRIVATE_PATHS`). Agents started outside the chooser are not isolated by it: the
+TraceLens skill runner's, GEAK's and kernelforge's forge loops' agents, which can run shell commands, run as the
+application. A ``multibranch`` flow is handed to its command before this check.
 """
 
 from __future__ import annotations
@@ -39,6 +52,8 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
+from hyperloom.common import confinement
+from hyperloom.common.agent_isolation import IsolationRefused, require_agent_isolation
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HOST_ONLY_VARS, HostInfo, HostInfoError, Var, read_host_info, take_host_info
@@ -70,6 +85,10 @@ INSTALL_LOG = "install.log"
 #: ``stop_reason`` of a run ended by a stop request before it started; the coordinator's name for an operator stop.
 STOP_REQUEST_REASON = "signal"
 DEFAULT_MCP_HOST = "127.0.0.1"
+#: The hosting layer's directory, as its ``start.sh`` names it.
+HOST_LAYER_ENV = "HYPERLOOM_HOST_LAYER"
+#: The hosting layer's bubblewrap, below its directory.
+LAYER_BWRAP = Path("bin", "bwrap")
 RETURNCODE_REFUSED = 2
 ENCODING = "utf-8"
 _DURABLE = WriteOptions(fsync=True)
@@ -121,6 +140,7 @@ def _run() -> int:
     lock = _plug_lock(spec)
     # From here on the host-only inputs live in ``info`` only: no child process may inherit them.
     info = take_host_info(os.environ, require=())
+    _require_isolation(info)
     session_dir = _prepare_session_dir(spec, info)
     os.environ[ENV_PACKAGE_DEST_ROOT] = str(ensure_archive_root(session_dir))  # the package outlives the container
     os.environ[ENV_IMAGE] = spec.framework_image
@@ -134,6 +154,32 @@ def _run() -> int:
     _confirm_previous_containers_gone(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+
+
+def layer_bwrap(environ: Mapping[str, str]) -> str | None:
+    """The hosting layer's bubblewrap, in the directory ``environ``'s ``HYPERLOOM_HOST_LAYER`` names; ``None`` when it
+    names none. The one bubblewrap a hosted run launches agents with: the framework image may carry its own, maybe
+    setuid, ahead of the layer's on ``PATH``."""
+    layer = environ.get(HOST_LAYER_ENV, "").strip()
+    return str(Path(layer) / LAYER_BWRAP) if layer else None
+
+
+def _require_isolation(info: HostInfo) -> None:
+    """Keep the state directory out of every agent sandbox, mark this process as a hosted run's, whose specialists must
+    be isolated, and refuse the run now where they cannot be.
+
+    Raises:
+        Refused: Neither an account nor the hosting layer's bubblewrap can isolate a specialist here.
+        IsolationRefused: The bubblewrap probe gave no answer in time (``transient``): no ``exit.json``, so the host
+            starts the leg again.
+    """
+    confinement.PRIVATE_PATHS.add(info.state_dir, "the hosted run's state directory")
+    try:
+        require_agent_isolation(bwrap=layer_bwrap(os.environ))
+    except IsolationRefused as refused:
+        if refused.transient:
+            raise
+        raise Refused(str(refused)) from None
 
 
 SCOPE_GONE_REASON = "hosted resume: the host starts a leg only once the previous application container no longer exists"

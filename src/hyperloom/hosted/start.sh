@@ -8,13 +8,19 @@
 #
 #   sh <layer dir>/start.sh
 #
-# It runs as the container's root and
-#   1. refuses, naming the tool, when the image has no git or setpriv (nothing is installed here),
-#   2. makes sure the account HYPERLOOM_SPECIALIST_USER names exists with uid/gid 2000, refusing when this container's
-#      user namespace does not map uid or gid 2000 (one that maps only its root): no process can become that account
-#      there (setuid fails with EINVAL, or under a fakeroot preload seems to succeed while the specialist stays root),
-#      so the specialists could not be kept from the application's credentials,
-#   3. puts the layer's claude CLI on PATH,
+# It runs as the container's user (root, to make the specialist account) and
+#   1. refuses, naming the tool, when the image has no git or bash (nothing is installed here),
+#   2. chooses how the specialists are kept from the application's credentials:
+#      - as the account HYPERLOOM_SPECIALIST_USER names, which it makes sure exists with uid/gid 2000, where a process
+#        here can become that account and stop it: this start runs as root, the image has setpriv, this container's
+#        user namespace maps uid and gid 2000, and root here holds CAP_KILL, CAP_SETGID and CAP_SETUID;
+#      - else under the layer's bubblewrap (bin/bwrap): it makes no account, unsets HYPERLOOM_SPECIALIST_USER and says
+#        why in one line; the application's start-up probes that bubblewrap and ends the run with a final exit.json
+#        where it cannot confine an agent,
+#      and refuses when neither can: in a user namespace that maps only its root no process can become the account
+#      (setuid fails with EINVAL, or under a fakeroot preload seems to succeed while the specialist stays root),
+#   3. names its own directory in HYPERLOOM_HOST_LAYER (the application launches agents with that directory's
+#      bin/bwrap, never one found on PATH) and puts the layer's claude CLI on PATH,
 #   4. trusts the layer's extra CA certificate (if any) through a bundle written to ${TMPDIR:-/tmp}/hyperloom-host
 #      (local to the container: not the layer, not the state dir, not /etc),
 #   5. makes the container's root mount private once, so bwrap can bind it (a failure only logs a line),
@@ -62,9 +68,10 @@ in_id_map() {
   return "$map_found"
 }
 
-# Refuses (exit 1, naming the map) unless the user namespace maps the id $1 as a uid (in the uid map $2) and as a gid
-# (in the gid map $3). A map that cannot be read, or has a line that is not three decimal ids, never counts as mapped.
-require_mapped() {
+# Whether the user namespace maps the id $1 as a uid (in the uid map $2) and as a gid (in the gid map $3): 0 when it
+# does, 1 when it does not, with no_account saying which is not. Refuses (exit 1, naming the map) when a map cannot be
+# read or has a line that is not three decimal ids: whether the specialist account can be switched to is then unknown.
+id_mapped() {
   wanted="$1"
   shift
   for kind in uid gid; do
@@ -72,36 +79,92 @@ require_mapped() {
     in_id_map "$wanted" "$1" || rc=$?
     case "$rc" in
       0) ;;
-      1) die "$kind $wanted is not mapped in this container's user namespace ($1: '${map_text:-empty}'): no process here can become the specialist account (setuid fails with EINVAL, or under a fakeroot preload seems to succeed while the specialist stays root and can read the application's credentials); run on a node whose user namespace maps uid and gid $wanted" ;;
+      1)
+        no_account="$kind $wanted is not mapped in this container's user namespace ($1: '${map_text:-empty}'): no process here can become the specialist account (setuid fails with EINVAL, or under a fakeroot preload seems to succeed while the specialist stays root and can read the application's credentials)"
+        return 1
+        ;;
       *) die "cannot read $1 as a user namespace map ($map_error), so whether the specialist account can be switched to is unknown" ;;
     esac
     shift
   done
 }
 
-for tool in git setpriv bash; do
-  command -v "$tool" >/dev/null 2>&1 || die "the image has no $tool; use a framework image that has git, setpriv (util-linux) and bash"
+# Whether root here holds CAP_KILL, CAP_SETGID and CAP_SETUID, which start a specialist as another account and later
+# stop it, as the capability bounding set in the process status file $1 says: root's effective set once it execs the
+# application is that set. 0 when it does, 1 when one is missing, with no_account naming them. A file that cannot be
+# read, or whose CapBnd is not hexadecimal, counts as holding them, as root has them unless they were dropped (the
+# application checks its own again before it starts a specialist as an account).
+launch_capabilities() {
+  bounding=""
+  if [ -r "$1" ]; then
+    while read -r field value rest || [ -n "${field:-}" ]; do
+      [ "$field" != "CapBnd:" ] || bounding="$value"
+      field=""
+    done <"$1"
+  fi
+  case "$bounding" in
+    "" | ? | *[!0-9a-f]*) return 0 ;;
+  esac
+  # CAP_KILL, CAP_SETGID and CAP_SETUID are bits 5, 6 and 7: all in the last two hexadecimal digits.
+  low=$((0x${bounding#"${bounding%??}"}))
+  missing=""
+  [ $((low & 0x20)) -ne 0 ] || missing="CAP_KILL"
+  [ $((low & 0x40)) -ne 0 ] || missing="${missing:+$missing, }CAP_SETGID"
+  [ $((low & 0x80)) -ne 0 ] || missing="${missing:+$missing, }CAP_SETUID"
+  [ -n "$missing" ] || return 0
+  no_account="root here lacks $missing ($1: CapBnd $bounding), so it cannot start a specialist as another account and later stop it"
+  return 1
+}
+
+# Whether the specialists can run as the account: this start runs as root, the image has setpriv, the user namespace
+# maps uid and gid $uid, and root here holds the capabilities that start and stop them. Sets no_account to why not.
+account_possible() {
+  no_account=""
+  me="$(id -u)"
+  if [ "$me" != 0 ]; then
+    no_account="this start runs as uid $me, not root, so it cannot make the specialist account"
+  elif ! command -v setpriv >/dev/null 2>&1; then
+    no_account="the image has no setpriv (util-linux), which starts the specialists as their account"
+  elif id_mapped "$uid" /proc/self/uid_map /proc/self/gid_map; then
+    launch_capabilities /proc/self/status || true
+  fi
+  [ -z "$no_account" ]
+}
+
+for tool in git bash; do
+  command -v "$tool" >/dev/null 2>&1 || die "the image has no $tool; use a framework image that has git and bash"
 done
-[ "$(id -u)" = 0 ] || die "must run as root (uid 0) to create the specialist account"
 [ -x "$layer/app_bootstrap.sh" ] || die "$layer has no app_bootstrap.sh"
 
-# The account must be one a process here can become: its uid and gid mapped in this container's user namespace. The
-# maps are kernel files; a fakeroot preload, which makes setuid seem to succeed, does not change what they say.
-require_mapped "$uid" /proc/self/uid_map /proc/self/gid_map
-
-# The account: its own uid and primary group, no supplementary group, a home it can write.
-by_uid="$(getent passwd "$uid" | cut -d: -f1 || true)"
-if [ -n "$by_uid" ] && [ "$by_uid" != "$user" ]; then
-  die "uid $uid is taken by the account $by_uid, not $user"
-fi
-if [ -z "$by_uid" ]; then
-  getent passwd "$user" >/dev/null 2>&1 && die "the account $user exists with a uid other than $uid"
-  if ! getent group "$uid" >/dev/null 2>&1; then
-    getent group "$user" >/dev/null 2>&1 && die "the group $user exists with a gid other than $uid"
-    groupadd --gid "$uid" "$user"
+# The account only where a process here can become it: its uid and gid mapped in this container's user namespace (the
+# maps are kernel files; a fakeroot preload, which makes setuid seem to succeed, does not change what they say) and
+# the capabilities to switch to it held. Else the layer's bubblewrap confines the specialists, as the app's own uid.
+bwrap="$layer/bin/bwrap"
+if account_possible; then
+  # The account: its own uid and primary group, no supplementary group, a home it can write.
+  by_uid="$(getent passwd "$uid" | cut -d: -f1 || true)"
+  if [ -n "$by_uid" ] && [ "$by_uid" != "$user" ]; then
+    die "uid $uid is taken by the account $by_uid, not $user"
   fi
-  useradd --create-home --uid "$uid" --gid "$uid" --shell /bin/bash "$user"
+  if [ -z "$by_uid" ]; then
+    getent passwd "$user" >/dev/null 2>&1 && die "the account $user exists with a uid other than $uid"
+    if ! getent group "$uid" >/dev/null 2>&1; then
+      getent group "$user" >/dev/null 2>&1 && die "the group $user exists with a gid other than $uid"
+      groupadd --gid "$uid" "$user"
+    fi
+    useradd --create-home --uid "$uid" --gid "$uid" --shell /bin/bash "$user"
+  fi
+elif [ -x "$bwrap" ]; then
+  # The application would otherwise try the account it names (the manifest may set it) before bubblewrap.
+  unset HYPERLOOM_SPECIALIST_USER
+  echo "hosted layer: $no_account; no account is made, and the specialists run under the layer's bubblewrap ($bwrap)" >&2
+else
+  die "$no_account; and the layer has no bubblewrap ($bwrap) to confine them instead, so the specialists could not be kept from the application's credentials: start from a layer that has bin/bwrap (the layer image's does), or where a process can become uid and gid $uid"
 fi
+
+# The one bubblewrap the application launches agents with is this directory's: the image may have its own on PATH.
+HYPERLOOM_HOST_LAYER="$layer"
+export HYPERLOOM_HOST_LAYER
 
 # The CLI the specialists spawn from PATH; a copy of it for every account, not a path in a home.
 PATH="$layer/bin:$PATH"
