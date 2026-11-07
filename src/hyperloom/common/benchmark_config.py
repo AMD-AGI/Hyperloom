@@ -32,6 +32,9 @@ class AgentxLaunch:
     executable: str
     append_args: tuple[str, ...]
     remove_args: tuple[str, ...]
+    replace_args: bool
+    unset_env: tuple[str, ...]
+    source_files: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,9 @@ class BenchmarkPoint:
                 executable=_text(launch, "executable"),
                 append_args=_strings(launch.get("append_args"), source),
                 remove_args=_strings(launch.get("remove_args"), source),
+                replace_args=bool(launch.get("replace_args")),
+                unset_env=_strings(launch.get("unset_env"), source),
+                source_files=_mapping(launch.get("source_files"), source),
             ),
             torch_profiler=torch_profiler.get("enabled") is True,
             server_ready_timeout_s=_number(ready),
