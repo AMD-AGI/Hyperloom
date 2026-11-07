@@ -9,11 +9,12 @@ the paths only the app may reach; :meth:`Confinement.policy` turns it into a bub
 
 The sandbox starts from an empty root, so a path no bind shows does not exist inside; a credential inside a bound tree
 is hidden there: a directory by a mask, a file (or a login not made yet) by binding the tree entry by entry without it,
-since a mount over a file goes with the file's first rename and none covers one made later. The masked paths come from configuration, never from a list of tool names in code
-(:func:`credential_paths`): this process's home, the XDG directories, every environment variable that names a credential
-location, Hugging Face's login files, and the files the app registers in :data:`PRIVATE_PATHS` as it creates them. So
-nothing broad under a credential location is bound because a program lives there: :func:`toolchain_paths` binds a
-program's own directory, and its parent only away from those locations.
+since a mount over a file goes with the file's first rename and none covers one made later. The masked paths come from
+configuration, never from a list of tool names in code (:func:`credential_paths`): this process's home, the XDG
+directories, every environment variable that names a credential location, Hugging Face's login files, and the files
+the app registers in :data:`PRIVATE_PATHS` as it creates them. So nothing broad under a credential location is bound
+because a program lives there: :func:`toolchain_paths` binds a program's own directory, and its parent only away from
+those locations.
 
 Nothing is resolved through what an agent writes. A name in a tree the agent writes may be a symlink it left there, to
 any host path, or become one before the next launch; so a path reached through such a tree (looked up in a directory
@@ -344,8 +345,8 @@ class Confinement:
         also writable bound once, writable; a read-only path a read-only bind above already shows left out; the
         masked directories masked at every bound path that shows them, and a read-only tree that shows any other
         masked path (a file, or a login not made yet) bound entry by entry without it (:func:`_narrowed`); such a path
-        in a tree the agent writes stays a mask, which :meth:`BwrapPolicy.problems` refuses. ``scratch`` is bound at ``/tmp`` and ``/dev/shm`` (else each is
-        a fresh tmpfs); ``chdir`` is the working directory inside.
+        in a tree the agent writes stays a mask, which :meth:`BwrapPolicy.problems` refuses. ``scratch`` is bound at
+        ``/tmp`` and ``/dev/shm`` (else each is a fresh tmpfs); ``chdir`` is the working directory inside.
 
         Nothing is resolved through the trees the agent writes (the writable paths bound and ``scratch``), or may have
         written (:func:`_agent_trees`): a writable path below another, or reached through one, is left out (the one
@@ -499,10 +500,11 @@ def credential_paths(
     """The paths to mask in a child of this process, from this process's configuration and the child's: the home
     (``HOME``, else the passwd entry's; and this process's passwd entry's either way), the XDG directories, the value
     of every variable that names a credential location (``:``-separated entries split, only absolute existing paths)
-    and Hugging Face's login files (made yet or not, in its directory), each read from ``app_environ`` (default: this process's environment) and from
-    ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`. A location of the child's in a tree
-    it writes (``writable``, its scratch too when that is on the host: a home or tool directory re-pointed there) is
-    its own, and is not masked; one in a tree only in doubt (:func:`_agent_trees`, not bound) is.
+    and Hugging Face's login files (made yet or not, in its directory), each read from ``app_environ`` (default: this
+    process's environment) and from ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`. A
+    location of the child's in a tree it writes (``writable``, its scratch too when that is on the host: a home or
+    tool directory re-pointed there) is its own, and is not masked; one in a tree only in doubt (:func:`_agent_trees`,
+    not bound) is.
 
     A source that holds an ``allowed`` path (the policy's writable and readable paths) or a ``given`` one (handed to
     the child on purpose, so it stays readable) is not masked whole: its other entries are, down to :data:`HOME_DEPTH`
