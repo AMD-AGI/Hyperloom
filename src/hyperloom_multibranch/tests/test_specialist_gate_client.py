@@ -8,10 +8,12 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import fixed_workload
+from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, fixed_workload
 from hyperloom_multibranch.specialist.gate_client import GateClient
+from inference_suite import inferencex_root
 
 MODEL = "Qwen/Qwen3-14B-FP8"
 
@@ -23,11 +25,20 @@ def _canonical(tmp_path: Path, **envs: str) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def tool_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    cache = tmp_path / "tool-cache"
+    monkeypatch.setenv(TOOL_CACHE_ENV, str(cache))
+    return cache
+
+
 def _flag(words: list[str], flag: str) -> str:
     return words[words.index(flag) + 1]
 
 
-def test_the_client_sends_the_warmup_then_the_measured_pass_of_the_gate_s_round(tmp_path: Path) -> None:
+def test_the_client_sends_the_warmup_then_the_measured_pass_of_the_gate_s_round(
+    tmp_path: Path, tool_cache: Path
+) -> None:
     envs = {"ISL": "1024", "OSL": "1024", "CONC": "8", "RANDOM_RANGE_RATIO": "0.8", "NUM_PROMPTS": "80"}
     canonical = _canonical(tmp_path, **envs, NUM_WARMUPS="16", MAGPIE_TRUST_REMOTE_CODE="1")
     client = GateClient.read(canonical)
@@ -38,7 +49,7 @@ def test_the_client_sends_the_warmup_then_the_measured_pass_of_the_gate_s_round(
 
     for words in (warmup, measured):
         assert words[:4] == [
-            "PYTHONPATH=/opt/InferenceX/inferencex-e2e",
+            f"PYTHONPATH={inferencex_root(tool_cache)}",
             "python3",
             "-m",
             "infx.bench_serving.benchmark_serving",
@@ -55,6 +66,16 @@ def test_the_client_sends_the_warmup_then_the_measured_pass_of_the_gate_s_round(
         str(tmp_path / "out"),
         "inferencex_result.json",
     )
+
+
+def test_the_client_runs_from_the_staged_inferencex_the_gate_s_round_runs_not_the_canonical_checkout(
+    tmp_path: Path, tool_cache: Path
+) -> None:
+    client = GateClient.read(_canonical(tmp_path, ISL="128", OSL="128", CONC="4", NUM_PROMPTS="40", NUM_WARMUPS="0"))
+    assert client is not None
+
+    assert client.package_root == str(inferencex_root(tool_cache))
+    assert "/opt/InferenceX" not in client.command(8000, tmp_path / "out")
 
 
 def test_a_workload_without_warmups_is_the_measured_pass_alone(tmp_path: Path) -> None:

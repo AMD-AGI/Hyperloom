@@ -4,9 +4,9 @@
 """The benchmark client the rule gate measures every InferenceX test with, for an agent to measure its own A/Bs alike.
 
 It is inference_suite's fixed client on the canonical measurement's workload, as the toolbox's rendered canonical
-configuration names it: the warmup pass on its own seed, then the measured pass, each built by the function a round
-builds its passes with. A client of the agent's own sends other prompts, which route MoE tokens otherwise, so its A/Bs
-can rank kernels the other way round.
+configuration names it, run from the staged InferenceX the gate's round runs: the warmup pass on its own seed, then the
+measured pass, each built by the function a round builds its passes with. A client of the agent's own sends other
+prompts, which route MoE tokens otherwise, so its A/Bs can rank kernels the other way round.
 """
 
 from __future__ import annotations
@@ -18,14 +18,14 @@ from pathlib import Path
 import yaml
 
 from hyperloom.common.outside_facts import ENV_ISL
-from hyperloom.orchestrator.actions.executors import fixed_workload
+from hyperloom.orchestrator.actions.executors import fixed_workload, staged_tool_cache
 from inference_suite import (
-    INFERENCEX_PROJECT_DIR,
     ClientPass,
     ClientTarget,
     ClientTool,
     client_argv,
     client_env,
+    inferencex_root,
     warmup_pass,
 )
 from inference_suite.contracts import FixedWorkload
@@ -38,7 +38,8 @@ RESULT_FILE = "inferencex_result.json"
 
 @dataclass(frozen=True)
 class GateClient:
-    """The workload the gate's client sends: the InferenceX package it runs from, the model and the fixed load."""
+    """The workload the gate's client sends: the staged InferenceX root holding the ``infx`` package it runs from, the
+    model and the fixed load."""
 
     package_root: str
     model: str
@@ -53,8 +54,7 @@ class GateClient:
         bench = document["benchmark"]
         if ENV_ISL not in bench["envs"]:
             return None
-        package_root = Path(bench["inferencex_path"]) / INFERENCEX_PROJECT_DIR
-        return cls(str(package_root), str(bench["model"]), fixed_workload(document))
+        return cls(str(inferencex_root(staged_tool_cache())), str(bench["model"]), fixed_workload(document))
 
     def command(self, port: int, result_dir: Path) -> str:
         """The shell command that measures a server on ``port`` as the gate does, writing the measured result in
