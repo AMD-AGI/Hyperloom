@@ -8,12 +8,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import shlex
 from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import to_str_list
+from hyperloom.common.env_safety import is_allowed_external_env_key
 from hyperloom.common.launch_log_evidence import launch_argv_from_log, observed_server_identity_from_log
 from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
 from inference_suite.contracts.launch import Launch, LayerSource
@@ -23,9 +25,13 @@ from ..actions.executors._round_folder import read_round_launch
 from ..kernel.geak_config import _geak_overlay_digest
 from ._keep_patch_column import _source_snapshot_layers
 
+log = logging.getLogger(__name__)
+
 #: The layers of a round's launch that describe that round's runtime (model path, address, GPU mask, profiler), not
 #: the configuration a consumer reproduces on its own server.
 _ROUND_LAYERS = frozenset({LayerSource.GUARD, LayerSource.PROFILE})
+#: The runner's environment (its overlay path, its reap mark) belongs to the process that ran the round as well.
+_ROUND_ENV_LAYERS = _ROUND_LAYERS | {LayerSource.RUNNER}
 
 
 def _measured_launch(measurement: Mapping[str, Any]) -> Launch | None:
@@ -35,15 +41,24 @@ def _measured_launch(measurement: Mapping[str, Any]) -> Launch | None:
 
 
 def _reproduced_flags(launch: Launch) -> str:
-    return shlex.join(token for arg in launch.args if arg.source not in _ROUND_LAYERS for token in arg.tokens())
+    args = [arg for arg in launch.args if arg.source not in _ROUND_LAYERS]
+    # GEAK re-renders structured values shell-quoted and its native launchers expand the args unquoted, so a JSON or
+    # list value would reach the server with its quotes and fail to parse.
+    structured = [arg for arg in args if any(value[:1] in ("[", "{") for value in arg.values)]
+    if structured:
+        log.info("launch: structured-value flags not forwarded: %s", " ".join(arg.flag for arg in structured))
+    return shlex.join(token for arg in args if arg not in structured for token in arg.tokens())
 
 
 def _reproduced_env(launch: Launch) -> dict[str, str]:
-    # A redacted value is a secret launch.json records only by digest, so it cannot be handed on.
+    # A redacted value is recorded only by digest. Credential, loader and path names are env_safety's to refuse: they
+    # would be written into the handoff verbatim, or displace the overlay the env spec carries.
     return {
         entry.name: entry.value
         for entry in launch.env_sources
-        if entry.source not in _ROUND_LAYERS and isinstance(entry.value, str)
+        if entry.source not in _ROUND_ENV_LAYERS
+        and isinstance(entry.value, str)
+        and is_allowed_external_env_key(entry.name)
     }
 
 
