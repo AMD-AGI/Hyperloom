@@ -2,16 +2,18 @@
 # SPDX-License-Identifier: MIT
 
 """``python -m inference_suite``: ``run`` one round, ``stop`` the server a round left running, ``resolve`` a base,
-``stage`` the tools a round runs.
+``stage`` the tools a round runs, ``publish`` them where several hosts share them.
 
 ``run --config <config.yaml> --run-dir <dir>`` runs the round into ``<dir>``, prints its ``report.json`` path and
 exits 0 when the round completed, 1 when it did not. SIGTERM and SIGINT cancel the round, which still reaps what it
 started and writes its report. ``stop --pid-dir <dir>`` prints what it reaped as JSON and exits 1 while a process
 outlives SIGKILL. ``resolve --query <query.json> --gpus <n> --out <base_launch.json>`` reads the sources once and
 writes the base they give, or exits 2 naming why each source holds none. ``stage --tool-cache <dir> [--source
-<InferenceX checkout>] [--wheels <dir>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`),
-offline from a wheel directory when given one, and prints the manifest's sha256; it stages nothing into a cache that
-already verifies, and exits 2 with ``staging_missing`` when it cannot stage or the cache is damaged. Exit 2 is also a document that breaks its contract.
+<InferenceX checkout>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`) and prints the
+manifest's sha256; it stages nothing into a cache that already verifies, and exits 2 with ``staging_missing`` when it
+cannot stage or the cache is damaged. ``publish --stagings <dir> [--source <InferenceX checkout>]`` publishes the
+staging of the pins in force as ``<dir>/<key>`` (:func:`inference_suite.staging.publish`) and prints that directory,
+or exits 2 with ``staging_missing``. Exit 2 is also a document that breaks its contract.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from inference_suite.recipe.user_file import parse_user_file
 from inference_suite.run import run_round
 from inference_suite.runtime.process import PidfileError
 from inference_suite.runtime.server import stop
-from inference_suite.staging import StagingError, ensure_staged
+from inference_suite.staging import StagingError, ensure_staged, publish
 
 PROG = "python -m inference_suite"
 EXIT_OK = 0
@@ -119,10 +121,19 @@ def _resolve(args: argparse.Namespace) -> int:
 
 def _stage(args: argparse.Namespace) -> int:
     try:
-        digest = ensure_staged(args.tool_cache, args.source, args.wheels)
+        digest = ensure_staged(args.tool_cache, args.source)
     except StagingError as exc:
         return _refused(f"{FailedStep.STAGING_MISSING.value}: {exc}")
     print(digest)
+    return EXIT_OK
+
+
+def _publish(args: argparse.Namespace) -> int:
+    try:
+        published = publish(args.stagings, args.source)
+    except StagingError as exc:
+        return _refused(f"{FailedStep.STAGING_MISSING.value}: {exc}")
+    print(published)
     return EXIT_OK
 
 
@@ -147,10 +158,15 @@ def _parser() -> argparse.ArgumentParser:
     stage_parser.add_argument(
         "--source", type=Path, help="an InferenceX checkout at the pin; fetched at the pin when omitted"
     )
-    stage_parser.add_argument(
-        "--wheels", type=Path, help="stage offline: install the harness from this wheel directory alone, fetch nothing"
-    )
     stage_parser.set_defaults(handler=_stage)
+    publish_parser = commands.add_parser(
+        "publish", help="publish the staging of the pins in force in a shared directory"
+    )
+    publish_parser.add_argument("--stagings", type=Path, required=True, help="the directory published stagings live in")
+    publish_parser.add_argument(
+        "--source", type=Path, help="an InferenceX checkout at the pin; fetched at the pin when omitted"
+    )
+    publish_parser.set_defaults(handler=_publish)
     return parser
 
 

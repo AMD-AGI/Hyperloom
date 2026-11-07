@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -24,8 +25,10 @@ from inference_suite.pins import (
     LM_EVAL_DISTRIBUTION,
     LM_EVAL_REQUIREMENT,
     LM_EVAL_VERSION,
+    LM_EVAL_WHEEL_SHA256,
     PINNED_TOOLS,
 )
+from inference_suite.client_env import BUILD_FILE, STAGED_LOCK
 from inference_suite.staging import (
     AGENTX_AGGREGATOR_FILE,
     AGENTX_PYTHON,
@@ -43,6 +46,7 @@ from inference_suite.staging import (
     tool_root,
     verify,
 )
+from inference_suite.tests.client_env_fakes import WHEELS, FakeClient
 
 _CLIENT = "infx/bench_serving/benchmark_serving.py"
 _CLIENT_TEXT = "print('client')\n"
@@ -50,7 +54,8 @@ _INSTALL_SH = Path(__file__).resolve().parents[2] / "hyperloom" / "inference_opt
 _SRC = Path(__file__).resolve().parents[2]
 _SUITE_INSTALL_SH = _SRC / "inference_suite" / "install.sh"
 _SHA = "a" * 64
-_HARNESS_RECORD = "agentx-venv/lib/python3.12/site-packages/agentx_harness-1.0.13.dist-info/RECORD"
+_SITE = "agentx-python/lib/python3.12/site-packages"
+_RECORDS = {f"{_SITE}/{name.replace('-', '_')}-{version}.dist-info/RECORD" for name, version in WHEELS.items()}
 _REQUIREMENTS_TEXT = "agentx-harness==1.0.13\n"
 
 
@@ -95,10 +100,8 @@ _REAL_STAGING_STEP = staging._run_staging_step
 
 
 class _FakeInstall:
-    """Stands in for ``python -m venv`` and ``pip install``: lays down the files a real venv would, and records argv.
-
-    git runs for real, so a fetch reads the fixture checkout.
-    """
+    """Stands in for ``pip install`` into this interpreter (lm-eval), and records argv. git runs for real, so a fetch
+    reads the fixture checkout; the client environment is the fake build and wheel index of :class:`FakeClient`."""
 
     def __init__(self, *, fail: str | None = None) -> None:
         self.calls: list[list[str]] = []
@@ -111,20 +114,15 @@ class _FakeInstall:
         self.calls.append(list(argv))
         if self.fail is not None and self.fail in what:
             raise StagingError(f"{what} exited with code 1: no network")
-        if argv[0] == sys.executable and argv[1:3] == ["-m", "pip"]:
-            return
-        if argv[1:3] == ["-m", "venv"]:
-            venv = Path(argv[3])
-            (venv / "bin").mkdir(parents=True)
-            (venv / "bin" / "python").write_text("interpreter\n")
-        else:
-            record = Path(argv[0]).parents[1] / Path(_HARNESS_RECORD).relative_to("agentx-venv")
-            record.parent.mkdir(parents=True)
-            record.write_text("agentx_cli.py,sha256=x,58\n")
 
 
 @pytest.fixture
-def install(monkeypatch: pytest.MonkeyPatch) -> _FakeInstall:
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeClient:
+    return FakeClient(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def install(monkeypatch: pytest.MonkeyPatch, client: FakeClient) -> _FakeInstall:
     fake = _FakeInstall()
     monkeypatch.setattr(staging, "_run_staging_step", fake)
     return fake
@@ -150,7 +148,7 @@ def test_the_stage_digest_is_the_manifest_file_sha256_and_verifies_with_the_pin_
     assert report.manifest_sha256 == digest
 
 
-def test_staging_copies_the_client_the_task_the_agentx_aggregator_and_the_harness_venv_and_nothing_else(
+def test_staging_copies_the_client_the_task_the_agentx_aggregator_and_the_client_environment_and_nothing_else(
     staged,
 ) -> None:
     cache, commit, digest = staged
@@ -169,51 +167,46 @@ def test_staging_copies_the_client_the_task_the_agentx_aggregator_and_the_harnes
         AGENTX_AGGREGATOR_FILE,
         AGENTX_REQUIREMENTS,
         AGENTX_PYTHON,
-        _HARNESS_RECORD,
+        BUILD_FILE,
+        STAGED_LOCK,
+        *_RECORDS,
     }
     assert (root / _CLIENT).read_text() == _CLIENT_TEXT
     assert not (root / "infx/bench_serving/__pycache__").exists()
 
 
-def test_the_harness_venv_is_built_in_place_by_the_staging_interpreter_from_the_staged_requirements(
-    staged, install: _FakeInstall
+def test_the_normalised_manifest_is_the_pinned_build_the_lock_wheels_and_this_interpreters_lm_eval(
+    staged, client: FakeClient, monkeypatch
 ) -> None:
+    cache, commit, _ = staged
+    monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: LM_EVAL_VERSION}.get)
+
+    identity = inference_suite.normalised_manifest(cache)
+
+    assert client.downloads == [client.build.url]
+    assert identity.inferencex == commit
+    assert (identity.interpreter_version, identity.interpreter_sha256) == (client.build.version, client.build.sha256)
+    assert {package.name: package.wheel_sha256 for package in identity.packages} == {
+        **client.lock_shas(),
+        "lm-eval": LM_EVAL_WHEEL_SHA256,
+    }
+
+
+@pytest.mark.parametrize("installed", [None, "0.4.11"])
+def test_the_normalised_manifest_refuses_an_lm_eval_off_its_pin(staged, monkeypatch, installed) -> None:
     cache, _, _ = staged
-    root = inferencex_root(cache)
+    monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: installed}.get)
 
-    assert install.calls == [
-        [sys.executable, "-m", "venv", str(root / "agentx-venv")],
-        [
-            str(root / AGENTX_PYTHON),
-            "-m",
-            "pip",
-            "install",
-            "--no-input",
-            "--disable-pip-version-check",
-            "-r",
-            str(root / AGENTX_REQUIREMENTS),
-        ],
-    ]
-    assert (root / AGENTX_REQUIREMENTS).read_text() == _REQUIREMENTS_TEXT
+    with pytest.raises(StagingError, match=re.escape(LM_EVAL_REQUIREMENT)):
+        inference_suite.normalised_manifest(cache)
 
 
-def test_staging_refuses_an_interpreter_the_harness_does_not_support(tmp_path, monkeypatch, install) -> None:
+def test_a_client_environment_that_cannot_be_installed_leaves_no_manifest(tmp_path, monkeypatch, install, client):
     repo, commit = _checkout(tmp_path)
     monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
-    monkeypatch.setattr(staging, "AGENTX_PYTHON_VERSIONS", ((3, 11),))
+    next(client.index.glob("aiohttp-*")).write_bytes(b"another aiohttp")
 
-    with pytest.raises(StagingError, match="needs Python 3.11"):
-        stage(repo, tmp_path / "tools")
-    assert install.calls == []
-    assert not (tmp_path / "tools" / MANIFEST_FILE).exists()
-
-
-def test_a_harness_that_cannot_be_installed_leaves_no_manifest(tmp_path, monkeypatch) -> None:
-    repo, commit = _checkout(tmp_path)
-    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
-    monkeypatch.setattr(staging, "_run_staging_step", _FakeInstall(fail="installing"))
-
-    with pytest.raises(StagingError, match="installing the AgentX harness exited with code 1: no network"):
+    with pytest.raises(StagingError, match="downloading the wheels the AgentX client lock pins"):
         stage(repo, tmp_path / "tools")
     assert not (tmp_path / "tools" / MANIFEST_FILE).exists()
 
@@ -641,40 +634,130 @@ def test_install_sh_stages_with_the_inference_suite_beside_it_and_refuses_a_dama
     assert done.stderr.strip() == f"{FailedStep.STAGING_MISSING.value}: {task} (changed since staging)"
 
 
-def _harness_install(staged_root: Path, *offline: str) -> list[str]:
-    pip = [str(staged_root / AGENTX_PYTHON), "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
-    return [*pip, *offline, "-r", str(staged_root / AGENTX_REQUIREMENTS)]
+@pytest.fixture
+def publishing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install: _FakeInstall) -> tuple[Path, Path]:
+    """A fixture checkout pinned and the directory stagings are published in."""
+    repo, commit = _checkout(tmp_path)
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
+    return repo, tmp_path / "runner-cache" / "inference-suite"
 
 
-def test_stage_with_wheels_installs_the_harness_from_them_alone_and_installs_no_lm_eval(
-    pinned, install, tmp_path, capsys
+def _publishing_dirs(stagings: Path) -> list[str]:
+    return [path.name for path in stagings.iterdir() if path.name.startswith(staging.PUBLISHING_PREFIX)]
+
+
+def test_publish_renames_a_verified_staging_into_its_key_and_leaves_no_private_directory(publishing) -> None:
+    repo, stagings = publishing
+
+    published = staging.publish(stagings, repo)
+
+    assert published == stagings / staging.staging_key()
+    assert verify(published, staging.manifest_sha256(published)).failed_step is None
+    assert stat.S_IMODE(stagings.stat().st_mode) == 0o2775
+    assert _publishing_dirs(stagings) == []
+    assert (inferencex_root(published) / AGENTX_PYTHON).is_file()
+
+
+def test_publish_uses_a_published_staging_as_it_is(publishing, client: FakeClient) -> None:
+    repo, stagings = publishing
+    published = staging.publish(stagings, repo)
+    manifest_mtime = (published / MANIFEST_FILE).stat().st_mtime_ns
+
+    assert staging.publish(stagings, repo) == published
+    assert client.downloads == [client.build.url]
+    assert (published / MANIFEST_FILE).stat().st_mtime_ns == manifest_mtime
+
+
+def test_publish_refuses_a_published_staging_that_no_longer_verifies_and_leaves_it(publishing) -> None:
+    repo, stagings = publishing
+    published = staging.publish(stagings, repo)
+    task = inferencex_root(published) / GSM8K_TASK
+    task.write_text("edited\n")
+
+    with pytest.raises(StagingError, match="does not verify, and is never rewritten"):
+        staging.publish(stagings, repo)
+    assert task.read_text() == "edited\n"
+
+
+def test_a_change_to_any_input_gives_a_new_key(publishing, client: FakeClient, monkeypatch) -> None:
+    key = staging.staging_key()
+    client.lock.write_text(client.lock.read_text() + "# another lock\n")
+    assert staging.staging_key() != key
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: "e" * 40})
+    assert len({key, staging.staging_key()}) == 2
+
+
+def _race(monkeypatch: pytest.MonkeyPatch, other_stager) -> None:
+    """Run ``other_stager`` to completion while the first stager has staged but not yet renamed."""
+    real = staging._fsync_tree
+    raced: list[Path] = []
+
+    def fsync_then_lose(root: Path) -> None:
+        real(root)
+        if not raced:
+            raced.append(root)
+            other_stager()
+
+    monkeypatch.setattr(staging, "_fsync_tree", fsync_then_lose)
+
+
+def test_two_stagers_publish_one_staging_and_the_loser_removes_only_its_own_directory(publishing, monkeypatch) -> None:
+    repo, stagings = publishing
+    winner: list[Path] = []
+    _race(monkeypatch, lambda: winner.append(staging.publish(stagings, repo)))
+
+    loser = staging.publish(stagings, repo)
+
+    assert loser == winner[0] == stagings / staging.staging_key()
+    assert _publishing_dirs(stagings) == []
+    assert verify(loser, staging.manifest_sha256(loser)).failed_step is None
+
+
+def test_a_loser_refuses_a_winner_that_is_other_software_naming_the_packages(
+    publishing, client: FakeClient, monkeypatch, tmp_path
 ) -> None:
-    repo, cache = pinned
-    wheels = tmp_path / "wheels"
+    repo, stagings = publishing
+    monkeypatch.setattr(staging, "staging_key", lambda: "k" * 64)
+    wheel = client.index / "datasets-4.8.0-py3-none-any.whl"
+    wheel.write_bytes(b"datasets 4.8.0")
+    other_lock = tmp_path / "other.lock"
+    other_lock.write_text(
+        re.sub(
+            r"datasets==\S+ --hash=sha256:\w+",
+            f"datasets==4.8.0 --hash=sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}",
+            client.lock.read_text(),
+        )
+    )
 
-    assert _stage_cli(cache, "--source", str(repo), "--wheels", str(wheels)) == cli.EXIT_OK
-    offline = ("--no-index", "--find-links", str(wheels), "--only-binary=:all:")
-    assert _harness_install(inferencex_root(cache), *offline) in install.calls
-    assert not [call for call in install.calls if call[0] == sys.executable and "pip" in call]
+    def other_host() -> None:
+        with monkeypatch.context() as other:
+            other.setattr(staging.client_env, "AGENTX_LOCK", other_lock)
+            staging.publish(stagings, repo)
+
+    _race(monkeypatch, other_host)
+
+    with pytest.raises(StagingError, match=r"not the one staged here: datasets 4\.8\.0 .* 4\.7\.0"):
+        staging.publish(stagings, repo)
+    assert _publishing_dirs(stagings) == []
 
 
-@pytest.mark.parametrize("installed", [None, "0.4.11"])
-def test_stage_with_wheels_refuses_lm_eval_off_its_pin_instead_of_installing_it(
-    pinned, install, monkeypatch, tmp_path, capsys, installed
-) -> None:
-    repo, cache = pinned
-    monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: installed}.get)
+def test_publish_and_its_readers_skip_a_private_staging_directory(publishing) -> None:
+    repo, stagings = publishing
+    stray = stagings / f"{staging.PUBLISHING_PREFIX}{staging.staging_key()}-another-host"
+    stray.mkdir(parents=True)
+    (stray / MANIFEST_FILE).write_text("half written")
 
-    assert _stage_cli(cache, "--source", str(repo), "--wheels", str(tmp_path / "wheels")) == cli.EXIT_REFUSED
-    err = capsys.readouterr().err
-    assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and LM_EVAL_REQUIREMENT in err
-    assert install.calls == [] and not (cache / MANIFEST_FILE).exists()
+    published = staging.publish(stagings, repo)
+
+    assert published.name == staging.staging_key()
+    assert (stray / MANIFEST_FILE).read_text() == "half written"
 
 
-def test_stage_with_wheels_and_no_source_is_refused_without_fetching(pinned, install, tmp_path, capsys) -> None:
-    _, cache = pinned
+def test_the_publish_command_prints_the_published_directory_or_refuses_with_staging_missing(publishing, capsys):
+    repo, stagings = publishing
 
-    assert _stage_cli(cache, "--wheels", str(tmp_path / "wheels")) == cli.EXIT_REFUSED
-    err = capsys.readouterr().err
-    assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and "--source" in err
-    assert install.calls == []
+    assert cli.main(["publish", "--stagings", str(stagings), "--source", str(repo)]) == cli.EXIT_OK
+    assert capsys.readouterr().out.strip() == str(stagings / staging.staging_key())
+    (inferencex_root(stagings / staging.staging_key()) / GSM8K_TASK).unlink()
+    assert cli.main(["publish", "--stagings", str(stagings), "--source", str(repo)]) == cli.EXIT_REFUSED
+    assert capsys.readouterr().err.startswith(f"{FailedStep.STAGING_MISSING.value}: ")
