@@ -33,6 +33,8 @@ SHARED_FILE_MODE = 0o664
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _PROBE_PREFIX = ".hl-writable-"
+#: The suffix of the new file a writer makes beside the one it replaces.
+_TEMPORARY_SUFFIX = ".tmp"
 
 
 def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
@@ -91,7 +93,7 @@ def create_shared_file(path: Path) -> None:
 def write_shared_bytes(path: Path, data: bytes, *, mode: int = SHARED_FILE_MODE) -> None:
     """Write ``data`` to a new file beside ``path`` with ``mode`` and rename it over ``path``: the file is then this
     account's, whoever owned the one it replaced."""
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=_TEMPORARY_SUFFIX, dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
@@ -110,7 +112,7 @@ def open_shared_replacement(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
     process's file from the start. What was at ``path`` (another leg's file, a link a member of the group put there)
     is replaced, never opened. The caller closes the descriptor.
     """
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=_TEMPORARY_SUFFIX, dir=path.parent)
     try:
         os.fchmod(descriptor, mode)
         os.replace(temporary, path)
@@ -139,7 +141,7 @@ def create_new_shared_file(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
 def copy_shared_file(source: Path, path: Path, *, mode: int = SHARED_FILE_MODE) -> None:
     """Copy ``source`` to a new file beside ``path`` with ``mode`` and rename it over ``path``, as
     :func:`write_shared_bytes` does, without holding the content in memory."""
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=_TEMPORARY_SUFFIX, dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as handle, open(source, "rb") as content:
             shutil.copyfileobj(content, handle)
