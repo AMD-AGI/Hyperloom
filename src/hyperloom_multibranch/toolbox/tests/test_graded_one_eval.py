@@ -84,7 +84,6 @@ def _graded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **plan: Any) -> tup
         output_dir=tmp_path / "out",
         timeout_sec=900,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t-1",
         kind="accuracy",
         accuracy=True,

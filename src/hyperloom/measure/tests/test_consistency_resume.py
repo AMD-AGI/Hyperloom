@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import statistics
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -56,7 +55,6 @@ def _items(*ids: str, repeats: int = 2) -> list[ChecklistItem]:
             output_dir=output_dir,
             timeout_sec=60,
             cwd=str(output_dir),
-            magpie_python=sys.executable,
             task_id=task_id,
         )
 

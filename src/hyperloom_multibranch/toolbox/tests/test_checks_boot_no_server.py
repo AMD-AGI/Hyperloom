@@ -91,7 +91,6 @@ def test_a_merge_test_and_a_final_test_each_boot_exactly_one_server_which_answer
         output_dir=tmp_path / "out",
         timeout_sec=900,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t-1",
         short_prompts=plan,
     )

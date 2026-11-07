@@ -49,7 +49,7 @@ root = pathlib.Path(os.environ["HYPERLOOM_SANDBOX_ROOT"])
 work = root / "work"
 point = work / "point.yaml"
 point.write_text(yaml.safe_dump({{"benchmark": {{"envs": {{}}}}}}))
-call = TestCall(points=(point,), output_dir=work, timeout_sec=1, cwd=str(work), magpie_python="", task_id="t")
+call = TestCall(points=(point,), output_dir=work, timeout_sec=1, cwd=str(work), task_id="t")
 with own_tmpdir(call, os.environ):
     name = os.environ["E2B_SANDBOX_ID"]
     subprocess.run([sys.executable, "-c", {server!r}, name, {shared!r}, str(root), OWN_TMP_PREFIX], check=True)

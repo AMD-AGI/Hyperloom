@@ -121,7 +121,6 @@ class TestCall:
     output_dir: Path
     timeout_sec: int
     cwd: str
-    magpie_python: str
     task_id: str
     kind: Kind = "test"
     prep: Prep = "grid"

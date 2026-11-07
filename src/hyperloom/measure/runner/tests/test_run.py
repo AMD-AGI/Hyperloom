@@ -1126,7 +1126,6 @@ def test_a_prompt_set_the_sandbox_does_not_hold_is_spec_rejected_before_any_serv
         output_dir=tmp_path / "out",
         timeout_sec=60,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t",
         short_prompts=ShortPromptPlan.parse(SHORT_PROMPTS, "sheet"),
     )
@@ -1178,7 +1177,6 @@ def test_a_long_context_set_the_sandbox_does_not_hold_is_spec_rejected_before_an
         output_dir=tmp_path / "out",
         timeout_sec=60,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t",
         long_context=LongContextPlan.parse(LONG_CONTEXT, "sheet"),
     )

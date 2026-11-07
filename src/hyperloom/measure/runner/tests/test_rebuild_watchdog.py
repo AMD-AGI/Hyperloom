@@ -49,7 +49,7 @@ def _point(
 
 
 def _call(tmp_path: Path, *points: Path) -> TestCall:
-    return TestCall(points=points, output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), magpie_python="", task_id="t")
+    return TestCall(points=points, output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
 
 
 def _bench(point: Path) -> dict:
