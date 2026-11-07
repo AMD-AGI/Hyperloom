@@ -100,12 +100,6 @@ class _Grid:
         return [self.answers.get(name) or self.result(name)]
 
 
-@pytest.fixture(autouse=True)
-def magpie_backend(monkeypatch) -> None:
-    """The benchmark backend is read from the process environment; a test that does not pick one runs on Magpie."""
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
-
-
 @pytest.fixture
 def grid(monkeypatch, tmp_path) -> _Grid:
     fake = _Grid(tmp_path)
@@ -116,14 +110,19 @@ def grid(monkeypatch, tmp_path) -> _Grid:
 class _Server:
     """Stands in for the lifecycle helpers: a server that is eligible and records its teardowns."""
 
-    def __init__(self, monkeypatch, *, eligible: bool = True) -> None:
+    def __init__(self, monkeypatch, *, eligible: bool = True, survivors: tuple[int, ...] = ()) -> None:
         self.teardowns: list[dict[str, Any]] = []
         monkeypatch.setattr(
             local,
             "resolve_lifecycle_params",
             lambda path: {"eligible": eligible, "port": 8123, "framework": "sglang", "reason": "not eligible"},
         )
-        monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kw: self.teardowns.append(kw))
+
+        def teardown(slot: Path, lifecycle: dict[str, Any]) -> list[int]:
+            self.teardowns.append({"pid_dir": slot, **lifecycle})
+            return list(survivors)
+
+        monkeypatch.setattr(local, "teardown_variant_server", teardown)
 
 
 @pytest.fixture
@@ -727,18 +726,16 @@ def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server
     assert grid.calls[0]["recipe"].base_yaml_path == call.points[0]
 
 
-@pytest.mark.parametrize(
-    ("backend", "boot_envs"), [("magpie", {}), ("bypass", {"MAGPIE_RUN_PHASE": "server"})], ids=["magpie", "bypass"]
-)
-def test_an_agentx_boot_carries_only_what_its_backend_says(grid, server, tmp_path, monkeypatch, backend, boot_envs):
-    """An AgentX point has no evaluation round and no prompt count: its boot round keeps only the backend's phase."""
+def test_an_agentx_boot_pins_nothing(grid, server, tmp_path, monkeypatch):
+    """An AgentX point has no evaluation round and no prompt count, and no backend phase is said for a boot."""
     point = _agentx_point(tmp_path, monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
 
     _run(_call(tmp_path, point, prep="conc_sweep"))
 
     boot, *measured = grid.calls
-    assert boot["recipe"].base.extra_envs == boot_envs
+    assert boot["launch"].lifecycle_boot_only
+    assert boot["recipe"].base.extra_envs == {}
     assert all(c["recipe"].base.extra_envs is None for c in measured)
 
 
@@ -780,6 +777,17 @@ def test_a_boot_that_fails_steps_down_one_level_and_that_level_is_measured_on_th
     assert [r.point for r in outcome.rounds] == [1, 2]
     assert "stepping down" in outcome.stderr
     assert len(server.teardowns) == 2  # after the failed boot, and at the end
+
+
+def test_a_sweep_takes_its_server_down_through_its_pid_dir_and_names_what_outlived_it(monkeypatch, grid, tmp_path):
+    """The arm's server is reaped as every grid caller's is: by its pid_dir, which a suite round's server.pid is in."""
+    server = _Server(monkeypatch, survivors=(4242,))
+    call = _sweep_call(tmp_path, 8, 4)
+
+    outcome = _run(call)
+
+    assert server.teardowns == [{"pid_dir": Path(call.output_dir) / "server_arm", "framework": "sglang", "port": 8123}]
+    assert "server pids [4242] outlived SIGKILL" in outcome.stderr
 
 
 def test_when_no_level_boots_the_ladder_falls_back_to_one_server_per_level(grid, server, tmp_path):
@@ -1416,10 +1424,11 @@ class _Case:
         self.ran = tmp_path / "case-ran"
         self.events: list[str] = []
 
-        def teardown(**_: Any) -> None:
+        def teardown(slot: Path, lifecycle: dict[str, Any]) -> list[int]:
             self.events.append("teardown after the case" if self.ran.exists() else "teardown before the case")
+            return []
 
-        monkeypatch.setattr(local, "teardown_lifecycle_server", teardown)
+        monkeypatch.setattr(local, "teardown_variant_server", teardown)
 
 
 def _repro_point(directory: Path) -> Path:

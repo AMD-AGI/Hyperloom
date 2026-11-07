@@ -25,12 +25,10 @@ from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.socket import MeasurementTimeout, TestCall
 from hyperloom.measure.tests.phase_rounds import READY_ONLY_LOG, FakeClock, Rounds, Run, Script, StagedGrid, result
-from hyperloom.measure.tests.test_local_backend import (  # noqa: F401 - magpie_backend is the module's autouse fixture
+from hyperloom.measure.tests.test_local_backend import (
     _call,
     _graded_call,
-    _point,
     _sweep_call,
-    magpie_backend,
 )
 
 
@@ -41,7 +39,7 @@ def clock(monkeypatch) -> FakeClock:
     monkeypatch.setattr(
         local, "resolve_lifecycle_params", lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}
     )
-    monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kw: clock.advance(3.0))
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot, lifecycle: clock.advance(3.0) or [])
     return clock
 
 

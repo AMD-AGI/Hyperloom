@@ -73,7 +73,7 @@ def main() -> int:
         "framework": "sglang",
         "reason": "",
     }
-    local.teardown_lifecycle_server = lambda **kwargs: None  # type: ignore[assignment]
+    local.teardown_variant_server = lambda slot, lifecycle: []  # type: ignore[assignment]
     return runner_flow.run(root / "in", root / "out", scratch=root / "work" / "scratch", spec_wait_sec=60)
 
 

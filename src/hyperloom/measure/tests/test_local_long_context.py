@@ -28,7 +28,7 @@ from hyperloom.measure.short_prompts.tests.support import staged_plan as short_p
 from hyperloom.measure.tests.test_local_backend import _call, _point
 from hyperloom.measure.tests.test_local_short_prompts import _CheckGrid as _ShortGrid
 from hyperloom.measure.tests.test_local_short_prompts import _Servers as _ShortServers
-from hyperloom.measure.tests.test_local_short_prompts import cache, magpie_backend  # noqa: F401 - fixtures
+from hyperloom.measure.tests.test_local_short_prompts import cache  # noqa: F401 - fixtures
 
 SKIPPED = "long_context_check skipped: test failed"
 CONTEXT_FLAG_ENV = framework_registry.FRAMEWORKS["sglang"].extra_args_env

@@ -56,7 +56,7 @@ class _Servers:
             "resolve_lifecycle_params",
             lambda path: {"eligible": eligible, "port": self.port, "framework": framework, "reason": "not eligible"},
         )
-        monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kw: self.stop())
+        monkeypatch.setattr(local, "teardown_variant_server", lambda slot, lifecycle: self.stop() or [])
 
         self.flushes = 0
 
@@ -87,11 +87,6 @@ class _CheckGrid(_Grid):
         if lifecycle and self.servers.live is None and name not in self.answers:
             self.servers.start(name, lifecycle["port"])
         return await super().__call__(**kwargs)
-
-
-@pytest.fixture(autouse=True)
-def magpie_backend(monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
 
 
 @pytest.fixture
