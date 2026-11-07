@@ -19,8 +19,8 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _suite_config
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_DIR
 from hyperloom.orchestrator.actions.executors._suite_config import (
-    ACCURACY_DIR,
     TOOL_CACHE_ENV,
     AccuracyRound,
     SuiteRoundRefused,

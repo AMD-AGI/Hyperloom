@@ -315,87 +315,92 @@ class TestEvalContractFingerprint:
         assert fp == ""
 
 
-class TestTheAgentXValidityGate:
-    """AgentX runs no lm-eval; the error rate upstream gates on stands in.
+def _accuracy_round(slot, score):
+    """Write the lm-eval result an AgentX slot's accuracy round leaves below ``<slot>/accuracy/eval``."""
+    eval_dir = slot / ag.ACCURACY_DIR / "eval" / "model"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "results_2026.json").write_text(
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score}}}), encoding="utf-8"
+    )
 
-    ``parse_eval_results`` maps it onto the accuracy contract the same way the
-    scriptable quality gate does, and fails closed for the same reason: a run
-    that reported no rate is not comparable to one that did.
-    """
 
-    def _result(self, tmp_path, **fields):
-        ws = tmp_path / "benchmark_x"
-        ws.mkdir()
-        (ws / "inferencex_result.json").write_text(json.dumps(fields), encoding="utf-8")
-        return tmp_path
+def _error_rate(slot, **fields):
+    ws = slot / "benchmark_x"
+    ws.mkdir()
+    (ws / "inferencex_result.json").write_text(json.dumps(fields), encoding="utf-8")
+    return slot
 
-    def test_a_rate_inside_the_threshold_passes(self, tmp_path):
-        """0.722% is what a real 6-error / 831-request session reported."""
-        ws = self._result(tmp_path, request_error_rate=0.722)
-        out = ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")
-        assert out["accuracy"] == 1.0
-        assert out["task"] == "agentx_error_rate"
-        assert out["error_rate"] == pytest.approx(0.722)
 
-    def test_the_threshold_is_inclusive(self, tmp_path):
-        """Upstream rejects above the threshold, so exactly at it still passes."""
-        ws = self._result(tmp_path, request_error_rate=AGENTX_ERROR_RATE_THRESHOLD_PCT)
-        assert ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")["accuracy"] == 1.0
+class TestTheAgentXAccuracyGate:
+    """Outside MLPerf an AgentX slot is graded on the GSM8K score of its accuracy round, never on its error rate."""
 
-    def test_a_rate_past_the_threshold_fails(self, tmp_path):
-        """The unit is a percentage, so 25 is 25% and well past upstream's 10%."""
-        ws = self._result(tmp_path, request_error_rate=25.0)
-        out = ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")
-        assert out["accuracy"] == 0.0
-        assert out["error_rate"] == pytest.approx(25.0)
+    @pytest.fixture(autouse=True)
+    def _native_backend(self, monkeypatch):
+        monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
 
-    def test_a_result_without_a_rate_fails_closed(self, tmp_path):
-        """Unknown is not the same as valid; scoring it as a pass is how an
-        incomparable measurement reaches the leaderboard-comparable set."""
-        ws = self._result(tmp_path, output_throughput=300.0)
-        out = ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")
-        assert out["accuracy"] == 0.0
-        assert out["error_rate"] is None
-
-    def test_no_result_file_at_all_fails_closed(self, tmp_path):
+    def test_the_slot_reads_the_score_its_accuracy_round_wrote(self, tmp_path):
+        _accuracy_round(tmp_path, 0.945)
         out = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
-        assert out["accuracy"] == 0.0
+        assert (out["accuracy"], out["task"], out["metric"]) == (0.945, "gsm8k", "exact_match,strict-match")
 
-    def test_a_synthetic_session_never_reaches_this_gate(self, tmp_path):
-        """The mode is the only switch; the file's presence must not arm it."""
-        ws = self._result(tmp_path, request_error_rate=0.9)
-        out = ag.parse_eval_results(ws, framework="vllm")
-        assert out.get("task") != "agentx_error_rate"
+    def test_a_dropped_score_is_not_hidden_behind_a_clean_error_rate(self, tmp_path):
+        """#155 c5075: a candidate at 0.000 against a 0.945 baseline passed while the gate read 1.0 off its error
+        rate."""
+        _error_rate(tmp_path, request_error_rate=0.0)
+        _accuracy_round(tmp_path, 0.0)
+        assert ag.grade_accuracy(str(tmp_path), 0.945, framework="vllm", benchmark_mode="agentx") is False
+
+    def test_a_slot_without_an_accuracy_round_has_no_accuracy(self, tmp_path):
+        """The error rate no longer stands in for a score: a clean rate alone grades nothing."""
+        _error_rate(tmp_path, request_error_rate=0.0)
+        out = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
         assert out["accuracy"] is None
 
-    def test_the_gate_outranks_the_scriptable_quality_gate(self, tmp_path):
-        """An AgentX run is graded on its own signal even where a gate exists."""
-        ws = self._result(tmp_path, request_error_rate=0.007)
-        (ws / "benchmark_x" / "benchmark_report.json").write_text(
+    def test_an_eval_outside_the_accuracy_round_is_not_read(self, tmp_path):
+        (tmp_path / "results.json").write_text(
+            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
+        )
+        assert ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")["accuracy"] is None
+
+    def test_the_round_outranks_the_scriptable_quality_gate(self, tmp_path):
+        (tmp_path / "benchmark_report.json").write_text(
             json.dumps({"quality_gate": {"passed": False}}), encoding="utf-8"
         )
-        out = ag.parse_eval_results(ws, framework="xdit", benchmark_mode="agentx")
-        assert out["task"] == "agentx_error_rate"
-        assert out["accuracy"] == 1.0
+        _accuracy_round(tmp_path, 0.9)
+        assert ag.parse_eval_results(tmp_path, framework="xdit", benchmark_mode="agentx")["accuracy"] == 0.9
+
+    def test_a_synthetic_session_never_reaches_this_gate(self, tmp_path):
+        """The mode is the only switch; the round's presence must not arm it."""
+        _error_rate(tmp_path, request_error_rate=0.9)
+        assert ag.parse_eval_results(tmp_path, framework="vllm")["accuracy"] is None
 
 
-@pytest.mark.parametrize("rate,expected", [(0.0, 1.0), (0.25, 0.0)])
-def test_public_agentx_report_reaches_correctness_gate(tmp_path, rate, expected):
-    report = {
-        "scenario": "agentx",
-        "success": True,
-        "benchmark_valid": True,
-        "publishable": True,
-        "agentx_metrics": {
-            "execution_owner": "magpie",
-            "server_launch": {"owner": "magpie"},
-            "requests": {"error_rate": rate},
-        },
-    }
-    (tmp_path / "benchmark_report.json").write_text(json.dumps(report))
-    result = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
-    assert result["accuracy"] == expected
-    assert result["error_rate"] == rate * 100
+class TestTheMLPerfInlineGate:
+    """The MLPerf harness keeps grading on its inline score, admitted by the error rate."""
+
+    @pytest.fixture(autouse=True)
+    def _mlperf_backend(self, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+
+    def test_a_scored_run_inside_the_threshold_reads_its_inline_score(self, tmp_path):
+        _error_rate(
+            tmp_path, request_error_rate=AGENTX_ERROR_RATE_THRESHOLD_PCT, accuracy_score=0.8, accuracy_missing_turns=0
+        )
+        out = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
+        assert (out["accuracy"], out["task"]) == (0.8, "mlperf_agentic_inline")
+
+    @pytest.mark.parametrize(
+        "fields",
+        [{"request_error_rate": 25.0}, {}, {"request_error_rate": 0.0, "accuracy_missing_turns": 1}],
+        ids=["past_threshold", "no_rate", "unscored_turn"],
+    )
+    def test_a_run_the_harness_could_not_score_drops_to_zero(self, tmp_path, fields):
+        _error_rate(tmp_path, **{"accuracy_score": 0.8, "accuracy_missing_turns": 0, **fields})
+        assert ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")["accuracy"] == 0.0
+
+    def test_an_accuracy_round_is_not_read(self, tmp_path):
+        _accuracy_round(tmp_path, 0.9)
+        assert ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")["accuracy"] == 0.0
 
 
 class TestParseAgentXErrorRate:

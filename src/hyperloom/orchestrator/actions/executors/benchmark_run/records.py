@@ -213,6 +213,19 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     return not (params or {}).get("quality_ref_exempt")
 
 
+def record_eval_score(result: dict[str, Any], eval_data: Mapping[str, Any]) -> bool:
+    """Copy the score ``parse_eval_results`` read into ``result``; False when it read none."""
+    accuracy = eval_data.get("accuracy")
+    if accuracy is None:
+        return False
+    result["accuracy"] = accuracy
+    result["accuracy_task"] = eval_data.get("task", "gsm8k")
+    result["accuracy_metric"] = eval_data.get("metric", "")
+    result["accuracy_source"] = eval_data.get("source_file", "")
+    result["eval_runtime_sec"] = eval_data.get("eval_runtime_sec")
+    return True
+
+
 def _requested_framework(params: dict[str, Any]) -> str | None:
     return str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
 

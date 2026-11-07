@@ -3,8 +3,8 @@
 
 """A candidate whose throughput cleared the KEEP threshold runs the D9 accuracy round into ``<slot>/accuracy``.
 
-The gates still grade AgentX accuracy through ``parse_eval_results``; these tests pin only that the round runs, where,
-under which lease and cap, and that its failure never turns into a verdict.
+These tests pin that the round runs, where, under which lease and cap, that its failure never turns into a verdict of
+its own, and that the gate reads the score it wrote.
 """
 
 from __future__ import annotations
@@ -17,7 +17,8 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.actions.executors._grid_base import VARIANT_CONFIG_FILE, variant_config_of
-from hyperloom.orchestrator.actions.executors._suite_config import ACCURACY_DIR, AccuracyRound
+from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_DIR
+from hyperloom.orchestrator.actions.executors._suite_config import AccuracyRound
 from hyperloom.orchestrator.actions.executors.benchmark_run import accuracy
 from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import (
     ACCURACY_ROUND_KEY,
@@ -269,3 +270,30 @@ def test_a_failed_accuracy_round_keeps_the_enablement_verdict_with_a_warning(tmp
     assert result["status"] == "kept"
     assert result["bench_result"][ACCURACY_ROUND_KEY]["error_class"] == "eval_failed"
     assert "agentx_accuracy_round_failed" in result["bench_result"]["nonfatal_warnings"]
+
+
+@pytest.mark.parametrize(
+    ("score", "outcome", "reason"),
+    [(0.94, "KEEP", ""), (0.0, "REVERT", "accuracy_drop"), (None, "REVERT", "accuracy_unavailable")],
+    ids=["held", "dropped", "no_round"],
+)
+def test_an_explore_slot_is_gated_on_the_score_its_accuracy_round_wrote(tmp_path, monkeypatch, score, outcome, reason):
+    from hyperloom.orchestrator.actions.executors.explore import _ExploreRound
+
+    monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
+    slot = tmp_path / "variant_00"
+    (slot / "benchmark_1").mkdir(parents=True)
+    (slot / "benchmark_1" / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}))
+    if score is not None:
+        eval_dir = slot / ACCURACY_DIR / "eval" / "model"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "results_gsm8k.json").write_text(
+            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score}}})
+        )
+    explore = object.__new__(_ExploreRound)
+    explore.framework, explore.baseline_accuracy, explore.ss = "sglang", 0.945, SharedState(benchmark_mode=_AGENTX)
+    row: dict = {"gates": [], "reason": ""}
+
+    explore._apply_accuracy_gate(row, slot)
+
+    assert (row["outcome"], row["reason"]) == (outcome, reason)

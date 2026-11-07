@@ -5,7 +5,7 @@
 
 :func:`run_accuracy_round` is the one entry to the D9 accuracy round of a slot, which the baseline runs here once its
 throughput round succeeded, and a candidate gate through :func:`run_candidate_accuracy_round` once its throughput
-cleared the KEEP threshold. Its score is not read yet: the gates still take AgentX accuracy from
+cleared the KEEP threshold. Every gate, the baseline's included, reads the round's score through
 ``parse_eval_results``.
 """
 
@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import RUN_
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
+from .._accuracy_gate import parse_eval_results
 from .._failed_step import failed_step_error_class
 from .._grid_runner import _num_gpus_for_config, session_grid_bounds
 from .._ray_serving import ServingLease, maybe_serving_lease
@@ -35,6 +36,7 @@ from .records import (
     _iter_log_tails,
     _requested_framework,
     _should_establish_quality_ref,
+    record_eval_score,
 )
 
 if TYPE_CHECKING:
@@ -75,13 +77,13 @@ class AccuracyRoundOutcome:
         return {"run_dir": str(self.run_dir), "error_class": self.error_class}
 
 
+def _native_agentx(state: Any) -> bool:
+    return agentx_active(benchmark_mode=getattr(state, _BENCHMARK_MODE_ATTR, "")) and not is_mlperf_backend()
+
+
 def accuracy_round_due(state: Any) -> bool:
     """Whether the session ``state`` runs the D9 accuracy round: native AgentX outside MLPerf, and not opted out."""
-    return (
-        agentx_active(benchmark_mode=getattr(state, _BENCHMARK_MODE_ATTR, ""))
-        and not is_mlperf_backend()
-        and state.agentx_accuracy
-    )
+    return _native_agentx(state) and state.agentx_accuracy
 
 
 async def run_accuracy_round(request: AccuracyRound, *, session: Path) -> AccuracyRoundOutcome:
@@ -317,6 +319,9 @@ class _BaselineAccuracyMixin:
             deadline_unix(session_grid_bounds(state)[0]),
         )
         record_accuracy_round(result, await run_accuracy_round(request, session=self.session_dir))
+        eval_data = parse_eval_results(slot, _requested_framework(params), state.benchmark_mode)
+        if not record_eval_score(result, eval_data):
+            log.warning("baseline_executor: the accuracy round left no score: %s", eval_data.get("error"))
 
     @staticmethod
     def _accuracy_stop_death_evidence(result: dict[str, Any]) -> str:
@@ -445,6 +450,10 @@ class _BaselineAccuracyMixin:
         # A failed status must NOT skip straight past the salvage below.
         if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
             return
+        shared_state = ctx.extra.get("shared_state") or self.shared_state
+        # An AgentX session that opted out of the accuracy round has no reference by design; its gates skip accuracy.
+        if _native_agentx(shared_state) and not shared_state.agentx_accuracy:
+            return
         acc = result.get("accuracy")
         eval_enablement = self._eval_enablement_active(ctx)
         from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR, accuracy_meets_floor
@@ -458,7 +467,6 @@ class _BaselineAccuracyMixin:
         if accuracy_meets_floor(acc, usable_floor):
             return
         framework = _requested_framework(params)
-        shared_state = ctx.extra.get("shared_state") or self.shared_state
         # Session-level salvage (complements #942): the cold-start guard and the coordinator's retries each run in
         # their own ``runs/baseline/<attempt>`` dir. #942 keeps every attempt's eval output inside that attempt's
         # ``$RESULT_DIR``, but the accuracy-stop decision runs on the *deciding* attempt -- whose dir can be empty
@@ -603,8 +611,6 @@ class _BaselineAccuracyMixin:
             return None
         try:
             from hyperloom.common.gain_math import finite_score
-
-            from .._accuracy_gate import parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
         except (OSError, ValueError, AttributeError, TypeError):
