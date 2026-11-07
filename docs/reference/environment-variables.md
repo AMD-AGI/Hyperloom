@@ -752,8 +752,12 @@ deployments.
    agent sandbox's commands (`choose_sandbox_isolation()`), which run as the app's own account.
 2. **bubblewrap**: the agent runs in a sandbox that starts from an empty root (`hyperloom_common/bwrap.py`): only the
    paths its confinement binds exist inside, read-only unless they are its work trees; the credential locations inside
-   a bound tree are masked (the app's home and XDG directories, every path an environment variable with a
-   credential-shaped name points at, Hugging Face's login files, and the files the app registers); it has its own
+   a bound tree (the app's home and XDG directories, every path an environment variable with a credential-shaped name
+   points at, Hugging Face's login files, and the files the app registers, each whether or not it exists yet) are
+   absent: a read-only tree that holds one is bound entry by entry without it, so a login the app rewrites (git's
+   lockfile and rename) or makes while the agent runs (a first Hugging Face login) never shows inside, nor does a
+   file the app adds to a directory opened up that way; in a work tree a credential directory is masked with an
+   empty tmpfs, and a credential file refuses the launch; it has its own
    user, pid and IPC namespaces, its own `/proc`, no capability and `no_new_privs`, and shares the app's network
    (loopback MCP). A program's own directory is bound, and its parent only away from those credential locations, so
    a native install under `~/.local/bin` does not make the rest of `~/.local` readable. Nothing is bound, run or
@@ -804,7 +808,7 @@ bubblewrap's own line; the usual causes:
 | `bwrap: setting up uid map: Permission denied` | The kernel created the user namespace without capabilities: with `kernel.apparmor_restrict_unprivileged_userns=1` it does so for a process without `CAP_SYS_ADMIN`. |
 | `bwrap: Creating new namespace failed: ...` | `user.max_user_namespaces` is 0 or used up, or a seccomp or AppArmor profile denies `unshare`. |
 | `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | The container's `/proc` has entries mounted over it (masked paths). |
-| `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`. |
+| `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`: the `unshare` on `PATH` for a bubblewrap found there, and for a hosting layer's only the `unshare` beside it, without which the host must make the root mount private first (`mount --make-rprivate /`, which the hosted `start.sh` does). |
 
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they

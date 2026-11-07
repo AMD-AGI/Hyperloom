@@ -8,7 +8,11 @@ the paths only the app may reach; :meth:`Confinement.policy` turns it into a bub
 :class:`~hyperloom_common.bwrap.BwrapPolicy`.
 
 The sandbox starts from an empty root, so a path no bind shows does not exist inside; a mask is needed only for a
-credential inside a bound tree. The masked paths come from configuration, never from a list of tool names in code
+credential inside a bound tree. A read-only bind that shows one is narrowed to the entries beside it, so the location
+is absent inside and stays so when the app replaces a login there or makes one during a task (a mount over a file
+would go with its first rename, and a path with nothing there yet has no mount at all); in a writable tree a credential
+directory is masked with an empty tmpfs. The masked paths come from configuration, never from a list of tool names in
+code
 (:func:`credential_paths`): this process's home, the XDG directories, every environment variable that names a credential
 location, Hugging Face's login files, and the files the app registers in :data:`PRIVATE_PATHS` as it creates them. So
 nothing broad under a credential location is bound because a program lives there: :func:`toolchain_paths` binds a
@@ -226,19 +230,66 @@ def _shown_elsewhere(bind: _Bind, kept: Iterable[_Bind]) -> bool:
     return not bind.writable and not max(above, key=lambda other: len(other.inside.parts)).writable
 
 
-def _translated(masked: Iterable[Path], binds: Iterable[_Bind]) -> tuple[str, ...]:
-    """The masks at every path inside that shows them (a mask outside every bind is left out: nothing is there), each
-    once and none below another (a mask hides what is below it, and is read-only)."""
+def _translated(masked: Iterable[Path], binds: Iterable[_Bind]) -> tuple[Path, ...]:
+    """The masks at every path inside that shows them, whether or not anything is there yet (a mask outside every bind
+    is left out: nothing is there, nor can be), each once and none below another (a mask hides what is below it, and
+    is read-only)."""
     shown = [bind for bind in binds if not bind.link]
     found: dict[Path, None] = {}
     for mask in masked:
-        if not os.path.lexists(mask):
-            continue
         real = _real(mask)
         for bind in shown:
             if _at_or_under(real, bind.real):
                 found[bind.inside / real.relative_to(bind.real)] = None
-    return tuple(str(mask) for mask in found if not any(other in mask.parents for other in found))
+    return tuple(mask for mask in found if not any(other in mask.parents for other in found))
+
+
+def _hidden(bind: _Bind, masks: Iterable[Path]) -> tuple[Path, ...]:
+    """The masks at or below ``bind`` when it is read-only (:func:`_narrow`); none for a writable one."""
+    if bind.writable or bind.link:
+        return ()
+    return tuple(mask for mask in masks if _at_or_under(mask, bind.inside))
+
+
+def _narrowed(bind: _Bind, hidden: tuple[Path, ...]) -> Iterator[_Bind]:
+    """``bind`` without the paths ``hidden`` below it: its entries bound one by one, those that hold a hidden path
+    opened up the same way, the hidden ones left out. Inside, a directory on the way is the sandbox's own, so a file
+    the host replaces or creates there later never shows. An entry that is a link is yielded as such
+    (:attr:`_Bind.link`); :func:`_narrow` keeps it only where another bind shows its target."""
+    if bind.inside in hidden:
+        return
+    try:
+        names = sorted(os.listdir(bind.real))
+    except OSError:
+        return
+    for name in names:
+        inside, real = bind.inside / name, bind.real / name
+        below = tuple(mask for mask in hidden if _at_or_under(mask, inside))
+        if inside in below:
+            continue
+        if below and inside.is_dir() and not inside.is_symlink():
+            yield from _narrowed(_Bind(inside, real, bind.writable), below)
+        else:
+            yield _Bind(inside, _real(real) if inside.is_symlink() else real, bind.writable)
+
+
+def _narrow(binds: list[_Bind], masked: Iterable[Path]) -> list[_Bind]:
+    """``binds`` with each read-only one that shows a mask replaced by its entries without it (:func:`_narrowed`), so
+    a credential location there is absent inside: a mount over a file goes with the file's first rename, a path with
+    nothing there yet has no mount to cover what the app creates later, and a directory narrowed around a mask (a
+    home opened up around what the agent needs) shows no login the app makes in it later either. An entry that is
+    also bound writable is left to that bind, and a link among the entries stays only where a bind kept shows its
+    target (bound, it would show its target itself). A writable bind is kept as it is, with its masks: one there that
+    is not a directory is refused (:meth:`~hyperloom_common.bwrap.BwrapPolicy.problems`)."""
+    masks = _translated(masked, binds)
+    found: list[_Bind] = []
+    for bind in binds:
+        hidden = _hidden(bind, masks)
+        found.extend(_narrowed(bind, hidden) if hidden else (bind,))
+    writable = {bind.inside for bind in found if bind.writable and not bind.link}
+    found = [bind for bind in dict.fromkeys(found) if bind.writable or bind.link or bind.inside not in writable]
+    shown = [bind.real for bind in found if not bind.link]
+    return [bind for bind in found if not bind.link or any(_at_or_under(bind.real, real) for real in shown)]
 
 
 @dataclass(frozen=True)
@@ -259,8 +310,9 @@ class Confinement:
         """The bubblewrap policy: missing paths dropped; each path bound at its resolved path, and at the given one
         too where that differs (a link becomes the same link inside, ``/bin -> usr/bin``); a readable path that is
         also writable bound once, writable; a read-only path a read-only bind above already shows left out; the
-        masks at every bound path that shows them. ``scratch`` is bound at ``/tmp`` and ``/dev/shm`` (else each is
-        a fresh tmpfs); ``chdir`` is the working directory inside.
+        masks at every bound path that shows them, a read-only bind that shows one narrowed to the entries beside it
+        (:func:`_narrow`). ``scratch`` is bound at ``/tmp``
+        and ``/dev/shm`` (else each is a fresh tmpfs); ``chdir`` is the working directory inside.
 
         Nothing is resolved through the trees the agent writes (the writable paths bound and ``scratch``), or may have
         written (:func:`_agent_trees`): a writable path below another, or reached through one, is left out (the one
@@ -280,11 +332,11 @@ class Confinement:
         taken = {bind.inside for bind in writable}
         readable = [bind for bind in dict.fromkeys(_binds(self.readable, False)) if bind.inside not in taken]
         candidates = [*writable, *readable]
-        kept = [bind for bind in candidates if not _shown_elsewhere(bind, candidates)]
+        kept = _narrow([bind for bind in candidates if not _shown_elsewhere(bind, candidates)], self.masked)
         return BwrapPolicy(
             read_only=tuple(str(bind.inside) for bind in kept if bind.link or not bind.writable),
             writable=tuple(str(bind.inside) for bind in kept if bind.writable and not bind.link),
-            masked=_translated(self.masked, kept),
+            masked=tuple(map(str, _translated(self.masked, kept))),
             devices=tuple(map(str, self.devices)),
             tmp=scratch.tmp if scratch else None,
             shm=scratch.shm if scratch else None,
@@ -385,10 +437,13 @@ def _opened_up(directory: Path, visible: tuple[Path, ...], depth: int) -> list[P
 
 
 def _masks_for(path: Path, visible: tuple[Path, ...]) -> list[Path]:
-    """``path`` itself when nothing of ``visible`` is at or below it; else its entries, opened up around them."""
+    """``path`` itself when nothing of ``visible`` is at or below it, whether or not anything is there yet (a login
+    made during a task lands there); else its entries, opened up around them."""
     real = _real(path)
-    if not real.exists() or real == _ROOT:
+    if real == _ROOT:
         return []
+    if not real.exists():
+        return [real]
     if not any(_at_or_under(shown, real) for shown in visible):
         return [real]
     if real in visible or not real.is_dir():
@@ -408,14 +463,16 @@ def credential_paths(
     (``HOME``, else the passwd entry's; and this process's passwd entry's either way), the XDG directories, the value
     of every variable that names a credential location (``:``-separated entries split, only absolute existing paths)
     and Hugging Face's login files, each read from ``app_environ`` (default: this process's environment) and from
-    ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`. A location of the child's in a tree
+    ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`; each whether or not anything is there
+    yet (a login made during a task creates it), none below another. A location of the child's in a tree
     it writes (``writable``, its scratch too when that is on the host: a home or tool directory re-pointed there) is
     its own, and is not masked; one in a tree only in doubt (:func:`_agent_trees`, not bound) is.
 
     A source that holds an ``allowed`` path (the policy's writable and readable paths) or a ``given`` one (handed to
     the child on purpose, so it stays readable) is not masked whole: its other entries are, down to :data:`HOME_DEPTH`
     levels. ``given`` paths themselves are never masked, nor is ``/``. :meth:`Confinement.policy` keeps only the masks
-    a bind shows. An ``allowed`` or ``given`` path reached through a tree the child writes, or may have written,
+    a bind shows, and narrows a read-only bind around them. An ``allowed`` or ``given`` path
+    reached through a tree the child writes, or may have written,
     counts for nothing here: the agent decides where it points (a link to a credential in a readable tree, left for
     the next launch), and the tree shows it already.
     """
@@ -428,7 +485,7 @@ def credential_paths(
     masks: dict[Path, None] = {}
     for source in dict.fromkeys(source for source in sources if source is not None):
         masks.update(dict.fromkeys(_masks_for(source, shown)))
-    return tuple(masks)
+    return tuple(mask for mask in masks if not any(other in mask.parents for other in masks))
 
 
 #: Run by the child's interpreter with no site processing and no ``PYTHON*`` variable (``-I -S``), so no ``.pth``

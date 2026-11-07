@@ -27,6 +27,8 @@ from hyperloom.common.confinement import (
 )
 
 PROBE = BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ())
+#: A home that does not exist: still a credential location, where a login made later would land.
+NO_HOME = Path("/nonexistent-home")
 
 
 @pytest.fixture
@@ -64,6 +66,11 @@ def _masks(environ: dict[str, str], **kwargs) -> set[Path]:
     return set(credential_paths(environ, **{"app_environ": {}, **kwargs}))
 
 
+def _hf_logins(home: Path) -> set[Path]:
+    """Hugging Face's login files under ``home``'s default cache, whether or not they exist."""
+    return {home / ".cache" / "huggingface" / login for login in ("token", "stored_tokens")}
+
+
 def _write(path: Path, text: str = "x") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="ascii")
@@ -98,7 +105,8 @@ def test_an_allowed_path_below_the_home_opens_up_only_its_ancestors(home, writte
         home / ".ssh",
         home / "scratch" / "other",
         home / "scratch/a/notes.txt",
-    }
+        *_hf_logins(home),
+    }, "Hugging Face's login files too, where a login during the task would create them"
     assert not any(worktree == mask or mask in worktree.parents for mask in found)
 
 
@@ -137,16 +145,15 @@ def test_every_variable_that_names_a_credential_location_is_masked(tmp_path):
         "TOKENIZERS_PARALLELISM": "false",
         "UNRELATED_DIR": str(tmp_path),
     }
-    assert _masks(environ) == {key, kube, token, secret_dir}
+    assert _masks(environ) == {key, kube, token, secret_dir, NO_HOME}
 
 
 def test_hugging_faces_login_files_are_masked_and_its_cache_is_not(tmp_path):
     hf = tmp_path / "hf"
     (hf / "hub").mkdir(parents=True)
     (hf / "token").write_text("hf_x", encoding="ascii")
-    (hf / "stored_tokens").write_text("hf_y", encoding="ascii")
-    found = _masks({"HOME": "/nonexistent-home", "HF_HOME": str(hf)}, allowed=[hf])
-    assert found == {hf / "token", hf / "stored_tokens"}
+    found = _masks({"HOME": str(NO_HOME), "HF_HOME": str(hf)}, allowed=[hf])
+    assert found == {hf / "token", hf / "stored_tokens", NO_HOME}, "stored_tokens before any login made it"
 
 
 def test_xdg_directories_outside_the_home_and_registered_files_are_masked(tmp_path, monkeypatch):
@@ -156,11 +163,11 @@ def test_xdg_directories_outside_the_home_and_registered_files_are_masked(tmp_pa
     registry = PrivatePaths()
     registry.add(private, "hosted state dir")
     registry.add(private, "registered twice")
-    environ = {"HOME": "/nonexistent-home", "XDG_CONFIG_HOME": str(config), "XDG_STATE_HOME": str(state)}
+    environ = {"HOME": str(NO_HOME), "XDG_CONFIG_HOME": str(config), "XDG_STATE_HOME": str(state)}
     assert registry.paths() == (private,)
-    assert _masks(environ) == {config, state}, "the process registry is empty"
+    assert _masks(environ) == {config, state, NO_HOME}, "the process registry is empty"
     monkeypatch.setattr(confinement, "PRIVATE_PATHS", registry)
-    assert _masks(environ) == {config, state, private}
+    assert _masks(environ) == {config, state, private, NO_HOME}
 
 
 def test_a_given_path_stays_readable_even_inside_the_masked_home(home):
@@ -172,8 +179,8 @@ def test_a_given_path_stays_readable_even_inside_the_masked_home(home):
 
 def test_the_root_directory_is_never_a_mask_nor_opened_up(home):
     """Opened up around ``/usr``, a home of ``/`` would mask ``/etc``, ``/opt``, ``/root`` and the rest."""
-    assert _masks({"HOME": "/", "SOME_TOKEN_DIR": "/"}, allowed=[Path("/usr")]) == set()
-    assert credential_paths({}, app_environ={"HOME": "/"}, allowed=[Path("/usr")]) == ()
+    assert _masks({"HOME": "/", "SOME_TOKEN_DIR": "/"}, allowed=[Path("/usr")]) == _hf_logins(Path("/"))
+    assert set(credential_paths({}, app_environ={"HOME": "/"}, allowed=[Path("/usr")])) == _hf_logins(Path("/"))
 
 
 def test_this_processs_own_credential_locations_are_masked_whatever_the_child_is_given(tmp_path, monkeypatch):
@@ -192,7 +199,8 @@ def test_this_processs_own_credential_locations_are_masked_whatever_the_child_is
     assert {kube, home} <= set(found)
     assert work / ".home" not in found, "the child's own home, in the tree it writes"
     policy = Confinement(writable=(work,), readable=(tools,), masked=found).policy()
-    assert policy.masked == (str(kube),)
+    assert policy.read_only == (str(tools / "bin"),), "the readable tree narrowed around the kube config"
+    assert policy.masked == () and _absent_inside(kube, policy)
     monkeypatch.setenv("KUBECONFIG", str(kube))
     assert kube in credential_paths(child, allowed=[tools]), "this process's environment by default"
 
@@ -649,10 +657,62 @@ def test_a_relative_program_path_binds_nothing_wherever_it_lies(tmp_path, monkey
 
 
 def test_masks_are_only_paths_a_bind_shows(tmp_path):
+    """In a tree the agent writes, a credential directory is masked; one no bind shows does not exist inside."""
+    tree = tmp_path / "tree"
+    logins, elsewhere = tree / "logins", tmp_path / "home" / ".aws"
+    for directory in (logins, elsewhere, tree / "data"):
+        directory.mkdir(parents=True)
+    policy = Confinement(writable=(tree,), masked=(logins, elsewhere, tmp_path / "missing")).policy()
+    assert policy.masked == (str(logins),), "a credential no bind shows does not exist inside: nothing to mask"
+    assert policy.writable == (str(tree),)
+
+
+def test_a_read_only_bind_is_narrowed_around_a_credential_file_or_a_location_with_nothing_there_yet(tmp_path):
+    """Hugging Face's home, bound read-only, holds a login (``token``) and none yet (``stored_tokens``) beside the hub
+    cache: it is bound entry by entry without them, so neither shows inside, now or after the app replaces or creates
+    it; a credential directory deeper down is left out the same way. A link among the entries stays where another
+    bind shows its target, and goes where it would show a login."""
     hf = tmp_path / "hf"
-    token, elsewhere = _write(hf / "token"), _write(tmp_path / "home" / ".aws" / "credentials")
-    policy = Confinement(readable=(hf,), masked=(token, elsewhere, tmp_path / "missing")).policy()
-    assert policy.masked == (str(token),), "a credential no bind shows does not exist inside: nothing to mask"
+    token = _write(hf / "token")
+    _write(hf / "hub" / "model.txt")
+    (hf / "xet").mkdir()
+    (hf / "cache-link").symlink_to(hf / "hub")
+    (hf / "login-link").symlink_to(token)
+    _write(hf / "deep" / "visible")
+    _write(hf / "deep" / "auth" / "key")
+    (hf / "deep" / "secrets").mkdir()
+    masked = (token, hf / "stored_tokens", hf / "deep" / "auth" / "key", hf / "deep" / "secrets")
+
+    policy = Confinement(readable=(hf,), masked=masked).policy()
+
+    assert policy.read_only == tuple(str(hf / name) for name in ("cache-link", "deep/visible", "hub", "xet"))
+    assert policy.masked == ()
+    assert policy.problems((0, 13, 1)) == []
+    for path in (token, hf / "stored_tokens", hf / "login-link", hf / "deep" / "auth" / "key", hf / "deep" / "secrets"):
+        assert _absent_inside(path, policy), path
+    argv = policy.argv(PROBE, ["true"])
+    assert argv[argv.index(str(hf / "cache-link")) - 2 : argv.index(str(hf / "cache-link")) + 1] == [
+        "--symlink",
+        str(hf / "hub"),
+        str(hf / "cache-link"),
+    ], "the link stays a link to the bound hub cache"
+
+
+def test_a_narrowed_entry_also_bound_writable_is_bound_once_writable(tmp_path):
+    tree = tmp_path / "tree"
+    _write(tree / ".netrc")
+    _write(tree / "notes")
+    (tree / "work").mkdir()
+    policy = Confinement(writable=(tree / "work",), readable=(tree,), masked=(tree / ".netrc",)).policy()
+    assert (policy.read_only, policy.writable, policy.masked) == ((str(tree / "notes"),), (str(tree / "work"),), ())
+
+
+def test_a_credential_file_in_a_writable_tree_is_left_to_the_adapter_which_refuses_it(tmp_path):
+    work = tmp_path / "work"
+    token = _write(work / "token")
+    policy = Confinement(writable=(work,), masked=(token,)).policy()
+    assert policy.masked == (str(token),)
+    assert [problem for problem in policy.problems((0, 13, 1)) if "is not a directory" in problem]
 
 
 def test_a_mask_reached_through_a_linked_directory_is_masked_at_both_paths(tmp_path):
@@ -662,13 +722,14 @@ def test_a_mask_reached_through_a_linked_directory_is_masked_at_both_paths(tmp_p
     (tmp_path / "link").symlink_to(tmp_path / "real")
     given = tmp_path / "link" / "data"
     policy = Confinement(readable=(given,), masked=(secret,)).policy()
-    assert policy.read_only == (str(tmp_path / "real" / "data"), str(given))
-    assert policy.masked == (str(secret), str(given / "secret"))
+    assert policy.read_only == (str(tmp_path / "real" / "data" / "visible"), str(given / "visible"))
+    assert policy.masked == ()
+    assert _absent_inside(secret, policy) and _absent_inside(given / "secret", policy)
 
 
 def test_a_mask_below_another_mask_is_left_out(tmp_path):
     inner = _write(tmp_path / "tree" / "a" / "b")
-    policy = Confinement(readable=(tmp_path / "tree",), masked=(inner, tmp_path / "tree" / "a")).policy()
+    policy = Confinement(writable=(tmp_path / "tree",), masked=(inner, tmp_path / "tree" / "a")).policy()
     assert policy.masked == (str(tmp_path / "tree" / "a"),), "a mask below a read-only mask could not be mounted"
 
 
