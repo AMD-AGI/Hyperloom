@@ -28,11 +28,11 @@ from hyperloom.orchestrator.phases.kernel import KernelPhase
 def _RESOLVE(recipe_path: str) -> str:
     """Resolve from a recipe on disk, the way the handoff builder does.
 
-    The resolver takes the parsed ``benchmark`` mapping so the handoff can read
+    The resolver takes the recipe's BenchmarkPoint so the handoff can read
     the recipe once for both of its resolvers; these cases still start from a
     file, so they go through the same parse step.
     """
-    return KernelPhase._resolve_launch_server_script(KernelPhase._recipe_benchmark(recipe_path))
+    return KernelPhase._resolve_launch_server_script(KernelPhase._recipe_point(recipe_path))
 
 
 def _checkout(tmp_path: Path, *scripts: str, lib: bool = True) -> Path:
