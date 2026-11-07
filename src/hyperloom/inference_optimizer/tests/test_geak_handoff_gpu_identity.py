@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""The GEAK handoff carries the explicit R9700 product/ISA pair."""
+"""The GEAK handoff carries the explicit Radeon product/ISA pair."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
     ("gpu_type", "expected"),
     [
         ("r9700", {"gpu_type": "r9700", "expected_target": "r9700", "expected_gfx": "gfx1201"}),
+        ("r9600d", {"gpu_type": "r9600d", "expected_target": "r9600d", "expected_gfx": "gfx1201"}),
         ("mi300x", {"gpu_type": "mi300x"}),
         ("mi355x", {"gpu_type": "mi355x"}),
         ("gfx1201", {"gpu_type": "gfx1201"}),
@@ -46,8 +47,11 @@ async def _write_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state:
 
 
 @pytest.mark.asyncio
-async def test_r9700_handoff_carries_product_and_isa(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    handoff = await _write_handoff(tmp_path, monkeypatch, SharedState(model_path="/models/m", gpu_type="r9700"))
-    assert handoff["gpu_type"] == "r9700"
-    assert handoff["expected_target"] == "r9700"
+@pytest.mark.parametrize("product", ["r9700", "r9600d"])
+async def test_radeon_handoff_carries_product_and_isa(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, product: str
+) -> None:
+    handoff = await _write_handoff(tmp_path, monkeypatch, SharedState(model_path="/models/m", gpu_type=product))
+    assert handoff["gpu_type"] == product
+    assert handoff["expected_target"] == product
     assert handoff["expected_gfx"] == "gfx1201"
