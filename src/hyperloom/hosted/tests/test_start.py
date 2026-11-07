@@ -380,7 +380,10 @@ def test_an_existing_account_is_left_alone_and_no_ca_means_no_bundle(tmp_path, l
     assert not (tmp_path / "local-tmp" / "hyperloom-host").exists()
 
 
-_ROOT_STAYS = "so the root mount stays as it is; wrap each bwrap call in 'unshare --mount'"
+_ROOT_STAYS = (
+    "so the root mount stays as it is; where bubblewrap cannot bind it, agents run only under an unshare beside the "
+    "layer's bwrap, and are refused without one"
+)
 
 
 @needs_2000_mapped
