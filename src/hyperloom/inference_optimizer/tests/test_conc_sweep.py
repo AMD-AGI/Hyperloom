@@ -479,7 +479,7 @@ def _fake_variant(
         returncode=0 if status == "succeeded" else 1,
         nonfatal_warnings=[],
         error=error,
-        error_class="" if status == "succeeded" else "magpie_timeout",
+        error_class="" if status == "succeeded" else "round_timeout",
         note="",
         runtime_sec=12.0 if status == "succeeded" else None,
         killed_overtime=False,

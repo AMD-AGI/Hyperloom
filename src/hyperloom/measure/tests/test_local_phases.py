@@ -229,7 +229,7 @@ def test_a_test_that_timed_out_says_the_phases_it_went_through(monkeypatch, cloc
     def timing_out(slot: Path, kwargs: dict[str, Any]):
         clock.advance(3.0)
         Run(clock, slot).boot(30.0, log=READY_ONLY_LOG).end(1500.0)
-        return result("test", slot, status="failed", returncode=None, error="timed out", error_class="magpie_timeout")
+        return result("test", slot, status="failed", returncode=None, error="timed out", error_class="round_timeout")
 
     monkeypatch.setattr(local, "run_grid", StagedGrid({"test": timing_out}))
 

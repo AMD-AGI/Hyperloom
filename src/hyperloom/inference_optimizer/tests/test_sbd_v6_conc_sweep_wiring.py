@@ -101,7 +101,7 @@ def _variant(
         e2el_mean_ms=200.0 if status == "succeeded" else None,
         workspace=f"/tmp/{name}",
         error=None if status == "succeeded" else "boom",
-        error_class="" if status == "succeeded" else "magpie_timeout",
+        error_class="" if status == "succeeded" else "round_timeout",
         killed_overtime=False,
         # The runner grants each slot its cap once it has composed the rung's config, and publishes
         # it on the row it returns; a double that left it out would stand in for a runner that never

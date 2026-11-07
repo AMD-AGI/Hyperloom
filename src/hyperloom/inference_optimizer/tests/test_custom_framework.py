@@ -392,7 +392,7 @@ class TestEntrypointFailFast:
         monkeypatch.setenv("CUSTOM_DIR", "")
 
     def test_an_empty_scripts_dir_exits_listing_candidates(self, monkeypatch, tmp_path, capsys):
-        """Failing here beats looping magpie_nonzero_invalid_measurement for hours."""
+        """Failing here beats looping round_nonzero_invalid_measurement for hours."""
         from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"

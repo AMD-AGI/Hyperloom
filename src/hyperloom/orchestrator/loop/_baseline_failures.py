@@ -29,7 +29,7 @@ from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
 from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_PRELUDE
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
-from ..state.failure_evidence import MAGPIE_NONZERO_INVALID_MEASUREMENT
+from ..state.failure_evidence import ROUND_NONZERO_INVALID_MEASUREMENT
 from ..state.shared_state import ActionAttempt
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
@@ -53,7 +53,7 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
     # The benchmark client, or the Magpie harness after serving its whole protocol, refused the result. The next
     # attempt runs the same client over the same workload, so it is refused the same way.
-    MAGPIE_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
+    ROUND_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
     FailedStep.CLIENT_FAILED.value: _BASELINE_FAILED_STOP_REASON,
     # No server started: the host lacks the idle GPUs the round needs. Only the operator can free them, and
     # ``_authorable_launch_log`` keeps it out of enablement.

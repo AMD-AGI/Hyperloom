@@ -1110,7 +1110,7 @@ def _is_name_resolution_error(exc: BaseException) -> bool:
 def _warn_published_gate_skipped(health_url: str, dns_failures: int, health_poll_s: int) -> None:
     """Warn that the published-service readiness gate is skipped because its URL never resolved."""
     # Surface, don't degrade silently: to the caller this is indistinguishable from a pass, so a
-    # later completed=0 / magpie_nonzero_invalid_measurement has no other clue it was this skip.
+    # later completed=0 / round_nonzero_invalid_measurement has no other clue it was this skip.
     log.warning(
         "published service_url %s did not resolve from here after %d consecutive "
         "attempts (~%ds); SKIPPING the published-service readiness gate. If this is "

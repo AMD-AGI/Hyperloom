@@ -147,9 +147,7 @@ def test_a_traced_attempt_that_left_no_trace_is_profiled_again(grid, tracer, tmp
 
 
 def test_a_traced_attempt_that_timed_out_is_not_run_again(grid, tracer, tmp_path, monkeypatch):
-    _answers(
-        grid, monkeypatch, lambda: _traced_result(grid, trace=False, status="failed", error_class="magpie_timeout")
-    )
+    _answers(grid, monkeypatch, lambda: _traced_result(grid, trace=False, status="failed", error_class="round_timeout"))
 
     with pytest.raises(local.MeasurementTimeout):
         _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
