@@ -22,6 +22,7 @@ from hyperloom.common.agent_isolation import (
     NO_LAYER_BWRAP,
     RAY_ACTOR_PATH,
     SANDBOX_ACCOUNT,
+    TEST_ACCOUNT,
     AccountIsolation,
     BwrapIsolation,
     IsolationRefused,
@@ -32,6 +33,7 @@ from hyperloom.common.agent_isolation import (
     bwrap_isolation,
     choose_agent_isolation,
     choose_sandbox_isolation,
+    choose_test_isolation,
     isolation_required,
     require_agent_isolation,
 )
@@ -244,6 +246,28 @@ def test_a_local_sandbox_is_never_refused_even_with_an_account_configured(accoun
     found = choose_sandbox_isolation(probe=Probes(DENIED))
     assert isinstance(found, NoIsolation)
     assert found.reasons[0] == f"running them as an account: {SANDBOX_ACCOUNT}"
+
+
+def test_a_local_test_sandbox_is_bubblewrapped_where_it_works_and_never_refused_even_with_an_account_configured(
+    account,
+):
+    assert choose_test_isolation(probe=Probes(ON_PATH)) == BwrapIsolation(
+        ON_PATH, (f"running them as an account: {TEST_ACCOUNT}",)
+    )
+    found = choose_test_isolation(probe=Probes(DENIED))
+    assert isinstance(found, NoIsolation) and found.reasons == (
+        f"running them as an account: {TEST_ACCOUNT}",
+        "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",
+    )
+
+
+def test_a_hosted_run_refuses_an_unconfined_test_sandbox_and_probes_only_its_layer_bubblewrap():
+    require_agent_isolation(bwrap=LAYER, allow_account=True, probe=Probes(IN_LAYER))
+    probes = Probes(LAYER_DENIED)
+    with pytest.raises(IsolationRefused) as refused:
+        choose_test_isolation(probe=probes)
+    assert refused.value.reasons[0] == f"running them as an account: {TEST_ACCOUNT}"
+    assert probes.asked == [LAYER]
 
 
 def test_a_sandbox_runs_under_bubblewrap_where_it_works(account):
