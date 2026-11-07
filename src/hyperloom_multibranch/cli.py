@@ -6,7 +6,8 @@
 ``run`` takes the fixed workload, spelled as ``hyperloom optimize`` spells it, the wall-clock budget and the kernel
 optimizer its recipes are scoped to, and the hard limits the judge works within. ``--workload`` names the workload
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
-requests; ``agentx`` takes ``--ep``, 1 when not given, and ``inferencex`` refuses it. An agentx session serves its
+requests; ``agentx`` takes ``--ep``, 1 when not given, and ``--agentx-duration-sec``, the trace window its tests
+replay (the measuring harness's default when not given), and ``inferencex`` refuses both. An agentx session serves its
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
@@ -276,6 +277,12 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
         default=None,
         help=f"Expert-parallel size of an agentx workload, default {DEFAULT_EP}; refused for inferencex.",
     )
+    run.add_argument(
+        "--agentx-duration-sec",
+        type=int,
+        default=None,
+        help="Trace window of an agentx workload's tests, written as the benchmark's DURATION; refused for inferencex.",
+    )
     run.add_argument("--precision", required=True, help="Model precision, as hyperloom optimize spells it.")
     run.add_argument(
         "--kernel-optimizer",
@@ -541,12 +548,11 @@ def _shape_errors(args: argparse.Namespace) -> list[str]:
     return missing or _positive(args, SEQUENCE_LENGTHS)
 
 
-def _ep_errors(args: argparse.Namespace) -> list[str]:
-    if args.ep is None:
-        return []
+def _agentx_only_errors(args: argparse.Namespace) -> list[str]:
+    given = [name for name in ("ep", "agentx_duration_sec") if getattr(args, name) is not None]
     if WorkloadKind(args.workload) is WorkloadKind.INFERENCEX:
-        return [f"--ep is not taken by an inferencex workload, which is served at EP {DEFAULT_EP}"]
-    return _positive(args, ("ep",))
+        return [f"--{name.replace('_', '-')} is not taken by an inferencex workload" for name in given]
+    return _positive(args, tuple(given))
 
 
 def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
@@ -707,7 +713,7 @@ def settings_from(
     does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
     """
 
-    errors = _shape_errors(args) + _ep_errors(args) + _positive(args, ("tp", "conc"))
+    errors = _shape_errors(args) + _agentx_only_errors(args) + _positive(args, ("tp", "conc"))
     errors += _limit_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
@@ -722,6 +728,7 @@ def settings_from(
         KernelOptimizer(args.kernel_optimizer),
         _workload_shape(args),
         DEFAULT_EP if args.ep is None else args.ep,
+        args.agentx_duration_sec,
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
     prompts, agents = args.specialist_prompts or [], args.agents or []

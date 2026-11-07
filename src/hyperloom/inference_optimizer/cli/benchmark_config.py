@@ -150,7 +150,8 @@ def _validate_agentx_benchmark(benchmark: dict) -> None:
 @dataclass(frozen=True)
 class AgentXWorkload:
     """A resolved Hyperloom workload. ``model_path`` is pinned only when it is a local directory, and then stands for
-    the model: a ``--model`` bound to the written file must name it."""
+    the model: a ``--model`` bound to the written file must name it. ``duration_sec`` is the trace window written as
+    ``envs.DURATION``; ``None`` leaves the measuring harness's default."""
 
     framework: str
     model: str
@@ -163,6 +164,7 @@ class AgentXWorkload:
     # Ignored: multibranch-dev's scheduling.local_peers still passes the board the YAML no longer names; removed once
     # that caller moves.
     gpu_type: str | None = None
+    duration_sec: int | None = None
 
 
 def write_agentx_benchmark(target: Path, workload: AgentXWorkload) -> None:
@@ -178,6 +180,8 @@ def write_agentx_benchmark(target: Path, workload: AgentXWorkload) -> None:
     }
     if workload.model_path and Path(workload.model_path).is_dir():
         benchmark["envs"]["MODEL_PATH"] = str(Path(workload.model_path).resolve())
+    if workload.duration_sec is not None:
+        benchmark["envs"]["DURATION"] = workload.duration_sec
     if workload.docker_image:
         benchmark["docker_image"] = workload.docker_image
     _validate_agentx_benchmark(benchmark)
