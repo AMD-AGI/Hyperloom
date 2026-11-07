@@ -18,6 +18,7 @@ from hyperloom_common.coerce import to_float, to_int
 from inference_suite.contracts import (
     FIXED_METRIC_KEYS,
     AgentxResult,
+    MlperfResult,
     Report,
     RunStatus,
     ScriptableResult,
@@ -57,6 +58,25 @@ _SCRIPTABLE_FIELDS = (
     ("e2el_mean_ms", "mean_e2el_ms", to_float),
     ("latency_s", "latency_s", to_float),
 )
+
+
+#: Each figure of the MLPerf harness's mapped result, by the measurement key it fills, with its coercion.
+_MLPERF_FIELDS = (
+    (_OUTPUT_THROUGHPUT, _OUTPUT_THROUGHPUT, to_float),
+    (_REQUEST_THROUGHPUT, _REQUEST_THROUGHPUT, to_float),
+    (_COMPLETED_REQUESTS, "completed", to_int),
+    (_DURATION_SECONDS, "duration", to_float),
+    (_REQUEST_ERROR_RATE, _REQUEST_ERROR_RATE, to_float),
+    ("total_output_tokens", "total_output_tokens", to_int),
+    *(
+        (f"{name}_{stat}_ms", f"{raw}_{name}_ms", to_float)
+        for name in ("ttft", "tpot")
+        for stat, raw in (("mean", "mean"), ("p50", "median"), ("p90", "p90"), ("p99", "p99"))
+    ),
+    ("e2el_mean_ms", "mean_e2el_ms", to_float),
+    ("e2el_p99_ms", "p99_e2el_ms", to_float),
+)
+_SUBMISSION_VALID = "submission_valid"
 
 
 def _agentx_error_rate_pct(counts: Mapping[str, int]) -> float | None:
@@ -113,6 +133,14 @@ def _scriptable_metrics(result: ScriptableResult) -> dict[str, Any]:
     return metrics
 
 
+def _mlperf_metrics(result: MlperfResult) -> dict[str, Any]:
+    document: Mapping[str, Any] = result.result
+    metrics: dict[str, Any] = {key: coerce(document.get(raw)) for key, raw, coerce in _MLPERF_FIELDS}
+    metrics[_SUBMISSION_VALID] = document.get(_SUBMISSION_VALID)
+    metrics["submission_invalid_reasons"] = list(document.get("submission_invalid_reasons") or [])
+    return metrics
+
+
 def _load_metrics(report: Report) -> dict[str, Any]:
     if report.fixed is not None:
         return dict(report.fixed.values)
@@ -120,6 +148,8 @@ def _load_metrics(report: Report) -> dict[str, Any]:
         return _agentx_metrics(report.agentx)
     if report.scriptable is not None:
         return _scriptable_metrics(report.scriptable)
+    if report.mlperf is not None:
+        return _mlperf_metrics(report.mlperf)
     return {}
 
 
@@ -155,12 +185,14 @@ def _positive(value: object) -> bool:
 def _load_valid(report: Report, measurement: Mapping[str, Any]) -> bool:
     """A round whose load ran and served: positive throughput, and a request served unless a script measured it.
 
-    An AgentX round is judged by its counts instead.
+    An AgentX round is judged by its counts instead, and an MLPerf round also by the harness's submission verdict.
     """
     if report.run_status not in _LOAD_MEASURED or not _positive(measurement[_OUTPUT_THROUGHPUT]):
         return False
     if report.agentx is not None:
         return _agentx_valid(report.agentx, measurement)
+    if report.mlperf is not None:
+        return measurement[_SUBMISSION_VALID] is True and _positive(measurement[_COMPLETED_REQUESTS])
     return report.scriptable is not None or _positive(measurement[_COMPLETED_REQUESTS])
 
 

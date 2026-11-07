@@ -90,6 +90,7 @@ def _serving_points() -> dict[str, dict]:
         "agentx profile": changed(agentx={"enabled": True}, profiler=profiler),
         "vllm": _point("vllm"),
         "atom profile": {"benchmark": {**_point("atom")["benchmark"], "profiler": profiler}},
+        "mlperf": changed(benchmark_script="mlperf_agentic_client.sh"),
     }
 
 
@@ -101,10 +102,9 @@ def test_every_serving_point_of_a_session_with_a_frozen_base_runs_on_the_suite(s
     assert suite_route(session, point) is not None
 
 
-@pytest.mark.parametrize("bench", [{"framework": "xdit"}, {"benchmark_script": "mlperf_agentic_client.sh"}])
-def test_a_point_that_serves_nothing_or_drives_its_own_server_stays_on_the_backend(session, tmp_path, bench) -> None:
+def test_a_point_that_serves_nothing_stays_on_the_backend(session, tmp_path) -> None:
     document = _point("sglang")
-    document["benchmark"].update(bench)
+    document["benchmark"]["framework"] = "xdit"
     point = tmp_path / "point.yaml"
     point.write_text(yaml.safe_dump(document), encoding="utf-8")
 
