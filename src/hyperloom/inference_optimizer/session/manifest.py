@@ -109,9 +109,8 @@ def _describe_dep(*env_vars: str) -> dict[str, str]:
 
 
 def _build_dependencies() -> dict[str, dict[str, str]]:
-    """Provenance (path/commit/remote) for the Magpie / InferenceX trees this session executes against, so debuggers can answer "which upstream?" later."""
+    """Provenance (path/commit/remote) for the InferenceX tree this session executes against, so debuggers can answer "which upstream?" later."""
     return {
-        "magpie": _describe_dep("MAGPIE_PATH"),
         "inferencex": _describe_dep("INFERENCEX_PATH"),
     }
 

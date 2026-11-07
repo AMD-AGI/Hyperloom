@@ -281,12 +281,11 @@ def test_manifest_records_dependencies_block_empty_when_envs_unset(
     monkeypatch,
 ):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     sd = paths.make_session_dir()
     m = write_manifest(sd, args=None, session_id="empty-deps")
     deps = m["dependencies"]
-    assert set(deps.keys()) == {"magpie", "inferencex"}
+    assert set(deps.keys()) == {"inferencex"}
     for sub in deps.values():
         assert sub == {"path": "", "commit": "", "remote": ""}
 
@@ -295,7 +294,7 @@ def test_manifest_records_dependencies_block_picks_up_git_metadata(
     tmp_path,
     monkeypatch,
 ):
-    """Plant two fake git checkouts and confirm we capture both SHA and origin URL."""
+    """Plant a fake git checkout and confirm we capture its SHA and origin URL."""
     import subprocess
 
     def _init_repo(path, remote_url, file_contents):
@@ -312,22 +311,16 @@ def test_manifest_records_dependencies_block_picks_up_git_metadata(
         ):
             subprocess.run(cmd, cwd=path, check=True, capture_output=True)
 
-    fake_magpie = tmp_path / "Magpie"
     fake_infx = tmp_path / "InferenceX"
-    _init_repo(fake_magpie, "https://example.test/Magpie.git", "m")
     _init_repo(fake_infx, "https://example.test/InferenceX.git", "i")
 
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
-    monkeypatch.setenv("MAGPIE_PATH", str(fake_magpie))
     monkeypatch.setenv("INFERENCEX_PATH", str(fake_infx))
 
     sd = paths.make_session_dir()
     m = write_manifest(sd, args=None, session_id="full-deps")
 
     deps = m["dependencies"]
-    assert deps["magpie"]["path"] == str(fake_magpie)
-    assert deps["magpie"]["remote"] == "https://example.test/Magpie.git"
-    assert deps["magpie"]["commit"], "expected non-empty magpie SHA"
     assert deps["inferencex"]["path"] == str(fake_infx)
     assert deps["inferencex"]["remote"] == "https://example.test/InferenceX.git"
     assert deps["inferencex"]["commit"], "expected non-empty inferencex SHA"
@@ -341,18 +334,12 @@ def test_manifest_dependencies_block_is_fail_soft_on_non_repo_paths(
     not_a_repo = tmp_path / "plain_dir"
     not_a_repo.mkdir()
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
-    monkeypatch.setenv("MAGPIE_PATH", str(not_a_repo))
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.setenv("INFERENCEX_PATH", str(not_a_repo))
 
     sd = paths.make_session_dir()
     m = write_manifest(sd, args=None, session_id="non-repo-deps")
-    assert m["dependencies"]["magpie"] == {
-        "path": str(not_a_repo),
-        "commit": "",
-        "remote": "",
-    }
     assert m["dependencies"]["inferencex"] == {
-        "path": "",
+        "path": str(not_a_repo),
         "commit": "",
         "remote": "",
     }
@@ -366,15 +353,15 @@ def test_manifest_pod_local_dependency_warning_matches_default_policy(
     from hyperloom.inference_optimizer.session import manifest
 
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
-    monkeypatch.setenv("MAGPIE_PATH", "/workspace/hyperloom_runtime_smoke/Magpie")
+    monkeypatch.setenv("INFERENCEX_PATH", "/workspace/hyperloom_runtime_smoke/InferenceX")
 
     with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.session.manifest"):
-        manifest._describe_dep("MAGPIE_PATH")
+        manifest._describe_dep("INFERENCEX_PATH")
 
-    messages = [r.message for r in caplog.records if "MAGPIE_PATH" in r.message]
+    messages = [r.message for r in caplog.records if "INFERENCEX_PATH" in r.message]
     assert messages
     assert "defaults open-source dependencies to the repo-local cache" in messages[0]
-    assert "point MAGPIE_PATH back" not in messages[0]
+    assert "point INFERENCEX_PATH back" not in messages[0]
 
 
 def test_build_session_id_includes_uuid_and_model(monkeypatch):
