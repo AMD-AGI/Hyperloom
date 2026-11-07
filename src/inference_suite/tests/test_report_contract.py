@@ -28,6 +28,7 @@ from inference_suite.contracts import (
     GpuMonitorBlock,
     LogRange,
     MetricStats,
+    MlperfResult,
     ProbeOutcome,
     ProfileResult,
     Report,
@@ -215,6 +216,22 @@ def test_workload_sections_follow_the_workload_kind() -> None:
         _report(fixed=None)
     partial = _report(run_status=RunStatus.PARTIAL, failed_step=FailedStep.EVAL_FAILED, eval=None)
     assert Report.from_document(_document(partial)) == partial
+
+
+def test_mlperf_section_round_trips_and_belongs_to_an_mlperf_round() -> None:
+    mlperf = MlperfResult(
+        summary_file="client/mlperf_artifacts/run/result_summary.json",
+        scores_file=None,
+        result_file="client/inferencex_result.json",
+        result={"output_throughput": 812.5, "submission_valid": True},
+    )
+    report = _report(workload_kind=WorkloadKind.MLPERF, fixed=None, mlperf=mlperf)
+
+    assert Report.from_document(_document(report)) == report
+    with pytest.raises(ReportError, match="carries the mlperf section"):
+        _report(mlperf=mlperf)
+    with pytest.raises(ReportError, match="completed mlperf round carries its mlperf section"):
+        _report(workload_kind=WorkloadKind.MLPERF, fixed=None)
 
 
 def test_agentx_section_round_trips_with_its_error_rate_definition() -> None:
