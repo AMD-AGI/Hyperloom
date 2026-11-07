@@ -153,7 +153,7 @@ One round writes one run directory and leaves it unchanged once the round ends.
 | `phase_marks.json` | The instants the round passed from one phase to the next. |
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |
 | `gpu_samples.csv`, `gpu_power.json` | GPU samples over the measured window, and the power summary derived from them. |
-| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json` and `aiperf_artifacts/` (`profile_export.jsonl`, `logs/aiperf.log`). |
+| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
 | `eval/` | `stdout.log`, `stderr.log`, lm-eval's `results_<time>.json`, `hyperloom_eval_probe.json` and `definition.json`. |
 | `profile/` | `torch_trace/`, `capture_traces/`, `graph_capture_profile/` and `capture.json`. |
 
