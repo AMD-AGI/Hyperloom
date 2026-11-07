@@ -343,10 +343,7 @@ def test_building_a_variant_leaves_a_real_draft_base_open(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypatch):
-    def _never_launched(_bench_round, **_kwargs):
-        raise AssertionError("a refused variant must not reach Magpie")
-
-    monkeypatch.setattr(gr, "_run_magpie", _never_launched)
+    monkeypatch.setattr(gr, "run_grid_suite_round", lambda *_a, **_k: pytest.fail("a refused variant was launched"))
     base = _base_yaml(tmp_path, "vllm", VLLM_SYNTHETIC, {})
     results = await run_grid(
         grid=[GridVariant("more-draft", extra_server_args=_spec_config(num_speculative_tokens=5))],
@@ -371,7 +368,7 @@ async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypa
     ],
 )
 async def test_a_variant_touching_golden_fails_as_serve_flag_naming_the_key(tmp_path, monkeypatch, candidate, key):
-    monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: pytest.fail("a refused variant must not reach Magpie"))
+    monkeypatch.setattr(gr, "run_grid_suite_round", lambda *_a, **_k: pytest.fail("a refused variant was launched"))
     results = await run_grid(
         grid=[GridVariant("touches-golden", extra_server_args=candidate)],
         output_root=tmp_path / "out",

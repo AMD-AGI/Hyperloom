@@ -7,14 +7,11 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 import yaml
 
 from hyperloom.inference_optimizer import framework_registry as fr
-from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 
 
 class TestRegistryEntry:
@@ -592,89 +589,3 @@ class TestCustomAdapterMeasurement:
         rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
         assert rep["success"] is True
         assert float(rep["throughput"]["output_throughput"]) == pytest.approx(1.29)
-
-    @pytest.mark.parametrize(
-        ("timeout_override", "expected_timeout"), [(None, 7800.0), ("10", 10.0)], ids=["default", "override"]
-    )
-    def test_an_inert_env_variant_measures_without_a_harness_error(
-        self, tmp_path, monkeypatch, timeout_override, expected_timeout
-    ):
-        """An inert env variant measures under the shared scriptable benchmark caps."""
-        import asyncio
-        import subprocess
-        import sys
-        from unittest.mock import patch
-
-        from hyperloom.orchestrator.actions.executors._grid_runner import (
-            GridVariant,
-            run_grid,
-        )
-
-        base = tmp_path / "base.yaml"
-        base.write_text(
-            yaml.safe_dump(
-                {
-                    "benchmark": {
-                        "framework": "custom",
-                        "model": "/models/custom",
-                        "workload_kind": "scriptable",
-                        "run_mode": "local",
-                        "envs": {"TP": 8, "HYWORLD_HOIST": "0"},
-                        "timeout_seconds": 60,
-                    }
-                }
-            )
-        )
-
-        def _ok(cmd, *a, **k):
-            assert k["watch"].timeout == expected_timeout
-            assert k["watch"].silence_timeout_sec == 600
-            assert k["watch"].server_log_path is None
-            assert k["watch"].session_deadline_sec is None
-            slot = Path(cmd[cmd.index("--output-dir") + 1])
-            ws = slot / "benchmark_custom_20260101_000000"
-            ws.mkdir(parents=True, exist_ok=True)
-            (ws / "benchmark_report.json").write_text(
-                json.dumps(
-                    {
-                        "success": True,
-                        "framework": "custom",
-                        "throughput": {
-                            "output_throughput": 1.29,
-                            "completed_requests": 1,
-                            "duration_seconds": 10.0,
-                        },
-                    }
-                )
-            )
-            return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
-        if timeout_override is None:
-            monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
-        else:
-            monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", timeout_override)
-        with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-            side_effect=_ok,
-        ) as launch:
-            results = asyncio.run(
-                run_grid(
-                    grid=[
-                        GridVariant(name="baseline"),
-                        GridVariant(
-                            name="inert-off",
-                            extra_envs={"HYWORLD_HOIST": "0"},
-                        ),
-                    ],
-                    output_root=tmp_path / "out",
-                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi355x")),
-                    launch=GridLaunch(magpie_python=sys.executable),
-                )
-            )
-        assert launch.call_count == 2
-        assert [r.status for r in results] == ["succeeded", "succeeded"]
-        assert [r.output_throughput for r in results] == pytest.approx([1.29, 1.29])
-        assert all(not r.error_class for r in results)
-        assert not list((tmp_path / "out").glob("variant_*/abort_reason.json"))

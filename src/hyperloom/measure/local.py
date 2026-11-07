@@ -650,7 +650,7 @@ async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResul
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
             output_root=Path(call.output_dir),
             recipe=GridRecipe(base_yaml, base=LaunchLayer(extra_envs=envs)),
-            launch=GridLaunch(call.magpie_python or None, call.result_dir, call.serving_lease, **launch),
+            launch=GridLaunch(call.result_dir, call.serving_lease, **launch),
             stop=GridStop(session_deadline_sec=call.session_deadline_sec),
         )
         ended = time.time()

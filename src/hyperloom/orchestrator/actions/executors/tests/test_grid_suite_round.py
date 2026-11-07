@@ -5,8 +5,8 @@
 
 The contract: the warmup, the measured, a caller's boot and a caller's reuse round are each one round with its own
 run_dir; the server a variant booted for its own rounds is reaped with ``stop`` on its slot, a caller's last reuse
-round takes the caller's server down, a failed step and a refusal map to their error classes, and the Magpie launch is
-never reached.
+round takes the caller's server down, a failed step and a refusal map to their error classes, and a session that froze
+no base runs nothing.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import yaml
 
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.executors import _grid_base, _grid_runner, _suite_config
+from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe, GridVariant, run_grid
 from hyperloom.orchestrator.actions.executors._suite_config import MEASURED_SEED, RUN_DIR_PREFIX, TOOL_CACHE_ENV
 from hyperloom.orchestrator.actions.executors._suite_config import WARMUP_SEED
@@ -69,11 +70,6 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(_grid_runner, "_resolve_session_dir", lambda: session)
     monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: sys.executable)
     monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
-
-    def no_magpie(*args, **kwargs):
-        raise AssertionError("a suite round launched the Magpie backend")
-
-    monkeypatch.setattr(_grid_runner, "_run_magpie", no_magpie)
     stopped: list[Path] = []
 
     def record_stop(pid_dir):
@@ -217,20 +213,14 @@ def test_a_variants_unset_envs_are_not_inherited_by_its_round(monkeypatch, suite
     assert _SCRUBBED_ENV not in config.server.env_inherit
 
 
-def test_a_point_without_a_frozen_base_stays_on_the_magpie_backend(monkeypatch, suite, tmp_path):
+def test_a_point_without_a_frozen_base_is_refused_as_an_invalid_config_and_runs_nothing(monkeypatch, suite, tmp_path):
     monkeypatch.setattr(_grid_runner, "_resolve_session_dir", lambda: tmp_path / "no_base")
-    launched: list[Path] = []
-
-    def magpie(bench_round, **kwargs):
-        launched.append(bench_round.config_path)
-        return 1, "", "magpie ran"
-
-    monkeypatch.setattr(_grid_runner, "_run_magpie", magpie)
-    _, calls, _ = _play(
+    row, calls, _ = _play(
         monkeypatch, suite, LaunchAttempt(outcome=READY), launch=GridLaunch(warmup_before_measure=False)
     )
 
-    assert launched and not calls
+    assert row.status == "failed" and row.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID), row
+    assert not calls
 
 
 class _Scope:

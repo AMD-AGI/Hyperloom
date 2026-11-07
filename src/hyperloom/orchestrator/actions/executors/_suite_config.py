@@ -948,9 +948,16 @@ def staged_tool_cache() -> Path:
     return resolve_dep_dir(TOOL_CACHE_DIR, TOOL_CACHE_ENV)
 
 
-def suite_route(session_dir: Path | None) -> SuiteRoute | None:
-    """The route every round of the session at ``session_dir`` runs on inference_suite, ``None`` with no session."""
-    return None if session_dir is None else session_route(Path(session_dir))
+def suite_route(session_dir: Path | None) -> SuiteRoute:
+    """What every round of the session at ``session_dir`` runs on inference_suite with.
+
+    Raises:
+        SuiteRoundRefused: ``config_invalid`` when there is no session, or it froze no base launch to run on.
+    """
+    route = None if session_dir is None else session_route(Path(session_dir))
+    if route is None:
+        raise _refused_at(FailedStep.CONFIG_INVALID, f"the session {session_dir} froze no base launch to run on")
+    return route
 
 
 def session_route(session_dir: Path) -> SuiteRoute | None:
@@ -1179,9 +1186,9 @@ __all__ = [
     "round_lifecycle",
     "run_accuracy_suite_round",
     "run_suite_round",
-    "session_route",
     "staged_tool_cache",
     "suite_config",
     "scriptable_workload",
+    "session_route",
     "suite_route",
 ]

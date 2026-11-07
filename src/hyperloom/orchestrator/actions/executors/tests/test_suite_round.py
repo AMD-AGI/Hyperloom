@@ -81,12 +81,16 @@ def test_a_point_of_a_session_with_a_frozen_base_runs_on_the_suite(session: Path
     assert route.manifest_sha256 is not None
 
 
-def test_a_session_without_a_frozen_base_stays_on_the_backend(session: Path, tmp_path: Path) -> None:
-    unfrozen = tmp_path / "unfrozen"
-    unfrozen.mkdir()
+@pytest.mark.parametrize("unfrozen", ["unfrozen", None], ids=["a session that froze no base", "no session"])
+def test_a_round_without_a_frozen_base_is_refused_as_an_invalid_config(tmp_path: Path, unfrozen: str | None) -> None:
+    session = None if unfrozen is None else tmp_path / unfrozen
+    if session is not None:
+        session.mkdir()
 
-    assert suite_route(unfrozen) is None
-    assert suite_route(None) is None
+    with pytest.raises(SuiteRoundRefused) as refused:
+        suite_route(session)
+
+    assert refused.value.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID)
 
 
 def test_every_point_of_a_session_with_a_frozen_base_runs_on_the_suite(session) -> None:
@@ -215,7 +219,6 @@ def test_a_point_naming_an_unknown_framework_runs_on_the_suite_and_is_refused_th
 
 def _grid_round(point: Path, checkpoint: AgentxCheckpoint) -> GridRound:
     return GridRound(
-        magpie_python="",
         config_path=point,
         output_dir=point.parent,
         timeout_sec=600,

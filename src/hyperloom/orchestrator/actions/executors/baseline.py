@@ -298,7 +298,16 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         extra = getattr(attempt.ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
         await asyncio.to_thread(self._prepare_point, config_path, output_dir)
-        attempt = replace(attempt, suite=suite_route(self.session_dir))
+        try:
+            attempt = replace(attempt, suite=suite_route(self.session_dir))
+        except SuiteRoundRefused as exc:
+            log.error("baseline_executor: round refused before it ran: %s", exc)
+            return {
+                "status": "failed",
+                "error_class": exc.error_class,
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
         if (refusal := await self._attempt_refusal(attempt, output_dir, shared_state)) is not None:
             return refusal
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
@@ -516,7 +525,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
     ) -> int:
         """Run the warmup pass as an external inference_suite round; a pass that fails warms nothing."""
         warm_round = GridRound(
-            magpie_python=self.magpie_python,
             config_path=round_.config_path,
             output_dir=warm_dir,
             timeout_sec=int(round_.timeout_sec),
