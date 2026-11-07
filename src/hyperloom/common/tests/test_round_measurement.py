@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
 from hyperloom.common.round_measurement import LATENCY_SOURCE, round_measurement
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from inference_suite.contracts import (
@@ -14,11 +15,13 @@ from inference_suite.contracts import (
     AgentxResult,
     FailedStep,
     FixedMetrics,
+    LaunchDelta,
+    ProfileResult,
     RunStatus,
     ScriptableResult,
     WorkloadKind,
 )
-from inference_suite.contracts.report import AGENTX_COUNT_KEYS, AGENTX_LATENCY_KEYS, AGENTX_THROUGHPUT_KEYS
+from inference_suite.contracts.report import AGENTX_LATENCY_KEYS, AGENTX_THROUGHPUT_KEYS
 from inference_suite.tests.test_compose import _launch
 from inference_suite.tests.test_report_contract import _report
 
@@ -84,25 +87,111 @@ def test_a_partial_round_keeps_the_load_it_measured() -> None:
     assert measurement["failed_step"] == "eval_failed"
 
 
-def test_an_agentx_round_maps_its_throughput_and_latency_in_milliseconds() -> None:
-    agentx = AgentxResult(
-        counts={**dict.fromkeys(AGENTX_COUNT_KEYS, 0), "records_total": 12, "successful": 10},
-        throughput={**dict.fromkeys(AGENTX_THROUGHPUT_KEYS), "output_tokens_per_second": 900.0},
+_AGENTX_COUNTS = {
+    "records_total": 112,
+    "successful": 90,
+    "error_dropped": 10,
+    "warmup_dropped": 14,
+    "dropped_total": 22,
+    "error_osl_exported": 10,
+}
+
+
+def _agentx_result(counts: dict[str, int] | None = None, **overrides: object) -> AgentxResult:
+    fields: dict[str, object] = dict(
+        counts=counts or _AGENTX_COUNTS,
+        throughput={
+            **dict.fromkeys(AGENTX_THROUGHPUT_KEYS),
+            "output_tokens_per_second": 900.0,
+            "total_tokens_per_second": 9000.0,
+            "duration_seconds": 600.0,
+        },
         latency_seconds={**dict.fromkeys(AGENTX_LATENCY_KEYS), "ttft_p90": 0.25},
         e2e_norm_intvty={"p50": 30.0, "p90": None},
         stopped_by_threshold=False,
         fast_mode=False,
     )
-    report = _fixed(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx)
+    fields.update(overrides)
+    return AgentxResult(**fields)
+
+
+def _agentx(result: AgentxResult | None = None, **overrides: object):
+    fields = {"workload_kind": WorkloadKind.AGENTX, "fixed": None, "agentx": result or _agentx_result(), **overrides}
+    return _fixed(**fields)
+
+
+def test_an_agentx_round_maps_its_throughput_and_latency_in_milliseconds() -> None:
+    report = _agentx()
     measurement = round_measurement(report, None)
     assert measurement["output_throughput"] == 900.0
-    assert measurement["completed_requests"] == 10
+    assert measurement["completed_requests"] == 90
     assert measurement["ttft_p90_ms"] == 250.0
     assert measurement["ttft_mean_ms"] is None
     assert measurement["e2e_norm_intvty_p50"] == 30.0
-    assert measurement["agentx_counts"]["records_total"] == 12
+    assert measurement["agentx_counts"] == _AGENTX_COUNTS
     assert measurement["workload_identity"] == report.workload_digest
     assert measurement["valid_measurement"] is True
+    assert measurement["round_succeeded"] is True
+
+
+def test_the_agentx_error_rate_leaves_warmup_drops_out() -> None:
+    # (dropped - warmup) / (successful + errors): (22 - 14) / (90 + 10).
+    assert round_measurement(_agentx(), None)["request_error_rate"] == pytest.approx(8.0)
+
+
+def _counts(**changes: int) -> dict[str, int]:
+    return {**_AGENTX_COUNTS, **changes}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(_agentx_result(stopped_by_threshold=True), id="stopped-by-threshold"),
+        pytest.param(_agentx_result(fast_mode=True), id="fast-mode"),
+        pytest.param(
+            _agentx_result(_counts(error_dropped=12, dropped_total=26, records_total=116)), id="error-rate-over-10pct"
+        ),
+        pytest.param(_agentx_result(_counts(records_total=113)), id="counts-do-not-add-up"),
+        pytest.param(_agentx_result(_counts(warmup_dropped=23)), id="more-warmup-than-dropped"),
+        pytest.param(
+            _agentx_result(_counts(successful=0, error_dropped=0, dropped_total=14, records_total=14)),
+            id="nothing-profiled",
+        ),
+        pytest.param(
+            _agentx_result(throughput={**dict.fromkeys(AGENTX_THROUGHPUT_KEYS), "output_tokens_per_second": 900.0}),
+            id="no-duration-or-total-throughput",
+        ),
+    ],
+)
+def test_an_invalid_agentx_round_is_not_a_measurement(result: AgentxResult) -> None:
+    measurement = round_measurement(_agentx(result), None)
+    assert measurement["valid_measurement"] is False
+    assert measurement["round_succeeded"] is False
+    assert measurement["diagnostic_only"] is False
+
+
+def test_an_error_rate_at_the_threshold_is_still_valid() -> None:
+    at_threshold = _agentx_result(_counts(error_dropped=10, successful=90, dropped_total=24, records_total=114))
+    measurement = round_measurement(_agentx(at_threshold), None)
+    assert measurement["request_error_rate"] == pytest.approx(AGENTX_ERROR_RATE_THRESHOLD_PCT)
+    assert measurement["valid_measurement"] is True
+
+
+def test_a_profiled_agentx_round_is_diagnostic_only_and_succeeds() -> None:
+    profiled = _agentx(profile=ProfileResult(trace_dirs=("profile/torch_trace",), has_step_traces=False))
+    measurement = round_measurement(profiled, None)
+    assert measurement["diagnostic_only"] is True
+    assert measurement["valid_measurement"] is False
+    assert measurement["round_succeeded"] is True
+
+
+def test_an_agentx_round_served_with_the_prefix_cache_off_stays_a_valid_measurement() -> None:
+    # The baseline prefix-cache refusal only judges a valid measurement, so the counts rule must not hide this round.
+    launch = _launch(candidate=LaunchDelta())
+    assert "--disable-radix-cache" in launch.argv
+    measurement = round_measurement(_agentx(), launch)
+    assert measurement["valid_measurement"] is True
+    assert measurement["framework"] == launch.framework.name.value
 
 
 def test_a_scriptable_round_maps_its_script_result_and_carries_the_quality_scores_raw() -> None:
