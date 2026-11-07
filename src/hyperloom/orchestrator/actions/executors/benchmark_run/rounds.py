@@ -64,6 +64,11 @@ log = logging.getLogger(__name__)
 _BENCHMARK_REPORT_NAME = "benchmark_report.json"
 
 
+def _round_report_path(workspace: Path) -> Path:
+    """The report a round left in ``workspace``: an inference_suite run_dir's, else Magpie's."""
+    return RunLayout(workspace).report if is_round_folder(workspace) else workspace / _BENCHMARK_REPORT_NAME
+
+
 # Above this cold-start delta the measured round is unlikely to have settled either: the observed pathological case
 # climbed 14,202 -> 19,374 -> 22,425 tok/s across three rounds of one unchanged config, i.e. +36% into round 2 and
 # another +16% into round 3.
@@ -735,7 +740,7 @@ class _BenchmarkRoundsMixin:
         warnings: list[str],
     ) -> dict[str, Any] | None:
         workspace = round_.output_dir if finished.workspace is None else finished.workspace
-        report_path = RunLayout(workspace).report if is_round_folder(workspace) else workspace / _BENCHMARK_REPORT_NAME
+        report_path = _round_report_path(workspace)
         tail = (finished.stderr or finished.stdout)[-2000:]
         failed = {
             "status": "failed",

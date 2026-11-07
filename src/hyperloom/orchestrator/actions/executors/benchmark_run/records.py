@@ -17,7 +17,8 @@ from hyperloom.common.env_safety import scrub_benchmark_process_env
 from ...stop_attribution import StoppedByTheRun
 from .._grid_runner import stopped_by_the_run
 from .._server_argv import ConfigUnreadable, config_point
-from .._subprocess_kill import post_ready_runtime_sec
+from .._suite_config import SuiteRoute
+from inference_suite.contracts import RunLayout
 
 if TYPE_CHECKING:
     from ....loop.sub_agent_runner import RunnerContext
@@ -56,19 +57,25 @@ def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
 
 
 def _round_post_ready_sec(
-    server_log_path: str | None,
+    round_dir: Path | None,
     *,
     started_unix: float,
     runtime_sec: float,
 ) -> float | None:
-    """How much of a round's wall-clock came after the boot: the benchmark, and the accuracy eval if it ran one."""
-    if not server_log_path:
+    """How much of a round's wall-clock came after the boot: the benchmark, and the accuracy eval if it ran one.
+
+    ``round_dir`` holds the round's ready stamp; ``None`` for a server-less round. A stamp written before the round
+    started is an earlier round's and says nothing about this one.
+    """
+    if round_dir is None:
         return None
-    return post_ready_runtime_sec(
-        server_log_path,
-        started_unix=started_unix,
-        runtime_sec=runtime_sec,
-    )
+    try:
+        stamp = RunLayout(round_dir).read_ready_stamp()
+    except OSError:
+        return None
+    if stamp is None or stamp.ready_unix < started_unix:
+        return None
+    return max(0.0, min(float(runtime_sec), float(runtime_sec) - stamp.boot_sec))
 
 
 class _RoundEnd(NamedTuple):
@@ -264,6 +271,8 @@ class BenchmarkAttempt:
     serving_lease: Any = None
     recorder: Any = None
     run_index: int = 0
+    #: Where the attempt's rounds run on inference_suite; ``None`` while they stay on the benchmark backend.
+    suite: SuiteRoute | None = None
 
 
 class _BenchmarkRound(NamedTuple):
