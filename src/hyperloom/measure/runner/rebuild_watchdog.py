@@ -130,7 +130,7 @@ def _with_watchdog(config: dict[str, Any], seconds: int) -> bool:
         raised = _raised_argv(list(point.agentx_launch.append_args), seconds) if isinstance(agentx, dict) else None
         if raised is None:
             return False
-        agentx.setdefault("launch_overrides", {})["append_args"] = raised
+        agentx["launch_overrides"] = {**(agentx.get("launch_overrides") or {}), "append_args": raised}
         return True
     name = FRAMEWORKS[_SGLANG].extra_args_env
     raised_line = _raised_line(str(point.envs.get(name) or ""), seconds)

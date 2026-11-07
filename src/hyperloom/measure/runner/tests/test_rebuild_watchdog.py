@@ -117,6 +117,16 @@ def test_a_module_the_patch_touches_that_the_server_builds_raises_the_watchdog_t
     assert note is not None and "module_gemm_a8w8_bpreshuffle_cktile" in note
 
 
+def test_an_agentx_point_with_null_launch_overrides_is_given_the_watchdog(image, tmp_path: Path) -> None:
+    point = tmp_path / "point.yaml"
+    bench = {"framework": "sglang", "agentx": {"enabled": True, "launch_overrides": None}}
+    point.write_text(yaml.safe_dump({"benchmark": bench}), encoding=_UTF8)
+
+    raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path, {"module_gemm_a8w8_bpreshuffle_cktile"})
+
+    assert _watchdog(point, True) == f"{_FLAG} 3000"
+
+
 #: A module entry shaped like the image aiter's (e7d2453f) CK-tile GEMM, which reads its compiler from the environment.
 _CKTILE_ENTRY = {
     "srcs": ["f'{AITER_CSRC_DIR}/cktile_gemm_a8w8_bpreshuffle/gemm_a8w8_bpreshuffle_cktile.cu'"],
