@@ -11,6 +11,7 @@ ownership check tells an admin directory it made from the app's.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import stat
@@ -70,13 +71,39 @@ class HeldWorktree:
             return cls(path, inode)
         return cls(path, inode, PinnedGit(admin, worktree_head(path, admin=admin)))
 
+    def intact(self) -> bool:
+        """Whether ``path`` still names the directory recorded."""
+        return self.inode is not None and _directory_inode(self.path) == self.inode
+
+    def read_text(self, name: str) -> str:
+        """The UTF-8 text of the regular file ``name`` in the worktree, read through the directory recorded and no
+        other: the worktree is opened without following a link and that open directory checked, so a swap after any
+        earlier check cannot send the read elsewhere.
+
+        Raises:
+            OSError: ``path`` no longer names the directory recorded (``ESTALE``), or ``name`` is not a regular file
+                there.
+        """
+        dir_fd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(dir_fd)
+            if (info.st_dev, info.st_ino) != self.inode:
+                raise OSError(errno.ESTALE, "not the worktree the specialist was given", str(self.path))
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "not a regular file", str(self.path / name))
+            return handle.read().decode("utf-8")
+
     def refusal(self) -> str:
         """``""`` while ``path`` names the directory recorded; else why nothing may be read through it.
 
         A link found at ``path`` then is removed (never what it names), so nothing that reads the workspace later
         reaches the directory it named either.
         """
-        if self.inode is not None and _directory_inode(self.path) == self.inode:
+        if self.intact():
             return ""
         if self.inode is None:
             reason = f"worktree_refused: {self.path} was not a directory of its own when the specialist started"

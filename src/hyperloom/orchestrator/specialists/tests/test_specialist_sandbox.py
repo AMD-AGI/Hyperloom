@@ -72,6 +72,16 @@ mv worktree worktree.orig && mkdir -p worktree/patches && echo moved > moved
 printf '%s\\n' '--- a/mod.py' '+++ b/mod.py' '@@ -1 +1 @@' '-old = 1' '+new = 2' > worktree/patches/x.patch
 echo '{{"summary": "moved", "proposal_set": [], "patches_written": ["worktree/patches/x.patch"]}}' > specialist_done.json
 """
+#: The stand-in CLI that swaps its worktree for a link to a host directory and keeps running, checkpointing in its
+#: workspace, while the reaper polls.
+_SWAPS_AND_RUNS = """#!/bin/sh
+cat > /dev/null
+cd {workspace}
+mv worktree worktree.orig && ln -s {host} worktree
+echo '{{"summary": "mine"}}' > specialist_done.partial.json
+sleep 1.5
+echo '{{"summary": "done", "proposal_set": []}}' > specialist_done.json
+"""
 _CANARY = "APP-SECRET-CANARY"
 _TRAPPED = """#!/bin/sh
 trap 'echo stopped > "{out}"; exit 0' TERM
@@ -231,6 +241,31 @@ async def test_a_worktree_moved_aside_for_a_directory_of_the_agents_own_gives_no
     assert result.worktree_refused in result.error
     assert sorted(p.name for p in (linked.path / "patches").iterdir()) == ["x.patch"]  # no harvest written there
     assert app_git(workspace / "worktree.orig", "ls-files", admin=linked.admin).stdout.split() == ["mod.py"]
+
+
+async def test_a_running_specialists_checkpoint_is_never_read_through_a_link_it_left_at_its_worktree(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    """While the agent runs, the reaper publishes its checkpoints, the worktree's first: a link the agent left at the
+    worktree's path is not followed to a checkpoint of that name in a host directory."""
+    repo, workspace, host = tmp_path / "repo", tmp_path / "ws", tmp_path / "app-secrets"
+    host.mkdir()
+    (host / "specialist_done.partial.json").write_text(f'{{"summary": "{_CANARY}"}}', encoding="utf-8")
+    init_git_repo(repo, seed_file="mod.py", seed_text="old = 1\n")
+    linked = link_worktree(repo, workspace / "worktree", "specialist-t-sandboxed")
+    assert linked.path is not None and linked.admin is not None, linked.error
+    cli = _script(tmp_path / "cli" / "bin" / "claude", _SWAPS_AND_RUNS.format(workspace=workspace, host=host))
+    published: list[dict] = []
+
+    async def progress(payload: dict, _elapsed: float) -> None:
+        published.append(payload)
+
+    result = await _dispatcher(cli).run(
+        _spawn(workspace, worktree=linked.path, worktree_base=repo, worktree_admin=linked.admin, progress_cb=progress)
+    )
+
+    assert result.done_payload["summary"] == "done" and result.worktree_refused
+    assert published and {payload["summary"] for payload in published} == {"mine"}
 
 
 async def test_a_specialist_killed_at_its_deadline_runs_its_own_stop_first(
