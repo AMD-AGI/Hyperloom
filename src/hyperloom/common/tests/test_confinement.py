@@ -282,6 +282,61 @@ def test_a_program_directly_in_a_credential_location_binds_only_itself(tmp_path,
     assert tool in found and home not in found and home.parent not in found
 
 
+@pytest.mark.parametrize("variable", ["PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "MODEL_PATH"])
+def test_a_variables_entry_that_is_a_credential_location_is_not_bound_and_one_below_it_is(
+    tmp_path, monkeypatch, no_child_python, variable
+):
+    """Bound whole, the home would show every login in it, and no mask: a mask is only ever below a bound path. So
+    would a tool's login directory a variable names, and a link to either."""
+    home, tools, gh = tmp_path / "home", tmp_path / "tools", tmp_path / "gh"
+    login = _write(home / ".ssh/id_ed25519")
+    _write(gh / "hosts.yml")
+    (home / "bin").mkdir()
+    tools.mkdir()
+    (tmp_path / "link").symlink_to(home)
+    monkeypatch.setenv("HOME", str(home))
+    entries = (home, tmp_path / "link", gh, home / "bin", tools)
+    environ = {"PATH": "/usr/bin", "GH_CONFIG_DIR": str(gh), variable: os.pathsep.join(map(str, entries))}
+
+    found = toolchain_paths(environ, "sh", writable=())
+
+    assert not {home, tmp_path / "link", gh} & set(found)
+    assert {home / "bin", tools} <= set(found)
+    masked = credential_paths(environ, allowed=found)
+    assert _absent_inside(login, Confinement(readable=found, masked=masked).policy())
+
+
+@pytest.mark.parametrize("variable", ["PATH", "PYTHONPATH", "MODEL_PATH"])
+def test_an_entry_that_holds_a_credential_location_is_bound_entry_by_entry_around_it(
+    tmp_path, monkeypatch, no_child_python, variable
+):
+    """An ancestor of the home (or of a tool's login directory) on a search path is never bound whole: its other
+    entries are, down to the login, which is not bound at all, so neither a login in it nor one made later shows."""
+    top = tmp_path / "top"
+    home, gh = top / "users" / "u", top / "etc-gh"
+    _write(home / ".netrc")
+    _write(gh / "hosts.yml")
+    (top / "users" / "u2").mkdir()
+    (top / "users" / "to-home").symlink_to(home)
+    tool = _write(top / "bin" / "tool", "#!/bin/sh\n")
+    monkeypatch.setenv("HOME", str(home))
+    environ = {"PATH": "/usr/bin", "GH_CONFIG_DIR": str(gh), variable: str(top)}
+
+    found = set(toolchain_paths(environ, "sh", writable=()))
+
+    assert {top / "bin", top / "users" / "u2"} <= found
+    assert not {top, top / "users", home, top / "users" / "to-home", gh} & found
+    assert tool.parent in found
+
+
+def test_the_system_roots_stay_whole_whatever_credential_location_lies_below_them(tmp_path, monkeypatch):
+    """A home or login under ``/etc`` or ``/opt`` (baked into an image) leaves the system roots as they are: the
+    masks hide it there."""
+    monkeypatch.setenv("HOME", "/opt")
+    found = toolchain_paths({"PATH": "/usr/bin:/opt", "HOME": "/opt"}, "sh", writable=())
+    assert {Path(root) for root in SYSTEM_ROOTS} <= set(found)
+
+
 def test_the_resolvers_target_is_readable_when_it_lies_outside_etc(tmp_path, monkeypatch, no_child_python):
     stub = _write(tmp_path / "run" / "stub-resolv.conf")
     link = tmp_path / "etc" / "resolv.conf"
