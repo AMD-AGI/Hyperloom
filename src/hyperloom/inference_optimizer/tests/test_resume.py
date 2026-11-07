@@ -761,7 +761,6 @@ async def test_resume_preserves_custom_workload_paths(session_dir):
         framework="custom",
         bypass_scripts_dir="/opt/worldplay/scripts",
         framework_repo_path="/opt/worldplay/src",
-        benchmark_backend="bypass",
     ).save(session_dir)
 
     coordinator = Coordinator(session_dir, backends=_backends_full())
@@ -770,7 +769,6 @@ async def test_resume_preserves_custom_workload_paths(session_dir):
         assert state.framework == "custom"
         assert state.bypass_scripts_dir == "/opt/worldplay/scripts"
         assert state.framework_repo_path == "/opt/worldplay/src"
-        assert state.benchmark_backend == "bypass"
     finally:
         await coordinator.stop()
 

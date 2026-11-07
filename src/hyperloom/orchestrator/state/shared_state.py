@@ -482,8 +482,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     framework_repo_path: str = ""
     # xDiT model registry name (``--xdit-model-name``).
     xdit_model_name: str = ""
-    # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
-    benchmark_backend: str = ""
     # The card's compute-partition shape this session was measured in, as observed at launch: mode, partition count,
     # CU and memory per partition, streams per partition.
     compute_partition: dict[str, Any] = field(default_factory=dict)

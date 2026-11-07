@@ -888,7 +888,6 @@ def _seed_shared_state(
         **_custom_specialist_fields(args),
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
-        benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         xdit_model_name=os.environ.get("XDIT_MODEL_NAME", "").strip(),
         compute_partition=dict(settled.compute_partition),
         nodes=max(1, int(getattr(args, _NODES, 1) or 1)),

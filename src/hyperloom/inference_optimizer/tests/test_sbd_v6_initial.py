@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import asyncio
 import json
 import logging
@@ -283,7 +284,6 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
         event,
         args=args,
         runtime=preflight.PreflightRuntime(
-            benchmark_backend="bypass",
             benchmark_python="python",
             magpie_python="python",
             inferencex_path="/opt/InferenceX",
@@ -725,13 +725,18 @@ def test_timeline_writer_does_not_migrate_flat_files(tmp_path):
 
 def _stub_preflight_steps(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.cli import preflight
-    from hyperloom.orchestrator.actions.executors import benchmark_backend
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 
     inferencex = tmp_path / "InferenceX"
     inferencex.mkdir()
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
-    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "bypass")
-    monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "python")
+    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "Magpie"))
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda *_args, **_kwargs: "python")
+    monkeypatch.setattr(
+        preflight.subprocess, "run", lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, b"", b"")
+    )
+    monkeypatch.setattr(preflight, "_ensure_client_trust_compat", lambda *_args: True)
+    monkeypatch.setattr(preflight, "_ensure_eval_concurrency_compat", lambda *_args: True)
     monkeypatch.setattr(preflight, "_provider_only_mode", lambda: "")
     monkeypatch.setattr(preflight, "_load_dotenv_fallback", lambda: None)
     monkeypatch.setattr(preflight, "_load_kernel_agent_env_fallback", lambda: None)
@@ -809,7 +814,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     steps = {step["step_id"]: step for step in event["ext"]["steps"]}
     assert steps["check_kernel_tuning_clis"]["status"] == "skipped"
     assert steps["check_kernel_tuning_clis"]["skip_reason"] == "no_kernel"
-    assert steps["ensure_magpie"]["message"] == "benchmark backend is 'bypass'"
+    assert steps["ensure_magpie"]["status"] == "already_present"
 
 
 def test_preflight_propagates_install_event_finalize_failure(tmp_path, monkeypatch):

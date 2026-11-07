@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 3-gate tests: Magpie install/preflight is gated by benchmark backend."""
+"""Stage 3-gate tests: the backend switch and install.sh's Magpie gate."""
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
@@ -21,38 +20,6 @@ def test_backend_resolution_controls_magpie_need(monkeypatch):
     # Unknown typos normalize to magpie so preflight still installs Magpie.
     monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "magpiee")
     assert bb.resolve_backend_name() == "magpie"
-
-
-def test_preflight_gates_magpie_on_backend():
-    src = inspect.getsource(preflight_mod._preflight)
-    # Preflight resolves the active backend and hands the gate to the Magpie step.
-    assert "resolve_backend_name" in src
-    assert "_magpie_backend_active" in src
-    assert "magpie_active=_magpie_backend_active" in src
-    # The gate wraps the import check and the clone/install branch.
-    magpie_src = inspect.getsource(preflight_mod._ensure_magpie)
-    assert "import Magpie" in magpie_src
-    assert "if magpie_active and" in magpie_src
-    # The synthetic bypass backend still needs InferenceX; its preparation is separate from the Magpie install.
-    assert "_prepare_inferencex(install_event, magpie_active=_magpie_backend_active)" in src
-    assert "_ensure_inferencex" not in magpie_src
-
-
-def test_preflight_resolves_interpreter_via_backend_not_magpie():
-    """A bypass-only environment must not route installs through Magpie's venv."""
-    src = inspect.getsource(preflight_mod._preflight)
-    assert "resolve_benchmark_interpreter" in src
-    # Ray installs with the backend interpreter, not a hardcoded Magpie one.
-    assert "benchmark_python" in src
-    assert "_ensure_ray(benchmark_python, pip_extra)" in src
-    # Ray availability is probed with the SAME interpreter (not shutil.which, which only inspects PATH and would
-    # false-positive on a bypass-only host that has a stray ``ray`` on PATH but cannot run Ray correctly).
-    ray_src = inspect.getsource(preflight_mod._ensure_ray)
-    assert "_ray_smoke(python_exe," in ray_src
-    assert "shutil.which" not in ray_src
-    # Magpie interpreter is no longer resolved unconditionally in _preflight; it comes through
-    # resolve_benchmark_interpreter for the Magpie backend.
-    assert "_resolve_magpie_python" not in src
 
 
 def test_install_sh_gates_magpie_calls():

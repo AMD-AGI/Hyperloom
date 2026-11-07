@@ -287,13 +287,13 @@ def test_native_preflight_leaves_checkout_and_patches_to_magpie(tmp_path, monkey
     monkeypatch.setattr(cli_preflight, "_patch_magpie_compat", unexpected)
     event = {"ext": {"steps": []}}
 
-    assert cli_preflight._prepare_inferencex(event, magpie_active=True) == ""
+    assert cli_preflight._prepare_inferencex(event) == ""
     assert os.environ["INFERENCEX_PATH"] == inherited_checkout
     assert os.environ["MAGPIE_INFERENCEX_PATH"] == native_checkout
     assert event["ext"]["steps"][-1]["skip_reason"] == "magpie_manages_native_agentx"
 
 
-@pytest.mark.parametrize("backend", ["magpie", "bypass", "mlperf"])
+@pytest.mark.parametrize("backend", ["magpie", "mlperf"])
 def test_synthetic_and_mlperf_preflight_keep_checkout_preparation(tmp_path, monkeypatch, backend):
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if backend == "mlperf" else "0")
@@ -304,8 +304,8 @@ def test_synthetic_and_mlperf_preflight_keep_checkout_preparation(tmp_path, monk
     monkeypatch.setattr(
         cli_preflight,
         "_patch_magpie_compat",
-        lambda _event, path, *, magpie_active: patches.append((path, magpie_active)),
+        lambda _event, path: patches.append(path),
     )
 
-    assert cli_preflight._prepare_inferencex({"ext": {"steps": []}}, magpie_active=backend != "bypass") == checkout
-    assert patches == [(checkout, backend != "bypass")]
+    assert cli_preflight._prepare_inferencex({"ext": {"steps": []}}) == checkout
+    assert patches == [checkout]

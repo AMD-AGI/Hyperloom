@@ -171,21 +171,6 @@ _XDIT_MODEL_NAME_ENV = "XDIT_MODEL_NAME"
 def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
     """Publish ``--framework-path`` / ``--benchmark-scripts-dir`` as env."""
     fatal: list[str] = []
-    if framework == "custom":
-        from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-            BENCHMARK_BACKEND_ENV,
-            DEFAULT_BENCHMARK_BACKEND,
-        )
-
-        # Matches install.sh's normalisation so the two gates agree on a value like " Bypass "; anything else,
-        # including unset, is refused.
-        backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
-        if backend != "bypass":
-            shown = f"{backend!r}" if backend else f"unset (defaults to {DEFAULT_BENCHMARK_BACKEND!r})"
-            fatal.append(
-                f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass; it is {shown}. "
-                "The default backend cannot run an operator-supplied script."
-            )
     for flag, value, env_name in (
         ("--framework-path", getattr(args, "framework_path", None), "FRAMEWORK_REPO_PATH"),
         (
@@ -228,7 +213,6 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
 def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -> None:
     """Re-export the session paths persisted on ``state`` when this resume omitted them."""
     from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import BENCHMARK_BACKEND_ENV
 
     cli_repo = str(getattr(args, "framework_path", None) or "").strip()
     cli_scripts = str(getattr(args, "benchmark_scripts_dir", None) or "").strip()
@@ -240,10 +224,6 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
         archived = str(getattr(state, "bypass_scripts_dir", "") or "").strip()
         if archived:
             os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] = archived
-    if not os.environ.get(BENCHMARK_BACKEND_ENV, "").strip():
-        archived = str(getattr(state, "benchmark_backend", "") or "").strip()
-        if archived:
-            os.environ[BENCHMARK_BACKEND_ENV] = archived
     if (
         not str(getattr(args, _XDIT_MODEL_NAME_ATTR, None) or "").strip()
         and not os.environ.get(_XDIT_MODEL_NAME_ENV, "").strip()
@@ -288,13 +268,8 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
 
 def _persist_operator_supplied_paths(state: SharedState) -> None:
     """Mirror the live custom-workload env back onto ``state`` for the next resume."""
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-        BENCHMARK_BACKEND_ENV,
-    )
-
     state.framework_repo_path = os.environ.get("FRAMEWORK_REPO_PATH", "").strip()
     state.bypass_scripts_dir = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
-    state.benchmark_backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
     state.xdit_model_name = os.environ.get(_XDIT_MODEL_NAME_ENV, "").strip()
 
 
@@ -477,20 +452,6 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
     if not _agentx_enabled():
         return
     from hyperloom.inference_optimizer import framework_registry
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-        resolve_backend_name,
-    )
-
-    backend = resolve_backend_name()
-    if backend == "bypass":
-        print(
-            "ERROR: HYPERLOOM_AGENTX=1 with HYPERLOOM_BENCHMARK_BACKEND=bypass. "
-            "The bypass backend ignores benchmark_script for serving frameworks, "
-            "so AgentX would not run and the session would report synthetic "
-            "measurements as AgentX results. Pick one.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
 
     framework = str(getattr(args, "framework", "") or "").strip().lower()
     if framework and framework_registry.is_scriptable(framework):
@@ -931,8 +892,6 @@ def _restore_platform_state(args: argparse.Namespace, state: SharedState, sessio
         print(f"  re-exported FRAMEWORK_REPO_PATH: {state.framework_repo_path}")
     if state.bypass_scripts_dir:
         print(f"  re-exported HYPERLOOM_BYPASS_SCRIPTS_DIR: {state.bypass_scripts_dir}")
-    if state.benchmark_backend:
-        print(f"  re-exported HYPERLOOM_BENCHMARK_BACKEND: {state.benchmark_backend}")
     # Feeds the IR-8 check.
     if state.nodes > 1 and int(getattr(args, "nodes", 1) or 1) <= 1:
         args.nodes = state.nodes

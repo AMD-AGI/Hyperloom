@@ -156,7 +156,6 @@ def test_seed_shared_state_records_custom_workload_paths(
     monkeypatch.setenv("FRAMEWORK", "custom")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "/scripts")
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "/fw")
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     from hyperloom.common import visible_devices
@@ -174,7 +173,7 @@ def test_seed_shared_state_records_custom_workload_paths(
     )
     assert state.bypass_scripts_dir == "/scripts"
     assert state.framework_repo_path == "/fw"
-    assert state.benchmark_backend == "bypass"
+    assert not hasattr(state, "benchmark_backend")
     # No KB has run yet: the framework on disk comes from the seed alone.
     assert SharedState.load_or_init(tmp_path).framework == "custom"
 
