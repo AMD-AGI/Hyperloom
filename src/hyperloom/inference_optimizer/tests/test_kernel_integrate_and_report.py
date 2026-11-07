@@ -150,6 +150,7 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
     state.benchmark_mode = "agentx"
+    state.agentx_accuracy = False
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.80
     state.baseline_perf = {
@@ -236,6 +237,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
     state.benchmark_mode = "agentx"
+    state.agentx_accuracy = False
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.80
     state.baseline_perf = {
@@ -633,6 +635,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
     state.benchmark_mode = "agentx"
+    state.agentx_accuracy = False
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.80
     state.baseline_perf = {
@@ -1779,6 +1782,59 @@ async def test_single_file_patch_import_behaviour_is_unchanged(session_dir, tmp_
     assert res["decision"] == "NEEDS_REVIEW"
     assert res["decision_reason"] == "source_not_confirmed_imported"
     assert "source_import_evidence" not in res
+
+
+async def _integrate_with_accuracy_round(session_dir, tmp_path, monkeypatch, *, tput: float, kernel_id: str):
+    """Integrate a kernel re-baselined at ``tput`` against a base of 800 tok/s, the session running the D9 round."""
+    from hyperloom.orchestrator.actions.executors.benchmark_run import accuracy
+    from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import AccuracyRoundOutcome
+
+    calls = []
+
+    async def run_candidate_accuracy_round(slot, launch, state, *, session):
+        calls.append((slot, launch, session))
+        return AccuracyRoundOutcome(slot / "accuracy", "")
+
+    monkeypatch.setattr(accuracy, "accuracy_round_due", lambda state: True)
+    monkeypatch.setattr(accuracy, "run_candidate_accuracy_round", run_candidate_accuracy_round)
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=tput, accuracy=0.79),
+    ):
+        res = await krh.integrate_handler(
+            _accuracy_payload(base_yaml, target, patch_file, kernel_id), session_dir=session_dir
+        )
+    return res, calls
+
+
+@pytest.mark.asyncio
+async def test_a_kernel_that_cleared_the_threshold_runs_its_accuracy_round_in_its_rebaseline_slot(
+    session_dir, tmp_path, monkeypatch
+):
+    res, calls = await _integrate_with_accuracy_round(
+        session_dir, tmp_path, monkeypatch, tput=900.0, kernel_id="k_acc_round"
+    )
+
+    ((slot, launch, session),) = calls
+    assert res["decision"] == "KEEP"
+    assert slot == session_dir / "runs" / "integrate" / "integrate-k_acc_round"
+    assert launch.parent == slot and launch.exists()
+    assert session == session_dir
+    assert res["bench_result"]["agentx_accuracy_round"] == {"run_dir": str(slot / "accuracy"), "error_class": ""}
+
+
+@pytest.mark.asyncio
+async def test_a_kernel_below_the_threshold_runs_no_accuracy_round(session_dir, tmp_path, monkeypatch) -> None:
+    res, calls = await _integrate_with_accuracy_round(
+        session_dir, tmp_path, monkeypatch, tput=805.0, kernel_id="k_acc_slow"
+    )
+
+    assert calls == []
+    assert res["decision"] != "KEEP"
 
 
 @pytest.mark.asyncio
