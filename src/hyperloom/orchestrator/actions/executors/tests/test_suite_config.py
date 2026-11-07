@@ -20,6 +20,7 @@ import pytest
 from hyperloom.orchestrator.actions.executors._suite_config import (
     RoundSettings,
     backend_reason,
+    fixed_workload,
     point_server,
     suite_config,
 )
@@ -210,6 +211,12 @@ def test_the_point_knobs_become_the_config_fields() -> None:
     assert (config.deadlines.boot_sec, config.deadlines.round_sec, config.deadlines.silence_sec) == (7200, 7200, 600)
     assert config.server.base.digest == _base("sglang").digest()
     assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config
+
+
+def test_the_fixed_workload_of_a_point_is_the_one_its_round_sends() -> None:
+    point = _point("vllm", NUM_WARMUPS="16", HYPERLOOM_CLIENT_TOKENIZER_MODE="slow")
+
+    assert fixed_workload(point) == suite_config(point, _base("vllm"), _settings()).fixed
 
 
 def test_a_server_phase_point_boots_the_server_and_runs_no_load_or_eval() -> None:
