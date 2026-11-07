@@ -1066,7 +1066,8 @@ write_env_file() {
   remove_derived_dotenv_path HYPERLOOM_RUNTIME_DIR /runtime
   remove_derived_dotenv_path KERNEL_AGENT_ENV /runtime/kernel-agent.env.sh
   remove_derived_dotenv_path HYPERLOOM_ROOT /runtime/source-mirrors
-  # Derived from the MAGPIE_REF / INFERENCEX_REF pins; a .env copy would read back as an override that skips them.
+  # Preflight resolves both from the Magpie it installs and the InferenceX checkout it pins; a .env copy would read back
+  # as an override that skips them.
   remove_dotenv_var MAGPIE_PATH
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
