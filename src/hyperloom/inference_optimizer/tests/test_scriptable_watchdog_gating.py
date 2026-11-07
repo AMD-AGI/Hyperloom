@@ -33,6 +33,8 @@ def test_config_framework_reads_materialized_yaml(tmp_path):
     cfg.write_text(yaml.safe_dump({"benchmark": {"framework": "Custom"}}), encoding="utf-8")
     assert _config_framework(cfg) == "custom"
     assert _config_framework(tmp_path / "missing.yaml") == ""
+    cfg.write_text(yaml.safe_dump({"other": {"framework": "custom"}}), encoding="utf-8")
+    assert _config_framework(cfg) == ""
 
 
 def _count_scans(monkeypatch) -> dict[str, int]:

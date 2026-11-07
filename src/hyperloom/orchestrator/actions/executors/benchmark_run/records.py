@@ -16,6 +16,7 @@ import yaml
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from ...stop_attribution import StoppedByTheRun
 from .._grid_runner import stopped_by_the_run
+from .._server_argv import ConfigUnreadable, config_point
 from .._subprocess_kill import post_ready_runtime_sec
 
 if TYPE_CHECKING:
@@ -40,11 +41,9 @@ _ACCURACY_ROUND_DIR = "accuracy_round"
 def _config_framework(config_path: Path | str) -> str:
     """Framework name from a materialized benchmark YAML (``""`` when unreadable)."""
     try:
-        with Path(config_path).open(encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
+        return config_point(config_path).framework.strip().lower()
+    except ConfigUnreadable:
         return ""
-    return str((cfg.get("benchmark") or {}).get("framework") or "").strip().lower()
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
