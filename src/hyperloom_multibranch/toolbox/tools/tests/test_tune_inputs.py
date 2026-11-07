@@ -121,6 +121,17 @@ def test_a_test_with_no_readable_point_configuration_is_a_failure_by_name(tmp_pa
         served_workload(landed_test(tmp_path, tmp_path / "model", concs=()))
 
 
+def test_a_point_not_shaped_as_one_is_not_read(tmp_path: Path) -> None:
+    landed = landed_test(tmp_path, tmp_path / "model", concs=(64,))
+    point = landed / "variant_00_c64" / "config.yaml"
+    document = yaml.safe_load(point.read_text())
+    document["benchmark"]["envs"] = "TP=1"
+    point.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ToolFailure, match="landed no readable point configuration"):
+        served_workload(landed)
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
