@@ -274,7 +274,9 @@ class LocalHostedToolbox(LeasedToolbox):
 
     def _live_log(self, request_id: str) -> tuple[float, str] | None:
         """The live log of the sandbox the backend's journal names for the test's unfinished attempt, reached from the
-        sandbox's root by a walk no link its processes made leads out of (they write ``/out``)."""
+        sandbox's root by a walk no link its processes made leads out of (they write ``/out``). ``None`` when there is
+        none or it cannot be read: the sandbox's processes change that tree as it is walked, and a test's progress is
+        reported without a live line rather than not at all."""
         record = self.backend.journal.latest(request_id)
         if record is None or record.state == STATE_FINISHED or not record.sandbox_id:
             return None
@@ -284,6 +286,9 @@ class LocalHostedToolbox(LeasedToolbox):
             return None
         try:
             return last_output_below(files, time.time())
+        except OSError:
+            logger.debug("the live log of sandbox %s could not be read", record.sandbox_id, exc_info=True)
+            return None
         finally:
             os.close(files)
 
