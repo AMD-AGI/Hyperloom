@@ -646,7 +646,7 @@ class _BenchmarkRoundsMixin:
             )
         else:
             # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh moving/cleaning
-            # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from Magpie's benchmark reports.
+            # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from the round reports.
             eval_data = parse_eval_results(round_.result_dir, framework=eval_framework, benchmark_mode=benchmark_mode)
             if record_eval_score(result, eval_data):
                 log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
