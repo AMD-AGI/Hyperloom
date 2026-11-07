@@ -164,19 +164,17 @@ _CONTRIBUTING = frozenset({_TEST, _ACCURACY})
 _PROCESS_LOCK = threading.Lock()
 
 #: What a boot round pins in its round's environment, on top of the point. A boot round only brings a server up for the
-#: rounds that measure: an inference_suite round told so runs no load, but Magpie runs the server phase and then a full
-#: client round, so that round has to be made small: no evaluation (``RUN_EVAL``: 1319 questions on a GSM8K point) and
-#: one request, not the point's ``NUM_PROMPTS``. Both are in Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS``, which a persistent
-#: server's reuse check leaves out; a variable outside those keys, ``MAGPIE_RUN_PHASE`` included, would make the check
-#: refuse the rounds that measure. ``NUM_WARMUPS`` stays the point's (Magpie takes its warmups from the concurrency). An
-#: AgentX point has no evaluation round and no prompt count; its boot round pins nothing.
+#: rounds that measure, and pins it small in case it runs a load: no evaluation (``RUN_EVAL``: 1319 questions on a
+#: GSM8K point) and one request, not the point's ``NUM_PROMPTS``. Both are client-only knobs, so the rounds that measure
+#: reuse the server the boot round started. ``NUM_WARMUPS`` stays the point's. An AgentX point has no evaluation round
+#: and no prompt count; its boot round pins nothing.
 _BOOT_CLIENT_ENVS = {ENV_RUN_EVAL: "false", ENV_NUM_PROMPTS: "1"}
 _WARMUP, _EVAL = ROLE_WARMUP, ROLE_EVAL  # a held test's rounds other than the measured one are named for their roles
-#: No bench of a graded test evaluates, although its point does. ``RUN_EVAL`` is one of Magpie's
-#: ``CLIENT_ONLY_REUSE_ENV_KEYS``, so the server the first round booted is the one each later round reuses.
+#: No bench of a graded test evaluates, although its point does. ``RUN_EVAL`` is a client-only knob, so the server the
+#: first round booted is the one each later round reuses.
 _BENCH_ENVS = {ENV_RUN_EVAL: "false"}
-#: The evaluation round runs no bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``, which
-#: Magpie's reuse check leaves out (an ``EVAL_*`` name).
+#: The evaluation round runs no bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``, a
+#: client-only knob (an ``EVAL_*`` name).
 _EVAL_ENVS = {ENV_RUN_EVAL: "true", ENV_EVAL_ONLY: "true"}
 #: What ``run_grid`` writes on a point whose warmup round it discarded, with the throughput of that round.
 _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
@@ -602,7 +600,7 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
 
     A round the server lifecycle does not hold (a profile round, a framework that cannot hold a server, a warmup that
     is not planned) has no port assigned, and its server listens on the default: two of them on one machine collide on
-    it. The InferenceX script and Magpie's AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
+    it. The InferenceX script and the AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
     there, into a copy: the point itself is shared by every test that runs it. The port is picked where the server is
     launched (:func:`~hyperloom.common.ports.pick_server_port`).
     """
@@ -1048,7 +1046,7 @@ def _result_returncode(result: VariantResult) -> int:
 
 
 def _eval_returncode(result: VariantResult) -> int:
-    """The accuracy pass's own exit code when its run_dir's report or Magpie's marker file has one, else the round's."""
+    """The accuracy pass's own exit code when its run_dir's report or its marker file has one, else the round's."""
     workspace = Path(result.workspace or "")
     if is_round_folder(workspace):
         code = RoundFolder.read(workspace).report.codes.eval
