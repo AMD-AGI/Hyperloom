@@ -38,7 +38,7 @@ from kernelforge.workflows.gemm_tune.evidence import (
     write_demand,
 )
 
-from hyperloom.common.benchmark_config import BenchmarkPoint, PointError, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.outside_facts import (
     AITER_LOG_TUNED_CONFIG_ENV,
     AITER_TUNED_HIT,
@@ -88,7 +88,7 @@ def read_point(path: Path) -> BenchmarkPoint | None:
         if path.stat().st_size > POINT_CONFIG_MAX_BYTES:
             return None
         return read_benchmark_point(path)
-    except (OSError, PointError, yaml.YAMLError):
+    except (OSError, ValueError, yaml.YAMLError):
         return None
 
 
