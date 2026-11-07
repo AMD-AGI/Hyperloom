@@ -132,14 +132,36 @@ def test_a_points_own_hip_mask_stays_inside_its_own_rocr_view(tmp_path, monkeypa
     """``ROCR=4,5,6,7`` with ``HIP=2,3`` is cards 6 and 7; the point chose that subset itself."""
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", _HOST_MASK)
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", _HOST_MASK)
-    envs = materialize(
-        write_config(
-            tmp_path / "point.yaml",
-            envs={"TP": 2, "ROCR_VISIBLE_DEVICES": "4,5,6,7", "HIP_VISIBLE_DEVICES": "2,3"},
-        ),
-        tmp_path / "o",
-    )["envs"]
+    point = {"TP": 2, "ROCR_VISIBLE_DEVICES": "4,5,6,7", "HIP_VISIBLE_DEVICES": "2,3"}
+    envs = materialize(write_config(tmp_path / "point.yaml", envs=point), tmp_path / "o")["envs"]
     assert (envs["ROCR_VISIBLE_DEVICES"], envs["HIP_VISIBLE_DEVICES"]) == ("4,5,6,7", "2,3")
+    again = materialize(write_config(tmp_path / "again.yaml", envs=envs), tmp_path / "o2")["envs"]
+    assert (again["ROCR_VISIBLE_DEVICES"], again["HIP_VISIBLE_DEVICES"]) == ("4,5,6,7", "2,3")
+
+
+def test_a_filled_hip_mask_is_refilled_on_another_processs_cards(tmp_path, monkeypatch):
+    """The fill indexes into the ROCR view the fill was made under; re-materializing moves that view."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", _HOST_MASK)
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", _HOST_MASK)
+    first = materialize(write_config(tmp_path / "point.yaml", envs={"TP": 2}), tmp_path / "o1")["envs"]
+    assert first["HIP_VISIBLE_DEVICES"] == _HOST_MASK
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
+    again = materialize(write_config(tmp_path / "again.yaml", envs=first), tmp_path / "o2")["envs"]
+    assert (again["ROCR_VISIBLE_DEVICES"], again["HIP_VISIBLE_DEVICES"]) == ("4,5", "0,1")
+    rebuilt = apply_runtime_benchmark_overrides({"envs": dict(first)})
+    assert (rebuilt["ROCR_VISIBLE_DEVICES"], rebuilt["HIP_VISIBLE_DEVICES"]) == ("4,5", "0,1")
+
+
+def test_a_stale_hip_fill_is_reindexed_when_the_process_exports_none(tmp_path, monkeypatch):
+    """The stale fill rides in the config itself, so dropping it from the process env does not disarm it."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", _HOST_MASK)
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", _HOST_MASK)
+    first = materialize(write_config(tmp_path / "point.yaml", envs={"TP": 2}), tmp_path / "o1")["envs"]
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+    again = materialize(write_config(tmp_path / "again.yaml", envs=first), tmp_path / "o2")["envs"]
+    assert (again["ROCR_VISIBLE_DEVICES"], again["HIP_VISIBLE_DEVICES"]) == ("4,5", "0,1")
 
 
 def test_an_uninherited_hip_mask_is_not_written_into_the_config(tmp_path, monkeypatch):
@@ -148,7 +170,15 @@ def test_an_uninherited_hip_mask_is_not_written_into_the_config(tmp_path, monkey
     envs = materialize(
         write_config(tmp_path / "point.yaml", envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "7"}), tmp_path / "o"
     )["envs"]
-    assert not {"HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"} & envs.keys()
+    assert (
+        not {
+            "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+            "GPU_DEVICE_ORDINAL",
+            "HYPERLOOM_HIP_AUTOFILL",
+        }
+        & envs.keys()
+    )
 
 
 def test_a_config_materialized_before_the_fill_record_is_refused_with_a_way_out(tmp_path, monkeypatch):

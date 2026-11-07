@@ -34,6 +34,9 @@ _BASELINE_RECIPE = "baseline_recipe"
 #: Records the ROCR mask the materializer filled in, so a later pass tells it from a point's own pin.
 ROCR_AUTOFILL_ENV = "HYPERLOOM_ROCR_AUTOFILL"
 
+#: The same record for the HIP-level view, so a later pass tells a fill from a point's own subset.
+HIP_AUTOFILL_ENV = "HYPERLOOM_HIP_AUTOFILL"
+
 
 def pin_rocr_visible_devices(envs: dict[str, Any], *, tp: int) -> None:
     """Set the ROCR mask a benchmark point launches on, at least ``tp`` cards wide.
@@ -89,18 +92,27 @@ def _align_hip_masks(envs: dict[str, Any]) -> None:
     (``cli/preflight.py:_normalize_hip_visible_devices``) and the round env is that process env
     under ``benchmark.envs``. A point mask narrower than the session's leaves that inherited mask
     naming devices ROCr no longer exposes, and HIP refuses to start on it, so the view is re-indexed
-    here, beside the mask it belongs to. Only the variables the process actually exports are
-    rewritten -- a variable nothing inherits needs no override. A point that sets a HIP-level mask
-    itself is choosing a subset inside its own ROCr view and is left alone.
+    here, beside the mask it belongs to. A variable nothing inherits needs no override, so only the
+    ones the process exports are written -- plus any this function filled before, since the ROCr
+    view it was indexed into is the one a re-materialization just moved. A point that sets a
+    HIP-level mask itself is choosing a subset inside its own ROCr view and is left alone; the fill
+    is recorded under ``HIP_AUTOFILL_ENV`` because nothing else distinguishes the two.
     """
-    if any(var in envs for var in HIP_LEVEL_VARS):
+    filled = _mask_value(envs.get(HIP_AUTOFILL_ENV))
+    if any(_mask_value(envs.get(var)) not in ("", filled) for var in HIP_LEVEL_VARS):
+        envs.pop(HIP_AUTOFILL_ENV, None)
         return
-    inherited = [var for var in HIP_LEVEL_VARS if os.environ.get(var, "").strip()]
+    stale = [var for var in HIP_LEVEL_VARS if filled and _mask_value(envs.get(var)) == filled]
+    targets = [var for var in HIP_LEVEL_VARS if var in stale or os.environ.get(var, "").strip()]
     value = hip_mask_within_rocr(envs)
-    if not inherited or value is None:
+    if value is None or not targets:
+        for var in stale:
+            envs.pop(var, None)
+        envs.pop(HIP_AUTOFILL_ENV, None)
         return
-    for var in inherited:
+    for var in targets:
         envs[var] = value
+    envs[HIP_AUTOFILL_ENV] = value
 
 
 def _cards_outside(point: list[str], session: list[str]) -> list[str]:
