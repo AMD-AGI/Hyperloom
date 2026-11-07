@@ -785,7 +785,10 @@ repository records for the worktree, never the one the worktree's `.git` file na
 and runs as the app's own uid, so no ownership check tells a directory it made from the app's), the framework source
 roots, the task's model when it is a local path, the programs of the stdio MCP servers they start (each named in one
 WARNING: nothing else such a server reads is bound unless the confinement shows it), and, for an agent runner launch,
-`AgentLaunchSpec.readable`; a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
+`AgentLaunchSpec.readable` (a multi-branch specialist's: the session's `MB-reference/<name>` directories, the
+directory its workload's model is served from, the files its worktree links and its branch's own dev lease area,
+`branch-sandboxes/<branch>` of a local toolbox or the branch's `dev` directory of a hosted one, so it applies a Forge
+patch from its lease's root and sees no other branch's lease); a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
 `HYPERLOOM_BUILD_STORE` and `HYPERLOOM_BUILD_TRUST` name are masked wherever a bind would show them (a hosted run's
 entry, which takes `HYPERLOOM_STATE_DIR` out of its environment, registers its state directory so it stays masked). The `claude` CLI
 runs there only with a login in its environment: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
