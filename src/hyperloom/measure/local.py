@@ -48,7 +48,6 @@ from hyperloom.common.outside_facts import (
     ROCR_VISIBLE_DEVICES_ENV,
 )
 from hyperloom.contracts.measurement import PhaseTiming, SandboxFacts
-from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
 from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure import log_causes
@@ -93,7 +92,6 @@ from hyperloom.measure.phases import (
 )
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS, launch_carriers
 from hyperloom.common.ports import pick_server_port
-from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_has_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
@@ -296,8 +294,6 @@ def _measure(call: TestCall, phases: PhaseRecorder, tracer: ruppell.Tracer | Non
         _framework_tables(call) as private,
         _patched_server(private.call) as call,
     ):
-        if call.kind == _PROFILE:
-            _patch_profile_client(call)
         with _test_environment(call) as unset_envs:
             call, tracer = _traced(call, tracer, notes)
             run = _Run(call, [name for name in unset_envs if name not in private.redirected], phases=phases)
@@ -418,22 +414,6 @@ def _check_sweep_levels(points: Sequence[Path]) -> None:
     levels = _levels(points)
     if any(level <= 0 for level in levels) or len(set(levels)) != len(levels):
         raise TestCallRefused(f"every sweep point names its own CONC, got {levels}")
-
-
-def _patch_profile_client(call: TestCall) -> None:
-    """Make the InferenceX checkout a profile point runs honour the point's capture window, or refuse the test.
-
-    The checkout is the one the point names, else the session's; a test with neither (an AgentX point, whose client is
-    Magpie's, or a framework with no InferenceX script) has none to patch.
-    """
-    point = _point(call.points[0])
-    root = point.inferencex_path or (call.session_facts.inferencex_path if call.session_facts is not None else None)
-    if not root or point.agentx or framework_registry.is_scriptable(point.framework):
-        return
-    try:
-        patch_profile_client(root)
-    except ProfileClientError as exc:
-        raise TestCallRefused(str(exc)) from exc
 
 
 @contextlib.contextmanager
