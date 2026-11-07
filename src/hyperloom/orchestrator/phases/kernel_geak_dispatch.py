@@ -25,7 +25,7 @@ from .kernel_round_budget import rebench_round_sec
 from hyperloom_common.env import env_float, env_int
 from hyperloom_common.jsonio import read_json
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
-from inference_suite.staging import CLIENT_FILE, inferencex_root
+from inference_suite import CLIENT_FILE, inferencex_root
 from ..actions.executors._round_folder import read_round_launch
 from ..actions.executors._suite_config import staged_tool_cache
 from ..actions.executors._workload_envs import geak_metric_axis
