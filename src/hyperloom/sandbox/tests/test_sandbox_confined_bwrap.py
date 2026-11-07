@@ -287,7 +287,7 @@ def test_a_test_s_server_reaches_its_own_tree_and_key_and_nothing_of_the_app_or_
         "other_fs": "ENOENT",
         "state": "ENOENT",
         "app_login": "ENOENT",
-        "hf_token": "EACCES",
+        "hf_token": "ENOENT",  # a login file in a bound tree is left out of it, not masked
         "hub_model": "ok:hub-weights",
         "model": "ok:weights",
         "out": "ok:",

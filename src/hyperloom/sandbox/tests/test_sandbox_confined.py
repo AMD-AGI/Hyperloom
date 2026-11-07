@@ -197,8 +197,9 @@ def test_a_runner_with_no_account_runs_in_bubblewrap_with_its_tree_and_key_writa
     assert ("--unshare-user",) in pairs and ("--unshare-pid",) in pairs and ("--cap-drop", "ALL") in pairs
     assert ("--die-with-parent",) not in pairs, "a reap or the timeout ends the sandbox, with its grace"
     assert ("--bind", fs, fs) in pairs and ("--bind", private, private) in pairs, "the runner removes its key"
-    assert ("--ro-bind-try", str(model), str(model)) in pairs
-    assert ("--ro-bind", "/dev/null", str(model / "credentials")) in pairs, "the app's credential is masked"
+    assert ("--ro-bind-try", str(model / "weights"), str(model / "weights")) in pairs
+    assert not [pair for pair in pairs if str(model / "credentials") in pair], "the app's credential is left out"
+    assert ("--ro-bind-try", str(model), str(model)) not in pairs, "the tree holding it is bound entry by entry"
     assert ("--chdir", f"{fs}/work") in pairs
     assert ("--setenv", SANDBOX_TAG_ENV, sandbox.sandbox_id) in pairs and SANDBOX_TAG_ENV not in env
     tmp = [pair for pair in pairs if pair[0] == "--bind" and pair[-1] == "/tmp"]

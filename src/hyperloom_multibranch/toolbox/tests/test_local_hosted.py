@@ -24,7 +24,7 @@ from hyperloom.common import confinement
 from hyperloom.common.outside_facts.rule_pack import PACK_ENV, load_pack
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
 from hyperloom.measure.archive import DirResultArchive
-from hyperloom.measure.framework.base import FRAMEWORK_BASE_FILE, load_snapshot
+from hyperloom.measure.framework.base import FRAMEWORK_BASE_FILE, SNAPSHOT_ENV, load_snapshot, take_snapshot
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
 from hyperloom.measure import live_log
 from hyperloom.measure.live_log import last_output
@@ -505,6 +505,22 @@ def test_the_live_output_is_never_read_through_a_link_the_sandbox_made_out_of_it
     assert output is None or "SECRET" not in output[1], output
     if linked == "out/files/v":
         assert output is not None and output[1] == "the sandbox's own line"
+
+
+def test_a_runner_reads_the_shared_tables_its_framework_snapshot_was_taken_from_and_none_without_one(
+    tmp_path: Path,
+) -> None:
+    """Each test hashes the shared tables against the snapshot, to show it changed none: a confined runner reads them,
+    read-only as every tree of its plan, and the session's directory, which holds the snapshot, never whole."""
+    configs = make_framework(tmp_path)
+    snapshot = tmp_path / "session" / "framework"
+    take_snapshot(configs, snapshot)
+
+    taken = runner_plan(tmp_path / "session", None, {SNAPSHOT_ENV: str(snapshot)}, "/usr/bin/python3", {})
+    none = runner_plan(tmp_path / "session", None, {SNAPSHOT_ENV: str(tmp_path / "absent")}, "/usr/bin/python3", {})
+
+    assert configs in taken.readable and snapshot in taken.readable
+    assert configs not in none.readable
 
 
 def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
