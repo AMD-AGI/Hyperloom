@@ -128,7 +128,7 @@ class EnvSpecUnserializable(Exception):
     """The accepted launch configuration could not be serialized into an env spec.
 
     Only this failure is an ``invalid_env_spec``. Everything else the GEAK handoff
-    raises while it is built -- a native-AgentX proposal refusing an unverified Magpie
+    raises while it is built -- a native-AgentX proposal refusing an unverified
     launch, a malformed env var, a state field that is not a number -- is a different
     fault and propagates to the caller rather than being reported as one.
     """

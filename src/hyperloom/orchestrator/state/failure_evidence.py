@@ -133,7 +133,7 @@ _ENVIRONMENT_EVIDENCE_RE = re.compile(
     r"|temporary\s+failure\s+in\s+name\s+resolution",
     re.IGNORECASE,
 )
-# A server or its actor that died before serving: Magpie's health-wait errors and the serving lease's actor death.
+# A server or its actor that died before serving: a health-wait error and the serving lease's actor death.
 _SERVER_DEATH_EVIDENCE_RE = re.compile(
     r"exited\s+(?:before\s+becoming\s+healthy|during\s+its\s+health\s+check)|ray_actor_error",
     re.IGNORECASE,
