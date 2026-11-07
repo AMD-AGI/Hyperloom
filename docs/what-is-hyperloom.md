@@ -2,7 +2,7 @@
 myst:
   html_meta:
     "description": "Learn what Hyperloom is: an autonomous agentic system that optimizes LLM inference workloads on AMD GPUs through profiling, kernel optimization, and iterative benchmarking."
-    "keywords": "Hyperloom, what is Hyperloom, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, IntelliKit, Magpie, kernel optimization, optimization loop"
+    "keywords": "Hyperloom, what is Hyperloom, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, InferenceSuite, kernel optimization, optimization loop"
 ---
 
 # What is Hyperloom?
@@ -13,9 +13,8 @@ Hyperloom analyzes your workload, identifies performance bottlenecks, implements
 and validates the performance and correctness of the optimizations without requiring manual intervention.
 
 The system operates through a sophisticated multi-stage pipeline. First TraceLens, the profiling brain of
-the workload understanding stage, consumes traces collected by Magpie (which in turn relies on IntelliKit
-for some low-level GPU profiling tools), captures bottlenecks, and derives the roofline targets that seed
-the optimization search tree.
+the workload understanding stage, consumes traces collected by InferenceSuite profile rounds, captures
+bottlenecks, and derives the roofline targets that seed the optimization search tree.
 
 Next, Hyperloom employs a self-evolving code optimization engine following an iterative agentic loop (Think
 → Decide → Implement → Benchmark). Arbor intelligently explores the optimization space using a Dynamic
@@ -73,9 +72,8 @@ The following diagram describes how Hyperloom processes a workload from submissi
 Hyperloom combines:
 
 - Trace analysis, identifying kernel bottlenecks and bridge planning through
-  [TraceLens](https://github.com/AMD-AGI/TraceLens) Agent (backend support
-   from [Magpie](https://github.com/AMD-AGI/Magpie) and
-   [IntelliKit](https://github.com/AMDResearch/intellikit)).
+  [TraceLens](https://github.com/AMD-AGI/TraceLens) Agent, over traces from
+  [InferenceSuite](reference/inference-suite.md) profile rounds.
 - Kernel optimization through the
   [GEAK](https://github.com/AMD-AGI/GEAK) backend.
 - Agentic search space exploration through
