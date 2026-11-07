@@ -211,7 +211,12 @@ def test_a_shared_dotenv_another_account_planted_lends_none_of_it_to_the_install
         proc = _run(
             installer,
             checkout,
-            {"USER_DATA_PATH": str(workspace), "INSTALL_ENV_DUMP": str(dump), **_CREDENTIALS},
+            {
+                "USER_DATA_PATH": str(workspace),
+                "INSTALL_ENV_DUMP": str(dump),
+                "PYTHONPATH": "/opt/own/site",
+                **_CREDENTIALS,
+            },
         )
 
         assert proc.returncode == 0, proc.stderr
@@ -229,6 +234,9 @@ def test_a_shared_dotenv_another_account_planted_lends_none_of_it_to_the_install
         assert f": {' '.join(values)}; export any of them you need in this shell" in warning.group(0)
         assert not [value for value in values.values() if value in proc.stdout + proc.stderr]
         assert _credentials_in(_kernel_env(workspace)) == _CREDENTIALS
+        # Nor does the install write there what such a .env would not lend: the kernel-agent env file carries it.
+        assert "/opt/own/site" not in (checkout / ".env").read_text(encoding="utf-8")
+        assert _assignments(_kernel_env(workspace))["PYTHONPATH"].endswith(":/opt/own/site")
     finally:
         shutil.rmtree(root)
 
@@ -337,10 +345,12 @@ def test_install_baremetal_writes_no_credential_into_a_shared_dotenv(monkeypatch
         env_file.write_text(f"#!/bin/sh\nexport MAGPIE_PATH='/opt/magpie'\n{old_block}", encoding="utf-8")
         env_file.chmod(0o600)
 
-        proc = _run_baremetal(script, checkout, workspace, tmp, **_BAREMETAL_CREDENTIALS)
+        proc = _run_baremetal(script, checkout, workspace, tmp, VIRTUAL_ENV="/opt/own/venv", **_BAREMETAL_CREDENTIALS)
 
         assert proc.returncode == 0, proc.stdout + proc.stderr
         text = (checkout / ".env").read_text(encoding="utf-8")
+        assert "/opt/own/venv" not in text
+        assert f"VIRTUAL_ENV is not written to {checkout}/.env, which another account can write" in proc.stderr
         assert not [value for value in _BAREMETAL_CREDENTIALS.values() if value in text]
         assert not {*_BAREMETAL_CREDENTIALS, "ANTHROPIC_AUTH_TOKEN"} & set(_assignments(checkout / ".env"))
         assert _assignments(checkout / ".env")[_MARKER] == "kernel-agent-env"

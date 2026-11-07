@@ -120,7 +120,9 @@ hooks and any other name outside the list are skipped, and so are `HTTP_PROXY`,
 `HIP_PATH`, `SGLANG_ROCM_INDEX_URL`, `HYPERLOOM_WHEEL_REPO`,
 `HYPERLOOM_RUNTIME_DIR`, `KERNEL_AGENT_ENV` and the `GEAK_*` program paths. Each
 skipped key is named in a warning, never its value; export any you need in the
-shell. A `.env` only you can write is read as before. `install_baremetal.sh`
+shell. The installers do not write such keys there either: `install.sh` keeps
+them in `kernel-agent.env.sh`, and `install_baremetal.sh` names each one it
+leaves out. A `.env` only you can write is read as before. `install_baremetal.sh`
 follows the same rules: on such a checkout it reads none of those keys, and
 none of the credentials, from `.env`, and writes the Anthropic-side credentials
 to `kernel-agent.env.sh` alone; an OpenAI key it does not write anywhere.

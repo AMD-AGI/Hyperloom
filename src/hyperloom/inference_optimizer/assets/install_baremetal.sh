@@ -2321,6 +2321,11 @@ read_dotenv_var() {
 # prefix so a pre-existing line is replaced (never duplicated). Pure-bash.
 upsert_dotenv_var() {
   local key="$1" value="$2" tmp found=0 line stripped
+  # A .env another account can write lends only runtime_env_dotenv_key_lent's keys, so no other is written there.
+  if [ -n "${DOTENV_NOT_PRIVATE:-}" ] && ! runtime_env_dotenv_key_lent "$key"; then
+    warn "${key} is not written to ${DOTENV}, which another account can write (${DOTENV_NOT_PRIVATE}); export it in the shell that runs hyperloom"
+    return 0
+  fi
   tmp="$(mktemp)"
   if [ -f "$DOTENV" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
