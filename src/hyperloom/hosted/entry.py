@@ -27,6 +27,7 @@ other than ``HYPERLOOM_STATE_DIR``, which it needs to install the hosted extra.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import shutil
@@ -142,8 +143,10 @@ def _run() -> int:
     session_dir = _prepare_session_dir(spec, info)
     try:
         archive = ensure_archive_root(session_dir)
-    except PermissionError as exc:
-        raise Refused(str(exc)) from None
+    except OSError as exc:
+        if not isinstance(exc, PermissionError) and exc.errno != errno.ELOOP:
+            raise
+        raise Refused(str(exc)) from None  # a link another account put on the way stays until someone removes it
     os.environ[ENV_PACKAGE_DEST_ROOT] = str(archive)  # the package outlives the container
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common.tests.shared_accounts import theirs
 from hyperloom.hosted import entry, host_info
 from hyperloom.hosted.host_info import Var
 from hyperloom.hosted.tests.test_campaign import FULL, MINIMAL
@@ -391,6 +392,20 @@ def test_an_archive_an_earlier_leg_left_unusable_ends_the_run_finally_naming_it(
         "returncode": 2,
         "error": f"the archive {archive} is not a directory (a link to one is refused too)",
     }
+    assert len(fake.calls) == 1
+
+
+def test_a_link_another_account_put_on_the_way_to_the_session_ends_the_run_finally_naming_it(run, monkeypatch):
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    sessions = Path(_session_json(run)).parent
+    sessions.rename(sessions.with_name("moved"))
+    sessions.symlink_to(sessions.with_name("moved"))
+    theirs(sessions, monkeypatch)
+    run.restart()
+    assert entry.main(["run"]) == 2
+    error = _exit(run)["error"]
+    assert "in a directory other accounts can write is not followed" in error and str(sessions) in error
     assert len(fake.calls) == 1
 
 
