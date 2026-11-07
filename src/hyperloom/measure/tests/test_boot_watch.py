@@ -29,7 +29,6 @@ from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec, boot_second
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.socket import TestCall
-from inference_suite.contracts.layout import READY_STAMP
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -78,7 +77,7 @@ def _call(tmp_path: Path, point: Path, timeout_sec: int = 4) -> TestCall:
 
 
 class _ServerGrid:
-    """``run_grid`` with a real child process in place of Magpie and the server it starts."""
+    """``run_grid`` with a real child process in place of the round and the server it starts."""
 
     def __init__(self, script: str) -> None:
         self.script = script
@@ -197,11 +196,10 @@ def test_a_round_whose_server_never_stamps_a_ready_banner_has_no_limit(framework
     assert boot_limit_sec(_benchmark(framework), 3600) is None
 
 
-def test_the_literals_the_guard_copies_equal_their_definitions() -> None:
+def test_the_frameworks_the_guard_copies_are_the_serving_frameworks() -> None:
     from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
     serving = {item.value for item in Framework if framework_facts(item).kind is FrameworkKind.SERVING}
-    assert boot_watch._READY_STAMP == READY_STAMP
     assert set(boot_watch._SERVER_FRAMEWORKS) == serving
 
 

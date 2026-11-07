@@ -52,7 +52,7 @@ class ToolPinError(ValueError):
 
 @dataclass(frozen=True)
 class ToolCommits:
-    """The Magpie commit preflight installs and the InferenceX commit the checkout Hyperloom detects is held to."""
+    """The last Magpie and InferenceX commits Hyperloom pinned, as the compatibility callers above still read them."""
 
     magpie: str
     inferencex: str
